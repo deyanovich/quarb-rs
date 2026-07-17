@@ -31,6 +31,8 @@ use tokio_postgres::{Client, NoTls, Row};
 pub enum PostgresError {
     #[error("postgres: {0}")]
     Postgres(#[from] tokio_postgres::Error),
+    #[error("pushdown plan: {0}")]
+    Plan(String),
     #[error("postgres runtime: {0}")]
     Runtime(#[from] std::io::Error),
 }
@@ -309,7 +311,17 @@ pub fn raw_query(
     config: &str,
     sql: &str,
     order_table: Option<&str>,
+    join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), PostgresError> {
+    // Witness-JOIN plans carry a uniqueness obligation this
+    // driver does not yet verify against its catalog; decline
+    // so the caller falls back to the (sound) scan.
+    if join_left.is_some() {
+        return Err(PostgresError::Plan(
+            "witness-JOIN uniqueness not verified by this driver".into(),
+        ));
+    }
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

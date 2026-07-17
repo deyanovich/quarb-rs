@@ -22,6 +22,8 @@ use rusqlite::types::ValueRef;
 pub enum SqliteError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("pushdown plan: {0}")]
+    Plan(String),
 }
 
 /// A SQLite database, materialized as an arbor.
@@ -63,8 +65,7 @@ fn specs(conn: &Connection) -> Result<Vec<TableSpec>, SqliteError> {
         let mut columns = Vec::new();
         let mut pk_cols: Vec<(i64, usize)> = Vec::new();
         {
-            let mut stmt =
-                conn.prepare(&format!("PRAGMA table_info({})", quote_ident(&name)))?;
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(&name)))?;
             let mut rows = stmt.query([])?;
             while let Some(r) = rows.next()? {
                 let col: String = r.get(1)?;
@@ -147,7 +148,9 @@ fn fetch_rows_where(
         Some(i) => quote_ident(&spec.columns[i]),
         None => cols.clone(),
     };
-    let mut stmt = conn.prepare(&format!("SELECT {cols} FROM {table}{filter} ORDER BY {order}"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM {table}{filter} ORDER BY {order}"
+    ))?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     let mut rowid = 0i64;
@@ -221,12 +224,74 @@ impl SqliteAdapter {
 /// and rows, ordered by `order_table`'s key when one is given (the
 /// pushdown contract: row order must match the adapter's document
 /// order, which is that key).
+/// Whether `cols` covers the primary key or a non-partial UNIQUE
+/// index of `table` — the soundness condition for executing a
+/// witness-JOIN pushdown (see `raw_query`).
+fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, SqliteError> {
+    use std::collections::HashSet;
+    let want: HashSet<&str> = cols.iter().map(|s| s.as_str()).collect();
+    if want.is_empty() {
+        return Ok(false);
+    }
+    // Primary key (pk ordinal > 0 in table_info).
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut pk: HashSet<String> = HashSet::new();
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(1)?;
+        let ord: i64 = r.get(5)?;
+        if ord > 0 {
+            pk.insert(name);
+        }
+    }
+    if !pk.is_empty() && pk.iter().all(|c| want.contains(c.as_str())) {
+        return Ok(true);
+    }
+    // Non-partial UNIQUE indexes.
+    let mut stmt = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+    let mut uniques: Vec<String> = Vec::new();
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(1)?;
+        let is_unique: i64 = r.get(2)?;
+        let partial: i64 = r.get(4).unwrap_or(0);
+        if is_unique == 1 && partial == 0 {
+            uniques.push(name);
+        }
+    }
+    for idx in uniques {
+        let mut stmt = conn.prepare(&format!("PRAGMA index_info({idx})"))?;
+        let mut cols_of: Vec<String> = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            cols_of.push(r.get(2)?);
+        }
+        if !cols_of.is_empty() && cols_of.iter().all(|c| want.contains(c.as_str())) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
     order_table: Option<&str>,
+    join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), SqliteError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // A witness-JOIN plan is only sound when the ON binds the left
+    // table by a unique key (else SQL multiplies rows where
+    // Quarb's existential binding does not). Verify against the
+    // catalog; refusing sends the caller back to the scan.
+    if let Some((table, cols)) = join_left {
+        if !unique_key(&conn, table, cols)? {
+            return Err(SqliteError::Plan(format!(
+                "join ON does not bind {table} by a unique key; \
+                 the SQL JOIN would multiply rows"
+            )));
+        }
+    }
     let sql = match order_table {
         Some(t) => {
             let key = specs(&conn)?

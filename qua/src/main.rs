@@ -31,8 +31,8 @@ use quarb_json::JsonAdapter;
 use quarb_maildir::MaildirAdapter;
 use quarb_mount::{Mount, MountAdapter, Shared};
 use quarb_mysql::MysqlAdapter;
-use quarb_objstore::ObjstoreAdapter;
 use quarb_neo4j::Neo4jAdapter;
+use quarb_objstore::ObjstoreAdapter;
 use quarb_postgres::PostgresAdapter;
 use quarb_serve::ServeAdapter;
 use quarb_sqlite::SqliteAdapter;
@@ -452,12 +452,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("bigquery://")
     {
-        if let Some(plan) = pushdown_plan(cli, query)
-            && let Ok((cols, rows)) =
-                quarb_bigquery::raw_query(s, &plan.sql, plan.order_table.as_deref())
-        {
-            print_raw(&cols, rows);
-            return Ok(());
+        if let Some(plan) = pushdown_plan(cli, query) {
+            match quarb_bigquery::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // The plan can fail catalog-side checks (e.g. the
+                    // witness-JOIN uniqueness obligation): fall back to
+                    // the scan, but never silently under --explain.
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
         }
         let adapter = match partial_plan(cli, query) {
             Some(p) => BigqueryAdapter::connect_filtered(s, &p.table, &p.where_sql),
@@ -476,12 +492,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("mysql://")
     {
-        if let Some(plan) = pushdown_plan(cli, query)
-            && let Ok((cols, rows)) =
-                quarb_mysql::raw_query(s, &plan.sql, plan.order_table.as_deref())
-        {
-            print_raw(&cols, rows);
-            return Ok(());
+        if let Some(plan) = pushdown_plan(cli, query) {
+            match quarb_mysql::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // The plan can fail catalog-side checks (e.g. the
+                    // witness-JOIN uniqueness obligation): fall back to
+                    // the scan, but never silently under --explain.
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
         }
         let adapter = match partial_plan(cli, query) {
             Some(p) => MysqlAdapter::connect_filtered(s, &p.table, &p.where_sql),
@@ -502,12 +534,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && is_pg_config(s)
     {
-        if let Some(plan) = pushdown_plan(cli, query)
-            && let Ok((cols, rows)) =
-                quarb_postgres::raw_query(s, &plan.sql, plan.order_table.as_deref())
-        {
-            print_raw(&cols, rows);
-            return Ok(());
+        if let Some(plan) = pushdown_plan(cli, query) {
+            match quarb_postgres::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // The plan can fail catalog-side checks (e.g. the
+                    // witness-JOIN uniqueness obligation): fall back to
+                    // the scan, but never silently under --explain.
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
         }
         let adapter = match partial_plan(cli, query) {
             Some(p) => PostgresAdapter::connect_filtered(s, &p.table, &p.where_sql),
@@ -632,12 +680,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
-        if let Some(plan) = pushdown_plan(cli, query)
-            && let Ok((cols, rows)) =
-                quarb_duckdb::raw_query(p, &plan.sql, plan.order_table.as_deref())
-        {
-            print_raw(&cols, rows);
-            return Ok(());
+        if let Some(plan) = pushdown_plan(cli, query) {
+            match quarb_duckdb::raw_query(
+                p,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // The plan can fail catalog-side checks (e.g. the
+                    // witness-JOIN uniqueness obligation): fall back to
+                    // the scan, but never silently under --explain.
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
         }
         let adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
         let src = p.display().to_string();
@@ -670,12 +734,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(p) = &path
         && is_sqlite(p)
     {
-        if let Some(plan) = pushdown_plan(cli, query)
-            && let Ok((cols, rows)) =
-                quarb_sqlite::raw_query(p, &plan.sql, plan.order_table.as_deref())
-        {
-            print_raw(&cols, rows);
-            return Ok(());
+        if let Some(plan) = pushdown_plan(cli, query) {
+            match quarb_sqlite::raw_query(
+                p,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // The plan can fail catalog-side checks (e.g. the
+                    // witness-JOIN uniqueness obligation): fall back to
+                    // the scan, but never silently under --explain.
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
         }
         let adapter = match partial_plan(cli, query) {
             Some(pl) => SqliteAdapter::open_filtered(p, &pl.table, &pl.where_sql),
@@ -1286,7 +1366,10 @@ fn run_bounded<A: AstAdapter>(
     daiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(n) = QUANT_BOUND.with(|b| b.get()) {
-        let bounded = QuantifierBound { inner: adapter, bound: n };
+        let bounded = QuantifierBound {
+            inner: adapter,
+            bound: n,
+        };
         return run_nowed(query, &bounded, render, daiv_source);
     }
     run_nowed(query, adapter, render, daiv_source)
@@ -1301,7 +1384,11 @@ fn run_nowed<A: AstAdapter>(
     // The invocation instant is always bound in the CLI (main set
     // it from --now or one startup clock read).
     let (secs, nanos) = NOW_INSTANT.with(|c| c.get());
-    let nowed = WithNow { inner: adapter, secs, nanos };
+    let nowed = WithNow {
+        inner: adapter,
+        secs,
+        nanos,
+    };
     run_inner(query, &nowed, render, daiv_source)
 }
 
@@ -1509,7 +1596,9 @@ fn emit_daiv(
                         "std/time/localdatetime"
                     };
                     b.declare_types("std/time").map_err(err)?;
-                    if b.leaf(&namepath, ty, &value.to_string(), Some(&prov)).is_ok() {
+                    if b.leaf(&namepath, ty, &value.to_string(), Some(&prov))
+                        .is_ok()
+                    {
                         return Ok(());
                     }
                 }

@@ -42,6 +42,7 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         notes: Vec::new(),
         strict: false,
         from_table: String::new(),
+        join_on_left_cols: Vec::new(),
         join_table: None,
         aggregate: false,
     };
@@ -60,6 +61,14 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
 pub struct Pushdown {
     pub sql: String,
     pub order_table: Option<String>,
+    /// Present when the plan contains a witness JOIN: the left
+    /// table and the left-side columns its ON equalities bind.
+    /// The plan is only sound if those columns form a unique key
+    /// of the left table (else SQL multiplies rows where Quarb's
+    /// existential binding does not) — the *driver* must verify
+    /// against its catalog before executing, and fall back to the
+    /// scan if it cannot.
+    pub join_left: Option<(String, Vec<String>)>,
 }
 
 /// Attempt the pushdown translation: `Some` only when every
@@ -81,6 +90,7 @@ pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
         notes: Vec::new(),
         strict: true,
         from_table: String::new(),
+        join_on_left_cols: Vec::new(),
         join_table: None,
         aggregate: false,
     };
@@ -93,8 +103,67 @@ pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
         // table's.
         Some(ex.join_table.clone().unwrap_or(ex.from_table.clone()))
     };
-    Ok(Pushdown { sql, order_table })
+    let join_left = ex
+        .join_table
+        .is_some()
+        .then(|| (ex.from_table.clone(), ex.join_on_left_cols.clone()));
+    Ok(Pushdown {
+        sql,
+        order_table,
+        join_left,
+    })
 }
+
+/// SQL keywords that must not appear as a bare `AS` alias —
+/// quoting them portably differs by dialect, so strict mode
+/// refuses and export mode quotes with double quotes plus a note.
+const ALIAS_KEYWORDS: &[&str] = &[
+    "all",
+    "and",
+    "as",
+    "asc",
+    "by",
+    "case",
+    "cross",
+    "desc",
+    "distinct",
+    "else",
+    "end",
+    "except",
+    "exists",
+    "from",
+    "group",
+    "having",
+    "in",
+    "index",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "join",
+    "left",
+    "like",
+    "limit",
+    "not",
+    "null",
+    "offset",
+    "on",
+    "or",
+    "order",
+    "outer",
+    "right",
+    "select",
+    "set",
+    "table",
+    "then",
+    "union",
+    "unique",
+    "update",
+    "using",
+    "values",
+    "when",
+    "where",
+];
 
 /// The SELECT under construction.
 #[derive(Default)]
@@ -183,6 +252,7 @@ pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
         notes: Vec::new(),
         strict: true,
         from_table: String::new(),
+        join_on_left_cols: Vec::new(),
         join_table: None,
         aggregate: false,
     };
@@ -215,6 +285,7 @@ struct Exporter {
     /// truthiness, group/distinct/sort ordering).
     strict: bool,
     from_table: String,
+    join_on_left_cols: Vec<String>,
     join_table: Option<String>,
     aggregate: bool,
 }
@@ -681,6 +752,28 @@ impl Exporter {
 
     /// Split a joined-side predicate: `col = $*1::col2` equalities
     /// become the ON condition; everything else the WHERE.
+    /// A safe `AS` alias: bare when it is a plain identifier and
+    /// not an SQL keyword; otherwise strict mode refuses (quoting
+    /// dialects disagree) and export mode double-quotes, noting it.
+    fn alias(&mut self, name: &str) -> Result<String, SqlError> {
+        let plain = !name.is_empty()
+            && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !ALIAS_KEYWORDS.contains(&name.to_ascii_lowercase().as_str());
+        if plain {
+            return Ok(name.to_string());
+        }
+        if self.strict {
+            return Err(SqlError::Unsupported(format!(
+                "pushdown: field name {name:?} needs SQL quoting \
+                 (dialects disagree); rename the field"
+            )));
+        }
+        self.notes
+            .push(format!("field name {name:?} double-quoted (ANSI)"));
+        Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+    }
+
     fn split_join_pred(
         &mut self,
         p: NodeId,
@@ -711,9 +804,23 @@ impl Exporter {
         }
         for e in parts {
             let uses_ctx = self.subtree_has(e, "context");
-            let cond = self.pred_expr(e, Some(rtable))?;
-            let cond = cond.replace("__LEFT__", ltable);
+            let raw = self.pred_expr(e, Some(rtable))?;
+            let cond = raw.replace("__LEFT__", ltable);
             if uses_ctx && self.kind(e) == "compare" && self.prop_s(e, "op") == "=" {
+                // Record which left-table columns the ON binds —
+                // the driver's uniqueness obligation (see
+                // Pushdown::join_left). Captured from the
+                // pre-substitution marker so literals can't fake
+                // a match.
+                for cap in raw.split("__LEFT__.").skip(1) {
+                    let col: String = cap
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if !col.is_empty() {
+                        self.join_on_left_cols.push(col);
+                    }
+                }
                 on.push(cond);
             } else {
                 wheres.push(cond);
@@ -813,6 +920,7 @@ impl Exporter {
                     let (key, agg, alias) = grouped.clone().ok_or_else(|| {
                         SqlError::Unsupported("'%.', with nothing grouped".into())
                     })?;
+                    let alias = self.alias(&alias)?;
                     sel.select = vec![key.clone(), format!("{agg} AS {alias}")];
                     // The HAVING condition compared the aggregate
                     // through $_ — substitute the real expression.
@@ -984,6 +1092,7 @@ impl Exporter {
                     Some((l, _)) => value.replace("__LEFT__", l),
                     None => value,
                 };
+                let name = self.alias(&name)?;
                 fields.push(format!("{value} AS {name}"));
                 i += 2;
             } else {

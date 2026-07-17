@@ -34,6 +34,8 @@ use serde_json::json;
 pub enum BigqueryError {
     #[error("bigquery: {0}")]
     Http(#[from] Box<ureq::Error>),
+    #[error("pushdown plan: {0}")]
+    Plan(String),
     #[error("bigquery auth: {0}")]
     Auth(String),
     #[error("bigquery: {0}")]
@@ -379,7 +381,17 @@ pub fn raw_query(
     target: &str,
     sql: &str,
     order_table: Option<&str>,
+    join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), BigqueryError> {
+    // Witness-JOIN plans carry a uniqueness obligation this
+    // driver does not yet verify against its catalog; decline
+    // so the caller falls back to the (sound) scan.
+    if join_left.is_some() {
+        return Err(BigqueryError::Plan(
+            "witness-JOIN uniqueness not verified by this driver".into(),
+        ));
+    }
+
     let t = parse_target(target)?;
     let client = Client {
         project: t.project.clone(),
@@ -464,7 +476,10 @@ mod tests {
         // The `from` inside the literal must be left untouched;
         // only the real table reference is qualified.
         assert_eq!(
-            qualify_tables("SELECT id FROM notes WHERE text = 'orders from paris'", "ds"),
+            qualify_tables(
+                "SELECT id FROM notes WHERE text = 'orders from paris'",
+                "ds"
+            ),
             "SELECT id FROM ds.notes WHERE text = 'orders from paris'"
         );
     }

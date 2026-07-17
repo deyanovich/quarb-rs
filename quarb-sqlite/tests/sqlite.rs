@@ -230,8 +230,15 @@ fn pushdown_matches_scan() {
     ];
     for q in cases {
         let plan = quarb_sql::pushdown(q).unwrap_or_else(|| panic!("expected pushdown for {q}"));
-        let (cols, rows) =
-            quarb_sqlite::raw_query(&path, &plan.sql, plan.order_table.as_deref()).unwrap();
+        let (cols, rows) = quarb_sqlite::raw_query(
+            &path,
+            &plan.sql,
+            plan.order_table.as_deref(),
+            plan.join_left
+                .as_ref()
+                .map(|(t, c)| (t.as_str(), c.as_slice())),
+        )
+        .unwrap();
         let pushed: Vec<String> = rows
             .into_iter()
             .map(|row| {
@@ -280,4 +287,45 @@ fn filtered_open_matches_scan() {
     let filtered = SqliteAdapter::open_filtered(&path, &plan.table, &plan.where_sql).unwrap();
     let plain = SqliteAdapter::open(&path).unwrap();
     assert_eq!(run(&filtered), run(&plain));
+}
+
+#[test]
+fn raw_query_join_uniqueness_gate() {
+    // The witness-JOIN soundness gate: a plan whose ON binds the
+    // left table by its primary key executes; one bound by a
+    // non-key column is refused (the SQL JOIN would multiply rows
+    // where the engine's existential binding does not).
+    let path = std::env::temp_dir().join(format!(
+        "quarb-sqlite-unique-gate-{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id));
+        INSERT INTO a VALUES (1, 'one'), (2, 'two');
+        INSERT INTO b VALUES (10, 1), (11, 1), (12, 2);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    let sql = "SELECT a.name, b.id FROM a JOIN b ON b.a_id = a.id";
+    let ok = quarb_sqlite::raw_query(&path, sql, Some("b"), Some(("a", &["id".to_string()][..])));
+    assert_eq!(ok.expect("PK-bound join executes").1.len(), 3);
+
+    let refused = quarb_sqlite::raw_query(
+        &path,
+        "SELECT b.id FROM b JOIN a ON a.a_id = b.a_id",
+        Some("a"),
+        Some(("b", &["a_id".to_string()][..])),
+    );
+    assert!(
+        refused.is_err(),
+        "non-key binding must refuse: the JOIN multiplies rows"
+    );
+
+    let _ = std::fs::remove_file(&path);
 }

@@ -310,3 +310,37 @@ fn partial_pushdown_gate() {
             .is_none()
     );
 }
+
+#[test]
+fn pushdown_join_soundness_metadata() {
+    use quarb_sql::pushdown;
+    // A witness join carries its left-binding columns so the
+    // driver can verify uniqueness (SQL JOIN multiplies rows when
+    // the ON binds the left side by a non-key column; Quarb's
+    // existential binding never does).
+    let p = pushdown("/albums/* <=> /tracks/*[::album_id = $*1::id] | rec(\"a\", $*1::title)")
+        .expect("canonical witness join pushes down");
+    let (table, cols) = p.join_left.expect("join carries its obligation");
+    assert_eq!(table, "albums");
+    assert_eq!(cols, vec!["id".to_string()]);
+    // No join → no obligation.
+    assert!(
+        pushdown("/tracks/* @| count")
+            .expect("plain aggregate pushes down")
+            .join_left
+            .is_none()
+    );
+}
+
+#[test]
+fn pushdown_refuses_keyword_aliases() {
+    use quarb_sql::pushdown_explained;
+    // `AS order` is an SQL syntax error; quoting portably differs
+    // by dialect, so strict pushdown refuses outright.
+    let Err(err) = pushdown_explained(
+        "/albums/* <=> /tracks/*[::album_id = $*1::id] | rec(\"order\", $*1::title)",
+    ) else {
+        panic!("keyword alias must refuse")
+    };
+    assert!(format!("{err}").contains("needs SQL quoting"), "{err}");
+}

@@ -33,6 +33,8 @@ use std::str::FromStr;
 pub enum MysqlError {
     #[error("mysql: {0}")]
     Mysql(#[from] sqlx::Error),
+    #[error("pushdown plan: {0}")]
+    Plan(String),
     #[error("mysql runtime: {0}")]
     Runtime(#[from] std::io::Error),
 }
@@ -296,7 +298,17 @@ pub fn raw_query(
     config: &str,
     sql: &str,
     order_table: Option<&str>,
+    join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), MysqlError> {
+    // Witness-JOIN plans carry a uniqueness obligation this
+    // driver does not yet verify against its catalog; decline
+    // so the caller falls back to the (sound) scan.
+    if join_left.is_some() {
+        return Err(MysqlError::Plan(
+            "witness-JOIN uniqueness not verified by this driver".into(),
+        ));
+    }
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

@@ -23,6 +23,8 @@ use quarb_relational::{RelationalModel, RowSpec, TableSpec};
 pub enum DuckdbError {
     #[error("duckdb: {0}")]
     Duckdb(#[from] duckdb::Error),
+    #[error("pushdown plan: {0}")]
+    Plan(String),
 }
 
 /// A DuckDB database, exposed as an arbor.
@@ -42,7 +44,10 @@ fn secs_nanos(unit: duckdb::types::TimeUnit, v: i64) -> (i64, u32) {
         TimeUnit::Nanosecond => 1_000_000_000,
     };
     let nanos_per = 1_000_000_000 / per_sec;
-    (v.div_euclid(per_sec), (v.rem_euclid(per_sec) * nanos_per) as u32)
+    (
+        v.div_euclid(per_sec),
+        (v.rem_euclid(per_sec) * nanos_per) as u32,
+    )
 }
 
 fn cell(row: &duckdb::Row<'_>, i: usize) -> Value {
@@ -255,7 +260,17 @@ pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
     order_table: Option<&str>,
+    join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), DuckdbError> {
+    // Witness-JOIN plans carry a uniqueness obligation this
+    // driver does not yet verify against its catalog; decline
+    // so the caller falls back to the (sound) scan.
+    if join_left.is_some() {
+        return Err(DuckdbError::Plan(
+            "witness-JOIN uniqueness not verified by this driver".into(),
+        ));
+    }
+
     let conn = Connection::open_with_flags(
         path,
         duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
