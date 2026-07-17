@@ -13,18 +13,34 @@ HTML, and Markdown alike. Try it live in the
 ## Install
 
 ```bash
-pip install qua
+pip install quarb
 ```
+
+This installs the `quarb` Python module and the `qua` command
+(the language is Quarb; `qua` is its CLI).
 
 Wheels are published for Linux (x86_64, aarch64), macOS (arm64,
 x86_64), and Windows (x86_64). The extension is built against
 PyO3's stable ABI (`abi3-py38`); a single wheel covers CPython
 3.8 and later.
 
+## The `qua` command
+
+The entry point covers what the bindings cover — one query over
+a text document:
+
+```bash
+qua '/books/*[/price:: > 20]/title::' store.json
+echo '{"users":[{"name":"ada"}]}' | qua -f json '/users/*/name::'
+```
+
+The full `qua` CLI — file systems, git, databases, mail,
+adapter composition — is the Rust binary: `cargo install qua`.
+
 ## Quick start
 
 ```python
-import qua
+import quarb
 
 doc = """{
   "books": [
@@ -33,10 +49,10 @@ doc = """{
   ]
 }"""
 
-qua.run('/books/*[/price:: > 20]/title::', doc, 'json')
+quarb.run('/books/*[/price:: > 20]/title::', doc, 'json')
 # ['Sapiens']
 
-qua.run_file('/books/*/title::', 'books.json')
+quarb.run_file('/books/*/title::', 'books.json')
 # ['Sapiens', 'Cosmos']
 ```
 

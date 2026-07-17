@@ -13,7 +13,7 @@ import pathlib
 
 import pytest
 
-import qua
+import quarb
 
 BOOKS_JSON = """{
   "books": [
@@ -29,18 +29,18 @@ BOOKS_JSON = """{
 
 
 def test_json_values():
-    got = qua.run('/books/*[/price:: > 20]/title::', BOOKS_JSON, "json")
+    got = quarb.run('/books/*[/price:: > 20]/title::', BOOKS_JSON, "json")
     assert got == ["Sapiens"]
 
 
 def test_json_nodes_render_as_pointers():
-    got = qua.run("/books/*", BOOKS_JSON, "json")
+    got = quarb.run("/books/*", BOOKS_JSON, "json")
     assert got == ["/books/0", "/books/1"]
 
 
 def test_csv_locale_sort():
     doc = "name\nэхо\nарбуз\nЯблоко\nбанан\n"
-    got = qua.run("/row::name @| sort('ru-RU')", doc, "csv")
+    got = quarb.run("/row::name @| sort('ru-RU')", doc, "csv")
     # Russian collation: я sorts last, case-insensitively — a
     # bytewise sort would put Яблоко first.
     assert got == ["арбуз", "банан", "эхо", "Яблоко"]
@@ -48,20 +48,20 @@ def test_csv_locale_sort():
 
 def test_tsv_delimiter():
     doc = "a\tb\n1\t2\n"
-    assert qua.run("/row::b", doc, "tsv") == ["2"]
+    assert quarb.run("/row::b", doc, "tsv") == ["2"]
 
 
 def test_yaml_values():
-    assert qua.run("/a::", "a: 1\nb: 2\n", "yaml") == ["1"]
+    assert quarb.run("/a::", "a: 1\nb: 2\n", "yaml") == ["1"]
 
 
 def test_markdown_runs():
-    assert qua.run("//text @| count", "# Title\n\nHello.\n", "markdown")
+    assert quarb.run("//text @| count", "# Title\n\nHello.\n", "markdown")
 
 
 def test_version():
-    assert isinstance(qua.__version__, str)
-    assert qua.__version__
+    assert isinstance(quarb.__version__, str)
+    assert quarb.__version__
 
 
 # --------------------------------------------------------------------------
@@ -73,26 +73,26 @@ def test_run_file_str_and_pathlike(tmp_path):
     p = tmp_path / "books.json"
     p.write_text(BOOKS_JSON)
     want = ["Sapiens", "Cosmos"]
-    assert qua.run_file("/books/*/title::", str(p)) == want
-    assert qua.run_file("/books/*/title::", pathlib.Path(p)) == want
+    assert quarb.run_file("/books/*/title::", str(p)) == want
+    assert quarb.run_file("/books/*/title::", pathlib.Path(p)) == want
 
 
 def test_run_file_yml(tmp_path):
     p = tmp_path / "doc.yml"
     p.write_text("a: 1\n")
-    assert qua.run_file("/a::", p) == ["1"]
+    assert quarb.run_file("/a::", p) == ["1"]
 
 
 def test_run_file_unknown_extension(tmp_path):
     p = tmp_path / "doc.dat"
     p.write_text("{}")
     with pytest.raises(ValueError, match="cannot infer format"):
-        qua.run_file("/a::", p)
+        quarb.run_file("/a::", p)
 
 
 def test_run_file_missing_file(tmp_path):
     with pytest.raises(OSError):
-        qua.run_file("/a::", tmp_path / "absent.json")
+        quarb.run_file("/a::", tmp_path / "absent.json")
 
 
 # --------------------------------------------------------------------------
@@ -102,14 +102,14 @@ def test_run_file_missing_file(tmp_path):
 
 def test_malformed_input():
     with pytest.raises(ValueError, match="parsing JSON"):
-        qua.run("/a::", '{"a": ', "json")
+        quarb.run("/a::", '{"a": ', "json")
 
 
 def test_bad_query():
     with pytest.raises(ValueError, match="parse error"):
-        qua.run("/[[", "{}", "json")
+        quarb.run("/[[", "{}", "json")
 
 
 def test_unknown_format():
     with pytest.raises(ValueError, match="unknown format"):
-        qua.run("/a::", "{}", "exe")
+        quarb.run("/a::", "{}", "exe")

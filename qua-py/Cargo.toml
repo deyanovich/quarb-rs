@@ -16,7 +16,7 @@ readme = "README.md"
 publish = false
 
 [lib]
-name = "_qua"
+name = "_quarb"
 crate-type = ["cdylib"]
 
 [dependencies]

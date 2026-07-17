@@ -1,4 +1,4 @@
-name: Publish qua-py to PyPI
+name: Publish qua-py to PyPI (dist: quarb)
 
 # Triggers on `py/v*` tag pushes to this GitHub mirror. Builds the full
 # wheel matrix (5 platforms + sdist) and publishes atomically to PyPI
@@ -7,7 +7,7 @@ name: Publish qua-py to PyPI
 #
 # One-time setup required before the first publish:
 #
-# 1. On PyPI (https://pypi.org/manage/project/qua/settings/publishing/):
+# 1. On PyPI (https://pypi.org/manage/project/quarb/settings/publishing/):
 #    Add a Trusted Publisher with:
 #      Owner:        deyanovich
 #      Repository:   quarb-rs

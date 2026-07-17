@@ -1,4 +1,4 @@
-"""qua — structure-aware queries over text formats.
+"""quarb — structure-aware queries over text formats.
 
 Python bindings for the Quarb query engine. Quarb reads structured
 text as an *arbor* (a tree-spanned graph) and runs one query
@@ -10,10 +10,10 @@ Docs: https://quarb.org/  ·  Playground: https://demo.quarb.org/
 
 Quick start::
 
-    import qua
+    import quarb
 
     doc = '{"books": [{"title": "Sapiens", "price": 25}]}'
-    qua.run('/books/*/title::', doc, 'json')
+    quarb.run('/books/*/title::', doc, 'json')
     # ['Sapiens']
 
 ``run`` takes the input as a string plus an explicit format name;
@@ -24,7 +24,7 @@ their display form — and raise ``ValueError`` with the engine's
 message on parse or execution errors.
 """
 
-from . import _qua as _ext
+from . import _quarb as _ext
 
 __version__ = _ext.__version__
 

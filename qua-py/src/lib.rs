@@ -1,7 +1,7 @@
 //! Python bindings for the Quarb engine via PyO3 / maturin.
 //!
-//! The Rust extension module `qua._qua`. The user-facing API is the
-//! `qua` Python package; `python/qua/__init__.py` re-exports from
+//! The Rust extension module `quarb._quarb`. The user-facing API is the
+//! `quarb` Python module (dist: qua-cli); `python/quarb/__init__.py` re-exports from
 //! this module. See the project README for usage.
 //!
 //! Dispatch mirrors `quarb-wasm`: parse the input with the matching
@@ -136,7 +136,7 @@ fn run_file(query: &str, path: PathBuf) -> PyResult<Vec<String>> {
 }
 
 #[pymodule]
-fn _qua(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;

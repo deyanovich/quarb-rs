@@ -1,6 +1,6 @@
-"""Type stubs for ``qua._qua`` — the PyO3 extension module.
+"""Type stubs for ``quarb._quarb`` — the PyO3 extension module.
 
-The user-facing API is the ``qua`` package; ``qua/__init__.py``
+The user-facing API is the ``quarb`` module; ``quarb/__init__.py``
 re-exports every name listed below.
 """
 

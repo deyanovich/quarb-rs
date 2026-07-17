@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "qua"
+name = "quarb"
 dynamic = ["version"]
 requires-python = ">=3.8"
 description = "Structure-aware queries over JSON, YAML, TOML, CSV, XML, HTML, and Markdown — Python bindings for the Quarb query engine"
@@ -34,10 +34,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+qua = "quarb._cli:main"
+
 [project.urls]
 Homepage = "https://quarb.org/"
 Repository = "https://gitlab.com/quarb/engine"
 
 [tool.maturin]
 python-source = "python"
-module-name = "qua._qua"
+module-name = "quarb._quarb"
