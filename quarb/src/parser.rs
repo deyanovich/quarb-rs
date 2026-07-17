@@ -307,9 +307,7 @@ impl Parser<'_> {
                     pipeline.push(self.pipe_item()?);
                 }
                 // `$| stage` — the map pipe.
-                Some(Token::Dollar)
-                    if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) =>
-                {
+                Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
                     pipeline.push(Stage::Map(Box::new(self.map_stage()?)));
                 }
@@ -1625,8 +1623,8 @@ impl Parser<'_> {
         // path-pattern group (`pattern_depth > 0`) a following `|` is
         // the alternation separator instead, so the `$` there really
         // is a leaf anchor and must still be consumed.
-        let map_pipe_ahead = self.pattern_depth == 0
-            && matches!(self.toks.get(self.pos + 1), Some(Token::Pipe));
+        let map_pipe_ahead =
+            self.pattern_depth == 0 && matches!(self.toks.get(self.pos + 1), Some(Token::Pipe));
         let leaf = if matches!(self.peek(), Some(Token::Dollar)) && !map_pipe_ahead {
             self.pos += 1;
             true
@@ -1901,9 +1899,7 @@ impl Parser<'_> {
                         self.pos += 1;
                         stages.push(self.inline_stage()?);
                     }
-                    Some(Token::At)
-                        if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) =>
-                    {
+                    Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                         self.pos += 2;
                         stages.push(self.inline_agg_stage()?);
                     }
@@ -2068,11 +2064,11 @@ impl Parser<'_> {
         }
         let projection = self.projection()?;
         Ok(Operand::Rel {
-                    steps,
-                    projection,
-                    anchored: false,
-                    mark: None,
-                })
+            steps,
+            projection,
+            anchored: false,
+            mark: None,
+        })
     }
 
     /// Parse a comparison operand: a relative path/projection, or a
@@ -2522,7 +2518,8 @@ impl Parser<'_> {
                     }
                     _ => {
                         return Err(QuarbError::Parse(
-                            "expected '*N', '.name', '_', '-', or 'ord' after '$' in an operand".into(),
+                            "expected '*N', '.name', '_', '-', or 'ord' after '$' in an operand"
+                                .into(),
                         ));
                     }
                 };
@@ -2749,11 +2746,19 @@ fn trait_cnf(e: TExpr) -> Vec<TraitClause> {
             TExpr::Not(inner) => nnf(*inner, !neg),
             TExpr::And(a, b) => {
                 let (a, b) = (Box::new(nnf(*a, neg)), Box::new(nnf(*b, neg)));
-                if neg { TExpr::Or(a, b) } else { TExpr::And(a, b) }
+                if neg {
+                    TExpr::Or(a, b)
+                } else {
+                    TExpr::And(a, b)
+                }
             }
             TExpr::Or(a, b) => {
                 let (a, b) = (Box::new(nnf(*a, neg)), Box::new(nnf(*b, neg)));
-                if neg { TExpr::And(a, b) } else { TExpr::Or(a, b) }
+                if neg {
+                    TExpr::And(a, b)
+                } else {
+                    TExpr::Or(a, b)
+                }
             }
             TExpr::Has(n) => {
                 if neg {
@@ -2877,9 +2882,8 @@ fn valid_locale_tag(tag: &str) -> bool {
     };
     (2..=8).contains(&lang.len())
         && lang.bytes().all(|b| b.is_ascii_alphabetic())
-        && subtags.all(|s| {
-            (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
-        })
+        && subtags
+            .all(|s| (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// Check a keyed aggregate's argument shape at parse time: every

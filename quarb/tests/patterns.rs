@@ -136,7 +136,11 @@ fn pattern_pushes_round_trip() {
 
 #[test]
 fn arrived_edges_round_trip() {
-    for q in ["/a->e | .(@-::qty)", "/a->e | .(@-)", "/a | rec(::x, 'l', @-)"] {
+    for q in [
+        "/a->e | .(@-::qty)",
+        "/a->e | .(@-)",
+        "/a | rec(::x, 'l', @-)",
+    ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
     assert!(refuse("/a | .(@-:::depth)").contains("plain properties"));
@@ -185,17 +189,17 @@ fn trait_algebra_round_trip() {
     // stacking still parses; canonical form is one bracket
     assert_eq!(canon("/a<x><y>"), "/a<x && y>");
     // distribution: OR over AND normalizes to CNF
-    assert_eq!(
-        canon("/a<(x && y) || z>"),
-        "/a<(x || z) && (y || z)>"
-    );
+    assert_eq!(canon("/a<(x && y) || z>"), "/a<(x || z) && (y || z)>");
     // double negation eliminates
     assert_eq!(canon("/a<!!x>"), "/a<x>");
 }
 
 #[test]
 fn spread_round_trip() {
-    for q in ["/a->e | @-::roles | ... | ...", "/a | (@*::x | ...) @| count"] {
+    for q in [
+        "/a->e | @-::roles | ... | ...",
+        "/a | (@*::x | ...) @| count",
+    ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
     // `each` is gone: it parses as an unknown function now

@@ -37,10 +37,7 @@ pub enum Value {
     },
     /// A span of time (instant minus instant; the `days(n)` family).
     /// Displays as an ISO-8601 duration (`P1DT2H`).
-    Duration {
-        secs: i64,
-        nanos: u32,
-    },
+    Duration { secs: i64, nanos: u32 },
     /// A value on a dimension (spec: The Quantital Fragment):
     /// the magnitude scaled to the dimension's SI-base expansion
     /// (`base`, e.g. `m`, `kg*m^2/s^3`), the written form kept
@@ -104,8 +101,9 @@ impl Value {
     pub fn unital_reading(&self) -> Option<(f64, String)> {
         match self {
             Value::Quantity { value, base, .. } => Some((*value, base.clone())),
-            Value::Str(s) => crate::quantity::parse_unit_text(s)
-                .map(|(v, base, ..)| (v, base.to_string())),
+            Value::Str(s) => {
+                crate::quantity::parse_unit_text(s).map(|(v, base, ..)| (v, base.to_string()))
+            }
             _ => None,
         }
     }

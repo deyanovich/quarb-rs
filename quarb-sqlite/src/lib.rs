@@ -234,7 +234,7 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
         return Ok(false);
     }
     // Primary key (pk ordinal > 0 in table_info).
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(table)))?;
     let mut pk: HashSet<String> = HashSet::new();
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
@@ -248,7 +248,7 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
         return Ok(true);
     }
     // Non-partial UNIQUE indexes.
-    let mut stmt = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA index_list({})", quote_ident(table)))?;
     let mut uniques: Vec<String> = Vec::new();
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
@@ -260,7 +260,7 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
         }
     }
     for idx in uniques {
-        let mut stmt = conn.prepare(&format!("PRAGMA index_info({idx})"))?;
+        let mut stmt = conn.prepare(&format!("PRAGMA index_info({})", quote_ident(&idx)))?;
         let mut cols_of: Vec<String> = Vec::new();
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
@@ -284,13 +284,13 @@ pub fn raw_query(
     // table by a unique key (else SQL multiplies rows where
     // Quarb's existential binding does not). Verify against the
     // catalog; refusing sends the caller back to the scan.
-    if let Some((table, cols)) = join_left {
-        if !unique_key(&conn, table, cols)? {
-            return Err(SqliteError::Plan(format!(
-                "join ON does not bind {table} by a unique key; \
-                 the SQL JOIN would multiply rows"
-            )));
-        }
+    if let Some((table, cols)) = join_left
+        && !unique_key(&conn, table, cols)?
+    {
+        return Err(SqliteError::Plan(format!(
+            "join ON does not bind {table} by a unique key; \
+             the SQL JOIN would multiply rows"
+        )));
     }
     let sql = match order_table {
         Some(t) => {

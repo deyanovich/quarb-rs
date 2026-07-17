@@ -220,7 +220,11 @@ pub fn scale_expr(expr: &str) -> Option<(f64, String)> {
 
 /// Fold one canonical expansion string (`kg*m^2/s^3`) into the
 /// exponent map, scaled by `signed`.
-fn accumulate(base: &mut std::collections::BTreeMap<&'static str, i64>, expansion: &'static str, signed: i64) {
+fn accumulate(
+    base: &mut std::collections::BTreeMap<&'static str, i64>,
+    expansion: &'static str,
+    signed: i64,
+) {
     let mut denom = false;
     for part in expansion.split_inclusive(['*', '/']) {
         let (tok, next_denom) = match part.strip_suffix('*') {
@@ -361,7 +365,10 @@ mod tests {
     #[test]
     fn unit_text() {
         let (bv, base, wv, wu) = parse_unit_text("5km").unwrap();
-        assert_eq!((bv, base.as_str(), wv, wu.as_str()), (5000.0, "m", 5.0, "km"));
+        assert_eq!(
+            (bv, base.as_str(), wv, wu.as_str()),
+            (5000.0, "m", 5.0, "km")
+        );
         let (bv, base, ..) = parse_unit_text("0.2 kW").unwrap();
         assert_eq!((bv, base.as_str()), (200.0, "kg*m^2/s^3"));
         assert_eq!(parse_unit_text("-40mm").map(|t| t.0), Some(-0.04));

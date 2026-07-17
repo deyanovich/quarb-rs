@@ -36,8 +36,7 @@ use std::cell::RefCell;
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
     Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate, Projection,
-    PushBody, Query, Reach, RegRef,
-    Stage, Step, TraitClause,
+    PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
 };
 use crate::error::Result;
 use crate::value::Value;
@@ -593,6 +592,22 @@ impl QueryArbor {
         }
     }
 
+    /// The correlation operands under `query`, in `$*k` order: a
+    /// nested query child (a left operand — correlations chain
+    /// leftward) contributes its own operands first, then the
+    /// sibling branches follow. A plain query yields its branches.
+    fn correlation_operands(&self, query: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        for &c in &self.nodes[query].children {
+            match self.nodes[c].name.as_deref() {
+                Some("query") => out.extend(self.correlation_operands(c)),
+                Some("branch") => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// The vocabulary surface of this arbor: every node kind that
     /// occurs, with the sorted union of its property keys — for
     /// conformance checking against the locked vocabulary.
@@ -1101,6 +1116,88 @@ impl AstAdapter for QueryArbor {
         self.property(node, key)
     }
 
+    /// Use→definition jumps on the reflected query. A register use
+    /// resolves to the site that binds it, so `::ref~>` (recall) and
+    /// `::index~>` (correlation context) navigate from a reference
+    /// to its definition — the reflection arbor stops being a pure
+    /// tree exactly where the language itself has non-tree edges.
+    /// Resolution is static and best-effort: it follows source
+    /// order (intern order is pre-order), so `$.N` finds the N-th
+    /// push site and `$.`/`$.name` the latest preceding one; the
+    /// whole-register views (`@.`, `%.`) have no single site and do
+    /// not resolve.
+    fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
+        let idx = node.0 as usize;
+        let n = self.nodes.get(idx)?;
+        match (n.name.as_deref()?, property) {
+            // `$*k` — the k-th operand of the enclosing correlation.
+            // `A <=> B` reflects with the left operand as a nested
+            // query node (`query{ query{branch A}, branch B }`), and
+            // chains nest leftward, so: climb to the correlation's
+            // top query, then flatten the left spine — each nested
+            // query contributes its operands before its sibling
+            // branches.
+            ("context", "index") => {
+                let k = match self.property(node, "index")? {
+                    Value::Int(i) if i >= 1 => i as usize,
+                    _ => return None,
+                };
+                let mut cur = idx;
+                let mut query = loop {
+                    cur = self.nodes[cur].parent?;
+                    if self.nodes[cur].name.as_deref() == Some("query") {
+                        break cur;
+                    }
+                };
+                while let Some(p) = self.nodes[query].parent {
+                    if self.nodes[p].name.as_deref() == Some("query") {
+                        query = p;
+                    } else {
+                        break;
+                    }
+                }
+                self.correlation_operands(query)
+                    .get(k - 1)
+                    .map(|&b| NodeId(b as u64))
+            }
+            ("recall", "ref") => {
+                let spelling = match self.property(node, "ref")? {
+                    Value::Str(s) => s,
+                    _ => return None,
+                };
+                let rest = spelling.strip_prefix("$.")?;
+                // Definition sites, in source order: push stages and
+                // named subcontexts (both bind a regula).
+                let sites: Vec<usize> = (0..self.nodes.len())
+                    .filter(|&i| {
+                        matches!(
+                            self.nodes[i].name.as_deref(),
+                            Some("push") | Some("subcontext")
+                        )
+                    })
+                    .collect();
+                let found = if rest.is_empty() {
+                    // `$.` — the latest site preceding the use.
+                    sites.into_iter().rev().find(|&i| i < idx)
+                } else if let Ok(k) = rest.parse::<usize>() {
+                    // `$.N` — the N-th site (1-based push order).
+                    k.checked_sub(1).and_then(|k| sites.get(k).copied())
+                } else {
+                    // `$.name` — the latest preceding site so named.
+                    sites.into_iter().rev().find(|&i| {
+                        i < idx
+                            && self.nodes[i]
+                                .props
+                                .iter()
+                                .any(|(k, v)| k == "name" && *v == Value::Str(rest.to_string()))
+                    })
+                };
+                found.map(|i| NodeId(i as u64))
+            }
+            _ => None,
+        }
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             return match key {
@@ -1182,5 +1279,75 @@ mod tests {
         // Synthetic ids are stable: re-surfacing a node yields the
         // same id, which the engine's cycle check relies on.
         assert_eq!(ad.children(data_node), kids);
+    }
+
+    /// Find every node of `kind` in pre-order.
+    fn find_all(arbor: &QueryArbor, kind: &str) -> Vec<NodeId> {
+        (0..arbor.nodes.len())
+            .filter(|&i| arbor.nodes[i].name.as_deref() == Some(kind))
+            .map(|i| NodeId(i as u64))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_context_index_to_correlation_operand() {
+        let a = QueryArbor::parse(
+            "/a/* <=> /b/*[::x = $*1::x] <=> /c/*[::y = $*2::y] | rec($*1::n, $*3::n)",
+        )
+        .unwrap();
+        // Operands in $*k order are the correlation's branches,
+        // left spine first: /a/*, /b/*, /c/*.
+        let first_matcher = |b: NodeId| {
+            let step = a
+                .children(b)
+                .into_iter()
+                .find(|&c| a.name(c).as_deref() == Some("step"))
+                .unwrap();
+            match a.property(step, "matcher").unwrap() {
+                Value::Str(s) => s,
+                v => panic!("matcher: {v:?}"),
+            }
+        };
+        for ctx in find_all(&a, "context") {
+            let k = match a.property(ctx, "index") {
+                Some(Value::Int(i)) => i as usize,
+                _ => continue,
+            };
+            let branch = a.resolve(ctx, "index", None).expect("operand resolves");
+            assert_eq!(a.name(branch).as_deref(), Some("branch"));
+            assert_eq!(first_matcher(branch), ["a", "b", "c"][k - 1], "$*{k}");
+        }
+    }
+
+    #[test]
+    fn resolve_recall_ref_to_definition_site() {
+        let a = QueryArbor::parse(
+            "/row | .adult(::age) | .fare(::fare) \
+             | rec(\"a\", $.adult, \"f\", $.fare, \"one\", $.1, \"top\", $.)",
+        )
+        .unwrap();
+        let name_of = |n: NodeId| match a.property(n, "name") {
+            Some(Value::Str(s)) => s,
+            v => panic!("name: {v:?}"),
+        };
+        let recalls = find_all(&a, "recall");
+        assert_eq!(recalls.len(), 4);
+        // $.adult and $.fare jump to their named subcontexts.
+        assert_eq!(
+            name_of(a.resolve(recalls[0], "ref", None).unwrap()),
+            "adult"
+        );
+        assert_eq!(name_of(a.resolve(recalls[1], "ref", None).unwrap()), "fare");
+        // $.1 is the first site in push order; $. the latest
+        // preceding one.
+        assert_eq!(
+            name_of(a.resolve(recalls[2], "ref", None).unwrap()),
+            "adult"
+        );
+        assert_eq!(name_of(a.resolve(recalls[3], "ref", None).unwrap()), "fare");
+        // The whole-register views have no single site.
+        let b = QueryArbor::parse("/row | .x(::n) | rec(\"all\", @.)").unwrap();
+        let r = find_all(&b, "recall")[0];
+        assert!(b.resolve(r, "ref", None).is_none());
     }
 }

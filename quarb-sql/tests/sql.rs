@@ -344,3 +344,19 @@ fn pushdown_refuses_keyword_aliases() {
     };
     assert!(format!("{err}").contains("needs SQL quoting"), "{err}");
 }
+
+#[test]
+fn refuses_the_internal_left_marker() {
+    use quarb_sql::{export, pushdown, pushdown_explained};
+    // "__LEFT__" is the exporter's internal placeholder for the
+    // join's left table: query text containing it would be
+    // rewritten inside its own literals and could spoof the join
+    // obligation, so it stays on the scan path.
+    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id'] | rec($*1::title)";
+    assert!(pushdown(q).is_none());
+    let Err(err) = pushdown_explained(q) else {
+        panic!("marker in a literal must refuse")
+    };
+    assert!(format!("{err}").contains("__LEFT__"), "{err}");
+    assert!(export(q).is_err(), "export substitutes too; must refuse");
+}

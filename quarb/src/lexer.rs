@@ -694,8 +694,7 @@ fn read_interpolated_until(
                                     }
                                     None => {
                                         return Err(QuarbError::Lex(
-                                            "unterminated interpolation '${…' (missing '}')"
-                                                .into(),
+                                            "unterminated interpolation '${…' (missing '}')".into(),
                                         ));
                                     }
                                 }
@@ -815,7 +814,13 @@ mod quant_tests {
         let toks = lex("/{2}").unwrap();
         assert_eq!(
             toks,
-            vec![Token::Slash, Token::Quant { min: 2, max: Some(2) }]
+            vec![
+                Token::Slash,
+                Token::Quant {
+                    min: 2,
+                    max: Some(2)
+                }
+            ]
         );
         // `+` and `*` after `)` stay name characters — the parser
         // reads them as quantifier suffixes by position, not the

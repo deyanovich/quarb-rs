@@ -11,20 +11,64 @@ use crate::ast::{Arg, FnCall};
 use crate::value::Value;
 
 const SCALAR: &[&str] = &[
-    "upper", "lower", "trim", "chars", "wc", "lines", "words", "split", "round", "floor",
-    "ceil", "abs", "json", "xml", "record", "rec", "default",
+    "upper",
+    "lower",
+    "trim",
+    "chars",
+    "wc",
+    "lines",
+    "words",
+    "split",
+    "round",
+    "floor",
+    "ceil",
+    "abs",
+    "json",
+    "xml",
+    "record",
+    "rec",
+    "default",
     // The temporal fragment.
-    "datetime", "epoch", "isoformat", "year", "month", "day", "hour", "minute", "second",
-    "weekday", "date", "seconds", "minutes", "hours", "days",
-    "duration", "td", "strptime", "tp",
-    "quantity", "convert",
-    "isodate", "isomonth", "isoweek", "strftime", "tfmt", "sh",
-    "sha256", "base64", "base64url", "base32", "crockford32", "hex", "decode", "dec",
+    "datetime",
+    "epoch",
+    "isoformat",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "weekday",
+    "date",
+    "seconds",
+    "minutes",
+    "hours",
+    "days",
+    "duration",
+    "td",
+    "strptime",
+    "tp",
+    "quantity",
+    "convert",
+    "isodate",
+    "isomonth",
+    "isoweek",
+    "strftime",
+    "tfmt",
+    "sh",
+    "sha256",
+    "base64",
+    "base64url",
+    "base32",
+    "crockford32",
+    "hex",
+    "decode",
+    "dec",
 ];
 
 const AGGREGATE: &[&str] = &[
-    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "sort", "unique",
-    "reverse", "first", "last", "join", "ungroup", "window", "shift",
+    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "sort",
+    "unique", "reverse", "first", "last", "join", "ungroup", "window", "shift",
 ];
 
 /// Whether `name` is a whole-context stage that never works per
@@ -177,48 +221,56 @@ pub fn apply_scalar(
                 })
                 .unwrap_or(Value::Null),
         }],
-        "epoch" => vec![topic
-            .temporal_reading()
-            .map(|(secs, _)| Value::Int(secs))
-            .unwrap_or(Value::Null)],
+        "epoch" => vec![
+            topic
+                .temporal_reading()
+                .map(|(secs, _)| Value::Int(secs))
+                .unwrap_or(Value::Null),
+        ],
         // `isoformat` is the reading, formatted UTC (spec: The
         // Temporal Fragment) — a typed instant renders in UTC, not
         // its written display offset, so it agrees with the text and
         // epoch paths rather than short-circuiting to Display.
-        "isoformat" => vec![topic
-            .temporal_reading()
-            .map(|(s, n)| Value::Str(crate::temporal::format_instant(s, n, None)))
-            .unwrap_or(Value::Null)],
+        "isoformat" => vec![
+            topic
+                .temporal_reading()
+                .map(|(s, n)| Value::Str(crate::temporal::format_instant(s, n, None)))
+                .unwrap_or(Value::Null),
+        ],
         "year" | "month" | "day" | "hour" | "minute" | "second" => {
-            vec![topic
+            vec![
+                topic
+                    .temporal_reading()
+                    .map(|(secs, _)| {
+                        let (y, mo, d, h, mi, se) = crate::temporal::components(secs);
+                        Value::Int(match call.name.as_str() {
+                            "year" => y,
+                            "month" => mo as i64,
+                            "day" => d as i64,
+                            "hour" => h as i64,
+                            "minute" => mi as i64,
+                            _ => se as i64,
+                        })
+                    })
+                    .unwrap_or(Value::Null),
+            ]
+        }
+        "isodate" | "isomonth" | "isoweek" => vec![
+            topic
                 .temporal_reading()
                 .map(|(secs, _)| {
-                    let (y, mo, d, h, mi, se) = crate::temporal::components(secs);
-                    Value::Int(match call.name.as_str() {
-                        "year" => y,
-                        "month" => mo as i64,
-                        "day" => d as i64,
-                        "hour" => h as i64,
-                        "minute" => mi as i64,
-                        _ => se as i64,
+                    let (y, mo, d, ..) = crate::temporal::components(secs);
+                    Value::Str(match call.name.as_str() {
+                        "isodate" => format!("{y:04}-{mo:02}-{d:02}"),
+                        "isomonth" => format!("{y:04}-{mo:02}"),
+                        _ => {
+                            let (gy, gw) = crate::temporal::iso_week(secs);
+                            format!("{gy:04}-W{gw:02}")
+                        }
                     })
                 })
-                .unwrap_or(Value::Null)]
-        }
-        "isodate" | "isomonth" | "isoweek" => vec![topic
-            .temporal_reading()
-            .map(|(secs, _)| {
-                let (y, mo, d, ..) = crate::temporal::components(secs);
-                Value::Str(match call.name.as_str() {
-                    "isodate" => format!("{y:04}-{mo:02}-{d:02}"),
-                    "isomonth" => format!("{y:04}-{mo:02}"),
-                    _ => {
-                        let (gy, gw) = crate::temporal::iso_week(secs);
-                        format!("{gy:04}-W{gw:02}")
-                    }
-                })
-            })
-            .unwrap_or(Value::Null)],
+                .unwrap_or(Value::Null),
+        ],
         // `strftime("%Y-%m-%d %H:%M")` (alias `tfmt`) — the
         // C/POSIX formatting standard Perl, Python, and Ruby
         // share, in the instant's own offset.
@@ -236,18 +288,22 @@ pub fn apply_scalar(
                     .unwrap_or(Value::Null),
             }]
         }
-        "weekday" => vec![topic
-            .temporal_reading()
-            .map(|(secs, _)| Value::Int(crate::temporal::weekday(secs) as i64))
-            .unwrap_or(Value::Null)],
-        "date" => vec![topic
-            .temporal_reading()
-            .map(|(secs, _)| Value::Instant {
-                secs: secs.div_euclid(86400) * 86400,
-                nanos: 0,
-                offset_min: None,
-            })
-            .unwrap_or(Value::Null)],
+        "weekday" => vec![
+            topic
+                .temporal_reading()
+                .map(|(secs, _)| Value::Int(crate::temporal::weekday(secs) as i64))
+                .unwrap_or(Value::Null),
+        ],
+        "date" => vec![
+            topic
+                .temporal_reading()
+                .map(|(secs, _)| Value::Instant {
+                    secs: secs.div_euclid(86400) * 86400,
+                    nanos: 0,
+                    offset_min: None,
+                })
+                .unwrap_or(Value::Null),
+        ],
         // Duration constructors: a numeric topic scales the unit
         // (`30 | days` = P30D).
         "seconds" | "minutes" | "hours" | "days" => {
@@ -257,16 +313,18 @@ pub fn apply_scalar(
                 "hours" => 3600.0,
                 _ => 86400.0,
             };
-            vec![topic
-                .numeric()
-                .map(|n| {
-                    let total = n * unit;
-                    Value::Duration {
-                        secs: total.floor() as i64,
-                        nanos: ((total - total.floor()) * 1e9) as u32,
-                    }
-                })
-                .unwrap_or(Value::Null)]
+            vec![
+                topic
+                    .numeric()
+                    .map(|n| {
+                        let total = n * unit;
+                        Value::Duration {
+                            secs: total.floor() as i64,
+                            nanos: ((total - total.floor()) * 1e9) as u32,
+                        }
+                    })
+                    .unwrap_or(Value::Null),
+            ]
         }
 
         // `duration` (alias `td`) — the span parser, defined via the
@@ -274,10 +332,12 @@ pub fn apply_scalar(
         // a number (seconds) to a duration, a duration passing
         // through. The untyped substrate's explicit opt-in, exactly
         // as `| datetime` is for instants.
-        "duration" | "td" => vec![topic
-            .durational_reading()
-            .map(|(secs, nanos)| Value::Duration { secs, nanos })
-            .unwrap_or(Value::Null)],
+        "duration" | "td" => vec![
+            topic
+                .durational_reading()
+                .map(|(secs, nanos)| Value::Duration { secs, nanos })
+                .unwrap_or(Value::Null),
+        ],
         // `strptime(fmt)` (alias `tp`) — strftime's inverse: a TEXT
         // topic parsed per the same C/POSIX specifiers with the same
         // fixed English names. A parsed %z is kept for display;
@@ -347,9 +407,7 @@ pub fn apply_scalar(
             else {
                 unreachable!()
             };
-            let (wv, wu) = written
-                .clone()
-                .unwrap_or_else(|| (*value, base.clone()));
+            let (wv, wu) = written.clone().unwrap_or_else(|| (*value, base.clone()));
             let rounded = match call.name.as_str() {
                 "round" => wv.round(),
                 "floor" => wv.floor(),
@@ -694,9 +752,8 @@ mod tests {
                 Value::Str("Zebra".into()),
             ]
         };
-        let texts = |vs: Vec<Value>| -> Vec<String> {
-            vs.into_iter().map(|v| v.to_string()).collect()
-        };
+        let texts =
+            |vs: Vec<Value>| -> Vec<String> { vs.into_iter().map(|v| v.to_string()).collect() };
         // Russian: ё collates adjacent to е (colligo's deliberate
         // dictionary treatment orders it as a distinct letter
         // after е; еда < ёж either way); Cyrillic reordered first.

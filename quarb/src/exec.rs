@@ -8,8 +8,7 @@
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
-    PredExpr, Predicate, PushBody,
-    Projection, Query, Reach, RegRef, Stage, Step,
+    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::stdlib;
 use crate::value::Value;
@@ -168,7 +167,9 @@ pub(crate) fn gate_shell(query: &Query, adapter: &impl AstAdapter) -> crate::Res
 
 fn uses_shell_query(q: &Query) -> bool {
     q.correlations.iter().any(uses_shell_query)
-        || q.branches.iter().any(|b| b.steps.iter().any(uses_shell_elem))
+        || q.branches
+            .iter()
+            .any(|b| b.steps.iter().any(uses_shell_elem))
         || q.pipeline.iter().any(uses_shell_stage)
 }
 
@@ -230,9 +231,7 @@ fn uses_shell_operand(o: &Operand) -> bool {
         }
         Operand::Neg(i) | Operand::Outer(i) => uses_shell_operand(i),
         Operand::Group(e) => uses_shell_pred(e),
-        Operand::Arith { left, right, .. } => {
-            uses_shell_operand(left) || uses_shell_operand(right)
-        }
+        Operand::Arith { left, right, .. } => uses_shell_operand(left) || uses_shell_operand(right),
         Operand::Cond { cond, then, other } => {
             uses_shell_pred(cond) || uses_shell_operand(then) || uses_shell_operand(other)
         }
@@ -498,9 +497,7 @@ fn stage_reads_context(stage: &Stage) -> bool {
                 InterpSeg::Expr(e) => op(e),
                 InterpSeg::Text(_) => false,
             }),
-            Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => {
-                steps.iter().any(elem)
-            }
+            Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => steps.iter().any(elem),
             _ => false,
         }
     }
@@ -629,9 +626,7 @@ fn apply_stage(
                 };
                 let cmd = call.args.first().map(|a| match a {
                     Arg::Lit(v) => v.to_string(),
-                    Arg::Expr(e) => {
-                        operand_scalar(adapter, c.node, e, trace, scope).to_string()
-                    }
+                    Arg::Expr(e) => operand_scalar(adapter, c.node, e, trace, scope).to_string(),
                     Arg::Range(..) => String::new(),
                 });
                 c.topic = Some(match cmd {
@@ -729,7 +724,7 @@ fn apply_stage(
                         topic: Some(v),
                         members: Vec::new(),
                         captures: c.captures.clone(),
-                    marks: c.marks.clone(),
+                        marks: c.marks.clone(),
                         bindings: c.bindings.clone(),
                         arrived: c.arrived.clone(),
                     })
@@ -759,7 +754,7 @@ fn apply_stage(
                         topic: Some(v),
                         members: Vec::new(),
                         captures: c.captures.clone(),
-                    marks: c.marks.clone(),
+                        marks: c.marks.clone(),
                         bindings: c.bindings.clone(),
                         arrived: c.arrived.clone(),
                     })
@@ -1638,8 +1633,12 @@ fn temporal_arith(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
     };
     match (left, right, op) {
         (
-            Instant { secs: a, nanos: an, .. },
-            Instant { secs: b, nanos: bn, .. },
+            Instant {
+                secs: a, nanos: an, ..
+            },
+            Instant {
+                secs: b, nanos: bn, ..
+            },
             ArithOp::Sub,
         ) => {
             let Some((secs, nanos)) = add(*a, *an, *b, *bn, -1) else {
@@ -1754,8 +1753,14 @@ fn quantital_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -
     match op {
         ArithOp::Mul => {
             return match (typed(left), typed(right)) {
-                (true, false) => right.numeric().map(|k| rescale(left, k)).or(Some(Value::Null)),
-                (false, true) => left.numeric().map(|k| rescale(right, k)).or(Some(Value::Null)),
+                (true, false) => right
+                    .numeric()
+                    .map(|k| rescale(left, k))
+                    .or(Some(Value::Null)),
+                (false, true) => left
+                    .numeric()
+                    .map(|k| rescale(right, k))
+                    .or(Some(Value::Null)),
                 _ => Some(Value::Null), // Q × Q: undefined (v1)
             };
         }
@@ -1784,7 +1789,11 @@ fn quantital_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -
             if ba != bb {
                 return Some(Value::Null);
             }
-            let v = if matches!(op, ArithOp::Add) { a + b } else { a - b };
+            let v = if matches!(op, ArithOp::Add) {
+                a + b
+            } else {
+                a - b
+            };
             Some(Value::Quantity {
                 value: v,
                 base: ba,
@@ -1950,9 +1959,7 @@ fn navigate_paths(
                     let mut succs = Vec::new();
                     apply_step(adapter, *node, step, trace, outer, marks, &mut succs);
                     next.extend(succs.into_iter().map(|s| {
-                        let arrived = arrived_edge(adapter, *node, step, s)
-                            .into_iter()
-                            .collect();
+                        let arrived = arrived_edge(adapter, *node, step, s).into_iter().collect();
                         (s, register.clone(), marks.clone(), arrived)
                     }));
                 }
@@ -2074,7 +2081,14 @@ impl GPath {
 
     /// The dedup key: node, ground covered, breadcrumbs made, and
     /// the arrived-by edge (it feeds future pushes).
-    fn key(&self) -> (NodeId, Vec<NodeId>, Vec<(Option<String>, String)>, Option<(NodeId, String, NodeId)>) {
+    fn key(
+        &self,
+    ) -> (
+        NodeId,
+        Vec<NodeId>,
+        Vec<(Option<String>, String)>,
+        Option<(NodeId, String, NodeId)>,
+    ) {
         (
             self.node,
             self.visited.clone(),
@@ -2210,7 +2224,12 @@ fn expand_group(
         }
         if count >= group.quant.min {
             let before = matches.len();
-            matches.extend(frontier.iter().filter(|p| admits(p)).map(|p| (p.clone(), count)));
+            matches.extend(
+                frontier
+                    .iter()
+                    .filter(|p| admits(p))
+                    .map(|p| (p.clone(), count)),
+            );
             // Proximal keeps only the smallest matched count: the
             // first tier with a survivor is the answer — stop
             // expanding.
@@ -2294,7 +2313,15 @@ fn expand_elems(
             match elem {
                 PathElem::Step(step) => {
                     let mut succs = Vec::new();
-                    apply_step(adapter, path.node, step, trace, outer, &path.marks, &mut succs);
+                    apply_step(
+                        adapter,
+                        path.node,
+                        step,
+                        trace,
+                        outer,
+                        &path.marks,
+                        &mut succs,
+                    );
                     next.extend(succs.into_iter().filter(|&s| !path.blocks(s)).map(|s| {
                         let edge = arrived_edge(adapter, path.node, step, s);
                         path.with(s, edge)
@@ -2984,8 +3011,7 @@ fn exists_binding(
 ) -> bool {
     if bound.len() == trace.contexts.len() {
         let hit = exprs.iter().all(|e| {
-            mentions_null_ctx(e, bound)
-                || eval_pred_expr(adapter, node, e, trace, bound, scope)
+            mentions_null_ctx(e, bound) || eval_pred_expr(adapter, node, e, trace, bound, scope)
         });
         // Remember the admitting tuple — the *witness* — so the
         // pipeline's `$*k` operands can read the joined side back.
@@ -3052,9 +3078,9 @@ fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool {
                 other,
             } => {
                 op_mentions(scrutinee, bound)
-                    || arms
-                        .iter()
-                        .any(|(test, _, result)| op_mentions(test, bound) || op_mentions(result, bound))
+                    || arms.iter().any(|(test, _, result)| {
+                        op_mentions(test, bound) || op_mentions(result, bound)
+                    })
                     || op_mentions(other, bound)
             }
             Operand::Interp(segs) => segs.iter().any(|seg| match seg {
@@ -3177,8 +3203,10 @@ fn eval_pred_expr(
             let rhs = eval_operand(adapter, node, r, trace, bound, scope);
             // Existential over a node's own multi-valued projections;
             // each `$*k` operand is a single bound node.
-            lhs.iter()
-                .any(|a| rhs.iter().any(|b| compare(a, *op, b, &|e| adapter.unit_scale(e))))
+            lhs.iter().any(|a| {
+                rhs.iter()
+                    .any(|b| compare(a, *op, b, &|e| adapter.unit_scale(e)))
+            })
         }
         PredExpr::Truthy(o) => eval_operand(adapter, node, o, trace, bound, scope)
             .iter()
@@ -3480,9 +3508,15 @@ fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
         CmpOp::Eq => value_eq(a, b, scale),
         CmpOp::Ne => !value_eq(a, b, scale),
         CmpOp::Lt => value_cmp(a, b, scale) == Some(Ordering::Less),
-        CmpOp::Le => matches!(value_cmp(a, b, scale), Some(Ordering::Less | Ordering::Equal)),
+        CmpOp::Le => matches!(
+            value_cmp(a, b, scale),
+            Some(Ordering::Less | Ordering::Equal)
+        ),
         CmpOp::Gt => value_cmp(a, b, scale) == Some(Ordering::Greater),
-        CmpOp::Ge => matches!(value_cmp(a, b, scale), Some(Ordering::Greater | Ordering::Equal)),
+        CmpOp::Ge => matches!(
+            value_cmp(a, b, scale),
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
         CmpOp::Match => regex_test(a, b, true),
         CmpOp::NotMatch => regex_test(a, b, false),
         // A null operand doesn't participate: null-propagate like
@@ -3582,12 +3616,7 @@ fn node_to_json(adapter: &impl AstAdapter, node: NodeId) -> Value {
             children
                 .iter()
                 .zip(&names)
-                .map(|(&c, n)| {
-                    (
-                        n.clone().unwrap_or_default(),
-                        node_to_json(adapter, c),
-                    )
-                })
+                .map(|(&c, n)| (n.clone().unwrap_or_default(), node_to_json(adapter, c)))
                 .collect(),
         )
     }
@@ -3632,7 +3661,10 @@ fn node_to_xml(adapter: &impl AstAdapter, node: NodeId) -> String {
             .children(node)
             .iter()
             .map(|&c| {
-                let t = adapter.name(c).map(|n| xml_tag(&n)).unwrap_or_else(|| "item".into());
+                let t = adapter
+                    .name(c)
+                    .map(|n| xml_tag(&n))
+                    .unwrap_or_else(|| "item".into());
                 node_to_xml_named(adapter, c, &t)
             })
             .collect(),
@@ -3651,7 +3683,10 @@ fn node_to_xml_named(adapter: &impl AstAdapter, node: NodeId, tag: &str) -> Stri
         let inner: String = children
             .iter()
             .map(|&c| {
-                let t = adapter.name(c).map(|n| xml_tag(&n)).unwrap_or_else(|| "item".into());
+                let t = adapter
+                    .name(c)
+                    .map(|n| xml_tag(&n))
+                    .unwrap_or_else(|| "item".into());
                 node_to_xml_named(adapter, c, &t)
             })
             .collect();
@@ -3839,7 +3874,10 @@ mod tests {
     #[test]
     fn durational_coercion_and_lift() {
         let sc: &dyn Fn(&str) -> Option<(f64, String)> = &crate::quantity::scale_expr;
-        let two_h = Value::Duration { secs: 7200, nanos: 0 };
+        let two_h = Value::Duration {
+            secs: 7200,
+            nanos: 0,
+        };
         // Comparison coercion beside a typed Duration: span text
         // (either grammar) and numbers-as-seconds.
         assert_eq!(
@@ -4289,10 +4327,7 @@ mod tests {
         // an unquantified group takes predicates too — endpoints of
         // different-length alternatives, filtered uniformly
         let s = MockTree::sample();
-        assert_eq!(
-            run("/b/(z.rs|deep/w.rs)[:::name = w.rs]", &s),
-            vec![7]
-        );
+        assert_eq!(run("/b/(z.rs|deep/w.rs)[:::name = w.rs]", &s), vec![7]);
         // zero repetitions: the anchor itself must pass
         assert_eq!(run("/a(/x.rs)*[:::name = a]", &s), vec![1]);
         // the walked edge is in scope for the group's predicate
@@ -4369,7 +4404,10 @@ mod tests {
         );
         // Capsa-preserving aggregates ride the inline pipe too.
         assert_eq!(
-            vals("//*.rs | .top((@*:::name @| sort @| [1..2] @| join('-')))", &t)[0],
+            vals(
+                "//*.rs | .top((@*:::name @| sort @| [1..2] @| join('-')))",
+                &t
+            )[0],
             Value::Str("w.rs-x.rs".into())
         );
         // Outside any context (navigation predicates), @* is null.
@@ -4384,7 +4422,10 @@ mod tests {
         let t = MockTree::sample();
         // basic selection by truthiness
         assert_eq!(
-            vals("/a/* | rec(:::name, 'kind', (:::name =~ ~(rs) ? 'code' : 'text'))", &t),
+            vals(
+                "/a/* | rec(:::name, 'kind', (:::name =~ ~(rs) ? 'code' : 'text'))",
+                &t
+            ),
             vec![
                 Value::Record(vec![
                     ("name".into(), Value::Str("x.rs".into())),
@@ -4398,7 +4439,10 @@ mod tests {
         );
         // chained else — the multi-branch form, no inner parens
         assert_eq!(
-            vals("//w.rs | ((:::depth = 1 ? 'top' : :::depth = 2 ? 'mid' : 'deep'))", &t),
+            vals(
+                "//w.rs | ((:::depth = 1 ? 'top' : :::depth = 2 ? 'mid' : 'deep'))",
+                &t
+            ),
             vec![Value::Str("deep".into())]
         );
         // only the taken branch evaluates: the untaken side would
@@ -4520,10 +4564,7 @@ mod tests {
             vec![Value::Str("[child]".into())]
         );
         // Depth as a value: count the breadcrumbs.
-        assert_eq!(
-            vals("//a(->e.(1))+! | @. | count", &t),
-            vec![Value::Int(2)]
-        );
+        assert_eq!(vals("//a(->e.(1))+! | @. | count", &t), vec![Value::Int(2)]);
         // A named push lands as a named regula. (Spaced: glued
         // `.q(` would lex into the matcher name, exactly as
         // `/x.rs(...)` keeps its filename.)
@@ -4539,7 +4580,10 @@ mod tests {
         // result capsa once the pattern pushes.
         let t = MockTree::diamond();
         assert_eq!(
-            vals("//a(->e.(:::name))+ | [:::name = deep] | @. | join(\"-\")", &t),
+            vals(
+                "//a(->e.(:::name))+ | [:::name = deep] | @. | join(\"-\")",
+                &t
+            ),
             vec![
                 Value::Str("x.rs-deep".into()),
                 Value::Str("y.txt-deep".into()),
@@ -4908,10 +4952,7 @@ mod tests {
         );
         // The context-typed push: bare .name in a SCALAR context
         // still feeds the register, not the marks.
-        assert_eq!(
-            vals("//*.rs @| count | .n | $.n", &t),
-            vec![Value::Int(3)]
-        );
+        assert_eq!(vals("//*.rs @| count | .n | $.n", &t), vec![Value::Int(3)]);
         // An unset mark yields nothing (predicate false), not an
         // error.
         assert_eq!(run("/a/*[(nope):::name = \"a\"]", &t), Vec::<u64>::new());
@@ -4992,17 +5033,13 @@ mod tests {
             _ => panic!("values"),
         };
         assert!(out[0].to_string().starts_with("<a>") && out[0].to_string().contains("x.rs"));
-        let out = match crate::run("^ | \"<r><x>1</x></r>\" | decode(xml) | json", &t)
-            .unwrap()
-        {
+        let out = match crate::run("^ | \"<r><x>1</x></r>\" | decode(xml) | json", &t).unwrap() {
             QueryResult::Values(vs) => vs,
             _ => panic!("values"),
         };
         assert_eq!(out, vec![Value::Str("{\"x\": \"1\"}".into())]);
         // Object → record; round-trips through json.
-        let out = match crate::run("^ | \"{\\\"a\\\":1}\" | decode(json) | json", &t)
-            .unwrap()
-        {
+        let out = match crate::run("^ | \"{\\\"a\\\":1}\" | decode(json) | json", &t).unwrap() {
             QueryResult::Values(vs) => vs,
             _ => panic!("values"),
         };
@@ -5194,15 +5231,30 @@ mod tests {
         // Null stringified to "" is a substring of everything).
         assert!(!compare(&name, CmpOp::Contains, &Value::Null, sc));
         // An actual empty string still matches, as it should.
-        assert!(compare(&name, CmpOp::Contains, &Value::Str(String::new()), sc));
+        assert!(compare(
+            &name,
+            CmpOp::Contains,
+            &Value::Str(String::new()),
+            sc
+        ));
         // A real substring still matches.
-        assert!(compare(&name, CmpOp::Contains, &Value::Str("one".into()), sc));
+        assert!(compare(
+            &name,
+            CmpOp::Contains,
+            &Value::Str("one".into()),
+            sc
+        ));
         // `=~` against a null pattern doesn't match everything (the
         // bug: Regex::new("") matches any input).
         assert!(!compare(&name, CmpOp::Match, &Value::Null, sc));
         // `!~` against null is true, mirroring `!=` on null.
         assert!(compare(&name, CmpOp::NotMatch, &Value::Null, sc));
         // A real pattern still matches.
-        assert!(compare(&name, CmpOp::Match, &Value::Str("^chap".into()), sc));
+        assert!(compare(
+            &name,
+            CmpOp::Match,
+            &Value::Str("^chap".into()),
+            sc
+        ));
     }
 }

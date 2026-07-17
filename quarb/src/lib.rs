@@ -39,12 +39,13 @@
 
 pub mod adapter;
 mod ast;
+mod encoding;
 mod error;
 mod exec;
 mod lexer;
 mod parser;
 pub mod reflect;
-mod encoding;
+pub use encoding::{sha256, sha256_hex};
 pub mod quantity;
 mod stdlib;
 pub mod temporal;

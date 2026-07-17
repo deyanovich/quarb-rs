@@ -34,6 +34,7 @@ use quarb::{AstAdapter, NodeId, Value};
 
 /// Translate a Quarb query to a SQL `SELECT` statement.
 pub fn export(quarb: &str) -> Result<Translation, SqlError> {
+    refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
     refuse_groups(&arbor)?;
@@ -51,6 +52,20 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         query,
         notes: ex.notes,
     })
+}
+
+/// The exporter rewrites `__LEFT__` as an internal placeholder for
+/// the join's left table (and scrapes `__LEFT__.col` occurrences
+/// into the join obligation). Query text containing the marker
+/// would be rewritten inside its own string literals — and could
+/// spoof the obligation — so such queries stay on the scan path.
+fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
+    if quarb.contains("__LEFT__") {
+        return Err(SqlError::Unsupported(
+            "query text contains the reserved marker \"__LEFT__\"".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A pushdown plan: SQL whose execution is provably identical to
@@ -82,6 +97,7 @@ pub fn pushdown(quarb: &str) -> Option<Pushdown> {
 /// [`pushdown`], keeping the refusal: the error names the first
 /// construct that kept the query on the scan path.
 pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
+    refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
     refuse_groups(&arbor)?;

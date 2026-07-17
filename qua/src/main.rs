@@ -154,6 +154,44 @@ struct Cli {
     /// live.
     #[arg(short = 'i', long)]
     interactive: bool,
+
+    /// Resident session: reuse (or start) a background qua that
+    /// keeps the materialized inputs alive, so repeated queries
+    /// skip the parse. The first query pays materialization; later
+    /// ones answer from the standing arbor. Sessions are keyed by
+    /// the canonical target set plus the semantics-affecting flags,
+    /// and exit after --resident-ttl idle seconds. The session
+    /// serves the inputs as they were when it started: edits to
+    /// the files (or to --refs/--defs content) are not seen until
+    /// the session expires or is killed.
+    #[arg(long)]
+    resident: bool,
+
+    /// Idle seconds before a resident session exits. Fixed when
+    /// the session starts; later clients of the same session
+    /// inherit it (as they do --explain and the other flags the
+    /// session was started with).
+    #[arg(long, value_name = "SECS", default_value_t = 1800)]
+    resident_ttl: u64,
+
+    /// Internal: serve a resident session (spawned by --resident).
+    #[arg(long, hide = true)]
+    resident_serve: bool,
+
+    /// Cache parsed syntax trees for code inputs (.rs/.py/.js/.c…):
+    /// the first query over a file parses and caches its AST; later
+    /// queries load it and skip the parse. Content-addressed under
+    /// ~/.quarb/cache (override with --cache-dir or $QUARB_CACHE_DIR;
+    /// remove that directory to clear it). A stale or corrupt entry
+    /// is silently ignored and reparsed, so the cache can never
+    /// change a result.
+    #[arg(long)]
+    cache: bool,
+
+    /// The AST cache directory (implies --cache). Default:
+    /// $QUARB_CACHE_DIR, else ~/.quarb/cache.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 thread_local! {
@@ -178,6 +216,15 @@ thread_local! {
     /// adapter with it, so every occurrence in a query denotes the
     /// same point and evaluation never reads a clock.
     static NOW_INSTANT: std::cell::Cell<(i64, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+thread_local! {
+    /// Resident-serve mode: the socket to bind, the idle TTL, and
+    /// whether --now pinned the instant (a pinned session replays;
+    /// an unpinned one re-reads the clock per query). Set once in
+    /// `main`; `run` checks it and enters the serve loop.
+    static RESIDENT: std::cell::RefCell<Option<(PathBuf, u64, bool)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 struct Expand;
@@ -289,7 +336,361 @@ fn main() -> anyhow::Result<()> {
         }
     };
     NOW_INSTANT.with(|c| c.set(now));
+
+    // Enable the AST cache before dispatch, so both a normal run and
+    // a resident daemon's per-query parses consult it.
+    if cli.cache || cli.cache_dir.is_some() {
+        let dir = cli
+            .cache_dir
+            .clone()
+            .unwrap_or_else(quarb_code::Cache::default_dir);
+        quarb_code::set_cache(Some(quarb_code::Cache::new(dir)));
+    }
+
+    if cli.resident || cli.resident_serve {
+        anyhow::ensure!(
+            !cli.daiv && cli.save.is_none() && !cli.expand && !cli.interactive,
+            "--resident does not combine with --daiv/--save/--expand/-i"
+        );
+        anyhow::ensure!(
+            !cli.paths.is_empty(),
+            "--resident needs file/directory inputs (stdin has no session identity)"
+        );
+    }
+    if cli.resident && !cli.resident_serve {
+        return resident_client(&cli);
+    }
+    if cli.resident_serve {
+        let sock = resident_socket(&cli)?;
+        RESIDENT.with(|r| *r.borrow_mut() = Some((sock, cli.resident_ttl, cli.now.is_some())));
+    }
     execute(&cli, &cli.query)
+}
+
+// ---------------------------------------------------------------------------
+// Resident sessions: a background qua keeps the materialized
+// adapter alive; clients send queries over a Unix socket and read
+// framed results. The protocol is deliberately tiny:
+//   client → "Q <len>\n" + <len bytes of query text>
+//   server → "R <len> <status>\n" + <len bytes>  (status 0 = ok)
+// ---------------------------------------------------------------------------
+
+/// The session socket: keyed by the canonical target set plus every
+/// flag that changes query semantics, so different views of the
+/// same tree get different sessions.
+fn resident_socket(cli: &Cli) -> anyhow::Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in &cli.paths {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.clone())
+            .hash(&mut h);
+    }
+    (
+        cli.descend,
+        cli.hidden,
+        cli.no_ignore,
+        cli.allow_shell,
+        cli.quantifier_bound,
+        &cli.now,
+        &cli.refs,
+        &cli.defs,
+        cli.no_pushdown,
+    )
+        .hash(&mut h);
+    let dir = resident_dir()?;
+    Ok(dir.join(format!("quarb-{:016x}.sock", h.finish())))
+}
+
+/// The directory holding session sockets. $XDG_RUNTIME_DIR is
+/// per-user and 0700; without it, fall back to a per-uid 0700
+/// subdirectory of the temp dir — never a world-writable directory
+/// directly, where the predictable socket name could be squatted
+/// by another local user. The fallback dir is verified to be ours
+/// (owned by this uid, mode 0700, not a symlink): a pre-created
+/// impostor directory would let its owner remove or replace live
+/// sockets, so an unverifiable dir is a hard error rather than a
+/// quiet risk.
+fn resident_dir() -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(d));
+    }
+    let uid = unsafe { libc::getuid() };
+    let d = std::env::temp_dir().join(format!("quarb-{uid}"));
+    let _ = std::fs::create_dir(&d);
+    let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+    let ok = std::fs::symlink_metadata(&d).is_ok_and(|m| {
+        m.file_type().is_dir() && m.uid() == uid && m.permissions().mode() & 0o777 == 0o700
+    });
+    anyhow::ensure!(
+        ok,
+        "{} is not a private directory owned by this user \
+         (another user may have created it); remove it or set \
+         XDG_RUNTIME_DIR to use resident sessions",
+        d.display()
+    );
+    Ok(d)
+}
+
+/// Client side: connect to the session (starting it if needed),
+/// send the query, stream the result.
+fn resident_client(cli: &Cli) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let sock = resident_socket(cli)?;
+    let mut stream = match std::os::unix::net::UnixStream::connect(&sock) {
+        Ok(s) => s,
+        // No live session. The server owns stale-socket cleanup
+        // (removing here would race a concurrent client into
+        // orphaning a daemon that just bound).
+        Err(_) => spawn_resident(cli, &sock)?,
+    };
+    let q = cli.query.as_bytes();
+    stream.write_all(format!("Q {}\n", q.len()).as_bytes())?;
+    stream.write_all(q)?;
+    stream.flush()?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut header = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut header)?;
+    let mut parts = header.trim_end().split(' ');
+    anyhow::ensure!(
+        parts.next() == Some("R"),
+        "bad session response: {header:?}"
+    );
+    let len: usize = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .context("bad session response length")?;
+    let status: u8 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .context("bad session response status")?;
+    let mut body = vec![0u8; len];
+    std::io::Read::read_exact(&mut reader, &mut body)?;
+    if status == 0 {
+        std::io::stdout().write_all(&body)?;
+        Ok(())
+    } else {
+        anyhow::bail!("{}", String::from_utf8_lossy(&body));
+    }
+}
+
+/// Start the session daemon (this binary, same arguments, plus the
+/// internal serve flag), detach it from the terminal, and wait for
+/// its socket — the wait covers materialization, which for a large
+/// tree is exactly the cost the session exists to amortize.
+fn spawn_resident(
+    cli: &Cli,
+    sock: &std::path::Path,
+) -> anyhow::Result<std::os::unix::net::UnixStream> {
+    use std::os::unix::process::CommandExt as _;
+    let log = sock.with_extension("log");
+    let logfile =
+        std::fs::File::create(&log).with_context(|| format!("creating {}", log.display()))?;
+    let exe = std::env::current_exe().context("resolving qua binary")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1))
+        .arg("--resident-serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(logfile));
+    // A session of its own: survives this client and its terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().context("starting resident session")?;
+    eprintln!(
+        "resident session starting (first query pays materialization; \
+         log: {})",
+        log.display()
+    );
+    let started = std::time::Instant::now();
+    let mut last_note = 0u64;
+    loop {
+        if let Ok(s) = std::os::unix::net::UnixStream::connect(sock) {
+            let _ = cli; // key derivation already used it
+            return Ok(s);
+        }
+        if let Some(status) = child.try_wait()? {
+            // A clean exit can mean our spawn lost a race and
+            // deferred to an already-live session — connect to it.
+            if let Ok(s) = std::os::unix::net::UnixStream::connect(sock) {
+                return Ok(s);
+            }
+            let tail = std::fs::read_to_string(&log).unwrap_or_default();
+            let tail = tail.lines().rev().take(5).collect::<Vec<_>>();
+            anyhow::bail!(
+                "resident session exited ({status}) before binding its socket:\n{}",
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= last_note + 15 {
+            eprintln!("  … materializing ({elapsed}s)");
+            last_note = elapsed;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// The largest query frame a session accepts. Query text is typed
+/// by a person; the cap only exists so a garbled length header
+/// cannot make the daemon allocate gigabytes.
+const RESIDENT_MAX_QUERY: usize = 1 << 20;
+
+/// Server side: bind the socket and answer queries against the
+/// standing adapter until the idle TTL expires. Queries run
+/// serially; each failure answers that client and the session
+/// lives on.
+fn resident_serve_loop<A: AstAdapter>(
+    adapter: &A,
+    render: impl Fn(NodeId) -> String,
+    sock: &std::path::Path,
+    ttl: u64,
+    now_pinned: bool,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    // Exclusive bind. When the path is taken, probe it: a live
+    // daemon answering means another spawn won the race — defer to
+    // it and exit, instead of unbinding it and idling as an
+    // unreachable copy of the (possibly huge) materialization.
+    // Only a dead socket (connect refused) is stale and removable.
+    let listener = match std::os::unix::net::UnixListener::bind(sock) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            if std::os::unix::net::UnixStream::connect(sock).is_ok() {
+                eprintln!("resident session already live; deferring to it");
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(sock);
+            std::os::unix::net::UnixListener::bind(sock)
+                .with_context(|| format!("binding {}", sock.display()))?
+        }
+        Err(e) => return Err(e).with_context(|| format!("binding {}", sock.display())),
+    };
+    // Belt over the 0700 directory: the socket itself is private.
+    let _ = std::fs::set_permissions(sock, {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(0o600)
+    });
+    listener.set_nonblocking(true)?;
+    let mut idle = std::time::Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((mut conn, _)) => {
+                idle = std::time::Instant::now();
+                conn.set_nonblocking(false)?;
+                // A stalled client (stopped, wedged) must not hang
+                // the serial loop past the TTL's reach.
+                let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(30)));
+                let mut reader = std::io::BufReader::new(conn.try_clone()?);
+                let mut header = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut header).is_err() {
+                    continue;
+                }
+                let len: usize = match header
+                    .trim_end()
+                    .strip_prefix("Q ")
+                    .and_then(|s| s.parse().ok())
+                {
+                    Some(n) if n <= RESIDENT_MAX_QUERY => n,
+                    Some(_) => {
+                        let msg = b"query exceeds the resident frame limit";
+                        let _ = conn.write_all(format!("R {} 1\n", msg.len()).as_bytes());
+                        let _ = conn.write_all(msg);
+                        continue;
+                    }
+                    None => continue,
+                };
+                let mut qbytes = vec![0u8; len];
+                if std::io::Read::read_exact(&mut reader, &mut qbytes).is_err() {
+                    continue;
+                }
+                let query = String::from_utf8_lossy(&qbytes).into_owned();
+                // Each query is its own invocation instant unless
+                // the session was pinned with --now.
+                if !now_pinned {
+                    let since = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    NOW_INSTANT.with(|c| c.set((since.as_secs() as i64, since.subsec_nanos())));
+                }
+                let (result, output) =
+                    with_stdout_capture(|| run_wrapped(&query, adapter, &render, None));
+                let (status, body) = match result {
+                    Ok(()) => (0u8, output),
+                    Err(e) => (1u8, format!("{e:#}").into_bytes()),
+                };
+                let _ = conn.write_all(format!("R {} {}\n", body.len(), status).as_bytes());
+                let _ = conn.write_all(&body);
+                let _ = conn.flush();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if idle.elapsed().as_secs() >= ttl {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                eprintln!("resident session accept error: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(sock);
+    Ok(())
+}
+
+/// Run `f` with stdout captured to a byte buffer (fd-level, so the
+/// existing print-based output paths need no plumbing, and
+/// non-UTF-8 output survives verbatim). Queries in a session run
+/// serially, which keeps the fd dance safe.
+fn with_stdout_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::fd::AsRawFd as _;
+    let _ = std::io::stdout().flush();
+    let mut tmp = match tempfile_in_temp() {
+        Ok(t) => t,
+        Err(_) => return (f(), Vec::new()),
+    };
+    let saved = unsafe { libc::dup(1) };
+    if saved < 0 {
+        return (f(), Vec::new());
+    }
+    unsafe { libc::dup2(tmp.as_raw_fd(), 1) };
+    let r = f();
+    let _ = std::io::stdout().flush();
+    unsafe {
+        libc::dup2(saved, 1);
+        libc::close(saved);
+    }
+    let mut out = Vec::new();
+    let _ = tmp.seek(std::io::SeekFrom::Start(0));
+    let _ = tmp.read_to_end(&mut out);
+    (r, out)
+}
+
+/// An anonymous scratch file for the capture (unlinked at once).
+fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
+    let path = std::env::temp_dir().join(format!(
+        "quarb-capture-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    let f = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let _ = std::fs::remove_file(&path);
+    Ok(f)
 }
 
 /// Run one query text against the CLI's inputs, printing results —
@@ -1349,9 +1750,25 @@ fn run<A: AstAdapter>(
     render: impl Fn(NodeId) -> String,
     daiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Every adapter dispatch funnels through here: the one place
-    // the --quantifier-bound and --allow-shell overrides wrap the
-    // adapter.
+    // Every adapter dispatch funnels through here — which makes it
+    // the one place a resident session takes over: the adapter is
+    // built and materialized, so instead of answering once and
+    // exiting, serve queries against it until the TTL.
+    if let Some((sock, ttl, pinned)) = RESIDENT.with(|r| r.borrow().clone()) {
+        return resident_serve_loop(adapter, render, &sock, ttl, pinned);
+    }
+    run_wrapped(query, adapter, &render, daiv_source)
+}
+
+/// The wrap chain (--allow-shell, --quantifier-bound, now-binding)
+/// and execution for one query — `run` for the one-shot path, and
+/// per-query inside a resident session.
+fn run_wrapped<A: AstAdapter>(
+    query: &str,
+    adapter: &A,
+    render: &impl Fn(NodeId) -> String,
+    daiv_source: Option<&str>,
+) -> anyhow::Result<()> {
     if ALLOW_SHELL.with(|b| b.get()) {
         let shelled = AllowShell { inner: adapter };
         return run_bounded(query, &shelled, render, daiv_source);

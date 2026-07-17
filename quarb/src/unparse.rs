@@ -10,8 +10,7 @@
 
 use crate::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PathElem, PredExpr,
-    Predicate, PushBody,
-    Projection, Query, Reach, RegRef, Stage, Step,
+    Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::value::Value;
 

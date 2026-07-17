@@ -41,3 +41,32 @@ fn deeply_nested_does_not_overflow() {
     // engine traversal.)
     assert_eq!(a.children(a.root()).len(), 1);
 }
+
+#[test]
+fn c_grammar() {
+    let src = r#"
+static int helper(int a, int b) { return a + b; }
+int main(void) {
+    for (int i = 0; i < 3; i++) {
+        helper(i, 1);
+    }
+    return 0;
+}
+"#;
+    let a = quarb_code::CodeAdapter::parse(src, "c").unwrap();
+    let got = quarb::run("//function_definition::declarator", &a).unwrap();
+    match got {
+        quarb::QueryResult::Values(vs) => {
+            let names: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
+            assert_eq!(names, ["helper(int a, int b)", "main(void)"]);
+        }
+        _ => panic!("expected values"),
+    }
+    let got = quarb::run("//for_statement//call_expression", &a).unwrap();
+    match got {
+        quarb::QueryResult::Nodes(ns) => assert_eq!(ns.len(), 1),
+        _ => panic!("expected nodes"),
+    }
+    assert!(quarb_code::supported("c"));
+    assert!(quarb_code::supported("h"));
+}

@@ -13,8 +13,8 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// The SHA-256 digest of `data`, as lowercase hex.
-pub fn sha256_hex(data: &[u8]) -> String {
+/// The SHA-256 digest of `data`, as 32 raw bytes (FIPS 180-4).
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
@@ -70,7 +70,16 @@ pub fn sha256_hex(data: &[u8]) -> String {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-    h.iter().map(|w| format!("{w:08x}")).collect()
+    let mut out = [0u8; 32];
+    for (i, w) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
+/// The SHA-256 digest of `data`, as lowercase hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    sha256(data).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -85,12 +94,7 @@ fn b64_with(data: &[u8], alphabet: &[u8], pad: bool) -> String {
             chunk.get(2).copied().unwrap_or(0),
         ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        let idx = [
-            (n >> 18) & 63,
-            (n >> 12) & 63,
-            (n >> 6) & 63,
-            n & 63,
-        ];
+        let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
         let keep = chunk.len() + 1;
         for (i, &ix) in idx.iter().enumerate() {
             if i < keep {
@@ -121,9 +125,7 @@ pub fn base32(data: &[u8]) -> String {
     for chunk in data.chunks(5) {
         let mut buf = [0u8; 5];
         buf[..chunk.len()].copy_from_slice(chunk);
-        let n = u64::from_be_bytes([
-            0, 0, 0, buf[0], buf[1], buf[2], buf[3], buf[4],
-        ]);
+        let n = u64::from_be_bytes([0, 0, 0, buf[0], buf[1], buf[2], buf[3], buf[4]]);
         // 8 output symbols per 5 input bytes; a partial chunk of
         // 1/2/3/4 bytes keeps 2/4/5/7 symbols.
         let keep = [0, 2, 4, 5, 7, 8][chunk.len()];
@@ -306,8 +308,8 @@ pub fn toml_to_value(text: &str) -> Option<crate::value::Value> {
 /// parent collects into a list), and any non-whitespace text a
 /// `#text` key. `None` on malformed XML.
 pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
-    use quick_xml::events::Event;
     use quick_xml::Reader;
+    use quick_xml::events::Event;
     let reader_ = Reader::from_str(text);
     let mut reader = reader_;
 
@@ -326,7 +328,11 @@ pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
         let mut out = Vec::new();
         for a in e.attributes().flatten() {
             let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let val = a.unescape_value().ok().map(|v| v.into_owned()).unwrap_or_default();
+            let val = a
+                .unescape_value()
+                .ok()
+                .map(|v| v.into_owned())
+                .unwrap_or_default();
             out.push((format!("@{key}"), crate::value::Value::Str(val)));
         }
         out
@@ -393,10 +399,7 @@ pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
 }
 
 /// Fold an element's fields and text into its value.
-fn frame_to_value(
-    fields: Vec<(String, crate::value::Value)>,
-    text: String,
-) -> crate::value::Value {
+fn frame_to_value(fields: Vec<(String, crate::value::Value)>, text: String) -> crate::value::Value {
     if fields.is_empty() {
         return crate::value::Value::Str(text);
     }
@@ -506,8 +509,14 @@ mod tests {
             assert_eq!(decode("hex", &hex(s)).as_deref(), Some(s));
         }
         // Crockford leniency: lowercase, O/I/L aliases, hyphens.
-        assert_eq!(decode("crockford32", "csqpyrk1e8"), decode("crockford32", "CSQPYRK1E8"));
-        assert_eq!(decode("crockford32", "C5-QP"), decode("crockford32", "C5QP"));
+        assert_eq!(
+            decode("crockford32", "csqpyrk1e8"),
+            decode("crockford32", "CSQPYRK1E8")
+        );
+        assert_eq!(
+            decode("crockford32", "C5-QP"),
+            decode("crockford32", "C5QP")
+        );
         // Unpadded base64 still decodes.
         assert_eq!(decode("base64", "Zm8"), Some(b"fo".to_vec()));
         // Malformed: odd hex, bad symbol.
@@ -520,7 +529,10 @@ mod tests {
         assert!(!is_decodable("sha256"));
         // Structured decode: json/yaml/toml → Value.
         use crate::value::Value;
-        assert_eq!(json_to_value("[1,2]"), Some(Value::List(vec![Value::Int(1), Value::Int(2)])));
+        assert_eq!(
+            json_to_value("[1,2]"),
+            Some(Value::List(vec![Value::Int(1), Value::Int(2)]))
+        );
         assert!(matches!(yaml_to_value("a: 1"), Some(Value::Record(_))));
         assert!(matches!(toml_to_value("a = 1"), Some(Value::Record(_))));
         assert_eq!(json_to_value("{bad"), None);
@@ -528,8 +540,14 @@ mod tests {
         // XML: text-only element → scalar; attrs → @keys; repeated
         // tags → list; entities resolved.
         assert_eq!(xml_to_value("<p>hi</p>"), Some(Value::Str("hi".into())));
-        assert_eq!(xml_to_value("<p>a &amp; b</p>"), Some(Value::Str("a & b".into())));
-        assert!(matches!(xml_to_value("<b id='1'><t>x</t></b>"), Some(Value::Record(_))));
+        assert_eq!(
+            xml_to_value("<p>a &amp; b</p>"),
+            Some(Value::Str("a & b".into()))
+        );
+        assert!(matches!(
+            xml_to_value("<b id='1'><t>x</t></b>"),
+            Some(Value::Record(_))
+        ));
         if let Some(Value::Record(f)) = xml_to_value("<l><i>1</i><i>2</i></l>") {
             assert_eq!(f[0].0, "i");
             assert!(matches!(f[0].1, Value::List(ref v) if v.len() == 2));

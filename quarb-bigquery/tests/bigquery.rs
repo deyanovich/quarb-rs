@@ -46,8 +46,15 @@ fn pushdown_matches_scan() {
     ];
     for q in cases {
         let plan = quarb_sql::pushdown(q).expect("plan");
-        let (cols, rows) =
-            quarb_bigquery::raw_query(&t, &plan.sql, plan.order_table.as_deref()).unwrap();
+        let (cols, rows) = quarb_bigquery::raw_query(
+            &t,
+            &plan.sql,
+            plan.order_table.as_deref(),
+            plan.join_left
+                .as_ref()
+                .map(|(t, c)| (t.as_str(), c.as_slice())),
+        )
+        .unwrap();
         let pushed: Vec<String> = rows
             .into_iter()
             .map(|row| {

@@ -89,9 +89,7 @@ pub enum Stage {
     /// case: where the plain spread would fork to nothing (null or
     /// an empty list), it emits ONE thread with a null topic — the
     /// row-multiplying half of OPTIONAL MATCH / LEFT JOIN.
-    Spread {
-        outer: bool,
-    },
+    Spread { outer: bool },
     /// `$| stage` — the map pipe, the scope-dual of `@|`: where
     /// `@|` hands its stage ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per

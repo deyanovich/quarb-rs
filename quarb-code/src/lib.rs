@@ -12,8 +12,7 @@
 //! Only *named* nodes appear (punctuation and keywords are
 //! syntax, not structure). Metadata: `::;kind`, `::;field` (this
 //! node's field name in its parent), `::;start-line` /
-//! `::;end-line` (1-based), `::;n-children`. Languages: Rust,
-//! Python, JavaScript, by extension (`rs`, `py`, `js`); the
+//! `::;end-line` (1-based), `::;n-children`. //! Python, JavaScript, by extension (`rs`, `py`, `js`); the
 //! grammar set is compile-time and easily grown.
 //!
 //! Composed (`qua --descend`), source files graft like JSON does
@@ -21,6 +20,21 @@
 //! query across every parsed file.
 
 use quarb::{AstAdapter, NodeId, Value};
+
+mod ast_cache;
+pub use ast_cache::Cache;
+
+thread_local! {
+    /// The AST cache for this thread, or `None` (uncached). Set once
+    /// by the CLI from `--cache`; consulted by every `parse` call, so
+    /// single-file and `--descend` (via quarb-compose) both benefit.
+    static CACHE: std::cell::RefCell<Option<Cache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Enable or disable the persistent AST cache for this thread.
+pub fn set_cache(cache: Option<Cache>) {
+    CACHE.with(|c| *c.borrow_mut() = cache);
+}
 
 /// An error parsing a source file.
 #[derive(Debug, thiserror::Error)]
@@ -33,18 +47,19 @@ pub enum CodeError {
     Parse,
 }
 
-struct Node {
-    kind: &'static str,
-    field: Option<&'static str>,
-    parent: Option<NodeId>,
-    children: Vec<NodeId>,
+#[derive(Debug, PartialEq)]
+pub(crate) struct Node {
+    pub(crate) kind: &'static str,
+    pub(crate) field: Option<&'static str>,
+    pub(crate) parent: Option<NodeId>,
+    pub(crate) children: Vec<NodeId>,
     /// Byte range into the source.
-    start: usize,
-    end: usize,
-    start_line: usize,
-    end_line: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
     /// Field name → child index, for `::field` properties.
-    fields: Vec<(&'static str, usize)>,
+    pub(crate) fields: Vec<(&'static str, usize)>,
 }
 
 /// A parsed source file, exposed as its syntax tree.
@@ -59,6 +74,7 @@ fn language(ext: &str) -> Option<tree_sitter::Language> {
         "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
         "py" => Some(tree_sitter_python::LANGUAGE.into()),
         "js" | "mjs" | "cjs" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -69,8 +85,35 @@ pub fn supported(ext: &str) -> bool {
 }
 
 impl CodeAdapter {
-    /// Parse source text as `ext`'s language.
+    /// Parse source text as `ext`'s language. When the thread's AST
+    /// cache is enabled (see [`set_cache`]), a cache hit for this
+    /// exact content skips tree-sitter entirely; a miss parses and
+    /// stores. Caching is transparent — the returned adapter is
+    /// identical either way.
     pub fn parse(text: &str, ext: &str) -> Result<Self, CodeError> {
+        if let Some(cache) = CACHE.with(|c| c.borrow().clone())
+            && let Some(lang) = language(ext)
+        {
+            let tag = ast_cache::lang_tag(ext);
+            if tag != 0 {
+                let hash = quarb::sha256(text.as_bytes());
+                if let Some(nodes) = ast_cache::load(&cache, tag, &lang, &hash, text) {
+                    return Ok(CodeAdapter {
+                        source: text.to_string(),
+                        nodes,
+                    });
+                }
+                let adapter = Self::parse_raw(text, ext)?;
+                ast_cache::store(&cache, &adapter.nodes, tag, &lang, &hash, text.len() as u64);
+                return Ok(adapter);
+            }
+        }
+        Self::parse_raw(text, ext)
+    }
+
+    /// Parse without consulting the cache — the direct tree-sitter
+    /// path, and the miss path of [`parse`].
+    fn parse_raw(text: &str, ext: &str) -> Result<Self, CodeError> {
         let lang = language(ext).ok_or_else(|| CodeError::Language(ext.to_string()))?;
         let mut parser = tree_sitter::Parser::new();
         parser

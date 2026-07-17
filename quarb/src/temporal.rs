@@ -730,7 +730,12 @@ pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
             None => hh,
         };
     }
-    if !(1..=12).contains(&mo) || d < 1 || d > days_in_month(year, mo) || h > 23 || mi > 59 || se > 60
+    if !(1..=12).contains(&mo)
+        || d < 1
+        || d > days_in_month(year, mo)
+        || h > 23
+        || mi > 59
+        || se > 60
     {
         return None;
     }
@@ -802,8 +807,14 @@ mod tests {
     #[test]
     fn strftime_specifiers() {
         let (s, n, o) = parse_iso("2024-02-15T13:26:40Z").unwrap();
-        assert_eq!(strftime("%Y-%m-%d %H:%M:%S", s, n, o), "2024-02-15 13:26:40");
-        assert_eq!(strftime("%A, %B %e (%a %b)", s, n, o), "Thursday, February 15 (Thu Feb)");
+        assert_eq!(
+            strftime("%Y-%m-%d %H:%M:%S", s, n, o),
+            "2024-02-15 13:26:40"
+        );
+        assert_eq!(
+            strftime("%A, %B %e (%a %b)", s, n, o),
+            "Thursday, February 15 (Thu Feb)"
+        );
         assert_eq!(strftime("%G-w%V day %u", s, n, o), "2024-w07 day 4");
         assert_eq!(strftime("%I:%M %p %z %Z", s, n, o), "01:26 PM +0000 UTC");
         assert_eq!(strftime("100%% %q", s, n, o), "100% %q");
