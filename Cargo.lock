@@ -2426,7 +2426,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "colligo",
  "globset",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "tempfile",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-code",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-csv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "csv",
  "quarb",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-datastore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "duckdb",
  "quarb",
@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firebase"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firestore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-fs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2624,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-html"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "scraper",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-imap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-jq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-json",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-markdown"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mount"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-csv",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2711,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-objstore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-postgres"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-py"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -2748,14 +2748,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-relational"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-serve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sql"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-toml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "calamine",
  "quarb",
@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xpath"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb",
  "quarb-xml",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-yaml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quarb-json",
  "serde_json",

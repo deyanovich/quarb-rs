@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb-html = { path = "../quarb-html", version = "0.1.0" }
+quarb-html = { path = "../quarb-html", version = "0.2.0" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

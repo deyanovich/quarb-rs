@@ -158,7 +158,7 @@ fn pipelines_and_union() {
     // count of code files (aggregation via @|)
     assert_eq!(values("//*<code> @| count", &dir), vec!["2"]);
     // total size of code files
-    assert_eq!(values("//*<code>::;size @| sum", &dir), vec!["6"]);
+    assert_eq!(values("//*<code>::;size @| sum", &dir), vec!["6 B"]);
     // sorted joined names
     assert_eq!(
         values("//*<code>:::name @| sort @| join(\", \")", &dir),
@@ -226,7 +226,7 @@ fn projections_return_scalars() {
     fs::write(dir.path().join("hello.txt"), "hi there").unwrap();
     assert_eq!(values("//hello.txt:::name", &dir), vec!["hello.txt"]);
     assert_eq!(values("//hello.txt:::is-leaf", &dir), vec!["true"]);
-    assert_eq!(values("//hello.txt::;size", &dir), vec!["8"]);
+    assert_eq!(values("//hello.txt::;size", &dir), vec!["8 B"]);
     assert_eq!(values("//hello.txt::;extension", &dir), vec!["txt"]);
     assert_eq!(values("//hello.txt::;is-file", &dir), vec!["true"]);
     // bare :: is the default projection — file content

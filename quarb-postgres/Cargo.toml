@@ -3,7 +3,7 @@ name = "quarb-postgres"
 description = "PostgreSQL adapter for the Quarb query engine"
 keywords = ["query", "postgres", "postgresql", "sql"]
 categories = ["database"]
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.2.0" }
 tokio-postgres.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 thiserror.workspace = true

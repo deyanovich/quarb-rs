@@ -3,7 +3,7 @@ name = "quarb-code"
 description = "Source-code AST adapter for the Quarb query engine (tree-sitter)"
 keywords = ["query", "ast", "tree-sitter", "code", "quarb"]
 categories = ["development-tools", "parsing"]
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"

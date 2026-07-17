@@ -55,6 +55,20 @@ pub enum Value {
 }
 
 impl Value {
+    /// A byte count as a typed quantity on the information base —
+    /// the mint for every adapter's `size` fact, so `[::;size >
+    /// 1GiB]`, `| convert(MB)`, and typed size totals work
+    /// uniformly. (Exact up to 2^53 bytes — 8 PiB — beyond which
+    /// f64 granularity coarsens; no substrate this engine mounts
+    /// reports single objects there.)
+    pub fn bytes(n: i64) -> Value {
+        Value::Quantity {
+            value: n as f64,
+            base: "B".to_string(),
+            written: None,
+        }
+    }
+
     /// Truthiness, for predicate coercion: `Null`, `false`, `0`, the
     /// empty string, and the empty list and record are falsy;
     /// everything else is truthy.

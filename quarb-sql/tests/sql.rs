@@ -360,3 +360,26 @@ fn refuses_the_internal_left_marker() {
     assert!(format!("{err}").contains("__LEFT__"), "{err}");
     assert!(export(q).is_err(), "export substitutes too; must refuse");
 }
+
+#[test]
+fn join_projections_qualify_by_operand_index() {
+    use quarb_sql::{pushdown, pushdown_explained};
+    // `$*1` projects the left/FROM table, `$*2` the joined one —
+    // found by the seams article: every context used to render as
+    // the left table, so `$*2::col` compiled to invalid SQL that
+    // only the driver's runtime refusal caught.
+    let p = pushdown(
+        "/albums/* <=> /tracks/*[::album_id = $*1::id] \
+         | rec(\"a\", $*1::title, \"t\", $*2::title)",
+    )
+    .expect("two-sided projection pushes down");
+    assert!(p.sql.contains("albums.title AS a"), "{}", p.sql);
+    assert!(p.sql.contains("tracks.title AS t"), "{}", p.sql);
+    // Beyond the two operands there is no verified mapping.
+    assert!(
+        pushdown_explained(
+            "/albums/* <=> /tracks/*[::album_id = $*1::id] | rec(\"x\", $*3::title)"
+        )
+        .is_err()
+    );
+}

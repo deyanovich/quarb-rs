@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
 
 [dev-dependencies]
-quarb-csv = { path = "../quarb-csv", version = "0.1.0" }
-quarb-json = { path = "../quarb-json", version = "0.1.0" }
+quarb-csv = { path = "../quarb-csv", version = "0.2.0" }
+quarb-json = { path = "../quarb-json", version = "0.2.0" }

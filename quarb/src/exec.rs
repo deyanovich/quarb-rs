@@ -1569,13 +1569,15 @@ fn operand_scalar_bound(
 /// = Instant; Duration ± Duration = Duration; Duration × n and
 /// Duration ÷ n scale. Anything else involving a temporal value is
 /// null (propagating).
-fn temporal_arith(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
+fn temporal_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -> Option<Value> {
     // Coerce a TEXT partner facing a typed temporal operand,
     // through whichever temporal-family reading the text has —
     // the two grammars are disjoint: instant text is date-shaped
     // (the written offset kept for the result's display), span
-    // text is P-prefixed or unit-suffixed. Numbers never lift in
-    // arithmetic (epoch point or span of seconds? — ambiguous).
+    // text is P-prefixed or unit-suffixed (builtin units first,
+    // then the mounted unit table's time units, e.g. `1jaj`).
+    // Numbers never lift in arithmetic (epoch point or span of
+    // seconds? — ambiguous).
     let lift = |v: &Value| -> Option<Value> {
         match v {
             Value::Instant { .. } | Value::Duration { .. } => Some(v.clone()),
@@ -1587,6 +1589,7 @@ fn temporal_arith(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
                 })
                 .or_else(|| {
                     crate::temporal::parse_span(s)
+                        .or_else(|| crate::temporal::span_from_units(s, scale))
                         .map(|(secs, nanos)| Value::Duration { secs, nanos })
                 }),
             _ => None,
@@ -1601,12 +1604,12 @@ fn temporal_arith(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
         match (typed(left), typed(right)) {
             (true, false) => {
                 if let Some(l) = lift(right) {
-                    return temporal_arith(op, left, &l);
+                    return temporal_arith(op, left, &l, scale);
                 }
             }
             (false, true) => {
                 if let Some(l) = lift(left) {
-                    return temporal_arith(op, &l, right);
+                    return temporal_arith(op, &l, right, scale);
                 }
             }
             _ => {}
@@ -1805,7 +1808,7 @@ fn quantital_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -
 }
 
 fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -> Value {
-    if let Some(v) = temporal_arith(op, left, right) {
+    if let Some(v) = temporal_arith(op, left, right, scale) {
         return v;
     }
     if let Some(v) = quantital_arith(op, left, right, scale) {
@@ -3502,6 +3505,16 @@ fn eval_operand(
 /// threaded so custom units resolve where comparisons happen.
 pub(crate) type UnitScale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
 
+/// The durational reading, extended by the mounted unit table:
+/// builtin span text first (`min`/`h`/`d` keep their engine
+/// meaning), then a magnitude on a custom time unit (`5rep`).
+fn durational_with(v: &Value, scale: UnitScale) -> Option<(i64, u32)> {
+    v.durational_reading().or_else(|| match v {
+        Value::Str(s) => crate::temporal::span_from_units(s, scale),
+        _ => None,
+    })
+}
+
 /// Compare two scalar values under `op`.
 fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
     match op {
@@ -3542,9 +3555,11 @@ fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
     }
     // Span equality when either side is a duration, the other
     // coercing via its durational reading (numbers as seconds,
-    // span text like `30d` or `P5DT3H`).
+    // span text like `30d` or `P5DT3H`) — extended by the mounted
+    // unit table, so criteria may speak the document's own time
+    // units (`5rep`), exactly as quantity criteria do.
     if matches!(a, Value::Duration { .. }) || matches!(b, Value::Duration { .. }) {
-        return match (a.durational_reading(), b.durational_reading()) {
+        return match (durational_with(a, scale), durational_with(b, scale)) {
             (Some(x), Some(y)) => x == y,
             _ => false,
         };
@@ -3577,7 +3592,7 @@ fn value_cmp(a: &Value, b: &Value, scale: UnitScale) -> Option<Ordering> {
         };
     }
     if matches!(a, Value::Duration { .. }) || matches!(b, Value::Duration { .. }) {
-        return match (a.durational_reading(), b.durational_reading()) {
+        return match (durational_with(a, scale), durational_with(b, scale)) {
             (Some(x), Some(y)) => Some(x.cmp(&y)),
             _ => None,
         };

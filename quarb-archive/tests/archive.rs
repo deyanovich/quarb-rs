@@ -28,6 +28,7 @@ fn zip_tree_and_content() {
     let a = ArchiveAdapter::open(&path).unwrap();
     assert_eq!(values(&a, "//*<file> @| count"), ["3"]);
     assert_eq!(values(&a, "/data/a.txt::"), ["alpha"]);
-    assert_eq!(values(&a, "/data/*::;size @| sum"), ["9"]);
-    assert_eq!(values(&a, "/top.txt::;size"), ["3"]);
+    // Sizes are typed byte quantities; totals stay typed.
+    assert_eq!(values(&a, "/data/*::;size @| sum"), ["9 B"]);
+    assert_eq!(values(&a, "/top.txt::;size"), ["3 B"]);
 }

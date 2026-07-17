@@ -3,7 +3,7 @@ name = "quarb-relational"
 description = "Shared relational model for Quarb's database adapters"
 keywords = ["query", "sql", "relational", "quarb"]
 categories = ["database", "data-structures"]
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,4 +11,4 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }

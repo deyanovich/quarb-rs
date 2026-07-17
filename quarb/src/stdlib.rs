@@ -335,6 +335,13 @@ pub fn apply_scalar(
         "duration" | "td" => vec![
             topic
                 .durational_reading()
+                .or_else(|| match &topic {
+                    // The mounted unit table's time units read too
+                    // (`5rep`), builtin span text having had first
+                    // claim — same order as comparisons.
+                    Value::Str(s) => crate::temporal::span_from_units(s, scale),
+                    _ => None,
+                })
                 .map(|(secs, nanos)| Value::Duration { secs, nanos })
                 .unwrap_or(Value::Null),
         ],
@@ -543,7 +550,117 @@ pub fn apply(call: &FnCall, input: Vec<Value>) -> Vec<Value> {
 /// reduces to null (spec: numeric reductions). Exact while every
 /// operand is an integer, promoting to float on overflow — as
 /// arithmetic does — rather than wrapping.
+/// The spans behind a durational `sum`/`mean`: engaged when a typed
+/// duration is present, refusing entirely if any element lacks a
+/// durational reading — a silent partial total would lie.
+fn durational_spans(input: &[Value]) -> Option<Vec<(i64, u32)>> {
+    if !input.iter().any(|v| matches!(v, Value::Duration { .. })) {
+        return None;
+    }
+    input.iter().map(Value::durational_reading).collect()
+}
+
+/// The quantital fold's verdict: engaged when a typed quantity is
+/// present. All elements must be quantities on one shared base —
+/// a cross-dimension fold (watts plus meters) or a dimensionless
+/// stowaway would total nonsense silently, so either refuses.
+enum QuantFold {
+    /// No quantities present — the numeric path proceeds.
+    Absent,
+    /// Every element a quantity on this base: fold the base
+    /// magnitudes and mint the result on it. When every element
+    /// was also *written* in one unit, `unit` carries it as
+    /// (base-per-unit factor, name), so the total can display as
+    /// `570.5 W` instead of the raw base expression.
+    Same {
+        base: String,
+        unit: Option<(f64, String)>,
+    },
+    /// Mixed dimensions or quantity/non-quantity mixture: refuse.
+    Unsound,
+}
+
+fn quantital_fold(input: &[Value]) -> QuantFold {
+    let mut base: Option<&str> = None;
+    let mut unit: Option<(f64, &str)> = None;
+    let mut unit_ok = true;
+    let mut quantities = 0usize;
+    for v in input {
+        if let Value::Quantity {
+            value,
+            base: b,
+            written,
+        } = v
+        {
+            quantities += 1;
+            match base {
+                None => base = Some(b),
+                Some(prev) if prev == b => {}
+                Some(_) => return QuantFold::Unsound,
+            }
+            match (unit_ok, written) {
+                (true, Some((mag, u))) if *mag != 0.0 => match unit {
+                    None => unit = Some((value / mag, u)),
+                    Some((_, prev)) if prev == u => {}
+                    Some(_) => unit_ok = false,
+                },
+                _ => unit_ok = false,
+            }
+        }
+    }
+    match (quantities, base) {
+        (0, _) => QuantFold::Absent,
+        (n, Some(b)) if n == input.len() => QuantFold::Same {
+            base: b.to_string(),
+            unit: unit.filter(|_| unit_ok).map(|(f, u)| (f, u.to_string())),
+        },
+        _ => QuantFold::Unsound,
+    }
+}
+
+/// Mint a fold's result on its base, re-expressed in the shared
+/// written unit where one survived.
+fn quantital_result(value: f64, base: String, unit: Option<(f64, String)>) -> Value {
+    Value::Quantity {
+        value,
+        base,
+        written: unit.map(|(f, u)| (value / f, u)),
+    }
+}
+
 fn sum(input: &[Value]) -> Value {
+    // Quantities total to a typed quantity in the base unit —
+    // mixed units of one dimension welcome (kW + W + BTU/h), mixed
+    // dimensions refused.
+    match quantital_fold(input) {
+        QuantFold::Unsound => return Value::Null,
+        QuantFold::Same { base, unit } => {
+            let value = input.iter().filter_map(Value::numeric).sum();
+            return quantital_result(value, base, unit);
+        }
+        QuantFold::Absent => {}
+    }
+    // Durations total to a typed duration (`PT15H45M`), the
+    // durational counterpart.
+    if let Some(spans) = durational_spans(input) {
+        let mut secs: i64 = 0;
+        let mut nanos: i64 = 0;
+        for (s, n) in spans {
+            match secs.checked_add(s) {
+                Some(t) => secs = t,
+                None => return Value::Null,
+            }
+            nanos += n as i64;
+        }
+        match secs.checked_add(nanos.div_euclid(1_000_000_000)) {
+            Some(t) => secs = t,
+            None => return Value::Null,
+        }
+        return Value::Duration {
+            secs,
+            nanos: nanos.rem_euclid(1_000_000_000) as u32,
+        };
+    }
     if !input.iter().any(|v| v.numeric().is_some()) {
         return Value::Null;
     }
@@ -595,6 +712,28 @@ fn product(input: &[Value]) -> Value {
 }
 
 fn mean(input: &[Value]) -> Value {
+    // The mean of same-base quantities is a quantity on that base.
+    match quantital_fold(input) {
+        QuantFold::Unsound => return Value::Null,
+        QuantFold::Same { base, unit } => {
+            let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
+            let value = nums.iter().sum::<f64>() / nums.len() as f64;
+            return quantital_result(value, base, unit);
+        }
+        QuantFold::Absent => {}
+    }
+    // The mean of durations is a duration.
+    if let Some(spans) = durational_spans(input) {
+        let total: i128 = spans
+            .iter()
+            .map(|(s, n)| *s as i128 * 1_000_000_000 + *n as i128)
+            .sum();
+        let avg = total / spans.len() as i128;
+        return Value::Duration {
+            secs: (avg.div_euclid(1_000_000_000)) as i64,
+            nanos: avg.rem_euclid(1_000_000_000) as u32,
+        };
+    }
     let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
     if nums.is_empty() {
         Value::Null
@@ -606,6 +745,23 @@ fn mean(input: &[Value]) -> Value {
 /// The middle numeric value; an even count averages the two middle
 /// values. All-integer input with an odd count stays an integer.
 fn median(input: &[Value]) -> Value {
+    // The median of same-base quantities is a quantity on that
+    // base; mixed dimensions refuse.
+    match quantital_fold(input) {
+        QuantFold::Unsound => return Value::Null,
+        QuantFold::Same { base, unit } => {
+            let mut nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
+            nums.sort_by(|a, b| a.partial_cmp(b).expect("no NaN from Value::numeric"));
+            let mid = nums.len() / 2;
+            let value = if nums.len() % 2 == 1 {
+                nums[mid]
+            } else {
+                (nums[mid - 1] + nums[mid]) / 2.0
+            };
+            return quantital_result(value, base, unit);
+        }
+        QuantFold::Absent => {}
+    }
     let mut nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
     if nums.is_empty() {
         return Value::Null;
@@ -627,6 +783,13 @@ fn median(input: &[Value]) -> Value {
 /// Population variance, post-processed by `finish` (identity for
 /// `variance`, square root for `stddev`).
 fn spread(input: &[Value], finish: impl Fn(f64) -> f64) -> Value {
+    // Statistical moments over mixed dimensions are nonsense too.
+    // Same-base spreads stay bare magnitudes for now (a stddev
+    // carries the base's unit, a variance its square — typing them
+    // is a ruling for the quantital round's next pass).
+    if matches!(quantital_fold(input), QuantFold::Unsound) {
+        return Value::Null;
+    }
     let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
     if nums.is_empty() {
         return Value::Null;
@@ -654,6 +817,12 @@ fn has_reading(v: &Value) -> bool {
 /// longer win via the comparison's string fallback), and reduce an
 /// empty (or wholly readingless) input to null (spec).
 fn extreme(input: Vec<Value>, want: std::cmp::Ordering) -> Vec<Value> {
+    // Ordering across dimensions is meaningless: a min over watts
+    // and meters would pick by raw magnitude. Refuse, like the
+    // numeric folds.
+    if matches!(quantital_fold(&input), QuantFold::Unsound) {
+        return vec![Value::Null];
+    }
     match input
         .into_iter()
         .filter(has_reading)
@@ -710,6 +879,71 @@ mod tests {
         assert_eq!(agg("mean", ints(&[1, 2, 3, 4])), vec![Value::Float(2.5)]);
         assert_eq!(agg("avg", ints(&[1, 2, 3, 4])), vec![Value::Float(2.5)]);
         assert_eq!(agg("mean", vec![]), vec![Value::Null]);
+    }
+
+    #[test]
+    fn quantital_folds_type_and_refuse() {
+        let q = |value: f64, written: Option<(f64, &str)>| Value::Quantity {
+            value,
+            base: "kg*m^2/s^3".into(),
+            written: written.map(|(m, u)| (m, u.to_string())),
+        };
+        // Same written unit: the total keeps it.
+        let watts = vec![q(142.5, Some((142.5, "W"))), q(290.0, Some((290.0, "W")))];
+        assert_eq!(
+            agg("sum", watts.clone()),
+            vec![q(432.5, Some((432.5, "W")))]
+        );
+        assert_eq!(agg("mean", watts), vec![q(216.25, Some((216.25, "W")))]);
+        // Mixed units of one dimension: base magnitudes, no unit.
+        let mixed = vec![q(1200.0, Some((1.2, "kW"))), q(350.0, Some((350.0, "W")))];
+        assert_eq!(agg("sum", mixed.clone()), vec![q(1550.0, None)]);
+        assert_eq!(agg("median", mixed), vec![q(775.0, None)]);
+        // Mixed DIMENSIONS refuse — watts plus meters is nonsense.
+        let bad = vec![
+            q(100.0, Some((100.0, "W"))),
+            Value::Quantity {
+                value: 2000.0,
+                base: "m".into(),
+                written: Some((2.0, "km".into())),
+            },
+        ];
+        for f in ["sum", "mean", "median", "min", "max", "stddev"] {
+            assert_eq!(agg(f, bad.clone()), vec![Value::Null], "{f}");
+        }
+        // A dimensionless stowaway refuses too.
+        assert_eq!(
+            agg("sum", vec![q(1.0, None), Value::Int(5)]),
+            vec![Value::Null]
+        );
+    }
+
+    #[test]
+    fn durational_sum_and_mean() {
+        let d = |secs: i64| Value::Duration { secs, nanos: 0 };
+        // Durations total and average to typed durations.
+        assert_eq!(
+            agg("sum", vec![d(2700), d(43200), d(10800)]),
+            vec![d(56700)] // PT15H45M
+        );
+        assert_eq!(
+            agg("mean", vec![d(2700), d(43200), d(10800)]),
+            vec![d(18900)] // PT5H15M
+        );
+        // Mixed with span text and numbers-as-seconds: still spans.
+        assert_eq!(
+            agg(
+                "sum",
+                vec![d(60), Value::Str("2min".into()), Value::Int(60)]
+            ),
+            vec![d(240)]
+        );
+        // Any unreadable element refuses the whole fold — a silent
+        // partial total would lie.
+        assert_eq!(
+            agg("sum", vec![d(60), Value::Str("soon".into())]),
+            vec![Value::Null]
+        );
     }
 
     #[test]

@@ -677,7 +677,7 @@ impl AstAdapter for GitAdapter {
                 .git(&["cat-file", "-s", &oid])
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
-                .map(Value::Int),
+                .map(Value::bytes),
             _ => None,
         }
     }
@@ -753,7 +753,10 @@ tttttttttttttttttttttttttttttttttttttttt\u{0}\u{0}\
         let a = parse_info(recs[0].1).expect("first record parses");
         assert_eq!(a.author, "Ann");
         assert_eq!(a.subject, "Revert commit deadbeef");
-        assert_eq!(a.message, "Revert commit deadbeef\n\nThis reverts commit deadbeef.");
+        assert_eq!(
+            a.message,
+            "Revert commit deadbeef\n\nThis reverts commit deadbeef."
+        );
         assert_eq!(recs[1].0, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         let b = parse_info(recs[1].1).expect("second record parses");
         assert_eq!(b.subject, "second");

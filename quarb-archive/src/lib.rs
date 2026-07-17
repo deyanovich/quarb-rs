@@ -302,7 +302,7 @@ impl AstAdapter for ArchiveAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
-            "size" => n.size.map(Value::Int),
+            "size" => n.size.map(Value::bytes),
             "compressed" => n.compressed.map(Value::Int),
             "n-entries" if node.0 == 0 => Some(Value::Int(self.nodes.len() as i64 - 1)),
             _ => None,

@@ -51,6 +51,23 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
         // *pure-time* result is rejected downstream: on the quarb
         // side a span of time is a Duration, one ontology per
         // dimension of time.
+        // Information (a quarb extension: bytes are not SI, but
+        // they are the most ubiquitous unit in the substrates this
+        // engine mounts — file sizes, blob sizes, object sizes).
+        // Decimal prefixes ride the generic machinery (kB = 1000 B,
+        // MB, GB, TB, …); the IEC binary forms are full names
+        // (KiB = 1024 B, MiB, GiB, …), and the colloquial capital
+        // KB reads decimal, equal to kB — the binary spelling is
+        // KiB, always. That one ruling settles the oldest seam in
+        // storage: 1 GB = 10^9 B; 1 GiB = 2^30 B; never confused.
+        "B" => (1.0, "B"),
+        "KB" => (1000.0, "B"),
+        "KiB" => (1024.0, "B"),
+        "MiB" => (1_048_576.0, "B"),
+        "GiB" => (1_073_741_824.0, "B"),
+        "TiB" => (1_099_511_627_776.0, "B"),
+        "PiB" => (1_125_899_906_842_624.0, "B"),
+        "EiB" => (1_152_921_504_606_846_976.0, "B"),
         "m" => (1.0, "m"),
         "s" => (1.0, "s"),
         "kg" => (1.0, "kg"),
@@ -101,7 +118,8 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
 fn prefixable(stem: &str) -> bool {
     matches!(
         stem,
-        "m" | "s"
+        "B" | "m"
+            | "s"
             | "g"
             | "A"
             | "K"
@@ -360,6 +378,32 @@ mod tests {
         assert_eq!(scale_expr("min"), None);
         assert_eq!(scale_expr("s"), None);
         assert_eq!(unit_scale("parsec"), None);
+    }
+
+    #[test]
+    fn byte_units() {
+        // The information base: decimal prefixes are powers of ten,
+        // the IEC binary forms are full names, and the colloquial
+        // capital KB reads decimal — the binary spelling is KiB.
+        assert_eq!(unit_scale("B"), Some((1.0, "B")));
+        assert_eq!(unit_scale("kB"), Some((1000.0, "B")));
+        assert_eq!(unit_scale("KB"), Some((1000.0, "B")));
+        assert_eq!(unit_scale("KiB"), Some((1024.0, "B")));
+        assert_eq!(unit_scale("MB"), Some((1e6, "B")));
+        assert_eq!(unit_scale("MiB"), Some((1_048_576.0, "B")));
+        assert_eq!(unit_scale("GB"), Some((1e9, "B")));
+        assert_eq!(unit_scale("GiB"), Some((1_073_741_824.0, "B")));
+        assert_eq!(unit_scale("TB"), Some((1e12, "B")));
+        assert_eq!(unit_scale("TiB"), Some((1_099_511_627_776.0, "B")));
+        // The seam, settled: a gibibyte outranks a gigabyte.
+        let gb = unit_scale("GB").unwrap().0;
+        let gib = unit_scale("GiB").unwrap().0;
+        assert!(gib > gb);
+        // Bytes flow through full expressions too (rates).
+        assert_eq!(
+            scale_expr("MB/s").map(|(f, b)| (f, b)),
+            Some((1e6, "B/s".to_string()))
+        );
     }
 
     #[test]

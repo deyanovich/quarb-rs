@@ -728,11 +728,26 @@ impl Exporter {
                 })
             }
             "context" => {
-                // `$*1::col` — the correlation (left/FROM) side.
+                // `$*k::col` — k names the correlation operand: 1 is
+                // the left/FROM side, 2 the joined side (the `qual`
+                // table in a join context). Anything else is outside
+                // the verified-safe set.
                 let p = self
                     .kid(o, "projection")
                     .ok_or_else(|| SqlError::Unsupported("a bare '$*' reference".into()))?;
-                Ok(format!("__LEFT__.{}", self.projection_col(p)?))
+                let col = self.projection_col(p)?;
+                match self.prop(o, "index") {
+                    None | Some(Value::Int(1)) => Ok(format!("__LEFT__.{col}")),
+                    Some(Value::Int(2)) => match qual {
+                        Some(q) => Ok(format!("{q}.{col}")),
+                        None => Err(SqlError::Unsupported(
+                            "$*2 outside a correlation join".into(),
+                        )),
+                    },
+                    Some(v) => Err(SqlError::Unsupported(format!(
+                        "pushdown: $*{v} beyond a two-branch correlation"
+                    ))),
+                }
             }
             "arith" => {
                 let op = self.prop_s(o, "op");

@@ -373,6 +373,41 @@ fn parse_systemd_span(s: &str) -> Option<i128> {
 /// duration (with a leading `-` accepted, so [`format_duration`]
 /// output round-trips) or a systemd time-span. Returns
 /// (secs, nanos) with nanos normalized into [0, 1e9).
+/// Span text through a *unit table*: a magnitude glued to (or
+/// spaced from) a unit expression the adapter's registry knows —
+/// `5rep`, `0.4jaj`, `2fortnight` — reads as a span iff the unit's
+/// base dimension is bare seconds. This is the durational
+/// counterpart of quantity criteria paying custom units: the
+/// builtin span grammar is consulted first by every caller, so
+/// `min`/`h`/`d` keep their engine meaning, and a length like `5m`
+/// resolves to meters (base `m`), fails the seconds check, and
+/// refuses rather than comparing nonsense.
+pub(crate) fn span_from_units(
+    s: &str,
+    scale: &dyn Fn(&str) -> Option<(f64, String)>,
+) -> Option<(i64, u32)> {
+    let s = s.trim();
+    let split = s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = s.split_at(split);
+    let num = num.trim();
+    let mag: f64 = if num.is_empty() {
+        1.0
+    } else {
+        num.parse().ok()?
+    };
+    let (factor, base) = scale(unit.trim())?;
+    if base != "s" {
+        return None;
+    }
+    let total = mag * factor;
+    if !(total.is_finite() && (0.0..=i64::MAX as f64).contains(&total)) {
+        return None;
+    }
+    let secs = total.floor() as i64;
+    let nanos = ((total - total.floor()) * 1e9) as u32;
+    Some((secs, nanos))
+}
+
 pub fn parse_span(s: &str) -> Option<(i64, u32)> {
     let s = s.trim();
     let (neg, body) = match s.strip_prefix('-') {
@@ -820,6 +855,28 @@ mod tests {
         assert_eq!(strftime("100%% %q", s, n, o), "100% %q");
         let (s, n, o) = parse_iso("2024-02-15T14:26:40+01:00").unwrap();
         assert_eq!(strftime("%T %z", s, n, o), "14:26:40 +0100");
+    }
+
+    #[test]
+    fn span_from_unit_table() {
+        // A stand-in registry: the Klingon hour and day, and a
+        // length unit that must NOT read as a span.
+        let scale = |u: &str| -> Option<(f64, String)> {
+            match u {
+                "rep" => Some((4500.0, "s".into())),
+                "jaj" => Some((108000.0, "s".into())),
+                "kellicam" => Some((2000.0, "m".into())),
+                _ => None,
+            }
+        };
+        assert_eq!(span_from_units("5rep", &scale), Some((22500, 0)));
+        assert_eq!(span_from_units("0.5jaj", &scale), Some((54000, 0)));
+        assert_eq!(span_from_units("jaj", &scale), Some((108000, 0)));
+        // Wrong dimension refuses; unknown unit refuses.
+        assert_eq!(span_from_units("3kellicam", &scale), None);
+        assert_eq!(span_from_units("3glorp", &scale), None);
+        // Negative spans refuse, like builtin span text.
+        assert_eq!(span_from_units("-1rep", &scale), None);
     }
 
     #[test]

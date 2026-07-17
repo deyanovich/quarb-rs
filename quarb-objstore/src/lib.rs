@@ -440,7 +440,7 @@ impl AstAdapter for ObjstoreAdapter {
         let nodes = self.nodes.borrow();
         let n = &nodes[node.0 as usize];
         match key {
-            "size" => n.size.map(Value::Int),
+            "size" => n.size.map(Value::bytes),
             "updated" => n.updated.clone().map(Value::Str),
             "key" => Some(Value::Str(n.key.clone())),
             _ => None,

@@ -3,7 +3,7 @@ name = "quarb-wasm"
 description = "Browser playground entry point for the Quarb engine"
 # Mirrors the quarb core version it wraps; surfaced in the
 # playground footer via version().
-version = "0.1.2"
+version.workspace = true
 publish = false
 edition.workspace = true
 license.workspace = true

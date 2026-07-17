@@ -3,7 +3,7 @@ name = "quarb-bigquery"
 description = "Google BigQuery adapter for the Quarb query engine"
 keywords = ["query", "bigquery", "sql", "quarb"]
 categories = ["database", "api-bindings"]
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,11 +11,11 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.2.0" }
 ureq.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb-sql = { path = "../quarb-sql", version = "0.1.0" }
+quarb-sql = { path = "../quarb-sql", version = "0.2.0" }

@@ -3,7 +3,7 @@ name = "quarb-sql"
 description = "SQL importer for the Quarb query engine"
 keywords = ["query", "sql", "importer", "quarb"]
 categories = ["parser-implementations", "database"]
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,9 +11,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb-sqlite = { path = "../quarb-sqlite", version = "0.1.0" }
+quarb-sqlite = { path = "../quarb-sqlite", version = "0.2.0" }
 rusqlite.workspace = true

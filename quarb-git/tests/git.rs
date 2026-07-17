@@ -73,7 +73,7 @@ fn refs_commits_and_time_travel() {
         values(&a, "/tags/start/src/lib.rs::"),
         ["pub fn one() {}\n"]
     );
-    assert_eq!(values(&a, "/branches/master/src/lib.rs::;size"), ["32"]);
+    assert_eq!(values(&a, "/branches/master/src/lib.rs::;size"), ["32 B"]);
 }
 
 #[test]

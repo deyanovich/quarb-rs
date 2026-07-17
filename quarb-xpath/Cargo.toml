@@ -11,9 +11,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.1.0" }
-quarb-xml = { path = "../quarb-xml", version = "0.1.0" }
+quarb = { path = "../quarb", version = "0.2.0" }
+quarb-xml = { path = "../quarb-xml", version = "0.2.0" }

@@ -226,7 +226,7 @@ impl AstAdapter for FsAdapter {
         let path = &self.paths[node.0 as usize];
         let md = std::fs::metadata(path).ok()?;
         match key {
-            "size" => Some(Value::Int(md.len() as i64)),
+            "size" => Some(Value::bytes(md.len() as i64)),
             "is-dir" => Some(Value::Bool(md.is_dir())),
             "is-file" => Some(Value::Bool(md.is_file())),
             "modified" => md
