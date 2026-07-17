@@ -1,0 +1,6 @@
+# wasm32 builds (quarb-wasm, the playground): getrandom 0.3 needs
+# its backend named explicitly on wasm32-unknown-unknown; wasm_js
+# routes it to crypto.getRandomValues via wasm-bindgen. Pairs with
+# the `getrandom = { features = ["wasm_js"] }` dep in quarb-wasm.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

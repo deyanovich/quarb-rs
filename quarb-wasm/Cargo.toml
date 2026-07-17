@@ -1,0 +1,34 @@
+[package]
+name = "quarb-wasm"
+description = "Browser playground entry point for the Quarb engine"
+# Mirrors the quarb core version it wraps; surfaced in the
+# playground footer via version().
+version = "0.1.2"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+quarb = { path = "../quarb" }
+quarb-json = { path = "../quarb-json" }
+quarb-yaml = { path = "../quarb-yaml" }
+quarb-toml = { path = "../quarb-toml" }
+quarb-csv = { path = "../quarb-csv" }
+quarb-xml = { path = "../quarb-xml" }
+quarb-html = { path = "../quarb-html" }
+quarb-markdown = { path = "../quarb-markdown" }
+wasm-bindgen = "0.2"
+serde_json.workspace = true
+# scraper (via quarb-html) → ahash → getrandom: the JS backend
+# must be opted in on wasm32-unknown-unknown. Pairs with the
+# `getrandom_backend="wasm_js"` rustflag in ../.cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]

@@ -1,0 +1,31 @@
+[package]
+name = "qua-py"
+# Decoupled from the workspace version: the Python package on PyPI
+# follows its own release cadence, independent of the quarb Rust
+# crates on crates.io.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Python bindings for the Quarb query engine — structure-aware queries over JSON, YAML, TOML, CSV, XML, HTML, and Markdown."
+readme = "README.md"
+# Not a crates.io publication target — this crate ships to PyPI via
+# maturin (see pyproject.toml), not to crates.io.
+publish = false
+
+[lib]
+name = "_qua"
+crate-type = ["cdylib"]
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1" }
+quarb-json = { path = "../quarb-json", version = "0.1" }
+quarb-yaml = { path = "../quarb-yaml", version = "0.1" }
+quarb-toml = { path = "../quarb-toml", version = "0.1" }
+quarb-csv = { path = "../quarb-csv", version = "0.1" }
+quarb-xml = { path = "../quarb-xml", version = "0.1" }
+quarb-html = { path = "../quarb-html", version = "0.1" }
+quarb-markdown = { path = "../quarb-markdown", version = "0.1" }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py38"] }

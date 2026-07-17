@@ -29,6 +29,7 @@ members = [
     "quarb-jq",
     "qm",
     "qua",
+    "qua-py",
     "quarb-mysql",
     "quarb-neo4j",
     "quarb-objstore",
@@ -37,6 +38,7 @@ members = [
     "quarb-serve",
     "quarb-sql",
     "quarb-sqlite",
+    "quarb-wasm",
 ]
 
 [workspace.package]

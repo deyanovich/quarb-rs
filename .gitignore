@@ -8,3 +8,9 @@
 *.idx
 *.ilg
 *.ind
+
+# wasm-pack output (built artifact, shipped via the demo repo)
+quarb-wasm/pkg/
+
+# Python bytecode (qua-py test runs)
+__pycache__/
