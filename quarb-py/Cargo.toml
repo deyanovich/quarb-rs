@@ -1,5 +1,5 @@
 [package]
-name = "qua-py"
+name = "quarb-py"
 # Decoupled from the workspace version: the Python package on PyPI
 # follows its own release cadence, independent of the quarb Rust
 # crates on crates.io.

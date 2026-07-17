@@ -2479,21 +2479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qua-py"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "quarb",
- "quarb-csv",
- "quarb-html",
- "quarb-json",
- "quarb-markdown",
- "quarb-toml",
- "quarb-xml",
- "quarb-yaml",
-]
-
-[[package]]
 name = "quarb"
 version = "0.1.2"
 dependencies = [
@@ -2742,6 +2727,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "quarb-py"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "quarb",
+ "quarb-csv",
+ "quarb-html",
+ "quarb-json",
+ "quarb-markdown",
+ "quarb-toml",
+ "quarb-xml",
+ "quarb-yaml",
 ]
 
 [[package]]

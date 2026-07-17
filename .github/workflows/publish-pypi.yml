@@ -1,4 +1,4 @@
-name: Publish qua-py to PyPI (dist: quarb)
+name: Publish quarb-py to PyPI (dist: quarb)
 
 # Triggers on `py/v*` tag pushes to this GitHub mirror. Builds the full
 # wheel matrix (5 platforms + sdist) and publishes atomically to PyPI
@@ -67,7 +67,7 @@ jobs:
           args: >-
             --release
             --strip
-            --manifest-path qua-py/Cargo.toml
+            --manifest-path quarb-py/Cargo.toml
             --out dist
           manylinux: auto
           python-version: "3.12"
@@ -94,7 +94,7 @@ jobs:
         with:
           command: sdist
           args: >-
-            --manifest-path qua-py/Cargo.toml
+            --manifest-path quarb-py/Cargo.toml
             --out dist
 
       - name: Upload sdist artifact

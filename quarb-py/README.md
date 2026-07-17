@@ -42,26 +42,34 @@ adapter composition — is the Rust binary: `cargo install qua`.
 ```python
 import quarb
 
-doc = """{
+doc = quarb.loads("""{
   "books": [
     {"title": "Sapiens", "price": 25},
     {"title": "Cosmos",  "price": 18}
   ]
-}"""
+}""", "json")
 
-quarb.run('/books/*[/price:: > 20]/title::', doc, 'json')
+doc.values('/books/*[/price:: > 20]/title::')
 # ['Sapiens']
 
-quarb.run_file('/books/*/title::', 'books.json')
-# ['Sapiens', 'Cosmos']
+doc.value('/books/*/price:: @| mean')
+# 21.5
+
+doc.records('/books/* | rec("t", /title::, "p", /price::)')
+# [{'t': 'Sapiens', 'p': 25}, {'t': 'Cosmos', 'p': 18}]
 ```
 
-`run` takes the input as a string plus an explicit format name
-(`json`, `yaml`, `toml`, `csv`, `tsv`, `xml`, `html`,
-`markdown`); `run_file` reads a file and infers the format from
-its extension. Both return the result lines as a list of strings
-and raise `ValueError` with the engine's message on parse or
-execution errors.
+`loads(text, format)` / `load(path)` parse once into a
+`Document`, queried many times. Results come back **typed**:
+ints, floats, strings, `None` for null, tz-aware `datetime` for
+instants, `timedelta` for durations, `Quantity` for unit-carrying
+values, dicts for records. Formats: `json`, `yaml`, `toml`,
+`csv`, `tsv`, `xml`, `html`, `markdown`.
+
+The lower-level `quarb.run(query, text, format)` and
+`quarb.run_file(query, path)` return the result *lines as
+strings* — exactly what the `qua` CLI prints. All errors raise
+`ValueError` with the engine's message.
 
 For the query language itself — steps, criteria, readings,
 patterns, joins — see the [user guide and spec][quarb].
