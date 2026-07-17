@@ -15,5 +15,5 @@ quarb = { path = "../quarb", version = "0.2.0" }
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb-sqlite = { path = "../quarb-sqlite", version = "0.2.0" }
+quarb-sqlite = { path = "../quarb-sqlite" }
 rusqlite.workspace = true
