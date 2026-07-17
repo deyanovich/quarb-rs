@@ -1,0 +1,18 @@
+[package]
+name = "quarb-gsheet"
+description = "Google Sheets adapter for the Quarb query engine"
+keywords = ["query", "google-sheets", "quarb"]
+categories = ["api-bindings"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.1.0" }
+ureq.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

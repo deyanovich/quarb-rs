@@ -1,0 +1,15 @@
+[package]
+name = "quarb-imap"
+description = "IMAP mailbox adapter for the Quarb query engine"
+keywords = ["query", "imap", "email", "mail", "quarb"]
+categories = ["email"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+thiserror.workspace = true

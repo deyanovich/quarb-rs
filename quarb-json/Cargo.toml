@@ -1,0 +1,15 @@
+[package]
+name = "quarb-json"
+description = "JSON adapter for the Quarb query engine"
+keywords = ["query", "json", "quarb", "arbor"]
+categories = ["parser-implementations", "encoding"]
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+serde_json.workspace = true

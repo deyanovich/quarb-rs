@@ -1,0 +1,20 @@
+[package]
+name = "quarb-xlsx"
+description = "Spreadsheet (xlsx/ods) adapter for the Quarb query engine"
+keywords = ["query", "xlsx", "spreadsheet", "quarb"]
+categories = ["parser-implementations", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.1.0" }
+calamine = "0.26"
+thiserror.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

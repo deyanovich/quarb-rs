@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "quarb",
+    "quarb-fs",
+    "quarb-imap",
+    "quarb-json",
+    "quarb-kaiv",
+    "quarb-yaml",
+    "quarb-toml",
+    "quarb-markdown",
+    "quarb-maildir",
+    "quarb-html",
+    "quarb-xlsx",
+    "quarb-xml",
+    "quarb-archive",
+    "quarb-bigquery",
+    "quarb-code",
+    "quarb-compose",
+    "quarb-csv",
+    "quarb-datastore",
+    "quarb-duckdb",
+    "quarb-firebase",
+    "quarb-firestore",
+    "quarb-git",
+    "quarb-gsheet",
+    "quarb-mount",
+    "quarb-xpath",
+    "quarb-jq",
+    "qm",
+    "qua",
+    "quarb-mysql",
+    "quarb-neo4j",
+    "quarb-objstore",
+    "quarb-postgres",
+    "quarb-relational",
+    "quarb-serve",
+    "quarb-sql",
+    "quarb-sqlite",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Bojan Durickovic <dev@deyanovich.org>"]
+repository = "https://gitlab.com/quarb/engine"
+homepage = "https://quarb.org"
+
+[workspace.dependencies]
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+globset = "0.4"
+serde_json = { version = "1", features = ["preserve_order"] }
+scraper = "0.20"
+csv = "1.4"
+rusqlite = "0.32"
+ureq = { version = "2", features = ["json"] }
+zip = "2"
+tar = "0.4"
+flate2 = "1"
+tokio = "1"
+tokio-postgres = "0.7"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
+quick-xml = "0.39"
+tempfile = "3"

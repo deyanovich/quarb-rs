@@ -1,0 +1,788 @@
+\documentclass{report}
+\usepackage{fontspec}
+\usepackage{xspace}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[unicode,pdfencoding=auto]{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=cyan,
+    pdfauthor={The Quarb Project},
+    pdftitle={Quarb Implementation Guide},
+}
+\setmainfont{IBM Plex Serif}
+\setmonofont{IBM Plex Mono}[Scale=MatchLowercase]
+
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{backcolour}{rgb}{0.96,0.96,0.94}
+
+\lstdefinelanguage{rust}{
+  keywords={break, continue, else, for, if, in, loop, match, return, while,
+    as, const, let, move, mut, ref, static, unsafe, use, where, crate, mod,
+    pub, super, trait, impl, dyn, enum, struct, type, union, fn, extern, Self},
+  keywordstyle=\color{blue}\bfseries,
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{codegray}\itshape,
+  stringstyle=\color{orange},
+  morestring=[b]",
+}
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    showstringspaces=false,
+    tabsize=2,
+    frame=none,
+}
+\lstset{style=mystyle}
+
+\newcommand{\live}{\textbf{\textcolor{blue!60!black}{[live]}}\xspace}
+\newcommand{\planned}{\textbf{\textcolor{gray}{[planned]}}\xspace}
+
+\title{Quarb Implementation Guide}
+\author{The Quarb Project}
+\date{Version: Draft 0.1 (walking skeleton)}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+\chapter{About This Guide}
+
+This guide describes the \textbf{Quarb engine}: the Rust
+implementation of the Quarb query language, its \texttt{qua}
+command-line tool, and the adapter architecture that lets one engine
+query many data sources. The language itself\,---\,its data model,
+execution model, and syntax\,---\,is defined in the \emph{Quarb
+Language Specification} (the \texttt{lang} sibling project); this
+guide covers only the implementation.
+
+\paragraph{The guide tracks the code.}
+The engine is being built as a series of thin, working slices rather
+than from a finished design. This document tracks that process:
+constructs the engine \emph{already implements} are marked \live and
+documented against the real code; constructs that are specified but
+\emph{not yet built} are marked \planned and sketch the intended
+surface. As each slice lands, its \planned entries become \live. The
+current milestone is a \emph{walking skeleton}: rooted tree
+navigation over a filesystem.
+
+\paragraph{Central concern: the adapter surface.}
+The one design question this guide most needs to get right is the
+\emph{adapter surface}\,---\,the trait a data source implements to be
+queried. That surface is deliberately being grown against a concrete
+first adapter (the filesystem) so that its shape is driven by real
+navigation problems rather than speculation. Chapter~\ref{ch:adapter}
+is its home.
+
+
+\chapter{Architecture}
+
+The engine follows a conventional compiler-style pipeline. A query
+string is lexed and parsed into a small AST, which the executor
+evaluates by driving an \emph{adapter} over the target data:
+
+\begin{lstlisting}
+[query string]
+      |  lexer          quarb::lexer
+      v
+[tokens]
+      |  parser         quarb::parser
+      v
+[query AST]             quarb::ast
+      |  executor       quarb::exec
+      v
+[node set]  <-- drives --  [AstAdapter]  --> [data source]
+\end{lstlisting}
+
+\noindent
+The executor never touches the data source directly. It knows only
+the \texttt{AstAdapter} trait (Chapter~\ref{ch:adapter}), so the same
+query runs unchanged over any adapter.
+
+\section{Workspace Layout}
+
+The engine is a Cargo workspace mirroring the intended separation of
+concerns\,---\,the core engine, one crate per adapter, and the CLI:
+
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Crate} & \textbf{Responsibility} \\
+\midrule
+\texttt{quarb} & The core engine: \texttt{lexer}, \texttt{parser},
+  \texttt{ast}, \texttt{exec}, and the \texttt{adapter} module
+  defining \texttt{AstAdapter}. No I/O. \\
+\texttt{quarb-fs} & The filesystem adapter. Depends on \texttt{quarb}. \\
+\texttt{quarb-imap} & Remote IMAP mailboxes, queried in place:
+  the maildir mapping over the wire (folders, messages by UID,
+  headers as properties, \texttt{::;epoch}), transported by
+  \texttt{curl} over subprocess (it speaks IMAP natively) — zero
+  new dependencies. Lazy per message: one LIST, one UID SEARCH
+  per folder, two fetches per touched message. The thread fabric
+  is deliberately absent (indexing it means fetching every header
+  — that is a sync; use mbsync + \texttt{quarb-maildir}). Target:
+  \texttt{imap[s]://HOST[:PORT][/FOLDER]}; credentials via
+  \texttt{QUARB\_IMAP\_USER}/\texttt{PASS} or
+  \texttt{\textasciitilde/.netrc}. Read-only. Tested against a
+  bundled deterministic mini IMAP server. \\
+\texttt{quarb-json} & The JSON adapter (keys and indices as names,
+  value types as traits). Depends on \texttt{quarb} and
+  \texttt{serde\_json}. \\
+\texttt{quarb-gsheet} & Google Sheets on the
+  \texttt{quarb-xlsx} mapping (sheets as tables, first-row
+  headers, typed values via \texttt{UNFORMATTED\_VALUE}),
+  fetched from the Sheets API. Auth honesty: the API rejects
+  gcloud's \texttt{cloud-platform} tokens, so the friction-free
+  path is an API key (\texttt{?key=} /
+  \texttt{QUARB\_GSHEET\_KEY}; enough for link-readable
+  sheets), with a properly-scoped bearer for private ones.
+  Target: \texttt{gsheet://SPREADSHEET\_ID}. \\
+\texttt{quarb-html} & The HTML adapter (tags as names, block/inline
+  as traits, attributes as properties, anchor fragments resolve).
+  Depends on \texttt{quarb} and \texttt{scraper}. \\
+\texttt{quarb-xml} & The XML adapter (qualified tags as names,
+  attributes as properties, \texttt{id}/\texttt{xml:id} references
+  resolve; strict well-formedness, no traits). Depends on
+  \texttt{quarb} and \texttt{quick-xml}. \\
+\texttt{quarb-relational} & The shared relational model: tables
+  as root children, rows named by primary key, columns as
+  properties, declared foreign keys driving
+  \texttt{\textasciitilde>} resolution (chained hops instead of
+  JOINs), \texttt{->}/\texttt{<-} crosslinks labeled by column,
+  \texttt{<\textasciitilde} reverse resolution, and the
+  table-naming hint for undeclared references. Loading is catalog-
+  eager, rows-lazy: a table materializes on first touch through
+  the driver-supplied fetcher, once, and untouched tables are
+  never read (\texttt{::;loaded} reports the state). Engine
+  adapters are thin catalog drivers over it. Depends on
+  \texttt{quarb}. \\
+\texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
+  introspection, storage-class type mapping. Depends on
+  \texttt{quarb-relational} and \texttt{rusqlite}. \\
+\texttt{quarb-objstore} & GCS and S3 buckets as lazy
+  directory trees (\texttt{gs://} / \texttt{s3://}, delimiter
+  listings, paginated; object content fetched on first read).
+  Composed by default in \texttt{qua}: a bucket of JSON / CSV /
+  source files grafts, so \texttt{/data/store.json/books/*}
+  crosses from cloud storage into the document mid-path —
+  grafting is this adapter's point. GCS: anonymous for public
+  buckets, gcloud-token auth otherwise. S3: anonymous only in
+  v1 (SigV4 signing is a recorded extension — private buckets
+  refuse honestly). \\
+\texttt{quarb-postgres} & The PostgreSQL catalog driver:
+  \texttt{information\_schema} introspection over
+  \texttt{tokio-postgres} (internal current-thread runtime,
+  synchronous surface); native bool/int/float/text, everything
+  else \texttt{::text}-cast into the numeric-reading regime.
+  Depends on \texttt{quarb-relational}. \\
+\texttt{quarb-mysql} & The MySQL/MariaDB catalog driver:
+  \texttt{information\_schema} introspection over \texttt{sqlx}
+  (internal current-thread runtime, synchronous surface;
+  \texttt{key\_column\_usage} carries the foreign keys
+  directly); integer/float/character families native, everything
+  else \texttt{CAST(... AS CHAR)} into the numeric-reading
+  regime. Depends on \texttt{quarb-relational}. \\
+\texttt{quarb-csv} & The CSV/TSV adapter (one \texttt{row} node per
+  record, columns as properties, empty cells as missing values that
+  numeric aggregates skip; \texttt{::;columns} / \texttt{::;n-rows}
+  metadata). Depends on \texttt{quarb} and \texttt{csv}. \\
+\texttt{quarb-xpath} & The XPath~1.0 bridge, both directions:
+  \texttt{translate} imports an XPath expression to Quarb, and
+  \texttt{export} walks a Quarb query's reflection arbor (the
+  locked vocabulary as the tooling surface) back to XPath —
+  honest refusal and divergence notes both ways. Binaries
+  \texttt{xpath2quarb} / \texttt{quarb2xpath}; the export side is
+  differentially tested against \texttt{xmllint}. \\
+\texttt{quarb-jq} & The jq bridge, both directions:
+  \texttt{translate} imports a jq filter (value-projecting; a node
+  mode pairs with \texttt{jq 'path(...)'}), and \texttt{export}
+  walks the reflection arbor back to a jq filter. Binaries
+  \texttt{jq2quarb} / \texttt{quarb2jq}; the export side is
+  differentially tested against the \texttt{jq} binary. \\
+\texttt{quarb-bigquery} & The Google BigQuery driver: the
+  REST API directly (\texttt{jobs.query} over a synchronous HTTP
+  client — no cloud SDK, no async runtime), bearer token from
+  \texttt{QUARB\_BQ\_TOKEN} or \texttt{gcloud auth
+  print-access-token}, catalog from
+  \texttt{INFORMATION\_SCHEMA} including the \emph{unenforced}
+  key constraints (declare them and the reference machinery
+  works). The execution ladder is a billing instrument here:
+  BigQuery meters bytes scanned, so lazy loading, pushdown, and
+  \texttt{--save} directly reduce cost. Target syntax:
+  \texttt{bigquery://PROJECT/DATASET[?account=EMAIL]}. \\
+\texttt{quarb-duckdb} & DuckDB, the fifth catalog driver —
+  and the columnar side door: a \texttt{CREATE VIEW ... AS
+  SELECT * FROM read\_parquet(...)} makes Parquet first-class.
+  Keys from \texttt{duckdb\_constraints()} (the
+  \texttt{information\_schema} FK view reports the referencing
+  side only), rows lazy, \texttt{raw\_query} for the ladder,
+  read-only connection. Bundled build; \texttt{.duckdb} /
+  \texttt{.ddb} by extension. \\
+\texttt{quarb-xlsx} & Spreadsheets (\texttt{.xlsx} /
+  \texttt{.xls} / \texttt{.ods}, via calamine) on the
+  relational model: sheets as tables, first-row headers as
+  columns (positional \texttt{cN} for blank/duplicate), rows
+  named by sheet row number, numeric cells typed. No keys —
+  sheets declare none — so resolution needs hints. Dispatched by
+  extension \emph{before} the archive check (workbooks are
+  zips; the sheets are the point). \\
+\texttt{quarb-firebase} & The Firebase Realtime Database
+  driver: the RTDB \emph{is} a JSON tree, so the mapping is
+  \texttt{quarb-json}'s, fetched lazily one node per shallow
+  GET and cached. Properties are direct fetches
+  (\texttt{::score} is one tiny request); \texttt{\textasciitilde>}
+  resolves by hint naming a root-relative container
+  (\texttt{::parent\textasciitilde>item}). Containers that
+  refuse enumeration (permission-scoped or unbounded — the
+  public Hacker News database's \texttt{/v0/item} holds tens of
+  millions of keys) are \emph{opaque}: reachable by name, empty
+  to wildcards — served by the engine's new
+  \texttt{children\_named} fast path. References are \emph{declared
+  client-side}: a refs document
+  (\texttt{\{"refs": \{"parent": "item", "kids/*": "item"\}\}},
+  supplied via \texttt{qua --refs}) is the portable mini-catalog
+  a schemaless substrate cannot hold — with it, bare
+  \texttt{\textasciitilde>} resolves and \texttt{->} crosslinks
+  enumerate (array fields one probed edge per element); an inline
+  hint overrides. Reverse resolution stays empty (it would scan
+  what opaque containers refuse; server-side \texttt{.indexOn}
+  queries are the recorded v2 path). Target:
+  \texttt{firebase://HOST/PATH[?auth=...]}. Read-only. \\
+\texttt{quarb-code} & Source code as its syntax tree
+  (tree-sitter): node kinds as edge names
+  (\texttt{//function\_item}), tree-sitter \emph{fields} as
+  properties (\texttt{::name} on a function is its name),
+  source text as the value, \texttt{::;start-line} /
+  \texttt{::;kind} / \texttt{::;field} metadata; named nodes
+  only. Rust / Python / JavaScript by extension, compile-time
+  grammar set. Grafts under composition — \texttt{--descend}
+  queries every function in a directory tree at once. \\
+\texttt{quarb-compose} & Adapter \emph{composition}: wrap any
+  adapter and a leaf whose name or content parses (json / xml /
+  html / csv, else a sniff) grafts its parsed arbor as children —
+  \texttt{/data/store.json/books/*} crosses from filesystem into
+  JSON mid-path. Grafts are lazy (read + parse on first entry),
+  the inner root is identified with the outer leaf (no phantom
+  node), and locators mark the boundary jar-style
+  (\texttt{store.json!/books/1}). \texttt{qua}: default for
+  archives, \texttt{--descend} for directories. \\
+\texttt{quarb-archive} & Zip and tar (\texttt{.tar[.gz]})
+  archives as path trees: entry content as the node value,
+  \texttt{::;size} / \texttt{::;compressed}; zip contents lazy
+  per entry, tar in one pass. With composition, \texttt{.docx} /
+  \texttt{.epub} / \texttt{.jar} internals are directly
+  queryable. \\
+\texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
+  and mbox mailboxes: headers as properties (lowercased), the
+  body as the value, \texttt{::;epoch} parsing the Date header
+  for range predicates. The thread graph is reference fabric:
+  \texttt{::in-reply-to\textasciitilde>} walks to the parent
+  message, \texttt{<-in-reply-to} finds the replies, via a
+  Message-ID index. Never touches flags; read-only. \\
+\texttt{quarb-firestore} & Google Firestore (native mode):
+  collections and documents alternate as the arbor's levels; map
+  and array fields descend as children, subcollections beside
+  them. \texttt{referenceValue} fields are \emph{native}
+  references — the first remote adapter where
+  \texttt{\textasciitilde>} and \texttt{->} need neither a
+  schema nor a refs file. Lazy per level, REST direct, token via
+  \texttt{QUARB\_GCP\_TOKEN} / gcloud. Target:
+  \texttt{firestore://PROJECT/DATABASE[?account=...]}. \\
+\texttt{quarb-datastore} & Google Cloud Datastore (Firestore in
+  Datastore mode): kinds and entities, the most relational of the
+  document stores; \texttt{keyValue} properties are native
+  references (\texttt{\textasciitilde>}/\texttt{->} schema-free).
+  Kind list via a \texttt{\_\_kind\_\_} query, entities via
+  cursor-paginated \texttt{runQuery}, lazy per kind. Target:
+  \texttt{datastore://PROJECT[/DATABASE][?account=...]}. Both
+  drivers send the \texttt{x-goog-request-params} routing header
+  named databases require. \\
+\texttt{quarb-git} & The git repository driver: the object
+  DAG as the arbor. \texttt{/branches}, \texttt{/tags},
+  \texttt{/HEAD} (refs alias their commits — same properties,
+  same children), \texttt{/commits} (rev-syntax aliasing:
+  \texttt{/commits/'HEAD\textasciitilde2'} navigates without
+  enumeration; \texttt{/commits/*} batches one
+  \texttt{rev-list --all}). A commit's children are its
+  \emph{tree} — time-travel file access, blob content as the
+  node value. References are inherent:
+  \texttt{::parent\textasciitilde>},
+  \texttt{->parent} (merges fan out), \texttt{<-parent}
+  (children, from the enumeration). The diff surface: tree
+  entries carry the \texttt{<changed>} trait when their path is
+  in the commit's diff vs its first parent (trees by prefix), so
+  \texttt{git log -- path} is
+  \texttt{/commits/*[/path<changed>]}; commits answer
+  \texttt{::changed} (the touched paths, deletions included)
+  and \texttt{::;n-changed}. Plumbing over subprocess —
+  no libgit2, zero new dependencies. Target: \texttt{git:PATH}.
+  Read-only. \\
+\texttt{quarb-serve} & The \emph{serve protocol} — the
+  extension surface for tools the engine never links: a tool
+  implements \texttt{AstAdapter} over its own model and hands it
+  to \texttt{serve()} (three lines; non-Rust tools implement the
+  protocol directly — nine operations over line-oriented JSON),
+  and \texttt{qua serve:COMMAND} spawns it and mounts it beside
+  every other source. LSP's shape: the protocol is the plugin
+  system. Two wires, one protocol: the handshake is JSON (the
+  universal floor) and advertises formats; every first-party
+  server offers \emph{kaiv} (\texttt{.daiv} frames, natively
+  typed leaves under \texttt{/@serve}) and the client upgrades
+  to it — the house format is the default wire, JSON the
+  foreign-tool floor. Read-only by construction (no mutating
+  operation exists). First external user: \texttt{cuj quarb-serve}
+  (the cuj vault, mounted without qua knowing cuj). Reference
+  server: \texttt{quarb-serve-json}; identity-tested against the
+  direct adapter. \\
+\texttt{quarb-sql} & The SQL bridge, both directions:
+  \texttt{translate} imports a \texttt{SELECT} statement (WHERE,
+  one JOIN via correlation and the witness, GROUP BY/HAVING,
+  ORDER/LIMIT/DISTINCT, \texttt{LIKE} as case-insensitive
+  regexes), and \texttt{export} walks a Quarb query's reflection
+  arbor back to \texttt{SELECT} — witness joins become
+  \texttt{JOIN ... ON}, grouped reductions become \texttt{GROUP
+  BY}/\texttt{HAVING}; \texttt{\textasciitilde>} chains are
+  refused by design (foreign keys live in the schema, not the
+  query — spell \texttt{<=>} to export). Both directions
+  differentially tested against SQLite; binaries
+  \texttt{sql2quarb} / \texttt{quarb2sql}. \\
+\texttt{qm} & The mailbox interface for the terminal — the
+  first \emph{library-path} client beside \texttt{qua}: it opens
+  the Maildir adapter once per invocation, addresses messages as
+  node handles, and phrases its subcommands (\texttt{ls},
+  \texttt{read}, \texttt{thread}, \texttt{from}, \texttt{grep},
+  \texttt{count}) as queries where a query is the natural shape,
+  with \texttt{qm query} as the raw escape hatch. Actions are the
+  tool's, not the engine's: \texttt{qm seen} performs the Maildir
+  flag rename itself on the file handle the adapter exposes
+  (\texttt{path\_of}). \\
+\texttt{qua} & The command-line tool. Picks the adapter from its
+  argument (a directory is filesystem; \texttt{.csv}/\texttt{.tsv}
+  is a table; a file or piped stdin is XML by extension or a leading
+  \texttt{<?xml}, HTML by extension or a leading \texttt{<}, else
+  JSON) and prints results. \texttt{--xpath} / \texttt{--jq} / \texttt{--sql}
+  translate the query from XPath, jq, or SQL first; database
+  inputs get \emph{pushdown} — a query whose constructs are all
+  in the verified-safe set (filtered selections, whole-table
+  aggregates, witness joins) compiles to SQL and runs on the
+  server, with rows ordered by the catalog key so output is
+  identical to the scan path (\texttt{--no-pushdown} opts out;
+  any refusal or error falls back silently, and
+  \texttt{--explain} prints the decision — the pushed SQL, or the
+  construct that kept the query on the scan path). When full
+  pushdown refuses, \emph{partial} pushdown pushes the leading
+  row predicates as the table's fetch filter and runs the original
+  query over the reduced set (gated: single reach, no
+  crosslink/resolution axes, no metadata — anything that could
+  observe the filtering). \texttt{--save FILE} materializes a
+  result — \texttt{.db}/\texttt{.sqlite} as a table
+  (\texttt{--as} names it), \texttt{.json} as a JSON array —
+  both first-class inputs for later queries (the reference syntax
+  is the existing file/mount mechanism); \texttt{--daiv} emits
+  canonical kaiv (typed leaves with per-value provenance; needs the
+  sibling \texttt{kaiv-rs} checkout). \\
+\bottomrule
+\end{tabularx}
+
+\medskip
+
+Adapters are separate crates by design: \texttt{quarb-fs},
+\texttt{quarb-json}, \texttt{quarb-html}, and \texttt{quarb-xml}
+share nothing but the \texttt{AstAdapter} trait, and a consumer
+pulls in only the adapters it needs. Each new adapter has confirmed
+the surface without changing it\,---\,the filesystem, a JSON tree,
+an HTML DOM, and an XML document are genuinely the same arbor to
+the engine.
+
+\section{The Execution Ladder}\label{sec:ladder}
+
+Database adapters evaluate on a three-rung ladder; every rung is
+\emph{output-identical} to the one below it (differential tests
+hold this), so the rungs trade only latency and transfer:
+
+\begin{enumerate}
+  \item \textbf{Full pushdown} (\texttt{quarb\_sql::pushdown},
+    the exporter's strict mode): the whole query compiles to SQL
+    when every construct is in the verified-safe set —
+    WHERE-filtered selections, whole-table aggregates, witness
+    joins. Strictness is the point: anything whose SQL semantics
+    are not provably identical (LIKE case folding, truthiness,
+    GROUP BY/DISTINCT order, collations, unordered LIMIT) refuses.
+    Row order is part of the contract — the plan names the result
+    table, and each driver appends \texttt{ORDER BY} its key from
+    the catalog. Measured: COUNT over 500k PostgreSQL rows,
+    2.57\,s scanned vs.\ 0.018\,s pushed.
+  \item \textbf{Partial pushdown}
+    (\texttt{quarb\_sql::partial\_pushdown}): the leading run of
+    strictly-translatable row predicates becomes the table's fetch
+    filter (each driver's lazy fetcher accepts a per-table WHERE),
+    and the \emph{original} query runs unchanged over the reduced
+    set — the engine re-applies the pushed predicates, a no-op on
+    pre-filtered rows, so there is no query rewriting. Gates:
+    leading run only (a positional predicate before an expression
+    one sees unfiltered rows), a single \texttt{/table/*} branch
+    with no correlations, the table reached exactly once, no
+    crosslink/resolution axes, no \texttt{:::}/\texttt{::;}
+    metadata (each would observe the filtering). Measured:
+    unpushable grouping over a 1\%-selective filter, 2.31\,s
+    vs.\ 0.081\,s.
+  \item \textbf{Lazy scan}: catalog-eager, rows-lazy per table
+    (Section on \texttt{quarb-relational}); correct for
+    everything, always the fallback.
+\end{enumerate}
+
+\noindent
+\texttt{qua --explain} prints the decision chain; \texttt{qua
+--no-pushdown} pins the scan rung; \texttt{qua --save FILE
+[--as NAME]} materializes any result as a first-class input
+(\texttt{.db} table / \texttt{.json} array) so expensive
+reductions run once and iteration proceeds locally. For metered
+engines (a future BigQuery adapter bills by bytes scanned), the
+ladder's transfer reductions are cost reductions.
+
+\section{Current Query Subset}
+
+The engine implements essentially the whole language. A query is a
+root-anchored sequence of hops, each an axis followed by a name:
+
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Form} & \textbf{Meaning} \\
+\midrule
+\texttt{/name}, \texttt{//name} & \live child / descendant named \texttt{name} \\
+\texttt{\textbackslash name}, \texttt{\textbackslash\textbackslash name}
+  & \live parent / ancestor named \texttt{name} \\
+\texttt{>name}, \texttt{<name} & \live next / previous sibling \\
+\texttt{>>name}, \texttt{<<name}, \texttt{>>?}, \texttt{>>!},
+\texttt{<<?}, \texttt{<<!}
+  & \live sibling reach: all following / preceding siblings at any
+    distance, with nearest / farthest quantifiers (matcher before
+    reach, mirroring \texttt{//?}); covers CSS \texttt{\textasciitilde}
+    and XPath following/preceding-sibling \\
+\texttt{//?}, \texttt{//!}, \texttt{\textbackslash\textbackslash?}, \texttt{\textbackslash\textbackslash!}
+  & \live proximal (nearest) / distal (farthest) reach \\
+\texttt{\textasciicircum}, \texttt{name\$} & \live root anchor / leaf anchor \\
+\texttt{*}, \texttt{*.rs}, \texttt{\textasciitilde(re)}
+  & \live wildcard, glob, and regex name matching \\
+\texttt{<code>}, \texttt{<a|b>}, \texttt{<a><b>}
+  & \live trait filters (alternation, conjunction) \\
+\texttt{::}, \texttt{:::key}, \texttt{::;key}
+  & \live property, core-metadata, and adapter-metadata projection \\
+\texttt{[::;size > 1K]}, \texttt{[/child]}, \texttt{[n]},
+\texttt{[-1]}, \texttt{[2..5]}
+  & \live predicates: comparisons (\texttt{=} \texttt{!=} \texttt{<}
+    \texttt{<=} \texttt{>} \texttt{>=}), substring \texttt{*=}, regex
+    \texttt{=\textasciitilde}/\texttt{!\textasciitilde}, structural
+    conditions, \texttt{and}/\texttt{or}/\texttt{!}/\texttt{not},
+    positional index and range (negative counts from the end) \\
+\texttt{::price * ::qty}, \texttt{7 div 2}, \texttt{idiv}, \texttt{mod}
+  & \live value expressions: arithmetic over numeric readings, in
+    predicates, pipeline stages (\texttt{| ::a * ::b}), and pushes
+    (\texttt{| .total(::a * ::b)} — a computed column); null
+    propagation, exact integers, overflow to float \\
+\texttt{//a || //b}, \texttt{| count}, \texttt{| sort | join(",")}
+  & \live union, and pipelines over a standard-library function set \\
+\texttt{->target}, \texttt{<-target}, \texttt{->*}
+  & \live crosslink navigation (filesystem: symlinks) \\
+\texttt{(/ul/li)+}, \texttt{(/p|/div)}, \texttt{(->mgr)\{1,3\}!},
+\texttt{/\{2\}}
+  & \live path patterns: groups, subpath alternation (strict and
+    tolerated forms), quantifiers (\texttt{+} \texttt{*}
+    \texttt{\{n\}} \texttt{\{m,n\}} \texttt{\{m,\}}) with
+    proximal/distal suffixes, the pattern dot wildcard, and the
+    bare-operator sugar. Simple-path expansion (no node revisited
+    within one path, the anchor included), capped by the adapter's
+    quantifier bound (default 32; \texttt{--quantifier-bound}
+    overrides) \\
+\texttt{| upper}, \texttt{@| count}, \texttt{| .n}, \texttt{| \$.n}
+  & \live per-capsa transform, whole-context aggregation, register
+    push and recall \\
+\texttt{@| sort\_by(::age)}, \texttt{@| top(3, ::fare)},
+\texttt{@| [..n]}, \texttt{| [::age > 30]}
+  & \live keyed aggregates (\texttt{sort\_by}, \texttt{unique\_by},
+    \texttt{min\_by}/\texttt{max\_by}, \texttt{top}/\texttt{bottom};
+    capsa-preserving, missing keys do not compete), whole-context
+    positional selection, and per-capsa filters \\
+\texttt{@| group(::k) | top(2, ::v) @| ungroup}, \texttt{\$ord}
+  & \live value-keyed grouping (list topics + member capsae, keys as
+    named regs), per-group keyed stages on the plain pipe,
+    \texttt{ungroup} flattening, and the \texttt{\$ordinal} operand
+    (position in the current context, scope-threaded into filters) \\
+\texttt{| \%.}, \texttt{qua q.quarb}
+  & \live the register record view (named regs as a record: the
+    row-wise table view, subsuming the planned \texttt{@.|}) and
+    reflection: \texttt{.quarb} files open as the query's own arbor
+    (\texttt{quarb::reflect}; vocabulary locked v1, enforced by the
+    conformance corpus in \texttt{tests/vocabulary.rs}, version on
+    the root as \texttt{::;vocabulary}) \\
+\texttt{def \&f(\$x): ...;}, \texttt{\&f(::age)},
+\texttt{--defs}, \texttt{--expand}
+  & \live fragments: parse-time expansion with call-by-name
+    \texttt{\$param} forms, defs files, and the unparser
+    (\texttt{quarb::unparse}) rendering any parsed query back to
+    canonical text (\texttt{--expand} = macroexpand) \\
+\texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | rec("k", \$1)},
+\texttt{qua -i}
+  & \live match captures (filter-stage \texttt{=\textasciitilde}
+    binds groups onto the capsa) and the interactive session
+    (living-query lines with rollback, session defs,
+    \texttt{:show}/\texttt{:undo}) \\
+\texttt{@| window(-2..0) | mean}, \texttt{@| window(..0) | sum},
+\texttt{@| shift(1, ::k)}
+  & \live window functions: offset-range spans over context
+    neighbors as members (partial edges; \texttt{window(n)} =
+    trailing count; open start = expanding), \texttt{shift} lag
+    with own registers kept, and optional partition keys
+    (per-group windows in original row order) \\
+\texttt{"\$\{::name\} (\$\{::age\})"},
+\texttt{macro \&m(\$p, @rest): body;}
+  & \live string interpolation (double-quoted \texttt{\$\{expr\}}
+    holes, evaluated in the current scope; null splices empty) and
+    procedural macros: the body runs at expansion time against the
+    invocation's expansion arbor (argument forms as reflected
+    subtrees, \texttt{::form} = each form's text), literal args bind
+    by value, \texttt{@rest} collects the remainder, and the text
+    results — joined, reparsed against strictly-earlier fragments —
+    become the expansion (\texttt{--expand} = macroexpand) \\
+\texttt{macro \&pivot!(\$col): /data/row | \$col @| unique | ...}
+  & \live data-aware macros: \texttt{!} on the definition mounts the
+    queried dataset as \texttt{/data} in the expansion arbor, and
+    every invocation spells the \texttt{!} (enforced both ways);
+    outside a hole a parameter is the argument form (call-by-name),
+    inside a hole its text — so a pivot reads distinct data values
+    at expansion and generates a column per value;
+    \texttt{--expand} with an input expands against it \\
+\texttt{| .(//*.rs @| count)}, \texttt{| .t(\^{}/row @| count)}
+  & \live subcontexts (grouped aggregation); a \texttt{\^{}}-anchored
+    branch navigates from the arbor root, so a subcontext can
+    consult the whole table (share-of-total columns) \\
+\texttt{.c(\^{}/row[::k = \$\$.k] @| count)},
+\texttt{| rec(\$*1/name::, /amt::)}
+  & \live correlated subqueries: \texttt{\$\$} steps a capsa-scope
+    operand out to the invoking capsa (\texttt{\$\$.name},
+    \texttt{\$\$\_}, \texttt{\$\$ord}; stacking
+    \texttt{\$\$\$} steps further) — wide crosstabs, groupwise
+    transforms; and the correlation keeps its \emph{witness}, so
+    \texttt{\$*k} in pipeline stages projects the joined side into
+    output (\texttt{SELECT a.x, b.y}) \\
+\texttt{E1 <=> E2[/k:: = \$*1/k:: and …]}
+  & \live correlation (context join): one tuple binds the whole
+    predicate, and \texttt{\$*N} may navigate from its context node
+    (\texttt{\$*1/field::}), so joins work where keys are children,
+    e.g. JSON \\
+\texttt{::ref\textasciitilde>}, \texttt{::'\$ref'\textasciitilde>/city}
+  & \live cross-reference resolution (JSON: follow a \texttt{\$ref}
+    JSON Pointer) \\
+\texttt{::ref<\textasciitilde}
+  & \live reverse resolution: every node whose \texttt{ref} resolves
+    to this one (naive whole-arbor scan) \\
+\bottomrule
+\end{tabularx}
+
+\medskip
+
+The pipeline runs on \emph{capsae}\,---\,the register system's unit,
+a node paired with a register (its breadcrumbs) and a current topic.
+A per-capsa \texttt{|} transforms each topic; \texttt{@|} reduces the
+whole context; \texttt{| .name} pushes the topic onto the register and
+\texttt{| \$.name} recalls it; a subcontext \texttt{| .(expr)}
+evaluates \texttt{expr} from each node, reduces it to a scalar, and
+pushes it\,---\,grouped aggregation without leaving the query.
+
+\medskip
+
+Any other operator is lexed and rejected with a
+\texttt{not yet supported} error naming the offending construct,
+rather than silently mis-parsed. Everything in
+Section~\ref{sec:planned} falls into this category today.
+
+
+\chapter{The Adapter Surface}\label{ch:adapter}
+
+An \emph{adapter} maps a data source onto the Quarb arbor model\,---\,a
+tree backbone whose edges carry \emph{names}, enriched with
+non-hierarchical crosslinks. The engine drives all navigation through
+the \texttt{AstAdapter} trait, so this trait \emph{is} the contract
+between the language and the world.
+
+\section{The Live Trait}
+
+The methods the skeleton actually uses. Signatures are the real ones
+from \texttt{quarb/src/adapter.rs}:
+
+\begin{lstlisting}[language=rust]
+/// An opaque handle to a node, minted and interpreted by the
+/// adapter that produced it.
+pub struct NodeId(pub u64);
+
+pub trait AstAdapter {
+    /// The root node -- the initial navigation context.
+    fn root(&self) -> NodeId;
+
+    /// The tree children of `node`, in document order.
+    fn children(&self, node: NodeId) -> Vec<NodeId>;
+
+    /// The name of `node` -- the label of its incoming tree edge.
+    /// `None` when the adapter leaves a node unnamed (e.g. the
+    /// filesystem root).
+    fn name(&self, node: NodeId) -> Option<String>;
+
+    /// The parent of `node`, or `None` for the root.
+    fn parent(&self, _node: NodeId) -> Option<NodeId> { None }
+
+    // --- projection surface (defaulted; implement what fits) ---
+
+    /// Adapter-defined classifications, for `<trait>` filters.
+    fn traits(&self, _node: NodeId) -> Vec<String> { Vec::new() }
+
+    /// A named property `::prop`.
+    fn property(&self, _node: NodeId, _name: &str) -> Option<Value> { None }
+
+    /// The default projection, bare `::` (filesystem: file content).
+    fn default_value(&self, _node: NodeId) -> Option<Value> { None }
+
+    /// Adapter metadata `::;key` (filesystem: size, modified, …).
+    fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> { None }
+
+    /// Outgoing / incoming crosslinks as (label, node) pairs, for
+    /// `->` / `<-` (filesystem: symlinks).
+    fn links(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
+    fn backlinks(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
+}
+\end{lstlisting}
+
+\noindent
+The navigation methods are required; the projection methods carry
+defaults, so an adapter implements only what its domain offers. Core
+metadata (\texttt{:::key}\,---\,index, depth, counts, \texttt{is-leaf},
+\dots) is computed by the engine from the navigation surface, so no
+adapter implements it.
+
+Three observations that the filesystem work has already forced:
+
+\begin{itemize}
+\item \textbf{Names live on edges, not nodes.} \texttt{name} returns
+  the label of a node's \emph{incoming} edge\,---\,its role in its
+  parent\,---\,exactly as the specification's edge-name model
+  requires. For the filesystem this is simply the filename.
+
+\item \textbf{\texttt{NodeId} is opaque and adapter-private.} The
+  engine never inspects the \texttt{u64}; it only passes ids back to
+  the adapter. Each adapter chooses its own identity scheme (the
+  filesystem adapter uses an interning arena index).
+
+\item \textbf{The root may be unnamed.} \texttt{name} returns
+  \texttt{Option} precisely so an adapter can leave the root without a
+  name, as the filesystem root \texttt{/} does.
+\end{itemize}
+
+\section{Worked Example: the Filesystem Adapter}
+
+\texttt{quarb-fs} implements the live trait over a directory tree. It
+materializes the tree once, at construction, into arrays indexed by
+\texttt{NodeId} (path, children, parent); the trait methods are then
+trivial lookups:
+
+\begin{lstlisting}[language=rust]
+impl AstAdapter for FsAdapter {
+    fn root(&self) -> NodeId { self.root }
+    fn children(&self, node: NodeId) -> Vec<NodeId> { self.children[node].clone() }
+    fn name(&self, node: NodeId) -> Option<String> {
+        if node == self.root { return None; }   // "/" is unnamed
+        self.paths[node].file_name().map(|n| n.to_string_lossy().into())
+    }
+    fn parent(&self, node: NodeId) -> Option<NodeId> { self.parents[node] }
+}
+\end{lstlisting}
+
+\paragraph{Ignore rules \live.}
+The materializing walk uses \texttt{ignore::WalkBuilder}\,---\,the
+same machinery ripgrep uses\,---\,so by default the adapter respects
+\texttt{.gitignore}/\texttt{.ignore} files and skips hidden entries.
+This came directly from running the skeleton: \texttt{qua '//*.rs'}
+in the engine's own tree first returned a build artifact under
+\texttt{target/}, because nothing yet excluded it. The adapter now
+honors ignore rules by default, and \texttt{qua} exposes
+\texttt{-{}-hidden} and \texttt{-{}-no-ignore} to opt back in. The
+walk is currently eager (a targeted query still walks the whole
+tree); a lazy traversal with cascading ignore rules is a planned
+optimization. This is the pattern the guide follows: a concrete
+problem, surfaced by running the code, drives the next slice.
+
+\section{The Planned Surface}\label{sec:planned}
+
+The rest of the arbor model, specified in the language but not yet
+built. Each becomes a live trait method (or a related capability) as
+its engine slice lands. The intended shapes:
+
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Capability} & \textbf{Query} & \textbf{Adapter surface (sketch)} \\
+\midrule
+Pattern search & \texttt{=>}
+  & \texttt{search(pattern) -> Vec<NodeId>}. \\
+\bottomrule
+\end{tabularx}
+
+\medskip
+
+These signatures are provisional. They are recorded here so the
+direction is legible, not to freeze a contract\,---\,the filesystem
+adapter (and the JSON adapter after it) will reshape them as they are
+implemented.
+
+
+\chapter{Building and Running}
+
+\begin{lstlisting}[language=bash]
+# from the engine workspace root
+cargo build            # build the whole workspace
+cargo test             # unit + integration + doc tests
+
+# query a directory tree
+cargo run -p qua -- '//*.rs' src/     # all Rust files under src/
+cargo run -p qua -- '/README.md'      # a single top-level file
+
+# query a document
+cargo run -p qua -- '/users/0/name::' data.json
+cargo run -p qua -- '//book[::pages > 200]::;id' catalog.xml
+cargo run -p qua -- '//a::href' page.html
+\end{lstlisting}
+
+\noindent
+\texttt{qua <QUERY> [PATH]} runs \texttt{QUERY} against the directory
+\texttt{PATH} (default: the current directory) and prints each
+matching path on its own line, so it composes in shell pipelines
+alongside \texttt{sort}, \texttt{uniq}, and friends.
+
+
+\chapter{Planned Integration Paths}
+
+Beyond the direct \texttt{AstAdapter} implementation shown above,
+these integration paths are described in the specification but
+\planned\ (none is implemented yet):
+
+\begin{itemize}
+\item \textbf{Petgraph adapter.} A ready-made adapter over a
+  \texttt{petgraph::Graph}, for Rust callers who transform their AST
+  into a graph once and query it at speed. See
+  \texttt{petgraph-adapter.md} in this project for the design note.
+\item \textbf{Python bindings.} A \texttt{quarb} Python package
+  exposing the engine and an \texttt{AstAdapter} base class.
+\item \textbf{C FFI.} A C ABI for embedding the engine in other
+  languages.
+\end{itemize}
+
+\noindent
+Each will be added once the core language surface is substantial
+enough to be worth binding.
+
+\end{document}

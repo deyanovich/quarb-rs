@@ -1,0 +1,18 @@
+[package]
+name = "quarb-mount"
+description = "Mount adapter for the Quarb query engine: compose adapters under one root"
+keywords = ["query", "mount", "compose", "quarb"]
+categories = ["data-structures"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+
+[dev-dependencies]
+quarb-csv = { path = "../quarb-csv", version = "0.1.0" }
+quarb-json = { path = "../quarb-json", version = "0.1.0" }

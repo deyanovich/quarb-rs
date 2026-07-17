@@ -1,0 +1,18 @@
+[package]
+name = "quarb-jq"
+description = "jq importer: translate jq filters to Quarb queries"
+keywords = ["query", "jq", "json", "importer", "quarb"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb-json = { path = "../quarb-json", version = "0.1.0" }

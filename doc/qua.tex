@@ -1,0 +1,83 @@
+
+\chapter{The \texttt{qua} Command-Line Tool}
+
+The \texttt{qua} command-line tool
+	is the primary and recommended method for executing Quarb queries
+	against structured data files.
+It is a powerful, structure-aware replacement
+	for traditional text-based search tools like \texttt{grep},
+	designed for the modern era of JSON, HTML, XML, and other tree-dominated data formats.
+
+
+\section{Overview}
+
+\texttt{qua} is a lightweight wrapper around the \texttt{quarb} engine.
+It translates your Quarb query string,
+	applies it to the parsed structure of an input file,
+	and displays the results intuitively.
+
+\paragraph{Key Features:}
+\begin{itemize}
+	\item \emph{Structure-Aware Search}:
+		Understands the hierarchy and relationships in your data,
+			eliminating the false positives
+			and complex regex patterns required by line-based tools.
+
+	\item \emph{Rich Output}:
+		Returns typed results
+			(strings, numbers, booleans) instead of just lines of text.
+
+	\item \emph{Powerful Pipelines}:
+		Seamlessly integrates into Unix shell pipelines,
+			working alongside tools like
+			\texttt{jq}, \texttt{sort}, and \texttt{uniq}.
+\end{itemize}
+
+\section{Installation}
+
+Install \texttt{qua} using the Rust package manager Cargo:
+\begin{verbatim}
+cargo install qua
+\end{verbatim}
+\emph{Other installation methods (e.g., package managers like Homebrew)
+	are planned in the future.
+	Check the official \texttt{qua} manual for the latest instructions.}
+
+\section{Basic Usage}
+
+The basic command structure is:
+\begin{verbatim}
+qua [OPTIONS] <QUERY_STRING> [FILE]
+\end{verbatim}
+If no \texttt{[FILE]} is provided, \texttt{qua} reads from standard input (stdin), allowing it to be used in pipelines.
+
+\section{Examples}
+\begin{enumerate}
+	\item Find all \texttt{name} fields of users in London from a JSON file:
+	\begin{verbatim}
+	qua '^//users/*[::city="London"]::name' data.json
+	\end{verbatim}
+
+	\item Find the text content of all heading elements in an HTML document from a URL:
+	\begin{verbatim}
+    curl -s https://example.com | qua '//h1::text'
+	\end{verbatim}
+
+	\item Count the number of deprecated functions in a codebase (using a hypothetical AST format):
+	\begin{verbatim}
+    qua '//function[::is_deprecated]' src/ | wc -l
+	\end{verbatim}
+\end{enumerate}
+
+\section{Learning More}
+
+This specification defines the Quarb language that \texttt{qua} executes.
+For complete documentation on the \texttt{qua} tool itself,
+	including command-line options, supported formats,
+	and advanced usage,
+	please see the official \emph{\texttt{qua} Manual}.
+
+\begin{itemize}
+	\item \texttt{qua} Manual: [\texttt{https://github.com/quarb/qua}](https://github.com/quarb/qua)
+	\item Quick Start Guide: [\texttt{https://quarb.org/guides/qua}](https://quarb.org/guides/qua)
+\end{itemize}

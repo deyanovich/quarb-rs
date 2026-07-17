@@ -1,0 +1,15 @@
+[package]
+name = "quarb-kaiv"
+description = "kaiv typed-data adapter for the Quarb query engine"
+keywords = ["query", "kaiv", "quarb", "arbor"]
+categories = ["parser-implementations", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+kaiv = { version = "0.3.0", default-features = false }

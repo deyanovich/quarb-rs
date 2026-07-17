@@ -1,0 +1,15 @@
+[package]
+name = "quarb-markdown"
+description = "Markdown adapter for the Quarb query engine"
+keywords = ["query", "markdown", "quarb", "arbor"]
+categories = ["parser-implementations", "text-processing"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb-html = { path = "../quarb-html", version = "0.1.0" }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

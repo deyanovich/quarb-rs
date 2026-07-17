@@ -1,0 +1,21 @@
+[package]
+name = "quarb-serve"
+description = "The Quarb serve protocol: expose any adapter to qua over a child process"
+keywords = ["query", "serve", "protocol", "quarb"]
+categories = ["network-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+kaiv = { version = "0.3.0", default-features = false }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dependencies.quarb-json]
+path = "../quarb-json"
+version = "0.1.0"

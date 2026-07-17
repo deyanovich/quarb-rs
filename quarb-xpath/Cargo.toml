@@ -1,0 +1,19 @@
+[package]
+name = "quarb-xpath"
+description = "XPath 1.0 importer: translate XPath to Quarb queries"
+keywords = ["query", "xpath", "xml", "importer", "quarb"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+quarb-xml = { path = "../quarb-xml", version = "0.1.0" }

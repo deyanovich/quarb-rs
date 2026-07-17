@@ -1,0 +1,16 @@
+[package]
+name = "quarb-toml"
+description = "TOML adapter for the Quarb query engine"
+keywords = ["query", "toml", "quarb", "arbor"]
+categories = ["parser-implementations", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb-json = { path = "../quarb-json", version = "0.1.0" }
+toml = "1"
+serde_json.workspace = true

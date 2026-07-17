@@ -1,0 +1,32 @@
+[package]
+name = "quarb"
+description = "Query engine for arbors (tree-spanned graphs)"
+keywords = ["query", "arbor", "graph", "xpath", "jq"]
+categories = ["parser-implementations", "data-structures"]
+version = "0.1.2"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["colligo"]
+# Locale-aware collation for `sort(LOCALE)`, via the colligo
+# collator (which replaced ICU4X in 0.1.2 — ~7x less dependency
+# weight, specialized to the context-free majority of locales).
+# With the feature disabled, `sort(LOCALE)` still parses but
+# orders by the standard value comparison (codepoint for text) —
+# useful for minimal builds (e.g. wasm) that can spare the
+# ~1 MB of embedded collation data.
+colligo = ["dep:colligo"]
+
+[dependencies]
+thiserror.workspace = true
+globset.workspace = true
+regex = "1"
+colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }
+serde_json.workspace = true
+serde_yaml_ng = "0.10.0"
+toml = "1.1.2"
+quick-xml.workspace = true

@@ -1,0 +1,10 @@
+/target
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.idx
+*.ilg
+*.ind

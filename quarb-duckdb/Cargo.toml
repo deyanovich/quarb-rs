@@ -1,0 +1,20 @@
+[package]
+name = "quarb-duckdb"
+description = "DuckDB adapter for the Quarb query engine"
+keywords = ["query", "duckdb", "sql", "quarb"]
+categories = ["database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.1.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.1.0" }
+duckdb = { version = "1", features = ["bundled"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb-sql = { path = "../quarb-sql", version = "0.1.0" }
