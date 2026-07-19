@@ -9,7 +9,7 @@ what the bindings cover — one query over a text document — so
 import argparse
 import sys
 
-from . import __version__, run, run_file
+from . import __version__, highlight, run, run_file
 
 FORMATS = "json yaml toml csv tsv xml html markdown".split()
 
@@ -38,11 +38,23 @@ def main(argv=None):
         "required for stdin)",
     )
     p.add_argument(
+        "--highlight",
+        action="store_true",
+        help="print the query with ANSI syntax highlighting and exit",
+    )
+    p.add_argument(
         "--version",
         action="version",
         version=f"qua (quarb {__version__})",
     )
     a = p.parse_args(argv)
+    if a.highlight:
+        import os
+        if os.environ.get("NO_COLOR") is not None:
+            print(a.query)
+        else:
+            print(highlight(a.query))
+        return 0
     try:
         if a.file is None:
             if a.format is None:

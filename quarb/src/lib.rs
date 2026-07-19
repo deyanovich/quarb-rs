@@ -48,6 +48,7 @@ pub mod reflect;
 pub use encoding::{sha256, sha256_hex};
 pub mod quantity;
 mod stdlib;
+pub mod highlight;
 pub mod temporal;
 mod unparse;
 mod value;

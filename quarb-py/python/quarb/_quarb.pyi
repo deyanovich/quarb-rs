@@ -75,3 +75,7 @@ def mount(paths: list[str], descend: bool = False) -> Document:
     """Mount several sources under one root so a single query joins
     across them; a single path just opens."""
     ...
+
+def highlight(query: str) -> str:
+    """The query with ANSI syntax-highlighting escapes."""
+    ...

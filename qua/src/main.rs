@@ -180,6 +180,14 @@ struct Cli {
     #[arg(long, hide = true)]
     resident_serve: bool,
 
+    /// Print the query with ANSI syntax highlighting and exit — the
+    /// terminal counterpart of the JupyterLab highlighter, coloring
+    /// paths, sigils, operators, strings, numbers, and stdlib
+    /// keywords. Honors NO_COLOR; forces color even off a TTY (so a
+    /// pipe into `less -R` works).
+    #[arg(long)]
+    highlight: bool,
+
     /// Cache parsed syntax trees for code inputs (.rs/.py/.js/.c…):
     /// the first query over a file parses and caches its AST; later
     /// queries load it and skip the parse. Content-addressed under
@@ -277,6 +285,17 @@ fn main() -> anyhow::Result<()> {
     // Interactive: the session manages its own defs and queries.
     // Ergonomics: `qua -i data.csv` parses data.csv as the query
     // positional; shift an existing path over.
+    if cli.highlight {
+        // Explicit --highlight forces color (the query is the
+        // deliverable), but NO_COLOR still wins.
+        if std::env::var_os("NO_COLOR").is_some() {
+            println!("{}", cli.query);
+        } else {
+            println!("{}", quarb::highlight::highlight_ansi(&cli.query));
+        }
+        return Ok(());
+    }
+
     if cli.interactive {
         if std::path::Path::new(&cli.query).exists() {
             let p = std::mem::take(&mut cli.query);
@@ -1324,7 +1343,15 @@ fn repl(cli: &Cli) -> anyhow::Result<()> {
                         println!("(no current query)");
                     } else {
                         let q = segments.join(" ");
-                        println!("{q}");
+                        // Color the echo when stdout is a terminal and
+                        // NO_COLOR is unset; otherwise plain text.
+                        if std::io::stdout().is_terminal()
+                            && std::env::var_os("NO_COLOR").is_none()
+                        {
+                            println!("{}", quarb::highlight::highlight_ansi(&q));
+                        } else {
+                            println!("{q}");
+                        }
                         if !defs.is_empty()
                             && let Ok(expanded) =
                                 quarb::expand(&combined(&defs, &segments), &quarb::Defs::default())

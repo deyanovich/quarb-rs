@@ -554,6 +554,15 @@ fn open(path: &str, descend: bool) -> PyResult<Document> {
     Ok(Document { doc, fmt: ext })
 }
 
+/// Colorize a Quarb query with ANSI escapes — the terminal
+/// syntax highlighter, the same token model as the JupyterLab
+/// extension. Honors nothing about the terminal itself (no TTY or
+/// NO_COLOR checks); the caller decides whether to emit it.
+#[pyfunction]
+fn highlight(query: &str) -> String {
+    quarb::highlight::highlight_ansi(query)
+}
+
 /// Translate a jq filter, an XPath 1.0 expression, or a SQL SELECT
 /// into Quarb query text (`lang` = "jq" | "xpath" | "sql") — the
 /// same bridges as the CLI's --jq/--xpath/--sql.
@@ -618,6 +627,7 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(mount, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
+    m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;
     Ok(())

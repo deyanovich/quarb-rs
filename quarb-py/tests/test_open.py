@@ -87,3 +87,18 @@ def test_mount_cross_source_join(tmp_path):
         assert False, "expected a stem-collision error"
     except ValueError as e:
         assert "colliding" in str(e)
+
+
+def test_highlight_binding():
+    import re
+    import quarb
+
+    h = quarb.highlight('/x/*[::v > 0.2kW] | rec("a", ::b) @| count')
+    # ANSI escapes present, and stripping them yields the source.
+    assert "\x1b[" in h
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", h)
+    assert plain == '/x/*[::v > 0.2kW] | rec("a", ::b) @| count'
+    # keywords and strings are wrapped.
+    assert "\x1b[1;36mrec\x1b[0m" in h
+    assert "\x1b[1;36mcount\x1b[0m" in h
+    assert '\x1b[32m"a"\x1b[0m' in h
