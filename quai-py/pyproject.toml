@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quai"
+version = "0.3.0"
+description = "Interactive Quarb — a session REPL where every line becomes a reusable query (&1, &2, …)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Bojan Đuričković" }]
+keywords = ["query", "repl", "interactive", "quarb", "json"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Utilities",
+    "Environment :: Console",
+]
+dependencies = ["quarb>=0.3"]
+
+[project.scripts]
+quai = "quai.cli:main"
+
+[project.urls]
+Homepage = "https://quarb.org/"
+Playground = "https://demo.quarb.org/quai/"
+Cookbook = "https://quarb.org/cookbooks/quai.html"
+Repository = "https://gitlab.com/quarb/engine"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quai"]

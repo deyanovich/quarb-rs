@@ -1,0 +1,24 @@
+[package]
+name = "quai-wasm"
+description = "Browser build of interactive Quarb (quai) — the demo.quarb.org/quai session playground"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The text-format subset only (no `native` feature): json/yaml/toml/
+# csv/xml/html/markdown, driven by Doc::parse. No daemon, no fs.
+quarb-session = { path = "../quarb-session", default-features = false }
+quarb = { path = "../quarb" }
+wasm-bindgen = "0.2"
+serde_json.workspace = true
+# scraper (via quarb-html, pulled in by quarb-session) → ahash →
+# getrandom: the JS backend must be opted in on wasm32-unknown-unknown.
+getrandom = { version = "0.3", features = ["wasm_js"] }

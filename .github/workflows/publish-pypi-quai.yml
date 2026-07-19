@@ -1,0 +1,75 @@
+name: "Publish quai-py to PyPI (dist: quai)"
+
+# Triggers on `quai-py/v*` tag pushes to this GitHub mirror. `quai` is
+# a pure-Python REPL over the published `quarb` engine, so this builds a
+# single universal wheel + sdist (no Rust, no platform matrix) and
+# publishes to PyPI using OIDC trusted publishing — no API token secret
+# on the GitHub side.
+#
+# The tag pattern is distinct from quarb-py's `py/v*`, so a
+# `quai-py/vX.Y.Z` tag triggers only this workflow.
+#
+# One-time setup required before the first publish:
+#
+# 1. On PyPI, add a *pending* Trusted Publisher for the new project
+#    (https://pypi.org/manage/account/publishing/ — the "pending"
+#    section, since `quai` does not exist on PyPI yet):
+#      PyPI Project Name: quai
+#      Owner:             deyanovich
+#      Repository:        quarb-rs
+#      Workflow name:     publish-pypi-quai.yml
+#      Environment:       pypi
+#
+# 2. The GitHub `pypi` environment already exists (created for the
+#    quarb-py workflow); this reuses it.
+
+on:
+  push:
+    tags:
+      - "quai-py/v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build
+          python -m build --outdir dist quai-py
+          ls -la dist/
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

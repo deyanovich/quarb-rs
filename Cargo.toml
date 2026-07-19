@@ -26,10 +26,12 @@ members = [
     "quarb-git",
     "quarb-gsheet",
     "quarb-mount",
+    "quarb-session",
     "quarb-xpath",
     "quarb-jq",
     "qm",
     "qua",
+    "quai",
     "quarb-py",
     "quarb-mysql",
     "quarb-neo4j",
@@ -40,6 +42,7 @@ members = [
     "quarb-sql",
     "quarb-sqlite",
     "quarb-wasm",
+    "quai-wasm",
 ]
 
 [workspace.package]
