@@ -3,7 +3,7 @@ name = "quarb-py"
 # Decoupled from the workspace version: the Python package on PyPI
 # follows its own release cadence, independent of the quarb Rust
 # crates on crates.io.
-version = "0.3.1"  # PyPI patch cadence, decoupled from the crates.io fleet
+version = "0.3.2"  # PyPI patch cadence, decoupled from the crates.io fleet
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

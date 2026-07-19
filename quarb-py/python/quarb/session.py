@@ -176,6 +176,54 @@ class Session:
             "no default document — mount a single path, or name one"
         )
 
+    def complete(self, text: str, cursor_pos: int):
+        """Path completions from the live default document.
+
+        Given the query text and cursor, complete the path segment
+        under the cursor against the mounted arbor's real child
+        names — ``/users/*/na`` offers ``name`` because the data
+        has it. Returns ``(matches, start, end)`` (end == cursor).
+        Resident sessions and non-navigable spots yield nothing.
+        """
+        try:
+            name = self._pick(None)
+        except Exception:
+            return [], cursor_pos, cursor_pos
+        if name not in self.docs:
+            return [], cursor_pos, cursor_pos
+        doc = self.docs[name]
+        # The segment under the cursor: back to the last '/', but a
+        # path only navigates from a '/', not from inside a literal.
+        left = text[:cursor_pos]
+        slash = left.rfind("/")
+        if slash < 0:
+            return [], cursor_pos, cursor_pos
+        seg = left[slash + 1 :]
+        stops = set(" \t\"'()[]|")
+        if any(c in stops for c in seg):
+            return [], cursor_pos, cursor_pos
+        parent = left[:slash]
+        # Trim any pipe/paren-scoped fragment back to the path root.
+        for i in range(len(parent) - 1, -1, -1):
+            if parent[i] in " \t|(":
+                parent = parent[i + 1 :]
+                break
+        # Inside an unclosed predicate `[ ... `, the path is relative
+        # to the node the predicate hangs on: splice the enclosing
+        # path onto the relative fragment.
+        if parent.count("[") > parent.count("]"):
+            base, _, rel = parent.rpartition("[")
+            parent = base.rstrip("/") + rel
+        parent = parent.rstrip("/")
+        # `parent` is now a path like "/users/*" or "" (root).
+        query = f"{parent}/*:::name" if parent else "/*:::name"
+        try:
+            names = [str(n) for n in doc.values(query)]
+        except Exception:
+            return [], cursor_pos, cursor_pos
+        matches = sorted({n for n in names if n.startswith(seg) and n != ""})
+        return matches, slash + 1, cursor_pos
+
     def run(self, query: str, name: str | None = None) -> QuarbResult:
         picked = self._pick(name)
         if picked in self.resident:

@@ -78,3 +78,13 @@ def test_kernel_directives_and_errors(kernel):
     # The kernel survives errors: query again.
     status, _ = run_cell(kernel, "%docs")
     assert status == "ok"
+
+
+def test_kernel_completion(kernel, tmp_path_factory):
+    import json as _json
+    tmp = tmp_path_factory.mktemp("kc")
+    (tmp / "d.json").write_text('{"servers":[{"host":"a"}],"config":{}}')
+    run_cell(kernel, f"%mount {tmp / 'd.json'}")
+    reply = kernel.complete("/serv", 5)
+    msg = kernel.get_shell_msg(timeout=15)
+    assert msg["content"]["matches"] == ["servers"]

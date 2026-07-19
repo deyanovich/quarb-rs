@@ -62,3 +62,22 @@ def test_named_documents(shell, tmp_path_factory):
     ra = shell.run_cell_magic("quarb", "a", "/x::")
     rb = shell.run_cell_magic("quarb", "b", "/x::")
     assert (ra.values, rb.values) == ([1], [2])
+
+
+def test_completion_from_live_data(tmp_path):
+    import quarb
+    from quarb.session import Session
+
+    p = tmp_path / "d.json"
+    p.write_text('{"users":[{"name":"ada","addr":{"city":"x"}}],"meta":{"v":1}}')
+    s = Session()
+    s.mount(str(p))
+    assert s.complete("/us", 3)[0] == ["users"]
+    assert s.complete("/users/*/na", 11)[0] == ["name"]
+    assert set(s.complete("/", 1)[0]) == {"meta", "users"}
+    # Predicate-relative: the path inside [ ... ] hangs on the node.
+    assert s.complete("/users/*[/na", 12)[0] == ["name"]
+    assert s.complete("/users/*[/addr/ci", 17)[0] == ["city"]
+    # No completion inside a literal or with no mount.
+    assert s.complete('/users/*[::name = "a', 20)[0] == []
+    assert Session().complete("/x", 2)[0] == []

@@ -8,6 +8,9 @@ then pick **Quarb** in the Jupyter launcher. Cells are Quarb
 queries against the session's mounts; a small directive family
 (lines starting with ``%``) manages state:
 
+- ``%python`` — the rest of the cell is Python (build a fixture,
+  post-process, plot); the namespace persists, ``session`` is the
+  live session, and ``_`` is the last query result.
 - ``%mount PATH [PATH ...] [--descend]`` — open documents
   in-process (directories, SQLite, kaiv, ``git:PATH``, archives,
   XLSX, source files, text formats).
@@ -27,6 +30,7 @@ lines. The wrapper delegates all protocol plumbing to ipykernel
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from . import translate
 from .session import Session
@@ -52,6 +56,12 @@ def _make_kernel_class():
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.qsession = Session()
+            # A persistent namespace for %python escapes — build a
+            # fixture, post-process a result, plot. The last query
+            # result is bound to `_`.
+            import quarb as _quarb
+
+            self.pyns = {"quarb": _quarb, "session": self.qsession, "_": None}
 
         # -- helpers ---------------------------------------------
         def _send_text(self, text: str):
@@ -90,7 +100,7 @@ def _make_kernel_class():
                 return translate(src.strip(), lang)
             raise ValueError(
                 f"unknown directive %{word} "
-                "(mount, connect, use, docs, translate)"
+                "(python, mount, connect, use, docs, translate)"
             )
 
         # -- protocol --------------------------------------------
@@ -100,7 +110,26 @@ def _make_kernel_class():
             cell_id=None,
         ):
             try:
-                lines = [l for l in code.strip().splitlines() if l.strip()]
+                stripped = code.strip()
+                # A cell opening with %python is Python all the way
+                # down — an escape hatch for fixtures, post-
+                # processing, plotting; the namespace persists.
+                if stripped.split("\n", 1)[0].strip() in ("%python", "%%python"):
+                    body = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+                    import io
+                    import contextlib
+
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        exec(body, self.pyns)  # noqa: S102 — user's own cell
+                    if not silent and buf.getvalue():
+                        self._send_text(buf.getvalue())
+                    return {
+                        "status": "ok",
+                        "execution_count": self.execution_count,
+                        "payload": [], "user_expressions": {},
+                    }
+                lines = [l for l in stripped.splitlines() if l.strip()]
                 directives = [l for l in lines if l.lstrip().startswith("%")]
                 query_lines = [l for l in lines if not l.lstrip().startswith("%")]
                 for d in directives:
@@ -109,6 +138,7 @@ def _make_kernel_class():
                         self._send_text(out + "\n")
                 if query_lines:
                     result = self.qsession.run("\n".join(query_lines))
+                    self.pyns["_"] = result
                     if not silent:
                         self._send_result(result)
             except Exception as e:  # noqa: BLE001 — kernel must not die
@@ -127,6 +157,13 @@ def _make_kernel_class():
             return {
                 "status": "ok", "execution_count": self.execution_count,
                 "payload": [], "user_expressions": {},
+            }
+
+        def do_complete(self, code, cursor_pos):
+            matches, start, end = self.qsession.complete(code, cursor_pos)
+            return {
+                "status": "ok", "matches": matches,
+                "cursor_start": start, "cursor_end": end, "metadata": {},
             }
 
     return QuarbKernel
@@ -168,6 +205,15 @@ def install(user: bool = False, prefix: str | None = None):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "install":
         install(user="--user" in sys.argv)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "demo":
+        import shutil
+        from importlib.resources import files
+
+        dest = Path(sys.argv[2] if len(sys.argv) > 2 else ".") / "quarb-demo.ipynb"
+        src = files("quarb").joinpath("examples/quarb-demo.ipynb")
+        shutil.copyfile(str(src), dest)
+        print(f"wrote {dest}")
         return
     from ipykernel.kernelapp import IPKernelApp
 
