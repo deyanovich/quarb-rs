@@ -125,6 +125,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "apotheca"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9df13bf48424f5f4eb2f6e99e67d93bbc6f100855dcccb88866de020f6b6459"
+dependencies = [
+ "clap",
+ "getrandom 0.2.17",
+ "hex",
+ "libc",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,6 +145,12 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
 ]
+
+[[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
@@ -368,6 +387,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake3"
+version = "1.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq 0.4.2",
+ "cpufeatures 0.3.0",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -509,6 +542,17 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfb"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d38f2da7a0a2c4ccf0065be06397cc26a81f4e528be095826eee9d4adbb8c60f"
+dependencies = [
+ "byteorder",
+ "fnv",
+ "uuid",
 ]
 
 [[package]]
@@ -683,6 +727,12 @@ name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation-sys"
@@ -1086,6 +1136,12 @@ dependencies = [
  "miniz_oxide",
  "zlib-rs",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -1639,6 +1695,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc150e5ce2330295b8616ce0e3f53250e53af31759a9dbedad1621ba29151847"
+dependencies = [
+ "cfb",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1688,9 +1753,9 @@ dependencies = [
 
 [[package]]
 name = "kaiv"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "209f0579b56f129a79a158d7ba7f8d2737f2beb868db059fec93ff8a4afecd57"
+checksum = "0183960d436e5d2adbb420ed4f41aaff50814b29b191c565cc06df1e68ac4f98"
 
 [[package]]
 name = "lazy_static"
@@ -1805,6 +1870,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -1914,6 +1980,21 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "metatheca"
+version = "0.1.3"
+dependencies = [
+ "clap",
+ "hex",
+ "infer",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "syntheca",
+ "unicode-normalization",
+ "uuid",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -2426,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2436,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2462,6 +2543,7 @@ dependencies = [
  "quarb-kaiv",
  "quarb-maildir",
  "quarb-markdown",
+ "quarb-metatheca",
  "quarb-mount",
  "quarb-mysql",
  "quarb-neo4j",
@@ -2480,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "colligo",
  "globset",
@@ -2494,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-archive"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -2505,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2517,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "tempfile",
@@ -2531,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-code",
@@ -2547,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-csv"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "csv",
  "quarb",
@@ -2555,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-datastore"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2565,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "duckdb",
  "quarb",
@@ -2576,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firebase"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2586,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firestore"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2596,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-fs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -2605,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2613,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2624,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-html"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "scraper",
@@ -2632,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-imap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2640,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-jq"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-json",
@@ -2649,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2657,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -2665,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "thiserror",
@@ -2673,15 +2755,26 @@ dependencies = [
 
 [[package]]
 name = "quarb-markdown"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
 ]
 
 [[package]]
+name = "quarb-metatheca"
+version = "0.3.0"
+dependencies = [
+ "metatheca",
+ "quarb",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "quarb-mount"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-csv",
@@ -2690,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2701,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -2711,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-objstore"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -2722,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-postgres"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2733,29 +2826,40 @@ dependencies = [
 
 [[package]]
 name = "quarb-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pyo3",
  "quarb",
+ "quarb-archive",
+ "quarb-code",
+ "quarb-compose",
  "quarb-csv",
+ "quarb-fs",
+ "quarb-git",
  "quarb-html",
+ "quarb-jq",
  "quarb-json",
+ "quarb-kaiv",
  "quarb-markdown",
+ "quarb-sql",
+ "quarb-sqlite",
  "quarb-toml",
+ "quarb-xlsx",
  "quarb-xml",
+ "quarb-xpath",
  "quarb-yaml",
 ]
 
 [[package]]
 name = "quarb-relational"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-serve"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -2766,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
@@ -2776,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -2787,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-toml"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -2796,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -2813,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "calamine",
  "quarb",
@@ -2824,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xml"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -2833,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xpath"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb",
  "quarb-xml",
@@ -2842,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-yaml"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -3777,6 +3881,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "syntheca"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c48c2e6f5f4dc4636e999e82dba2fcf9d46362381204b9ee371a4a0d6cf3683"
+dependencies = [
+ "apotheca",
+ "blake3",
+ "clap",
+ "hex",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4280,6 +4396,7 @@ version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -4818,7 +4935,7 @@ dependencies = [
  "aes",
  "arbitrary",
  "bzip2",
- "constant_time_eq",
+ "constant_time_eq 0.3.1",
  "crc32fast",
  "crossbeam-utils",
  "deflate64",

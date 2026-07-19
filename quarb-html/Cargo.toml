@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.2.0" }
+quarb = { path = "../quarb", version = "0.3.0" }
 scraper.workspace = true

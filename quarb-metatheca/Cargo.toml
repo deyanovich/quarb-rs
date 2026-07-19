@@ -1,8 +1,8 @@
 [package]
-name = "quarb-datastore"
-description = "Google Datastore adapter for the Quarb query engine"
-keywords = ["query", "datastore", "google", "quarb"]
-categories = ["database", "api-bindings"]
+name = "quarb-metatheca"
+description = "Metatheca vault adapter for the Quarb query engine"
+keywords = ["query", "metatheca", "vault", "history", "quarb"]
+categories = ["development-tools", "database"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,9 @@ homepage.workspace = true
 
 [dependencies]
 quarb = { path = "../quarb", version = "0.3.0" }
-ureq.workspace = true
+metatheca = "0.1.3"
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

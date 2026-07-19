@@ -60,3 +60,13 @@ def run(query: str, input: str, format: str) -> list[str]:
 def run_file(query: str, path: str | os.PathLike[str]) -> list[str]:
     """Execute ``query`` against the file at ``path``, inferring
     the format from the extension; result lines as strings."""
+
+def open(path: str, descend: bool = False) -> Document:
+    """Open path with the adapter its kind calls for (dirs, SQLite,
+    kaiv, git:PATH, archives, XLSX, source code); text formats fall
+    back to load()."""
+    ...
+
+def translate(source: str, lang: str) -> str:
+    """Translate a jq / xpath / sql query into Quarb text."""
+    ...

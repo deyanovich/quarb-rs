@@ -51,17 +51,17 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
         // *pure-time* result is rejected downstream: on the quarb
         // side a span of time is a Duration, one ontology per
         // dimension of time.
-        // Information (a quarb extension: bytes are not SI, but
-        // they are the most ubiquitous unit in the substrates this
-        // engine mounts — file sizes, blob sizes, object sizes).
-        // Decimal prefixes ride the generic machinery (kB = 1000 B,
-        // MB, GB, TB, …); the IEC binary forms are full names
-        // (KiB = 1024 B, MiB, GiB, …), and the colloquial capital
-        // KB reads decimal, equal to kB — the binary spelling is
-        // KiB, always. That one ruling settles the oldest seam in
-        // storage: 1 GB = 10^9 B; 1 GiB = 2^30 B; never confused.
+        // Information (bytes are not SI, but they are the most
+        // ubiquitous unit in the substrates this engine mounts —
+        // file sizes, blob sizes, object sizes). Decimal prefixes
+        // ride the generic machinery (kB = 1000 B, MB, GB, TB, …);
+        // the IEC binary forms are full names (KiB = 1024 B, MiB,
+        // GiB, …). Strictly SI + IEC — there is no capital KB, the
+        // same discipline that keeps `min` the only short minute:
+        // decimal is kB, binary is KiB, and 1 GB = 10^9 B while
+        // 1 GiB = 2^30 B, never confused. The table matches kaiv's
+        // (harmonized by ruling 2026-07-18).
         "B" => (1.0, "B"),
-        "KB" => (1000.0, "B"),
         "KiB" => (1024.0, "B"),
         "MiB" => (1_048_576.0, "B"),
         "GiB" => (1_073_741_824.0, "B"),
@@ -382,12 +382,12 @@ mod tests {
 
     #[test]
     fn byte_units() {
-        // The information base: decimal prefixes are powers of ten,
-        // the IEC binary forms are full names, and the colloquial
-        // capital KB reads decimal — the binary spelling is KiB.
+        // The information base: decimal prefixes are powers of
+        // ten, the IEC binary forms are full names. Strict SI:
+        // there is no capital KB — decimal is kB, binary is KiB.
         assert_eq!(unit_scale("B"), Some((1.0, "B")));
         assert_eq!(unit_scale("kB"), Some((1000.0, "B")));
-        assert_eq!(unit_scale("KB"), Some((1000.0, "B")));
+        assert_eq!(unit_scale("KB"), None);
         assert_eq!(unit_scale("KiB"), Some((1024.0, "B")));
         assert_eq!(unit_scale("MB"), Some((1e6, "B")));
         assert_eq!(unit_scale("MiB"), Some((1_048_576.0, "B")));

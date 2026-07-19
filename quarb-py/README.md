@@ -78,3 +78,17 @@ patterns, joins — see the [user guide and spec][quarb].
 
 Licensed under either of Apache License, Version 2.0 or the MIT
 license at your option. Both texts are bundled in the package.
+
+## Jupyter
+
+```
+%load_ext quarb.ipython
+%quarb_mount fleet.daiv
+%quarb /@hosts/*[::power > 0.2kW]::name
+```
+
+`%%quarb [NAME]` runs a cell-sized query against a named mount;
+results render as HTML tables, iterate as typed values
+(quantities keep magnitude + unit), and convert with `.df` /
+`.df_magnitudes()`. `pip install quarb[jupyter]` pulls IPython
+and pandas.

@@ -50,6 +50,14 @@ enum Doc {
     Csv(quarb_csv::CsvAdapter),
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
+    Sqlite(quarb_sqlite::SqliteAdapter),
+    Kaiv(quarb_kaiv::KaivAdapter),
+    Fs(quarb_fs::FsAdapter),
+    FsDeep(quarb_compose::ComposeAdapter<quarb_fs::FsAdapter>),
+    Git(quarb_git::GitAdapter),
+    Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
+    Xlsx(quarb_xlsx::XlsxAdapter),
+    Code(quarb_code::CodeAdapter),
 }
 
 impl Doc {
@@ -96,6 +104,14 @@ impl Doc {
             Doc::Csv(a) => go!(a),
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
+            Doc::Sqlite(a) => go!(a),
+            Doc::Kaiv(a) => go!(a),
+            Doc::Fs(a) => go!(a),
+            Doc::FsDeep(a) => go!(a),
+            Doc::Git(a) => go!(a),
+            Doc::Archive(a) => go!(a),
+            Doc::Xlsx(a) => go!(a),
+            Doc::Code(a) => go!(a),
         }
     }
 
@@ -105,6 +121,16 @@ impl Doc {
             Doc::Csv(a) => a.locator(node),
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
+            Doc::Sqlite(a) => a.locator(node),
+            Doc::Kaiv(a) => a.locator(node),
+            Doc::Fs(a) => a.path(node).display().to_string(),
+            Doc::FsDeep(a) => {
+                a.locator(node, |o| a.outer().path(o).display().to_string())
+            }
+            Doc::Git(a) => a.locator(node),
+            Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
+            Doc::Xlsx(a) => a.locator(node),
+            Doc::Code(a) => a.locator(node),
         }
     }
 }
@@ -366,6 +392,101 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
     })
 }
 
+/// Open `path` with the adapter its kind calls for — the full
+/// local fleet, mirroring the qua CLI's dispatch:
+///
+/// - a directory mounts as a filesystem tree (`descend=True`
+///   grafts parseable leaves — JSON, CSV, code, … — as subtrees);
+/// - `.db` / `.sqlite` / `.sqlite3` opens SQLite;
+/// - `.kaiv` / `.daiv` / `.raiv` mounts typed kaiv (units, instants,
+///   durations — sibling `.faiv` unit libraries resolve relative to
+///   the document);
+/// - `.zip` / `.tar` / `.tgz` / `.tar.gz` mounts the archive, its
+///   parseable entries grafted;
+/// - `.xlsx` opens the workbook; source-code extensions (`.rs`,
+///   `.py`, `.js`, `.c`, …) parse to a syntax arbor;
+/// - a repository path given as `git:PATH` (or a `.git` directory)
+///   mounts the commit graph;
+/// - anything else falls back to text parsing by extension, as
+///   [`load`] does.
+#[pyfunction]
+#[pyo3(signature = (path, descend=false))]
+fn open(path: &str, descend: bool) -> PyResult<Document> {
+    let err = |e: String| PyValueError::new_err(e);
+    if let Some(repo) = path.strip_prefix("git:") {
+        let a = quarb_git::GitAdapter::open(Path::new(repo)).map_err(|e| err(e.to_string()))?;
+        return Ok(Document { doc: Doc::Git(a), fmt: "git".into() });
+    }
+    let p = PathBuf::from(path);
+    if p.is_dir() {
+        if p.join(".git").exists() && p.extension().is_none() && path.ends_with(".git") {
+            // explicit .git dir
+        }
+        let opts = quarb_fs::FsOptions::default();
+        let a = quarb_fs::FsAdapter::with_options(&p, opts).map_err(|e| err(e.to_string()))?;
+        return Ok(if descend {
+            Document { doc: Doc::FsDeep(quarb_compose::ComposeAdapter::new(a)), fmt: "fs".into() }
+        } else {
+            Document { doc: Doc::Fs(a), fmt: "fs".into() }
+        });
+    }
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let doc = match ext.as_str() {
+        "db" | "sqlite" | "sqlite3" => {
+            Doc::Sqlite(quarb_sqlite::SqliteAdapter::open(&p).map_err(|e| err(e.to_string()))?)
+        }
+        "kaiv" | "daiv" | "raiv" => {
+            // Extension picks the pipeline stage, as in the CLI:
+            // .daiv is canonical, .kaiv compiles first, .raiv
+            // denormalizes its $field references.
+            let text = std::fs::read_to_string(&p)?;
+            let a = match ext.as_str() {
+                "daiv" => quarb_kaiv::KaivAdapter::parse_daiv_at(&text, p.parent()),
+                "raiv" => quarb_kaiv::KaivAdapter::parse_raiv_at(&text, p.parent()),
+                _ => quarb_kaiv::KaivAdapter::parse_kaiv_at(&text, p.parent()),
+            }
+            .map_err(|e| err(e.to_string()))?;
+            Doc::Kaiv(a)
+        }
+        "zip" | "tar" | "tgz" | "gz" | "txz" | "xz" | "zst" => Doc::Archive(
+            quarb_compose::ComposeAdapter::new(
+                quarb_archive::ArchiveAdapter::open(&p).map_err(|e| err(e.to_string()))?,
+            ),
+        ),
+        "xlsx" => Doc::Xlsx(quarb_xlsx::XlsxAdapter::open(&p).map_err(|e| err(e.to_string()))?),
+        e if quarb_code::supported(e) => {
+            Doc::Code(quarb_code::CodeAdapter::open(&p).map_err(|e| err(e.to_string()))?)
+        }
+        _ => return load(p, None),
+    };
+    Ok(Document { doc, fmt: ext })
+}
+
+/// Translate a jq filter, an XPath 1.0 expression, or a SQL SELECT
+/// into Quarb query text (`lang` = "jq" | "xpath" | "sql") — the
+/// same bridges as the CLI's --jq/--xpath/--sql.
+#[pyfunction]
+fn translate(source: &str, lang: &str) -> PyResult<String> {
+    let q = match lang {
+        "jq" => quarb_jq::translate(source)
+            .map(|t| t.query)
+            .map_err(|e| e.to_string()),
+        "xpath" => quarb_xpath::translate(source)
+            .map(|t| t.query)
+            .map_err(|e| e.to_string()),
+        "sql" => quarb_sql::translate(source)
+            .map(|t| t.query)
+            .map_err(|e| e.to_string()),
+        other => Err(format!("unknown source language: {other} (jq | xpath | sql)")),
+    }
+    .map_err(PyValueError::new_err)?;
+    Ok(q)
+}
+
 /// Execute `query` against `input` parsed as `format` and return
 /// the result lines as strings — the qua CLI's exact rendering.
 /// The low-level layer; prefer [`loads`] + [`Document`] for typed
@@ -406,6 +527,8 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Quantity>()?;
     m.add_function(wrap_pyfunction!(loads, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add_function(wrap_pyfunction!(translate, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;
     Ok(())

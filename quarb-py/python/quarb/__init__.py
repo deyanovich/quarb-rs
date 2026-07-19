@@ -33,6 +33,13 @@ the low-level layer: result lines as strings, exactly as the
 ``qua`` CLI renders them. Errors raise ``ValueError`` with the
 engine's message.
 
+``quarb.open(path)`` dispatches on the path's kind — directories
+(``descend=True`` grafts parseable leaves), SQLite, kaiv/daiv
+(typed units, instants, durations), git repositories (``git:PATH``),
+archives, XLSX workbooks, and source files — and
+``quarb.translate(src, "jq"|"xpath"|"sql")`` turns queries you
+already have into Quarb text.
+
 The ``qua`` console command installed with this package covers the
 same text formats; the full CLI (files, git, databases, mail) is
 the Rust binary: ``cargo install qua``.
@@ -47,12 +54,16 @@ Document = _ext.Document
 Quantity = _ext.Quantity
 load = _ext.load
 loads = _ext.loads
+open = _ext.open
+translate = _ext.translate
 
 # The string-faithful layer: the qua CLI's exact rendering.
 run = _ext.run
 run_file = _ext.run_file
 
 __all__ = [
+    "open",
+    "translate",
     "__version__",
     "Document",
     "Quantity",

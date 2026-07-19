@@ -29,6 +29,7 @@ use quarb_html::HtmlAdapter;
 use quarb_imap::ImapAdapter;
 use quarb_json::JsonAdapter;
 use quarb_maildir::MaildirAdapter;
+use quarb_metatheca::MetathecaAdapter;
 use quarb_mount::{Mount, MountAdapter, Shared};
 use quarb_mysql::MysqlAdapter;
 use quarb_neo4j::Neo4jAdapter;
@@ -79,11 +80,12 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["xpath", "jq"])]
     sql: bool,
 
-    /// Emit results as canonical kaiv (.daiv): one typed leaf per
-    /// value under /@results/N, with provenance recording the source
-    /// document and each value's origin node.
-    #[arg(long)]
-    daiv: bool,
+    /// Emit results as canonical kaiv: one typed leaf per value
+    /// under /@results/N, with provenance recording the source
+    /// document and each value's origin node. (--daiv remains a
+    /// hidden alias from the 0.2.0 era.)
+    #[arg(long, alias = "daiv")]
+    kaiv: bool,
 
     /// Load fragment definitions (`def &name(params): body;`) from a
     /// file before parsing the query; inline defs extend them.
@@ -349,8 +351,8 @@ fn main() -> anyhow::Result<()> {
 
     if cli.resident || cli.resident_serve {
         anyhow::ensure!(
-            !cli.daiv && cli.save.is_none() && !cli.expand && !cli.interactive,
-            "--resident does not combine with --daiv/--save/--expand/-i"
+            !cli.kaiv && cli.save.is_none() && !cli.expand && !cli.interactive,
+            "--resident does not combine with --kaiv/--save/--expand/-i"
         );
         anyhow::ensure!(
             !cli.paths.is_empty(),
@@ -740,7 +742,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     format!("/{}{}", adapter.mount_name(m), renders[m](inner))
                 }
             },
-            cli.daiv.then_some(sources.as_str()),
+            cli.kaiv.then_some(sources.as_str()),
         );
     }
     let path = cli.paths.first().cloned();
@@ -761,7 +763,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 query,
                 &adapter,
                 |n| adapter.locator(n, |o| adapter.outer().path(o).display().to_string()),
-                cli.daiv.then_some(src.as_str()),
+                cli.kaiv.then_some(src.as_str()),
             );
         }
         let adapter = FsAdapter::with_options(path, opts)?;
@@ -769,7 +771,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.path(n).display().to_string(),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -782,7 +784,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
@@ -793,7 +795,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -806,7 +808,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -821,7 +823,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // A metatheca vault: `metatheca:PATH` or `mt:PATH` (the vault
+    // root — the directory holding `cella/`).
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && let Some(vault) = s
+            .strip_prefix("metatheca:")
+            .or_else(|| s.strip_prefix("mt:"))
+    {
+        let adapter = MetathecaAdapter::open(std::path::Path::new(vault))
+            .context("opening metatheca vault")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -845,7 +864,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -885,7 +904,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -925,7 +944,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -967,7 +986,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -982,7 +1001,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -995,7 +1014,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -1010,7 +1029,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n, |o| adapter.outer().locator(o)),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -1023,7 +1042,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -1037,7 +1056,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(s),
+            cli.kaiv.then_some(s),
         );
     }
 
@@ -1054,7 +1073,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -1071,7 +1090,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -1110,7 +1129,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -1126,7 +1145,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n, |o| adapter.outer().locator(o)),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -1168,7 +1187,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             query,
             &adapter,
             |n| adapter.locator(n),
-            cli.daiv.then_some(src.as_str()),
+            cli.kaiv.then_some(src.as_str()),
         );
     }
 
@@ -1195,53 +1214,53 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     };
 
     let source = path.map_or_else(|| "stdin".to_string(), |p| p.display().to_string());
-    let daiv = cli.daiv.then_some(source.as_str());
+    let kaiv = cli.kaiv.then_some(source.as_str());
 
     // A .quarb file holds a Quarb query: reflect it as an arbor and
     // query the query (extension-only, like CSV).
     if is_quarb(path) {
         let adapter = quarb::reflect::QueryArbor::parse(&text).context("parsing Quarb query")?;
-        return run(query, &adapter, |n| adapter.locator(n), daiv);
+        return run(query, &adapter, |n| adapter.locator(n), kaiv);
     }
     // CSV/TSV are extension-only (tabular text is not sniffable).
     if let Some(delim) = csv_delimiter(path) {
         let adapter = CsvAdapter::parse_with_delimiter(&text, delim).context("parsing CSV")?;
-        return run(query, &adapter, |n| adapter.locator(n), daiv);
+        return run(query, &adapter, |n| adapter.locator(n), kaiv);
     }
     // YAML/TOML are extension-only (both share the JSON model).
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
         if matches!(ext, "yaml" | "yml") {
             let adapter = quarb_yaml::parse(&text).context("parsing YAML")?;
-            return run(query, &adapter, |n| adapter.pointer(n), daiv);
+            return run(query, &adapter, |n| adapter.pointer(n), kaiv);
         }
         if ext == "toml" {
             let adapter = quarb_toml::parse(&text).context("parsing TOML")?;
-            return run(query, &adapter, |n| adapter.pointer(n), daiv);
+            return run(query, &adapter, |n| adapter.pointer(n), kaiv);
         }
         if matches!(ext, "md" | "markdown") {
             let adapter = quarb_markdown::parse(&text);
-            return run(query, &adapter, |n| adapter.locator(n), daiv);
+            return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
         // kaiv documents — the typed arbor whose namepaths ARE
-        // quarb paths, so --daiv output re-mounts (graft and join
+        // quarb paths, so --kaiv output re-mounts (graft and join
         // over typed results). Extension picks the pipeline stage:
-        // .daiv is canonical, .kaiv compiles first, .raiv
+        // .kaiv is canonical, .kaiv compiles first, .raiv
         // denormalizes its $field references.
         if matches!(ext, "daiv" | "kaiv" | "raiv") {
             let dir = path.and_then(|p| p.parent());
             let adapter = parse_kaiv_ext(ext, &text, dir)?;
-            return run(query, &adapter, |n| adapter.locator(n), daiv);
+            return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
     }
     if is_xml(path, &text) {
         let adapter = XmlAdapter::parse(&text).context("parsing XML")?;
-        run(query, &adapter, |n| adapter.locator(n), daiv)
+        run(query, &adapter, |n| adapter.locator(n), kaiv)
     } else if is_html(path, &text) {
         let adapter = HtmlAdapter::parse(&text);
-        run(query, &adapter, |n| adapter.locator(n), daiv)
+        run(query, &adapter, |n| adapter.locator(n), kaiv)
     } else {
         let adapter = JsonAdapter::parse(&text).context("parsing JSON")?;
-        run(query, &adapter, |n| adapter.pointer(n), daiv)
+        run(query, &adapter, |n| adapter.pointer(n), kaiv)
     }
 }
 
@@ -1371,10 +1390,10 @@ fn is_quarb(path: Option<&Path>) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("quarb"))
 }
 
-/// Whether pushdown applies: enabled, not emitting daiv (which
+/// Whether pushdown applies: enabled, not emitting kaiv (which
 /// needs node provenance), and not in --expand mode.
 fn pushdown_applies(cli: &Cli) -> bool {
-    !cli.no_pushdown && !cli.daiv && !EXPAND.get() && cli.save.is_none()
+    !cli.no_pushdown && !cli.kaiv && !EXPAND.get() && cli.save.is_none()
 }
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
@@ -1532,7 +1551,7 @@ type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
 
 /// Open one input as a boxed adapter plus its locator renderer, for
 /// mounting. Format detection matches the single-input flow.
-/// Mount kaiv text by its extension's pipeline stage: `.daiv` is
+/// Mount kaiv text by its extension's pipeline stage: `.kaiv` is
 /// canonical, `.kaiv` is authored (compile + denormalize), `.raiv`
 /// is relational (denormalize). The file's directory anchors the
 /// resolver, so `.!units` / `.!types` imports (and a sibling
@@ -1596,6 +1615,18 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     {
         let a = Rc::new(
             GitAdapter::open(std::path::Path::new(repo)).context("opening git repository")?,
+        );
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && let Some(vault) = s
+            .strip_prefix("metatheca:")
+            .or_else(|| s.strip_prefix("mt:"))
+    {
+        let a = Rc::new(
+            MetathecaAdapter::open(std::path::Path::new(vault))
+                .context("opening metatheca vault")?,
         );
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
@@ -1748,7 +1779,7 @@ fn run<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,
-    daiv_source: Option<&str>,
+    kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     // Every adapter dispatch funnels through here — which makes it
     // the one place a resident session takes over: the adapter is
@@ -1757,7 +1788,7 @@ fn run<A: AstAdapter>(
     if let Some((sock, ttl, pinned)) = RESIDENT.with(|r| r.borrow().clone()) {
         return resident_serve_loop(adapter, render, &sock, ttl, pinned);
     }
-    run_wrapped(query, adapter, &render, daiv_source)
+    run_wrapped(query, adapter, &render, kaiv_source)
 }
 
 /// The wrap chain (--allow-shell, --quantifier-bound, now-binding)
@@ -1767,36 +1798,36 @@ fn run_wrapped<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: &impl Fn(NodeId) -> String,
-    daiv_source: Option<&str>,
+    kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     if ALLOW_SHELL.with(|b| b.get()) {
         let shelled = AllowShell { inner: adapter };
-        return run_bounded(query, &shelled, render, daiv_source);
+        return run_bounded(query, &shelled, render, kaiv_source);
     }
-    run_bounded(query, adapter, render, daiv_source)
+    run_bounded(query, adapter, render, kaiv_source)
 }
 
 fn run_bounded<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,
-    daiv_source: Option<&str>,
+    kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(n) = QUANT_BOUND.with(|b| b.get()) {
         let bounded = QuantifierBound {
             inner: adapter,
             bound: n,
         };
-        return run_nowed(query, &bounded, render, daiv_source);
+        return run_nowed(query, &bounded, render, kaiv_source);
     }
-    run_nowed(query, adapter, render, daiv_source)
+    run_nowed(query, adapter, render, kaiv_source)
 }
 
 fn run_nowed<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,
-    daiv_source: Option<&str>,
+    kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     // The invocation instant is always bound in the CLI (main set
     // it from --now or one startup clock read).
@@ -1806,14 +1837,14 @@ fn run_nowed<A: AstAdapter>(
         secs,
         nanos,
     };
-    run_inner(query, &nowed, render, daiv_source)
+    run_inner(query, &nowed, render, kaiv_source)
 }
 
 fn run_inner<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,
-    daiv_source: Option<&str>,
+    kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
     // --expand with an input: expansion with the dataset at hand,
     // so data-aware macros (&name!) can read it.
@@ -1825,9 +1856,9 @@ fn run_inner<A: AstAdapter>(
         );
         return Ok(());
     }
-    if let Some(source) = daiv_source {
+    if let Some(source) = kaiv_source {
         let rows = quarb::run_traced(query, adapter)?;
-        print!("{}", emit_daiv(&rows, source, render)?);
+        print!("{}", emit_kaiv(&rows, source, render)?);
         return Ok(());
     }
     let save = SAVE_TARGET.with(|t| t.borrow().clone());
@@ -1966,14 +1997,14 @@ fn sqlite_value(v: &Value) -> rusqlite::types::Value {
 /// and the origin node's locator, identifier-sanitized, as `#dpid`.
 /// A value canonical kaiv cannot hold on a flat line falls back to
 /// its JSON text (quoted, single-line) as `str`.
-fn emit_daiv(
+fn emit_kaiv(
     rows: &[(NodeId, Option<Value>)],
     source: &str,
     render: impl Fn(NodeId) -> String,
 ) -> anyhow::Result<String> {
-    use kaiv::{DaivBuilder, Provenance};
-    let err = |e: kaiv::PipelineError| anyhow::anyhow!("emitting .daiv: {e}");
-    let mut b = DaivBuilder::new();
+    use kaiv::{KaivBuilder, Provenance};
+    let err = |e: kaiv::PipelineError| anyhow::anyhow!("emitting kaiv: {e}");
+    let mut b = KaivBuilder::new();
     b.declare_source("q", source).map_err(err)?;
     for (i, (node, topic)) in rows.iter().enumerate() {
         let prov = Provenance {
@@ -2000,6 +2031,18 @@ fn emit_daiv(
                         return Ok(());
                     }
                 }
+                // Durations emit on the seconds unit: a time-unit
+                // annotation mints a duration at the re-mount (one
+                // ontology per dimension of time), so the loop is
+                // lossless.
+                Value::Duration { secs, nanos } => {
+                    let v = *secs as f64 + *nanos as f64 / 1e9;
+                    if b.leaf_with_unit(&namepath, "float", Some("s"), &v.to_string(), Some(&prov))
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
                 Value::Instant {
                     secs,
                     nanos,
@@ -2021,7 +2064,7 @@ fn emit_daiv(
                 }
                 _ => {}
             }
-            let (t, payload) = daiv_scalar(value);
+            let (t, payload) = kaiv_scalar(value);
             if b.leaf(&namepath, t, &payload, Some(&prov)).is_err() {
                 // Not flat-line representable: carry the JSON text.
                 b.leaf(&namepath, "str", &value.to_json(), Some(&prov))
@@ -2042,12 +2085,12 @@ fn emit_daiv(
             Some(v) => put("value", v)?,
         }
     }
-    Ok(b.finish())
+    b.finish().map_err(err)
 }
 
 /// The kaiv type annotation and payload for one value. Lists and
 /// records ride as JSON text.
-fn daiv_scalar(v: &Value) -> (&'static str, String) {
+fn kaiv_scalar(v: &Value) -> (&'static str, String) {
     match v {
         Value::Null => ("null", String::new()),
         Value::Bool(b) => ("bool", b.to_string()),
@@ -2071,7 +2114,7 @@ fn ident_of(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut dash = false;
     for c in s.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+        if c.is_ascii_alphanumeric() || c == '_' {
             out.push(c);
             dash = false;
         } else if !dash && !out.is_empty() {

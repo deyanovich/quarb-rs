@@ -634,7 +634,10 @@ mod tests {
         assert_eq!(values(&a, "/rig[::power > 0.2kW]::power"), ["290 W"]);
         assert_eq!(values(&a, "/rig | ::power | convert(kW)"), ["0.29 kW"]);
         // Dimension mismatch: the comparison fails, never lies.
-        assert_eq!(values(&a, "/rig[::power > 5km]::power"), Vec::<String>::new());
+        assert_eq!(
+            values(&a, "/rig[::power > 5km]::power"),
+            Vec::<String>::new()
+        );
         assert_eq!(values(&a, "/net/host::;type"), ["acme/net/label"]);
         assert_eq!(values(&a, "/net::host"), ["web-01"]);
     }
@@ -670,7 +673,7 @@ mod tests {
         // A weird/units .faiv preloaded on the resolver — the same
         // road qua takes via the document's directory.
         let faiv = concat!(
-            ".!kaivunit 1 weird/units\n",
+            ".!faiv 1 weird/units\n",
             "m 1.7018\n&smoot=\n",
             "m 2000\n&kellicam=\n",
         );

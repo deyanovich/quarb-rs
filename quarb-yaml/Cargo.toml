@@ -11,6 +11,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb-json = { path = "../quarb-json", version = "0.2.0" }
+quarb-json = { path = "../quarb-json", version = "0.3.0" }
 serde_yaml_ng = "0.10"
 serde_json.workspace = true

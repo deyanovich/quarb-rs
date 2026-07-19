@@ -1,4 +1,8 @@
 [package]
+# The `qm` name on crates.io belongs to an unrelated project
+# (hd-gmbh's microservice utilities). The mail client ships from
+# source until it gets a registry-safe name.
+publish = false
 name = "qm"
 description = "A mailbox interface for the terminal, on the Quarb engine"
 keywords = ["email", "mail", "cli", "quarb"]
@@ -11,7 +15,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.2.0" }
-quarb-maildir = { path = "../quarb-maildir", version = "0.2.0" }
+quarb = { path = "../quarb", version = "0.3.0" }
+quarb-maildir = { path = "../quarb-maildir", version = "0.3.0" }
 anyhow.workspace = true
 clap.workspace = true

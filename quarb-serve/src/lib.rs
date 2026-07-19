@@ -217,6 +217,10 @@ fn daiv_encode(msg: &Json) -> String {
             put(&mut b, "/@serve", k, v);
         }
     }
+    // The flat canonical builder, deliberately: serve frames are a
+    // machine wire format the decoder hand-parses line-per-leaf.
+    // (qua's user-facing --kaiv export uses KaivBuilder's authored
+    // form instead.)
     b.finish()
 }
 
@@ -710,8 +714,14 @@ mod tests {
 
     #[test]
     fn plain_string_and_scalars_roundtrip() {
-        assert_eq!(daiv_roundtrip(value_to_json(&Value::Str("hello".into()))), json!("hello"));
+        assert_eq!(
+            daiv_roundtrip(value_to_json(&Value::Str("hello".into()))),
+            json!("hello")
+        );
         assert_eq!(daiv_roundtrip(value_to_json(&Value::Int(42))), json!(42));
-        assert_eq!(daiv_roundtrip(value_to_json(&Value::Bool(true))), json!(true));
+        assert_eq!(
+            daiv_roundtrip(value_to_json(&Value::Bool(true))),
+            json!(true)
+        );
     }
 }
