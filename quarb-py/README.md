@@ -109,8 +109,9 @@ python -m quarb.kernel demo      # writes quarb-demo.ipynb to try
 Cells are queries; `%mount`, `%connect`, `%use`, `%docs`,
 `%translate`, and `%python` (an escape hatch — the rest of the
 cell is Python, with the live `session` and the last result `_`
-in scope) are the directives. Tab-completion offers the mounted
-arbor's real child names. `%connect NAME PATH...` (magic:
+in scope) are the directives. Tab-completion offers the mounted arbor's real child names,
+and the bundled JupyterLab extension highlights Quarb syntax
+in cells automatically. `%connect NAME PATH...` (magic:
 `%quarb_connect`) attaches to a `qua --resident` daemon — for
 arbors too large to rebuild per notebook, queried from a
 standing session. `pip install quarb[jupyter]` pulls IPython,

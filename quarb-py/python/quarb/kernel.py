@@ -48,7 +48,11 @@ def _make_kernel_class():
         language_version = "0.3"
         language_info = {
             "name": "quarb",
-            "mimetype": "text/plain",
+            # The MIME and codemirror_mode the quarb-lab JupyterLab
+            # extension registers its highlighting under; without the
+            # extension these degrade to plain text.
+            "mimetype": "text/x-quarb",
+            "codemirror_mode": "quarb",
             "file_extension": ".quarb",
         }
         banner = BANNER

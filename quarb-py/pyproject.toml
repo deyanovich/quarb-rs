@@ -47,3 +47,8 @@ Repository = "https://gitlab.com/quarb/engine"
 [tool.maturin]
 python-source = "python"
 module-name = "quarb._quarb"
+# Ship the prebuilt JupyterLab extension (quarb-lab) as data, so
+# `pip install quarb` places it where JupyterLab discovers it.
+# The JS is built locally and vendored (labextension/) — CI needs
+# no node. Rebuild with: cd lab && jlpm build:prod, then copy.
+data = "labextension"

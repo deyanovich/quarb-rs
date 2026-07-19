@@ -1,0 +1,43 @@
+{
+  "name": "quarb-lab",
+  "version": "0.3.3",
+  "description": "JupyterLab syntax highlighting for the Quarb query language",
+  "keywords": [
+    "jupyter",
+    "jupyterlab",
+    "jupyterlab-extension",
+    "quarb"
+  ],
+  "homepage": "https://quarb.org",
+  "license": "MIT",
+  "files": [
+    "lib/**/*.{js,d.ts}",
+    "style/**/*.css"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "jlpm build:lib && jlpm build:labextension:dev",
+    "build:prod": "jlpm clean && jlpm build:lib:prod && jlpm build:labextension",
+    "build:lib": "tsc --sourceMap",
+    "build:lib:prod": "tsc",
+    "build:labextension": "jupyter labextension build .",
+    "build:labextension:dev": "jupyter labextension build --development True .",
+    "clean": "rimraf lib tsconfig.tsbuildinfo quarb/labextension"
+  },
+  "dependencies": {
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@jupyterlab/application": "^4.0.0",
+    "@jupyterlab/codemirror": "^4.0.0"
+  },
+  "devDependencies": {
+    "@jupyterlab/builder": "^4.0.0",
+    "rimraf": "^5.0.0",
+    "typescript": "~5.0.0"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "quarb/labextension"
+  }
+}
