@@ -34,8 +34,14 @@ qua '/books/*[/price:: > 20]/title::' store.json
 echo '{"users":[{"name":"ada"}]}' | qua -f json '/users/*/name::'
 ```
 
-The full `qua` CLI — file systems, git, databases, mail,
-adapter composition — is the Rust binary: `cargo install qua`.
+Beyond text, `quarb.open(path)` dispatches on kind over the full
+local fleet — SQLite, kaiv (typed units), the filesystem
+(`descend=True` grafts parseable leaves), git (`git:PATH`),
+archives, XLSX, and source code — and `quarb.mount([a, b, ...])`
+mounts several sources under one root so a single query joins
+across them (a YAML file `<=>` a SQLite database). The networked
+adapters — Postgres, MySQL, BigQuery, Neo4j, object stores,
+mail — and DuckDB live in the Rust binary: `cargo install qua`.
 
 ## Quick start
 

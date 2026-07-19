@@ -58,7 +58,10 @@ def test_named_documents(shell, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("nb3")
     (tmp / "a.json").write_text('{"x": 1}')
     (tmp / "b.json").write_text('{"x": 2}')
-    shell.run_line_magic("quarb_mount", f"{tmp}/a.json {tmp}/b.json")
+    # Separate mounts keep separate named documents (a single
+    # multi-path mount would instead join them under one root).
+    shell.run_line_magic("quarb_mount", f"{tmp}/a.json")
+    shell.run_line_magic("quarb_mount", f"{tmp}/b.json")
     ra = shell.run_cell_magic("quarb", "a", "/x::")
     rb = shell.run_cell_magic("quarb", "b", "/x::")
     assert (ra.values, rb.values) == ([1], [2])
@@ -81,3 +84,20 @@ def test_completion_from_live_data(tmp_path):
     # No completion inside a literal or with no mount.
     assert s.complete('/users/*[::name = "a', 20)[0] == []
     assert Session().complete("/x", 2)[0] == []
+
+
+def test_session_multimount_joins(tmp_path):
+    import sqlite3
+    from quarb.session import Session
+
+    (tmp_path / "a.yaml").write_text("rows:\n  - k: x\n  - k: y\n")
+    db = tmp_path / "b.db"
+    con = sqlite3.connect(db)
+    con.executescript("CREATE TABLE t(k TEXT, v INTEGER);"
+                      "INSERT INTO t VALUES('x',1),('y',2);")
+    con.commit(); con.close()
+    s = Session()
+    msg = s.mount(f"{tmp_path / 'a.yaml'} {db}")
+    assert "a+b" in msg and "/a" in msg and "/b" in msg
+    r = s.run("/a/rows/* <=> /b/t/*[::k = $*1/k::] | rec('k', $*1/k::, 'v', ::v)")
+    assert r.records == [{"k": "x", "v": 1}, {"k": "y", "v": 2}]

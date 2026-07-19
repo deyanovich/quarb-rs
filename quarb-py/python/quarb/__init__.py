@@ -55,6 +55,7 @@ Quantity = _ext.Quantity
 load = _ext.load
 loads = _ext.loads
 open = _ext.open
+mount = _ext.mount
 translate = _ext.translate
 
 # The string-faithful layer: the qua CLI's exact rendering.
@@ -63,6 +64,7 @@ run_file = _ext.run_file
 
 __all__ = [
     "open",
+    "mount",
     "translate",
     "__version__",
     "Document",

@@ -19,7 +19,7 @@ import subprocess
 from html import escape
 from pathlib import Path
 
-from . import Document, Quantity, open as _open
+from . import Document, Quantity, mount as _mount, open as _open
 
 
 class QuarbResult:
@@ -135,14 +135,19 @@ class Session:
         paths = [a for a in args if a != "--descend"]
         if not paths:
             raise ValueError("usage: mount PATH [PATH ...] [--descend]")
-        names = []
-        for p in paths:
-            name = Path(p.removeprefix("git:")).stem or p
-            self.docs[name] = _open(p, descend)
-            names.append(name)
         if len(paths) == 1:
-            self.default = names[0]
-        return "mounted: " + ", ".join(sorted(self.docs))
+            name = Path(paths[0].removeprefix("git:")).stem or paths[0]
+            self.docs[name] = _open(paths[0], descend)
+            self.default = name
+            return f"mounted: {name}"
+        # Several paths mount together under one root, so a single
+        # query can join across them (/a/... <=> /b/...). Keyed by
+        # the joined stems.
+        stems = [Path(p.removeprefix("git:")).stem or p for p in paths]
+        name = "+".join(stems)
+        self.docs[name] = _mount(paths, descend)
+        self.default = name
+        return f"mounted: {name} (children: {', '.join('/' + s for s in stems)})"
 
     def connect(self, line: str) -> str:
         """Register a resident target set (served by qua --resident).

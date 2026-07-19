@@ -70,3 +70,8 @@ def open(path: str, descend: bool = False) -> Document:
 def translate(source: str, lang: str) -> str:
     """Translate a jq / xpath / sql query into Quarb text."""
     ...
+
+def mount(paths: list[str], descend: bool = False) -> Document:
+    """Mount several sources under one root so a single query joins
+    across them; a single path just opens."""
+    ...

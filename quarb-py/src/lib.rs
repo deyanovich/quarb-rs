@@ -29,7 +29,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList};
-use quarb::adapter::WithNow;
+use quarb::adapter::{AstAdapter, WithNow};
 use quarb::{NodeId, QueryResult, Value};
 
 /// The invocation instant for `now()`, as (seconds, subsecond
@@ -58,6 +58,23 @@ enum Doc {
     Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
     Xlsx(quarb_xlsx::XlsxAdapter),
     Code(quarb_code::CodeAdapter),
+    Mount(quarb_mount::MountAdapter),
+}
+
+/// A name-path locator built from the adapter trait alone
+/// (`parent`/`name`) — used for the mount adapter, whose per-source
+/// render functions the CLI threads through but Python doesn't keep.
+fn generic_locator<A: AstAdapter>(a: &A, node: NodeId) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if let Some(nm) = a.name(n) {
+            parts.push(nm);
+        }
+        cur = a.parent(n);
+    }
+    parts.reverse();
+    format!("/{}", parts.join("/"))
 }
 
 impl Doc {
@@ -112,6 +129,7 @@ impl Doc {
             Doc::Archive(a) => go!(a),
             Doc::Xlsx(a) => go!(a),
             Doc::Code(a) => go!(a),
+            Doc::Mount(a) => go!(a),
         }
     }
 
@@ -131,8 +149,78 @@ impl Doc {
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
             Doc::Xlsx(a) => a.locator(node),
             Doc::Code(a) => a.locator(node),
+            Doc::Mount(a) => generic_locator(a, node),
         }
     }
+}
+
+/// Open one source as a boxed, shared adapter — the building block
+/// for a multi-source [`mount`]. Mirrors [`open`]'s kind-dispatch.
+fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> {
+    use std::rc::Rc;
+    let boxed = |d: Document| -> Result<Box<dyn AstAdapter>, String> {
+        Ok(match d.doc {
+            Doc::Json(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Csv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Xml(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Html(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Sqlite(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Kaiv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Fs(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::FsDeep(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Git(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Archive(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Xlsx(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Code(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Mount(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+        })
+    };
+    // Reuse open()'s kind-dispatch (it reads/parses), then box the
+    // resulting concrete adapter. Callers hold the GIL.
+    let doc = open(path, descend).map_err(|e| e.to_string())?;
+    boxed(doc)
+}
+
+/// Mount several sources under one root — the multi-source
+/// document, so a single query can correlate across them (a YAML
+/// fleet `<=>` a SQLite CMDB). Each source is addressed by its file
+/// stem: `mount(["fleet.yaml", "cmdb.db"])` answers `/fleet/...`
+/// and `/cmdb/...`. A single path just [`open`]s (keeping its typed
+/// rendering). `descend` grafts parseable leaves under directory
+/// mounts.
+#[pyfunction]
+#[pyo3(signature = (paths, descend=false))]
+fn mount(paths: Vec<String>, descend: bool) -> PyResult<Document> {
+    if paths.is_empty() {
+        return Err(PyValueError::new_err("mount needs at least one path"));
+    }
+    if paths.len() == 1 {
+        return open(&paths[0], descend);
+    }
+    let mut mounts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in &paths {
+        let stem = Path::new(path.strip_prefix("git:").unwrap_or(path))
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+            .to_string();
+        if !seen.insert(stem.clone()) {
+            return Err(PyValueError::new_err(format!(
+                "input {path:?} mounts as {stem:?}, colliding with an earlier \
+                 input of the same stem — give each a distinct basename"
+            )));
+        }
+        let adapter = open_boxed(path, descend).map_err(PyValueError::new_err)?;
+        mounts.push(quarb_mount::Mount {
+            name: stem,
+            adapter,
+        });
+    }
+    Ok(Document {
+        doc: Doc::Mount(quarb_mount::MountAdapter::new(mounts)),
+        fmt: "mount".into(),
+    })
 }
 
 /// Infer the format name from a file extension.
@@ -528,6 +616,7 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(loads, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add_function(wrap_pyfunction!(mount, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;

@@ -50,3 +50,40 @@ def test_translate():
     assert quarb.translate(".users[].name", "jq")
     assert quarb.translate("SELECT name FROM t WHERE age > 30", "sql")
     assert quarb.translate("//book/title", "xpath")
+
+
+def test_mount_cross_source_join(tmp_path):
+    import sqlite3
+    import quarb
+
+    (tmp_path / "fleet.yaml").write_text(
+        "hosts:\n  - name: web-01\n    role: web\n  - name: db-01\n    role: db\n"
+    )
+    db = tmp_path / "cmdb.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE hosts(name TEXT, owner TEXT);"
+        "INSERT INTO hosts VALUES('web-01','ops'),('db-01','dba');"
+    )
+    con.commit(); con.close()
+    d = quarb.mount([str(tmp_path / "fleet.yaml"), str(db)])
+    assert d.values("/*") == ["/fleet", "/cmdb"]
+    rows = d.records(
+        "/fleet/hosts/* <=> /cmdb/hosts/*[::name = $*1/name::] "
+        "| rec('host', $*1/name::, 'owner', ::owner)"
+    )
+    assert rows == [
+        {"host": "web-01", "owner": "ops"},
+        {"host": "db-01", "owner": "dba"},
+    ]
+    # A single-path mount() just opens (keeps typed rendering).
+    single = quarb.mount([str(db)])
+    assert single.values("/hosts/1::owner") == ["ops"]
+    # Colliding stems are refused.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "cmdb.db").write_bytes((db).read_bytes())
+    try:
+        quarb.mount([str(db), str(tmp_path / "sub" / "cmdb.db")])
+        assert False, "expected a stem-collision error"
+    except ValueError as e:
+        assert "colliding" in str(e)
