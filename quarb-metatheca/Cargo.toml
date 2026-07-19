@@ -1,8 +1,4 @@
 [package]
-# Not on crates.io yet: requires metatheca 0.1.3, which is not
-# published (registry has 0.1.0). Flip to publishable once the
-# sibling releases — the crate itself is registry-ready.
-publish = false
 name = "quarb-metatheca"
 description = "Metatheca vault adapter for the Quarb query engine"
 keywords = ["query", "metatheca", "vault", "history", "quarb"]
