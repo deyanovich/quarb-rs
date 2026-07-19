@@ -28,7 +28,7 @@ quarb-csv = { path = "../quarb-csv", version = "0.3.0" }
 quarb-xml = { path = "../quarb-xml", version = "0.3.0" }
 quarb-html = { path = "../quarb-html", version = "0.3.0" }
 quarb-markdown = { path = "../quarb-markdown", version = "0.3.0" }
-quarb-sqlite = { path = "../quarb-sqlite", version = "0.3.0" }
+quarb-sqlite = { path = "../quarb-sqlite", version = "0.3.0", features = ["bundled"] }
 quarb-kaiv = { path = "../quarb-kaiv", version = "0.3.0" }
 quarb-fs = { path = "../quarb-fs", version = "0.3.0" }
 quarb-git = { path = "../quarb-git", version = "0.3.0" }

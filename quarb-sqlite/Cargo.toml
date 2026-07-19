@@ -18,3 +18,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 quarb-sql = { path = "../quarb-sql" }
+
+[features]
+# Vendor SQLite (rusqlite's bundled build) — portable wheels and
+# static binaries want this; system-library builds stay default.
+bundled = ["rusqlite/bundled"]
