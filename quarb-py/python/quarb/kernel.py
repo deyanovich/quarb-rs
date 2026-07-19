@@ -51,7 +51,7 @@ def _make_kernel_class():
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self.session = Session()
+            self.qsession = Session()
 
         # -- helpers ---------------------------------------------
         def _send_text(self, text: str):
@@ -75,15 +75,15 @@ def _make_kernel_class():
             word, _, rest = line[1:].partition(" ")
             rest = rest.strip()
             if word == "mount":
-                return self.session.mount(rest)
+                return self.qsession.mount(rest)
             if word == "connect":
-                return self.session.connect(rest)
+                return self.qsession.connect(rest)
             if word == "use":
-                self.session._pick(rest)  # validates
-                self.session.default = rest
+                self.qsession._pick(rest)  # validates
+                self.qsession.default = rest
                 return f"default: {rest}"
             if word == "docs":
-                pool = sorted([*self.session.docs, *self.session.resident])
+                pool = sorted([*self.qsession.docs, *self.qsession.resident])
                 return ", ".join(pool) or "(nothing mounted)"
             if word == "translate":
                 lang, _, src = rest.partition(" ")
@@ -108,7 +108,7 @@ def _make_kernel_class():
                     if not silent and out:
                         self._send_text(out + "\n")
                 if query_lines:
-                    result = self.session.run("\n".join(query_lines))
+                    result = self.qsession.run("\n".join(query_lines))
                     if not silent:
                         self._send_result(result)
             except Exception as e:  # noqa: BLE001 — kernel must not die
