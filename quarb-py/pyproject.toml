@@ -35,7 +35,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-jupyter = ["ipython", "pandas"]
+jupyter = ["ipython", "pandas", "ipykernel", "jupyter_client"]
 
 [project.scripts]
 qua = "quarb._cli:main"

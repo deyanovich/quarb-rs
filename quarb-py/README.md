@@ -90,5 +90,18 @@ license at your option. Both texts are bundled in the package.
 `%%quarb [NAME]` runs a cell-sized query against a named mount;
 results render as HTML tables, iterate as typed values
 (quantities keep magnitude + unit), and convert with `.df` /
-`.df_magnitudes()`. `pip install quarb[jupyter]` pulls IPython
-and pandas.
+`.df_magnitudes()`.
+
+For a notebook where *every* cell is a query, install the
+dedicated kernel and pick **Quarb** in the launcher:
+
+```
+python -m quarb.kernel install
+```
+
+Cells are queries; `%mount`, `%connect`, `%use`, `%docs`, and
+`%translate` are the directives. `%connect NAME PATH...` (magic:
+`%quarb_connect`) attaches to a `qua --resident` daemon — for
+arbors too large to rebuild per notebook, queried from a
+standing session. `pip install quarb[jupyter]` pulls IPython,
+pandas, and the kernel runtime.

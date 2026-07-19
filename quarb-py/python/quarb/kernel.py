@@ -139,27 +139,35 @@ KERNEL_JSON = {
 }
 
 
-def install(user: bool = True):
-    """Write the kernelspec so Quarb appears in the launcher."""
+def install(user: bool = False, prefix: str | None = None):
+    """Write the kernelspec so Quarb appears in the launcher.
+
+    Defaults to the running environment's prefix (the venv or
+    conda env), which is what you want inside one; pass user=True
+    for ~/.local, or an explicit prefix.
+    """
     import json
+    import sys
     import tempfile
     from pathlib import Path
 
     from jupyter_client.kernelspec import KernelSpecManager
 
+    if not user and prefix is None:
+        prefix = sys.prefix
     with tempfile.TemporaryDirectory() as td:
         d = Path(td) / "quarb"
         d.mkdir()
         (d / "kernel.json").write_text(json.dumps(KERNEL_JSON, indent=2))
         path = KernelSpecManager().install_kernel_spec(
-            str(d), "quarb", user=user
+            str(d), "quarb", user=user, prefix=prefix
         )
     print(f"installed kernelspec: {path}")
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "install":
-        install(user="--sys-prefix" not in sys.argv)
+        install(user="--user" in sys.argv)
         return
     from ipykernel.kernelapp import IPKernelApp
 
