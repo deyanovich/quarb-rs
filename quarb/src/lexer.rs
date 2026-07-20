@@ -48,8 +48,9 @@ pub enum Token {
     ColonColon,
     /// `:::` — core-metadata projection.
     ColonColonColon,
-    /// `::;` — adapter-metadata projection.
-    ColonColonSemi,
+    /// `;;;` — adapter-metadata projection. The historical
+    /// spelling `::;` is accepted as a deprecated alias.
+    SemiSemiSemi,
     /// `|` — pipe / trait alternation.
     Pipe,
     /// `||` — union.
@@ -358,8 +359,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             ':' => {
                 // A single ':' is the definition separator
-                // (`def &name: body;`); '::'/':::'/'::;' are the
-                // projection family.
+                // (`def &name: body;`); '::'/':::' are the projection
+                // family ('::;' lexes as the deprecated alias of ';;;').
                 if at(i + 1) != Some(':') {
                     tokens.push(Token::Colon);
                     i += 1;
@@ -371,7 +372,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         i += 3;
                     }
                     Some(';') => {
-                        tokens.push(Token::ColonColonSemi);
+                        tokens.push(Token::SemiSemiSemi);
                         i += 3;
                     }
                     _ => {
@@ -477,6 +478,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             '&' => {
                 tokens.push(Token::Amp);
                 i += 1;
+            }
+            ';' if at(i + 1) == Some(';') && at(i + 2) == Some(';') => {
+                tokens.push(Token::SemiSemiSemi);
+                i += 3;
             }
             ';' => {
                 tokens.push(Token::Semi);

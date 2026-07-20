@@ -33,6 +33,8 @@ onto the arbor model.
 [`quarb-yaml`](quarb-yaml/), [`quarb-toml`](quarb-toml/),
 [`quarb-csv`](quarb-csv/), [`quarb-xml`](quarb-xml/),
 [`quarb-html`](quarb-html/), [`quarb-markdown`](quarb-markdown/),
+[`quarb-atrep`](quarb-atrep/) (atrep semantic markup, queried
+through its dialektos),
 [`quarb-xlsx`](quarb-xlsx/) (xlsx/docx),
 [`quarb-archive`](quarb-archive/) (zip/tar).
 
@@ -75,7 +77,7 @@ cargo install qua
 qua '/books/*[/price:: > 20]/title::' store.json
 
 # A filesystem, like find — but with graph navigation:
-qua '//*[::;size > 1e6]' ~/logs
+qua '//*[;;;size > 1e6]' ~/logs
 
 # A SQLite database, no SQL:
 qua '/albums/*::title' music.db

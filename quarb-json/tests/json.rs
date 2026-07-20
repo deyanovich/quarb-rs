@@ -120,10 +120,10 @@ fn resolve_json_ref() {
 
 #[test]
 fn metadata_and_aggregation() {
-    assert_eq!(values("/users::;length"), vec!["2"]);
-    assert_eq!(values("/users/0/name::;type"), vec!["string"]);
+    assert_eq!(values("/users;;;length"), vec!["2"]);
+    assert_eq!(values("/users/0/name;;;type"), vec!["string"]);
     // total age across users
-    assert_eq!(values("/users/*/age::;type"), vec!["number", "number"]);
+    assert_eq!(values("/users/*/age;;;type"), vec!["number", "number"]);
     assert_eq!(values("/users/*/age:: @| sum"), vec!["47"]);
 }
 

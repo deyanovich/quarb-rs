@@ -65,7 +65,7 @@ fn groups_in_operand_position() {
     for q in [
         "//user <=>? //order[::uid = $*1::id]::amt | ...?",
         "//u <=> //v <=>? //order[::uid = $*2::id]",
-        "//commit[::;short = ^/tags/*::;short]",
+        "//commit[;;;short = ^/tags/*;;;short]",
         "/movie .m <-ACTED_IN[::born > (m)::released] | rec(::name, (m)::title)",
         "/c/* | (::kind ?= 'a' ? 1 : ~(^b) ? 2 : 0)",
         "/tags/* | .t(:::name) | `cloc --git ${$.t}` | rec($.t, 'lines', $_)",

@@ -22,7 +22,7 @@
 //!   so private S3 buckets refuse honestly rather than
 //!   half-work.
 //!
-//! Metadata: `::;size`, `::;updated` on objects; traits
+//! Metadata: `;;;size`, `;;;updated` on objects; traits
 //! `<object>` / `<prefix>`. Read-only, as always.
 
 use quarb::{AstAdapter, NodeId, Value};
@@ -435,7 +435,7 @@ impl AstAdapter for ObjstoreAdapter {
         self.content_of(node).map(Value::Str)
     }
 
-    /// `::;size`, `::;updated`, `::;key`.
+    /// `;;;size`, `;;;updated`, `;;;key`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         let n = &nodes[node.0 as usize];

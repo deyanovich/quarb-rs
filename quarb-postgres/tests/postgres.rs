@@ -21,7 +21,7 @@ fn values(query: &str) -> Vec<String> {
 #[test]
 #[ignore = "needs QUARB_PG pointing at a music-store database"]
 fn catalog_and_rows() {
-    assert_eq!(values("/tracks::;n-rows"), vec!["7"]);
+    assert_eq!(values("/tracks;;;n-rows"), vec!["7"]);
     assert_eq!(values("/artists/2::name"), vec!["Bartok"]);
     assert_eq!(values("/tracks/*[::price < 1]::title @| count"), vec!["3"]);
 }

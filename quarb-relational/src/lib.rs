@@ -16,12 +16,12 @@
 //! **Loading model: catalog eager, rows lazy.** The schema is read
 //! once at open; a table's rows materialize on *first touch* —
 //! navigating into the table, a `~>` resolution landing in it, a
-//! backlink scan crossing it, or its `::;n-rows` — via the
+//! backlink scan crossing it, or its `;;;n-rows` — via the
 //! driver-supplied [`Fetcher`], and are cached for the adapter's
 //! lifetime. Untouched tables are never read, so `/artists/2::name`
 //! against a hundred-table schema loads one table. A fetch failure
 //! surfaces as an empty table plus a warning on stderr (the adapter
-//! trait has no error channel mid-navigation); `::;loaded` on a
+//! trait has no error channel mid-navigation); `;;;loaded` on a
 //! table node reports whether it has materialized.
 //! [`RelationalModel::build`] remains the fully-eager form (used by
 //! in-memory loads and tests).

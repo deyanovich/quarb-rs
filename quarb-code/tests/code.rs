@@ -9,7 +9,7 @@ fn rust_functions_fields_and_lines() {
         quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| a.locator(n)).collect(),
     };
     assert_eq!(v("//function_item::name"), ["main", "greet"]);
-    assert_eq!(v("//function_item[::name = \"greet\"]::;start-line"), ["2"]);
+    assert_eq!(v("//function_item[::name = \"greet\"];;;start-line"), ["2"]);
     assert_eq!(v("//call_expression::function"), ["greet"]);
     assert_eq!(v("//string_literal:: @| count"), ["1"]);
     assert_eq!(v("/function_item[1]::name"), ["main"]);

@@ -229,7 +229,7 @@ fn projection(p: &Projection) -> String {
         Projection::Property(None) => "::".to_string(),
         Projection::Property(Some(k)) => format!("::{}", proj_name(k)),
         Projection::CoreMeta(k) => format!(":::{}", proj_name(k)),
-        Projection::AdapterMeta(k) => format!("::;{}", proj_name(k)),
+        Projection::AdapterMeta(k) => format!(";;;{}", proj_name(k)),
     }
 }
 
@@ -604,6 +604,24 @@ mod tests {
         once
     }
 
+    // Finding: `;;;` is the canonical adapter-metadata spelling; the
+    // deprecated `::;` alias must parse to the same AST and reprint
+    // as `;;;`.
+    #[test]
+    fn adapter_meta_alias_canonicalizes() {
+        assert_eq!(rt("//*.txt::;size"), "//*.txt;;;size");
+        assert_eq!(rt("//*.txt;;;size"), "//*.txt;;;size");
+        assert_eq!(
+            rt("/commits/*[::;short = ^/tags/*::;short]"),
+            "/commits/*[;;;short = ^/tags/*;;;short]"
+        );
+        // The def statement terminator still lexes as a single `;`.
+        assert_eq!(
+            rt("def &f: //x;;;size; &f"),
+            rt("def &f: //x::;size; &f")
+        );
+    }
+
     // Finding: a projection key named `and`/`or`/`not` must reprint
     // quoted, or the bare `::and` relexes as the default projection
     // followed by the connective keyword.
@@ -612,7 +630,7 @@ mod tests {
         assert_eq!(assert_fixpoint("/x::'and'"), "/x::'and'");
         assert_eq!(assert_fixpoint("/x::'or'"), "/x::'or'");
         assert_eq!(assert_fixpoint("/x:::'not'"), "/x:::'not'");
-        assert_eq!(assert_fixpoint("/x::;'and'"), "/x::;'and'");
+        assert_eq!(assert_fixpoint("/x;;;'and'"), "/x;;;'and'");
         // A near-miss name is not a keyword and stays bare.
         assert_eq!(assert_fixpoint("/x::android"), "/x::android");
     }

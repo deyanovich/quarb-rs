@@ -73,7 +73,7 @@ fn refs_commits_and_time_travel() {
         values(&a, "/tags/start/src/lib.rs::"),
         ["pub fn one() {}\n"]
     );
-    assert_eq!(values(&a, "/branches/master/src/lib.rs::;size"), ["32 B"]);
+    assert_eq!(values(&a, "/branches/master/src/lib.rs;;;size"), ["32 B"]);
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn dag_navigation() {
     // Bare ~> walks first parents; the merge has two via ->.
     assert_eq!(values(&a, "/HEAD::parent~>::subject"), ["second: grow"]);
     assert_eq!(values(&a, "/HEAD->parent @| count"), ["2"]);
-    assert_eq!(values(&a, "/HEAD::;n-parents"), ["2"]);
+    assert_eq!(values(&a, "/HEAD;;;n-parents"), ["2"]);
     // Backlinks: the tag commit fathered two branches of history.
     assert_eq!(values(&a, "/tags/start<-parent @| count"), ["2"]);
     // Rev-syntax aliasing through children_named, no enumeration.
@@ -119,7 +119,7 @@ fn diff_surface() {
     assert_eq!(values(&a, "/commits/*[/src<changed>] @| count"), ["2"]);
     // The changed list and its count (a clean merge changes
     // nothing, matching git's own diff of a merge).
-    assert_eq!(values(&a, "/HEAD::;n-changed"), ["0"]);
+    assert_eq!(values(&a, "/HEAD;;;n-changed"), ["0"]);
     assert_eq!(values(&a, "/commits/'HEAD~1'::changed"), ["src/lib.rs"]);
 }
 
@@ -129,16 +129,16 @@ fn tag_metadata() {
     let a = GitAdapter::open(&dir).unwrap();
     // The `start` tag sits on the first commit; nothing else is
     // tagged.
-    assert_eq!(values(&a, "/tags/start::;tags"), ["start"]);
-    assert_eq!(values(&a, "/HEAD::;n-tags"), ["0"]);
+    assert_eq!(values(&a, "/tags/start;;;tags"), ["start"]);
+    assert_eq!(values(&a, "/HEAD;;;n-tags"), ["0"]);
     assert_eq!(
-        values(&a, "/commits/*[::;n-tags > 0] | ::subject"),
+        values(&a, "/commits/*[;;;n-tags > 0] | ::subject"),
         ["first: skeleton"]
     );
     // `git describe`: the nearest tagged ancestor, as a targeted
     // proximal walk.
     assert_eq!(
-        values(&a, "/HEAD(->parent)+[::;n-tags > 0]? | ::;tags"),
+        values(&a, "/HEAD(->parent)+[;;;n-tags > 0]? | ;;;tags"),
         ["start"]
     );
 }

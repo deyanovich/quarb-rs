@@ -1,6 +1,6 @@
 {
   "name": "quarb-lab",
-  "version": "0.3.3",
+  "version": "0.3.6",
   "description": "JupyterLab syntax highlighting for the Quarb query language",
   "keywords": [
     "jupyter",
@@ -40,7 +40,7 @@
     "extension": true,
     "outputDir": "quarb/labextension",
     "_build": {
-      "load": "static/remoteEntry.26cd50c68870af0b7779.js",
+      "load": "static/remoteEntry.be01d92fe58450c2d313.js",
       "extension": "./extension"
     }
   }

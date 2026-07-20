@@ -11,7 +11,7 @@
 //!   `<string>`, `<number>`, `<boolean>`, `<null>`), so the value
 //!   type is available for filtering alongside the key.
 //! - A primitive's default projection (`::`) is its value.
-//! - Adapter metadata exposes `::;type` and `::;length`.
+//! - Adapter metadata exposes `;;;type` and `;;;length`.
 //! - A `$ref`-style property resolves (`::'$ref'~>`) by treating its
 //!   string value as a JSON Pointer (`#/definitions/address`).
 //!
@@ -209,7 +209,7 @@ impl AstAdapter for JsonAdapter {
         }
     }
 
-    /// `::;type` (the JSON type) and `::;length` (element count for a
+    /// `;;;type` (the JSON type) and `;;;length` (element count for a
     /// container, character count for a string).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];

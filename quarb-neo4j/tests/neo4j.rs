@@ -31,7 +31,7 @@ fn locators(query: &str) -> Vec<String> {
 fn catalog_and_rows() {
     // labels, sorted
     assert_eq!(locators("/*"), vec!["/Employee", "/Part", "/Person"]);
-    assert_eq!(values("/Person::;n-rows"), vec!["5"]);
+    assert_eq!(values("/Person;;;n-rows"), vec!["5"]);
     assert_eq!(
         values("/Person/*::name"),
         vec!["Alice", "Bob", "Carol", "Dan", "Eve"]
@@ -81,7 +81,7 @@ fn quantified_paths() {
 #[ignore = "needs QUARB_NEO4J pointing at a fixture-loaded server"]
 fn multi_label_nodes() {
     // Employee excludes plain-Person Eve
-    assert_eq!(values("/Employee::;n-rows"), vec!["4"]);
+    assert_eq!(values("/Employee;;;n-rows"), vec!["4"]);
     // the same node appears under both labels, interned once
     assert_eq!(
         values("/Employee/1::name"),
@@ -94,7 +94,7 @@ fn multi_label_nodes() {
     );
     // canonical parent is the first label in storage order
     assert_eq!(values("/Person/1:::name"), vec!["1"]);
-    assert_eq!(values("/Person/1::;labels @| count"), vec!["1"]);
+    assert_eq!(values("/Person/1;;;labels @| count"), vec!["1"]);
 }
 
 #[test]
@@ -138,11 +138,11 @@ fn pattern_breadcrumbs() {
 #[ignore = "needs QUARB_NEO4J pointing at a fixture-loaded server"]
 fn metadata_and_degrees() {
     assert_eq!(
-        values("^::;rel-types"),
+        values("^;;;rel-types"),
         vec!["CONTAINS, FRIEND, REPORTS_TO"]
     );
     // Bob: out = REPORTS_TO + FRIEND, in = two reports
-    assert_eq!(values("/Person/2::;out-degree"), vec!["2"]);
-    assert_eq!(values("/Person/2::;in-degree"), vec!["2"]);
-    assert!(values("/Person/2::;element-id")[0].contains(':'));
+    assert_eq!(values("/Person/2;;;out-degree"), vec!["2"]);
+    assert_eq!(values("/Person/2;;;in-degree"), vec!["2"]);
+    assert!(values("/Person/2;;;element-id")[0].contains(':'));
 }

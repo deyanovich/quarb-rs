@@ -1,6 +1,6 @@
 {
   "name": "quarb-lab",
-  "version": "0.3.3",
+  "version": "0.3.6",
   "description": "JupyterLab syntax highlighting for the Quarb query language",
   "keywords": [
     "jupyter",

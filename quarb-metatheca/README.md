@@ -42,10 +42,10 @@ qua 'mt:/path/to/vault' '/paths/docs/a.md/*[::kind = "core/path"] | ::path'
 - Traits: `<state>` `<genesis>` `<head>` `<dir>` `<entry>`
   `<orphan>` (no live path at the coordinate) `<changed>` (a
   fact was added in exactly that coordinate's state) `<fact>`.
-- Metadata: states `::;short` `::;n-facts` `::;seq`; entries
-  `::;blob` `::;size` `::;n-facts` `::;n-paths` `::;first-at`
-  `::;last-at`; facts `::;hash` `::;short` `::;state`
-  `::;state-short` `::;seq`.
+- Metadata: states `;;;short` `;;;n-facts` `;;;seq`; entries
+  `;;;blob` `;;;size` `;;;n-facts` `;;;n-paths` `;;;first-at`
+  `;;;last-at`; facts `;;;hash` `;;;short` `;;;state`
+  `;;;state-short` `;;;seq`.
 
 ## Exploring the facts history
 
@@ -53,8 +53,8 @@ qua 'mt:/path/to/vault' '/paths/docs/a.md/*[::kind = "core/path"] | ::path'
 /states/* @| count                              the chain
 /head(->previous)+ @| count                     ancestry walk
 /states/'~1'/paths/docs/a.md::                  as-of content read
-/states/'2026-07-01T12:00:00Z'::;short          instant stateref
-/head(->previous)+[/paths/img.png]? | ::;short  nearest state where
+/states/'2026-07-01T12:00:00Z';;;short          instant stateref
+/head(->previous)+[/paths/img.png]? | ;;;short  nearest state where
                                                 the file existed
 /paths/docs/a.md/*[::kind = "core/path"] | ::path      the renames
 /paths/docs/a.md/*[::kind = "core/blob-ref"]::at       every content

@@ -20,7 +20,7 @@
 //! *children are its tree* — descend `/branches/master/src/lib.rs`
 //! and the blob's content is the node's value (`::`), giving
 //! time-travel file access at any commit. Tree entries carry
-//! `::;type`, `::;mode`, `::;size`, and `::;hash`.
+//! `;;;type`, `;;;mode`, `;;;size`, and `;;;hash`.
 //!
 //! References are inherent, no schema needed: `::parent~>`
 //! resolves to the first parent, `->parent` enumerates all
@@ -644,9 +644,9 @@ impl AstAdapter for GitAdapter {
         self.git(&["cat-file", "blob", &oid]).ok().map(Value::Str)
     }
 
-    /// Commits: `::;short`, `::;n-parents`, `::;tags`,
-    /// `::;n-tags`. Entries: `::;type`, `::;mode`, `::;size`,
-    /// `::;hash`.
+    /// Commits: `;;;short`, `;;;n-parents`, `;;;tags`,
+    /// `;;;n-tags`. Entries: `;;;type`, `;;;mode`, `;;;size`,
+    /// `;;;hash`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if let Some(hash) = self.commit_of(node) {
             return match key {

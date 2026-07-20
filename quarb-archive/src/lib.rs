@@ -3,7 +3,7 @@
 //! An archive is a directory tree in a file: entries become
 //! nodes under their path (intermediate directories synthesized),
 //! a file entry's content is its value (`::`, text lossily
-//! decoded), and `::;size` / `::;compressed` (zip) report the
+//! decoded), and `;;;size` / `;;;compressed` (zip) report the
 //! obvious. Half the world's document formats are zip archives —
 //! `.jar`, `.docx`, `.xlsx`, `.odt`, `.epub` — and composed with
 //! [`quarb-compose`], their inner XML/JSON is directly queryable:
@@ -298,7 +298,7 @@ impl AstAdapter for ArchiveAdapter {
         self.content(entry).map(Value::Str)
     }
 
-    /// `::;size`, `::;compressed` (zip), `::;n-entries` (root).
+    /// `;;;size`, `;;;compressed` (zip), `;;;n-entries` (root).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

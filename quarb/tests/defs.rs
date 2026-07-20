@@ -166,7 +166,7 @@ fn defs_files() {
 fn unparse_fixpoint() {
     let queries = [
         "/row[::Age >= 18] @| count",
-        "//book[::pages > 200]::;id",
+        "//book[::pages > 200];;;id",
         "//*<block>[:::index = 2][1..3]$",
         "/items/*[/price:: * /qty:: > 15]/name::",
         "/a || /b::x | upper @| join(', ')",
@@ -179,7 +179,7 @@ fn unparse_fixpoint() {
         "/x | s/foo/bar/g | trim",
         "/x | (:::index + 1) * 3",
         "/x[- :::index = -2]",
-        "::;n-rows",
+        ";;;n-rows",
         "//~(^ch[0-9]+$)/*.rs",
         "/row | [::name =~ /^(\\w+), (\\w+)/] | rec('surname', $1, 'title', $2)",
         "/row | ::fare @| window(-2..0) | mean",
@@ -189,7 +189,7 @@ fn unparse_fixpoint() {
         "/row | \"${::name} (${::age})\" @| join(', ')",
         "/row | ::fare | .f | \"fare \\$${$.f}, doubled ${$_ * 2}\"",
         "//h2>>p::text @| join(' ')",
-        "//aside<<?*::;tag || //a[1]>>!p",
+        "//aside<<?*;;;tag || //a[1]>>!p",
         "/row | .d(::dept) | .m(^/row[::dept = $$.d]::pay @| mean) | $.m - $$_",
         "/users/* <=> /orders/*[/uid:: = $*1/id::] | rec('who', $*1/name::, 'amt', /amt::)",
         "/tracks/* | rec(::title, 'artist', ::album_id~>::artist_id~>::name)",

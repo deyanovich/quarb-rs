@@ -279,7 +279,7 @@ impl Parser<'_> {
             }
             if matches!(
                 self.peek(),
-                Some(Token::ColonColon | Token::ColonColonColon | Token::ColonColonSemi)
+                Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi)
             ) {
                 return Err(QuarbError::Parse(
                     "a fragment does not take a trailing projection; \
@@ -494,7 +494,7 @@ impl Parser<'_> {
             Some(
                 Token::ColonColon
                 | Token::ColonColonColon
-                | Token::ColonColonSemi
+                | Token::SemiSemiSemi
                 | Token::Slash
                 | Token::SlashSlash
                 | Token::LParen
@@ -1159,7 +1159,7 @@ impl Parser<'_> {
                         | Token::ArrowIn
                         | Token::ColonColon
                         | Token::ColonColonColon
-                        | Token::ColonColonSemi
+                        | Token::SemiSemiSemi
                 )
             )
     }
@@ -1197,7 +1197,7 @@ impl Parser<'_> {
                     | Token::ArrowIn
                     | Token::ColonColon
                     | Token::ColonColonColon
-                    | Token::ColonColonSemi
+                    | Token::SemiSemiSemi
             )
         ) {
             return None;
@@ -1270,7 +1270,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse an optional trailing projection (`::`, `:::`, `::;`).
+    /// Parse an optional trailing projection (`::`, `:::`, `;;;`).
     fn projection(&mut self) -> Result<Option<Projection>> {
         let proj = match self.peek() {
             Some(Token::ColonColon) => {
@@ -1281,9 +1281,9 @@ impl Parser<'_> {
                 self.pos += 1;
                 Projection::CoreMeta(self.require_projection_name("core metadata `:::`")?)
             }
-            Some(Token::ColonColonSemi) => {
+            Some(Token::SemiSemiSemi) => {
                 self.pos += 1;
-                Projection::AdapterMeta(self.require_projection_name("adapter metadata `::;`")?)
+                Projection::AdapterMeta(self.require_projection_name("adapter metadata `;;;`")?)
             }
             _ => return Ok(None),
         };
@@ -2272,7 +2272,7 @@ impl Parser<'_> {
                     mark: None,
                 })
             }
-            Some(Token::ColonColon | Token::ColonColonColon | Token::ColonColonSemi) => {
+            Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi) => {
                 let projection = self.projection()?.expect("projection start");
                 Ok(Operand::Rel {
                     steps: Vec::new(),
@@ -3019,7 +3019,7 @@ fn literal_value(text: &str, quoted: bool) -> Value {
 fn is_projection_start(tok: &Token) -> bool {
     matches!(
         tok,
-        Token::ColonColon | Token::ColonColonColon | Token::ColonColonSemi
+        Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi
     )
 }
 

@@ -75,9 +75,9 @@ fn attributes_as_properties() {
     assert_eq!(values("//book::pages"), vec!["192", "352"]);
     assert_eq!(values("//loan::reader"), vec!["Ada"]);
     // via metadata too
-    assert_eq!(values("//loan::;tag"), vec!["loan"]);
-    assert_eq!(values("//loan::;n-attrs"), vec!["2"]);
-    assert_eq!(values("//book::;id"), vec!["b1", "b2"]);
+    assert_eq!(values("//loan;;;tag"), vec!["loan"]);
+    assert_eq!(values("//loan;;;n-attrs"), vec!["2"]);
+    assert_eq!(values("//book;;;id"), vec!["b1", "b2"]);
 }
 
 #[test]
@@ -87,23 +87,23 @@ fn namespaced_names() {
         nodes("//'dc:title'"),
         vec!["/library/book[1]/dc:title", "/library/book[2]/dc:title"]
     );
-    assert_eq!(values("/library/book/'dc:title'::;tag").len(), 2);
-    // prefix-agnostic filtering via ::;local-name
+    assert_eq!(values("/library/book/'dc:title';;;tag").len(), 2);
+    // prefix-agnostic filtering via ;;;local-name
     assert_eq!(
-        nodes(r#"//*[::;local-name = "title"]"#),
+        nodes(r#"//*[;;;local-name = "title"]"#),
         vec!["/library/book[1]/dc:title", "/library/book[2]/dc:title"]
     );
-    assert_eq!(values("//'dc:title'::;ns-prefix"), vec!["dc", "dc"]);
-    assert_eq!(values("//'dc:title'::;local-name"), vec!["title", "title"]);
+    assert_eq!(values("//'dc:title';;;ns-prefix"), vec!["dc", "dc"]);
+    assert_eq!(values("//'dc:title';;;local-name"), vec!["title", "title"]);
     // an unprefixed tag has no ns-prefix: the projection is null,
     // which renders empty
-    assert_eq!(values("//author::;ns-prefix"), vec!["", "", ""]);
+    assert_eq!(values("//author;;;ns-prefix"), vec!["", "", ""]);
 }
 
 #[test]
 fn predicates_and_pipelines() {
     // numeric coercion of a string attribute in a predicate
-    assert_eq!(values("//book[::pages > 200]::;id"), vec!["b2"]);
+    assert_eq!(values("//book[::pages > 200];;;id"), vec!["b2"]);
     assert_eq!(
         values("//author::text @| join(\", \")"),
         vec!["Ada, Bo, Cy"]

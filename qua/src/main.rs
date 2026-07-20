@@ -14,6 +14,7 @@ use anyhow::Context;
 use clap::Parser;
 use quarb::{AllowShell, AstAdapter, NodeId, QuantifierBound, QueryResult, Value, WithNow};
 use quarb_archive::ArchiveAdapter;
+use quarb_atrep::AtrepAdapter;
 use quarb_bigquery::BigqueryAdapter;
 use quarb_code::CodeAdapter;
 use quarb_compose::ComposeAdapter;
@@ -1270,6 +1271,22 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             let adapter = parse_kaiv_ext(ext, &text, dir)?;
             return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
+        // atrep documents mount through the dialektos they
+        // declare (.atd deltos, .atk kanon); the file's directory
+        // anchors dialektos resolution, std definitions embedded.
+        if matches!(ext, "atd" | "atk") {
+            let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
+            let adapter =
+                AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
+            return run(query, &adapter, |n| adapter.locator(n), kaiv);
+        }
+    }
+    if is_atrep(&text) {
+        let dir = path
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| Path::new("."));
+        let adapter = AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
+        return run(query, &adapter, |n| adapter.locator(n), kaiv);
     }
     if is_xml(path, &text) {
         let adapter = XmlAdapter::parse(&text).context("parsing XML")?;
@@ -1545,6 +1562,21 @@ fn csv_delimiter(path: Option<&Path>) -> Option<u8> {
     }
 }
 
+/// Whether the input is an atrep document: the first content line
+/// (after an optional shebang) is a dialektos declaration in either
+/// sigil — `@@@!<id>` or `\\\!<id>`. Extension dispatch handles
+/// `.atd`/`.atk`; this sniff catches stdin and unsuffixed files,
+/// and cannot collide with the `<`-leading XML/HTML sniffs.
+fn is_atrep(text: &str) -> bool {
+    let mut lines = text.lines();
+    let mut first = lines.next().unwrap_or("");
+    if first.starts_with("#!") {
+        first = lines.next().unwrap_or("");
+    }
+    let decl = first.trim_start();
+    decl.starts_with("@@@!") || decl.starts_with("\\\\\\!")
+}
+
 /// Whether the input should be parsed as XML: an `.xml`/`.svg`/
 /// `.xhtml` extension, or content that begins with the `<?xml`
 /// prologue. Checked before HTML, whose generic `<` sniff would
@@ -1782,6 +1814,21 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
         }
+        if matches!(ext, "atd" | "atk") {
+            let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
+            let a =
+                Rc::new(AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
+    }
+    if is_atrep(&text) {
+        let dir = path
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| Path::new("."));
+        let a = Rc::new(AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     if let Some(delim) = csv_delimiter(path) {
         let a = Rc::new(CsvAdapter::parse_with_delimiter(&text, delim).context("parsing CSV")?);

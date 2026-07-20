@@ -13,7 +13,7 @@ pub enum Value {
     Null,
     /// A boolean (e.g. `:::is-leaf`).
     Bool(bool),
-    /// An integer (e.g. `::;size`, `:::index`).
+    /// An integer (e.g. `;;;size`, `:::index`).
     Int(i64),
     /// A floating-point number.
     Float(f64),
@@ -56,7 +56,7 @@ pub enum Value {
 
 impl Value {
     /// A byte count as a typed quantity on the information base —
-    /// the mint for every adapter's `size` fact, so `[::;size >
+    /// the mint for every adapter's `size` fact, so `[;;;size >
     /// 1GiB]`, `| convert(MB)`, and typed size totals work
     /// uniformly. (Exact up to 2^53 bytes — 8 PiB — beyond which
     /// f64 granularity coarsens; no substrate this engine mounts

@@ -22,7 +22,7 @@ fn gcs_public_listing() {
 fn s3_public_listing_and_content() {
     let a = ObjstoreAdapter::connect("s3://noaa-ghcn-pds").unwrap();
     assert_eq!(
-        values(&a, "/*[:::name = \"ghcnd-states.txt\"]::;size"),
+        values(&a, "/*[:::name = \"ghcnd-states.txt\"];;;size"),
         ["1086"]
     );
     let content = values(&a, "/*[:::name = \"ghcnd-countries.txt\"]::");

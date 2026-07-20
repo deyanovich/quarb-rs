@@ -40,6 +40,6 @@ fn folders_messages_and_headers() {
         ["Re: Release plan"]
     );
     assert_eq!(v("/INBOX/2::"), ["Friday works. Docs are ready.\n"]);
-    assert_eq!(v("/INBOX/*[::;epoch > 1783410000] @| count"), ["2"]);
+    assert_eq!(v("/INBOX/*[;;;epoch > 1783410000] @| count"), ["2"]);
     let _ = server.kill();
 }

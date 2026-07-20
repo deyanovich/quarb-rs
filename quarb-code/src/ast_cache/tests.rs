@@ -73,11 +73,11 @@ fn check_round_trip(src: &str, ext: &str) {
     // Observational: a battery of queries must agree byte-for-byte.
     let b = adapter_from_nodes(src, nodes_b);
     for q in [
-        "//*::;kind",
-        "//*::;start-line",
-        "//*::;end-line",
-        "//*::;field",
-        "//*::;n-children",
+        "//*;;;kind",
+        "//*;;;start-line",
+        "//*;;;end-line",
+        "//*;;;field",
+        "//*;;;n-children",
         "//*::",
         "/*",
     ] {
@@ -267,7 +267,7 @@ fn set_cache_makes_parse_transparent() {
     // First parse: miss → parse → store. Second: hit → load.
     let a = CodeAdapter::parse(RUST, "rs").unwrap(); // populates
     let b = CodeAdapter::parse(RUST, "rs").unwrap(); // from cache
-    for q in ["//function_item::name", "//*::;kind", "//*::;start-line"] {
+    for q in ["//function_item::name", "//*;;;kind", "//*;;;start-line"] {
         assert_eq!(
             rendered(&a, q),
             rendered(&b, q),

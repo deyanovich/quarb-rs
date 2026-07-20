@@ -10,22 +10,22 @@
 //! - Containers (namespace segments, array elements) are nodes;
 //!   fields are typed *properties* on their container AND leaf
 //!   child nodes, so per-field provenance is addressable:
-//!   `/@results/0::age` reads the value, `/@results/0/age::;dpid`
+//!   `/@results/0::age` reads the value, `/@results/0/age;;;dpid`
 //!   reads where it came from.
 //! - Core types mint typed values (`!int` → integer, `!bool` →
 //!   boolean, `!null` → null); the std/time types with a date part
 //!   mint *instants* (a `datetime`'s written offset is kept for
 //!   display); `!b64` and any other named type ride as text with
-//!   the type name in `::;type`.
+//!   the type name in `;;;type`.
 //! - Unit-annotated types (`!float:km`) mint QUANTITIES: the value
 //!   scales to its dimension's base through kaiv's frozen unit
 //!   table, so `42 km` filters against `5000 m` or `30mi` and a
 //!   criterion may be written in any compatible unit (spec: The
 //!   Quantital Fragment). Pure-time units mint Durations; the
-//!   written unit stays on display and in `::;unit`.
-//! - Provenance surfaces as leaf metadata: `::;source` (the
-//!   declared id), `::;source-uri` (its declared URI),
-//!   `::;timestamp`, `::;dpid`.
+//!   written unit stays on display and in `;;;unit`.
+//! - Provenance surfaces as leaf metadata: `;;;source` (the
+//!   declared id), `;;;source-uri` (its declared URI),
+//!   `;;;timestamp`, `;;;dpid`.
 //! - Authored sugar (variables, blocks, `+:=`, maps, units,
 //!   named-type imports) is resolved by kaiv's own compiler before
 //!   mounting, and `$field` references are denormalized to their
@@ -181,7 +181,7 @@ fn unquote(name: &str) -> String {
     }
 }
 
-/// The typed value for a canonical type name, plus the `::;type`
+/// The typed value for a canonical type name, plus the `;;;type`
 /// metadata where the name is worth keeping (non-core, named
 /// types). Named types from kaiv's embedded standard libraries
 /// resolve through their declared ordering class: `..num` mints
@@ -338,7 +338,7 @@ impl KaivAdapter {
         // import's `.faiv` definitions join the customs table, so
         // custom units scale to base exactly like built-ins; an
         // unresolvable library is skipped, and its units keep the
-        // text-plus-`::;unit` fallback.
+        // text-plus-`;;;unit` fallback.
         let mut layer1: Vec<(String, String)> = Vec::new();
         let mut unit_libs: Vec<String> = Vec::new();
         for line in &lines {
@@ -380,7 +380,7 @@ impl KaivAdapter {
                     // (one ontology per dimension of time), a
                     // dimensionless one stays a plain number, and
                     // an unresolvable custom unit keeps the old
-                    // text-plus-::;unit behavior (the .faiv
+                    // text-plus-;;;unit behavior (the .faiv
                     // registry route is a recorded seam).
                     let minted = l.unit.and_then(|unit| {
                         let n: f64 = value.trim().parse().ok()?;
@@ -617,13 +617,13 @@ mod tests {
         .unwrap();
         assert_eq!(values(&a, "/readings::temp"), ["100"]);
         assert_eq!(values(&a, "/readings/temp::"), ["100"]);
-        assert_eq!(values(&a, "/readings/temp::;source"), ["sensor1"]);
+        assert_eq!(values(&a, "/readings/temp;;;source"), ["sensor1"]);
         assert_eq!(
-            values(&a, "/readings/temp::;source-uri"),
+            values(&a, "/readings/temp;;;source-uri"),
             ["https://sensors.example.com/1"]
         );
-        assert_eq!(values(&a, "/readings/temp::;dpid"), ["req-42"]);
-        assert_eq!(values(&a, "/trip/length::;unit"), ["km"]);
+        assert_eq!(values(&a, "/readings/temp;;;dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/trip/length;;;unit"), ["km"]);
         // Unit-annotated: a quantity, filterable in ANY compatible
         // unit — the criterion converts through the same table.
         assert_eq!(values(&a, "/trip[::length > 26mi]/length::"), ["42 km"]);
@@ -638,7 +638,7 @@ mod tests {
             values(&a, "/rig[::power > 5km]::power"),
             Vec::<String>::new()
         );
-        assert_eq!(values(&a, "/net/host::;type"), ["acme/net/label"]);
+        assert_eq!(values(&a, "/net/host;;;type"), ["acme/net/label"]);
         assert_eq!(values(&a, "/net::host"), ["web-01"]);
     }
 
@@ -720,7 +720,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(values(&b, "/bridge::length"), ["364.4"]);
-        assert_eq!(values(&b, "/bridge/length::;unit"), ["smoot"]);
+        assert_eq!(values(&b, "/bridge/length;;;unit"), ["smoot"]);
     }
 
     #[test]

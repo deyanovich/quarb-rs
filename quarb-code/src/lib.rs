@@ -10,9 +10,9 @@
 //! `//function_item[::name = "main"]` reads as it should.
 //!
 //! Only *named* nodes appear (punctuation and keywords are
-//! syntax, not structure). Metadata: `::;kind`, `::;field` (this
-//! node's field name in its parent), `::;start-line` /
-//! `::;end-line` (1-based), `::;n-children`. //! Python, JavaScript, by extension (`rs`, `py`, `js`); the
+//! syntax, not structure). Metadata: `;;;kind`, `;;;field` (this
+//! node's field name in its parent), `;;;start-line` /
+//! `;;;end-line` (1-based), `;;;n-children`. //! Python, JavaScript, by extension (`rs`, `py`, `js`); the
 //! grammar set is compile-time and easily grown.
 //!
 //! Composed (`qua --descend`), source files graft like JSON does

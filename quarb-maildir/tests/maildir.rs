@@ -44,5 +44,5 @@ fn headers_body_and_thread() {
         ["bo@x"]
     );
     // The parsed epoch: 09:00 +0200 = 07:00 UTC.
-    assert_eq!(values(&a, "/*[::from = \"ada@x\"]::;epoch"), ["1783407600"]);
+    assert_eq!(values(&a, "/*[::from = \"ada@x\"];;;epoch"), ["1783407600"]);
 }

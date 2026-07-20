@@ -12,7 +12,7 @@
 //! rules is a planned optimization.
 //!
 //! Projections and traits are live: the default projection (`::`) is
-//! a file's text content; `::;key` exposes metadata (`size`,
+//! a file's text content; `;;;key` exposes metadata (`size`,
 //! `modified`, `extension`, `is-dir`, `is-file`, and on Unix `mode`
 //! and `permissions`); and `<trait>` filters on a structural class
 //! (`dir`, `file`, `symlink`) or a file class by extension (`code`,
@@ -219,7 +219,7 @@ impl AstAdapter for FsAdapter {
         }
     }
 
-    /// Filesystem metadata (`::;key`): `size`, `modified`,
+    /// Filesystem metadata (`;;;key`): `size`, `modified`,
     /// `extension`, `is-dir`, `is-file`, and (on Unix) `mode` and
     /// `permissions`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

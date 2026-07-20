@@ -302,8 +302,8 @@ fn partial_pushdown_gate() {
     assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n").is_none());
     // Crosslink/resolution axes = out.
     assert!(partial_pushdown("/t/*[::a = 1]::b~>::c").is_none());
-    // Metadata = out (a filtered ::;n-rows would lie).
-    assert!(partial_pushdown("/t/*[::a = 1] | ::;table").is_none());
+    // Metadata = out (a filtered ;;;n-rows would lie).
+    assert!(partial_pushdown("/t/*[::a = 1] | ;;;table").is_none());
     // Non-strict predicates (LIKE folding) = out.
     assert!(
         partial_pushdown("/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.")

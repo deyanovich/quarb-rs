@@ -62,7 +62,7 @@ enum Cmd {
     Query { q: String },
 }
 
-/// All messages, newest first by `::;epoch` (undated ones last).
+/// All messages, newest first by `;;;epoch` (undated ones last).
 fn inbox(a: &MaildirAdapter) -> Vec<NodeId> {
     let mut msgs: Vec<(i64, NodeId)> = a
         .children(a.root())
@@ -224,7 +224,7 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         Cmd::Unread => {
-            list_query(&a, "/*[::;new]")?;
+            list_query(&a, "/*[;;;new]")?;
         }
         Cmd::Since { date } => {
             let epoch: i64 = if let Ok(e) = date.parse() {
@@ -244,7 +244,7 @@ fn main() -> anyhow::Result<()> {
                 let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
                 (era * 146097 + doe - 719468) * 86400
             };
-            list_query(&a, &format!("/*[::;epoch >= {epoch}]"))?;
+            list_query(&a, &format!("/*[;;;epoch >= {epoch}]"))?;
         }
         Cmd::Replies { n } => {
             let node = nth(&a, n)?;
@@ -270,7 +270,7 @@ fn main() -> anyhow::Result<()> {
             if file.exists() {
                 bail!("{} already exists (refusing to overwrite)", file.display());
             }
-            let q = "/* | rec(::from, ::subject, \"epoch\", ::;epoch)";
+            let q = "/* | rec(::from, ::subject, \"epoch\", ;;;epoch)";
             let QueryResult::Values(vs) = quarb::run(q, &a)? else {
                 bail!("internal: expected values");
             };

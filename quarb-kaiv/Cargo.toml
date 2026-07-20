@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.3.0" }
+quarb = { path = "../quarb", version = "0.4.0" }
 kaiv = { version = "0.6.0", default-features = false }

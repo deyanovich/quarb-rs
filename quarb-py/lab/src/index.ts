@@ -53,7 +53,7 @@ interface State {
 // Longest-match operator table. Order matters: try longer sigils
 // before their prefixes (`:::` before `::`, `<=>?` before `<=>`).
 const OPERATORS = [
-  ':::', '::;', '::', // metadata / core-fact / property projections
+  ';;;', ':::', '::;', '::', // adapter-meta / core-meta / property projections (::; = deprecated alias of ;;;)
   '<=>?', '<=>', // correlation, outer correlation
   '~>', '<~', '->', '<-', // resolve / reverse / link / reverse-link
   '@|', '|', // pipes

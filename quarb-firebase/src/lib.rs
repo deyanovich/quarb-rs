@@ -2,7 +2,7 @@
 //!
 //! An RTDB *is* a JSON tree, so the mapping is `quarb-json`'s —
 //! objects' fields (and arrays' elements) as named children,
-//! scalars carrying the value, traits and `::;type` naming the
+//! scalars carrying the value, traits and `;;;type` naming the
 //! JSON kind — but the tree lives on the other end of a REST API
 //! and can be enormous (the public Hacker News database has tens
 //! of millions of nodes), so nothing is ever fetched whole.
@@ -450,8 +450,8 @@ impl AstAdapter for FirebaseAdapter {
         }
     }
 
-    /// `::;type`, `::;length` (children of a container), and
-    /// `::;path` (the RTDB path — the node's address in the
+    /// `;;;type`, `;;;length` (children of a container), and
+    /// `;;;path` (the RTDB path — the node's address in the
     /// database).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {

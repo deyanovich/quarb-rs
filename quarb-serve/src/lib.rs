@@ -10,18 +10,21 @@
 //! line, mirroring the `AstAdapter` methods:
 //!
 //! ```text
-//! → {"op":"hello"}
-//! ← {"serve":1,"name":"cuj"}
+//! → {"op":"hello","typed":true}
+//! ← {"serve":1,"name":"cuj","typed":true}
 //! → {"op":"children","node":0}
 //! ← {"nodes":[1,2,3]}
 //! → {"op":"property","node":7,"name":"tags"}
 //! ← {"value":"inbox urgent"}
+//! → {"op":"link_property","source":7,"label":"cites","target":9,"name":"tags"}
+//! ← {"value":{"t":"list","v":[{"t":"str","v":"key"}]}}
 //! ```
 //!
 //! **Server side** (the tool): implement `AstAdapter` over your
 //! own model and hand it to [`serve`] — three lines. Non-Rust
-//! tools implement the protocol directly; it is nine operations
-//! over JSON.
+//! tools implement the protocol directly; it is a small fixed set
+//! of operations over JSON, one per `AstAdapter` method (plus the
+//! `hello`/`format`/`locator` session ops).
 //!
 //! **Client side** (`qua`): [`ServeAdapter::spawn`] runs a
 //! command line and presents the child as an ordinary adapter —
@@ -42,6 +45,23 @@
 //! [...]}`, `null`. Node ids are opaque `u64`s owned by the
 //! server either way. The protocol is read-only by construction:
 //! there is no mutating operation to implement.
+//!
+//! **Typed values.** A client that understands them asks in the
+//! handshake (`{"op":"hello","typed":true}`); the server echoes
+//! the grant and thereafter wires instants, durations, and
+//! quantities structurally:
+//!
+//! ```text
+//! {"t":"instant","v":{"secs":…,"nanos":…,"offset_min":…|null}}
+//! {"t":"duration","v":{"secs":…,"nanos":…}}
+//! {"t":"quantity","v":{"value":…,"base":"B",
+//!                      "written":{"value":…,"unit":"…"}|null}}
+//! ```
+//!
+//! Either side may be legacy: an old server ignores the unknown
+//! hello field and an old client never asks, so both fall back to
+//! the display-string encoding (`{"t":"str"}`) — no version bump,
+//! `"serve": 1` unchanged. Records stay stringly on every wire.
 
 use quarb::{AstAdapter, NodeId, Value};
 use serde_json::{Value as Json, json};
@@ -62,7 +82,13 @@ pub enum ServeError {
 // Value wire form
 // ---------------------------------------------------------------
 
-fn value_to_json(v: &Value) -> Json {
+/// Encode a value for the wire. `typed` is the session's negotiated
+/// capability: when the client's hello asked for typed values,
+/// instants, durations, and quantities ride structured tags; for a
+/// legacy peer they fall back to their display strings, exactly the
+/// pre-negotiation wire. Records stay stringly on both — no adapter
+/// mints them today, and the display form is faithful JSON.
+fn value_to_json(v: &Value, typed: bool) -> Json {
     match v {
         Value::Null => Json::Null,
         Value::Bool(b) => json!({"t": "bool", "v": b}),
@@ -70,7 +96,27 @@ fn value_to_json(v: &Value) -> Json {
         Value::Float(f) => json!({"t": "float", "v": f}),
         Value::Str(s) => json!({"t": "str", "v": s}),
         Value::List(items) => {
-            json!({"t": "list", "v": items.iter().map(value_to_json).collect::<Vec<_>>()})
+            json!({"t": "list", "v": items.iter().map(|i| value_to_json(i, typed)).collect::<Vec<_>>()})
+        }
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+        } if typed => {
+            json!({"t": "instant", "v": {"secs": secs, "nanos": nanos, "offset_min": offset_min}})
+        }
+        Value::Duration { secs, nanos } if typed => {
+            json!({"t": "duration", "v": {"secs": secs, "nanos": nanos}})
+        }
+        Value::Quantity {
+            value,
+            base,
+            written,
+        } if typed => {
+            let written = written
+                .as_ref()
+                .map(|(v, u)| json!({"value": v, "unit": u}));
+            json!({"t": "quantity", "v": {"value": value, "base": base, "written": written}})
         }
         other => json!({"t": "str", "v": other.to_string()}),
     }
@@ -106,6 +152,32 @@ fn value_from_json(j: &Json) -> Value {
                 .map(|a| a.iter().map(value_from_json).collect())
                 .unwrap_or_default(),
         ),
+        ("instant", Some(v)) => Value::Instant {
+            secs: v.pointer("/secs").and_then(|x| x.as_i64()).unwrap_or(0),
+            nanos: v.pointer("/nanos").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            offset_min: v
+                .pointer("/offset_min")
+                .and_then(|x| x.as_i64())
+                .map(|m| m as i16),
+        },
+        ("duration", Some(v)) => Value::Duration {
+            secs: v.pointer("/secs").and_then(|x| x.as_i64()).unwrap_or(0),
+            nanos: v.pointer("/nanos").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        },
+        ("quantity", Some(v)) => Value::Quantity {
+            value: v.pointer("/value").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            base: v
+                .pointer("/base")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            written: v.pointer("/written").and_then(|w| {
+                Some((
+                    w.pointer("/value")?.as_f64()?,
+                    w.pointer("/unit")?.as_str()?.to_string(),
+                ))
+            }),
+        },
         _ => Value::Null,
     }
 }
@@ -397,6 +469,7 @@ pub fn serve(
     let mut inp = BufReader::new(stdin.lock());
     let mut out = std::io::stdout().lock();
     let mut wire = Wire::Json;
+    let mut typed = false;
     loop {
         let req = match read_msg(&mut inp, wire) {
             Ok(Some(r)) => r,
@@ -406,52 +479,89 @@ pub fn serve(
                 continue;
             }
         };
-        let op = req.pointer("/op").and_then(|v| v.as_str()).unwrap_or("");
-        let node = NodeId(req.pointer("/node").and_then(|v| v.as_u64()).unwrap_or(0));
-        let name_arg = req.pointer("/name").and_then(|v| v.as_str()).unwrap_or("");
-        let resp = match op {
-            "hello" => json!({"serve": 1, "name": name, "formats": ["daiv", "json"]}),
-            "format" => {
-                let want = req.pointer("/format").and_then(|v| v.as_str());
-                if want == Some("daiv") {
-                    // Ack in the OLD wire, then switch.
-                    write_msg(&mut out, wire, &json!({"ok": true}))?;
-                    wire = Wire::Daiv;
-                    continue;
-                }
-                json!({"ok": want == Some("json")})
+        // The format switch is the one op the dispatch cannot answer:
+        // its ack must ride the OLD wire, then the session upgrades.
+        if req.pointer("/op").and_then(|v| v.as_str()) == Some("format") {
+            let want = req.pointer("/format").and_then(|v| v.as_str());
+            if want == Some("daiv") {
+                write_msg(&mut out, wire, &json!({"ok": true}))?;
+                wire = Wire::Daiv;
+                continue;
             }
-            "root" => json!({"node": adapter.root().0}),
-            "children" => json!({"nodes": nodes_json(&adapter.children(node))}),
-            "children_named" => {
-                json!({"nodes": nodes_json(&adapter.children_named(node, name_arg))})
-            }
-            "name" => json!({"name": adapter.name(node)}),
-            "parent" => json!({"node": adapter.parent(node).map(|n| n.0)}),
-            "traits" => json!({"traits": adapter.traits(node)}),
-            "property" => json!({"value": adapter
-                .property(node, name_arg)
-                .as_ref()
-                .map(value_to_json)}),
-            "default_value" => {
-                json!({"value": adapter.default_value(node).as_ref().map(value_to_json)})
-            }
-            "metadata" => json!({"value": adapter
-                .metadata(node, name_arg)
-                .as_ref()
-                .map(value_to_json)}),
-            "resolve" => {
-                let hint = req.pointer("/hint").and_then(|v| v.as_str());
-                json!({"node": adapter.resolve(node, name_arg, hint).map(|n| n.0)})
-            }
-            "links" => json!({"links": links_json(&adapter.links(node))}),
-            "backlinks" => json!({"links": links_json(&adapter.backlinks(node))}),
-            "locator" => json!({"locator": locator(node)}),
-            other => json!({"error": format!("unknown op: {other}")}),
-        };
+            write_msg(&mut out, wire, &json!({"ok": want == Some("json")}))?;
+            continue;
+        }
+        let resp = respond(adapter, &locator, name, &req, &mut typed);
         write_msg(&mut out, wire, &resp)?;
     }
     Ok(())
+}
+
+/// Answer one request. Pure dispatch (no I/O), so it is directly
+/// testable; `typed` is the session's negotiated value capability,
+/// set by the hello request's `"typed": true` field.
+fn respond(
+    adapter: &impl AstAdapter,
+    locator: &impl Fn(NodeId) -> String,
+    name: &str,
+    req: &Json,
+    typed: &mut bool,
+) -> Json {
+    let op = req.pointer("/op").and_then(|v| v.as_str()).unwrap_or("");
+    let node = NodeId(req.pointer("/node").and_then(|v| v.as_u64()).unwrap_or(0));
+    let name_arg = req.pointer("/name").and_then(|v| v.as_str()).unwrap_or("");
+    let value_json = |v: &Value| value_to_json(v, *typed);
+    match op {
+        "hello" => {
+            // Capability negotiation: a client that understands typed
+            // instant/duration/quantity encodings says so; the server
+            // echoes the grant. Legacy peers (bare hello) keep the
+            // string fallback. `"serve": 1` is load-bearing — old
+            // clients hard-check it.
+            *typed = req.pointer("/typed").and_then(|v| v.as_bool()) == Some(true);
+            if *typed {
+                json!({"serve": 1, "name": name, "formats": ["daiv", "json"], "typed": true})
+            } else {
+                json!({"serve": 1, "name": name, "formats": ["daiv", "json"]})
+            }
+        }
+        "root" => json!({"node": adapter.root().0}),
+        "children" => json!({"nodes": nodes_json(&adapter.children(node))}),
+        "children_named" => {
+            json!({"nodes": nodes_json(&adapter.children_named(node, name_arg))})
+        }
+        "name" => json!({"name": adapter.name(node)}),
+        "parent" => json!({"node": adapter.parent(node).map(|n| n.0)}),
+        "traits" => json!({"traits": adapter.traits(node)}),
+        "property" => json!({"value": adapter
+            .property(node, name_arg)
+            .as_ref()
+            .map(value_json)}),
+        "default_value" => {
+            json!({"value": adapter.default_value(node).as_ref().map(value_json)})
+        }
+        "metadata" => json!({"value": adapter
+            .metadata(node, name_arg)
+            .as_ref()
+            .map(value_json)}),
+        "resolve" => {
+            let hint = req.pointer("/hint").and_then(|v| v.as_str());
+            json!({"node": adapter.resolve(node, name_arg, hint).map(|n| n.0)})
+        }
+        "links" => json!({"links": links_json(&adapter.links(node))}),
+        "backlinks" => json!({"links": links_json(&adapter.backlinks(node))}),
+        "link_property" => {
+            let source = NodeId(req.pointer("/source").and_then(|v| v.as_u64()).unwrap_or(0));
+            let target = NodeId(req.pointer("/target").and_then(|v| v.as_u64()).unwrap_or(0));
+            let label = req.pointer("/label").and_then(|v| v.as_str()).unwrap_or("");
+            json!({"value": adapter
+                .link_property(source, label, target, name_arg)
+                .as_ref()
+                .map(value_json)})
+        }
+        "locator" => json!({"locator": locator(node)}),
+        other => json!({"error": format!("unknown op: {other}")}),
+    }
 }
 
 // ---------------------------------------------------------------
@@ -490,7 +600,10 @@ impl ServeAdapter {
             wire: RefCell::new(Wire::Json),
             cache: RefCell::new(HashMap::new()),
         };
-        let hello = adapter.call(json!({"op": "hello"}))?;
+        // `typed: true` asks for structured instant/duration/quantity
+        // encodings; old servers ignore the unknown field and answer
+        // with string fallbacks — graceful both ways.
+        let hello = adapter.call(json!({"op": "hello", "typed": true}))?;
         if hello.pointer("/serve").and_then(|v| v.as_u64()) != Some(1) {
             return Err(ServeError::Protocol(
                 "handshake failed (no {\"serve\":1})".into(),
@@ -644,6 +757,31 @@ impl AstAdapter for ServeAdapter {
             .map(NodeId)
     }
 
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<Value> {
+        // An old server answers unknown-op with an error, which
+        // call_ok maps to Null → None: bare-edge semantics, exactly
+        // the trait default. (Errors are not cached, so a legacy
+        // server is re-asked per edge — acceptable.)
+        let resp = self.call_ok(json!({
+            "op": "link_property",
+            "source": source.0,
+            "label": label,
+            "target": target.0,
+            "name": name,
+        }));
+        let v = resp.pointer("/value")?;
+        if v.is_null() {
+            return None;
+        }
+        Some(value_from_json(v))
+    }
+
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.call_ok(json!({"op": "links", "node": node.0}))
             .pointer("/links")
@@ -697,7 +835,7 @@ mod tests {
         // A string whose content is literally `"quoted"` rides a plain
         // `str` leaf and must not be un-quoted in transit. This was
         // the bug: the decoder guess-decoded any JSON-looking payload.
-        let wire = value_to_json(&Value::Str("\"quoted\"".into()));
+        let wire = value_to_json(&Value::Str("\"quoted\"".into()), false);
         assert_eq!(daiv_roundtrip(wire), json!("\"quoted\""));
     }
 
@@ -707,7 +845,7 @@ mod tests {
         // embedded line break) take the JSON-encoded fallback and must
         // decode back to the original.
         for original in ["$ref", "line1\nline2"] {
-            let wire = value_to_json(&Value::Str(original.to_string()));
+            let wire = value_to_json(&Value::Str(original.to_string()), false);
             assert_eq!(daiv_roundtrip(wire), json!(original), "for {original:?}");
         }
     }
@@ -715,13 +853,181 @@ mod tests {
     #[test]
     fn plain_string_and_scalars_roundtrip() {
         assert_eq!(
-            daiv_roundtrip(value_to_json(&Value::Str("hello".into()))),
+            daiv_roundtrip(value_to_json(&Value::Str("hello".into()), false)),
             json!("hello")
         );
-        assert_eq!(daiv_roundtrip(value_to_json(&Value::Int(42))), json!(42));
         assert_eq!(
-            daiv_roundtrip(value_to_json(&Value::Bool(true))),
+            daiv_roundtrip(value_to_json(&Value::Int(42), false)),
+            json!(42)
+        );
+        assert_eq!(
+            daiv_roundtrip(value_to_json(&Value::Bool(true), false)),
             json!(true)
         );
+    }
+
+    fn sample_instant() -> Value {
+        Value::Instant {
+            secs: 1_700_000_000,
+            nanos: 500,
+            offset_min: Some(-120),
+        }
+    }
+
+    #[test]
+    fn typed_values_roundtrip_json() {
+        for v in [
+            sample_instant(),
+            Value::Duration {
+                secs: 3600,
+                nanos: 0,
+            },
+            Value::Quantity {
+                value: 14.0,
+                base: "B".into(),
+                written: None,
+            },
+            Value::Quantity {
+                value: 42_000.0,
+                base: "m".into(),
+                written: Some((42.0, "km".into())),
+            },
+            Value::List(vec![sample_instant(), Value::Int(1)]),
+        ] {
+            assert_eq!(value_from_json(&value_to_json(&v, true)), v, "for {v:?}");
+        }
+    }
+
+    #[test]
+    fn typed_values_roundtrip_daiv() {
+        // The daiv wire has no native instant leaf: the tagged object
+        // flows through the generic object flattener and reassembles
+        // on the far side, where value_from_json reads the tag.
+        for v in [
+            sample_instant(),
+            Value::Duration { secs: 5, nanos: 1 },
+            Value::Quantity {
+                value: 14.0,
+                base: "B".into(),
+                written: None,
+            },
+        ] {
+            let back = daiv_roundtrip(value_to_json(&v, true));
+            assert_eq!(value_from_json(&back), v, "for {v:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_encoding_stays_stringly() {
+        // Without the negotiated capability, typed values keep the
+        // pre-negotiation wire: their display string.
+        let wire = value_to_json(&sample_instant(), false);
+        assert_eq!(
+            wire.pointer("/t").and_then(|t| t.as_str()),
+            Some("str"),
+            "legacy instants must wire as strings"
+        );
+    }
+
+    /// A two-node toy adapter with one annotated edge, for dispatch
+    /// tests.
+    struct Toy;
+    impl AstAdapter for Toy {
+        fn root(&self) -> NodeId {
+            NodeId(0)
+        }
+        fn children(&self, node: NodeId) -> Vec<NodeId> {
+            if node.0 == 0 { vec![NodeId(1)] } else { vec![] }
+        }
+        fn name(&self, node: NodeId) -> Option<String> {
+            (node.0 == 1).then(|| "leaf".into())
+        }
+        fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+            (node.0 == 1 && key == "created").then(sample_instant)
+        }
+        fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+            if node.0 == 0 {
+                vec![("cites".into(), NodeId(1))]
+            } else {
+                vec![]
+            }
+        }
+        fn link_property(
+            &self,
+            source: NodeId,
+            label: &str,
+            target: NodeId,
+            name: &str,
+        ) -> Option<Value> {
+            (source.0 == 0 && label == "cites" && target.0 == 1 && name == "tags")
+                .then(|| Value::List(vec![Value::Str("key".into())]))
+        }
+    }
+
+    fn ask(req: Json, typed: &mut bool) -> Json {
+        respond(&Toy, &|n| format!("/{}", n.0), "toy", &req, typed)
+    }
+
+    #[test]
+    fn hello_negotiates_typed() {
+        let mut typed = false;
+        let resp = ask(json!({"op": "hello", "typed": true}), &mut typed);
+        assert!(typed);
+        assert_eq!(resp.pointer("/serve"), Some(&json!(1)));
+        assert_eq!(resp.pointer("/typed"), Some(&json!(true)));
+        // A legacy hello resets the grant and omits the field.
+        let resp = ask(json!({"op": "hello"}), &mut typed);
+        assert!(!typed);
+        assert_eq!(resp.pointer("/typed"), None);
+        assert_eq!(resp.pointer("/serve"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn link_property_dispatch() {
+        let mut typed = true;
+        let resp = ask(
+            json!({"op": "link_property", "source": 0, "label": "cites",
+                   "target": 1, "name": "tags"}),
+            &mut typed,
+        );
+        assert_eq!(
+            value_from_json(resp.pointer("/value").unwrap()),
+            Value::List(vec![Value::Str("key".into())])
+        );
+        // A bare edge answers null.
+        let resp = ask(
+            json!({"op": "link_property", "source": 0, "label": "cites",
+                   "target": 1, "name": "since"}),
+            &mut typed,
+        );
+        assert!(resp.pointer("/value").unwrap().is_null());
+    }
+
+    #[test]
+    fn typed_metadata_respects_session_flag() {
+        let mut typed = false;
+        ask(json!({"op": "hello", "typed": true}), &mut typed);
+        let resp = ask(json!({"op": "metadata", "node": 1, "name": "created"}), &mut typed);
+        assert_eq!(
+            resp.pointer("/value/t").and_then(|t| t.as_str()),
+            Some("instant")
+        );
+        let mut legacy = false;
+        ask(json!({"op": "hello"}), &mut legacy);
+        let resp = ask(
+            json!({"op": "metadata", "node": 1, "name": "created"}),
+            &mut legacy,
+        );
+        assert_eq!(
+            resp.pointer("/value/t").and_then(|t| t.as_str()),
+            Some("str")
+        );
+    }
+
+    #[test]
+    fn unknown_op_still_errors() {
+        let mut typed = false;
+        let resp = ask(json!({"op": "mutate"}), &mut typed);
+        assert!(resp.pointer("/error").is_some());
     }
 }

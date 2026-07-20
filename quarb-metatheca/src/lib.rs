@@ -31,7 +31,7 @@
 //! ```text
 //! /head(->previous)* @| count                     the chain walk
 //! /states/'~1'/paths/docs/a.md::                  as-of content read
-//! /head(->previous)*[/paths/img.png]? | ::;short  when did it last exist
+//! /head(->previous)*[/paths/img.png]? | ;;;short  when did it last exist
 //! /paths/docs/a.md/*[::kind='core/path'] | ::path the renames, visible
 //! /states/'~2'->added | ::kind                    what changed in a state
 //! /states/'~2'/entries/*<changed>                 …as a diff surface
@@ -891,10 +891,10 @@ impl AstAdapter for MetathecaAdapter {
         }
     }
 
-    /// States: `::;short`, `::;n-facts`, `::;seq` (0 = genesis).
-    /// Entries: `::;blob`, `::;size`, `::;n-facts`, `::;n-paths`,
-    /// `::;first-at`, `::;last-at`. Fact events: `::;hash`,
-    /// `::;short`, `::;state`, `::;state-short`, `::;seq`.
+    /// States: `;;;short`, `;;;n-facts`, `;;;seq` (0 = genesis).
+    /// Entries: `;;;blob`, `;;;size`, `;;;n-facts`, `;;;n-paths`,
+    /// `;;;first-at`, `;;;last-at`. Fact events: `;;;hash`,
+    /// `;;;short`, `;;;state`, `;;;state-short`, `;;;seq`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if let Some(hash) = self.state_of(node) {
             return match key {

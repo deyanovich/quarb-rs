@@ -138,7 +138,7 @@ pub enum Arg {
 
 /// The field name an expression carries on its own, for `record(...)`
 /// auto-naming: the projection's key (`::href` → `href`,
-/// `/a/b::c` → `c`, `:::name` → `name`, `::;tag` → `tag`). Computed
+/// `/a/b::c` → `c`, `:::name` → `name`, `;;;tag` → `tag`). Computed
 /// expressions and bare paths carry none and need an explicit name.
 pub fn auto_field_name(op: &Operand) -> Option<&str> {
     if let Operand::Outer(inner) = op {
@@ -180,7 +180,7 @@ pub enum Projection {
     Property(Option<String>),
     /// `:::key` — engine-computed core metadata.
     CoreMeta(String),
-    /// `::;key` — adapter-defined metadata.
+    /// `;;;key` — adapter-defined metadata.
     AdapterMeta(String),
 }
 
@@ -303,7 +303,7 @@ pub enum Operand {
         projection: Option<Projection>,
         /// `^` — the operand navigates from the arbor root rather
         /// than the current node, mirroring the branch anchor:
-        /// `[::;short = ^/tags/*::;short]` compares against a set
+        /// `[;;;short = ^/tags/*;;;short]` compares against a set
         /// gathered elsewhere in the arbor (existentially, like any
         /// multi-valued operand).
         anchored: bool,
@@ -362,7 +362,7 @@ pub enum Operand {
     /// INPUT (the snapshot rule — a stage is the transition, so
     /// "the context" during its evaluation is what it received).
     /// Bare, the peers' topics as a list; projected (`@*::prop`,
-    /// `:::`, `::;`), the projection mapped over the peers' nodes.
+    /// `:::`, `;;;`), the projection mapped over the peers' nodes.
     /// Null where no context exists (navigation predicates).
     Capsae { projection: Option<Projection> },
     /// `(expr | f @| g ...)` — an operand with a pipe tail. Stage

@@ -522,7 +522,7 @@ impl Parser {
                 self.pos += 1;
                 match state {
                     State::Nodes => {
-                        out.push_str("::;length");
+                        out.push_str(";;;length");
                         Ok(State::Values)
                     }
                     // A slice's length is its element count.
@@ -988,7 +988,7 @@ mod tests {
 
     #[test]
     fn functions() {
-        assert_eq!(t(".users | length"), "/users::;length");
+        assert_eq!(t(".users | length"), "/users;;;length");
         assert_eq!(t(".users[0] | keys"), "/users/0/*:::name @| sort");
         assert_eq!(t(".nums | add"), "/nums/*:: @| sum");
         assert_eq!(t(".nums | min"), "/nums/*:: @| min");

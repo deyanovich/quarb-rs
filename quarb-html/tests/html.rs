@@ -53,9 +53,9 @@ fn attributes_as_properties() {
     assert_eq!(values("//p::class"), vec!["intro"]);
     assert_eq!(values("//html::lang"), vec!["en"]);
     // via metadata too
-    assert_eq!(values("//p::;classes"), vec!["intro"]);
-    assert_eq!(values("//h1::;id"), vec!["top"]);
-    assert_eq!(values("//h1::;tag"), vec!["h1"]);
+    assert_eq!(values("//p;;;classes"), vec!["intro"]);
+    assert_eq!(values("//h1;;;id"), vec!["top"]);
+    assert_eq!(values("//h1;;;tag"), vec!["h1"]);
     // core-meta `:::traits` is the node's trait list
     assert_eq!(values("//strong:::traits"), vec!["inline"]);
     assert_eq!(values("//h1:::traits"), vec!["block, heading"]);

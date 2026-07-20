@@ -68,13 +68,13 @@ fn nodes(query: &str) -> Vec<String> {
 fn tables_and_rows() {
     // tables are the root's children; rows are named by primary key
     assert_eq!(nodes("/*"), vec!["/albums", "/artists", "/tracks"]);
-    assert_eq!(values("/tracks::;n-rows"), vec!["8"]);
+    assert_eq!(values("/tracks;;;n-rows"), vec!["8"]);
     assert_eq!(nodes("/tracks/7"), vec!["/tracks/7"]);
     assert_eq!(values("/artists/2::name"), vec!["Bartok"]);
     // columns are properties; SQL NULL is null (dropna filters)
     assert_eq!(values("/tracks/*[::price > 1]::title @| count"), vec!["4"]);
     assert_eq!(values("/tracks/*[::album_id] @| count"), vec!["7"]);
-    assert_eq!(values("/tracks/8::;table"), vec!["tracks"]);
+    assert_eq!(values("/tracks/8;;;table"), vec!["tracks"]);
 }
 
 #[test]

@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 const CORPUS: &[&str] = &[
     // descendant axis, traits, expr/index/range predicates, leaf
     // anchor, adapter-metadata projection
-    "//book<block||inline>[::pages > 200][2][1..3]$::;id",
+    "//book<block||inline>[::pages > 200][2][1..3]$;;;id",
     // the trait boolean algebra: &&, tight !, parens (CNF inside)
     "//sec<(a||b) && !deprecated>",
     // union branches, scalar + aggregate stages, literal args
@@ -85,7 +85,7 @@ const CORPUS: &[&str] = &[
     // the outer spread and the outer correlation (2026-07-11)
     "//user <=>? //order[::uid = $*1::id]::amt | ...?",
     // the anchored operand (2026-07-11)
-    "//commit[::;short = ^/tags/*::;short]",
+    "//commit[;;;short = ^/tags/*;;;short]",
     // marks and the (name) anchor (2026-07-11)
     "/movie .m <-ACTED_IN[::born > (m)::released] | rec(::name, (m)::title)",
     // the branch-position mark anchor, inside a subcontext body

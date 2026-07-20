@@ -49,8 +49,8 @@ fn states_and_time_travel() {
     let a = MetathecaAdapter::open(&root).unwrap();
     // The whole chain enumerates; the head is its last state.
     assert_eq!(values(&a, "/states/* @| count"), ["7"]);
-    assert_eq!(values(&a, "/head::;seq"), ["6"]);
-    assert_eq!(values(&a, "/states/*<genesis>::;seq"), ["0"]);
+    assert_eq!(values(&a, "/head;;;seq"), ["6"]);
+    assert_eq!(values(&a, "/states/*<genesis>;;;seq"), ["0"]);
     // As-of listings: before the rm, three files; at the head, two.
     assert_eq!(values(&a, "/states/'~2'/paths//*<entry> @| count"), ["3"]);
     assert_eq!(values(&a, "/paths//*<entry> @| count"), ["2"]);
@@ -70,14 +70,14 @@ fn chain_navigation() {
     let a = MetathecaAdapter::open(&root).unwrap();
     // The ancestry walk spans the chain.
     assert_eq!(values(&a, "/head(->previous)+ @| count"), ["6"]);
-    assert_eq!(values(&a, "/head->previous::;seq"), ["5"]);
-    assert_eq!(values(&a, "/head::previous~>::;seq"), ["5"]);
+    assert_eq!(values(&a, "/head->previous;;;seq"), ["5"]);
+    assert_eq!(values(&a, "/head::previous~>;;;seq"), ["5"]);
     // The successor, from the linear chain.
-    assert_eq!(values(&a, "/states/'~1'<-previous::;seq"), ["6"]);
+    assert_eq!(values(&a, "/states/'~1'<-previous;;;seq"), ["6"]);
     // Reach ?: the nearest ancestor state where img.png still
     // existed — the state just before the rm.
-    let nearest = values(&a, "/head(->previous)+[/paths/img.png]? | ::;short");
-    assert_eq!(nearest, values(&a, "/states/'~2'::;short"));
+    let nearest = values(&a, "/head(->previous)+[/paths/img.png]? | ;;;short");
+    assert_eq!(nearest, values(&a, "/states/'~2';;;short"));
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn added_and_changed() {
         values(&a, "/states/'~2'->added->entry | ::path"),
         ["docs/a.md"]
     );
-    assert_eq!(values(&a, "/states/'~2'->added->state | ::;seq"), ["4"]);
+    assert_eq!(values(&a, "/states/'~2'->added->state | ;;;seq"), ["4"]);
     // The diff surface: the one entry that changed in that state.
     assert_eq!(values(&a, "/states/'~2'/entries/*<changed> @| count"), ["1"]);
     assert_eq!(values(&a, "/states/'~2'/entries/*<changed>::path"), ["docs/a.md"]);
@@ -152,15 +152,15 @@ fn stateref_aliasing() {
     let a = MetathecaAdapter::open(&root).unwrap();
     // `current`, a full hash, a 12-hex prefix, and an ISO instant
     // all land on their state without enumeration.
-    assert_eq!(values(&a, "/states/current::;seq"), ["6"]);
+    assert_eq!(values(&a, "/states/current;;;seq"), ["6"]);
     let s3 = vault.resolve("~3").unwrap();
     let full = s3.to_hex();
     let prefix = &full[..12];
-    assert_eq!(values(&a, &format!("/states/{full}::;seq")), ["3"]);
-    assert_eq!(values(&a, &format!("/states/'{prefix}'::;seq")), ["3"]);
+    assert_eq!(values(&a, &format!("/states/{full};;;seq")), ["3"]);
+    assert_eq!(values(&a, &format!("/states/'{prefix}';;;seq")), ["3"]);
     let at = vault.get_state(&s3).unwrap().created_at_ns;
     let iso = metatheca::format_iso8601_ns(at);
-    assert_eq!(values(&a, &format!("/states/'{iso}'::;seq")), ["3"]);
+    assert_eq!(values(&a, &format!("/states/'{iso}';;;seq")), ["3"]);
     // An entry addressed by its UUID, and its fact-event names by
     // their blob hashes.
     let entry = vault.resolve_entry("docs/a.md").unwrap();

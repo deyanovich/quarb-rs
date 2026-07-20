@@ -3,7 +3,7 @@
 //! Remote mailboxes, queried in place: folders as the root's
 //! children, messages by UID, headers as properties
 //! (`::subject`, `::from`, ...), the body as the value,
-//! `::;epoch` for date predicates — the same mapping as
+//! `;;;epoch` for date predicates — the same mapping as
 //! `quarb-maildir`, over the wire.
 //!
 //! The transport is `curl` (which speaks IMAP natively) over
@@ -378,7 +378,7 @@ impl ImapAdapter {
     }
 }
 
-/// Reuse the maildir date parser's semantics for `::;epoch`.
+/// Reuse the maildir date parser's semantics for `;;;epoch`.
 fn parse_date(s: &str) -> Option<i64> {
     let s = s.split_once(',').map(|(_, r)| r).unwrap_or(s).trim();
     let mut it = s.split_whitespace();
@@ -484,7 +484,7 @@ impl AstAdapter for ImapAdapter {
         Some(Value::Str(self.body_of(&folder, uid)))
     }
 
-    /// `::;epoch`, `::;uid`; `::;n-messages` on folders.
+    /// `;;;epoch`, `;;;uid`; `;;;n-messages` on folders.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
             "n-messages" => match &self.nodes.borrow()[node.0 as usize].kind {

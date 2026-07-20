@@ -88,7 +88,7 @@ fn predicates_reflect() {
 
 #[test]
 fn source_metadata_and_introspection_aggregates() {
-    assert_eq!(values("^::;source"), vec![Value::Str(QUERY.to_string())]);
+    assert_eq!(values("^;;;source"), vec![Value::Str(QUERY.to_string())]);
     // "how many stages does this query run?"
     assert_eq!(values("/query/pipeline/* @| count"), vec![Value::Int(5)]);
     // "does it use any descendant hops?" — no

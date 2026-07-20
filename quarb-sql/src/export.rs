@@ -252,7 +252,7 @@ pub struct Partial {
 /// `^`-anchored subcontexts, self-references — would see the
 /// filtered subset); no crosslink or resolution axes anywhere
 /// (backlinks and reverse resolution into the table would too);
-/// and no `:::` / `::;` metadata anywhere (a filtered `::;n-rows`
+/// and no `:::` / `;;;` metadata anywhere (a filtered `;;;n-rows`
 /// would lie).
 pub fn partial_pushdown(quarb: &str) -> Option<Partial> {
     partial_pushdown_explained(quarb).ok()
@@ -376,7 +376,7 @@ impl Exporter {
                 "projection" if self.prop_s(*n, "kind") != "property" => {
                     return Err(SqlError::Unsupported(
                         "partial pushdown: metadata would observe the filtering \
-                         (::;n-rows, :::index)"
+                         (;;;n-rows, :::index)"
                             .into(),
                     ));
                 }

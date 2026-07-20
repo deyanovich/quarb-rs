@@ -82,7 +82,7 @@ pub trait AstAdapter {
         None
     }
 
-    /// Adapter-defined metadata — `::;key` (a filesystem adapter's
+    /// Adapter-defined metadata — `;;;key` (a filesystem adapter's
     /// `size`, `modified`, `permissions`, …). `None` if absent.
     fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> {
         None

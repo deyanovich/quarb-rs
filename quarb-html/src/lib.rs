@@ -14,7 +14,7 @@
 //!   anchor with an `href`.
 //! - Attributes are properties: `::href`, `::class`, `::id`. The
 //!   default projection (`::`) and `::text` are the element's text
-//!   content; `::;tag`, `::;id`, `::;classes`, and any `::;attr`
+//!   content; `;;;tag`, `;;;id`, `;;;classes`, and any `;;;attr`
 //!   expose metadata.
 //! - An anchor's fragment `href` resolves: `::href~>` follows
 //!   `#section` to the element with `id="section"`.
@@ -266,8 +266,8 @@ impl AstAdapter for HtmlAdapter {
         Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
     }
 
-    /// `::;tag`, `::;text`, `::;id`, `::;classes`, `::;n-attrs`, and
-    /// any attribute by name (`::;href`).
+    /// `;;;tag`, `;;;text`, `;;;id`, `;;;classes`, `;;;n-attrs`, and
+    /// any attribute by name (`;;;href`).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

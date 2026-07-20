@@ -123,7 +123,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-fs} & The filesystem adapter. Depends on \texttt{quarb}. \\
 \texttt{quarb-imap} & Remote IMAP mailboxes, queried in place:
   the maildir mapping over the wire (folders, messages by UID,
-  headers as properties, \texttt{::;epoch}), transported by
+  headers as properties, \texttt{;;;epoch}), transported by
   \texttt{curl} over subprocess (it speaks IMAP natively) — zero
   new dependencies. Lazy per message: one LIST, one UID SEARCH
   per folder, two fetches per touched message. The thread fabric
@@ -161,7 +161,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   table-naming hint for undeclared references. Loading is catalog-
   eager, rows-lazy: a table materializes on first touch through
   the driver-supplied fetcher, once, and untouched tables are
-  never read (\texttt{::;loaded} reports the state). Engine
+  never read (\texttt{;;;loaded} reports the state). Engine
   adapters are thin catalog drivers over it. Depends on
   \texttt{quarb}. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
@@ -192,7 +192,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   regime. Depends on \texttt{quarb-relational}. \\
 \texttt{quarb-csv} & The CSV/TSV adapter (one \texttt{row} node per
   record, columns as properties, empty cells as missing values that
-  numeric aggregates skip; \texttt{::;columns} / \texttt{::;n-rows}
+  numeric aggregates skip; \texttt{;;;columns} / \texttt{;;;n-rows}
   metadata). Depends on \texttt{quarb} and \texttt{csv}. \\
 \texttt{quarb-xpath} & The XPath~1.0 bridge, both directions:
   \texttt{translate} imports an XPath expression to Quarb, and
@@ -260,8 +260,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   (tree-sitter): node kinds as edge names
   (\texttt{//function\_item}), tree-sitter \emph{fields} as
   properties (\texttt{::name} on a function is its name),
-  source text as the value, \texttt{::;start-line} /
-  \texttt{::;kind} / \texttt{::;field} metadata; named nodes
+  source text as the value, \texttt{;;;start-line} /
+  \texttt{;;;kind} / \texttt{;;;field} metadata; named nodes
   only. Rust / Python / JavaScript by extension, compile-time
   grammar set. Grafts under composition — \texttt{--descend}
   queries every function in a directory tree at once. \\
@@ -276,13 +276,13 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   archives, \texttt{--descend} for directories. \\
 \texttt{quarb-archive} & Zip and tar (\texttt{.tar[.gz]})
   archives as path trees: entry content as the node value,
-  \texttt{::;size} / \texttt{::;compressed}; zip contents lazy
+  \texttt{;;;size} / \texttt{;;;compressed}; zip contents lazy
   per entry, tar in one pass. With composition, \texttt{.docx} /
   \texttt{.epub} / \texttt{.jar} internals are directly
   queryable. \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
   and mbox mailboxes: headers as properties (lowercased), the
-  body as the value, \texttt{::;epoch} parsing the Date header
+  body as the value, \texttt{;;;epoch} parsing the Date header
   for range predicates. The thread graph is reference fabric:
   \texttt{::in-reply-to\textasciitilde>} walks to the parent
   message, \texttt{<-in-reply-to} finds the replies, via a
@@ -322,9 +322,22 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{git log -- path} is
   \texttt{/commits/*[/path<changed>]}; commits answer
   \texttt{::changed} (the touched paths, deletions included)
-  and \texttt{::;n-changed}. Plumbing over subprocess —
+  and \texttt{;;;n-changed}. Plumbing over subprocess —
   no libgit2, zero new dependencies. Target: \texttt{git:PATH}.
   Read-only. \\
+\texttt{quarb-atrep} & The atrep semantic-document adapter —
+  the OQL homecoming. Mounts a deltos (\texttt{.atd}) or kanon
+  (\texttt{.atk}) \emph{through its dialektos}: sims named by
+  their dialect names (\texttt{//section}, \texttt{//footnote}),
+  genoses as traits, \texttt{::onym}/\texttt{::taxis}/
+  \texttt{::lemma} projections, deixes and onym-monosims as
+  typed crosslinks with a precomputed reverse index (the first
+  adapter to prebuild both \texttt{links} and
+  \texttt{backlinks}), \texttt{<dangling>} as a
+  broken-cross-reference linter. Mounting runs
+  \texttt{kanonizo::tasso} (ordering only — onyms stay as
+  authored; transclusion stays visible as edges). Depends on
+  \texttt{quarb} and \texttt{atrep}. \\
 \texttt{quarb-serve} & The \emph{serve protocol} — the
   extension surface for tools the engine never links: a tool
   implements \texttt{AstAdapter} over its own model and hands it
@@ -430,7 +443,7 @@ hold this), so the rungs trade only latency and transfer:
     leading run only (a positional predicate before an expression
     one sees unfiltered rows), a single \texttt{/table/*} branch
     with no correlations, the table reached exactly once, no
-    crosslink/resolution axes, no \texttt{:::}/\texttt{::;}
+    crosslink/resolution axes, no \texttt{:::}/\texttt{;;;}
     metadata (each would observe the filtering). Measured:
     unpushable grouping over a 1\%-selective filter, 2.31\,s
     vs.\ 0.081\,s.
@@ -474,9 +487,9 @@ root-anchored sequence of hops, each an axis followed by a name:
   & \live wildcard, glob, and regex name matching \\
 \texttt{<code>}, \texttt{<a|b>}, \texttt{<a><b>}
   & \live trait filters (alternation, conjunction) \\
-\texttt{::}, \texttt{:::key}, \texttt{::;key}
+\texttt{::}, \texttt{:::key}, \texttt{;;;key}
   & \live property, core-metadata, and adapter-metadata projection \\
-\texttt{[::;size > 1K]}, \texttt{[/child]}, \texttt{[n]},
+\texttt{[;;;size > 1K]}, \texttt{[/child]}, \texttt{[n]},
 \texttt{[-1]}, \texttt{[2..5]}
   & \live predicates: comparisons (\texttt{=} \texttt{!=} \texttt{<}
     \texttt{<=} \texttt{>} \texttt{>=}), substring \texttt{*=}, regex
@@ -522,7 +535,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     reflection: \texttt{.quarb} files open as the query's own arbor
     (\texttt{quarb::reflect}; vocabulary locked v1, enforced by the
     conformance corpus in \texttt{tests/vocabulary.rs}, version on
-    the root as \texttt{::;vocabulary}) \\
+    the root as \texttt{;;;vocabulary}) \\
 \texttt{def \&f(\$x): ...;}, \texttt{\&f(::age)},
 \texttt{--defs}, \texttt{--expand}
   & \live fragments: parse-time expansion with call-by-name
@@ -649,7 +662,7 @@ pub trait AstAdapter {
     /// The default projection, bare `::` (filesystem: file content).
     fn default_value(&self, _node: NodeId) -> Option<Value> { None }
 
-    /// Adapter metadata `::;key` (filesystem: size, modified, …).
+    /// Adapter metadata `;;;key` (filesystem: size, modified, …).
     fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> { None }
 
     /// Outgoing / incoming crosslinks as (label, node) pairs, for
@@ -753,7 +766,7 @@ cargo run -p qua -- '/README.md'      # a single top-level file
 
 # query a document
 cargo run -p qua -- '/users/0/name::' data.json
-cargo run -p qua -- '//book[::pages > 200]::;id' catalog.xml
+cargo run -p qua -- '//book[::pages > 200];;;id' catalog.xml
 cargo run -p qua -- '//a::href' page.html
 \end{lstlisting}
 

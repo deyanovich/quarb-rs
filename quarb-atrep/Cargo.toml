@@ -1,8 +1,8 @@
 [package]
-name = "quarb-metatheca"
-description = "Metatheca vault adapter for the Quarb query engine"
-keywords = ["query", "metatheca", "vault", "history", "quarb"]
-categories = ["development-tools", "database"]
+name = "quarb-atrep"
+description = "Atrep semantic-document adapter for the Quarb query engine"
+keywords = ["query", "atrep", "markup", "quarb", "arbor"]
+categories = ["parser-implementations", "text-processing"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,7 @@ homepage.workspace = true
 
 [dependencies]
 quarb = { path = "../quarb", version = "0.4.0" }
-metatheca = "0.1.3"
-serde_json.workspace = true
+atrep = { version = "0.1.0", default-features = false }
 thiserror.workspace = true
 
 [dev-dependencies]

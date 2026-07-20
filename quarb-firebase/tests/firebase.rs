@@ -44,7 +44,7 @@ fn hint_resolution() {
         values(&a, "/item/15::parent~>item::title"),
         ["Y Combinator"]
     );
-    assert_eq!(values(&a, "/item/15::;path"), ["/item/15"]);
+    assert_eq!(values(&a, "/item/15;;;path"), ["/item/15"]);
 }
 
 #[test]

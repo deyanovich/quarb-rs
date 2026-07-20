@@ -9,7 +9,7 @@
 //! parent, ancestor, and sibling hops; proximal/distal reach; root and
 //! leaf anchors; literal, glob, and `~(...)` regex name matching;
 //! `<trait>` filters), scalar projection (`::` properties, `:::` core
-//! metadata, `::;` adapter metadata), `[...]` predicates (comparisons,
+//! metadata, `;;;` adapter metadata), `[...]` predicates (comparisons,
 //! `and`/`or`/`not`/`!`, structural conditions, index selection),
 //! `||` union, `->` / `<-` crosslink navigation, path patterns
 //! (`(...)` groups with subpath alternation and `+`/`*`/`{m,n}`

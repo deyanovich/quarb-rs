@@ -25,7 +25,7 @@
 //! node kinds, property keys, and spellings keep their meaning;
 //! growth is additive only (new kinds and keys may appear, existing
 //! ones never change or vanish). The root carries the version as
-//! `::;vocabulary`, and [`QueryArbor::inventory`] exposes the
+//! `;;;vocabulary`, and [`QueryArbor::inventory`] exposes the
 //! kind → property-key map for conformance checking (the
 //! `vocabulary` test locks it). `param` is *reserved*: it names a
 //! fragment parameter in the walker, but reflection sees expanded
@@ -56,7 +56,7 @@ struct RNode {
 /// A parsed query exposed as an arbor.
 pub struct QueryArbor {
     nodes: Vec<RNode>,
-    /// The original query text (root `::;source`).
+    /// The original query text (root `;;;source`).
     source: String,
 }
 

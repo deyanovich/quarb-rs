@@ -37,8 +37,8 @@ fn rows_and_columns() {
     // a quoted cell keeps its embedded comma
     assert_eq!(values("/row[4]::dept"), vec!["ops, misc"]);
     // table shape
-    assert_eq!(values("^::;n-rows"), vec!["4"]);
-    assert_eq!(values("^::;columns"), vec!["name, dept, age, salary"]);
+    assert_eq!(values("^;;;n-rows"), vec!["4"]);
+    assert_eq!(values("^;;;columns"), vec!["name, dept, age, salary"]);
 }
 
 #[test]
