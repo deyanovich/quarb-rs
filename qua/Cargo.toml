@@ -3,7 +3,7 @@ name = "qua"
 description = "Structure-aware query CLI for the Quarb engine"
 keywords = ["query", "cli", "quarb", "xpath", "jq"]
 categories = ["command-line-utilities"]
-version.workspace = true
+version = "0.5.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -62,4 +62,8 @@ quarb-xlsx = { path = "../quarb-xlsx", version = "0.5.0" }
 quarb-sql = { path = "../quarb-sql", version = "0.5.0" }
 rusqlite.workspace = true
 quarb-sqlite = { path = "../quarb-sqlite", version = "0.5.0" }
+
+# The SIGPIPE disposition and the resident-session machinery are
+# Unix-only (gated with cfg(unix) in lib.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.186"

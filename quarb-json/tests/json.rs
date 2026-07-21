@@ -89,6 +89,22 @@ fn type_traits() {
     );
 }
 
+/// JSONL: every non-empty line one value, the document their
+/// array — the same queries as the equivalent JSON array.
+#[test]
+fn jsonl_parses_as_array() {
+    let lines = "{\"name\": \"ada\", \"age\": 30}\n\n{\"name\": \"bob\", \"age\": 17}\n";
+    let a = JsonAdapter::parse_lines(lines).unwrap();
+    let vals = |q: &str| match quarb::run(q, &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(vals("/* @| count"), vec!["2"]);
+    assert_eq!(vals("/*[::age >= 18]::name"), vec!["ada"]);
+    // A malformed line is an error, not a skip.
+    assert!(JsonAdapter::parse_lines("{\"a\": 1}\nnot json\n").is_err());
+}
+
 /// Dual exposure: a scalar-valued object field answers as a
 /// property (`::age`) as well as a child (`/age::`); a
 /// container-valued field answers only to navigation.

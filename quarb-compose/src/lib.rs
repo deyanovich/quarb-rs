@@ -88,6 +88,11 @@ fn parse_inner(name: &str, content: &str) -> Option<Inner> {
                 .ok()
                 .map(Inner::Json);
         }
+        "jsonl" | "ndjson" => {
+            return quarb_json::JsonAdapter::parse_lines(content)
+                .ok()
+                .map(Inner::Json);
+        }
         "xml" | "svg" | "xhtml" => {
             return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
         }

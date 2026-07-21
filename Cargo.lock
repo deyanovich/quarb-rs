@@ -3376,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3523,7 +3523,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "flate2",
  "quarb",
@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3854,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-session"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "quarb",

@@ -653,11 +653,12 @@ root-anchored sequence of hops, each an axis followed by a name:
     (\texttt{quarb::unparse}) rendering any parsed query back to
     canonical text (\texttt{--expand} = macroexpand) \\
 \texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | rec("k", \$1)},
-\texttt{qua -i}
+\texttt{quai}
   & \live match captures (filter-stage \texttt{=\textasciitilde}
     binds groups onto the capsa) and the interactive session
     (living-query lines with rollback, session defs,
-    \texttt{:show}/\texttt{:undo}) \\
+    \texttt{:show}/\texttt{:undo}; retired from \texttt{qua} in
+    favor of the standalone \texttt{quai} crate) \\
 \texttt{@| window(-2..0) | mean}, \texttt{@| window(..0) | sum},
 \texttt{@| shift(1, ::k)}
   & \live window functions: offset-range spans over context

@@ -59,12 +59,15 @@ pub enum Doc {
 impl Doc {
     /// Parse a text document by format name — the wasm entry point,
     /// and the text tail of the native `open`. Formats: json, yaml,
-    /// toml, csv, tsv, xml, html, markdown.
+    /// toml, csv, tsv, xml, html, markdown, jsonl/ndjson.
     pub fn parse(input: &str, format: &str) -> Result<Doc> {
         match format {
             "json" => quarb_json::JsonAdapter::parse(input)
                 .map(Doc::Json)
                 .context("parsing JSON"),
+            "jsonl" | "ndjson" => quarb_json::JsonAdapter::parse_lines(input)
+                .map(Doc::Json)
+                .context("parsing JSONL"),
             "yaml" | "yml" => quarb_yaml::parse(input).map(Doc::Json).context("parsing YAML"),
             "toml" => quarb_toml::parse(input).map(Doc::Json).context("parsing TOML"),
             "csv" => quarb_csv::CsvAdapter::parse_with_delimiter(input, b',')
@@ -226,6 +229,7 @@ impl Doc {
             Some("yaml" | "yml") => Doc::parse(&text, "yaml"),
             Some("toml") => Doc::parse(&text, "toml"),
             Some("md" | "markdown") => Doc::parse(&text, "markdown"),
+            Some("jsonl" | "ndjson") => Doc::parse(&text, "jsonl"),
             _ => {
                 if is_xml(path, &text) {
                     Doc::parse(&text, "xml")

@@ -83,6 +83,9 @@ impl Doc {
             "json" => quarb_json::JsonAdapter::parse(input)
                 .map(Doc::Json)
                 .map_err(|e| format!("parsing JSON: {e}")),
+            "jsonl" | "ndjson" => quarb_json::JsonAdapter::parse_lines(input)
+                .map(Doc::Json)
+                .map_err(|e| format!("parsing JSONL: {e}")),
             "yaml" => quarb_yaml::parse(input)
                 .map(Doc::Json)
                 .map_err(|e| format!("parsing YAML: {e}")),
@@ -232,6 +235,7 @@ fn format_of(path: &Path) -> Option<&'static str> {
         .as_deref()
     {
         Some("json") => Some("json"),
+        Some("jsonl" | "ndjson") => Some("jsonl"),
         Some("yaml" | "yml") => Some("yaml"),
         Some("toml") => Some("toml"),
         Some("csv") => Some("csv"),

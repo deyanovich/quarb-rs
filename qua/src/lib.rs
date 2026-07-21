@@ -61,8 +61,11 @@ struct Cli {
     /// Directories (filesystem) and/or `.json`/`.xml`/`.html`/`.csv`
     /// files. One argument queries it directly; several are mounted
     /// as named children of one root (file stem = mount name), so a
-    /// single query — including a `<=>` join — spans them all. If
-    /// omitted, reads one document from stdin.
+    /// single query — including a `<=>` join — spans them all.
+    /// `NAME=TARGET` picks the mount name explicitly (`ga=events.json`
+    /// mounts as `/ga`) — the way to a clean name when the target is
+    /// a URL with a query string. If omitted, reads one document
+    /// from stdin.
     paths: Vec<PathBuf>,
 
     /// Include hidden entries (filesystem only).
@@ -115,9 +118,9 @@ struct Cli {
     #[arg(long)]
     explain: bool,
 
-    /// Save the result instead of printing it: `.db`/`.sqlite`
-    /// writes a SQLite table (records become columns), `.json` a
-    /// JSON array — both first-class inputs for later queries.
+    /// Save the result instead of printing it: `.json` writes a
+    /// JSON array, any other extension a SQLite table (records
+    /// become columns) — both first-class inputs for later queries.
     #[arg(long, value_name = "FILE")]
     save: Option<PathBuf>,
 
@@ -157,13 +160,6 @@ struct Cli {
     /// pinned run replays exactly.
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
-
-    /// Interactive session: lines starting with a pipe extend the
-    /// current query, anything else starts a new one; ':help' lists
-    /// the commands. Inputs re-read per line, so live data stays
-    /// live.
-    #[arg(short = 'i', long)]
-    interactive: bool,
 
     /// Resident session: reuse (or start) a background qua that
     /// keeps the materialized inputs alive, so repeated queries
@@ -236,6 +232,7 @@ thread_local! {
     static NOW_INSTANT: std::cell::Cell<(i64, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+#[cfg(unix)]
 thread_local! {
     /// Resident-serve mode: the socket to bind, the idle TTL, and
     /// whether --now pinned the instant (a pinned session replays;
@@ -243,17 +240,6 @@ thread_local! {
     /// `main`; `run` checks it and enters the serve loop.
     static RESIDENT: std::cell::RefCell<Option<(PathBuf, u64, bool)>> =
         const { std::cell::RefCell::new(None) };
-}
-
-struct Expand;
-static EXPAND: Expand = Expand;
-impl Expand {
-    fn get(&self) -> bool {
-        EXPAND_FLAG.with(|f| f.get())
-    }
-    fn set(&self, v: bool) {
-        EXPAND_FLAG.with(|f| f.set(v));
-    }
 }
 
 /// Split a scheme-prefixed query (`github:/torvalds/…`) into
@@ -322,9 +308,6 @@ pub fn cli_main() -> anyhow::Result<()> {
         cli.query = translation.query;
     }
 
-    // Interactive: the session manages its own defs and queries.
-    // Ergonomics: `qua -i data.csv` parses data.csv as the query
-    // positional; shift an existing path over.
     if cli.highlight {
         // Explicit --highlight forces color (the query is the
         // deliverable), but NO_COLOR still wins.
@@ -336,20 +319,14 @@ pub fn cli_main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if cli.interactive {
-        if std::path::Path::new(&cli.query).exists() {
-            let p = std::mem::take(&mut cli.query);
-            cli.paths.insert(0, PathBuf::from(p));
-        }
-        return repl(&cli);
-    }
-
     // A --defs file holds definitions only; validate it as such,
     // then let its statements precede the query, where inline defs
     // (and duplicate detection) already work.
     if let Some(defs_path) = &cli.defs {
         let text = std::fs::read_to_string(defs_path)
             .with_context(|| format!("reading {}", defs_path.display()))?;
+        // Strip a leading UTF-8 BOM, as the document readers do.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
         quarb::parse_defs(&text)
             .with_context(|| format!("parsing definitions in {}", defs_path.display()))?;
         cli.query = format!("{text}\n{}", cli.query);
@@ -368,7 +345,7 @@ pub fn cli_main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
-        EXPAND.set(true);
+        EXPAND_FLAG.with(|f| f.set(true));
     }
 
     if let Some(path) = &cli.save {
@@ -410,20 +387,26 @@ pub fn cli_main() -> anyhow::Result<()> {
 
     if cli.resident || cli.resident_serve {
         anyhow::ensure!(
-            !cli.kaiv && cli.save.is_none() && !cli.expand && !cli.interactive,
-            "--resident does not combine with --kaiv/--save/--expand/-i"
+            !cli.kaiv && cli.save.is_none() && !cli.expand,
+            "--resident does not combine with --kaiv/--save/--expand"
         );
         anyhow::ensure!(
             !cli.paths.is_empty(),
             "--resident needs file/directory inputs (stdin has no session identity)"
         );
+        #[cfg(not(unix))]
+        anyhow::bail!("--resident needs Unix domain sockets (unavailable on this platform)");
     }
-    if cli.resident && !cli.resident_serve {
-        return resident_client(&cli);
-    }
-    if cli.resident_serve {
-        let sock = resident_socket(&cli)?;
-        RESIDENT.with(|r| *r.borrow_mut() = Some((sock, cli.resident_ttl, cli.now.is_some())));
+    #[cfg(unix)]
+    {
+        if cli.resident && !cli.resident_serve {
+            return resident_client(&cli);
+        }
+        if cli.resident_serve {
+            let sock = resident_socket(&cli)?;
+            RESIDENT
+                .with(|r| *r.borrow_mut() = Some((sock, cli.resident_ttl, cli.now.is_some())));
+        }
     }
     execute(&cli, &cli.query)
 }
@@ -439,6 +422,7 @@ pub fn cli_main() -> anyhow::Result<()> {
 /// The session socket: keyed by the canonical target set plus every
 /// flag that changes query semantics, so different views of the
 /// same tree get different sessions.
+#[cfg(unix)]
 fn resident_socket(cli: &Cli) -> anyhow::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -472,6 +456,7 @@ fn resident_socket(cli: &Cli) -> anyhow::Result<PathBuf> {
 /// impostor directory would let its owner remove or replace live
 /// sockets, so an unverifiable dir is a hard error rather than a
 /// quiet risk.
+#[cfg(unix)]
 fn resident_dir() -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -496,6 +481,7 @@ fn resident_dir() -> anyhow::Result<PathBuf> {
 
 /// Client side: connect to the session (starting it if needed),
 /// send the query, stream the result.
+#[cfg(unix)]
 fn resident_client(cli: &Cli) -> anyhow::Result<()> {
     use std::io::Write as _;
     let sock = resident_socket(cli)?;
@@ -504,7 +490,7 @@ fn resident_client(cli: &Cli) -> anyhow::Result<()> {
         // No live session. The server owns stale-socket cleanup
         // (removing here would race a concurrent client into
         // orphaning a daemon that just bound).
-        Err(_) => spawn_resident(cli, &sock)?,
+        Err(_) => spawn_resident(&sock)?,
     };
     let q = cli.query.as_bytes();
     stream.write_all(format!("Q {}\n", q.len()).as_bytes())?;
@@ -540,10 +526,8 @@ fn resident_client(cli: &Cli) -> anyhow::Result<()> {
 /// internal serve flag), detach it from the terminal, and wait for
 /// its socket — the wait covers materialization, which for a large
 /// tree is exactly the cost the session exists to amortize.
-fn spawn_resident(
-    cli: &Cli,
-    sock: &std::path::Path,
-) -> anyhow::Result<std::os::unix::net::UnixStream> {
+#[cfg(unix)]
+fn spawn_resident(sock: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixStream> {
     use std::os::unix::process::CommandExt as _;
     let log = sock.with_extension("log");
     let logfile =
@@ -572,7 +556,6 @@ fn spawn_resident(
     let mut last_note = 0u64;
     loop {
         if let Ok(s) = std::os::unix::net::UnixStream::connect(sock) {
-            let _ = cli; // key derivation already used it
             return Ok(s);
         }
         if let Some(status) = child.try_wait()? {
@@ -600,12 +583,14 @@ fn spawn_resident(
 /// The largest query frame a session accepts. Query text is typed
 /// by a person; the cap only exists so a garbled length header
 /// cannot make the daemon allocate gigabytes.
+#[cfg(unix)]
 const RESIDENT_MAX_QUERY: usize = 1 << 20;
 
 /// Server side: bind the socket and answer queries against the
 /// standing adapter until the idle TTL expires. Queries run
 /// serially; each failure answers that client and the session
 /// lives on.
+#[cfg(unix)]
 fn resident_serve_loop<A: AstAdapter>(
     adapter: &A,
     render: impl Fn(NodeId) -> String,
@@ -614,6 +599,15 @@ fn resident_serve_loop<A: AstAdapter>(
     now_pinned: bool,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
+    // Clients can vanish mid-response (Ctrl-C, a closed pipe on
+    // their stdout): the write then raises SIGPIPE, and the SIG_DFL
+    // disposition cli_main restores (right for the one-shot filter)
+    // would kill the whole session — and its materialization — with
+    // it. Ignore it here; the write fails with EPIPE instead, which
+    // the per-client `let _ =` absorbs.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     // Exclusive bind. When the path is taken, probe it: a live
     // daemon answering means another spawn won the race — defer to
     // it and exit, instead of unbinding it and idling as an
@@ -710,6 +704,7 @@ fn resident_serve_loop<A: AstAdapter>(
 /// existing print-based output paths need no plumbing, and
 /// non-UTF-8 output survives verbatim). Queries in a session run
 /// serially, which keeps the fd dance safe.
+#[cfg(unix)]
 fn with_stdout_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
     use std::io::{Read as _, Seek as _, Write as _};
     use std::os::fd::AsRawFd as _;
@@ -736,6 +731,7 @@ fn with_stdout_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
 }
 
 /// An anonymous scratch file for the capture (unlinked at once).
+#[cfg(unix)]
 fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
     let path = std::env::temp_dir().join(format!(
         "quarb-capture-{}-{:x}",
@@ -755,34 +751,35 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
 }
 
 /// Run one query text against the CLI's inputs, printing results —
-/// the whole adapter dispatch. Inputs are (re-)read on every call,
-/// so an interactive session sees live data.
+/// the whole adapter dispatch.
 fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
-    // Several inputs are mounted as named children of one root.
-    if cli.paths.len() >= 2 {
+    // Several inputs are mounted as named children of one root; a
+    // single `NAME=TARGET` input mounts too, so its name is real.
+    if cli.paths.len() >= 2 || cli.paths.iter().any(|p| split_alias(p).is_some()) {
         let mut mounts: Vec<Mount> = Vec::new();
         let mut renders: Vec<Box<dyn Fn(NodeId) -> String>> = Vec::new();
         for (i, p) in cli.paths.iter().enumerate() {
-            let stem = p
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("doc{i}"));
-            // Mounts are addressed by file stem, so two inputs sharing
-            // a stem would silently union under one name with no way to
-            // target either — refuse rather than merge distinct sources.
-            if mounts.iter().any(|m| m.name == stem) {
+            let (name, target) = match split_alias(p) {
+                Some(alias) => alias,
+                None => (
+                    p.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("doc{i}")),
+                    p.clone(),
+                ),
+            };
+            // Mounts are addressed by name, so two inputs sharing one
+            // would silently union under it with no way to target
+            // either — refuse rather than merge distinct sources.
+            if mounts.iter().any(|m| m.name == name) {
                 anyhow::bail!(
-                    "input '{}' mounts as '{stem}', colliding with an earlier input of the \
-                     same file stem; give each a distinct name (rename or use inputs with \
-                     different basenames)",
+                    "input '{}' mounts as '{name}', colliding with an earlier input of the \
+                     same name; give one an explicit alias (NAME=TARGET)",
                     p.display()
                 );
             }
-            let (adapter, render) = open_mount(p, cli)?;
-            mounts.push(Mount {
-                name: stem,
-                adapter,
-            });
+            let (adapter, render) = open_mount(&target, cli)?;
+            mounts.push(Mount { name, adapter });
             renders.push(render);
         }
         let sources = cli
@@ -927,7 +924,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -937,7 +934,11 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = MssqlAdapter::connect(s).context("connecting to SQL Server")?;
+        let adapter = match partial_plan(cli, query) {
+            Some(p) => MssqlAdapter::connect_filtered(s, &p.table, &p.where_sql),
+            None => MssqlAdapter::connect(s),
+        }
+        .context("connecting to SQL Server")?;
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -953,7 +954,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -963,7 +964,11 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = OracleAdapter::connect(s).context("connecting to Oracle")?;
+        let adapter = match partial_plan(cli, query) {
+            Some(p) => OracleAdapter::connect_filtered(s, &p.table, &p.where_sql),
+            None => OracleAdapter::connect(s),
+        }
+        .context("connecting to Oracle")?;
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1058,7 +1063,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1093,7 +1098,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1130,7 +1135,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1271,7 +1276,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1308,7 +1313,9 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     // CBOR is binary: dispatch on the raw bytes before the text
     // read (extension-only — CBOR has no reliable magic).
     if let Some(p) = &path
-        && p.extension().and_then(|e| e.to_str()) == Some("cbor")
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cbor"))
     {
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         let adapter = quarb_cbor::CborAdapter::parse(&bytes).context("parsing CBOR")?;
@@ -1336,7 +1343,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows);
+                    print_raw(&cols, rows)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1396,6 +1403,8 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     }
     // YAML/TOML are extension-only (both share the JSON model).
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        let ext = ext.as_str();
         if matches!(ext, "yaml" | "yml") {
             let adapter = quarb_yaml::parse(&text).context("parsing YAML")?;
             return run(query, &adapter, |n| adapter.pointer(n), kaiv);
@@ -1408,10 +1417,14 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             let adapter = quarb_markdown::parse(&text);
             return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
+        if matches!(ext, "jsonl" | "ndjson") {
+            let adapter = JsonAdapter::parse_lines(&text).context("parsing JSONL")?;
+            return run(query, &adapter, |n| adapter.pointer(n), kaiv);
+        }
         // kaiv documents — the typed arbor whose namepaths ARE
         // quarb paths, so --kaiv output re-mounts (graft and join
         // over typed results). Extension picks the pipeline stage:
-        // .kaiv is canonical, .kaiv compiles first, .raiv
+        // .kaiv is canonical, .daiv compiles first, .raiv
         // denormalizes its $field references.
         if matches!(ext, "daiv" | "kaiv" | "raiv") {
             let dir = path.and_then(|p| p.parent());
@@ -1442,135 +1455,18 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         let adapter = HtmlAdapter::parse(&text);
         run(query, &adapter, |n| adapter.locator(n), kaiv)
     } else {
-        let adapter = JsonAdapter::parse(&text).context("parsing JSON")?;
+        // A whole-document parse first; a stream of per-line values
+        // (JSONL — qua's own output shape) second, so results pipe
+        // back in. The original error wins if neither reading fits.
+        let adapter = match JsonAdapter::parse(&text) {
+            Ok(a) => a,
+            Err(e) => match JsonAdapter::parse_lines(&text) {
+                Ok(a) => a,
+                Err(_) => return Err(e).context("parsing JSON"),
+            },
+        };
         run(query, &adapter, |n| adapter.pointer(n), kaiv)
     }
-}
-
-/// The interactive session: a read-eval-print loop where the
-/// current query is living state. A line starting with a pipe
-/// extends it (and is rolled back if it fails); a `def` line adds a
-/// fragment; any other query line starts fresh. Inputs are re-read
-/// per line, so live data stays live.
-fn repl(cli: &Cli) -> anyhow::Result<()> {
-    use std::io::{BufRead, Write};
-
-    if cli.paths.is_empty() {
-        anyhow::bail!("interactive mode needs an input path (stdin drives the session)");
-    }
-    // Definition lines accumulate; --defs seeds them.
-    let mut defs = match &cli.defs {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            quarb::parse_defs(&text)
-                .with_context(|| format!("parsing definitions in {}", path.display()))?;
-            text
-        }
-        None => String::new(),
-    };
-    // The current query, one segment per accepted line (`:undo`
-    // pops one).
-    let mut segments: Vec<String> = Vec::new();
-    let combined = |defs: &str, segments: &[String]| {
-        let q = segments.join(" ");
-        if defs.is_empty() {
-            q
-        } else {
-            format!("{defs}\n{q}")
-        }
-    };
-
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-    loop {
-        print!("qua> ");
-        std::io::stdout().flush()?;
-        let Some(line) = lines.next() else { break };
-        let line = line?;
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Commands: `:word` (a query cannot start with a lone `:`).
-        if line.starts_with(':') && !line.starts_with("::") {
-            match line {
-                ":q" | ":quit" => break,
-                ":help" | ":h" => {
-                    println!(
-                        "  <query>        run a fresh query\n                           | <stage> ...   extend the current query (rolls back on error)\n                           def &n: ...;    add a fragment definition\n                           :show           print the current query (and its expansion)\n                           :undo           drop the last accepted line\n                           :reset          clear the current query\n                           :quit           leave (also Ctrl-D)"
-                    );
-                }
-                ":show" | ":s" => {
-                    if segments.is_empty() {
-                        println!("(no current query)");
-                    } else {
-                        let q = segments.join(" ");
-                        // Color the echo when stdout is a terminal and
-                        // NO_COLOR is unset; otherwise plain text.
-                        if std::io::stdout().is_terminal()
-                            && std::env::var_os("NO_COLOR").is_none()
-                        {
-                            println!("{}", quarb::highlight::highlight_ansi(&q));
-                        } else {
-                            println!("{q}");
-                        }
-                        if !defs.is_empty()
-                            && let Ok(expanded) =
-                                quarb::expand(&combined(&defs, &segments), &quarb::Defs::default())
-                        {
-                            println!("expanded: {expanded}");
-                        }
-                    }
-                }
-                ":undo" | ":u" => {
-                    if segments.pop().is_none() {
-                        println!("(nothing to undo)");
-                    } else if !segments.is_empty() {
-                        let _ = execute(cli, &combined(&defs, &segments));
-                    }
-                }
-                ":reset" | ":r" => segments.clear(),
-                other => println!("unknown command '{other}' (:help lists them)"),
-            }
-            continue;
-        }
-
-        // A definition line (template or macro) extends the
-        // session's fragment table.
-        if line.starts_with("def ")
-            || line == "def"
-            || line.starts_with("macro ")
-            || line == "macro"
-        {
-            let candidate = format!("{defs}\n{line}");
-            match quarb::parse_defs(&candidate) {
-                Ok(_) => defs = candidate,
-                Err(e) => eprintln!("error: {e}"),
-            }
-            continue;
-        }
-
-        // A pipe line extends the current query; anything else
-        // starts a new one. Failed lines are not committed.
-        let candidate: Vec<String> = if line.starts_with('|') || line.starts_with("@|") {
-            if segments.is_empty() {
-                eprintln!("error: no current query to extend (start with a path)");
-                continue;
-            }
-            let mut c = segments.clone();
-            c.push(line.to_string());
-            c
-        } else {
-            vec![line.to_string()]
-        };
-        match execute(cli, &combined(&defs, &candidate)) {
-            Ok(()) => segments = candidate,
-            Err(e) => eprintln!("error: {e:#}"),
-        }
-    }
-    Ok(())
 }
 
 /// Whether the input is a Quarb query file (`.quarb`), to be
@@ -1582,9 +1478,18 @@ fn is_quarb(path: Option<&Path>) -> bool {
 }
 
 /// Whether pushdown applies: enabled, not emitting kaiv (which
-/// needs node provenance), and not in --expand mode.
+/// needs node provenance), not in --expand mode, not saving, and
+/// not resident. A resident daemon must reach the serve loop with
+/// the unfiltered adapter: a first-query full pushdown would answer
+/// and exit before binding the socket, and a partial pushdown would
+/// bake its WHERE into the standing arbor every later query reuses.
 fn pushdown_applies(cli: &Cli) -> bool {
-    !cli.no_pushdown && !cli.kaiv && !EXPAND.get() && cli.save.is_none()
+    !cli.no_pushdown
+        && !cli.kaiv
+        && !EXPAND_FLAG.with(|f| f.get())
+        && cli.save.is_none()
+        && !cli.resident
+        && !cli.resident_serve
 }
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
@@ -1645,18 +1550,24 @@ fn pushdown_plan(
 }
 
 /// Print a pushed-down result the way the engine would: bare
-/// values for one column, records for several.
-fn print_raw(cols: &[String], rows: Vec<Vec<Value>>) {
+/// values for one column, records for several. Buffered: one
+/// flush at the end, not a syscall per line.
+fn print_raw(cols: &[String], rows: Vec<Vec<Value>>) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
     for row in rows {
         if cols.len() <= 1 {
             for v in row {
-                println!("{v}");
+                writeln!(out, "{v}")?;
             }
         } else {
             let rec = Value::Record(cols.iter().cloned().zip(row).collect());
-            println!("{rec}");
+            writeln!(out, "{rec}")?;
         }
     }
+    out.flush()?;
+    Ok(())
 }
 
 /// Whether the input names a PostgreSQL connection rather than a
@@ -1666,9 +1577,41 @@ fn is_pg_config(s: &str) -> bool {
     s.starts_with("postgres://") || s.starts_with("postgresql://") || s.starts_with("host=")
 }
 
-/// Whether the input is a SQLite database: by extension
-/// (`.db` / `.sqlite` / `.sqlite3`), or by the 16-byte magic.
-/// Zip-family or tar archives, by magic bytes or extension.
+/// Whether the extension belongs to a format the text dispatch
+/// owns: the archive/SQLite magic sniffs must not pre-empt these —
+/// a CSV whose first cell starts with "PK" is still a CSV.
+fn known_text_ext(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "quarb"
+                | "csv"
+                | "tsv"
+                | "json"
+                | "jsonl"
+                | "ndjson"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "md"
+                | "markdown"
+                | "kaiv"
+                | "daiv"
+                | "raiv"
+                | "atd"
+                | "atk"
+                | "xml"
+                | "svg"
+                | "xhtml"
+                | "html"
+                | "htm"
+                | "txt"
+        )
+    })
+}
+
+/// Zip-family or tar archives, by extension or magic bytes. The
+/// magic sniff skips extensions the text dispatch owns.
 fn is_archive(path: &Path) -> bool {
     if let Some(e) = path.extension().and_then(|e| e.to_str())
         && matches!(
@@ -1678,6 +1621,9 @@ fn is_archive(path: &Path) -> bool {
     {
         return true;
     }
+    if known_text_ext(path) {
+        return false;
+    }
     let mut buf = [0u8; 2];
     std::fs::File::open(path)
         .and_then(|mut f| std::io::Read::read(&mut f, &mut buf))
@@ -1685,6 +1631,9 @@ fn is_archive(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the input is a SQLite database: by extension
+/// (`.db` / `.sqlite` / `.sqlite3`), or by the 16-byte magic (again
+/// skipped for extensions the text dispatch owns).
 fn is_sqlite(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         e.eq_ignore_ascii_case("db")
@@ -1692,6 +1641,9 @@ fn is_sqlite(path: &Path) -> bool {
             || e.eq_ignore_ascii_case("sqlite3")
     }) {
         return true;
+    }
+    if known_text_ext(path) {
+        return false;
     }
     let mut buf = [0u8; 16];
     std::fs::File::open(path)
@@ -1754,15 +1706,32 @@ fn is_html(path: Option<&Path>, text: &str) -> bool {
     by_ext || text.trim_start().starts_with('<')
 }
 
-/// Run `query` against `adapter`, printing node locations (via
-/// `render`) or projected values, one per line.
+/// An input argument's explicit mount alias: `NAME=TARGET` mounts
+/// TARGET as `/NAME`. The prefix must look like a mount name (a
+/// letter or `_`, then letters, digits, `_`, `-`) and the argument
+/// must not name an existing file — a real file called `a=b.json`
+/// still mounts by its stem.
+fn split_alias(p: &Path) -> Option<(String, PathBuf)> {
+    let s = p.to_str()?;
+    let (name, target) = s.split_once('=')?;
+    if target.is_empty() || p.exists() {
+        return None;
+    }
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    Some((name.to_string(), PathBuf::from(target)))
+}
+
 /// A boxed adapter and its locator renderer, ready to mount.
 type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
 
-/// Open one input as a boxed adapter plus its locator renderer, for
-/// mounting. Format detection matches the single-input flow.
 /// Mount kaiv text by its extension's pipeline stage: `.kaiv` is
-/// canonical, `.kaiv` is authored (compile + denormalize), `.raiv`
+/// canonical, `.daiv` is authored (compile + denormalize), `.raiv`
 /// is relational (denormalize). The file's directory anchors the
 /// resolver, so `.!units` / `.!types` imports (and a sibling
 /// `kaiv.kaiv`) resolve exactly as `kaiv build` there would.
@@ -1779,12 +1748,25 @@ fn parse_kaiv_ext(
     parsed.map_err(|e| anyhow::anyhow!("parsing {ext}: {e}"))
 }
 
+/// Open one input as a boxed adapter plus its locator renderer, for
+/// mounting. Format detection matches the single-input flow.
 fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if p.is_dir() {
         let opts = FsOptions {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
         };
+        if cli.descend {
+            let a = Rc::new(ComposeAdapter::with_source_paths(
+                FsAdapter::with_options(p, opts)?,
+                |fs, n| Some(fs.path(n)),
+            ));
+            let r = a.clone();
+            return Ok((
+                Box::new(Shared(a)),
+                Box::new(move |n| r.locator(n, |o| r.outer().path(o).display().to_string())),
+            ));
+        }
         let a = Rc::new(FsAdapter::with_options(p, opts)?);
         let r = a.clone();
         return Ok((
@@ -1893,7 +1875,17 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if let Some(s) = p.to_str()
         && s.starts_with("firebase://")
     {
-        let a = Rc::new(FirebaseAdapter::connect(s).context("connecting to Firebase")?);
+        let adapter = match &cli.refs {
+            Some(f) => {
+                let text = std::fs::read_to_string(f)
+                    .with_context(|| format!("reading refs file {}", f.display()))?;
+                let refs = quarb_firebase::parse_refs(&text).context("parsing refs")?;
+                FirebaseAdapter::connect_with_refs(s, refs)
+            }
+            None => FirebaseAdapter::connect(s),
+        }
+        .context("connecting to Firebase")?;
+        let a = Rc::new(adapter);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
@@ -1951,12 +1943,31 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
+    // Source code: files with a tree-sitter grammar parse into
+    // their syntax tree, matching the single-input flow.
+    if p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| quarb_code::supported(&e.to_ascii_lowercase()))
+    {
+        let a = Rc::new(CodeAdapter::open(p).context("parsing source file")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
     // Spreadsheets before the archive check — .xlsx/.ods ARE zips (PK
     // magic), but the sheets are the point, not the raw XML entries.
     if let Some(ext) = p.extension().and_then(|e| e.to_str())
         && matches!(ext.to_ascii_lowercase().as_str(), "xlsx" | "xls" | "ods")
     {
         let a = Rc::new(XlsxAdapter::open(p).context("opening workbook")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    // DuckDB databases, by extension.
+    if p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
+    {
+        let a = Rc::new(DuckdbAdapter::open(p).context("opening DuckDB database")?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
@@ -1969,6 +1980,17 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             Box::new(Shared(a)),
             Box::new(move |n| r.locator(n, |o| r.outer().locator(o))),
         ));
+    }
+    // CBOR is binary: dispatch on the extension before the text
+    // read, matching the single-input flow.
+    if p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cbor"))
+    {
+        let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let a = Rc::new(quarb_cbor::CborAdapter::parse(&bytes).context("parsing CBOR")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.pointer(n))));
     }
     if is_sqlite(p) {
         let a = Rc::new(SqliteAdapter::open(p).context("opening SQLite database")?);
@@ -1989,16 +2011,21 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str())
-        && matches!(ext, "daiv" | "kaiv" | "raiv")
+        && matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "daiv" | "kaiv" | "raiv"
+        )
     {
         let dir = path.and_then(|p| p.parent());
-        let a = Rc::new(parse_kaiv_ext(ext, &text, dir)?);
+        let a = Rc::new(parse_kaiv_ext(&ext.to_ascii_lowercase(), &text, dir)?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     // YAML/TOML/Markdown are extension-only, matching the single-input
     // flow (YAML/TOML share the JSON pointer model; Markdown locates).
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        let ext = ext.as_str();
         if matches!(ext, "yaml" | "yml") {
             let a = Rc::new(quarb_yaml::parse(&text).context("parsing YAML")?);
             let r = a.clone();
@@ -2013,6 +2040,11 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             let a = Rc::new(quarb_markdown::parse(&text));
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
+        if matches!(ext, "jsonl" | "ndjson") {
+            let a = Rc::new(JsonAdapter::parse_lines(&text).context("parsing JSONL")?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.pointer(n))));
         }
         if matches!(ext, "atd" | "atk") {
             let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
@@ -2043,7 +2075,15 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))))
     } else {
-        let a = Rc::new(JsonAdapter::parse(&text).context("parsing JSON")?);
+        // Whole-document JSON first, per-line (JSONL) second —
+        // matching the single-input flow.
+        let a = match JsonAdapter::parse(&text) {
+            Ok(a) => Rc::new(a),
+            Err(e) => match JsonAdapter::parse_lines(&text) {
+                Ok(a) => Rc::new(a),
+                Err(_) => return Err(e).context("parsing JSON"),
+            },
+        };
         let r = a.clone();
         Ok((Box::new(Shared(a)), Box::new(move |n| r.pointer(n))))
     }
@@ -2069,6 +2109,8 @@ fn run_relational<A: AstAdapter>(
     )
 }
 
+/// Run `query` against `adapter`, printing node locations (via
+/// `render`) or projected values, one per line.
 fn run<A: AstAdapter>(
     query: &str,
     adapter: &A,
@@ -2079,6 +2121,7 @@ fn run<A: AstAdapter>(
     // the one place a resident session takes over: the adapter is
     // built and materialized, so instead of answering once and
     // exiting, serve queries against it until the TTL.
+    #[cfg(unix)]
     if let Some((sock, ttl, pinned)) = RESIDENT.with(|r| r.borrow().clone()) {
         return resident_serve_loop(adapter, render, &sock, ttl, pinned);
     }
@@ -2142,7 +2185,7 @@ fn run_inner<A: AstAdapter>(
 ) -> anyhow::Result<()> {
     // --expand with an input: expansion with the dataset at hand,
     // so data-aware macros (&name!) can read it.
-    if EXPAND.get() {
+    if EXPAND_FLAG.with(|f| f.get()) {
         println!(
             "{}",
             quarb::expand_with(query, &quarb::Defs::default(), adapter)
@@ -2166,18 +2209,23 @@ fn run_inner<A: AstAdapter>(
         eprintln!("saved {n} row(s) to {}", path.display());
         return Ok(());
     }
+    // Buffered: one flush at the end, not a syscall per line.
+    use std::io::Write as _;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
     match quarb::run(query, adapter)? {
         QueryResult::Nodes(nodes) => {
             for node in nodes {
-                println!("{}", render(node));
+                writeln!(out, "{}", render(node))?;
             }
         }
         QueryResult::Values(values) => {
             for value in values {
-                println!("{value}");
+                writeln!(out, "{value}")?;
             }
         }
     }
+    out.flush()?;
     Ok(())
 }
 
@@ -2193,12 +2241,22 @@ fn save_result(path: &Path, table: &str, values: Vec<Value>) -> anyhow::Result<(
         .unwrap_or("")
         .to_ascii_lowercase();
     if ext == "json" {
-        if path.exists() {
-            anyhow::bail!("{} already exists (refusing to overwrite)", path.display());
-        }
+        use std::io::Write as _;
+        // create_new: the existence check and the create are one
+        // atomic open, so a concurrent writer cannot slip between.
+        let mut f = match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                anyhow::bail!("{} already exists (refusing to overwrite)", path.display())
+            }
+            Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+        };
         let items: Vec<String> = values.iter().map(|v| v.to_json()).collect();
-        std::fs::write(
-            path,
+        f.write_all(
             format!(
                 "[{}]
 ",
@@ -2206,13 +2264,14 @@ fn save_result(path: &Path, table: &str, values: Vec<Value>) -> anyhow::Result<(
                     ",
  "
                 )
-            ),
+            )
+            .as_bytes(),
         )?;
         return Ok(());
     }
     // SQLite: records become columns (first-appearance union),
     // scalars a single `value` column.
-    let conn =
+    let mut conn =
         rusqlite::Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
@@ -2241,37 +2300,48 @@ fn save_result(path: &Path, table: &str, values: Vec<Value>) -> anyhow::Result<(
     if columns.is_empty() {
         columns.push("value".to_string());
     }
-    let decl: Vec<String> = columns.iter().map(|c| format!("\"{c}\"")).collect();
-    conn.execute(
-        &format!("CREATE TABLE \"{table}\" ({})", decl.join(", ")),
+    // Identifiers come from the data (record field names can be
+    // arbitrary document keys): escape embedded quotes rather than
+    // letting them break — or rewrite — the statement.
+    let ident = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let decl: Vec<String> = columns.iter().map(|c| ident(c)).collect();
+    // One transaction for the whole save: per-row implicit
+    // transactions would fsync every insert.
+    let tx = conn.transaction()?;
+    tx.execute(
+        &format!("CREATE TABLE {} ({})", ident(table), decl.join(", ")),
         [],
     )?;
     let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
-    let mut stmt = conn.prepare(&format!(
-        "INSERT INTO \"{table}\" ({}) VALUES ({})",
-        decl.join(", "),
-        placeholders.join(", ")
-    ))?;
-    for v in values {
-        let row: Vec<rusqlite::types::Value> = if all_records {
-            let Value::Record(fields) = &v else {
-                unreachable!()
+    {
+        let mut stmt = tx.prepare(&format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            ident(table),
+            decl.join(", "),
+            placeholders.join(", ")
+        ))?;
+        for v in values {
+            let row: Vec<rusqlite::types::Value> = if all_records {
+                let Value::Record(fields) = &v else {
+                    unreachable!()
+                };
+                columns
+                    .iter()
+                    .map(|c| {
+                        fields
+                            .iter()
+                            .find(|(k, _)| k == c)
+                            .map(|(_, v)| sqlite_value(v))
+                            .unwrap_or(rusqlite::types::Value::Null)
+                    })
+                    .collect()
+            } else {
+                vec![sqlite_value(&v)]
             };
-            columns
-                .iter()
-                .map(|c| {
-                    fields
-                        .iter()
-                        .find(|(k, _)| k == c)
-                        .map(|(_, v)| sqlite_value(v))
-                        .unwrap_or(rusqlite::types::Value::Null)
-                })
-                .collect()
-        } else {
-            vec![sqlite_value(&v)]
-        };
-        stmt.execute(rusqlite::params_from_iter(row))?;
+            stmt.execute(rusqlite::params_from_iter(row))?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -2306,8 +2376,23 @@ fn emit_kaiv(
             timestamp: None,
             dpid: Some(ident_of(&render(*node))),
         };
+        // Sanitization can collide distinct field names ("a b" and
+        // "a-b" both become "a-b"); suffix rather than abort.
+        let mut used = std::collections::HashSet::new();
         let mut put = |field: &str, value: &Value| -> anyhow::Result<()> {
-            let namepath = format!("/@results/{i}::{}", ident_of(field));
+            let mut id = ident_of(field);
+            if !used.insert(id.clone()) {
+                let mut k = 2;
+                loop {
+                    let candidate = format!("{id}-{k}");
+                    if used.insert(candidate.clone()) {
+                        id = candidate;
+                        break;
+                    }
+                    k += 1;
+                }
+            }
+            let namepath = format!("/@results/{i}::{id}");
             // Quantities emit unit-annotated (`!float:km`), in
             // their written unit so the authored form survives the
             // loop; instants emit as their std/time type, so a
@@ -2402,8 +2487,9 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
     }
 }
 
-/// Sanitize a locator or field name into kaiv's identifier charset
-/// ([A-Za-z0-9_.-]): runs of other characters become one `-`.
+/// Sanitize a locator or field name into kaiv's identifier charset:
+/// ASCII alphanumerics and `_` pass through; each run of any other
+/// characters (including `.` and `-`) collapses to one `-`.
 fn ident_of(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut dash = false;
@@ -2426,7 +2512,28 @@ fn ident_of(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_scheme_query;
+    use super::{split_alias, split_scheme_query};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn mount_aliases_split() {
+        assert_eq!(
+            split_alias(Path::new("ga=bigquery://p/quarb_ga?account=a@b.c")),
+            Some((
+                "ga".to_string(),
+                PathBuf::from("bigquery://p/quarb_ga?account=a@b.c")
+            ))
+        );
+        assert_eq!(
+            split_alias(Path::new("raw_2026-06=events.jsonl")),
+            Some(("raw_2026-06".to_string(), PathBuf::from("events.jsonl")))
+        );
+        // Not aliases: no '=', empty target, non-name prefix.
+        assert_eq!(split_alias(Path::new("events.jsonl")), None);
+        assert_eq!(split_alias(Path::new("ga=")), None);
+        assert_eq!(split_alias(Path::new("2ga=x.json")), None);
+        assert_eq!(split_alias(Path::new("a/b=x.json")), None);
+    }
 
     #[test]
     fn scheme_prefixed_queries_split() {

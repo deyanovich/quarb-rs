@@ -22,6 +22,10 @@
 //! Object keys are visited in document order: the workspace builds
 //! serde_json with its `preserve_order` feature, so keys keep the order
 //! they appear in the source text rather than being sorted.
+//!
+//! Newline-delimited JSON (`.jsonl` / `.ndjson`) parses via
+//! [`JsonAdapter::parse_lines`]: the lines become one array, so the
+//! same queries work over both spellings of a record stream.
 
 use quarb::{AstAdapter, NodeId, Value};
 use serde_json::Value as Json;
@@ -80,6 +84,20 @@ impl JsonAdapter {
     /// Parse `text` as JSON and build the adapter.
     pub fn parse(text: &str) -> serde_json::Result<Self> {
         Ok(Self::from_json_value(serde_json::from_str(text)?))
+    }
+
+    /// Parse newline-delimited JSON (JSONL / NDJSON): every
+    /// non-empty line is one value, and the document is their
+    /// array — so `/*` iterates the lines, exactly as it would
+    /// the equivalent JSON array. This is also the shape `qua`
+    /// itself emits, so results pipe back in.
+    pub fn parse_lines(text: &str) -> serde_json::Result<Self> {
+        let values = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<Vec<Json>>>()?;
+        Ok(Self::from_json_value(Json::Array(values)))
     }
 
     /// Build the adapter from an already-parsed value. YAML and
