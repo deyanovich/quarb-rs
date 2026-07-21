@@ -173,7 +173,10 @@ impl Doc {
             let fs = quarb_fs::FsAdapter::with_options(path, fsopts)
                 .with_context(|| format!("opening directory {}", path.display()))?;
             return Ok(if opts.descend {
-                Doc::FsDeep(quarb_compose::ComposeAdapter::new(fs))
+                Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(
+                    fs,
+                    |fs, n| Some(fs.path(n)),
+                ))
             } else {
                 Doc::Fs(fs)
             });

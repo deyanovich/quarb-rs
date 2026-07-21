@@ -45,7 +45,7 @@ fn pushdown_matches_scan() {
         "/invoices/* | ::qty @| sum",
     ];
     for q in cases {
-        let plan = quarb_sql::pushdown(q).expect("plan");
+        let plan = quarb_sql::pushdown(q, None).expect("plan");
         let (cols, rows) = quarb_bigquery::raw_query(
             &t,
             &plan.sql,

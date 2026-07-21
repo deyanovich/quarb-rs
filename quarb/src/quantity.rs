@@ -159,6 +159,13 @@ pub fn unit_scale(name: &str) -> Option<(f64, &'static str)> {
         if let Some(stem) = name.strip_prefix(p)
             && prefixable(stem)
         {
+            // No fractional bytes: a shrinking prefix on B is
+            // never a size ("mB" is the MB typo, "dB" a decibel),
+            // so reading it as 10^-3 B would order a real figure
+            // below every genuine size. Refuse, like capital KB.
+            if stem == "B" && *pow < 0 {
+                return None;
+            }
             let (f, base) = full_name_scale(stem)?;
             return Some((f * 10f64.powi(*pow), base));
         }
@@ -265,8 +272,10 @@ fn accumulate(
     }
 }
 
-/// The seven SI base names as 'static strs (the expansions only
-/// ever mention these).
+/// The base names the built-in table's expansions mention — the
+/// seven SI bases plus the byte — as 'static strs. Anything else
+/// (an adapter's custom base) is interned: one leaked copy per
+/// distinct name for the process lifetime, never one per parse.
 fn leak_base_name(name: &str) -> &'static str {
     match name {
         "m" => "m",
@@ -276,8 +285,20 @@ fn leak_base_name(name: &str) -> &'static str {
         "K" => "K",
         "mol" => "mol",
         "cd" => "cd",
-        other => Box::leak(other.to_string().into_boxed_str()),
+        "B" => "B",
+        other => intern_base_name(other),
     }
+}
+
+fn intern_base_name(name: &str) -> &'static str {
+    static INTERNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut table = INTERNED.lock().expect("base-name intern table");
+    if let Some(hit) = table.iter().find(|s| **s == name) {
+        return hit;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    table.push(leaked);
+    leaked
 }
 
 /// Format the exponent map in kaiv's canonical form.

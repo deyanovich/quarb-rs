@@ -42,7 +42,9 @@ through its dialektos),
 [`quarb-relational`](quarb-relational/) (the shared model),
 [`quarb-sqlite`](quarb-sqlite/), [`quarb-duckdb`](quarb-duckdb/),
 [`quarb-postgres`](quarb-postgres/), [`quarb-mysql`](quarb-mysql/),
-[`quarb-bigquery`](quarb-bigquery/).
+[`quarb-bigquery`](quarb-bigquery/),
+[`quarb-mssql`](quarb-mssql/) (SQL Server),
+[`quarb-oracle`](quarb-oracle/).
 
 **Graph** — [`quarb-neo4j`](quarb-neo4j/).
 
@@ -56,6 +58,8 @@ symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
 [`quarb-firestore`](quarb-firestore/),
 [`quarb-datastore`](quarb-datastore/),
 [`quarb-mongodb`](quarb-mongodb/) (document stores),
+[`quarb-cbor`](quarb-cbor/) (CBOR, on the JSON mapping),
+[`quarb-ldap`](quarb-ldap/) (LDAP directories),
 [`quarb-kubernetes`](quarb-kubernetes/) (cluster state via
 kubectl),
 [`quarb-github`](quarb-github/) (the GitHub API via gh:

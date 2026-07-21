@@ -213,32 +213,111 @@ impl Value {
         }
     }
 
-    /// A total order for sorting: timeline when either side is an
-    /// instant (the other coercing via its temporal reading), span
-    /// when either side is a duration (the other coercing via its
-    /// durational reading), numeric when both are numeric, else by
-    /// string form.
+    /// A total order for sorting — transitive by construction, via
+    /// a per-value canonical key (see [`SortKey`]): null, then
+    /// booleans, then the *magnitude line* (numbers, instants as
+    /// epoch seconds, durations as seconds, quantities as their
+    /// base magnitude, and text through its one reading — the text
+    /// readings are disjoint by grammar), then readingless text,
+    /// then lists and records by display form. Values meeting on
+    /// the line compare by magnitude alone, so `60`, `PT1M`, and a
+    /// same-point instant are equal — the price of transitive
+    /// equality (`group` already keys `60` and `PT1M` together).
+    ///
+    /// Ordering contexts with an adapter at hand should call
+    /// [`Value::compare_with`] so mounted custom units read; this
+    /// wrapper uses the frozen built-in table.
     pub fn compare(&self, other: &Value) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        if matches!(self, Value::Instant { .. }) || matches!(other, Value::Instant { .. }) {
-            if let (Some(a), Some(b)) = (self.temporal_reading(), other.temporal_reading()) {
-                return a.cmp(&b);
+        self.compare_with(other, &crate::quantity::scale_expr)
+    }
+
+    /// [`Value::compare`] with an explicit unit-expression resolver
+    /// (the adapter's `unit_scale`), so custom-unit text takes its
+    /// place on the magnitude line exactly as it does in criteria.
+    pub fn compare_with(
+        &self,
+        other: &Value,
+        scale: &dyn Fn(&str) -> Option<(f64, String)>,
+    ) -> std::cmp::Ordering {
+        sort_key(self, scale).cmp_key(&sort_key(other, scale))
+    }
+}
+
+/// The canonical sort key behind [`Value::compare`]: every value
+/// maps to exactly one class, so the order is total and transitive
+/// where the old pairwise fragment activation was not (`10 < "1z" <
+/// "9" < 10` cycled through the string fallback).
+enum SortKey {
+    Null,
+    Bool(bool),
+    /// The magnitude line: everything with a numeric, temporal,
+    /// durational, or unital reading, by that reading's magnitude.
+    Line(f64),
+    /// Text with no reading, by codepoint order.
+    Text(String),
+    /// Lists then records order after scalars, by display form.
+    ListText(String),
+    RecordText(String),
+}
+
+impl SortKey {
+    fn rank(&self) -> u8 {
+        match self {
+            SortKey::Null => 0,
+            SortKey::Bool(_) => 1,
+            SortKey::Line(_) => 2,
+            SortKey::Text(_) => 3,
+            SortKey::ListText(_) => 4,
+            SortKey::RecordText(_) => 5,
+        }
+    }
+
+    fn cmp_key(&self, other: &SortKey) -> std::cmp::Ordering {
+        use SortKey::*;
+        match (self, other) {
+            (Bool(a), Bool(b)) => a.cmp(b),
+            // total_cmp: NaN (mintable by query arithmetic) sorts
+            // deterministically after +inf instead of poisoning
+            // the order.
+            (Line(a), Line(b)) => a.total_cmp(b),
+            (Text(a), Text(b)) | (ListText(a), ListText(b)) | (RecordText(a), RecordText(b)) => {
+                a.cmp(b)
+            }
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+fn sort_key(v: &Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey {
+    match v {
+        Value::Null => SortKey::Null,
+        Value::Bool(b) => SortKey::Bool(*b),
+        Value::Int(n) => SortKey::Line(*n as f64),
+        Value::Float(f) => SortKey::Line(*f),
+        Value::Instant { secs, nanos, .. } | Value::Duration { secs, nanos } => {
+            SortKey::Line(*secs as f64 + *nanos as f64 / 1e9)
+        }
+        Value::Quantity { value, .. } => SortKey::Line(*value),
+        // A string has at most one reading — numeric text carries
+        // no unit, unital text excludes pure time (that is span
+        // territory), span text needs its span grammar, ISO text
+        // is none of those — so the priority order below never
+        // actually chooses between readings.
+        Value::Str(s) => {
+            if let Some(f) = s.trim().parse::<f64>().ok().filter(|f| f.is_finite()) {
+                SortKey::Line(f)
+            } else if let Some((bv, ..)) = crate::quantity::parse_unit_text_with(s, scale) {
+                SortKey::Line(bv)
+            } else if let Some((secs, nanos)) = crate::temporal::parse_span(s) {
+                SortKey::Line(secs as f64 + nanos as f64 / 1e9)
+            } else if let Some((secs, nanos, _)) = crate::temporal::parse_iso(s) {
+                SortKey::Line(secs as f64 + nanos as f64 / 1e9)
+            } else {
+                SortKey::Text(s.clone())
             }
         }
-        if matches!(self, Value::Duration { .. }) || matches!(other, Value::Duration { .. }) {
-            if let (Some(a), Some(b)) = (self.durational_reading(), other.durational_reading()) {
-                return a.cmp(&b);
-            }
-        }
-        if matches!(self, Value::Quantity { .. }) || matches!(other, Value::Quantity { .. }) {
-            if let Some((a, b)) = quantital_pair(self, other) {
-                return a.partial_cmp(&b).unwrap_or(Ordering::Equal);
-            }
-        }
-        if let (Some(x), Some(y)) = (self.numeric(), other.numeric()) {
-            return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
-        }
-        self.to_string().cmp(&other.to_string())
+        Value::List(_) => SortKey::ListText(v.to_string()),
+        Value::Record(_) => SortKey::RecordText(v.to_string()),
     }
 }
 
@@ -285,18 +364,13 @@ impl fmt::Display for Value {
 }
 
 /// The base-unit magnitudes of a comparison in which at least one
-/// side is a quantity (spec: The Unital Reading). The other side
-/// coerces through its unital reading; a bare number (or numeric
-/// text) reads as the *partner's* base, since it carries no
-/// dimension of its own. Dimensions must agree — a base mismatch
-/// is no pair, so the comparison fails rather than lies.
-pub(crate) fn quantital_pair(a: &Value, b: &Value) -> Option<(f64, f64)> {
-    quantital_pair_with(a, b, &crate::quantity::scale_expr)
-}
-
-/// [`quantital_pair`] with an explicit unit-expression resolver —
-/// the adapter's `unit_scale`, so criterion text may use the
-/// mounted document's custom units.
+/// side is a quantity (spec: The Unital Reading), under an explicit
+/// unit-expression resolver — the adapter's `unit_scale`, so
+/// criterion text may use the mounted document's custom units. The
+/// non-quantity side coerces through its unital reading; a bare
+/// number (or numeric text) reads as the *partner's* base, since it
+/// carries no dimension of its own. Dimensions must agree — a base
+/// mismatch is no pair, so the comparison fails rather than lies.
 pub(crate) fn quantital_pair_with(
     a: &Value,
     b: &Value,

@@ -229,7 +229,8 @@ fn pushdown_matches_scan() {
         "/tracks/*[::secs > 100 and ::price >= 1] | ::title",
     ];
     for q in cases {
-        let plan = quarb_sql::pushdown(q).unwrap_or_else(|| panic!("expected pushdown for {q}"));
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite))
+            .unwrap_or_else(|| panic!("expected pushdown for {q}"));
         let (cols, rows) = quarb_sqlite::raw_query(
             &path,
             &plan.sql,

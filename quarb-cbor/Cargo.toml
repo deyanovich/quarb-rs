@@ -1,0 +1,19 @@
+[package]
+name = "quarb-cbor"
+description = "CBOR adapter for the Quarb query engine"
+keywords = ["query", "cbor", "quarb"]
+categories = ["database", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.5.0" }
+ciborium.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

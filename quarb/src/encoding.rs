@@ -253,6 +253,13 @@ fn decode_base32(s: &str, crockford: bool) -> Option<Vec<u8>> {
         .bytes()
         .filter(|&c| c != b'=' && c != b'-' && !c.is_ascii_whitespace())
         .collect();
+    // 1, 3, or 6 symbols past a full quantum encode fewer than 8
+    // whole bits — no byte count produces them, so the input is
+    // corrupt (the base64 decoder rejects its impossible length
+    // the same way) rather than truncatable.
+    if matches!(syms.len() % 8, 1 | 3 | 6) {
+        return None;
+    }
     let mut acc = 0u64;
     let mut bits = 0u32;
     let mut out = Vec::with_capacity(syms.len() * 5 / 8);
@@ -295,10 +302,14 @@ pub fn yaml_to_value(text: &str) -> Option<crate::value::Value> {
     Some(from_serde(&v))
 }
 
-/// Parse TOML text into a [`Value`].
+/// Parse TOML text into a [`Value`]. Datetimes — which the toml
+/// crate tunnels to foreign formats as a magic single-key map —
+/// surface as an [`Value::Instant`] where the text has an ISO
+/// reading, its text otherwise (local times), never as the
+/// `$__toml_private_datetime` record.
 pub fn toml_to_value(text: &str) -> Option<crate::value::Value> {
     let v: serde_json::Value = toml::from_str(text).ok()?;
-    Some(from_serde(&v))
+    Some(from_serde_with(&v, true))
 }
 
 /// Parse XML text into a [`Value`], by a fixed convention: a
@@ -391,7 +402,17 @@ pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
         }
     }
     // The document element is the lone field of the synthetic root.
+    // Anything else is malformed: an element left open at EOF (the
+    // stack still holds its frame), a second root, or stray text
+    // outside the root — returning "the first root" would silently
+    // drop content.
+    if stack.len() != 1 {
+        return None;
+    }
     let root = stack.pop()?;
+    if root.fields.len() > 1 || !root.text.trim().is_empty() {
+        return None;
+    }
     match root.fields.into_iter().next() {
         Some((_, v)) => Some(v),
         None => Some(crate::value::Value::Null),
@@ -437,6 +458,13 @@ pub fn is_structured_format(fmt: &str) -> bool {
 }
 
 fn from_serde(v: &serde_json::Value) -> crate::value::Value {
+    from_serde_with(v, false)
+}
+
+/// [`from_serde`] with the TOML datetime tunnel unwrapped when
+/// `toml` is set (scoped so a JSON document that genuinely holds
+/// the sentinel key is left alone).
+fn from_serde_with(v: &serde_json::Value, toml: bool) -> crate::value::Value {
     use crate::value::Value;
     match v {
         serde_json::Value::Null => Value::Null,
@@ -447,9 +475,28 @@ fn from_serde(v: &serde_json::Value) -> crate::value::Value {
             .or_else(|| n.as_f64().map(Value::Float))
             .unwrap_or(Value::Null),
         serde_json::Value::String(s) => Value::Str(s.clone()),
-        serde_json::Value::Array(a) => Value::List(a.iter().map(from_serde).collect()),
+        serde_json::Value::Array(a) => {
+            Value::List(a.iter().map(|v| from_serde_with(v, toml)).collect())
+        }
         serde_json::Value::Object(o) => {
-            Value::Record(o.iter().map(|(k, v)| (k.clone(), from_serde(v))).collect())
+            if toml
+                && o.len() == 1
+                && let Some(serde_json::Value::String(s)) = o.get("$__toml_private_datetime")
+            {
+                return match crate::temporal::parse_iso(s) {
+                    Some((secs, nanos, offset_min)) => Value::Instant {
+                        secs,
+                        nanos,
+                        offset_min,
+                    },
+                    None => Value::Str(s.clone()),
+                };
+            }
+            Value::Record(
+                o.iter()
+                    .map(|(k, v)| (k.clone(), from_serde_with(v, toml)))
+                    .collect(),
+            )
         }
     }
 }
@@ -497,6 +544,47 @@ mod tests {
         assert_eq!(crockford32(b"foobar"), "CSQPYRK1E8");
         assert_eq!(crockford32(b"f"), "CR");
         assert_eq!(crockford32(b""), "");
+    }
+
+    #[test]
+    fn base32_dangling_symbol_rejected() {
+        // 1, 3, or 6 symbols past a quantum encode no whole byte:
+        // corrupt input, not truncatable (mirrors base64's rule).
+        assert_eq!(decode_base32("A", false), None);
+        assert_eq!(decode_base32("MZXW6YTBA", false), None);
+        // Every legal length still decodes.
+        assert_eq!(
+            decode_base32("MZXQ====", false).as_deref(),
+            Some(b"fo".as_slice())
+        );
+    }
+
+    #[test]
+    fn toml_datetime_unwraps_typed() {
+        use crate::value::Value;
+        // The toml crate's private datetime tunnel must never leak
+        // as a `$__toml_private_datetime` record: an ISO-readable
+        // datetime mints an Instant, a local time stays its text.
+        let v = toml_to_value("when = 1979-05-27T07:32:00Z\nn = 5").unwrap();
+        let Value::Record(fields) = v else {
+            panic!("expected a record");
+        };
+        let when = fields.iter().find(|(k, _)| k == "when").unwrap();
+        assert!(matches!(when.1, Value::Instant { .. }), "got {:?}", when.1);
+        let v = toml_to_value("t = 07:32:00").unwrap();
+        let Value::Record(fields) = v else {
+            panic!("expected a record");
+        };
+        assert_eq!(fields[0].1, Value::Str("07:32:00".into()));
+    }
+
+    #[test]
+    fn xml_rejects_multiple_roots_and_trailing_content() {
+        use crate::value::Value;
+        assert_eq!(xml_to_value("<a>1</a><b>2</b>"), None);
+        assert_eq!(xml_to_value("<a>x</a>trailing"), None);
+        assert_eq!(xml_to_value("<a><b>x"), None); // left open at EOF
+        assert_eq!(xml_to_value("<a>1</a>"), Some(Value::Str("1".into())));
     }
 
     #[test]

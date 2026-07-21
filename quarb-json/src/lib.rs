@@ -11,6 +11,10 @@
 //!   `<string>`, `<number>`, `<boolean>`, `<null>`), so the value
 //!   type is available for filtering alongside the key.
 //! - A primitive's default projection (`::`) is its value.
+//! - A scalar-valued object field is *also* a property of its
+//!   object (`::port` where `port` holds a primitive) — dual
+//!   exposure, mirroring record substrates. Container-valued
+//!   fields answer only to navigation.
 //! - Adapter metadata exposes `;;;type` and `;;;length`.
 //! - A `$ref`-style property resolves (`::'$ref'~>`) by treating its
 //!   string value as a JSON Pointer (`#/definitions/address`).
@@ -197,6 +201,29 @@ impl AstAdapter for JsonAdapter {
     /// The node's JSON type: `<object>`, `<string>`, `<number>`, …
     fn traits(&self, node: NodeId) -> Vec<String> {
         vec![self.nodes[node.0 as usize].kind.name().to_string()]
+    }
+
+    /// Dual exposure: a scalar-valued object field answers as a
+    /// property too, so `::port` reads a flat field the way a CSV
+    /// column or an XML attribute reads. The child spelling
+    /// (`/port::`) always works and is the shape-stable one — a
+    /// field that holds a container in *this* document answers
+    /// only to navigation, never as a property. Array elements
+    /// are not properties (an index is a position, not a field).
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        let n = &self.nodes[node.0 as usize];
+        if !matches!(n.kind, Kind::Object) {
+            return None;
+        }
+        let child = n
+            .children
+            .iter()
+            .find(|&&c| self.nodes[c.0 as usize].name.as_deref() == Some(name))?;
+        let c = &self.nodes[child.0 as usize];
+        match c.kind {
+            Kind::Object | Kind::Array => None,
+            _ => Some(c.scalar.clone()),
+        }
     }
 
     /// A primitive projects to its value; a container has no default

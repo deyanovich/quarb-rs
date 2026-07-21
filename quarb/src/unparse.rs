@@ -26,17 +26,30 @@ pub fn unparse(query: &Query) -> String {
 }
 
 fn query_body(q: &Query) -> String {
-    let mut out = q
-        .branches
-        .iter()
-        .map(branch)
-        .collect::<Vec<_>>()
-        .join(" || ");
+    let mut parts: Vec<String> = q.branches.iter().map(branch).collect();
+    // A trailing leaf anchor before a plain pipe would reparse as
+    // the map pipe (`/a$ | f` relexes as `/a $| f` — the token
+    // stream cannot spell them apart), so such a branch reprints
+    // as a single-alternative group: `(/a$) | f`.
+    if let (Some(last), Some(first)) = (q.branches.last(), q.pipeline.first())
+        && branch_ends_bare_leaf(last)
+        && stage(first).starts_with('|')
+    {
+        let text = parts.pop().expect("branches and parts zip");
+        parts.push(format!("({text})"));
+    }
+    let mut out = parts.join(" || ");
     for stage_ast in &q.pipeline {
         out.push(' ');
         out.push_str(&stage(stage_ast));
     }
     out
+}
+
+/// Whether a branch's emitted text ends with the bare leaf anchor
+/// `$` (a trailing leaf-anchored step with no projection after it).
+fn branch_ends_bare_leaf(b: &Branch) -> bool {
+    b.projection.is_none() && matches!(b.steps.last(), Some(PathElem::Step(s)) if s.leaf)
 }
 
 fn branch(b: &Branch) -> String {
@@ -144,7 +157,21 @@ fn step(s: &Step) -> String {
             return out + &step_suffix(s);
         }
     }
-    out.push_str(&matcher(&s.matcher));
+    let m = matcher(&s.matcher);
+    // The lexer reads `<-3` as less-than-minus-three and `<-x` as
+    // an incoming crosslink, so a digit-leading matcher after `<-`
+    // (and a dash-leading one after `<`) needs a separating space
+    // to keep its axis on reparse. Quoting would corrupt globs;
+    // the space is meaning-preserving everywhere.
+    let glue_breaks = match &s.axis {
+        Axis::InLink => m.starts_with(|c: char| c.is_ascii_digit()),
+        Axis::PrevSibling => m.starts_with('-'),
+        _ => false,
+    };
+    if glue_breaks {
+        out.push(' ');
+    }
+    out.push_str(&m);
     out + &step_suffix(s)
 }
 
@@ -167,7 +194,12 @@ fn step_suffix(s: &Step) -> String {
             .traits
             .iter()
             .map(|t| {
-                let body = t.alts.join(" || ");
+                let body = t
+                    .alts
+                    .iter()
+                    .map(|a| trait_lit(a))
+                    .collect::<Vec<_>>()
+                    .join(" || ");
                 if many && t.alts.len() > 1 {
                     format!("({body})")
                 } else {
@@ -195,6 +227,28 @@ fn matcher(m: &Matcher) -> String {
         Matcher::Regex(r) => format!("~({})", r.as_str()),
         Matcher::Any => "*".to_string(),
         Matcher::Dot => ".".to_string(),
+    }
+}
+
+/// A CNF trait literal (`name` / `!name`): the negation mark stays
+/// bare; the name quotes when it would not lex back as one name
+/// token (a trait named "my trait" must reprint as `<'my trait'>`).
+/// The bare set is the lexer's name characters — wider than
+/// [`name_text`]'s, since `<*>`-style wildcards are bare traits.
+fn trait_lit(lit: &str) -> String {
+    let quote = |n: &str| {
+        let bare = !n.is_empty()
+            && n.chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '+'));
+        if bare {
+            n.to_string()
+        } else {
+            format!("'{n}'")
+        }
+    };
+    match lit.strip_prefix('!') {
+        Some(name) => format!("!{}", quote(name)),
+        None => quote(lit),
     }
 }
 
@@ -353,7 +407,21 @@ fn operand(o: &Operand) -> String {
         },
         Operand::Piped { expr, stages } => {
             let tail: Vec<String> = stages.iter().map(stage).collect();
-            format!("({} {})", operand(expr), tail.join(" "))
+            let mut head = operand(expr);
+            // The same `$`-then-`|` hazard as at query level: a
+            // path operand ending in a bare leaf anchor regroups
+            // before a plain pipe.
+            if let Operand::Rel {
+                steps,
+                projection: None,
+                ..
+            } = expr.as_ref()
+                && matches!(steps.last(), Some(PathElem::Step(s)) if s.leaf)
+                && tail.first().is_some_and(|t| t.starts_with('|'))
+            {
+                head = format!("({head})");
+            }
+            format!("({} {})", head, tail.join(" "))
         }
         Operand::Cond { cond, then, other } => format!(
             "({} ? {} : {})",
@@ -543,7 +611,22 @@ fn stage(st: &Stage) -> String {
             Some(n) => format!("| .{n}({})", unparse(body)),
             None => format!("| .({})", unparse(body)),
         },
-        Stage::Expr(e) => format!("| {}", operand(e)),
+        // Only some operand spellings are self-delimiting after `|`
+        // (the starts pipe_item's expression arms accept: a paren,
+        // a quoted string, a path or projection, the `$` family,
+        // `@-`); everything else — `(3)`, `(now())`, `(@*)`,
+        // `(^/a)` — must keep parens, or the reparse reads it as a
+        // function name.
+        Stage::Expr(e) => {
+            let text = operand(e);
+            let delimited =
+                text.starts_with(['(', '\'', '"', '/', ':', ';', '$']) || text.starts_with("@-");
+            if delimited {
+                format!("| {text}")
+            } else {
+                format!("| ({text})")
+            }
+        }
         Stage::ExprPush { name, expr } => match name {
             Some(n) => format!("| .{n}({})", operand(expr)),
             None => format!("| .({})", operand(expr)),
@@ -616,10 +699,7 @@ mod tests {
             "/commits/*[;;;short = ^/tags/*;;;short]"
         );
         // The def statement terminator still lexes as a single `;`.
-        assert_eq!(
-            rt("def &f: //x;;;size; &f"),
-            rt("def &f: //x::;size; &f")
-        );
+        assert_eq!(rt("def &f: //x;;;size; &f"), rt("def &f: //x::;size; &f"));
     }
 
     // Finding: a projection key named `and`/`or`/`not` must reprint

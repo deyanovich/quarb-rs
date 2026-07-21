@@ -43,6 +43,42 @@ fn grafts_parse_lazily_and_compose() {
     );
 }
 
+/// An archive leaf grafts by path — and the archive composes in
+/// turn, so one path runs filesystem → tar.gz → JSON.
+#[test]
+fn archive_leaves_graft_by_path() {
+    let dir = fixture("archive");
+    let tarball = {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut ar = tar::Builder::new(gz);
+        let json = br#"{"services": [{"name": "web", "port": 8080}, {"name": "db", "port": 5432}]}"#;
+        let mut h = tar::Header::new_gnu();
+        h.set_size(json.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, "app/config/services.json", &json[..])
+            .unwrap();
+        ar.into_inner().unwrap().finish().unwrap()
+    };
+    std::fs::write(dir.join("app.tar.gz"), tarball).unwrap();
+
+    let with_paths = ComposeAdapter::with_source_paths(
+        FsAdapter::with_options(&dir, FsOptions::default()).unwrap(),
+        |fs, n| Some(fs.path(n)),
+    );
+    assert_eq!(
+        values(
+            &with_paths,
+            "//*.tar.gz//services.json/services/*[/port:: > 6000]/name::"
+        ),
+        ["web"]
+    );
+    // Without the path hook, the binary leaf stays a leaf.
+    let without =
+        ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
+    assert_eq!(values(&without, "/app.tar.gz/* @| count"), ["0"]);
+}
+
 /// Regression: grafted node ids must stay inside the low 56 bits so
 /// they survive being packed into a `MountAdapter`, which reserves the
 /// high byte (bits 56–63) for the mount index. A graft tag at bit 63

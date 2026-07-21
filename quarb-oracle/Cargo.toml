@@ -1,0 +1,17 @@
+[package]
+name = "quarb-oracle"
+description = "Oracle Database adapter for the Quarb query engine"
+keywords = ["query", "oracle", "database", "quarb"]
+categories = ["database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.5.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.5.0" }
+oracle.workspace = true
+thiserror.workspace = true

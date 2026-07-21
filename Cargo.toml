@@ -30,6 +30,10 @@ members = [
     "quarb-gsheet",
     "quarb-kubernetes",
     "quarb-mongodb",
+    "quarb-mssql",
+    "quarb-oracle",
+    "quarb-ldap",
+    "quarb-cbor",
     "quarb-mount",
     "quarb-session",
     "quarb-xpath",
@@ -51,7 +55,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]
@@ -75,5 +79,10 @@ tokio = "1"
 tokio-postgres = "0.7"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
 mongodb = { version = "3", features = ["sync"] }
+tiberius = { version = "0.12", default-features = false, features = ["rustls"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+oracle = "0.6"
+ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
+ciborium = "0.2"
 quick-xml = "0.39"
 tempfile = "3"

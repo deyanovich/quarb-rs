@@ -42,6 +42,7 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         arbor,
         notes: Vec::new(),
         strict: false,
+        dialect: None,
         from_table: String::new(),
         join_on_left_cols: Vec::new(),
         join_table: None,
@@ -54,16 +55,18 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
     })
 }
 
-/// The exporter rewrites `__LEFT__` as an internal placeholder for
-/// the join's left table (and scrapes `__LEFT__.col` occurrences
-/// into the join obligation). Query text containing the marker
-/// would be rewritten inside its own string literals — and could
-/// spoof the obligation — so such queries stay on the scan path.
+/// The exporter rewrites `__LEFT__` (the join's left table) and
+/// `__AGG__` (the HAVING aggregate) as internal placeholders.
+/// Query text containing either marker would be rewritten inside
+/// its own string literals — and could spoof the emitted SQL — so
+/// such queries stay on the scan path.
 fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
-    if quarb.contains("__LEFT__") {
-        return Err(SqlError::Unsupported(
-            "query text contains the reserved marker \"__LEFT__\"".into(),
-        ));
+    for marker in ["__LEFT__", "__AGG__"] {
+        if quarb.contains(marker) {
+            return Err(SqlError::Unsupported(format!(
+                "query text contains the reserved marker \"{marker}\""
+            )));
+        }
     }
     Ok(())
 }
@@ -77,7 +80,9 @@ pub struct Pushdown {
     pub sql: String,
     pub order_table: Option<String>,
     /// Present when the plan contains a witness JOIN: the left
-    /// table and the left-side columns its ON equalities bind.
+    /// table and the left-side columns its ON equalities bind
+    /// (collected structurally from the `$*1` operands, so query
+    /// text cannot spoof them).
     /// The plan is only sound if those columns form a unique key
     /// of the left table (else SQL multiplies rows where Quarb's
     /// existential binding does not) — the *driver* must verify
@@ -86,17 +91,35 @@ pub struct Pushdown {
     pub join_left: Option<(String, Vec<String>)>,
 }
 
+/// The target SQL dialect, for the one construct whose emitted
+/// SQL is not portable: a filter that navigates *into* a JSON
+/// column, which each engine extracts with its own operator.
+/// The rest of a pushdown is dialect-agnostic. A query with no
+/// JSON-column filter emits identical SQL regardless of dialect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dialect {
+    Postgres,
+    MySql,
+    Sqlite,
+    Mssql,
+    Oracle,
+}
+
 /// Attempt the pushdown translation: `Some` only when every
 /// construct in the query is in the verified-safe set. Anything
 /// else — including everything `export` would merely annotate with
 /// a divergence note — returns `None`, and the caller scans.
-pub fn pushdown(quarb: &str) -> Option<Pushdown> {
-    pushdown_explained(quarb).ok()
+///
+/// `dialect` enables JSON-column-path pushdown for that engine
+/// (fixed-path string equality only); `None` keeps such filters
+/// on the client-side graft.
+pub fn pushdown(quarb: &str, dialect: Option<Dialect>) -> Option<Pushdown> {
+    pushdown_explained(quarb, dialect).ok()
 }
 
 /// [`pushdown`], keeping the refusal: the error names the first
 /// construct that kept the query on the scan path.
-pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
+pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushdown, SqlError> {
     refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
@@ -105,6 +128,7 @@ pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
         arbor,
         notes: Vec::new(),
         strict: true,
+        dialect,
         from_table: String::new(),
         join_on_left_cols: Vec::new(),
         join_table: None,
@@ -130,10 +154,42 @@ pub fn pushdown_explained(quarb: &str) -> Result<Pushdown, SqlError> {
     })
 }
 
-/// SQL keywords that must not appear as a bare `AS` alias —
-/// quoting them portably differs by dialect, so strict mode
-/// refuses and export mode quotes with double quotes plus a note.
-const ALIAS_KEYWORDS: &[&str] = &[
+/// The dialect-specific SQL that extracts a JSON scalar at a
+/// fixed object path, unquoted to text. `path` holds plain
+/// object keys (identifier-safe, per `json_path`), so no
+/// per-dialect path-escaping is needed. Each engine's operator
+/// returns the value as text and yields NULL for an absent path
+/// or a non-scalar — matching the graft, which excludes those
+/// rows too.
+fn json_extract(dialect: Dialect, qual: Option<&str>, col: &str, path: &[String]) -> String {
+    let qcol = match qual {
+        Some(q) => format!("{q}.{col}"),
+        None => col.to_string(),
+    };
+    match dialect {
+        // `#>>` takes a text-array path and returns text; the
+        // `::jsonb` cast lets it work on json, jsonb, and
+        // text-holding-JSON columns alike (an invalid-JSON row
+        // errors, and the driver falls back to the scan).
+        Dialect::Postgres => format!("({qcol}::jsonb #>> '{{{}}}')", path.join(",")),
+        // JSON_UNQUOTE(JSON_EXTRACT(...)) is the `->>` shorthand
+        // spelled out — portable across MySQL and MariaDB, where
+        // the `->>` operator itself is not.
+        Dialect::MySql => {
+            format!("JSON_UNQUOTE(JSON_EXTRACT({qcol}, '$.{}'))", path.join("."))
+        }
+        Dialect::Sqlite => format!("json_extract({qcol}, '$.{}')", path.join(".")),
+        // JSON_VALUE returns a scalar as text (lax mode: NULL on a
+        // missing path or a non-scalar, no error).
+        Dialect::Mssql | Dialect::Oracle => format!("JSON_VALUE({qcol}, '$.{}')", path.join(".")),
+    }
+}
+
+/// SQL keywords that must not appear as a bare identifier or `AS`
+/// alias — quoting them portably differs by dialect, so strict
+/// mode refuses and export mode quotes with double quotes plus a
+/// note.
+const SQL_KEYWORDS: &[&str] = &[
     "all",
     "and",
     "as",
@@ -180,6 +236,19 @@ const ALIAS_KEYWORDS: &[&str] = &[
     "when",
     "where",
 ];
+
+/// A bare SQL identifier, portable across the target dialects: a
+/// letter or underscore, then letters, digits, and underscores,
+/// and not a reserved word.
+fn is_plain_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !SQL_KEYWORDS.contains(&name.to_ascii_lowercase().as_str())
+}
 
 /// The SELECT under construction.
 #[derive(Default)]
@@ -260,6 +329,7 @@ pub fn partial_pushdown(quarb: &str) -> Option<Partial> {
 
 /// [`partial_pushdown`], keeping the refusal reason.
 pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
+    refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
     refuse_groups(&arbor)?;
@@ -267,6 +337,7 @@ pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
         arbor,
         notes: Vec::new(),
         strict: true,
+        dialect: None,
         from_table: String::new(),
         join_on_left_cols: Vec::new(),
         join_table: None,
@@ -300,6 +371,9 @@ struct Exporter {
     /// are not provably identical to Quarb's (LIKE case folding,
     /// truthiness, group/distinct/sort ordering).
     strict: bool,
+    /// The target dialect for JSON-column-path pushdown; `None`
+    /// leaves such filters on the client-side graft.
+    dialect: Option<Dialect>,
     from_table: String,
     join_on_left_cols: Vec<String>,
     join_table: Option<String>,
@@ -450,12 +524,17 @@ impl Exporter {
                 ));
             }
             let (rtable, rpreds) = self.table_branch(branches[0])?;
+            // The SQL renderings of the two table names (validated
+            // or quoted); the raw names stay in the plan metadata,
+            // which the driver matches against its catalog.
+            let lsql = self.sql_ident(&ltable, "table name")?;
+            let rsql = self.sql_ident(&rtable, "table name")?;
             // Split the joined side's predicates: $*1 equalities
             // form the ON, the rest the WHERE.
             let mut on = Vec::new();
             let mut wheres = Vec::new();
             for p in rpreds {
-                self.split_join_pred(p, &ltable, &rtable, &mut on, &mut wheres)?;
+                self.split_join_pred(p, &lsql, &rsql, &mut on, &mut wheres)?;
             }
             if on.is_empty() {
                 return Err(SqlError::Unsupported(
@@ -467,23 +546,31 @@ impl Exporter {
                  SQL multiplies rows when several left rows match"
                     .to_string(),
             );
-            sel.from = ltable.clone();
-            self.from_table = ltable.clone();
-            self.join_table = Some(rtable.clone());
-            sel.join = Some((rtable.clone(), on.join(" AND ")));
+            sel.from = lsql.clone();
+            self.from_table = ltable;
+            self.join_table = Some(rtable);
+            sel.join = Some((rsql.clone(), on.join(" AND ")));
             sel.wheres = wheres;
-            self.pipeline(q, &mut sel, Some((&ltable, &rtable)))?;
+            // A terminal projection on the joined branch is a
+            // one-column select of the result context's table.
+            if let Some(proj) = self.kid(branches[0], "projection") {
+                let col = self.projection_col(proj)?;
+                let col = self.sql_ident(&col, "column name")?;
+                sel.select.push(format!("{rsql}.{col}"));
+            }
+            self.pipeline(q, &mut sel, Some((&lsql, &rsql)))?;
         } else {
             let (table, preds) = self.table_branch(branches[0])?;
-            sel.from = table.clone();
-            self.from_table = table.clone();
+            sel.from = self.sql_ident(&table, "table name")?;
+            self.from_table = table;
             for p in preds {
                 let cond = self.predicate_cond(p, None)?;
                 sel.wheres.push(cond);
             }
             // A terminal projection is a one-column select.
             if let Some(proj) = self.kid(branches[0], "projection") {
-                sel.select.push(self.projection_col(proj)?);
+                let col = self.projection_col(proj)?;
+                sel.select.push(self.sql_ident(&col, "column name")?);
             }
             self.pipeline(q, &mut sel, None)?;
         }
@@ -600,6 +687,31 @@ impl Exporter {
                         format!("{col} IS NOT NULL")
                     });
                 }
+                // JSON-column-path pushdown: `[/col/a/b:: = 'lit']`
+                // navigates into a JSON column and compares a fixed
+                // path to a string literal. Only this exact shape —
+                // fixed object path, string equality — is provably
+                // identical to the client-side graft (each engine's
+                // scalar extractor unquotes to text, and an absent
+                // path or non-string value excludes the row on both
+                // sides, matching Quarb's `value_eq`). Numeric casts,
+                // `!=`, wildcards, and deeper predicates are *not*
+                // handled here, so they fall through to the ordinary
+                // operand logic below, which refuses the navigation
+                // and scans. Enabled only when a dialect is set.
+                if op == "="
+                    && let Some(dialect) = self.dialect
+                {
+                    for (pi, li) in [(0usize, 1usize), (1, 0)] {
+                        if self.is_text_literal(kids[li])
+                            && let Some((col, path)) = self.json_path(kids[pi])
+                        {
+                            let lit = self.operand(kids[li], qual)?;
+                            let extract = json_extract(dialect, qual, &col, &path);
+                            return Ok(format!("{extract} = {lit}"));
+                        }
+                    }
+                }
                 let l = self.operand(kids[0], qual)?;
                 let r = self.operand(kids[1], qual)?;
                 Ok(match op.as_str() {
@@ -634,13 +746,34 @@ impl Exporter {
                                 "pushdown: LIKE case folding differs per engine".into(),
                             ));
                         }
+                        // The pattern must be a text literal: a
+                        // column or computed operand holds a value,
+                        // not a pattern, and SQL LIKE cannot express
+                        // "contains that value" portably.
+                        if !self.is_text_literal(kids[1]) {
+                            return Err(SqlError::Unsupported(
+                                "'*=' with a non-literal pattern".into(),
+                            ));
+                        }
                         self.notes.push(
                             "*= → LIKE: Quarb's substring test is case-sensitive; LIKE \
                              folds case on SQLite/MySQL but not PostgreSQL"
                                 .to_string(),
                         );
-                        let pat = r.trim_matches('\'').replace('%', "\\%").replace('_', "\\_");
-                        format!("{l} LIKE '%{pat}%'")
+                        // Escape LIKE's metacharacters, then quote.
+                        // The explicit ESCAPE makes '\' the escape
+                        // everywhere — SQLite, MSSQL, and Oracle
+                        // have no default escape character.
+                        let raw = self
+                            .prop(kids[1], "value")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let pat = raw
+                            .replace('\\', "\\\\")
+                            .replace('%', "\\%")
+                            .replace('_', "\\_")
+                            .replace('\'', "''");
+                        format!("{l} LIKE '%{pat}%' ESCAPE '\\'")
                     }
                     "=~" | "!~" => {
                         return Err(SqlError::Unsupported(
@@ -722,6 +855,7 @@ impl Exporter {
                     .kid(o, "projection")
                     .ok_or_else(|| SqlError::Unsupported("an empty path operand".into()))?;
                 let col = self.projection_col(p)?;
+                let col = self.sql_ident(&col, "column name")?;
                 Ok(match qual {
                     Some(q) => format!("{q}.{col}"),
                     None => col,
@@ -731,19 +865,23 @@ impl Exporter {
                 // `$*k::col` — k names the correlation operand: 1 is
                 // the left/FROM side, 2 the joined side (the `qual`
                 // table in a join context). Anything else is outside
-                // the verified-safe set.
+                // the verified-safe set. Outside a join (`qual` is
+                // None) there is no table for either to name, so
+                // refuse — the `__LEFT__` placeholder would leak
+                // into the emitted SQL unsubstituted.
                 let p = self
                     .kid(o, "projection")
                     .ok_or_else(|| SqlError::Unsupported("a bare '$*' reference".into()))?;
                 let col = self.projection_col(p)?;
+                let col = self.sql_ident(&col, "column name")?;
+                if qual.is_none() {
+                    return Err(SqlError::Unsupported(
+                        "a '$*' reference outside a correlation join".into(),
+                    ));
+                }
                 match self.prop(o, "index") {
                     None | Some(Value::Int(1)) => Ok(format!("__LEFT__.{col}")),
-                    Some(Value::Int(2)) => match qual {
-                        Some(q) => Ok(format!("{q}.{col}")),
-                        None => Err(SqlError::Unsupported(
-                            "$*2 outside a correlation join".into(),
-                        )),
-                    },
+                    Some(Value::Int(2)) => Ok(format!("{}.{col}", qual.expect("checked above"))),
                     Some(v) => Err(SqlError::Unsupported(format!(
                         "pushdown: $*{v} beyond a two-branch correlation"
                     ))),
@@ -781,17 +919,59 @@ impl Exporter {
         }
     }
 
-    /// Split a joined-side predicate: `col = $*1::col2` equalities
-    /// become the ON condition; everything else the WHERE.
+    /// Whether `o` is a text string literal (`'London'`).
+    fn is_text_literal(&self, o: NodeId) -> bool {
+        self.kind(o) == "literal" && self.prop_s(o, "type") == "text"
+    }
+
+    /// If `o` is the one JSON-column-path shape pushdown handles —
+    /// `/col/seg/seg…::`, a plain-navigation path (every hop `/`
+    /// and a plain-identifier object key, no wildcards, no nested
+    /// predicate), at least one segment past the column, ending in
+    /// the bare `::` projection — return `(column, [json segments])`.
+    /// Anything else is `None` (and falls back to the graft).
+    fn json_path(&self, o: NodeId) -> Option<(String, Vec<String>)> {
+        if self.kind(o) != "path" {
+            return None;
+        }
+        let steps = self.kids(o, "step");
+        if steps.len() < 2 {
+            return None;
+        }
+        // The projection must be the bare `::` (default value of
+        // the JSON leaf), not `::key` or a `;;;`/`:::` metadata form.
+        let proj = self.kid(o, "projection")?;
+        if self.prop_s(proj, "kind") != "property" || self.prop(proj, "key").is_some() {
+            return None;
+        }
+        let mut names = Vec::with_capacity(steps.len());
+        for s in &steps {
+            if self.prop_s(*s, "axis") != "/"
+                || self.prop_s(*s, "matcher-kind") != "name"
+                || self.kid(*s, "predicate").is_some()
+            {
+                return None;
+            }
+            let name = self.prop_s(*s, "matcher");
+            // Plain object keys only — no array indices, no
+            // characters that would need per-dialect path escaping.
+            let plain = !name.is_empty()
+                && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !plain {
+                return None;
+            }
+            names.push(name);
+        }
+        let col = names.remove(0);
+        Some((col, names))
+    }
+
     /// A safe `AS` alias: bare when it is a plain identifier and
     /// not an SQL keyword; otherwise strict mode refuses (quoting
     /// dialects disagree) and export mode double-quotes, noting it.
     fn alias(&mut self, name: &str) -> Result<String, SqlError> {
-        let plain = !name.is_empty()
-            && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && !ALIAS_KEYWORDS.contains(&name.to_ascii_lowercase().as_str());
-        if plain {
+        if is_plain_ident(name) {
             return Ok(name.to_string());
         }
         if self.strict {
@@ -805,6 +985,29 @@ impl Exporter {
         Ok(format!("\"{}\"", name.replace('"', "\"\"")))
     }
 
+    /// A table or column name rendered into SQL. Bare when it is a
+    /// plain identifier; otherwise strict mode refuses — a name
+    /// like `a OR b` would silently rewrite the emitted SQL's
+    /// meaning, breaking the provably-identical guarantee (and a
+    /// portable quoting does not exist) — and export mode
+    /// double-quotes with a note.
+    fn sql_ident(&mut self, name: &str, what: &str) -> Result<String, SqlError> {
+        if is_plain_ident(name) {
+            return Ok(name.to_string());
+        }
+        if self.strict {
+            return Err(SqlError::Unsupported(format!(
+                "pushdown: {what} {name:?} is not a plain SQL identifier"
+            )));
+        }
+        self.notes
+            .push(format!("{what} {name:?} double-quoted (ANSI)"));
+        Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+    }
+
+    /// Split a joined-side predicate: `col = $*1::col2` equalities
+    /// become the ON condition; everything else the WHERE.
+    /// `ltable` and `rtable` are the tables' SQL renderings.
     fn split_join_pred(
         &mut self,
         p: NodeId,
@@ -835,27 +1038,36 @@ impl Exporter {
         }
         for e in parts {
             let uses_ctx = self.subtree_has(e, "context");
-            let raw = self.pred_expr(e, Some(rtable))?;
-            let cond = raw.replace("__LEFT__", ltable);
+            let cond = self.pred_expr(e, Some(rtable))?.replace("__LEFT__", ltable);
             if uses_ctx && self.kind(e) == "compare" && self.prop_s(e, "op") == "=" {
                 // Record which left-table columns the ON binds —
                 // the driver's uniqueness obligation (see
-                // Pushdown::join_left). Captured from the
-                // pre-substitution marker so literals can't fake
-                // a match.
-                for cap in raw.split("__LEFT__.").skip(1) {
-                    let col: String = cap
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                        .collect();
-                    if !col.is_empty() {
-                        self.join_on_left_cols.push(col);
-                    }
-                }
+                // Pushdown::join_left). Collected from the arbor's
+                // `$*1` operand nodes, never from the rendered SQL
+                // text, so neither a literal nor an unusual column
+                // name can corrupt the obligation.
+                self.collect_left_cols(e)?;
                 on.push(cond);
             } else {
                 wheres.push(cond);
             }
+        }
+        Ok(())
+    }
+
+    /// The left-table columns a `$*1::col` operand binds, anywhere
+    /// in `e`'s subtree, appended to the join obligation with their
+    /// raw (catalog) names.
+    fn collect_left_cols(&mut self, e: NodeId) -> Result<(), SqlError> {
+        if self.kind(e) == "context"
+            && matches!(self.prop(e, "index"), None | Some(Value::Int(1)))
+            && let Some(p) = self.kid(e, "projection")
+        {
+            let col = self.projection_col(p)?;
+            self.join_on_left_cols.push(col);
+        }
+        for c in self.arbor.children(e) {
+            self.collect_left_cols(c)?;
         }
         Ok(())
     }
@@ -908,7 +1120,16 @@ impl Exporter {
                                     "'| {name}' outside a group (use '@| {name}')"
                                 ))
                             })?;
-                            let agg = sql_agg(&name, pending_col.take());
+                            // Quarb's count counts every member,
+                            // nulls included: COUNT(*), never the
+                            // NULL-skipping COUNT(col).
+                            let col = if name == "count" {
+                                pending_col = None;
+                                None
+                            } else {
+                                pending_col.take()
+                            };
+                            let agg = sql_agg(&name, col)?;
                             grouped = Some((key.clone(), agg.clone(), agg));
                         }
                         other => {
@@ -972,7 +1193,7 @@ impl Exporter {
                             } else {
                                 pending_col.take()
                             };
-                            sel.select = vec![sql_agg(&name, col)];
+                            sel.select = vec![sql_agg(&name, col)?];
                             self.aggregate = true;
                         }
                         "group" => {
@@ -981,6 +1202,11 @@ impl Exporter {
                                     "pushdown: GROUP BY result order is unordered in SQL".into(),
                                 ));
                             }
+                            self.notes.push(
+                                "GROUP BY: SQL keeps a NULL-key group; Quarb's group \
+                                 drops null keys"
+                                    .to_string(),
+                            );
                             let key = self.group_key(s, join)?;
                             sel.group_by = Some(key.clone());
                             grouped = Some((key, String::new(), String::new()));
@@ -989,6 +1215,22 @@ impl Exporter {
                             if self.strict {
                                 return Err(SqlError::Unsupported(
                                     "pushdown: ORDER BY collations differ per engine".into(),
+                                ));
+                            }
+                            // A sort after a positional selection
+                            // (or a second sort) cannot render: the
+                            // fixed SELECT shape orders before
+                            // LIMIT, and has one ORDER BY.
+                            if sel.limit.is_some() {
+                                return Err(SqlError::Unsupported(
+                                    "a sort after a positional selection (SQL orders \
+                                     before LIMIT)"
+                                        .into(),
+                                ));
+                            }
+                            if sel.order_by.is_some() {
+                                return Err(SqlError::Unsupported(
+                                    "a second sort (SQL has a single ORDER BY)".into(),
                                 ));
                             }
                             let kids = self.arbor.children(s);
@@ -1009,6 +1251,18 @@ impl Exporter {
                                     "pushdown: ORDER BY collations differ per engine".into(),
                                 ));
                             }
+                            if sel.limit.is_some() {
+                                return Err(SqlError::Unsupported(
+                                    "'top' after a positional selection (SQL orders \
+                                     before LIMIT)"
+                                        .into(),
+                                ));
+                            }
+                            if sel.order_by.is_some() {
+                                return Err(SqlError::Unsupported(
+                                    "a second sort (SQL has a single ORDER BY)".into(),
+                                ));
+                            }
                             let kids = self.arbor.children(s);
                             let n = self.prop_s(kids[0], "value");
                             let e = self.operand(kids[1], join.map(|(_, r)| r))?;
@@ -1019,6 +1273,15 @@ impl Exporter {
                             if self.strict {
                                 return Err(SqlError::Unsupported(
                                     "pushdown: DISTINCT result order is unordered in SQL".into(),
+                                ));
+                            }
+                            // Quarb dedups the limited rows; SQL
+                            // applies DISTINCT before LIMIT.
+                            if sel.limit.is_some() {
+                                return Err(SqlError::Unsupported(
+                                    "'unique' after a positional selection (SQL applies \
+                                     DISTINCT before LIMIT)"
+                                        .into(),
                                 ));
                             }
                             if let Some(c) = pending_col.take() {
@@ -1038,6 +1301,11 @@ impl Exporter {
                         ));
                     }
                     // `@| [..n]` → LIMIT.
+                    if sel.limit.is_some() {
+                        return Err(SqlError::Unsupported(
+                            "a second positional selection".into(),
+                        ));
+                    }
                     let p = self.arbor.children(s)[0];
                     match (self.prop_s(p, "kind").as_str(), self.prop(p, "to")) {
                         ("range", Some(Value::Int(n)))
@@ -1140,7 +1408,7 @@ impl Exporter {
     }
 }
 
-fn sql_agg(name: &str, col: Option<String>) -> String {
+fn sql_agg(name: &str, col: Option<String>) -> Result<String, SqlError> {
     let f = match name {
         "count" => "COUNT",
         "sum" => "SUM",
@@ -1150,24 +1418,66 @@ fn sql_agg(name: &str, col: Option<String>) -> String {
         _ => unreachable!("checked by caller"),
     };
     match col {
-        Some(c) => format!("{f}({c})"),
-        None => {
-            if f == "COUNT" {
-                "COUNT(*)".to_string()
-            } else {
-                format!("{f}(*)")
-            }
-        }
+        Some(c) => Ok(format!("{f}({c})")),
+        // Only COUNT aggregates bare rows; SUM(*) and friends are
+        // not SQL.
+        None if f == "COUNT" => Ok("COUNT(*)".to_string()),
+        None => Err(SqlError::Unsupported(format!(
+            "'{name}' over row nodes (project a column first: '| ::col @| {name}')"
+        ))),
     }
 }
 
 #[cfg(test)]
 mod null_and_literal_tests {
-    use super::{export, partial_pushdown, pushdown};
+    use super::{Dialect, export, partial_pushdown, pushdown};
 
     // Grouped pipeline that never pushes, so `partial_pushdown` hinges
     // only on the leading predicate (mirrors the crate's partial gate).
     const GROUPED: &str = " | ::x @| group(\"g\", ::x) | count | .n | %.";
+
+    #[test]
+    fn json_column_path_pushdown_per_dialect() {
+        // `[/col/a/b:: = 'lit']` navigates into a JSON column; each
+        // dialect extracts the fixed path to text and compares.
+        // Verified live against all five engines to match the graft.
+        let q = "/orders/*[/data/meta/tier:: = 'gold']::id";
+        let sql = |d| pushdown(q, Some(d)).unwrap().sql;
+        assert_eq!(
+            sql(Dialect::Postgres),
+            "SELECT id FROM orders WHERE (data::jsonb #>> '{meta,tier}') = 'gold'"
+        );
+        assert_eq!(
+            sql(Dialect::MySql),
+            "SELECT id FROM orders WHERE JSON_UNQUOTE(JSON_EXTRACT(data, '$.meta.tier')) = 'gold'"
+        );
+        assert_eq!(
+            sql(Dialect::Sqlite),
+            "SELECT id FROM orders WHERE json_extract(data, '$.meta.tier') = 'gold'"
+        );
+        assert_eq!(
+            sql(Dialect::Mssql),
+            "SELECT id FROM orders WHERE JSON_VALUE(data, '$.meta.tier') = 'gold'"
+        );
+        assert_eq!(
+            sql(Dialect::Oracle),
+            "SELECT id FROM orders WHERE JSON_VALUE(data, '$.meta.tier') = 'gold'"
+        );
+        // With no dialect, the JSON navigation is not pushable — it
+        // falls back to the client-side graft.
+        assert!(pushdown(q, None).is_none());
+    }
+
+    #[test]
+    fn json_pushdown_only_string_equality() {
+        // Numeric comparison, `!=`, and a wildcard hop stay off the
+        // pushdown path (they are not provably identical to the
+        // graft), so they refuse and scan even with a dialect set.
+        let d = Some(Dialect::Sqlite);
+        assert!(pushdown("/o/*[/data/n:: > 2]::id", d).is_none());
+        assert!(pushdown("/o/*[/data/tier:: != 'gold']::id", d).is_none());
+        assert!(pushdown("/o/*[/data/items/*/sku:: = 'A1']::id", d).is_none());
+    }
 
     #[test]
     fn null_literal_compares_use_is_null() {
@@ -1183,11 +1493,11 @@ mod null_and_literal_tests {
             "SELECT x FROM t WHERE x IS NOT NULL"
         );
         assert_eq!(
-            pushdown("/t/*[::x = null] | ::x").unwrap().sql,
+            pushdown("/t/*[::x = null] | ::x", None).unwrap().sql,
             "SELECT x FROM t WHERE x IS NULL"
         );
         assert_eq!(
-            pushdown("/t/*[::x != null] | ::x").unwrap().sql,
+            pushdown("/t/*[::x != null] | ::x", None).unwrap().sql,
             "SELECT x FROM t WHERE x IS NOT NULL"
         );
     }
@@ -1197,8 +1507,8 @@ mod null_and_literal_tests {
         // `!=` against a non-null value and `not(...)` drop the NULL
         // rows Quarb keeps under SQL three-valued logic: the pushdown
         // paths refuse (and scan), full and partial alike.
-        assert!(pushdown("/t/*[::x != 5] | ::x").is_none());
-        assert!(pushdown("/t/*[!::x = 5] | ::x").is_none());
+        assert!(pushdown("/t/*[::x != 5] | ::x", None).is_none());
+        assert!(pushdown("/t/*[!::x = 5] | ::x", None).is_none());
         assert!(partial_pushdown(&format!("/t/*[::x != 5]{GROUPED}")).is_none());
         assert!(partial_pushdown(&format!("/t/*[!::x = 5]{GROUPED}")).is_none());
         // The display translation still emits `<>`, flagged with a note.
@@ -1212,11 +1522,11 @@ mod null_and_literal_tests {
         // A backslash (MySQL/BigQuery escape) or an apostrophe
         // (BigQuery rejects '' doubling) has no portable escaping, so
         // pushdown refuses; a clean literal still pushes.
-        assert!(pushdown("/files/*[::path = \"C:\\temp\"] | ::path").is_none());
-        assert!(pushdown("/t/*[::name = \"it's\"] | ::name").is_none());
+        assert!(pushdown("/files/*[::path = \"C:\\temp\"] | ::path", None).is_none());
+        assert!(pushdown("/t/*[::name = \"it's\"] | ::name", None).is_none());
         assert!(partial_pushdown(&format!("/t/*[::name = \"it's\"]{GROUPED}")).is_none());
         assert_eq!(
-            pushdown("/t/*[::name = \"rare\"] | ::name").unwrap().sql,
+            pushdown("/t/*[::name = \"rare\"] | ::name", None).unwrap().sql,
             "SELECT name FROM t WHERE name = 'rare'"
         );
     }

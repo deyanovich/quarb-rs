@@ -375,6 +375,9 @@ impl AstAdapter for PostgresAdapter {
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.model.property(node, name)
     }
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        self.model.default_value(node)
+    }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.model.metadata(node, key)
     }

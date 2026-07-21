@@ -173,7 +173,9 @@ pub fn parse_iso(s: &str) -> Option<(i64, u32, Option<i16>)> {
 /// midnight instant with no sub-day parts prints as a bare date.
 pub fn format_instant(secs: i64, nanos: u32, offset: Option<i16>) -> String {
     let shift = offset.unwrap_or(0) as i64 * 60;
-    let local = secs + shift;
+    // Saturating: display must not abort on an instant minted near
+    // the i64 rim (adapters can hand us any epoch).
+    let local = secs.saturating_add(shift);
     let (y, mo, d, h, mi, s) = components(local);
     let date = format!("{y:04}-{mo:02}-{d:02}");
     let subday = h != 0 || mi != 0 || s != 0 || nanos != 0 || offset.is_some();
@@ -487,7 +489,7 @@ const MONTHS: [&str; 12] = [
 /// passes through literally.
 pub fn strftime(fmt: &str, secs: i64, nanos: u32, offset_min: Option<i16>) -> String {
     let _ = nanos;
-    let local = secs + offset_min.unwrap_or(0) as i64 * 60;
+    let local = secs.saturating_add(offset_min.unwrap_or(0) as i64 * 60);
     let (y, mo, d, h, mi, se) = components(local);
     let wd = weekday(local); // 1 = Monday
     let doy = local.div_euclid(86400) - days_from_civil(y, 1, 1) + 1;
@@ -750,6 +752,13 @@ pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
     }
 
     if let Some(secs) = epoch_direct {
+        // Bound %s to the civil years 0000-9999 (what the other
+        // mint routes' four-digit years already imply): an epoch
+        // near i64::MAX would overflow display-offset arithmetic,
+        // and a nineteen-digit "timestamp" is junk, not a reading.
+        if !(-62_167_219_200..=253_402_300_799).contains(&secs) {
+            return None;
+        }
         return Some((secs, 0, offset));
     }
     if let Some(c) = century {

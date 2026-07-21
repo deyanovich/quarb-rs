@@ -55,6 +55,7 @@ pub fn parse_with_data(
         data,
         pattern_depth: 0,
         predicate_depth: 0,
+        nest_depth: 0,
     };
     p.parse()
 }
@@ -70,6 +71,7 @@ pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
         data: None,
         pattern_depth: 0,
         predicate_depth: 0,
+        nest_depth: 0,
     };
     while p.at_def() || p.at_macro() {
         if p.at_def() {
@@ -171,11 +173,37 @@ struct Parser<'a> {
     /// paths to descending navigation and outgoing edges (`<-` — an
     /// adapter-indexed backlink — is allowed).
     predicate_depth: usize,
+    /// How deeply the recursive-descent constructs (parenthesized
+    /// expressions, path groups, `!` chains) are nested right now.
+    /// Bounded by [`MAX_NEST`]: unbounded, a long run of `(` is a
+    /// stack overflow (an abort, not an error) — and macro expansion
+    /// re-enters the parser, so adversarial *data* can reach this.
+    nest_depth: usize,
 }
+
+/// Nesting depth past which parsing refuses (see
+/// [`Parser::nest_depth`]). Far beyond any real query, and small
+/// enough that the deepest frame chain (each `(` costs several
+/// stack frames through the group/operand dual reading) fits the
+/// smallest stacks in play — test threads (2 MB) and wasm.
+const MAX_NEST: usize = 64;
 
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
         self.toks.get(self.pos)
+    }
+
+    /// Enter one level of recursive nesting; a parse error past the
+    /// bound, instead of a stack overflow. Callers pair it with a
+    /// decrement after the recursive call returns.
+    fn descend(&mut self) -> Result<()> {
+        self.nest_depth += 1;
+        if self.nest_depth > MAX_NEST {
+            return Err(QuarbError::Parse(format!(
+                "query nested more than {MAX_NEST} levels deep"
+            )));
+        }
+        Ok(())
     }
 
     fn bump(&mut self) -> Option<&Token> {
@@ -424,7 +452,14 @@ impl Parser<'_> {
                 };
                 Ok(Stage::Spread { outer })
             }
-            Some(Token::Name { text, .. }) if text.starts_with('.') => {
+            // `quoted: false`: a quoted string that happens to start
+            // with a dot (`| '.gitignore'`) is a constant topic, not
+            // a push.
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if text.starts_with('.') => {
                 let text = text.clone();
                 self.pos += 1;
                 let name = if text == "." {
@@ -1056,6 +1091,7 @@ impl Parser<'_> {
                     data: self.data,
                     pattern_depth: 0,
                     predicate_depth: 0,
+                    nest_depth: 0,
                 };
                 let mut stages = Vec::new();
                 p.pipeline_items(&mut stages).map_err(wrap)?;
@@ -1332,6 +1368,13 @@ impl Parser<'_> {
     /// one-element group (`/{2}` ≡ `(/.){2}`, `/div{2}` ≡
     /// `(/div){2}`).
     fn path_elem(&mut self) -> Result<PathElem> {
+        self.descend()?;
+        let r = self.path_elem_inner();
+        self.nest_depth -= 1;
+        r
+    }
+
+    fn path_elem_inner(&mut self) -> Result<PathElem> {
         // Bare `.name` (no body) in path position marks the current
         // node — the context-typed push: nodes go to the mark
         // store, never the register. (`.name(` is a pattern push;
@@ -1608,7 +1651,7 @@ impl Parser<'_> {
     /// axis and matcher.
     fn finish_step(&mut self, axis: Axis, matcher: Matcher) -> Result<Step> {
         let mut traits = Vec::new();
-        while let Some(clauses) = self.try_trait() {
+        while let Some(clauses) = self.try_trait()? {
             traits.extend(clauses);
         }
         let mut predicates = Vec::new();
@@ -1728,6 +1771,15 @@ impl Parser<'_> {
                 self.pos += 2;
                 return Ok(Predicate::Index(n));
             }
+            // A lone digit run that failed the i64 parse is an
+            // overflowing index — error, rather than falling through
+            // to a float operand whose truthiness keeps every node.
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(QuarbError::Parse(format!(
+                    "positional index [{text}] is out of range"
+                )));
+            }
             if let Some((a, b)) = text.split_once("..") {
                 let start = if a.is_empty() { None } else { a.parse().ok() };
                 let end = if b.is_empty() { None } else { b.parse().ok() };
@@ -1774,6 +1826,13 @@ impl Parser<'_> {
     }
 
     fn pred_not(&mut self) -> Result<PredExpr> {
+        self.descend()?;
+        let r = self.pred_not_inner();
+        self.nest_depth -= 1;
+        r
+    }
+
+    fn pred_not_inner(&mut self) -> Result<PredExpr> {
         if matches!(self.peek(), Some(Token::Bang)) {
             self.pos += 1;
             return Ok(PredExpr::Not(Box::new(self.pred_not()?)));
@@ -1867,6 +1926,13 @@ impl Parser<'_> {
     /// parenthesized boolean expression in operand position is its
     /// truth value, so `(a or b) and c` still groups as before.
     fn unary(&mut self) -> Result<Operand> {
+        self.descend()?;
+        let r = self.unary_inner();
+        self.nest_depth -= 1;
+        r
+    }
+
+    fn unary_inner(&mut self) -> Result<Operand> {
         if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "-") {
             self.pos += 1;
             return Ok(Operand::Neg(Box::new(self.unary()?)));
@@ -2031,10 +2097,32 @@ impl Parser<'_> {
     /// One `@| ...` stage of an inline pipe: an aggregate call, or
     /// positional selection.
     fn inline_agg_stage(&mut self) -> Result<Stage> {
+        // The same discipline as the top-level `@|`: positional
+        // selection only in brackets, known aggregates only, shapes
+        // validated — an unchecked inline form would parse queries
+        // whose conditions the executor silently ignores.
         if matches!(self.peek(), Some(Token::LBracket)) {
-            return Ok(Stage::Select(self.predicate()?));
+            return match self.predicate()? {
+                pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => Ok(Stage::Select(pred)),
+                Predicate::Expr(_) => Err(QuarbError::Parse(
+                    "a condition filters per capsa; write '| [cond]' \
+                     ('@| [n]' selects positionally)"
+                        .into(),
+                )),
+            };
         }
         let call = self.func_call()?;
+        if !crate::stdlib::known_agg(&call.name) {
+            return Err(QuarbError::Unsupported(format!(
+                "aggregate function '{}'",
+                call.name
+            )));
+        }
+        if call.name == "ungroup" && !call.args.is_empty() {
+            return Err(QuarbError::Parse("'ungroup' takes no arguments".into()));
+        }
+        validate_window_shift(&call)?;
+        validate_keyed(&call)?;
         Ok(Stage::Agg(call))
     }
 
@@ -2086,6 +2174,7 @@ impl Parser<'_> {
             data: self.data,
             pattern_depth: 0,
             predicate_depth: 0,
+            nest_depth: 0,
         };
         let expr = p.additive().map_err(context)?;
         if p.pos != tokens.len() {
@@ -2322,12 +2411,35 @@ impl Parser<'_> {
                         )));
                     }
                 };
+                // The duality must hold at parse time too: validate
+                // the stage half exactly as `| f(rest)` would be —
+                // otherwise `foo(::x)` parses here and its unparse
+                // `(::x | foo)` fails its own reparse.
+                let stage_call = FnCall {
+                    name: call.name,
+                    args: args.collect(),
+                };
+                if crate::stdlib::known_keyed(&stage_call.name) {
+                    validate_keyed(&stage_call)?;
+                } else {
+                    let reducible = crate::stdlib::known_agg(&stage_call.name)
+                        && !crate::stdlib::context_only(&stage_call.name);
+                    if !crate::stdlib::known_scalar(&stage_call.name) && !reducible {
+                        let hint = if crate::stdlib::context_only(&stage_call.name) {
+                            format!(" ('{}' uses '@|')", stage_call.name)
+                        } else {
+                            String::new()
+                        };
+                        return Err(QuarbError::Unsupported(format!(
+                            "pipeline function '{}'{hint}",
+                            stage_call.name
+                        )));
+                    }
+                    validate_record(&stage_call)?;
+                }
                 Ok(Operand::Piped {
                     expr: Box::new(first),
-                    stages: vec![Stage::Func(FnCall {
-                        name: call.name,
-                        args: args.collect(),
-                    })],
+                    stages: vec![Stage::Func(stage_call)],
                 })
             }
             Some(Token::Name { text, quoted, .. }) => {
@@ -2595,22 +2707,22 @@ impl Parser<'_> {
     /// `None` (without consuming) if what follows is not a
     /// well-formed trait\,---\,e.g. a bare `<name` that is really a
     /// previous-sibling hop.
-    fn try_trait(&mut self) -> Option<Vec<TraitClause>> {
+    fn try_trait(&mut self) -> Result<Option<Vec<TraitClause>>> {
         if !matches!(self.peek(), Some(Token::Lt)) {
-            return None;
+            return Ok(None);
         }
         let start = self.pos;
         self.pos += 1; // consume '<'
         let Some(expr) = self.trait_or() else {
             self.pos = start;
-            return None;
+            return Ok(None);
         };
         if !matches!(self.peek(), Some(Token::Gt)) {
             self.pos = start;
-            return None;
+            return Ok(None);
         }
         self.pos += 1;
-        Some(trait_cnf(expr))
+        trait_cnf(expr).map(Some)
     }
 
     fn trait_or(&mut self) -> Option<TExpr> {
@@ -2735,11 +2847,17 @@ enum TExpr {
     Or(Box<TExpr>, Box<TExpr>),
 }
 
+/// The clause count past which CNF conversion refuses: distributing
+/// OR over AND is exponential, so an adversarial trait filter of a
+/// few dozen OR'd conjunct pairs would otherwise hang the parse.
+/// Real filters produce a handful of clauses.
+const MAX_TRAIT_CLAUSES: usize = 512;
+
 /// Normalize a trait expression to CNF: one clause per conjunct,
 /// each a disjunction of literals (`name` / `!name`). This is what
 /// lets the full algebra ride the executor's existing
 /// AND-of-OR-clauses shape unchanged.
-fn trait_cnf(e: TExpr) -> Vec<TraitClause> {
+fn trait_cnf(e: TExpr) -> Result<Vec<TraitClause>> {
     // Negation-normal form first (De Morgan, double-negation).
     fn nnf(e: TExpr, neg: bool) -> TExpr {
         match e {
@@ -2769,18 +2887,18 @@ fn trait_cnf(e: TExpr) -> Vec<TraitClause> {
             }
         }
     }
-    // Then distribute OR over AND.
-    fn clauses(e: TExpr) -> Vec<Vec<String>> {
-        match e {
+    // Then distribute OR over AND, refusing past the clause budget.
+    fn clauses(e: TExpr) -> Result<Vec<Vec<String>>> {
+        let out = match e {
             TExpr::Has(n) => vec![vec![n]],
             TExpr::And(a, b) => {
-                let mut out = clauses(*a);
-                out.extend(clauses(*b));
+                let mut out = clauses(*a)?;
+                out.extend(clauses(*b)?);
                 out
             }
             TExpr::Or(a, b) => {
-                let (ca, cb) = (clauses(*a), clauses(*b));
-                let mut out = Vec::new();
+                let (ca, cb) = (clauses(*a)?, clauses(*b)?);
+                let mut out = Vec::with_capacity(ca.len().saturating_mul(cb.len()));
                 for x in &ca {
                     for y in &cb {
                         let mut alt = x.clone();
@@ -2791,12 +2909,19 @@ fn trait_cnf(e: TExpr) -> Vec<TraitClause> {
                 out
             }
             TExpr::Not(_) => unreachable!("nnf removed compound negation"),
+        };
+        if out.len() > MAX_TRAIT_CLAUSES {
+            return Err(QuarbError::Parse(format!(
+                "trait filter too complex: its normal form exceeds \
+                 {MAX_TRAIT_CLAUSES} clauses"
+            )));
         }
+        Ok(out)
     }
-    clauses(nnf(e, false))
+    Ok(clauses(nnf(e, false))?
         .into_iter()
         .map(|alts| TraitClause { alts })
-        .collect()
+        .collect())
 }
 
 /// Interpret a name token as a predicate literal. A quoted name is
@@ -3009,7 +3134,13 @@ fn literal_value(text: &str, quoted: bool) -> Value {
     if let Ok(n) = text.parse::<i64>() {
         return Value::Int(n);
     }
-    if let Ok(f) = text.parse::<f64>() {
+    // The float reading is for digits only: Rust's f64 parser also
+    // accepts the words `inf` / `infinity` / `NaN`, but a bare word
+    // is a string literal here (`[::status = inf]` compares text).
+    if text.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+' || c == '.')
+        && let Ok(f) = text.parse::<f64>()
+        && f.is_finite()
+    {
         return Value::Float(f);
     }
     Value::Str(text.to_string())
@@ -3199,6 +3330,52 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adversarial_nesting_is_an_error_not_an_abort() {
+        // A long run of `(` must be refused by the depth bound —
+        // unbounded recursion is a stack overflow (an abort).
+        let deep = "(".repeat(5_000);
+        let toks = lexer::lex(&deep).unwrap();
+        assert!(parse(&toks).is_err());
+        // `!` chains recurse through pred_not the same way.
+        let bangs = format!("//a[{}::x]", "!".repeat(5_000));
+        let toks = lexer::lex(&bangs).unwrap();
+        assert!(parse(&toks).is_err());
+        // Real nesting well under the bound still parses.
+        let ok = format!("{}::x{}", "(".repeat(20), ")".repeat(20));
+        let toks = lexer::lex(&format!("//a[{ok}]")).unwrap();
+        assert!(parse(&toks).is_ok());
+    }
+
+    #[test]
+    fn trait_cnf_blowup_is_an_error_not_a_hang() {
+        // Distributing OR over AND is exponential: two dozen OR'd
+        // conjunct pairs must refuse fast, not hang the parse.
+        let pairs: Vec<String> = (0..24).map(|i| format!("(a{i}&&b{i})")).collect();
+        let toks = lexer::lex(&format!("//*<{}>", pairs.join("||"))).unwrap();
+        assert!(parse(&toks).is_err());
+        // A modest algebra still normalizes.
+        let toks = lexer::lex("//*<(a&&b)||(c&&d)>").unwrap();
+        assert!(parse(&toks).is_ok());
+    }
+
+    #[test]
+    fn overflowing_positional_index_is_an_error() {
+        // Not a float operand whose truthiness keeps every node.
+        let toks = lexer::lex("/a[9999999999999999999]").unwrap();
+        assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn bare_inf_and_nan_are_string_literals() {
+        // Rust's f64 parser accepts the words; the query language
+        // does not — a bare word is text.
+        let toks = lexer::lex("/x[::status = inf]").unwrap();
+        let q = parse(&toks).unwrap();
+        let dbg = format!("{q:?}");
+        assert!(dbg.contains("Str(\"inf\")"), "got {dbg}");
+    }
 
     fn last_step(q: &Query) -> &Step {
         match q.branches.last().unwrap().steps.last().unwrap() {

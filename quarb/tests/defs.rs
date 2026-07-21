@@ -194,6 +194,21 @@ fn unparse_fixpoint() {
         "/users/* <=> /orders/*[/uid:: = $*1/id::] | rec('who', $*1/name::, 'amt', /amt::)",
         "/tracks/* | rec(::title, 'artist', ::album_id~>::artist_id~>::name)",
         "/invoices/* | ::qty * ::track_id~>::price @| group(::customer) | sum",
+        // Round-trip regressions (2026-07-21 review): constant and
+        // operand stages keep their parens; a quoted dot-leading
+        // string stays a constant topic; quoted trait names reprint
+        // quoted; `<-`/`<` keep their axis before digit-/dash-led
+        // matchers; a trailing leaf anchor regroups before a plain
+        // pipe instead of reparsing as the map pipe.
+        "/a | (3)",
+        "/a | (now())",
+        "/a | (- 3)",
+        "/a | (@*)",
+        "/files | '.gitignore'",
+        "//x<'my trait'>",
+        "//a <- 3",
+        "//a < -x",
+        "def &f: /a$; &f | upper",
     ];
     for q in queries {
         let once = exp(q);

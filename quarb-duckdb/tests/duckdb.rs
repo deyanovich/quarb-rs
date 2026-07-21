@@ -32,7 +32,7 @@ fn catalog_keys_and_pushdown() {
     assert_eq!(v("/tracks/1::artist_id~>::name"), ["Holst"]);
     assert_eq!(v("/artists/2::artist_id<~ @| count"), ["1"]);
     // The pushdown path answers identically to the scan.
-    let plan = quarb_sql::pushdown("/tracks/*[::secs > 100] | rec(::title)").unwrap();
+    let plan = quarb_sql::pushdown("/tracks/*[::secs > 100] | rec(::title)", None).unwrap();
     let (cols, rows) = quarb_duckdb::raw_query(
         &path,
         &plan.sql,

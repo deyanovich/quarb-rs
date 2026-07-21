@@ -513,7 +513,12 @@ fn open(path: &str, descend: bool) -> PyResult<Document> {
         let opts = quarb_fs::FsOptions::default();
         let a = quarb_fs::FsAdapter::with_options(&p, opts).map_err(|e| err(e.to_string()))?;
         return Ok(if descend {
-            Document { doc: Doc::FsDeep(quarb_compose::ComposeAdapter::new(a)), fmt: "fs".into() }
+            Document {
+                doc: Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(a, |fs, n| {
+                    Some(fs.path(n))
+                })),
+                fmt: "fs".into(),
+            }
         } else {
             Document { doc: Doc::Fs(a), fmt: "fs".into() }
         });

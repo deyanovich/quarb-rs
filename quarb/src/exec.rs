@@ -497,6 +497,16 @@ fn stage_reads_context(stage: &Stage) -> bool {
                 InterpSeg::Expr(e) => op(e),
                 InterpSeg::Text(_) => false,
             }),
+            Operand::Cond { cond, then, other } => pred(cond) || op(then) || op(other),
+            Operand::Match {
+                scrutinee,
+                arms,
+                other,
+            } => {
+                op(scrutinee)
+                    || op(other)
+                    || arms.iter().any(|(test, _, result)| op(test) || op(result))
+            }
             Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => steps.iter().any(elem),
             _ => false,
         }
@@ -672,8 +682,14 @@ fn apply_stage(
                 if c.members.is_empty() {
                     return c;
                 }
-                let members =
-                    keyed_agg(call, std::mem::take(&mut c.members), adapter, trace, outer);
+                let members = keyed_agg(
+                    call,
+                    std::mem::take(&mut c.members),
+                    adapter,
+                    trace,
+                    outer,
+                    peers,
+                );
                 c.topic = Some(Value::List(
                     members
                         .iter()
@@ -701,7 +717,7 @@ fn apply_stage(
                     Some(other) => vec![other],
                     None => vec![node_scalar(adapter, c.node)],
                 };
-                let mut out = stdlib::apply(call, items);
+                let mut out = stdlib::apply(call, items, &|e| adapter.unit_scale(e));
                 c.topic = Some(match out.len() {
                     1 => out.pop().expect("len checked"),
                     _ => Value::List(out),
@@ -929,17 +945,19 @@ fn apply_stage(
         // neighbors are the nearest capsae whose key compares equal,
         // original order preserved.
         Stage::Agg(call) if call.name == "window" => {
-            window_stage(call, caps, adapter, trace, outer)
+            window_stage(call, caps, adapter, trace, outer, peers)
         }
         // `@| shift(n[, key])` — each capsa's topic becomes the
         // effective topic of the capsa `n` positions back (negative
         // looks forward; null where none exists). Registers and
         // captures stay the capsa's own.
-        Stage::Agg(call) if call.name == "shift" => shift_stage(call, caps, adapter, trace, outer),
+        Stage::Agg(call) if call.name == "shift" => {
+            shift_stage(call, caps, adapter, trace, outer, peers)
+        }
         // Keyed aggregates reorder or filter the capsae themselves,
         // preserving nodes, registers, and topics.
         Stage::Agg(call) if stdlib::known_keyed(&call.name) => {
-            keyed_agg(call, caps, adapter, trace, outer)
+            keyed_agg(call, caps, adapter, trace, outer, peers)
         }
         // The order/selection family is capsa-preserving too: it
         // reorders or picks, never reduces, so nodes and registers
@@ -972,7 +990,9 @@ fn apply_stage(
                     Some(coll) => caps.sort_by(|a, b| {
                         coll.compare(&topic_of(a).to_string(), &topic_of(b).to_string())
                     }),
-                    None => caps.sort_by(|a, b| topic_of(a).compare(&topic_of(b))),
+                    None => caps.sort_by(|a, b| {
+                        topic_of(a).compare_with(&topic_of(b), &|e| adapter.unit_scale(e))
+                    }),
                 },
                 "reverse" => caps.reverse(),
                 "unique" => {
@@ -1063,7 +1083,7 @@ fn apply_stage(
                 })
                 .collect();
             let node = caps.first().map_or(adapter.root(), |c| c.node);
-            stdlib::apply(call, topics)
+            stdlib::apply(call, topics, &|e| adapter.unit_scale(e))
                 .into_iter()
                 .map(|v| Capsa {
                     node,
@@ -1099,6 +1119,7 @@ fn keyed_agg(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    peers: Option<&[Capsa]>,
 ) -> Vec<Capsa> {
     // `top` / `bottom` carry their count as a leading literal.
     let (count, key_args): (Option<usize>, &[Arg]) = match call.args.split_first() {
@@ -1125,7 +1146,7 @@ fn keyed_agg(
                         bindings: &c.bindings,
                         edge: None,
                         arrived: &c.arrived,
-                        peers: None,
+                        peers,
                         outer,
                     },
                 )),
@@ -1136,7 +1157,7 @@ fn keyed_agg(
     let compare_keys = |a: &[Value], b: &[Value]| -> Ordering {
         a.iter()
             .zip(b.iter())
-            .map(|(x, y)| x.compare(y))
+            .map(|(x, y)| x.compare_with(y, &|e| adapter.unit_scale(e)))
             .find(|o| *o != Ordering::Equal)
             .unwrap_or(Ordering::Equal)
     };
@@ -1165,7 +1186,7 @@ fn keyed_agg(
                 bindings: &c.bindings,
                 edge: None,
                 arrived: &c.arrived,
-                peers: None,
+                peers,
                 outer,
             };
             let fields = record_fields(&call.args, adapter, c.node, trace, scope);
@@ -1175,9 +1196,9 @@ fn keyed_agg(
             }
             match groups.iter_mut().find(|(k, _, _)| {
                 k.len() == key.len()
-                    && k.iter()
-                        .zip(&key)
-                        .all(|(a, b)| a.compare(b) == Ordering::Equal)
+                    && k.iter().zip(&key).all(|(a, b)| {
+                        a.compare_with(b, &|e| adapter.unit_scale(e)) == Ordering::Equal
+                    })
             }) {
                 Some((_, _, members)) => members.push(c),
                 None => groups.push((key, fields, vec![c])),
@@ -1294,6 +1315,7 @@ fn peer_lists(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    peers: Option<&[Capsa]>,
 ) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
     let Some(key) = key else {
         let all: Vec<usize> = (0..caps.len()).collect();
@@ -1312,16 +1334,16 @@ fn peer_lists(
             bindings: &c.bindings,
             edge: None,
             arrived: &c.arrived,
-            peers: None,
+            peers,
             outer,
         };
         let k = operand_scalar(adapter, c.node, key, trace, scope);
         let slot = if matches!(k, Value::Null) {
             None
         } else {
-            lists
-                .iter()
-                .position(|(lk, _)| matches!(lk, Some(lk) if lk.compare(&k) == Ordering::Equal))
+            lists.iter().position(|(lk, _)| {
+                matches!(lk, Some(lk) if lk.compare_with(&k, &|e| adapter.unit_scale(e)) == Ordering::Equal)
+            })
         };
         match slot {
             Some(li) => {
@@ -1367,17 +1389,20 @@ fn window_stage(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    peers: Option<&[Capsa]>,
 ) -> Vec<Capsa> {
     let (from, to, key) = window_args(call);
-    let (lists, of) = peer_lists(&caps, key, adapter, trace, outer);
+    let (lists, of) = peer_lists(&caps, key, adapter, trace, outer, peers);
     let windows: Vec<Vec<usize>> = of
         .iter()
         .map(|&(li, p)| {
             let list = &lists[li];
             let p = p as i64;
-            let lo = from.map_or(0, |a| (p + a).max(0)) as usize;
+            // Saturating: span ends come from query text unclamped,
+            // so `window(0..i64::MAX)` must not overflow the adds.
+            let lo = from.map_or(0, |a| p.saturating_add(a).max(0)) as usize;
             let hi = to.map_or(list.len() as i64 - 1, |b| {
-                (p + b).min(list.len() as i64 - 1)
+                p.saturating_add(b).min(list.len() as i64 - 1)
             });
             if hi < lo as i64 {
                 return Vec::new();
@@ -1414,6 +1439,7 @@ fn shift_stage(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    peers: Option<&[Capsa]>,
 ) -> Vec<Capsa> {
     let (n, key) = match call.args.split_first() {
         Some((Arg::Lit(Value::Int(n)), rest)) => (
@@ -1425,12 +1451,13 @@ fn shift_stage(
         ),
         _ => (1, None),
     };
-    let (lists, of) = peer_lists(&caps, key, adapter, trace, outer);
+    let (lists, of) = peer_lists(&caps, key, adapter, trace, outer, peers);
     let topics: Vec<Value> = of
         .iter()
         .map(|&(li, p)| {
             let list = &lists[li];
-            let idx = p as i64 - n;
+            // Saturating: `shift(i64::MIN)` must not overflow.
+            let idx = (p as i64).saturating_sub(n);
             if idx < 0 || idx >= list.len() as i64 {
                 Value::Null
             } else {
@@ -1697,8 +1724,14 @@ fn temporal_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) ->
             };
             Some(Duration { secs, nanos })
         }
+        // A Quantity partner is dimensional nonsense here, not a
+        // scaling factor: its `numeric()` is the base magnitude,
+        // which must not leak in as a bare number. Let it fall to
+        // the temporal catch-all (null), mirroring Q × Q.
         (Duration { secs, nanos }, n, ArithOp::Mul)
-        | (n, Duration { secs, nanos }, ArithOp::Mul) => {
+        | (n, Duration { secs, nanos }, ArithOp::Mul)
+            if !matches!(n, Value::Quantity { .. }) =>
+        {
             let k = n.numeric()?;
             let total = (*secs as f64 + *nanos as f64 / 1e9) * k;
             Some(Duration {
@@ -1706,7 +1739,7 @@ fn temporal_arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) ->
                 nanos: ((total - total.floor()) * 1e9) as u32,
             })
         }
-        (Duration { secs, nanos }, n, ArithOp::Div) => {
+        (Duration { secs, nanos }, n, ArithOp::Div) if !matches!(n, Value::Quantity { .. }) => {
             let k = n.numeric()?;
             if k == 0.0 {
                 return Some(Value::Null);
@@ -3924,6 +3957,27 @@ mod tests {
         // Duration ± span text stays a duration.
         let sum = arith(ArithOp::Add, &two_h, &Value::Str("30min".into()), sc);
         assert_eq!(sum.to_string(), "PT2H30M");
+        // A quantity is no scaling factor: Duration × Quantity (and
+        // ÷) is dimensional nonsense — null, like Q × Q — never the
+        // base magnitude leaking in as a bare number (5 kg × 2 h
+        // must not be PT10H).
+        let five_kg = Value::Quantity {
+            value: 5.0,
+            base: "kg".into(),
+            written: Some((5.0, "kg".into())),
+        };
+        assert!(matches!(
+            arith(ArithOp::Mul, &two_h, &five_kg, sc),
+            Value::Null
+        ));
+        assert!(matches!(
+            arith(ArithOp::Mul, &five_kg, &two_h, sc),
+            Value::Null
+        ));
+        assert!(matches!(
+            arith(ArithOp::Div, &two_h, &five_kg, sc),
+            Value::Null
+        ));
     }
 
     /// A tiny in-memory arbor for testing navigation without I/O.
@@ -4904,6 +4958,29 @@ mod tests {
         // the wrong pipe is a parse error pointing at the right one
         assert!(parse(&lex("//* | [1]").unwrap()).is_err());
         assert!(parse(&lex("//* @| [:::is-leaf]").unwrap()).is_err());
+        // ...and the inline `@|` enforces the same discipline
+        assert!(parse(&lex("//a | ((::x @| [:::is-leaf] @| count))").unwrap()).is_err());
+        assert!(parse(&lex("//a | ((::x @| bogus))").unwrap()).is_err());
+    }
+
+    /// The `@*` snapshot must materialize wherever the stage reads
+    /// it: inside conditional/match operands, and in keyed-aggregate
+    /// keys (a silent `peers: None` there made `@*` null — and a
+    /// null key excludes every capsa).
+    #[test]
+    fn context_snapshot_in_cond_and_agg_keys() {
+        let t = MockTree::sample();
+        assert_eq!(
+            vals("//*.rs | ((@* @| count) > 2 ? 'many' : 'few')", &t),
+            vec![
+                Value::Str("many".into()),
+                Value::Str("many".into()),
+                Value::Str("many".into()),
+            ]
+        );
+        // Keys (@* @| count) - $ord = 2, 1, 0 — the minimum is the
+        // third file; with `@*` null every capsa would drop.
+        assert_eq!(run("//*.rs @| min_by((@* @| count) - $ord)", &t), vec![7]);
     }
 
     #[test]

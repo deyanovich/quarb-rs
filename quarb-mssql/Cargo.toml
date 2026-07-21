@@ -1,0 +1,19 @@
+[package]
+name = "quarb-mssql"
+description = "Microsoft SQL Server adapter for the Quarb query engine"
+keywords = ["query", "mssql", "sql-server", "quarb"]
+categories = ["database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.5.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.5.0" }
+tiberius.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+tokio-util.workspace = true
+thiserror.workspace = true

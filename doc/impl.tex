@@ -190,6 +190,41 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   directly); integer/float/character families native, everything
   else \texttt{CAST(... AS CHAR)} into the numeric-reading
   regime. Depends on \texttt{quarb-relational}. \\
+\texttt{quarb-mssql} & The SQL Server catalog driver:
+  \texttt{INFORMATION\_SCHEMA} plus \texttt{sys.foreign\_key\_columns}
+  (parallel column ids keep composite keys paired), over
+  \texttt{tiberius} (pure-Rust TDS, internal current-thread
+  runtime); \texttt{bit}/integer/float/character families
+  native, everything else \texttt{CAST(... AS NVARCHAR(MAX))}.
+  Target: \texttt{mssql://USER:PASS@HOST[:PORT]/DATABASE}.
+  Depends on \texttt{quarb-relational}. \\
+\texttt{quarb-oracle} & The Oracle catalog driver: the
+  \texttt{USER\_*} dictionary views over the \texttt{oracle}
+  crate (ODPI-C, synchronous); \texttt{NUMBER(p,0)} integer,
+  \texttt{BINARY\_FLOAT}/\texttt{DOUBLE} float, character
+  family text, \texttt{DATE}/\texttt{TIMESTAMP} through an
+  ISO-8601 \texttt{TO\_CHAR} into the temporal regime,
+  everything else \texttt{TO\_CHAR}. Target:
+  \texttt{oracle://USER:PASS@HOST[:PORT]/SERVICE}. Depends on
+  \texttt{quarb-relational}. \\
+\texttt{quarb-ldap} & The LDAP directory driver: the DIT
+  \emph{is} the arbor — the base DN is the root, an entry's
+  children are the entries one level below (RDN names), its
+  attributes are properties (multi-valued as lists),
+  \texttt{objectClass} values are traits. DN-valued attributes
+  (\texttt{member}, \texttt{manager}, \dots) are native
+  references — \texttt{\textasciitilde>} follows, \texttt{->}
+  enumerates, \texttt{<-member} finds the groups by a filtered
+  search. Over the \texttt{ldap3} sync client, anonymous or
+  simple bind. Target:
+  \texttt{ldap[s]://[USER:PASS@]HOST[:PORT]/BASE\_DN}. \\
+\texttt{quarb-cbor} & The CBOR (RFC~8949) adapter, the JSON
+  mapping extended: non-text map keys name nodes by canonical
+  rendering, byte strings are hex scalars (\texttt{;;;length}
+  is the raw byte count), the standard time tags (0, 1) decode
+  to instants, other tags are transparent with the number at
+  \texttt{;;;tag}. Traits carry the CBOR type. Binary, by the
+  \texttt{.cbor} extension. Depends on \texttt{ciborium}. \\
 \texttt{quarb-csv} & The CSV/TSV adapter (one \texttt{row} node per
   record, columns as properties, empty cells as missing values that
   numeric aggregates skip; \texttt{;;;columns} / \texttt{;;;n-rows}

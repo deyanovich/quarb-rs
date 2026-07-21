@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.4.1" }
-quarb-relational = { path = "../quarb-relational", version = "0.4.1" }
+quarb = { path = "../quarb", version = "0.5.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.5.0" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 thiserror.workspace = true

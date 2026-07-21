@@ -71,9 +71,18 @@ struct LazyTable {
     data: OnceCell<TableData>,
 }
 
-/// Row ids live in the low bits, the table in the high bits, so
-/// node ids are stable regardless of load order.
-const ROW_BITS: u64 = 40;
+/// Node ids pack three levels — table, row, column — so they are
+/// stable regardless of load order. The column field (low bits)
+/// is 0 for a table or row node and `col+1` for a *cell* node (a
+/// row's per-column leaf, which carries the column's value as its
+/// default projection so composition can graft a JSON string
+/// there). The whole id stays below bit 55, the bit
+/// `quarb-compose` claims when it grafts an inner arbor onto such
+/// a leaf, and below the high byte `quarb-mount` reserves.
+const COL_BITS: u64 = 12;
+const ROW_BITS: u64 = 32;
+const TABLE_SHIFT: u64 = COL_BITS + ROW_BITS;
+const COL_MASK: u64 = (1 << COL_BITS) - 1;
 const ROW_MASK: u64 = (1 << ROW_BITS) - 1;
 
 /// A database exposed as an arbor: eager or lazily materialized.
@@ -152,22 +161,46 @@ impl RelationalModel {
     }
 
     fn table_node(t: usize) -> NodeId {
-        NodeId((t as u64 + 1) << ROW_BITS)
+        NodeId((t as u64 + 1) << TABLE_SHIFT)
     }
 
     fn row_node(t: usize, r: usize) -> NodeId {
-        NodeId((t as u64 + 1) << ROW_BITS | (r as u64 + 1))
+        NodeId((t as u64 + 1) << TABLE_SHIFT | (r as u64 + 1) << COL_BITS)
     }
 
-    /// Decode a node id: `(table index, Some(row index))` for rows,
-    /// `(table index, None)` for table nodes.
+    fn cell_node(t: usize, r: usize, c: usize) -> NodeId {
+        NodeId(
+            (t as u64 + 1) << TABLE_SHIFT | (r as u64 + 1) << COL_BITS | (c as u64 + 1),
+        )
+    }
+
+    /// Decode a table or row node: `(table, Some(row))` for a row,
+    /// `(table, None)` for a table node. A cell node (column field
+    /// set) is *not* one of these, so this returns `None` for it —
+    /// the reference/link machinery that keys on `entry` then
+    /// naturally no-ops on cells.
     fn entry(&self, node: NodeId) -> Option<(usize, Option<usize>)> {
-        let t = (node.0 >> ROW_BITS).checked_sub(1)? as usize;
+        if node.0 & COL_MASK != 0 {
+            return None;
+        }
+        let t = (node.0 >> TABLE_SHIFT).checked_sub(1)? as usize;
         if t >= self.tables.len() {
             return None;
         }
-        let r = node.0 & ROW_MASK;
+        let r = (node.0 >> COL_BITS) & ROW_MASK;
         Some((t, r.checked_sub(1).map(|r| r as usize)))
+    }
+
+    /// Decode a cell node into `(table, row, column)`; `None` for a
+    /// table or row node (no column field).
+    fn cell(&self, node: NodeId) -> Option<(usize, usize, usize)> {
+        let c = (node.0 & COL_MASK).checked_sub(1)? as usize;
+        let t = (node.0 >> TABLE_SHIFT).checked_sub(1)? as usize;
+        if t >= self.tables.len() {
+            return None;
+        }
+        let r = ((node.0 >> COL_BITS) & ROW_MASK).checked_sub(1)? as usize;
+        Some((t, r, c))
     }
 
     fn row(&self, node: NodeId) -> Option<(&TableSpec, &Row)> {
@@ -199,6 +232,14 @@ impl RelationalModel {
 
     /// A human-readable locator: `/table/key` for rows.
     pub fn locator(&self, node: NodeId) -> String {
+        if let Some((t, r, c)) = self.cell(node) {
+            let table = &self.tables[t];
+            let col = table.spec.columns.get(c).cloned().unwrap_or_default();
+            return match self.data(t).rows.get(r) {
+                Some(row) => format!("/{}/{}/{}", table.spec.name, row.key, col),
+                None => format!("/{}/{}", table.spec.name, col),
+            };
+        }
         match self.entry(node) {
             None => "/".to_string(),
             Some((t, None)) => format!("/{}", self.tables[t].spec.name),
@@ -227,11 +268,27 @@ impl AstAdapter for RelationalModel {
                 let n = self.data(t).rows.len();
                 (0..n).map(|r| Self::row_node(t, r)).collect()
             }
-            _ => Vec::new(),
+            // A row's children are its text-valued cells — one
+            // leaf per string column, so composition can graft a
+            // JSON string there and navigation can descend into
+            // it. Non-string columns stay properties only.
+            Some((t, Some(r))) => {
+                let Some(row) = self.data(t).rows.get(r) else {
+                    return Vec::new();
+                };
+                (0..row.values.len())
+                    .filter(|&c| matches!(row.values[c], Value::Str(_)))
+                    .map(|c| Self::cell_node(t, r, c))
+                    .collect()
+            }
+            None => Vec::new(),
         }
     }
 
     fn name(&self, node: NodeId) -> Option<String> {
+        if let Some((t, _, c)) = self.cell(node) {
+            return self.tables[t].spec.columns.get(c).cloned();
+        }
         match self.entry(node) {
             None => None,
             Some((t, None)) => Some(self.tables[t].spec.name.clone()),
@@ -240,6 +297,9 @@ impl AstAdapter for RelationalModel {
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
+        if let Some((t, r, _)) = self.cell(node) {
+            return Some(Self::row_node(t, r));
+        }
         match self.entry(node) {
             None => None,
             Some((_, None)) => Some(NodeId(0)),
@@ -251,6 +311,13 @@ impl AstAdapter for RelationalModel {
         let (spec, row) = self.row(node)?;
         let col = spec.columns.iter().position(|c| c == name)?;
         Some(row.values[col].clone())
+    }
+
+    /// A cell node projects to its column's value — the hook
+    /// composition reads to graft a JSON string as a subtree.
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        let (t, r, c) = self.cell(node)?;
+        self.data(t).rows.get(r)?.values.get(c).cloned()
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
@@ -358,5 +425,55 @@ impl AstAdapter for RelationalModel {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> RelationalModel {
+        // one table `orders`, two columns: an int `id` (the key)
+        // and a text `data` holding a JSON string.
+        let spec = TableSpec {
+            name: "orders".into(),
+            columns: vec!["id".into(), "data".into()],
+            pk: Some(0),
+            fks: vec![],
+        };
+        let rows = vec![
+            RowSpec { rowid: 1, values: vec![Value::Int(1), Value::Str("{\"p\":\"hi\"}".into())] },
+            RowSpec { rowid: 2, values: vec![Value::Int(2), Value::Str("{\"p\":\"lo\"}".into())] },
+        ];
+        RelationalModel::build(vec![(spec, rows)])
+    }
+
+    #[test]
+    fn text_columns_become_cell_leaves() {
+        let m = model();
+        let table = RelationalModel::table_node(0);
+        let rows = m.children(table);
+        assert_eq!(rows.len(), 2);
+        // A row's children are its text-valued cells only — `data`,
+        // not the integer `id`.
+        let cells = m.children(rows[0]);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(m.name(cells[0]).as_deref(), Some("data"));
+        // The cell carries its value through default_value (the
+        // hook composition reads to graft), and is childless.
+        assert_eq!(
+            m.default_value(cells[0]),
+            Some(Value::Str("{\"p\":\"hi\"}".into()))
+        );
+        assert!(m.children(cells[0]).is_empty());
+        // Its parent is the row; its locator is /table/key/col.
+        assert_eq!(m.parent(cells[0]), Some(rows[0]));
+        assert_eq!(m.locator(cells[0]), "/orders/1/data");
+        // The column is still reachable as a property, unchanged.
+        assert_eq!(m.property(rows[0], "data"), m.default_value(cells[0]));
+        // A cell decodes back to its (table, row, col); a row does
+        // not decode as a cell.
+        assert_eq!(m.cell(cells[0]), Some((0, 0, 1)));
+        assert_eq!(m.cell(rows[0]), None);
     }
 }

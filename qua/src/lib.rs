@@ -34,7 +34,10 @@ use quarb_json::JsonAdapter;
 use quarb_kubernetes::KubernetesAdapter;
 use quarb_maildir::MaildirAdapter;
 use quarb_metatheca::MetathecaAdapter;
+use quarb_ldap::LdapAdapter;
 use quarb_mongodb::MongodbAdapter;
+use quarb_mssql::MssqlAdapter;
+use quarb_oracle::OracleAdapter;
 use quarb_mount::{Mount, MountAdapter, Shared};
 use quarb_mysql::MysqlAdapter;
 use quarb_neo4j::Neo4jAdapter;
@@ -814,7 +817,10 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         };
         let src = path.display().to_string();
         if cli.descend {
-            let adapter = ComposeAdapter::new(FsAdapter::with_options(path, opts)?);
+            let adapter = ComposeAdapter::with_source_paths(
+                FsAdapter::with_options(path, opts)?,
+                |fs, n| Some(fs.path(n)),
+            );
             return run(
                 query,
                 &adapter,
@@ -909,6 +915,66 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         );
     }
 
+    // A SQL Server database: mssql://USER:PASS@HOST[:PORT]/DB.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("mssql://")
+    {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Mssql)) {
+            match quarb_mssql::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
+        }
+        let adapter = MssqlAdapter::connect(s).context("connecting to SQL Server")?;
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+    }
+
+    // An Oracle database: oracle://USER:PASS@HOST[:PORT]/SERVICE.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("oracle://")
+    {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Oracle)) {
+            match quarb_oracle::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows);
+                    return Ok(());
+                }
+                Err(e) => {
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
+        }
+        let adapter = OracleAdapter::connect(s).context("connecting to Oracle")?;
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+    }
+
+    // An LDAP directory: ldap[s]://[USER:PASS@]HOST[:PORT]/BASE_DN.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("ldap://") || s.starts_with("ldaps://"))
+    {
+        let adapter = LdapAdapter::connect(s).context("connecting to LDAP")?;
+        return run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(s));
+    }
+
     // A Neo4j property graph: neo4j://HOST[/DB][?key=PROP].
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("neo4j://")
@@ -982,7 +1048,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("bigquery://")
     {
-        if let Some(plan) = pushdown_plan(cli, query) {
+        if let Some(plan) = pushdown_plan(cli, query, None) {
             match quarb_bigquery::raw_query(
                 s,
                 &plan.sql,
@@ -1010,19 +1076,14 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             None => BigqueryAdapter::connect(s),
         }
         .context("connecting to BigQuery")?;
-        return run(
-            query,
-            &adapter,
-            |n| adapter.locator(n),
-            cli.kaiv.then_some(s),
-        );
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A MySQL/MariaDB URL connects and introspects the database.
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("mysql://")
     {
-        if let Some(plan) = pushdown_plan(cli, query) {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::MySql)) {
             match quarb_mysql::raw_query(
                 s,
                 &plan.sql,
@@ -1050,12 +1111,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             None => MysqlAdapter::connect(s),
         }
         .context("connecting to MySQL")?;
-        return run(
-            query,
-            &adapter,
-            |n| adapter.locator(n),
-            cli.kaiv.then_some(s),
-        );
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A PostgreSQL connection string connects and materializes the
@@ -1064,7 +1120,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && is_pg_config(s)
     {
-        if let Some(plan) = pushdown_plan(cli, query) {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Postgres)) {
             match quarb_postgres::raw_query(
                 s,
                 &plan.sql,
@@ -1092,12 +1148,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             None => PostgresAdapter::connect(s),
         }
         .context("connecting to PostgreSQL")?;
-        return run(
-            query,
-            &adapter,
-            |n| adapter.locator(n),
-            cli.kaiv.then_some(s),
-        );
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A served adapter: `serve:COMMAND` spawns the command and
@@ -1210,7 +1261,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
-        if let Some(plan) = pushdown_plan(cli, query) {
+        if let Some(plan) = pushdown_plan(cli, query, None) {
             match quarb_duckdb::raw_query(
                 p,
                 &plan.sql,
@@ -1235,12 +1286,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         }
         let adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
         let src = p.display().to_string();
-        return run(
-            query,
-            &adapter,
-            |n| adapter.locator(n),
-            cli.kaiv.then_some(src.as_str()),
-        );
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
 
     // Archives are binary: dispatch before the text read (zip/PK
@@ -1259,12 +1305,28 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         );
     }
 
+    // CBOR is binary: dispatch on the raw bytes before the text
+    // read (extension-only — CBOR has no reliable magic).
+    if let Some(p) = &path
+        && p.extension().and_then(|e| e.to_str()) == Some("cbor")
+    {
+        let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let adapter = quarb_cbor::CborAdapter::parse(&bytes).context("parsing CBOR")?;
+        let src = p.display().to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.pointer(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
+
     // SQLite databases are binary: dispatch before the text read
     // (by extension, or the 16-byte magic).
     if let Some(p) = &path
         && is_sqlite(p)
     {
-        if let Some(plan) = pushdown_plan(cli, query) {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Sqlite)) {
             match quarb_sqlite::raw_query(
                 p,
                 &plan.sql,
@@ -1293,12 +1355,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         }
         .context("opening SQLite database")?;
         let src = p.display().to_string();
-        return run(
-            query,
-            &adapter,
-            |n| adapter.locator(n),
-            cli.kaiv.then_some(src.as_str()),
-        );
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
 
     let (text, path) = match &path {
@@ -1557,14 +1614,18 @@ fn partial_plan(cli: &Cli, query: &str) -> Option<quarb_sql::Partial> {
 
 /// The pushdown plan for a database input, with --explain
 /// commentary on stderr either way.
-fn pushdown_plan(cli: &Cli, query: &str) -> Option<quarb_sql::Pushdown> {
+fn pushdown_plan(
+    cli: &Cli,
+    query: &str,
+    dialect: Option<quarb_sql::Dialect>,
+) -> Option<quarb_sql::Pushdown> {
     if !pushdown_applies(cli) {
         if cli.explain {
             eprintln!("pushdown: disabled; scanning");
         }
         return None;
     }
-    match quarb_sql::pushdown_explained(query) {
+    match quarb_sql::pushdown_explained(query, dialect) {
         Ok(plan) => {
             if cli.explain {
                 match &plan.order_table {
@@ -1749,6 +1810,27 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("datastore://")
     {
         let a = Rc::new(DatastoreAdapter::connect(s).context("connecting to Datastore")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("mssql://")
+    {
+        let a = Rc::new(MssqlAdapter::connect(s).context("connecting to SQL Server")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("oracle://")
+    {
+        let a = Rc::new(OracleAdapter::connect(s).context("connecting to Oracle")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("ldap://") || s.starts_with("ldaps://"))
+    {
+        let a = Rc::new(LdapAdapter::connect(s).context("connecting to LDAP")?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
@@ -1965,6 +2047,26 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         Ok((Box::new(Shared(a)), Box::new(move |n| r.pointer(n))))
     }
+}
+
+/// Run a relational query with JSON-column grafting: the adapter
+/// is wrapped in `ComposeAdapter`, so a text column whose value
+/// parses as JSON grafts an inner arbor navigable in place
+/// (`/orders/*/data/user/age`). `outer_loc` is the wrapped
+/// adapter's own locator, threaded through the bang-locator.
+fn run_relational<A: AstAdapter>(
+    inner: A,
+    query: &str,
+    outer_loc: impl Fn(&A, NodeId) -> String,
+    kaiv_source: Option<&str>,
+) -> anyhow::Result<()> {
+    let adapter = ComposeAdapter::new(inner);
+    run(
+        query,
+        &adapter,
+        |n| adapter.locator(n, |o| outer_loc(adapter.outer(), o)),
+        kaiv_source,
+    )
 }
 
 fn run<A: AstAdapter>(

@@ -371,7 +371,15 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         tokens.push(Token::ColonColonColon);
                         i += 3;
                     }
-                    Some(';') => {
+                    // The deprecated alias claims '::;' only when a
+                    // metadata key follows; otherwise the ';' is a
+                    // def separator after a bare '::' projection
+                    // (`def &f: /x::; &f`).
+                    Some(';')
+                        if at(i + 3).is_some_and(|c| {
+                            c.is_alphanumeric() || c == '_' || c == '\'' || c == '"'
+                        }) =>
+                    {
                         tokens.push(Token::SemiSemiSemi);
                         i += 3;
                     }

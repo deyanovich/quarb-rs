@@ -608,6 +608,38 @@ impl QueryArbor {
         out
     }
 
+    /// The register scope root of node `idx`: its nearest ancestor
+    /// `query` node. Every reflected query — the top query, a
+    /// subcontext body, a correlation operand — evaluates with a
+    /// register scope of its own at runtime.
+    fn scope_query_of(&self, mut idx: usize) -> Option<usize> {
+        while let Some(p) = self.nodes[idx].parent {
+            if self.nodes[p].name.as_deref() == Some("query") {
+                return Some(p);
+            }
+            idx = p;
+        }
+        None
+    }
+
+    /// Whether node `idx` belongs to the register scope rooted at
+    /// `scope`: reachable by climbing without crossing another
+    /// `query` node. A nested subcontext body or correlation
+    /// operand is its own scope — though the subcontext node
+    /// itself still binds in the outer one.
+    fn in_scope(&self, mut idx: usize, scope: usize) -> bool {
+        while let Some(p) = self.nodes[idx].parent {
+            if p == scope {
+                return true;
+            }
+            if self.nodes[p].name.as_deref() == Some("query") {
+                return false;
+            }
+            idx = p;
+        }
+        false
+    }
+
     /// The vocabulary surface of this arbor: every node kind that
     /// occurs, with the sorted union of its property keys — for
     /// conformance checking against the locked vocabulary.
@@ -1142,23 +1174,38 @@ impl AstAdapter for QueryArbor {
                     Value::Int(i) if i >= 1 => i as usize,
                     _ => return None,
                 };
+                // Every enclosing correlation chain contributes, and
+                // the runtime trace passes outer contexts into
+                // subcontext bodies before any inner correlation
+                // binds — so collect each chain's top query from the
+                // innermost outward, then flatten operands outermost
+                // first (a `$*1` inside a subcontext body of
+                // `A <=> B | .s(…)` means A, not the body's own
+                // branches).
+                let mut tops: Vec<usize> = Vec::new();
                 let mut cur = idx;
-                let mut query = loop {
-                    cur = self.nodes[cur].parent?;
-                    if self.nodes[cur].name.as_deref() == Some("query") {
-                        break cur;
-                    }
-                };
-                while let Some(p) = self.nodes[query].parent {
+                while let Some(p) = self.nodes[cur].parent {
                     if self.nodes[p].name.as_deref() == Some("query") {
-                        query = p;
+                        // Chains nest leftward: climb this chain's
+                        // left spine to its top.
+                        let mut top = p;
+                        while let Some(pp) = self.nodes[top].parent
+                            && self.nodes[pp].name.as_deref() == Some("query")
+                        {
+                            top = pp;
+                        }
+                        tops.push(top);
+                        cur = top;
                     } else {
-                        break;
+                        cur = p;
                     }
                 }
-                self.correlation_operands(query)
-                    .get(k - 1)
-                    .map(|&b| NodeId(b as u64))
+                tops.reverse();
+                let ops: Vec<usize> = tops
+                    .iter()
+                    .flat_map(|&t| self.correlation_operands(t))
+                    .collect();
+                ops.get(k - 1).map(|&b| NodeId(b as u64))
             }
             ("recall", "ref") => {
                 let spelling = match self.property(node, "ref")? {
@@ -1166,14 +1213,32 @@ impl AstAdapter for QueryArbor {
                     _ => return None,
                 };
                 let rest = spelling.strip_prefix("$.")?;
-                // Definition sites, in source order: push stages and
-                // named subcontexts (both bind a regula).
+                // The recall's register scope: its nearest enclosing
+                // query node — every reflected query (the top query,
+                // a subcontext body, a correlation operand) opens a
+                // register scope of its own. Each `$$` outer wrapper
+                // above the recall climbs one scope out.
+                let mut scope = self.scope_query_of(idx)?;
+                let mut probe = idx;
+                while let Some(p) = self.nodes[probe].parent {
+                    if self.nodes[p].name.as_deref() != Some("outer") {
+                        break;
+                    }
+                    scope = self.scope_query_of(scope)?;
+                    probe = p;
+                }
+                // Definition sites, in source order, *within that
+                // scope*: push stages, expression pushes, and named
+                // subcontexts (all three bind a regula at runtime).
+                // A site buried in a nested body belongs to the
+                // inner scope and must not skew `$.N` numbering or
+                // name lookup out here.
                 let sites: Vec<usize> = (0..self.nodes.len())
                     .filter(|&i| {
                         matches!(
                             self.nodes[i].name.as_deref(),
-                            Some("push") | Some("subcontext")
-                        )
+                            Some("push") | Some("expr-push") | Some("subcontext")
+                        ) && self.in_scope(i, scope)
                     })
                     .collect();
                 let found = if rest.is_empty() {

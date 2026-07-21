@@ -10,6 +10,11 @@
 use crate::ast::{Arg, FnCall};
 use crate::value::Value;
 
+/// The unit-expression resolver threaded from the executor (the
+/// adapter's `unit_scale`), so aggregates read custom units exactly
+/// as criteria and ordering do.
+type Scale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
+
 const SCALAR: &[&str] = &[
     "upper",
     "lower",
@@ -490,17 +495,17 @@ fn numeric_scalar(topic: &Value, f: impl Fn(f64) -> Value) -> Value {
 /// order/selection family (`sort`, `unique`, `reverse`, `first`,
 /// `last`) and the keyed aggregates are capsa-preserving and live in
 /// the executor instead.
-pub fn apply(call: &FnCall, input: Vec<Value>) -> Vec<Value> {
+pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
     match call.name.as_str() {
         "count" => vec![Value::Int(input.len() as i64)],
-        "sum" => vec![sum(&input)],
+        "sum" => vec![sum(&input, scale)],
         "product" => vec![product(&input)],
-        "min" => extreme(input, std::cmp::Ordering::Less),
-        "max" => extreme(input, std::cmp::Ordering::Greater),
-        "mean" | "avg" => vec![mean(&input)],
-        "median" => vec![median(&input)],
-        "stddev" => vec![spread(&input, f64::sqrt)],
-        "variance" => vec![spread(&input, |v| v)],
+        "min" => extreme(input, std::cmp::Ordering::Less, scale),
+        "max" => extreme(input, std::cmp::Ordering::Greater, scale),
+        "mean" | "avg" => vec![mean(&input, scale)],
+        "median" => vec![median(&input, scale)],
+        "stddev" => vec![spread(&input, f64::sqrt, scale)],
+        "variance" => vec![spread(&input, |v| v, scale)],
         "join" => vec![Value::Str(join(&input, arg_str(call, 0, "")))],
         // The order/selection family over an explicit value list —
         // reached from the per-capsa list reductions (`| last` on a
@@ -515,7 +520,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>) -> Vec<Value> {
             let mut v = input;
             match collator_for(call) {
                 Some(c) => v.sort_by(|a, b| c.compare(&a.to_string(), &b.to_string())),
-                None => v.sort_by(Value::compare),
+                None => v.sort_by(|a, b| a.compare_with(b, scale)),
             }
             v
         }
@@ -550,71 +555,95 @@ pub fn apply(call: &FnCall, input: Vec<Value>) -> Vec<Value> {
 /// reduces to null (spec: numeric reductions). Exact while every
 /// operand is an integer, promoting to float on overflow — as
 /// arithmetic does — rather than wrapping.
-/// The spans behind a durational `sum`/`mean`: engaged when a typed
-/// duration is present, refusing entirely if any element lacks a
-/// durational reading — a silent partial total would lie.
-fn durational_spans(input: &[Value]) -> Option<Vec<(i64, u32)>> {
-    if !input.iter().any(|v| matches!(v, Value::Duration { .. })) {
-        return None;
-    }
-    input.iter().map(Value::durational_reading).collect()
-}
-
-/// The quantital fold's verdict: engaged when a typed quantity is
-/// present. All elements must be quantities on one shared base —
-/// a cross-dimension fold (watts plus meters) or a dimensionless
-/// stowaway would total nonsense silently, so either refuses.
-enum QuantFold {
-    /// No quantities present — the numeric path proceeds.
+/// The durational fold's verdict: engaged when a typed duration is
+/// present, refusing entirely if any element lacks a durational
+/// reading — a silent partial total would lie.
+enum DurFold {
+    /// No typed duration present — the numeric path proceeds.
     Absent,
-    /// Every element a quantity on this base: fold the base
-    /// magnitudes and mint the result on it. When every element
-    /// was also *written* in one unit, `unit` carries it as
-    /// (base-per-unit factor, name), so the total can display as
-    /// `570.5 W` instead of the raw base expression.
-    Same {
-        base: String,
-        unit: Option<(f64, String)>,
-    },
-    /// Mixed dimensions or quantity/non-quantity mixture: refuse.
+    /// Every element read as a span: fold these.
+    Spans(Vec<(i64, u32)>),
+    /// A typed duration mixed with span-less elements: refuse.
     Unsound,
 }
 
-fn quantital_fold(input: &[Value]) -> QuantFold {
-    let mut base: Option<&str> = None;
-    let mut unit: Option<(f64, &str)> = None;
-    let mut unit_ok = true;
-    let mut quantities = 0usize;
-    for v in input {
-        if let Value::Quantity {
-            value,
-            base: b,
-            written,
-        } = v
-        {
-            quantities += 1;
-            match base {
-                None => base = Some(b),
-                Some(prev) if prev == b => {}
-                Some(_) => return QuantFold::Unsound,
-            }
-            match (unit_ok, written) {
-                (true, Some((mag, u))) if *mag != 0.0 => match unit {
-                    None => unit = Some((value / mag, u)),
-                    Some((_, prev)) if prev == u => {}
-                    Some(_) => unit_ok = false,
-                },
-                _ => unit_ok = false,
-            }
-        }
+fn durational_fold(input: &[Value]) -> DurFold {
+    if !input.iter().any(|v| matches!(v, Value::Duration { .. })) {
+        return DurFold::Absent;
     }
-    match (quantities, base) {
-        (0, _) => QuantFold::Absent,
-        (n, Some(b)) if n == input.len() => QuantFold::Same {
-            base: b.to_string(),
-            unit: unit.filter(|_| unit_ok).map(|(f, u)| (f, u.to_string())),
+    match input.iter().map(Value::durational_reading).collect() {
+        Some(spans) => DurFold::Spans(spans),
+        None => DurFold::Unsound,
+    }
+}
+
+/// The quantital fold's verdict: engaged when a typed quantity is
+/// present. Unit text then lifts through the unital reading — the
+/// fold is iterated `+`, and `Q + '500 m'` lifts — but every
+/// element must land on one shared base, and a bare number refuses
+/// exactly as `Q + 5` does: a cross-dimension fold (watts plus
+/// meters) or a dimensionless stowaway would total nonsense
+/// silently.
+enum QuantFold {
+    /// No quantities present — the numeric path proceeds.
+    Absent,
+    /// Every element read on this base: fold `mags` (the base
+    /// magnitudes, in order) and mint the result on it. When every
+    /// element was also *written* in one unit, `unit` carries it
+    /// as (base-per-unit factor, name), so the total can display
+    /// as `570.5 W` instead of the raw base expression.
+    Same {
+        base: String,
+        unit: Option<(f64, String)>,
+        mags: Vec<f64>,
+    },
+    /// Mixed dimensions, a bare number, or unreadable text: refuse.
+    Unsound,
+}
+
+fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
+    if !input.iter().any(|v| matches!(v, Value::Quantity { .. })) {
+        return QuantFold::Absent;
+    }
+    let mut base: Option<String> = None;
+    let mut unit: Option<(f64, String)> = None;
+    let mut unit_ok = true;
+    let mut mags = Vec::with_capacity(input.len());
+    for v in input {
+        let (value, b, written): (f64, String, Option<(f64, String)>) = match v {
+            Value::Quantity {
+                value,
+                base,
+                written,
+            } => (*value, base.clone(), written.clone()),
+            Value::Str(s) => match crate::quantity::parse_unit_text_with(s, scale) {
+                Some((bv, b, wmag, wunit)) => (bv, b, Some((wmag, wunit))),
+                None => return QuantFold::Unsound,
+            },
+            _ => return QuantFold::Unsound,
+        };
+        match &base {
+            None => base = Some(b),
+            Some(prev) if *prev == b => {}
+            Some(_) => return QuantFold::Unsound,
+        }
+        match (unit_ok, &written) {
+            (true, Some((mag, u))) if *mag != 0.0 => match &unit {
+                None => unit = Some((value / mag, u.clone())),
+                Some((_, prev)) if prev == u => {}
+                Some(_) => unit_ok = false,
+            },
+            _ => unit_ok = false,
+        }
+        mags.push(value);
+    }
+    match base {
+        Some(base) => QuantFold::Same {
+            base,
+            unit: unit.filter(|_| unit_ok),
+            mags,
         },
-        _ => QuantFold::Unsound,
+        None => QuantFold::Absent,
     }
 }
 
@@ -628,21 +657,26 @@ fn quantital_result(value: f64, base: String, unit: Option<(f64, String)>) -> Va
     }
 }
 
-fn sum(input: &[Value]) -> Value {
+fn sum(input: &[Value], scale: Scale) -> Value {
     // Quantities total to a typed quantity in the base unit —
-    // mixed units of one dimension welcome (kW + W + BTU/h), mixed
-    // dimensions refused.
-    match quantital_fold(input) {
+    // mixed units of one dimension welcome (kW + W + BTU/h), unit
+    // text lifted alongside; mixed dimensions refused.
+    match quantital_fold(input, scale) {
         QuantFold::Unsound => return Value::Null,
-        QuantFold::Same { base, unit } => {
-            let value = input.iter().filter_map(Value::numeric).sum();
+        QuantFold::Same { base, unit, mags } => {
+            let value = mags.iter().sum();
             return quantital_result(value, base, unit);
         }
         QuantFold::Absent => {}
     }
     // Durations total to a typed duration (`PT15H45M`), the
     // durational counterpart.
-    if let Some(spans) = durational_spans(input) {
+    let spans = match durational_fold(input) {
+        DurFold::Unsound => return Value::Null,
+        DurFold::Spans(spans) => Some(spans),
+        DurFold::Absent => None,
+    };
+    if let Some(spans) = spans {
         let mut secs: i64 = 0;
         let mut nanos: i64 = 0;
         for (s, n) in spans {
@@ -711,19 +745,23 @@ fn product(input: &[Value]) -> Value {
     Value::Float(input.iter().filter_map(Value::numeric).product())
 }
 
-fn mean(input: &[Value]) -> Value {
+fn mean(input: &[Value], scale: Scale) -> Value {
     // The mean of same-base quantities is a quantity on that base.
-    match quantital_fold(input) {
+    match quantital_fold(input, scale) {
         QuantFold::Unsound => return Value::Null,
-        QuantFold::Same { base, unit } => {
-            let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
-            let value = nums.iter().sum::<f64>() / nums.len() as f64;
+        QuantFold::Same { base, unit, mags } => {
+            let value = mags.iter().sum::<f64>() / mags.len() as f64;
             return quantital_result(value, base, unit);
         }
         QuantFold::Absent => {}
     }
     // The mean of durations is a duration.
-    if let Some(spans) = durational_spans(input) {
+    let spans = match durational_fold(input) {
+        DurFold::Unsound => return Value::Null,
+        DurFold::Spans(spans) => Some(spans),
+        DurFold::Absent => None,
+    };
+    if let Some(spans) = spans {
         let total: i128 = spans
             .iter()
             .map(|(s, n)| *s as i128 * 1_000_000_000 + *n as i128)
@@ -744,29 +782,40 @@ fn mean(input: &[Value]) -> Value {
 
 /// The middle numeric value; an even count averages the two middle
 /// values. All-integer input with an odd count stays an integer.
-fn median(input: &[Value]) -> Value {
+fn median(input: &[Value], scale: Scale) -> Value {
     // The median of same-base quantities is a quantity on that
     // base; mixed dimensions refuse.
-    match quantital_fold(input) {
+    match quantital_fold(input, scale) {
         QuantFold::Unsound => return Value::Null,
-        QuantFold::Same { base, unit } => {
-            let mut nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
-            nums.sort_by(|a, b| a.partial_cmp(b).expect("no NaN from Value::numeric"));
-            let mid = nums.len() / 2;
-            let value = if nums.len() % 2 == 1 {
-                nums[mid]
+        QuantFold::Same {
+            base,
+            unit,
+            mut mags,
+        } => {
+            // total_cmp: query arithmetic can mint NaN (float
+            // overflow subtraction), which must not panic the sort.
+            mags.sort_by(f64::total_cmp);
+            let mid = mags.len() / 2;
+            let value = if mags.len() % 2 == 1 {
+                mags[mid]
             } else {
-                (nums[mid - 1] + nums[mid]) / 2.0
+                (mags[mid - 1] + mags[mid]) / 2.0
             };
             return quantital_result(value, base, unit);
         }
         QuantFold::Absent => {}
     }
+    // A typed duration mixed with span-less numerics would skip the
+    // durations and report the median of the leftovers — refuse,
+    // like the folds.
+    if matches!(durational_fold(input), DurFold::Unsound) {
+        return Value::Null;
+    }
     let mut nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
     if nums.is_empty() {
         return Value::Null;
     }
-    nums.sort_by(|a, b| a.partial_cmp(b).expect("no NaN from Value::numeric"));
+    nums.sort_by(f64::total_cmp);
     let mid = nums.len() / 2;
     if nums.len() % 2 == 1 {
         let m = nums[mid];
@@ -782,15 +831,23 @@ fn median(input: &[Value]) -> Value {
 
 /// Population variance, post-processed by `finish` (identity for
 /// `variance`, square root for `stddev`).
-fn spread(input: &[Value], finish: impl Fn(f64) -> f64) -> Value {
+fn spread(input: &[Value], finish: impl Fn(f64) -> f64, scale: Scale) -> Value {
     // Statistical moments over mixed dimensions are nonsense too.
     // Same-base spreads stay bare magnitudes for now (a stddev
     // carries the base's unit, a variance its square — typing them
     // is a ruling for the quantital round's next pass).
-    if matches!(quantital_fold(input), QuantFold::Unsound) {
-        return Value::Null;
-    }
-    let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
+    let nums: Vec<f64> = match quantital_fold(input, scale) {
+        QuantFold::Unsound => return Value::Null,
+        // The engaged fold's magnitudes include lifted unit text,
+        // which the numeric path below would silently drop.
+        QuantFold::Same { mags, .. } => mags,
+        QuantFold::Absent => {
+            if matches!(durational_fold(input), DurFold::Unsound) {
+                return Value::Null;
+            }
+            input.iter().filter_map(Value::numeric).collect()
+        }
+    };
     if nums.is_empty() {
         return Value::Null;
     }
@@ -805,29 +862,40 @@ fn spread(input: &[Value], finish: impl Fn(f64) -> f64) -> Value {
 /// orders by beyond its bare string fallback. A value with none (a
 /// non-numeric string, a bool, null) is missing to the numeric
 /// reductions.
-fn has_reading(v: &Value) -> bool {
+fn has_reading(v: &Value, scale: Scale) -> bool {
     v.numeric().is_some()
         || v.temporal_reading().is_some()
         || v.durational_reading().is_some()
-        || v.unital_reading().is_some()
+        || match v {
+            // The unital probe pays the threaded resolver, so
+            // custom-unit text is admitted exactly as it compares.
+            Value::Str(s) => crate::quantity::parse_unit_text_with(s, scale).is_some(),
+            Value::Quantity { .. } => true,
+            _ => false,
+        }
 }
 
 /// `min` / `max`: numeric reductions that coerce through the reading,
 /// skip a value with no reading as missing (so a junk string can no
 /// longer win via the comparison's string fallback), and reduce an
 /// empty (or wholly readingless) input to null (spec).
-fn extreme(input: Vec<Value>, want: std::cmp::Ordering) -> Vec<Value> {
+fn extreme(input: Vec<Value>, want: std::cmp::Ordering, scale: Scale) -> Vec<Value> {
     // Ordering across dimensions is meaningless: a min over watts
     // and meters would pick by raw magnitude. Refuse, like the
     // numeric folds.
-    if matches!(quantital_fold(&input), QuantFold::Unsound) {
+    if matches!(quantital_fold(&input, scale), QuantFold::Unsound) {
         return vec![Value::Null];
     }
     match input
         .into_iter()
-        .filter(has_reading)
-        .reduce(|a, b| if a.compare(&b) == want { a } else { b })
-    {
+        .filter(|v| has_reading(v, scale))
+        .reduce(|a, b| {
+            if a.compare_with(&b, scale) == want {
+                a
+            } else {
+                b
+            }
+        }) {
         Some(v) => vec![v],
         None => vec![Value::Null],
     }
@@ -859,7 +927,7 @@ mod tests {
             name: name.into(),
             args: Vec::new(),
         };
-        apply(&call, input)
+        apply(&call, input, &crate::quantity::scale_expr)
     }
 
     fn sc(name: &str, topic: Value) -> Vec<Value> {
@@ -944,6 +1012,153 @@ mod tests {
             agg("sum", vec![d(60), Value::Str("soon".into())]),
             vec![Value::Null]
         );
+        // Including a *numeric* span-less element: the refusal must
+        // not fall through to a numeric total that skips the
+        // durations (sum over [PT1M, "5"] is not 5).
+        assert_eq!(
+            agg("sum", vec![d(60), Value::Str("5".into())]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            agg("mean", vec![d(60), Value::Str("5".into())]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            agg("median", vec![d(60), Value::Str("5".into())]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            agg("stddev", vec![d(60), Value::Str("5".into())]),
+            vec![Value::Null]
+        );
+    }
+
+    #[test]
+    fn compare_is_a_total_order() {
+        // The old pairwise fallbacks cycled (10 < "1z" < "9" < 10);
+        // the canonical key sorts the same triple deterministically:
+        // the magnitude line first, readingless text after.
+        assert_eq!(
+            agg(
+                "sort",
+                vec![
+                    Value::Int(10),
+                    Value::Str("1z".into()),
+                    Value::Str("9".into())
+                ]
+            ),
+            vec![
+                Value::Str("9".into()),
+                Value::Int(10),
+                Value::Str("1z".into())
+            ]
+        );
+        // Rank order: null, booleans, the line (readings included),
+        // then text.
+        assert_eq!(
+            agg(
+                "sort",
+                vec![
+                    Value::Str("b".into()),
+                    Value::Str("2h".into()),
+                    Value::Int(5),
+                    Value::Null,
+                    Value::Bool(true),
+                ]
+            ),
+            vec![
+                Value::Null,
+                Value::Bool(true),
+                Value::Int(5),
+                Value::Str("2h".into()), // 7200 s on the line
+                Value::Str("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_with_pays_the_custom_resolver() {
+        use std::cmp::Ordering;
+        // "zorkmid" exists only in the custom table: unital order
+        // (10 > 5) with it, string order ("10…" < "5…") without.
+        let custom = |e: &str| (e == "zorkmid").then(|| (3.0, "m".to_string()));
+        let (a, b) = (
+            Value::Str("10 zorkmid".into()),
+            Value::Str("5 zorkmid".into()),
+        );
+        assert_eq!(a.compare_with(&b, &custom), Ordering::Greater);
+        assert_eq!(
+            a.compare_with(&b, &crate::quantity::scale_expr),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn quantital_fold_lifts_text_refuses_numbers() {
+        let q = |value: f64, written: Option<(f64, &str)>| Value::Quantity {
+            value,
+            base: "B".into(),
+            written: written.map(|(v, u)| (v, u.to_string())),
+        };
+        // A typed quantity engages the fold; unit text lifts, as in
+        // ± arithmetic — and the shared written unit survives.
+        let mixed = vec![
+            q(10_000_000.0, Some((10.0, "MB"))),
+            Value::Str("5MB".into()),
+        ];
+        assert_eq!(agg("sum", mixed.clone())[0].to_string(), "15 MB");
+        assert_eq!(agg("mean", mixed.clone())[0].to_string(), "7.5 MB");
+        assert_eq!(agg("min", mixed)[0].to_string(), "5MB");
+        // A bare number refuses, exactly as `Q + 5` does…
+        assert_eq!(
+            agg("sum", vec![q(10_000_000.0, None), Value::Int(5)]),
+            vec![Value::Null]
+        );
+        // …and so do cross-dimension text and readingless text.
+        assert_eq!(
+            agg("sum", vec![q(10_000_000.0, None), Value::Str("5km".into())]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            agg(
+                "sum",
+                vec![q(10_000_000.0, None), Value::Str("soon".into())]
+            ),
+            vec![Value::Null]
+        );
+    }
+
+    #[test]
+    fn extremes_pair_unit_text_unitally() {
+        // Two unit texts order by magnitude, not lexicographically
+        // ("5MB" must lose to "10MB"), and a bare number reads in
+        // the partner's base.
+        assert_eq!(
+            agg(
+                "max",
+                vec![Value::Str("5MB".into()), Value::Str("10MB".into())]
+            ),
+            vec![Value::Str("10MB".into())]
+        );
+        assert_eq!(
+            agg(
+                "min",
+                vec![Value::Str("5MB".into()), Value::Str("10MB".into())]
+            ),
+            vec![Value::Str("5MB".into())]
+        );
+        assert_eq!(
+            agg("max", vec![Value::Str("5MB".into()), Value::Int(10)]),
+            vec![Value::Str("5MB".into())]
+        );
+    }
+
+    #[test]
+    fn median_survives_nan() {
+        // Query arithmetic can mint NaN (float-overflow subtraction);
+        // the sort must not panic on it.
+        let vs = vec![Value::Float(f64::NAN), Value::Int(1), Value::Int(3)];
+        assert_eq!(agg("median", vs).len(), 1);
     }
 
     #[test]
@@ -992,22 +1207,34 @@ mod tests {
         // dictionary treatment orders it as a distinct letter
         // after е; еда < ёж either way); Cyrillic reordered first.
         assert_eq!(
-            texts(apply(&call(Some("ru-RU")), words())),
+            texts(apply(
+                &call(Some("ru-RU")),
+                words(),
+                &crate::quantity::scale_expr
+            )),
             ["еда", "ёж", "Öl", "Zebra"]
         );
         // Swedish: Ö is its own letter, after Z.
         assert_eq!(
-            texts(apply(&call(Some("sv-SE")), words())),
+            texts(apply(
+                &call(Some("sv-SE")),
+                words(),
+                &crate::quantity::scale_expr
+            )),
             ["Zebra", "Öl", "еда", "ёж"]
         );
         // German: Ö sorts with O, before Z.
         assert_eq!(
-            texts(apply(&call(Some("de-DE")), words())),
+            texts(apply(
+                &call(Some("de-DE")),
+                words(),
+                &crate::quantity::scale_expr
+            )),
             ["Öl", "Zebra", "еда", "ёж"]
         );
         // No locale: the standard comparison (codepoint for text).
         assert_eq!(
-            texts(apply(&call(None), words())),
+            texts(apply(&call(None), words(), &crate::quantity::scale_expr)),
             ["Zebra", "Öl", "еда", "ёж"]
         );
     }

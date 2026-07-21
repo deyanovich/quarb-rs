@@ -11,15 +11,18 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.4.1" }
-quarb-code = { path = "../quarb-code", version = "0.4.1" }
-quarb-csv = { path = "../quarb-csv", version = "0.4.1" }
-quarb-html = { path = "../quarb-html", version = "0.4.1" }
-quarb-json = { path = "../quarb-json", version = "0.4.1" }
-quarb-yaml = { path = "../quarb-yaml", version = "0.4.1" }
-quarb-toml = { path = "../quarb-toml", version = "0.4.1" }
-quarb-markdown = { path = "../quarb-markdown", version = "0.4.1" }
-quarb-xml = { path = "../quarb-xml", version = "0.4.1" }
+quarb = { path = "../quarb", version = "0.5.0" }
+quarb-archive = { path = "../quarb-archive", version = "0.5.0" }
+quarb-code = { path = "../quarb-code", version = "0.5.0" }
+quarb-csv = { path = "../quarb-csv", version = "0.5.0" }
+quarb-html = { path = "../quarb-html", version = "0.5.0" }
+quarb-json = { path = "../quarb-json", version = "0.5.0" }
+quarb-yaml = { path = "../quarb-yaml", version = "0.5.0" }
+quarb-toml = { path = "../quarb-toml", version = "0.5.0" }
+quarb-markdown = { path = "../quarb-markdown", version = "0.5.0" }
+quarb-xml = { path = "../quarb-xml", version = "0.5.0" }
 
 [dev-dependencies]
 quarb-fs = { path = "../quarb-fs" }
+tar.workspace = true
+flate2.workspace = true

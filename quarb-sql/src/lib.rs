@@ -10,8 +10,9 @@
 //! - `SELECT cols FROM t` → `/t/* | rec(::col, …)`; `SELECT *` →
 //!   the row nodes; `SELECT DISTINCT col` → `/t/*::col @| unique`.
 //! - `WHERE` → a predicate: comparisons, `AND`/`OR`/`NOT`,
-//!   `IS [NOT] NULL` → truthiness, `IN (…)` → an `or`-chain,
-//!   `LIKE` → `*=` for `%x%`, `=~` anchors for `x%` / `%x`.
+//!   `IS [NOT] NULL` → `= null` / `!= null` (exact: Quarb's
+//!   `value_eq` treats NULL as an ordinary value), `IN (…)` → an
+//!   `or`-chain, `LIKE` → anchored `=~` regexes.
 //! - Aggregates (`COUNT(*)`, `COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX`)
 //!   → `@|` reductions; `GROUP BY k` → `@| group(::k)` with the
 //!   aggregate riding the plain pipe and `HAVING` a filter after
@@ -23,21 +24,27 @@
 //!   numeric `-` key when mixed); `LIMIT n` → `@| [..n]`.
 //!
 //! Refused: subqueries, `UNION`, window functions, `CASE`,
-//! multi-join chains (one `JOIN` translates), aggregate arithmetic
+//! outer and `CROSS` joins (Quarb's `<=>` correlation is
+//! inner/existential), multi-join chains (one `JOIN` translates),
+//! `HAVING` without `GROUP BY`, aggregate arithmetic
 //! (`SUM(a) + 1`), and any non-`SELECT` statement.
 //!
 //! Known semantic divergences are reported as
 //! [`Translation::notes`] rather than errors:
 //!
 //! - Quarb's `count` counts all rows (SQL `COUNT(col)` skips NULLs;
-//!   the translation adds the dropna filter, and says so).
+//!   the translation adds the `[::col != null]` filter, and says
+//!   so).
 //! - Quarb streams records (JSONL), not a result table.
-//! - `LIKE` translations are case-sensitive; MySQL's default
-//!   collation is not.
+//! - `LIKE` translates to a case-insensitive regex (matching
+//!   MySQL's and SQLite's default folding; PostgreSQL's `LIKE`
+//!   is case-sensitive).
+//! - SQL keeps a NULL-key group under `GROUP BY`; Quarb's `group`
+//!   drops null keys.
 
 mod export;
 pub use export::{
-    Partial, Pushdown, export, partial_pushdown, partial_pushdown_explained, pushdown,
+    Dialect, Partial, Pushdown, export, partial_pushdown, partial_pushdown_explained, pushdown,
     pushdown_explained,
 };
 
@@ -111,8 +118,10 @@ fn lex(input: &str) -> Result<Vec<Tok>, SqlError> {
         }
         if c.is_ascii_digit() {
             let mut s = String::new();
+            let mut dotted = false;
             while let Some(&ch) = chars.get(i) {
-                if ch.is_ascii_digit() || ch == '.' {
+                if ch.is_ascii_digit() || (ch == '.' && !dotted) {
+                    dotted |= ch == '.';
                     s.push(ch);
                     i += 1;
                 } else {
@@ -128,13 +137,18 @@ fn lex(input: &str) -> Result<Vec<Tok>, SqlError> {
             if c == '"' || c == '`' {
                 let quote = c;
                 let mut s = String::new();
+                let mut closed = false;
                 i += 1;
                 while let Some(&ch) = chars.get(i) {
                     i += 1;
                     if ch == quote {
+                        closed = true;
                         break;
                     }
                     s.push(ch);
+                }
+                if !closed {
+                    return Err(SqlError::Syntax("unterminated quoted identifier".into()));
                 }
                 out.push(Tok::Word(s));
                 continue;
@@ -159,7 +173,7 @@ fn lex(input: &str) -> Result<Vec<Tok>, SqlError> {
             i += 2;
             continue;
         }
-        if "(),.*=<>;".contains(c) {
+        if "(),.*=<>;-".contains(c) {
             out.push(Tok::Sym(c));
             i += 1;
             continue;
@@ -191,6 +205,8 @@ enum Scalar {
 #[derive(Debug)]
 enum Cond {
     Cmp(ColRef, String, Scalar),
+    /// An aggregate call compared to a scalar — HAVING only.
+    AggCmp(Agg, Option<ColRef>, String, Scalar),
     Like(ColRef, String),
     IsNull(ColRef, bool),
     In(ColRef, Vec<Scalar>),
@@ -207,6 +223,18 @@ enum Agg {
     Avg,
     Min,
     Max,
+}
+
+/// The aggregate a keyword names, if any.
+fn agg_kw(w: &str) -> Option<Agg> {
+    match w.to_ascii_uppercase().as_str() {
+        "COUNT" => Some(Agg::Count),
+        "SUM" => Some(Agg::Sum),
+        "AVG" => Some(Agg::Avg),
+        "MIN" => Some(Agg::Min),
+        "MAX" => Some(Agg::Max),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -291,6 +319,16 @@ impl Parser {
                 self.pos += 1;
                 Ok(Scalar::Num(n))
             }
+            Some(Tok::Sym('-')) => {
+                self.pos += 1;
+                match self.peek().cloned() {
+                    Some(Tok::Num(n)) => {
+                        self.pos += 1;
+                        Ok(Scalar::Num(format!("-{n}")))
+                    }
+                    _ => Err(SqlError::Syntax("expected a number after '-'".into())),
+                }
+            }
             Some(Tok::Word(w)) if w.eq_ignore_ascii_case("NULL") => {
                 self.pos += 1;
                 Ok(Scalar::Null)
@@ -335,7 +373,68 @@ impl Parser {
         self.comparison()
     }
 
+    /// An aggregate call's argument list: the parser is past the
+    /// name, at `(`. Returns the aggregate (COUNT refined to
+    /// CountCol) and its column, `None` for `(*)`.
+    fn agg_call(&mut self, mut a: Agg) -> Result<(Agg, Option<ColRef>), SqlError> {
+        self.pos += 1; // '('
+        let col = if self.sym('*') {
+            None
+        } else {
+            let c = self.col_ref()?;
+            if a == Agg::Count {
+                a = Agg::CountCol;
+            }
+            Some(c)
+        };
+        if !self.sym(')') {
+            return Err(SqlError::Syntax("expected ')' after aggregate".into()));
+        }
+        Ok((a, col))
+    }
+
+    fn cmp_op(&mut self) -> Result<String, SqlError> {
+        Ok(match self.peek().cloned() {
+            Some(Tok::Sym('=')) => {
+                self.pos += 1;
+                "=".to_string()
+            }
+            Some(Tok::Sym('<')) => {
+                self.pos += 1;
+                "<".to_string()
+            }
+            Some(Tok::Sym('>')) => {
+                self.pos += 1;
+                ">".to_string()
+            }
+            Some(Tok::Op2(o)) => {
+                self.pos += 1;
+                match o.as_str() {
+                    "<>" | "!=" => "!=".to_string(),
+                    other => other.to_string(),
+                }
+            }
+            other => {
+                return Err(SqlError::Syntax(format!(
+                    "expected an operator, found {other:?}"
+                )));
+            }
+        })
+    }
+
     fn comparison(&mut self) -> Result<Cond, SqlError> {
+        // An aggregate call (`SUM(x) > 5`): meaningful in HAVING,
+        // refused with its own message in WHERE.
+        if let Some(Tok::Word(w)) = self.peek().cloned()
+            && let Some(a) = agg_kw(&w)
+            && matches!(self.toks.get(self.pos + 1), Some(Tok::Sym('(')))
+        {
+            self.pos += 1; // the name
+            let (a, col) = self.agg_call(a)?;
+            let op = self.cmp_op()?;
+            let rhs = self.scalar()?;
+            return Ok(Cond::AggCmp(a, col, op, rhs));
+        }
         let col = self.col_ref()?;
         if self.kw("IS") {
             let not = self.kw("NOT");
@@ -367,32 +466,7 @@ impl Parser {
             }
             return Ok(Cond::In(col, items));
         }
-        let op = match self.peek().cloned() {
-            Some(Tok::Sym('=')) => {
-                self.pos += 1;
-                "=".to_string()
-            }
-            Some(Tok::Sym('<')) => {
-                self.pos += 1;
-                "<".to_string()
-            }
-            Some(Tok::Sym('>')) => {
-                self.pos += 1;
-                ">".to_string()
-            }
-            Some(Tok::Op2(o)) => {
-                self.pos += 1;
-                match o.as_str() {
-                    "<>" | "!=" => "!=".to_string(),
-                    other => other.to_string(),
-                }
-            }
-            other => {
-                return Err(SqlError::Syntax(format!(
-                    "expected an operator, found {other:?}"
-                )));
-            }
-        };
+        let op = self.cmp_op()?;
         let rhs = self.scalar()?;
         Ok(Cond::Cmp(col, op, rhs))
     }
@@ -439,32 +513,74 @@ impl Scope {
     /// The operand for `col`: `::col`, or `$*1::col` for the left
     /// side under a join (whose result context is the right side).
     fn operand(&self, col: &ColRef) -> Result<String, SqlError> {
+        let key = quarb_key(&col.column)?;
         Ok(if self.join.is_some() && self.is_left(col)? {
-            format!("$*1::{}", col.column)
+            format!("$*1::{key}")
         } else {
-            format!("::{}", col.column)
+            format!("::{key}")
         })
     }
 }
 
-fn scalar_text(s: &Scalar) -> String {
-    match s {
-        Scalar::Col(c) => format!("::{}", c.column),
-        Scalar::Str(v) => format!("\"{v}\""),
+/// A SQL string as a Quarb string literal: double-quoted, with the
+/// Quarb lexer's `\"`, `\\`, `\$`, and `` \` `` escapes applied so
+/// the content survives verbatim (`$` would otherwise read as an
+/// interpolation).
+fn quarb_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// A SQL identifier as a Quarb name (a step matcher or projection
+/// key): bare when it lexes as one, single-quoted otherwise (a
+/// quoted SQL identifier can hold spaces or keywords). A name with
+/// a quote in it does not translate.
+fn quarb_key(name: &str) -> Result<String, SqlError> {
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+        && !name.starts_with('.')
+        && !matches!(name, "and" | "or" | "not");
+    if bare {
+        return Ok(name.to_string());
+    }
+    if name.contains('\'') {
+        return Err(SqlError::Unsupported(format!(
+            "the identifier {name:?} (a quote inside a quoted identifier)"
+        )));
+    }
+    Ok(format!("'{name}'"))
+}
+
+/// A scalar as a Quarb operand; columns resolve through the scope.
+fn scalar_text(s: &Scalar, scope: &Scope) -> Result<String, SqlError> {
+    Ok(match s {
+        Scalar::Col(c) => scope.operand(c)?,
+        Scalar::Str(v) => quarb_str(v),
         Scalar::Num(n) => n.clone(),
         Scalar::Null => "null".to_string(),
-    }
+    })
 }
 
 fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String, SqlError> {
     Ok(match c {
         Cond::Cmp(col, op, rhs) => {
             let lhs = scope.operand(col)?;
-            let rhs = match rhs {
-                Scalar::Col(r) => scope.operand(r)?,
-                other => scalar_text(other),
-            };
-            format!("{lhs} {op} {rhs}")
+            format!("{lhs} {op} {}", scalar_text(rhs, scope)?)
+        }
+        Cond::AggCmp(..) => {
+            return Err(SqlError::Unsupported(
+                "an aggregate in WHERE (SQL puts it in HAVING)".into(),
+            ));
         }
         Cond::Like(col, pat) => {
             let lhs = scope.operand(col)?;
@@ -488,15 +604,23 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
             }
         }
         Cond::IsNull(col, is_null) => {
+            // `= null` / `!= null`: Quarb's `value_eq` treats NULL
+            // as an ordinary value, so these are exactly SQL's
+            // `IS [NOT] NULL` — truthiness (`not ::c`) would also
+            // drop 0 and ''.
             let lhs = scope.operand(col)?;
-            if *is_null { format!("not {lhs}") } else { lhs }
+            if *is_null {
+                format!("{lhs} = null")
+            } else {
+                format!("{lhs} != null")
+            }
         }
         Cond::In(col, items) => {
             let lhs = scope.operand(col)?;
             let parts: Vec<String> = items
                 .iter()
-                .map(|s| format!("{lhs} = {}", scalar_text(s)))
-                .collect();
+                .map(|s| Ok(format!("{lhs} = {}", scalar_text(s, scope)?)))
+                .collect::<Result<_, SqlError>>()?;
             format!("({})", parts.join(" or "))
         }
         Cond::And(a, b) => format!(
@@ -551,42 +675,18 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         if p.sym('*') {
             items.push(SelectItem::Star);
         } else if let Some(Tok::Word(w)) = p.peek().cloned() {
-            let agg = match w.to_ascii_uppercase().as_str() {
-                "COUNT" => Some(Agg::Count),
-                "SUM" => Some(Agg::Sum),
-                "AVG" => Some(Agg::Avg),
-                "MIN" => Some(Agg::Min),
-                "MAX" => Some(Agg::Max),
-                _ => None,
-            };
-            if let Some(mut a) = agg
+            if let Some(a) = agg_kw(&w)
                 && matches!(p.toks.get(p.pos + 1), Some(Tok::Sym('(')))
             {
-                {
-                    p.pos += 2;
-                    let col = if p.sym('*') {
-                        None
-                    } else {
-                        let c = p.col_ref()?;
-                        if a == Agg::Count {
-                            a = Agg::CountCol;
-                        }
-                        Some(c)
-                    };
-                    if !p.sym(')') {
-                        return Err(SqlError::Syntax("expected ')' after aggregate".into()));
-                    }
-                    let alias = p.kw("AS").then(|| p.ident()).transpose()?;
-                    items.push(SelectItem::Agg(a, col, alias));
-                    if p.sym(',') {
-                        continue;
-                    }
-                    break;
-                }
+                p.pos += 1; // the name
+                let (a, col) = p.agg_call(a)?;
+                let alias = p.kw("AS").then(|| p.ident()).transpose()?;
+                items.push(SelectItem::Agg(a, col, alias));
+            } else {
+                let col = p.col_ref()?;
+                let alias = p.kw("AS").then(|| p.ident()).transpose()?;
+                items.push(SelectItem::Col(col, alias));
             }
-            let col = p.col_ref()?;
-            let alias = p.kw("AS").then(|| p.ident()).transpose()?;
-            items.push(SelectItem::Col(col, alias));
         } else {
             return Err(SqlError::Syntax("expected a select item".into()));
         }
@@ -597,27 +697,46 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
 
     p.expect_kw("FROM")?;
     let from_table = p.ident()?;
-    let from_alias = match p.peek() {
-        Some(Tok::Word(w))
-            if ![
-                "JOIN", "INNER", "WHERE", "GROUP", "ORDER", "LIMIT", "HAVING",
-            ]
-            .contains(&w.to_ascii_uppercase().as_str()) =>
-        {
-            Some(p.ident()?)
+    // Keywords that end the FROM clause and so cannot be a bare
+    // table alias.
+    const CLAUSE_KEYWORDS: &[&str] = &[
+        "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER", "ON", "WHERE", "GROUP",
+        "ORDER", "LIMIT", "HAVING", "UNION",
+    ];
+    let from_alias = if p.kw("AS") {
+        Some(p.ident()?)
+    } else {
+        match p.peek() {
+            Some(Tok::Word(w)) if !CLAUSE_KEYWORDS.contains(&w.to_ascii_uppercase().as_str()) => {
+                Some(p.ident()?)
+            }
+            _ => None,
         }
-        _ => None,
     };
 
-    // One optional JOIN ... ON a = b.
+    // One optional inner JOIN ... ON a = b; the outer forms have
+    // no existential-correlation equivalent, so they refuse rather
+    // than silently translating as inner.
+    if p.kw("LEFT") || p.kw("RIGHT") || p.kw("FULL") {
+        return Err(SqlError::Unsupported(
+            "an outer JOIN (Quarb's '<=>' correlation is inner/existential)".into(),
+        ));
+    }
+    if p.kw("CROSS") {
+        return Err(SqlError::Unsupported("CROSS JOIN".into()));
+    }
     let mut join = None;
     let mut join_on = None;
     if p.kw("INNER") || matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("JOIN")) {
         p.expect_kw("JOIN")?;
         let t = p.ident()?;
-        let alias = match p.peek() {
-            Some(Tok::Word(w)) if !w.eq_ignore_ascii_case("ON") => Some(p.ident()?),
-            _ => None,
+        let alias = if p.kw("AS") {
+            Some(p.ident()?)
+        } else {
+            match p.peek() {
+                Some(Tok::Word(w)) if !w.eq_ignore_ascii_case("ON") => Some(p.ident()?),
+                _ => None,
+            }
         };
         p.expect_kw("ON")?;
         let l = p.col_ref()?;
@@ -627,9 +746,9 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let r = p.col_ref()?;
         join = Some((t, alias));
         join_on = Some((l, r));
-        if matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("JOIN"))
-            || matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("INNER"))
-            || matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("LEFT"))
+        if matches!(p.peek(), Some(Tok::Word(w))
+            if ["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
+                .contains(&w.to_ascii_uppercase().as_str()))
         {
             return Err(SqlError::Unsupported(
                 "more than one JOIN (chain resolutions with '~>' instead)".into(),
@@ -678,6 +797,11 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             "trailing SQL after the query ({t:?})"
         )));
     }
+    if group_by.is_none() && having.is_some() {
+        return Err(SqlError::Unsupported(
+            "HAVING without GROUP BY (a whole-table group)".into(),
+        ));
+    }
 
     // ---- emit ----
     let mut q = String::new();
@@ -688,8 +812,11 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let (left_col, right_col) = if scope.is_left(l)? { (l, r) } else { (r, l) };
         write!(
             q,
-            "/{from_table}/* <=> /{jt}/*[::{} = $*1::{}",
-            right_col.column, left_col.column
+            "/{}/* <=> /{}/*[::{} = $*1::{}",
+            quarb_key(&from_table)?,
+            quarb_key(jt)?,
+            quarb_key(&right_col.column)?,
+            quarb_key(&left_col.column)?
         )
         .unwrap();
         if let Some(w) = &where_cond {
@@ -702,7 +829,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 .to_string(),
         );
     } else {
-        write!(q, "/{from_table}/*").unwrap();
+        write!(q, "/{}/*", quarb_key(&from_table)?).unwrap();
         if let Some(w) = &where_cond {
             write!(q, "[{}]", emit_cond(w, &scope, &mut notes)?).unwrap();
         }
@@ -710,6 +837,9 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
 
     // GROUP BY: the aggregate rides the plain pipe.
     if let Some(k) = &group_by {
+        if distinct {
+            return Err(SqlError::Unsupported("SELECT DISTINCT with GROUP BY".into()));
+        }
         let aggs: Vec<&SelectItem> = items
             .iter()
             .filter(|i| matches!(i, SelectItem::Agg(..)))
@@ -722,26 +852,61 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let SelectItem::Agg(a, col, alias) = aggs[0] else {
             unreachable!()
         };
-        if let Some(c) = col {
-            if matches!(a, Agg::CountCol) {
-                notes.push(format!(
-                    "COUNT({0}): Quarb count counts all; the dropna filter [::{0}] restores \
-                     SQL's NULL-skipping",
-                    c.column
-                ));
-                write!(q, "[::{}]", c.column).unwrap();
-            }
-            if !matches!(a, Agg::Count | Agg::CountCol) {
-                write!(q, " | ::{}", c.column).unwrap();
+        // Any plain select item must be the group key — anything
+        // else would silently vanish from the translation.
+        let mut key_alias = None;
+        for item in &items {
+            match item {
+                SelectItem::Col(c, ka) if c.column.eq_ignore_ascii_case(&k.column) => {
+                    key_alias = ka.clone();
+                }
+                SelectItem::Col(c, _) => {
+                    return Err(SqlError::Unsupported(format!(
+                        "the non-aggregate column '{}' is not the GROUP BY key",
+                        c.column
+                    )));
+                }
+                SelectItem::Star => {
+                    return Err(SqlError::Unsupported("SELECT * with GROUP BY".into()));
+                }
+                SelectItem::Agg(..) => {}
             }
         }
-        write!(q, " @| group(::{})", k.column).unwrap();
+        notes.push(
+            "GROUP BY: SQL keeps a NULL-key group; Quarb's group drops null keys".to_string(),
+        );
+        if let Some(c) = col {
+            let op = scope.operand(c)?;
+            if matches!(a, Agg::CountCol) {
+                notes.push(format!(
+                    "COUNT({}): Quarb count counts all; the [{op} != null] filter \
+                     restores SQL's NULL-skipping",
+                    c.column
+                ));
+                write!(q, "[{op} != null]").unwrap();
+            }
+            if !matches!(a, Agg::Count | Agg::CountCol) {
+                write!(q, " | {op}").unwrap();
+            }
+        }
+        match &key_alias {
+            Some(ka) => {
+                write!(q, " @| group({}, {})", quarb_str(ka), scope.operand(k)?).unwrap()
+            }
+            None => write!(q, " @| group({})", scope.operand(k)?).unwrap(),
+        }
         let name = alias.clone().unwrap_or_else(|| agg_fn(a).to_string());
+        if !plain_register(&name) {
+            return Err(SqlError::Unsupported(format!(
+                "the aggregate alias {name:?} (not a plain register name)"
+            )));
+        }
         write!(q, " | {} | .{name}", agg_fn(a)).unwrap();
         if let Some(h) = &having {
-            // HAVING refers to the aggregate (by alias or function
-            // name) or the group key.
-            let cond = emit_having(h, &name)?;
+            // HAVING refers to the aggregate (an aggregate call,
+            // its alias, or its function name) or the group key.
+            let key_field = key_alias.as_deref().unwrap_or(&k.column);
+            let cond = emit_having(h, a, col.as_ref(), &name, &k.column, key_field)?;
             write!(q, " | [{cond}]").unwrap();
         }
         write!(q, " | %.").unwrap();
@@ -752,33 +917,38 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 "mixing aggregates and columns without GROUP BY".into(),
             ));
         }
+        if distinct {
+            return Err(SqlError::Unsupported(
+                "SELECT DISTINCT with an aggregate".into(),
+            ));
+        }
         let SelectItem::Agg(a, col, _) = &items[0] else {
             unreachable!()
         };
         if let Some(c) = col {
+            let op = scope.operand(c)?;
             if matches!(a, Agg::CountCol) {
                 notes.push(format!(
-                    "COUNT({0}): Quarb count counts all; the dropna filter [::{0}] restores \
-                     SQL's NULL-skipping",
+                    "COUNT({}): Quarb count counts all; the [{op} != null] filter \
+                     restores SQL's NULL-skipping",
                     c.column
                 ));
-                write!(q, "[::{}]", c.column).unwrap();
+                write!(q, "[{op} != null]").unwrap();
             }
             if !matches!(a, Agg::Count | Agg::CountCol) {
-                write!(q, "::{}", c.column).unwrap();
+                write!(q, " | {op}").unwrap();
             }
         }
         write!(q, " @| {}", agg_fn(a)).unwrap();
     } else {
-        // Plain column selection.
+        // Plain column selection: sort, then DISTINCT's dedup
+        // (stable, so the sorted order survives), then LIMIT —
+        // SQL applies DISTINCT before ORDER BY and LIMIT.
         if let Some((c, desc)) = &order_by {
             write!(q, " @| sort_by({})", scope.operand(c)?).unwrap();
             if *desc {
                 q.push_str(" @| reverse");
             }
-        }
-        if let Some(n) = &limit {
-            write!(q, " @| [..{n}]").unwrap();
         }
         if distinct {
             if items.len() != 1 {
@@ -790,7 +960,15 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 return Err(SqlError::Unsupported("SELECT DISTINCT *".into()));
             };
             write!(q, " | {} @| unique", scope.operand(c)?).unwrap();
-        } else if items.len() == 1 && matches!(items[0], SelectItem::Star) {
+            if let Some(n) = &limit {
+                write!(q, " @| [..{n}]").unwrap();
+            }
+            return Ok(Translation { query: q, notes });
+        }
+        if let Some(n) = &limit {
+            write!(q, " @| [..{n}]").unwrap();
+        }
+        if items.len() == 1 && matches!(items[0], SelectItem::Star) {
             // row nodes as-is
             notes.push("SELECT *: the result is the row nodes (their locators print)".to_string());
         } else {
@@ -803,7 +981,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                     SelectItem::Col(c, alias) => {
                         let op = scope.operand(c)?;
                         match alias {
-                            Some(a) => fields.push(format!("\"{a}\", {op}")),
+                            Some(a) => fields.push(format!("{}, {op}", quarb_str(a))),
                             // The witness side names its field with
                             // the SQL qualifier, so two-sided select
                             // lists keep distinct keys.
@@ -812,7 +990,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                                     Some(t) => format!("{t}.{}", c.column),
                                     None => c.column.clone(),
                                 };
-                                fields.push(format!("\"{name}\", {op}"));
+                                fields.push(format!("{}, {op}", quarb_str(&name)));
                             }
                             None => fields.push(op),
                         }
@@ -826,9 +1004,10 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         return Ok(Translation { query: q, notes });
     }
 
-    // ORDER BY / LIMIT after grouped or aggregate forms.
+    // ORDER BY / LIMIT after grouped or aggregate forms; the sort
+    // key names a field of the group record.
     if let Some((c, desc)) = &order_by {
-        write!(q, " @| sort_by(::{})", c.column).unwrap();
+        write!(q, " @| sort_by(::{})", quarb_key(&c.column)?).unwrap();
         if *desc {
             q.push_str(" @| reverse");
         }
@@ -839,21 +1018,69 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     Ok(Translation { query: q, notes })
 }
 
-/// A HAVING condition: comparisons against the (single) aggregate,
-/// referred to by its alias or function name — it is the topic's
-/// pushed register.
-fn emit_having(c: &Cond, agg_name: &str) -> Result<String, SqlError> {
+/// A name usable as a bare Quarb register (`.name` / `$.name`).
+fn plain_register(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// A HAVING condition: a single comparison whose left side names
+/// the (single) aggregate — an aggregate call matching the select
+/// list's, its alias, or its function name (it is the topic's
+/// pushed register, `$_`) — or the group key (`$.key`).
+fn emit_having(
+    c: &Cond,
+    agg: &Agg,
+    agg_col: Option<&ColRef>,
+    agg_name: &str,
+    key: &str,
+    key_field: &str,
+) -> Result<String, SqlError> {
+    let rhs_text = |rhs: &Scalar| -> Result<String, SqlError> {
+        match rhs {
+            Scalar::Col(_) => Err(SqlError::Unsupported(
+                "HAVING compares against a literal".into(),
+            )),
+            Scalar::Str(v) => Ok(quarb_str(v)),
+            Scalar::Num(n) => Ok(n.clone()),
+            Scalar::Null => Ok("null".to_string()),
+        }
+    };
     match c {
-        Cond::Cmp(col, op, rhs) => {
-            let lhs = if col.column.eq_ignore_ascii_case(agg_name)
-                || ["count", "sum", "avg", "min", "max", "n"]
-                    .contains(&col.column.to_ascii_lowercase().as_str())
-            {
-                "$_".to_string()
-            } else {
-                format!("$.{}", col.column)
+        Cond::AggCmp(a, col, op, rhs) => {
+            let same_col = match (col, agg_col) {
+                (None, None) => true,
+                (Some(x), Some(y)) => x.column.eq_ignore_ascii_case(&y.column),
+                _ => false,
             };
-            Ok(format!("{lhs} {op} {}", scalar_text(rhs)))
+            if a != agg || !same_col {
+                return Err(SqlError::Unsupported(
+                    "HAVING refers to an aggregate not in the select list".into(),
+                ));
+            }
+            Ok(format!("$_ {op} {}", rhs_text(rhs)?))
+        }
+        Cond::Cmp(col, op, rhs) => {
+            let lhs = if col.column.eq_ignore_ascii_case(agg_name) {
+                "$_".to_string()
+            } else if col.column.eq_ignore_ascii_case(key) {
+                if !plain_register(key_field) {
+                    return Err(SqlError::Unsupported(format!(
+                        "the group key {key_field:?} in HAVING (not a plain register name)"
+                    )));
+                }
+                format!("$.{key_field}")
+            } else {
+                return Err(SqlError::Unsupported(format!(
+                    "the HAVING column '{}' (name the aggregate or the group key)",
+                    col.column
+                )));
+            };
+            Ok(format!("{lhs} {op} {}", rhs_text(rhs)?))
         }
         _ => Err(SqlError::Unsupported(
             "HAVING translates for a single comparison".into(),

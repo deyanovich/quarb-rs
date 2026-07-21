@@ -26,8 +26,7 @@ const REGISTER: &str = "\x1b[36m"; // cyan — $. $* @. %. register refs
 /// before `<=>`).
 const OPERATORS: &[&str] = &[
     ";;;", ":::", "::;", "::", "<=>?", "<=>", "~>", "<~", "->", "<-", "@|", "&&", "||", "=~", "?=",
-    ">=",
-    "<=", "!=", "*=", "|", "!", "=", "<", ">", "+", "{", "}", "?", "(", ")", "[", "]", ",",
+    ">=", "<=", "!=", "*=", "|", "!", "=", "<", ">", "+", "{", "}", "?", "(", ")", "[", "]", ",",
 ];
 
 /// A token category — the shared classification both renderers map.
@@ -112,7 +111,9 @@ fn scan(src: &str) -> Vec<(Option<Class>, &str)> {
 
         // Register / record / context references: $. $.name $*1 $$
         // @. %. — the whole run colors as a register reference.
-        if c == '$' || c == '@' || c == '%' {
+        // `@|` is the aggregation pipe, not a register: leave it
+        // for the operator table.
+        if (c == '$' || c == '@' || c == '%') && !(c == '@' && b.get(i + 1) == Some(&b'|')) {
             let start = i;
             i += 1;
             while i < b.len() && matches!(b[i] as char, '.' | '*' | '$' | '-') {
@@ -132,7 +133,11 @@ fn scan(src: &str) -> Vec<(Option<Class>, &str)> {
             while i < b.len() && (b[i] as char).is_ascii_digit() {
                 i += 1;
             }
-            if i < b.len() && b[i] as char == '.' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit() {
+            if i < b.len()
+                && b[i] as char == '.'
+                && i + 1 < b.len()
+                && (b[i + 1] as char).is_ascii_digit()
+            {
                 i += 1;
                 while i < b.len() && (b[i] as char).is_ascii_digit() {
                     i += 1;

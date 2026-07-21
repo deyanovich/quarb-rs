@@ -1,6 +1,6 @@
 //! The adapter surface: how a data source plugs into the engine.
 //!
-//! The live methods\,---\,those the engine currently drives\,---\,are
+//! The live methods — those the engine currently drives — are
 //! the navigation set ([`root`](AstAdapter::root),
 //! [`children`](AstAdapter::children), [`name`](AstAdapter::name),
 //! [`parent`](AstAdapter::parent)) plus the projection set

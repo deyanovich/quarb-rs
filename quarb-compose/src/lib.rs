@@ -16,7 +16,13 @@
 //! and parsed when navigation actually enters it. Detection is by
 //! extension (`.json`, `.xml`, `.html`/`.htm`/`.xhtml`/`.svg`,
 //! `.csv`/`.tsv`), else by sniffing the content's first
-//! character; a parse failure simply leaves the leaf a leaf. The
+//! character; a parse failure simply leaves the leaf a leaf.
+//! Archive leaves (`.zip`, `.tar`, `.tar.gz`) are binary, so they
+//! graft by *path* rather than content — available when the outer
+//! substrate has real paths (see
+//! [`ComposeAdapter::with_source_paths`]) — and the grafted
+//! archive composes in turn, so one path runs filesystem → tar →
+//! JSON without a seam. The
 //! inner root is *identified with* the outer leaf node — the leaf
 //! itself answers the inner root's children — so there is no
 //! phantom node between the file and its content.
@@ -27,6 +33,7 @@
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// A parsed inner arbor.
 enum Inner {
@@ -35,6 +42,9 @@ enum Inner {
     Html(quarb_html::HtmlAdapter),
     Csv(quarb_csv::CsvAdapter),
     Code(quarb_code::CodeAdapter),
+    /// A grafted archive, itself composed so its own parseable
+    /// entries graft in turn.
+    Archive(Box<ComposeAdapter<quarb_archive::ArchiveAdapter>>),
 }
 
 impl Inner {
@@ -45,6 +55,7 @@ impl Inner {
             Inner::Html(a) => a,
             Inner::Csv(a) => a,
             Inner::Code(a) => a,
+            Inner::Archive(a) => &**a,
         }
     }
 
@@ -55,8 +66,17 @@ impl Inner {
             Inner::Html(a) => a.locator(node),
             Inner::Csv(a) => a.locator(node),
             Inner::Code(a) => a.locator(node),
+            Inner::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
         }
     }
+}
+
+/// Names [`quarb_archive::ArchiveAdapter::open`] can take: the
+/// zip family, tar, and gzip (`.gz` alone included — the open
+/// checks magic bytes, and a failure leaves the leaf a leaf).
+fn archive_name(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "zip" | "tar" | "tgz" | "gz")
 }
 
 /// Parse `content` by `name`'s extension, else by sniffing.
@@ -127,6 +147,10 @@ pub struct ComposeAdapter<A: AstAdapter> {
     /// (graft, inner id) → interned composite id, and the reverse.
     interned: RefCell<HashMap<(usize, NodeId), NodeId>>,
     reverse: RefCell<Vec<(usize, NodeId)>>,
+    /// Maps an outer leaf to a filesystem path, when the outer
+    /// substrate has one. Enables archive grafts, which are
+    /// binary and open by path rather than parsing from text.
+    source_path: Option<fn(&A, NodeId) -> Option<PathBuf>>,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -137,6 +161,19 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             probed: RefCell::new(HashMap::new()),
             interned: RefCell::new(HashMap::new()),
             reverse: RefCell::new(Vec::new()),
+            source_path: None,
+        }
+    }
+
+    /// Like [`new`](Self::new), with a hook mapping outer leaves
+    /// to filesystem paths, so archive leaves (`.zip`,
+    /// `.tar[.gz]`) graft too. The grafted archive composes in
+    /// turn: its own parseable entries graft, and one path walks
+    /// filesystem → archive → document.
+    pub fn with_source_paths(outer: A, source_path: fn(&A, NodeId) -> Option<PathBuf>) -> Self {
+        ComposeAdapter {
+            source_path: Some(source_path),
+            ..Self::new(outer)
         }
     }
 
@@ -196,6 +233,16 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 return None;
             }
             let name = self.outer.name(node)?;
+            if archive_name(&name)
+                && let Some(path_of) = self.source_path
+                && let Some(path) = path_of(&self.outer, node)
+                && let Ok(a) = quarb_archive::ArchiveAdapter::open(&path)
+            {
+                let inner = Inner::Archive(Box::new(ComposeAdapter::new(a)));
+                let mut grafts = self.grafts.borrow_mut();
+                grafts.push(Graft { outer: node, inner });
+                return Some(grafts.len() - 1);
+            }
             let content = match self.outer.default_value(node)? {
                 Value::Str(s) => s,
                 _ => return None,

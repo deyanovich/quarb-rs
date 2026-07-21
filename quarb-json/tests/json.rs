@@ -89,6 +89,34 @@ fn type_traits() {
     );
 }
 
+/// Dual exposure: a scalar-valued object field answers as a
+/// property (`::age`) as well as a child (`/age::`); a
+/// container-valued field answers only to navigation.
+#[test]
+fn scalar_fields_are_properties_too() {
+    assert_eq!(values("/users/*::age"), vec!["17", "30"]);
+    assert_eq!(values("/users/*[::age >= 18]::name"), vec!["Alice"]);
+    // The two spellings agree.
+    assert_eq!(values("/users/*::age"), values("/users/*/age::"));
+    let doc = r#"{"services": [
+        {"name": "web", "port": 8080},
+        {"name": "db", "port": {"num": 5432, "proto": "tcp"}}
+    ]}"#;
+    let adapter = JsonAdapter::from_json_value(serde_json::from_str(doc).unwrap());
+    let vals = |q: &str| match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    // A container-valued field answers only to navigation: db's
+    // structured port projects to nothing (same as `/port::` on
+    // it), and predicates pass it over — no error, no match.
+    assert_eq!(vals("/services/*::port"), vec!["8080", ""]);
+    assert_eq!(vals("/services/*[::port > 6000]::name"), vec!["web"]);
+    // The shape-stable child spelling still reaches both shapes.
+    assert_eq!(vals("/services/*/port::"), vec!["8080", ""]);
+    assert_eq!(vals("/services/*/port/num::"), vec!["5432"]);
+}
+
 #[test]
 fn predicates_over_json() {
     // users whose age >= 18, then their name (project the child value
