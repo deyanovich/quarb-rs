@@ -23,7 +23,7 @@ fn mock_gitlab() {
         f,
         "#!/bin/sh\n\
          [ \"$1\" = api ] || exit 2\n\
-         p=$(printf %s \"$2\" | sed 's/[?&]per_page=100&page=[0-9]*$//')\n\
+         p=$(printf %s \"$2\" | sed 's/[?&]per_page=100&page=[0-9]*$//' | tr '?&=' '___')\n\
          f=\"{fixtures}/$(printf %s \"$p\" | tr / _).json\"\n\
          [ -f \"$f\" ] || {{ echo \"404 Not Found: $p\" >&2; exit 1; }}\n\
          cat \"$f\"\n"
