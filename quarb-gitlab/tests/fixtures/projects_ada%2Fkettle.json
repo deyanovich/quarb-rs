@@ -1,0 +1,45 @@
+{
+ "id": 14,
+ "name": "kettle",
+ "path": "kettle",
+ "path_with_namespace": "ada/kettle",
+ "namespace": {
+  "kind": "user",
+  "full_path": "ada"
+ },
+ "description": null,
+ "visibility": "public",
+ "star_count": 1,
+ "forks_count": 0,
+ "open_issues_count": 0,
+ "topics": [],
+ "archived": false,
+ "default_branch": "main",
+ "created_at": "2020-06-01T00:00:00Z",
+ "last_activity_at": "2026-07-01T00:00:00Z",
+ "web_url": "https://gitlab.com/ada/kettle",
+ "forked_from_project": {
+  "id": 11,
+  "name": "kettle",
+  "path": "kettle",
+  "path_with_namespace": "tesslab/kettle",
+  "namespace": {
+   "kind": "group",
+   "full_path": "tesslab"
+  },
+  "description": "Boils anything. Library.",
+  "visibility": "public",
+  "star_count": 128,
+  "forks_count": 1,
+  "open_issues_count": 2,
+  "topics": [
+   "thermo",
+   "library"
+  ],
+  "archived": false,
+  "default_branch": "main",
+  "created_at": "2020-06-01T00:00:00Z",
+  "last_activity_at": "2026-07-01T00:00:00Z",
+  "web_url": "https://gitlab.com/tesslab/kettle"
+ }
+}

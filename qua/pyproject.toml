@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+# The PyPI face of the qua crate itself: `pip install quarb-full`
+# ships this crate's binary — the complete CLI, every adapter —
+# prebuilt, under its own name. The base `quarb` package installs
+# a text-format-subset `qua`; installing quarb-full replaces it
+# with the full one (last install wins; `pip install
+# --force-reinstall quarb-full` restores it after a quarb
+# upgrade).
+[project]
+name = "quarb-full"
+dynamic = ["version"]
+requires-python = ">=3.8"
+description = "The complete qua CLI, prebuilt — every Quarb adapter (databases, MongoDB, Neo4j, Kubernetes, GitHub, GitLab, mail, object stores, DuckDB, …) with no Rust toolchain and no compile"
+readme = "README-pypi.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+authors = [
+    { name = "Bojan Đuričković" }
+]
+keywords = ["query", "quarb", "cli", "database", "kubernetes"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Environment :: Console",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://quarb.org/"
+Adapters = "https://quarb.org/adapters/"
+Repository = "https://gitlab.com/quarb/engine"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

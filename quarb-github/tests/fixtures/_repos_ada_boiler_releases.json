@@ -1,0 +1,16 @@
+[
+ {
+  "tag_name": "v1.0",
+  "name": "First boil",
+  "prerelease": false,
+  "author": {
+   "login": "ada",
+   "type": "User",
+   "html_url": "https://github.com/ada"
+  },
+  "body": "It boils.",
+  "html_url": "https://github.com/ada/boiler/releases/tag/v1.0",
+  "created_at": "2026-04-01T00:00:00Z",
+  "published_at": "2026-04-02T00:00:00Z"
+ }
+]

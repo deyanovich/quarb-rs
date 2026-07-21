@@ -1,0 +1,24 @@
+{
+ "iid": 2,
+ "id": 1002,
+ "title": "Rename to bouilloire",
+ "state": "closed",
+ "author": {
+  "id": 101,
+  "username": "ada",
+  "name": "Ada Lovelace",
+  "state": "active",
+  "web_url": "https://gitlab.com/ada"
+ },
+ "labels": [],
+ "description": "Too French.",
+ "user_notes_count": 0,
+ "upvotes": 0,
+ "assignees": [],
+ "confidential": false,
+ "milestone": null,
+ "web_url": "https://gitlab.com/tesslab/kettle/-/issues/2",
+ "created_at": "2025-01-10T00:00:00Z",
+ "updated_at": "2026-07-01T00:00:00Z",
+ "closed_at": "2025-01-15T00:00:00Z"
+}

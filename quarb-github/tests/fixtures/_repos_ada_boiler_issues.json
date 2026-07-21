@@ -1,0 +1,57 @@
+[
+ {
+  "number": 1,
+  "title": "Steam leak",
+  "state": "open",
+  "user": {
+   "login": "grace",
+   "type": "User",
+   "html_url": "https://github.com/grace"
+  },
+  "labels": [
+   {
+    "name": "bug"
+   }
+  ],
+  "comments": 3,
+  "assignees": [
+   {
+    "login": "ada",
+    "type": "User",
+    "html_url": "https://github.com/ada"
+   }
+  ],
+  "body": "It hisses.",
+  "html_url": "https://github.com/ada/boiler/issues/1",
+  "created_at": "2026-06-01T00:00:00Z",
+  "updated_at": "2026-06-02T00:00:00Z",
+  "closed_at": null
+ },
+ {
+  "number": 2,
+  "title": "Add valve",
+  "state": "open",
+  "user": {
+   "login": "ada",
+   "type": "User",
+   "html_url": "https://github.com/ada"
+  },
+  "labels": [],
+  "comments": 3,
+  "assignees": [
+   {
+    "login": "ada",
+    "type": "User",
+    "html_url": "https://github.com/ada"
+   }
+  ],
+  "body": "It hisses.",
+  "html_url": "https://github.com/ada/boiler/issues/1",
+  "created_at": "2026-06-01T00:00:00Z",
+  "updated_at": "2026-06-02T00:00:00Z",
+  "closed_at": null,
+  "pull_request": {
+   "url": "..."
+  }
+ }
+]

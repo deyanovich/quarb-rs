@@ -1,0 +1,7 @@
+{
+ "resources": {
+  "core": {
+   "limit": 5000
+  }
+ }
+}

@@ -1,0 +1,3 @@
+{"kind":"APIResourceList","groupVersion":"apps/v1","resources":[
+ {"name":"deployments","kind":"Deployment","namespaced":true,"verbs":["get","list"]},
+ {"name":"replicasets","kind":"ReplicaSet","namespaced":true,"verbs":["get","list"]}]}

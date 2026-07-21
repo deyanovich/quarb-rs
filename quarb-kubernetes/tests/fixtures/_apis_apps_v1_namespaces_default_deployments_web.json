@@ -1,0 +1,4 @@
+{"kind":"Deployment","apiVersion":"apps/v1",
+ "metadata":{"name":"web","namespace":"default","uid":"d-1",
+  "creationTimestamp":"2026-06-01T09:58:00Z","labels":{"app":"web"}},
+ "spec":{"replicas":1},"status":{"availableReplicas":1}}

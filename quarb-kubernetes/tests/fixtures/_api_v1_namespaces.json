@@ -1,0 +1,9 @@
+{"kind":"NamespaceList","items":[
+ {"metadata":{"name":"default","uid":"ns-1",
+   "creationTimestamp":"2025-01-01T00:00:00Z"},
+  "spec":{"finalizers":["kubernetes"]},
+  "status":{"phase":"Active"}},
+ {"metadata":{"name":"kube-system","uid":"ns-2",
+   "creationTimestamp":"2025-01-01T00:00:00Z"},
+  "spec":{"finalizers":["kubernetes"]},
+  "status":{"phase":"Active"}}]}

@@ -1,0 +1,6 @@
+{"kind":"APIResourceList","groupVersion":"v1","resources":[
+ {"name":"pods","kind":"Pod","namespaced":true,"verbs":["get","list","watch"]},
+ {"name":"pods/status","kind":"Pod","namespaced":true,"verbs":["get"]},
+ {"name":"nodes","kind":"Node","namespaced":false,"verbs":["get","list"]},
+ {"name":"namespaces","kind":"Namespace","namespaced":false,"verbs":["get","list"]},
+ {"name":"bindings","kind":"Binding","namespaced":true,"verbs":["create"]}]}

@@ -1,0 +1,10 @@
+{
+ "id": 2,
+ "name": "Instruments",
+ "path": "instruments",
+ "full_path": "tesslab/instruments",
+ "visibility": "public",
+ "description": "Measurement tools",
+ "created_at": "2019-01-01T00:00:00Z",
+ "web_url": "https://gitlab.com/groups/tesslab/instruments"
+}

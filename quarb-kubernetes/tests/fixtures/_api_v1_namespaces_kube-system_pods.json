@@ -1,0 +1,1 @@
+{"kind": "PodList", "items": [{"metadata": {"name": "sys-1", "namespace": "kube-system", "uid": "p-3", "creationTimestamp": "2026-06-15T08:30:00Z"}, "spec": {"containers": [{"name": "sys", "image": "pause:3.9"}]}, "status": {"phase": "Pending"}}]}

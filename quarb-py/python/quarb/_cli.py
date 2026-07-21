@@ -1,9 +1,11 @@
 """The ``qua`` command for pip installs — the text-format subset.
 
-The full ``qua`` CLI (files, git, databases, mail, composition)
-is the Rust binary: ``cargo install qua``. This entry point covers
-what the bindings cover — one query over a text document — so
-``pip install qua-cli`` alone yields a working command.
+The full ``qua`` CLI (files, git, databases, mail, the networked
+adapters, composition) is the Rust binary, shipped prebuilt under
+the same command name by ``pip install quarb-full`` (or built
+from source with ``cargo install qua``). This entry point covers
+what the bindings cover — one query over a text document — so the
+base package alone yields a working command.
 """
 
 import argparse
@@ -20,7 +22,7 @@ def main(argv=None):
         description=(
             "Structure-aware queries over text formats "
             "(the Quarb engine; text-format subset — "
-            "the full CLI is `cargo install qua`)."
+            "the full CLI is `pip install quarb-full`)."
         ),
     )
     p.add_argument("query", help="the Quarb query")

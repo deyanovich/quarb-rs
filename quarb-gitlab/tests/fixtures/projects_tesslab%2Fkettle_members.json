@@ -1,0 +1,18 @@
+[
+ {
+  "id": 101,
+  "username": "ada",
+  "name": "Ada Lovelace",
+  "state": "active",
+  "web_url": "https://gitlab.com/ada",
+  "access_level": 50
+ },
+ {
+  "id": 102,
+  "username": "grace",
+  "name": "Grace Hopper",
+  "state": "active",
+  "web_url": "https://gitlab.com/grace",
+  "access_level": 30
+ }
+]

@@ -88,7 +88,6 @@ fn parse_left(left: &str) -> Option<LeftSide<'_>> {
     // doubled `"`, never `'`).
     let q = rest.find('\'')?;
     let (meta, namepath) = (&rest[..q], &rest[q + 1..]);
-    let mut ty = meta;
     let mut unit = None;
     let mut source = None;
     let mut timestamp = None;
@@ -101,7 +100,7 @@ fn parse_left(left: &str) -> Option<LeftSide<'_>> {
             break;
         }
     }
-    ty = &meta[..cut];
+    let ty = &meta[..cut];
     let mut tail = &meta[cut..];
     if let Some(rest) = tail.strip_prefix(':') {
         let end = rest.find(['?', '#']).unwrap_or(rest.len());

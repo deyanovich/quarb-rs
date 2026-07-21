@@ -1,0 +1,13 @@
+{
+ "id": 902,
+ "status": "failed",
+ "ref": "valve",
+ "sha": "bb22",
+ "source": "merge_request_event",
+ "created_at": "2026-07-01T00:00:00Z",
+ "web_url": "https://gitlab.com/tesslab/kettle/-/pipelines/902",
+ "duration": 54.0,
+ "user": {
+  "username": "grace"
+ }
+}

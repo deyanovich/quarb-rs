@@ -1,0 +1,5 @@
+{"kind":"NodeList","items":[
+ {"metadata":{"name":"worker-1","uid":"n-1",
+   "creationTimestamp":"2025-01-01T00:00:00Z",
+   "labels":{"zone":"a"}},
+  "status":{"capacity":{"cpu":"8"}}}]}

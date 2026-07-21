@@ -1,0 +1,5 @@
+{"kind":"ReplicaSet","apiVersion":"apps/v1",
+ "metadata":{"name":"web-rs","namespace":"default","uid":"rs-1",
+  "creationTimestamp":"2026-06-01T09:59:00Z",
+  "ownerReferences":[{"kind":"Deployment","name":"web"}]},
+ "spec":{"replicas":1},"status":{"readyReplicas":1}}

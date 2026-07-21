@@ -1,0 +1,24 @@
+{
+ "name": "kettle",
+ "full_name": "tesslab/kettle",
+ "owner": {
+  "login": "tesslab",
+  "type": "User",
+  "html_url": "https://github.com/tesslab"
+ },
+ "html_url": "https://github.com/tesslab/kettle",
+ "fork": false,
+ "archived": false,
+ "private": false,
+ "topics": [],
+ "stargazers_count": 2,
+ "forks_count": 1,
+ "open_issues_count": 0,
+ "size": 100,
+ "default_branch": "main",
+ "language": "Rust",
+ "created_at": "2020-01-01T00:00:00Z",
+ "updated_at": "2026-07-01T00:00:00Z",
+ "pushed_at": "2026-07-01T00:00:00Z",
+ "subscribers_count": 3
+}

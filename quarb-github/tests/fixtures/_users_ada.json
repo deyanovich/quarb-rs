@@ -1,0 +1,15 @@
+{
+ "login": "ada",
+ "type": "User",
+ "html_url": "https://github.com/ada",
+ "name": "Ada Lovelace",
+ "bio": "first programmer",
+ "followers": 1,
+ "following": 1,
+ "public_repos": 2,
+ "public_gists": 0,
+ "company": "Analytical Engines",
+ "location": "London",
+ "created_at": "2011-01-25T18:44:36Z",
+ "updated_at": "2026-07-01T00:00:00Z"
+}

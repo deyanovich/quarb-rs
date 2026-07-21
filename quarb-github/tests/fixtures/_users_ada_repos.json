@@ -1,0 +1,51 @@
+[
+ {
+  "name": "boiler",
+  "full_name": "ada/boiler",
+  "owner": {
+   "login": "ada",
+   "type": "User",
+   "html_url": "https://github.com/ada"
+  },
+  "html_url": "https://github.com/ada/boiler",
+  "fork": false,
+  "archived": false,
+  "private": false,
+  "topics": [
+   "cli",
+   "rust"
+  ],
+  "stargazers_count": 42,
+  "forks_count": 1,
+  "open_issues_count": 2,
+  "size": 100,
+  "default_branch": "main",
+  "language": "Rust",
+  "created_at": "2020-01-01T00:00:00Z",
+  "updated_at": "2026-07-01T00:00:00Z",
+  "pushed_at": "2026-07-01T00:00:00Z"
+ },
+ {
+  "name": "fork-of-kettle",
+  "full_name": "ada/fork-of-kettle",
+  "owner": {
+   "login": "ada",
+   "type": "User",
+   "html_url": "https://github.com/ada"
+  },
+  "html_url": "https://github.com/ada/fork-of-kettle",
+  "fork": true,
+  "archived": false,
+  "private": false,
+  "topics": [],
+  "stargazers_count": 0,
+  "forks_count": 0,
+  "open_issues_count": 0,
+  "size": 100,
+  "default_branch": "main",
+  "language": null,
+  "created_at": "2020-01-01T00:00:00Z",
+  "updated_at": "2026-07-01T00:00:00Z",
+  "pushed_at": "2026-07-01T00:00:00Z"
+ }
+]

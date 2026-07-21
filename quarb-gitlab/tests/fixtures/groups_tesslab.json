@@ -1,0 +1,10 @@
+{
+ "id": 1,
+ "name": "Tesslab",
+ "path": "tesslab",
+ "full_path": "tesslab",
+ "visibility": "public",
+ "description": "Boiling research",
+ "created_at": "2019-01-01T00:00:00Z",
+ "web_url": "https://gitlab.com/groups/tesslab"
+}

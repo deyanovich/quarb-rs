@@ -54,7 +54,14 @@ symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
 (mailboxes), [`quarb-gsheet`](quarb-gsheet/) (Google Sheets),
 [`quarb-firebase`](quarb-firebase/),
 [`quarb-firestore`](quarb-firestore/),
-[`quarb-datastore`](quarb-datastore/) (cloud document stores),
+[`quarb-datastore`](quarb-datastore/),
+[`quarb-mongodb`](quarb-mongodb/) (document stores),
+[`quarb-kubernetes`](quarb-kubernetes/) (cluster state via
+kubectl),
+[`quarb-github`](quarb-github/) (the GitHub API via gh:
+repos, issues, and the social graph as edge fabric),
+[`quarb-gitlab`](quarb-gitlab/) (the GitLab API via glab:
+nested groups as the tree, CI pipelines, member edges),
 [`quarb-objstore`](quarb-objstore/) (GCS/S3 object stores).
 
 **Composition and protocol** — [`quarb-mount`](quarb-mount/)
@@ -71,7 +78,10 @@ adapter to `qua` over a child process).
 ## Quick start
 
 ```sh
-cargo install qua
+pip install quarb-full   # the complete CLI, prebuilt (or:
+                         # `pip install quarb` for the text-format
+                         # subset + Python bindings, or
+                         # `cargo install qua` to build from source)
 
 # JSON, like jq:
 qua '/books/*[/price:: > 20]/title::' store.json

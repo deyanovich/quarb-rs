@@ -305,6 +305,81 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{datastore://PROJECT[/DATABASE][?account=...]}. Both
   drivers send the \texttt{x-goog-request-params} routing header
   named databases require. \\
+\texttt{quarb-mongodb} & MongoDB: collections hold BSON
+  documents, named by \texttt{\_id} (ObjectIds as hex); embedded
+  documents and arrays descend as children. DBRef fields
+  (\texttt{\{\$ref, \$id\}}) are native references
+  (\texttt{\textasciitilde>}/\texttt{->} schema-free). BSON dates
+  arrive as instants; ObjectId and Decimal128 as strings. Lazy
+  per collection (one \texttt{\_id}-sorted \texttt{find}),
+  reference targets by single \texttt{findOne}s; official Rust
+  driver, sync API. Read-only. Target: a standard connection
+  string with the database as the path,
+  \texttt{mongodb://HOST[:PORT]/DATABASE[?options]} (or
+  \texttt{mongodb+srv://}); a missing
+  \texttt{serverSelectionTimeoutMS} defaults to 5\,s. \\
+\texttt{quarb-kubernetes} & The Kubernetes API, which is
+  already a tree: the root holds one listing per discovered
+  resource (cluster-scoped kinds plus the all-namespaces view,
+  kubectl's \texttt{-A}); each namespace object carries its
+  scoped listings beside its own fields; objects descend as
+  their JSON, RFC\,3339 strings as instants.
+  \texttt{ownerReferences} are native references
+  (\texttt{::owner\textasciitilde>} climbs Pod → ReplicaSet →
+  Deployment schema-free; \texttt{->node},
+  \texttt{::namespace\textasciitilde>}); unknown property names
+  fall through to \texttt{metadata.labels}. Lazy per listing,
+  discovery at connect. Transport is \texttt{kubectl get --raw}
+  over subprocess (git-adapter posture, zero new dependencies;
+  \texttt{QUARB\_KUBECTL} overrides the binary), so contexts and
+  auth behave exactly as kubectl does. Read-only. Target:
+  \texttt{k8s:} / \texttt{k8s:CONTEXT} (alias
+  \texttt{kubernetes:}). \\
+\texttt{quarb-github} & GitHub, three shapes in their native
+  registers. The tree mirrors github.com URLs: users/orgs at
+  the root (addressed by login — the root does not enumerate),
+  repositories as their children, \texttt{files} /
+  \texttt{issues} / \texttt{pulls} / \texttt{releases} sections
+  below; file content and issue bodies are node values. The
+  social graph is edge fabric, API-backed both ways:
+  \texttt{follows}, \texttt{starred}, \texttt{owner},
+  \texttt{parent} (\texttt{<-parent} = the forks),
+  \texttt{author}/\texttt{assignee}, \texttt{org}, and
+  \texttt{contributor} — the first adapter with true
+  \texttt{backlinks}, and its contributor edge carries data
+  (\texttt{\$-::contributions}). Counts and scalars are
+  properties (\texttt{::stars}, timestamps as instants); flags,
+  issue labels, and repo topics are traits (\texttt{<fork>},
+  \texttt{<bug>}, \texttt{<cli>}); an organization answers the
+  \texttt{<org>} shorthand and the forge-neutral
+  \texttt{<group>} alias. Direct addressing skips
+  enumeration (\texttt{/rust-lang/rust/issues/12345}, closed
+  included; listings show the API's default open set).
+  Transport is \texttt{gh api} over subprocess
+  (\texttt{QUARB\_GH} overrides); lazy, cached, read-only.
+  Target: \texttt{github:[OWNER[/REPO]]}. \\
+\texttt{quarb-gitlab} & GitLab, whose defining shape is the
+  \emph{deep tree}: groups nest arbitrarily and mix subgroups
+  with projects as children, which the REST API walks by
+  URL-encoded full paths and the arbor restores to a path —
+  \texttt{/tesslab/instruments/gauge/issues/7}, one GET per
+  segment. Project sections: \texttt{files} (content as value),
+  \texttt{issues} / \texttt{mrs} (the open sets; direct
+  addressing by iid reaches any state), \texttt{releases},
+  \texttt{pipelines} (jobs as children; statuses as traits —
+  CI is half of what a GitLab project is). Code over social:
+  no follows, stars as a count; the edge fabric is
+  \texttt{member} (with access-level edge data —
+  \texttt{\$-::access}, \texttt{\$-::role}), \texttt{parent} on
+  forks (\texttt{<-parent} = the forks), and \texttt{author} /
+  \texttt{assignee} / \texttt{reviewer}. Labels (scoped
+  included), topics, visibility, and statuses are traits; a
+  project answers the forge-neutral \texttt{<repo>} alias
+  (\texttt{//*<repo>} sweeps either forge identically).
+  Transport is \texttt{glab api} over subprocess
+  (\texttt{QUARB\_GLAB} overrides; hosts via glab config), so
+  self-managed instances work as glab does. Read-only. Target:
+  \texttt{gitlab:[PATH]}. \\
 \texttt{quarb-git} & The git repository driver: the object
   DAG as the arbor. \texttt{/branches}, \texttt{/tags},
   \texttt{/HEAD} (refs alias their commits — same properties,

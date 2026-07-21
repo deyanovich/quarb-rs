@@ -1,0 +1,2 @@
+{"kind":"APIGroupList","groups":[
+ {"name":"apps","preferredVersion":{"groupVersion":"apps/v1","version":"v1"}}]}
