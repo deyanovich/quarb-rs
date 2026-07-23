@@ -263,13 +263,12 @@ impl AstAdapter for XmlAdapter {
 
     /// `::text` is the element's text content; any other name is an
     /// attribute value.
+    /// Attributes, by name (`::pages`). Element text is the bare
+    /// projection (`::`) — no attribute name is shadowed.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        let n = &self.nodes[node.0 as usize];
-        if name == "text" {
-            Some(Value::Str(n.text.clone()))
-        } else {
-            n.attr(name).map(|v| Value::Str(v.to_string()))
-        }
+        self.nodes[node.0 as usize]
+            .attr(name)
+            .map(|v| Value::Str(v.to_string()))
     }
 
     /// The default projection of an element is its text content.
@@ -277,17 +276,13 @@ impl AstAdapter for XmlAdapter {
         Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
     }
 
-    /// `;;;tag`, `;;;text`, `;;;id`, `;;;local-name`, `;;;ns-prefix`,
-    /// `;;;n-attrs`, and any attribute by name (`;;;pages`).
+    /// `;;;tag`, `;;;local-name`, `;;;ns-prefix`, and `;;;n-attrs`
+    /// — facts about the element, never its data: attributes are
+    /// properties (`::pages`), text is the bare projection.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
             "tag" => n.tag.clone().map(Value::Str),
-            "text" => Some(Value::Str(n.text.clone())),
-            "id" => n
-                .attr("id")
-                .or_else(|| n.attr("xml:id"))
-                .map(|v| Value::Str(v.to_string())),
             "local-name" => n
                 .tag
                 .as_deref()
@@ -298,7 +293,7 @@ impl AstAdapter for XmlAdapter {
                 .and_then(|t| split_qualified(t).0)
                 .map(|p| Value::Str(p.to_string())),
             "n-attrs" => Some(Value::Int(n.attrs.len() as i64)),
-            other => n.attr(other).map(|v| Value::Str(v.to_string())),
+            _ => None,
         }
     }
 

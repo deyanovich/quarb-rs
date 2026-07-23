@@ -147,18 +147,15 @@ impl Exporter {
     fn projection(&mut self, p: NodeId) -> Result<String, XPathError> {
         match self.prop_s(p, "kind").as_str() {
             "property" => match self.prop(p, "key") {
-                Some(k) if k.to_string() == "text" => {
+                Some(k) => Ok(format!("/@{k}")),
+                None => {
                     self.notes.push(
-                        "text(): Quarb ::text is the concatenated descendant text; \
+                        "text(): Quarb's bare :: is the concatenated descendant text; \
                          XPath text() selects immediate text nodes (equal on leaf elements)"
                             .to_string(),
                     );
                     Ok("/text()".to_string())
                 }
-                Some(k) => Ok(format!("/@{k}")),
-                None => Err(XPathError::Unsupported(
-                    "the bare '::' projection (adapter-specific default value)".into(),
-                )),
             },
             other => Err(XPathError::Unsupported(format!(
                 "the {other} metadata projection"

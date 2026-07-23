@@ -23,18 +23,18 @@ fn x(quarb: &str) -> String {
 
 #[test]
 fn translations() {
-    assert_eq!(x("//book/title::text"), "//book/title/text()");
+    assert_eq!(x("//book/title::"), "//book/title/text()");
     assert_eq!(x("//book[::pages > 500]::id"), "//book[@pages > 500]/@id");
     assert_eq!(x("//book @| count"), "count(//book)");
     assert_eq!(x("//book::pages @| sum"), "sum(//book/@pages)");
     assert_eq!(x("//book[-1]::id"), "//book[last()]/@id");
-    assert_eq!(x("//h2>>p::text"), "//h2/following-sibling::p/text()");
+    assert_eq!(x("//h2>>p::"), "//h2/following-sibling::p/text()");
     assert_eq!(
         x("//book[not (::pages > 400)]::id"),
         "//book[not((@pages > 400))]/@id"
     );
     assert_eq!(
-        x("//title::text || //author::text"),
+        x("//title:: || //author::"),
         "//title/text() | //author/text()"
     );
     assert_eq!(

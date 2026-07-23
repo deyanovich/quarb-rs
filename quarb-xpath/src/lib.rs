@@ -541,11 +541,11 @@ impl Parser {
                 self.expect(Tok::LParen, "'('")?;
                 self.expect(Tok::RParen, "')'")?;
                 self.notes.push(
-                    "text(): Quarb ::text is the concatenated descendant text; \
+                    "text(): Quarb's bare :: is the concatenated descendant text; \
                      XPath text() selects immediate text nodes (equal on leaf elements)"
                         .into(),
                 );
-                return Ok(StepOut::Projection("::text".into()));
+                return Ok(StepOut::Projection("::".into()));
             }
             Some(Tok::Name(n, true)) if n == "node" => {
                 return Err(XPathError::Unsupported(
@@ -831,7 +831,7 @@ impl Parser {
                     self.pos += 1;
                     self.expect(Tok::LParen, "'('")?;
                     self.expect(Tok::RParen, "')'")?;
-                    out.push_str("::text");
+                    out.push_str("::");
                     return Ok((out, false));
                 }
                 Some(Tok::Name(n, false)) => {
@@ -964,7 +964,7 @@ mod tests {
     fn attributes_and_text() {
         assert_eq!(t("//chapter/@id"), "//chapter::id");
         assert_eq!(t("/EXAMPLE/attribute::prop1"), "/EXAMPLE::prop1");
-        assert_eq!(t("//title/text()"), "//title::text");
+        assert_eq!(t("//title/text()"), "//title::");
     }
 
     #[test]
@@ -987,7 +987,7 @@ mod tests {
         );
         assert_eq!(t("//chapter[.//image]"), "//chapter[//image]");
         assert_eq!(t("//p[.='...']"), "//p[:: = \"...\"]");
-        assert_eq!(t("//chapter[text()='x']"), "//chapter[::text = \"x\"]");
+        assert_eq!(t("//chapter[text()='x']"), "//chapter[:: = \"x\"]");
         assert_eq!(
             t("//chapter[@id='a' or @id='b']"),
             "//chapter[::id = \"a\" or ::id = \"b\"]"
@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn qualified_names_quote() {
         assert_eq!(t("//dc:title"), "//'dc:title'");
-        assert_eq!(t("//dc:title/text()"), "//'dc:title'::text");
+        assert_eq!(t("//dc:title/text()"), "//'dc:title'::");
     }
 
     #[test]

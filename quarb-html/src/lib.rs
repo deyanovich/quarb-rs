@@ -252,13 +252,12 @@ impl AstAdapter for HtmlAdapter {
 
     /// `::text` is the element's text content; any other name is an
     /// attribute value.
+    /// Attributes, by name (`::href`). Element text is the bare
+    /// projection (`::`) — no attribute name is shadowed.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        let n = &self.nodes[node.0 as usize];
-        if name == "text" {
-            Some(Value::Str(n.text.clone()))
-        } else {
-            n.attr(name).map(|v| Value::Str(v.to_string()))
-        }
+        self.nodes[node.0 as usize]
+            .attr(name)
+            .map(|v| Value::Str(v.to_string()))
     }
 
     /// The default projection of an element is its text content.
@@ -266,14 +265,14 @@ impl AstAdapter for HtmlAdapter {
         Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
     }
 
-    /// `;;;tag`, `;;;text`, `;;;id`, `;;;classes`, `;;;n-attrs`, and
-    /// any attribute by name (`;;;href`).
+    /// `;;;tag`, `;;;classes` (the class attribute, split), and
+    /// `;;;n-attrs` — facts about the element, never its data:
+    /// attributes are properties (`::href`), text is the bare
+    /// projection.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
             "tag" => n.tag.clone().map(Value::Str),
-            "text" => Some(Value::Str(n.text.clone())),
-            "id" => n.attr("id").map(|v| Value::Str(v.to_string())),
             "classes" => n.attr("class").map(|c| {
                 Value::List(
                     c.split_whitespace()
@@ -282,7 +281,7 @@ impl AstAdapter for HtmlAdapter {
                 )
             }),
             "n-attrs" => Some(Value::Int(n.attrs.len() as i64)),
-            other => n.attr(other).map(|v| Value::Str(v.to_string())),
+            _ => None,
         }
     }
 

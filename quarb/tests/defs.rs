@@ -188,7 +188,7 @@ fn unparse_fixpoint() {
         "/row | ::fare @| window(3) | mean",
         "/row | \"${::name} (${::age})\" @| join(', ')",
         "/row | ::fare | .f | \"fare \\$${$.f}, doubled ${$_ * 2}\"",
-        "//h2>>p::text @| join(' ')",
+        "//h2>>p:: @| join(' ')",
         "//aside<<?*;;;tag || //a[1]>>!p",
         "/row | .d(::dept) | .m(^/row[::dept = $$.d]::pay @| mean) | $.m - $$_",
         "/users/* <=> /orders/*[/uid:: = $*1/id::] | rec('who', $*1/name::, 'amt', /amt::)",

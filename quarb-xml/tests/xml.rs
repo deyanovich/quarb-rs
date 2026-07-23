@@ -58,12 +58,12 @@ fn navigate_by_tag() {
 fn text_and_entities() {
     // &amp; unescaped in text content
     assert_eq!(
-        values(r#"//book[::id = "b1"]/'dc:title'::text"#),
+        values(r#"//book[::id = "b1"]/'dc:title'::"#),
         vec!["Ins & Outs"]
     );
     // CDATA is taken verbatim, markup un-mangled
     assert_eq!(
-        values(r#"//book[::id = "b2"]/'dc:title'::text"#),
+        values(r#"//book[::id = "b2"]/'dc:title'::"#),
         vec!["Tags & <literals>"]
     );
     // the bare default projection is the text content
@@ -77,7 +77,7 @@ fn attributes_as_properties() {
     // via metadata too
     assert_eq!(values("//loan;;;tag"), vec!["loan"]);
     assert_eq!(values("//loan;;;n-attrs"), vec!["2"]);
-    assert_eq!(values("//book;;;id"), vec!["b1", "b2"]);
+    assert_eq!(values("//book::id"), vec!["b1", "b2"]);
 }
 
 #[test]
@@ -103,9 +103,9 @@ fn namespaced_names() {
 #[test]
 fn predicates_and_pipelines() {
     // numeric coercion of a string attribute in a predicate
-    assert_eq!(values("//book[::pages > 200];;;id"), vec!["b2"]);
+    assert_eq!(values("//book[::pages > 200]::id"), vec!["b2"]);
     assert_eq!(
-        values("//author::text @| join(\", \")"),
+        values("//author:: @| join(\", \")"),
         vec!["Ada, Bo, Cy"]
     );
     assert_eq!(values("//book @| count"), vec!["2"]);

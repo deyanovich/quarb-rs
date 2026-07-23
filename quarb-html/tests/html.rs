@@ -43,9 +43,9 @@ fn navigate_by_tag() {
         nodes("/html/body/main/ul/li"),
         vec!["/html/body/main/ul/li[1]", "/html/body/main/ul/li[2]"]
     );
-    assert_eq!(values("//h1::text"), vec!["Welcome"]);
+    assert_eq!(values("//h1::"), vec!["Welcome"]);
     // text content includes descendant text
-    assert_eq!(values("//p::text"), vec!["Hello world."]);
+    assert_eq!(values("//p::"), vec!["Hello world."]);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn attributes_as_properties() {
     assert_eq!(values("//html::lang"), vec!["en"]);
     // via metadata too
     assert_eq!(values("//p;;;classes"), vec!["intro"]);
-    assert_eq!(values("//h1;;;id"), vec!["top"]);
+    assert_eq!(values("//h1::id"), vec!["top"]);
     assert_eq!(values("//h1;;;tag"), vec!["h1"]);
     // core-meta `:::traits` is the node's trait list
     assert_eq!(values("//strong:::traits"), vec!["inline"]);
@@ -82,18 +82,18 @@ fn structural_traits() {
 #[test]
 fn predicates_and_pipelines() {
     // list items joined
-    assert_eq!(values("//li::text @| join(\", \")"), vec!["one, two"]);
+    assert_eq!(values("//li:: @| join(\", \")"), vec!["one, two"]);
     // count of anchors
     assert_eq!(values("//a @| count"), vec!["2"]);
     // external links (href not starting with #)
-    assert_eq!(values("//a[::href !~ ~(^#)]::text"), vec!["external"]);
+    assert_eq!(values("//a[::href !~ ~(^#)]::"), vec!["external"]);
     // substring containment: the external link's href holds "example"
-    assert_eq!(values("//a[::href *= \"example\"]::text"), vec!["external"]);
+    assert_eq!(values("//a[::href *= \"example\"]::"), vec!["external"]);
     // regex match with a /.../ literal (equivalent to ~(...))
-    assert_eq!(values("//a[::href =~ /example/]::text"), vec!["external"]);
+    assert_eq!(values("//a[::href =~ /example/]::"), vec!["external"]);
     // ... and no anchor's href contains "missing"
     assert_eq!(
-        values("//a[::href *= \"missing\"]::text"),
+        values("//a[::href *= \"missing\"]::"),
         Vec::<String>::new()
     );
 }
@@ -103,10 +103,10 @@ fn resolve_fragment_href() {
     // the "back to top" anchor's href="#top" resolves to <h1 id="top">
     assert_eq!(nodes("//a::href~>"), vec!["/html/body/header/h1"]);
     // follow the fragment and read the target's text
-    assert_eq!(values("//a::href~>::text"), vec!["Welcome"]);
+    assert_eq!(values("//a::href~>::"), vec!["Welcome"]);
     // reverse resolution: which nodes' href resolves to the <h1>?
     assert_eq!(nodes("//h1::href<~"), vec!["/html/body/main/a[1]"]);
-    assert_eq!(values("//h1::href<~::text"), vec!["back to top"]);
+    assert_eq!(values("//h1::href<~::"), vec!["back to top"]);
 }
 
 /// Numeric aggregation over HTML, whose attribute values are all
