@@ -39,6 +39,27 @@ fn nav_stages_round_trip() {
 }
 
 #[test]
+fn mark_anchors_round_trip() {
+    for q in [
+        // anonymous marks, positional and recency anchors
+        "/a . /b | (1)/c",
+        "/a . /b | (.)/c",
+        "/a .m /b | (2):::name",
+        // the plural: bare re-seed, with steps, named
+        "/a | . | ^/b | . | (@)",
+        "/a | . | (@)/kids/*",
+        "/a .s /b | (@s)::x",
+        // anchors in operand position
+        "/a . /*[(1)/x]",
+        "/e/*[(.)::depth > 2]",
+    ] {
+        assert_eq!(canon(q), q, "not a fixpoint: {q}");
+    }
+    // a bare parenthesized number stays the literal topic
+    assert_eq!(canon("/a | (2)"), "/a | (2)");
+}
+
+#[test]
 fn arithmetic_paths_stay_expressions() {
     // A dangling operator after the path means the stage was a
     // value expression all along — the operand reading survives

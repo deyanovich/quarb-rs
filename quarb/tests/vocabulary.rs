@@ -105,6 +105,11 @@ const CORPUS: &[&str] = &[
     // stage position, wrapped in the nav kind
     "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
     "/a .m | /b | ^/c:::name | . | (m)/d(->e)+::x",
+    // the mark array (2026-07-24, marks symmetry): anonymous
+    // marks, positional/recency/plural anchors — in branch and
+    // in operand position
+    "/a . /b .m | (1)/c | (.)/d | (@)/e | (@m)/f",
+    "/a . /*[(2)::x > 1][(.)::y = (@)::z][(@m)::w]",
 ];
 
 /// kind → sorted property keys, as locked. `param` is reserved
@@ -115,8 +120,13 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("alt", &[]),
     ("and", &[]),
     ("arith", &["op"]),
-    // v1 additive growth: mark key (2026-07-11, the (name) anchor).
-    ("branch", &["anchored", "mark"]),
+    // v1 additive growth: mark key (2026-07-11, the (name)
+    // anchor); the mark-array anchor keys (2026-07-24, marks
+    // symmetry: (N), (.), (@), (@name)).
+    (
+        "branch",
+        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name"],
+    ),
     // v1 additive growth: capsae, piped (2026-07-11, @* + inline
     // pipes).
     ("capsae", &[]),
@@ -160,8 +170,12 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("outer", &[]),
     ("parens", &[]),
     // v1 additive growth: anchored key (2026-07-11, ^-operands);
-    // mark key same day (the (name) anchor).
-    ("path", &["anchored", "mark"]),
+    // mark key same day (the (name) anchor); the mark-array
+    // anchor keys (2026-07-24, marks symmetry).
+    (
+        "path",
+        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name"],
+    ),
     ("piped", &[]),
     ("pipeline", &[]),
     ("predicate", &["from", "kind", "to", "value"]),

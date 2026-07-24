@@ -16,7 +16,7 @@
 
 use crate::adapter::AstAdapter;
 use crate::ast::{
-    Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
     PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RegRef, Stage, Step,
     TraitClause,
 };
@@ -619,6 +619,21 @@ impl Parser<'_> {
                     self.expect(Token::RParen, "')' to close a subcontext")?;
                     Ok(Stage::ExprPush { name, expr })
                 } else {
+                    // In navigation mode a bare push marks; marks
+                    // may not take numeric names (positions number
+                    // themselves).
+                    if mode == PipeMode::Nav
+                        && name
+                            .as_deref()
+                            .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+                    {
+                        return Err(QuarbError::Parse(
+                            "positions number themselves — a mark takes a \
+                             word name ('| .name') or none at all ('| .'); \
+                             recall a position with '(N)'"
+                                .into(),
+                        ));
+                    }
                     Ok(Stage::Push(name))
                 }
             }
@@ -1285,18 +1300,19 @@ impl Parser<'_> {
     }
 
     fn branch(&mut self) -> Result<Branch> {
-        // Optional explicit root anchor (the default is already root).
-        // A lone `^` is a complete branch: the root itself as the
-        // context (`^ | count`, non-navigating macro bodies).
-        let anchored = matches!(self.peek(), Some(Token::Caret));
-        if anchored {
+        // Optional explicit anchor (the default is the current
+        // node, which at the top level is the root). A lone `^` is
+        // a complete branch: the root itself as the context
+        // (`^ | count`, non-navigating macro bodies). The mark
+        // anchors — `(name)`, `(N)`, `(.)`, `(@)`, `(@name)` —
+        // read as anchors only in the exact shapes peek_anchor
+        // accepts; groups keep `(` for everything else.
+        let anchor = if matches!(self.peek(), Some(Token::Caret)) {
             self.pos += 1;
-        }
-        // `(name)` — anchor the branch on a marked node. Only the
-        // exact shape LParen bare-name RParen followed by a path
-        // continuation reads as an anchor; groups keep `(` for
-        // everything else.
-        let mark = self.mark_anchor();
+            Anchor::Root
+        } else {
+            self.mark_anchor().unwrap_or(Anchor::Current)
+        };
 
         let mut steps = Vec::new();
         while let Some(tok) = self.peek() {
@@ -1336,7 +1352,7 @@ impl Parser<'_> {
 
         let projection = self.projection()?;
 
-        if steps.is_empty() && projection.is_none() && !anchored {
+        if steps.is_empty() && projection.is_none() && anchor == Anchor::Current {
             return Err(QuarbError::Parse(
                 "a query branch needs at least one step or a projection".into(),
             ));
@@ -1344,25 +1360,30 @@ impl Parser<'_> {
         Ok(Branch {
             steps,
             projection,
-            anchored,
-            mark,
+            anchor,
         })
     }
 
     /// Peek-only form of [`Self::mark_anchor`], for match guards.
     fn mark_anchor_ahead(&self) -> bool {
-        let Some(Token::Name {
-            text,
-            quoted: false,
-            ..
-        }) = self.toks.get(self.pos + 1)
-        else {
-            return false;
-        };
-        !text.starts_with('.')
-            && matches!(self.toks.get(self.pos + 2), Some(Token::RParen))
-            && matches!(
-                self.toks.get(self.pos + 3),
+        self.peek_anchor().is_some()
+    }
+
+    /// The mark-anchor lookahead: `(name)` / `(N)` / `(.)` one
+    /// mark, `(@)` / `(@name)` the plural. The name and number
+    /// interiors require a path continuation after the closing
+    /// paren — without one they stay a parenthesized expression
+    /// (`(1) * 2` is arithmetic). The dot and at interiors cannot
+    /// be expressions, so they stand on their own (`| (@)` alone
+    /// re-seeds a thread from its marks). Returns the anchor and
+    /// its token span without consuming.
+    fn peek_anchor(&self) -> Option<(Anchor, usize)> {
+        if !matches!(self.toks.get(self.pos), Some(Token::LParen)) {
+            return None;
+        }
+        let continues = |i: usize| {
+            matches!(
+                self.toks.get(i),
                 Some(
                     Token::Slash
                         | Token::SlashSlash
@@ -1375,49 +1396,64 @@ impl Parser<'_> {
                         | Token::SemiSemiSemi
                 )
             )
+        };
+        // A mark name is word-shaped: it may not start with a
+        // digit (positions number themselves), a dot, or any
+        // operator character that would collide with an
+        // expression reading (`(@*)` is the parenthesized capsae
+        // operand, never an anchor).
+        let word = |text: &str| {
+            text.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && !text.contains('/')
+        };
+        match self.toks.get(self.pos + 1) {
+            // `(@)` all marks; `(@name)` all marks under a name.
+            Some(Token::At) => match self.toks.get(self.pos + 2) {
+                Some(Token::RParen) => Some((Anchor::MarksAll, 3)),
+                Some(Token::Name { text, quoted: false, .. })
+                    if word(text)
+                        && matches!(
+                            self.toks.get(self.pos + 3),
+                            Some(Token::RParen)
+                        ) =>
+                {
+                    Some((Anchor::MarksNamed(text.clone()), 4))
+                }
+                _ => None,
+            },
+            Some(Token::Name { text, quoted: false, .. })
+                if matches!(self.toks.get(self.pos + 2), Some(Token::RParen)) =>
+            {
+                if text == "." {
+                    // `(.)` — the latest mark (the array's top).
+                    Some((Anchor::MarkTop, 3))
+                } else if text.chars().all(|c| c.is_ascii_digit()) {
+                    if continues(self.pos + 3) {
+                        text.parse()
+                            .ok()
+                            .filter(|&n| n >= 1)
+                            .map(|n| (Anchor::MarkIndex(n), 3))
+                    } else {
+                        None
+                    }
+                } else if word(text) && continues(self.pos + 3) {
+                    Some((Anchor::Mark(text.clone()), 3))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
-    /// Try the `(name)` mark-anchor lookahead: LParen, one bare
-    /// name, RParen, then a token that continues a path (an axis or
-    /// a projection). Consumes and returns the name on a hit;
-    /// leaves the position untouched otherwise.
-    fn mark_anchor(&mut self) -> Option<String> {
-        let Some(Token::LParen) = self.toks.get(self.pos) else {
-            return None;
-        };
-        let Some(Token::Name {
-            text,
-            quoted: false,
-            ..
-        }) = self.toks.get(self.pos + 1)
-        else {
-            return None;
-        };
-        if text.starts_with('.') || text.contains('/') {
-            return None;
-        }
-        if !matches!(self.toks.get(self.pos + 2), Some(Token::RParen)) {
-            return None;
-        }
-        if !matches!(
-            self.toks.get(self.pos + 3),
-            Some(
-                Token::Slash
-                    | Token::SlashSlash
-                    | Token::Backslash
-                    | Token::BackslashBackslash
-                    | Token::ArrowOut
-                    | Token::ArrowIn
-                    | Token::ColonColon
-                    | Token::ColonColonColon
-                    | Token::SemiSemiSemi
-            )
-        ) {
-            return None;
-        }
-        let name = text.clone();
-        self.pos += 3;
-        Some(name)
+    /// Consume the rounded anchor [`Self::peek_anchor`] saw, if
+    /// any; leaves the position untouched otherwise.
+    fn mark_anchor(&mut self) -> Option<Anchor> {
+        let (anchor, len) = self.peek_anchor()?;
+        self.pos += len;
+        Some(anchor)
     }
 
     fn func_call(&mut self) -> Result<FnCall> {
@@ -1562,12 +1598,26 @@ impl Parser<'_> {
             ..
         }) = self.peek()
             && text.starts_with('.')
-            && text.len() > 1
             && !text[1..].starts_with('.')
             && (self.pattern_depth == 0
                 || !matches!(self.toks.get(self.pos + 1), Some(Token::LParen)))
         {
-            let name = text[1..].to_string();
+            // Bare `.` marks anonymously — the slot is still
+            // `(N)`-addressable, and `(.)`/`(@)` see it.
+            let name = if text == "." {
+                None
+            } else {
+                let n = &text[1..];
+                if n.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(QuarbError::Parse(
+                        "positions number themselves — a mark takes a word \
+                         name ('.name') or none at all ('.'); recall a \
+                         position with '(N)'"
+                            .into(),
+                    ));
+                }
+                Some(n.to_string())
+            };
             self.pos += 1;
             return Ok(PathElem::Mark(name));
         }
@@ -2344,8 +2394,8 @@ impl Parser<'_> {
         Ok(Operand::Rel {
             steps,
             projection,
-            anchored: false,
-            mark: None,
+            anchor: Anchor::Current,
+
         })
     }
 
@@ -2411,11 +2461,14 @@ impl Parser<'_> {
 
     fn operand(&mut self) -> Result<Operand> {
         match self.peek() {
-            // `(name)` — a mark-anchored operand path: navigate
-            // from the labeled node. Same lookahead as the branch
-            // form; parenthesized expressions keep `(` otherwise.
+            // A rounded-anchor operand path — `(name)`, `(N)`,
+            // `(.)`, `(@)`, `(@name)`, `()` — navigates from the
+            // anchored node(s). Same lookahead as the branch form;
+            // parenthesized expressions keep `(` otherwise. The
+            // plural forms gather values from every matching mark
+            // (existential, like any multi-valued operand).
             Some(Token::LParen) if self.mark_anchor_ahead() => {
-                let mark = self.mark_anchor().expect("lookahead hit");
+                let anchor = self.mark_anchor().expect("lookahead hit");
                 let mut steps = Vec::new();
                 loop {
                     if self.is_resolution_ahead() {
@@ -2441,8 +2494,7 @@ impl Parser<'_> {
                 Ok(Operand::Rel {
                     steps,
                     projection,
-                    anchored: false,
-                    mark: Some(mark),
+                    anchor,
                 })
             }
             // `^` — a root-anchored operand path: navigate from the
@@ -2482,8 +2534,7 @@ impl Parser<'_> {
                 Ok(Operand::Rel {
                     steps,
                     projection,
-                    anchored: true,
-                    mark: None,
+                    anchor: Anchor::Root,
                 })
             }
             // A relative path operand. It may descend (`/`, `//`) or
@@ -2515,8 +2566,8 @@ impl Parser<'_> {
                 Ok(Operand::Rel {
                     steps,
                     projection,
-                    anchored: false,
-                    mark: None,
+                    anchor: Anchor::Current,
+
                 })
             }
             // A resolution chain in operand position: follow the
@@ -2547,8 +2598,8 @@ impl Parser<'_> {
                 Ok(Operand::Rel {
                     steps,
                     projection,
-                    anchored: false,
-                    mark: None,
+                    anchor: Anchor::Current,
+
                 })
             }
             Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi) => {
@@ -2556,8 +2607,8 @@ impl Parser<'_> {
                 Ok(Operand::Rel {
                     steps: Vec::new(),
                     projection: Some(projection),
-                    anchored: false,
-                    mark: None,
+                    anchor: Anchor::Current,
+
                 })
             }
             // A call operand: a function word glued to `(` — the

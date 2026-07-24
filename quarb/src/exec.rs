@@ -7,7 +7,7 @@
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
     PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::stdlib;
@@ -23,15 +23,52 @@ struct Reg {
     value: Value,
 }
 
-/// One entry in a thread's mark store: a node labeled during
-/// navigation (`.name` in node context), anchored on later with
-/// `(name)`. Marks live beside the register — the register is a
-/// stack of scalars, marks a stack of node handles — and never
-/// enter the value space.
+/// One entry in a thread's mark array: a node pocketed during
+/// navigation (`.name` — or bare `.` for an anonymous slot — in
+/// node context), anchored on later by name (`(name)`), position
+/// (`(N)`, 1-based), recency (`(.)`), or in the plural (`(@)`,
+/// `(@name)`). Marks live beside the register — the register is
+/// an array of scalars, marks an array of node handles; names in
+/// both are references layered over the indices — and node
+/// identity never enters the value space.
 #[derive(Clone, PartialEq)]
 struct Mark {
-    name: String,
+    name: Option<String>,
     node: NodeId,
+}
+
+/// The nodes an anchor starts navigation from, resolved against a
+/// thread's mark array. Singular anchors yield at most one node;
+/// the plural forms yield every match in push order (the caller
+/// forks one thread per node); a miss yields nothing, never an
+/// error.
+fn anchor_nodes(
+    anchor: &Anchor,
+    current: NodeId,
+    root: NodeId,
+    marks: &[Mark],
+) -> Vec<NodeId> {
+    match anchor {
+        Anchor::Current => vec![current],
+        Anchor::Root => vec![root],
+        Anchor::Mark(m) => marks
+            .iter()
+            .rev()
+            .find(|k| k.name.as_deref() == Some(m))
+            .map(|k| k.node)
+            .into_iter()
+            .collect(),
+        Anchor::MarkIndex(n) => {
+            marks.get(n - 1).map(|k| k.node).into_iter().collect()
+        }
+        Anchor::MarkTop => marks.last().map(|k| k.node).into_iter().collect(),
+        Anchor::MarksAll => marks.iter().map(|k| k.node).collect(),
+        Anchor::MarksNamed(m) => marks
+            .iter()
+            .filter(|k| k.name.as_deref() == Some(m))
+            .map(|k| k.node)
+            .collect(),
+    }
 }
 
 /// The execution unit: a node, its register (breadcrumbs), and the
@@ -446,23 +483,15 @@ fn union_branches(
 ) -> Vec<Capsa> {
     let mut caps = Vec::new();
     for branch in branches {
-        // An anchored branch (`^`) navigates from the root — the
-        // same node at the top level, the reach-back from inside a
-        // subcontext body. A `(name)`-anchored branch navigates
-        // from the invoking thread's marked node; the invoker's
+        // A root-anchored branch (`^` / `()`) navigates from the
+        // root — the same node at the top level, the reach-back
+        // from inside a subcontext body. The mark anchors navigate
+        // from the invoking thread's marked node(s) — the plural
+        // forms fork one navigation per pocket; the invoker's
         // marks also seed the navigation, so nested predicates and
         // deeper anchors keep seeing them.
         let seed: &[Mark] = outer.map(|s| s.marks).unwrap_or(&[]);
-        let from = if let Some(m) = &branch.mark {
-            match seed.iter().rev().find(|k| &k.name == m) {
-                Some(k) => k.node,
-                None => continue,
-            }
-        } else if branch.anchored {
-            adapter.root()
-        } else {
-            start
-        };
+        for from in anchor_nodes(&branch.anchor, start, adapter.root(), seed) {
         for (node, register, marks, arrived) in
             navigate_paths(&branch.steps, adapter, from, trace, outer, seed, &[])
         {
@@ -487,6 +516,7 @@ fn union_branches(
                     .cloned()
                     .unwrap_or_default(),
             });
+        }
         }
     }
     // Dedup by (node, register): per-path results — the same node
@@ -847,18 +877,13 @@ fn apply_stage(
         Stage::Nav(branch) => {
             let mut out = Vec::new();
             for c in &caps {
-                let from = if let Some(m) = &branch.mark {
-                    // The thread's own pebble; an unset mark
-                    // yields nothing, like every anchor miss.
-                    match c.marks.iter().rev().find(|k| &k.name == m) {
-                        Some(k) => k.node,
-                        None => continue,
-                    }
-                } else if branch.anchored {
-                    adapter.root()
-                } else {
-                    c.node
-                };
+                // The thread's own pockets; an unset anchor yields
+                // nothing, like every anchor miss. `(@)` re-seeds
+                // the thread from every pocket — one fork per
+                // marked node, registers and marks carried.
+                for from in
+                    anchor_nodes(&branch.anchor, c.node, adapter.root(), &c.marks)
+                {
                 for (node, register, marks, arrived) in navigate_paths(
                     &branch.steps,
                     adapter,
@@ -882,6 +907,7 @@ fn apply_stage(
                         bindings: c.bindings.clone(),
                     });
                 }
+                }
             }
             let mut seen = HashSet::new();
             out.retain(|c| seen.insert((c.node, reg_key(&c.register))));
@@ -890,18 +916,19 @@ fn apply_stage(
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: the shared push spelling is
         // context-typed. A scalar goes to the register, a node to
-        // the mark store; the two never mix.
+        // the mark array (anonymously when no name is given — the
+        // slot stays `(N)`-addressable); the two never mix.
         Stage::Push(name) => caps
             .into_iter()
             .map(|mut c| {
-                match (c.topic.clone(), name.clone()) {
-                    (None, Some(label)) => c.marks.push(Mark {
-                        name: label,
+                match c.topic.clone() {
+                    None => c.marks.push(Mark {
+                        name: name.clone(),
                         node: c.node,
                     }),
-                    (topic, name) => c.register.push(Reg {
-                        name,
-                        value: topic.unwrap_or(Value::Null),
+                    Some(topic) => c.register.push(Reg {
+                        name: name.clone(),
+                        value: topic,
                     }),
                 }
                 c
@@ -2102,7 +2129,7 @@ fn navigate_paths(
         // the collapsed duplicates — a node reached three ways keeps
         // one entry whose `@-` has three elements.
         let mut merged: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> = Vec::new();
-        let mut index: HashMap<(NodeId, Vec<(Option<String>, String)>, Vec<(String, u64)>), usize> =
+        let mut index: HashMap<(NodeId, Vec<(Option<String>, String)>, Vec<(Option<String>, u64)>), usize> =
             HashMap::new();
         for (n, r, m, arrived) in next {
             match index.entry((n, reg_key(&r), mark_key(&m))) {
@@ -2129,7 +2156,7 @@ fn navigate_paths(
 }
 
 /// The comparable view of a mark stack, for dedup keys.
-fn mark_key(marks: &[Mark]) -> Vec<(String, u64)> {
+fn mark_key(marks: &[Mark]) -> Vec<(Option<String>, u64)> {
     marks.iter().map(|m| (m.name.clone(), m.node.0)).collect()
 }
 
@@ -3518,25 +3545,26 @@ fn eval_operand(
         Operand::Rel {
             steps,
             projection,
-            anchored,
-            mark,
+            anchor,
         } => {
-            // An anchored operand (`^`) navigates from the root —
-            // the branch anchor's rule, in operand position. A
-            // `(name)` anchor navigates from the marked node (most
-            // recent mark under that name); an unset mark yields
-            // nothing.
-            let from = if let Some(m) = mark {
-                match scope.marks.iter().rev().find(|k| &k.name == m) {
-                    Some(k) => k.node,
-                    None => return Vec::new(),
-                }
-            } else if *anchored {
-                adapter.root()
-            } else {
-                node
-            };
-            let nodes = navigate_from(steps, adapter, from, trace, scope.outer, scope.marks);
+            // The branch anchor's rule, in operand position: `^`
+            // navigates from the root, the rounded family from the
+            // marked node(s) — the plural forms unioning the
+            // values gathered from every matching mark
+            // (existential, like any multi-valued operand). An
+            // unset anchor yields nothing.
+            let mut nodes = Vec::new();
+            for from in anchor_nodes(anchor, node, adapter.root(), scope.marks) {
+                nodes.extend(navigate_from(
+                    steps,
+                    adapter,
+                    from,
+                    trace,
+                    scope.outer,
+                    scope.marks,
+                ));
+            }
+            let nodes = dedup(nodes);
             match projection {
                 Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
                 None => vec![Value::Bool(true); nodes.len()],
@@ -5477,6 +5505,58 @@ mod tests {
         // Hops are per-thread: neither `@|` nor `$|` takes them.
         assert!(refuse("/a @| /b").contains("per-thread"));
         assert!(refuse("/a | ... $| /b").contains("map pipe"));
+    }
+
+    #[test]
+    fn mark_array_symmetry() {
+        let t = MockTree::sample();
+        // Bare `.` pockets the node anonymously — mid-path and as
+        // a pipe stage — and `(N)` / `(.)` recall positionally.
+        assert_eq!(run("/a . /x.rs | (1)/y.txt", &t), vec![3]);
+        assert_eq!(run("/a . /x.rs | (.)/y.txt", &t), vec![3]);
+        assert_eq!(run("/a | . | /x.rs | (1)/y.txt", &t), vec![3]);
+        // Names are references over the same slots: the named mark
+        // is also position 2. (Bare `| (2)` stays the literal 2 —
+        // digit anchors need a continuation; the bare re-seed
+        // spellings are `(.)`, `(@)`, `(@name)`.)
+        assert_eq!(
+            vals("/a . /x.rs .m | (2):::name", &t),
+            vec![Value::Str("x.rs".into())]
+        );
+        // The null wart is gone: a bare push in node context marks
+        // and files NOTHING in the register.
+        assert_eq!(
+            vals("/a | . | @. | json", &t),
+            vec![Value::Str("[]".into())]
+        );
+        // Positional recall of marks lives in operand space too.
+        assert_eq!(run("/a . /*[(1)/x.rs]", &t), vec![2, 3]);
+    }
+
+    #[test]
+    fn marks_fan_out() {
+        let t = MockTree::sample();
+        // `(@)` re-seeds the thread from every pocket, in push
+        // order — one fork per marked node.
+        assert_eq!(run("/a/x.rs | . | ^/b/z.rs | . | (@)", &t), vec![2, 5]);
+        // ... and navigation continues from each in parallel.
+        assert_eq!(run("/a | . | ^/b | . | (@)/*.rs", &t), vec![2, 5]);
+        // `(@name)` fans over every mark under one name, shadowed
+        // ones included.
+        assert_eq!(run("/a .s /x.rs | ^/b .s /z.rs | (@s)", &t), vec![1, 4]);
+        // An empty pocket yields nothing, never an error.
+        assert_eq!(run("/a | (@)/x.rs", &t), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn numeric_mark_names_refused() {
+        let refuse = |q: &str| {
+            parse(&lex(q).unwrap())
+                .expect_err("should refuse")
+                .to_string()
+        };
+        assert!(refuse("/a .1 /b").contains("positions number themselves"));
+        assert!(refuse("/a | .1").contains("positions number themselves"));
     }
 
     #[test]

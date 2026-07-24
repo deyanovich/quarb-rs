@@ -35,12 +35,34 @@ use std::cell::RefCell;
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate, Projection,
-    PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
+    Anchor, Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
+    Projection, PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
 };
 use crate::error::Result;
 use crate::value::Value;
 use crate::{lexer, parser};
+
+/// The reflected properties of a navigation anchor, shared by
+/// `branch` nodes and `path` operand nodes. The v1 keys
+/// (`anchored` for `^`, `mark` for `(name)`) are unchanged; the
+/// mark-array anchors reflect additively: `mark-index` for `(N)`,
+/// `mark-top` for `(.)`, `marks-all` for `(@)`, `marks-name` for
+/// `(@name)`.
+fn anchor_props(anchor: &Anchor) -> Vec<(String, Value)> {
+    match anchor {
+        Anchor::Current => Vec::new(),
+        Anchor::Root => vec![("anchored".to_string(), Value::Bool(true))],
+        Anchor::Mark(m) => vec![("mark".to_string(), Value::Str(m.clone()))],
+        Anchor::MarkIndex(n) => {
+            vec![("mark-index".to_string(), Value::Int(*n as i64))]
+        }
+        Anchor::MarkTop => vec![("mark-top".to_string(), Value::Bool(true))],
+        Anchor::MarksAll => vec![("marks-all".to_string(), Value::Bool(true))],
+        Anchor::MarksNamed(m) => {
+            vec![("marks-name".to_string(), Value::Str(m.clone()))]
+        }
+    }
+}
 
 /// One node of the reflected query tree.
 struct RNode {
@@ -120,14 +142,7 @@ impl QueryArbor {
     }
 
     fn walk_branch(&mut self, b: &Branch, parent: usize) {
-        let mut props = Vec::new();
-        if b.anchored {
-            props.push(("anchored".to_string(), Value::Bool(true)));
-        }
-        if let Some(m) = &b.mark {
-            props.push(("mark".to_string(), Value::Str(m.clone())));
-        }
-        let id = self.intern(Some("branch"), props, Some(parent));
+        let id = self.intern(Some("branch"), anchor_props(&b.anchor), Some(parent));
         for elem in &b.steps {
             self.walk_elem(elem, id);
         }
@@ -139,11 +154,11 @@ impl QueryArbor {
     fn walk_elem(&mut self, e: &PathElem, parent: usize) {
         match e {
             PathElem::Mark(name) => {
-                self.intern(
-                    Some("mark"),
-                    vec![("name".to_string(), Value::Str(name.clone()))],
-                    Some(parent),
-                );
+                let mut props = Vec::new();
+                if let Some(n) = name {
+                    props.push(("name".to_string(), Value::Str(n.clone())));
+                }
+                self.intern(Some("mark"), props, Some(parent));
             }
             PathElem::Step(s) => self.walk_step(s, parent),
             PathElem::Group(g) => self.walk_group(g, parent),
@@ -313,17 +328,9 @@ impl QueryArbor {
             Operand::Rel {
                 steps,
                 projection,
-                anchored,
-                mark,
+                anchor,
             } => {
-                let mut props = Vec::new();
-                if *anchored {
-                    props.push(("anchored".to_string(), Value::Bool(true)));
-                }
-                if let Some(m) = mark {
-                    props.push(("mark".to_string(), Value::Str(m.clone())));
-                }
-                let id = self.intern(Some("path"), props, Some(parent));
+                let id = self.intern(Some("path"), anchor_props(anchor), Some(parent));
                 for e in steps {
                     self.walk_elem(e, id);
                 }

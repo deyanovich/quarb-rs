@@ -26,20 +26,52 @@ pub struct Query {
     pub outer: bool,
 }
 
+/// Where a navigation (a branch, a navigation stage, or an operand
+/// path) starts. The parenthesized mark anchors mirror the
+/// register's sigil law on the node side: `(name)` one mark by
+/// name, `(N)` one by 1-based position, `(.)` the latest, `(@)`
+/// ALL of the thread's marks — forking into one thread per marked
+/// node — and `(@name)` every node marked under one (possibly
+/// shadowed) name.
+/// Every anchor resolves to a LIST of start nodes; the singular
+/// forms yield at most one, and a miss yields nothing (never an
+/// error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Anchor {
+    /// Navigate from the current node (the default).
+    Current,
+    /// `^` — navigate from the arbor root. At the top level the
+    /// two coincide; inside a subcontext body the anchor reaches
+    /// back to the root (`.t(^/row @| count)` — the whole-table
+    /// total from any capsa).
+    Root,
+    /// `(name)` — the most recent mark under `name` in scope.
+    Mark(String),
+    /// `(N)` — the mark at 1-based position `N` in the thread's
+    /// mark array (names never shift positions; they are
+    /// references layered on top).
+    MarkIndex(usize),
+    /// `(.)` — the most recent mark, named or not (the top of
+    /// the mark array, mirroring the register's `$.`).
+    MarkTop,
+    /// `(@)` — every mark in the thread's array, in push order:
+    /// the navigation forks into one thread per marked node,
+    /// registers and marks carried (the sigil law's plural — it
+    /// yields THREADS, not a list value; node identity never
+    /// enters the value space).
+    MarksAll,
+    /// `(@name)` — every mark pushed under `name`, shadowed ones
+    /// included, in push order; forks like `(@)`.
+    MarksNamed(String),
+}
+
 /// One `||` branch: navigation and an optional projection.
 #[derive(Debug, Clone)]
 pub struct Branch {
     pub steps: Vec<PathElem>,
     pub projection: Option<Projection>,
-    /// `^` — navigate from the arbor root rather than the current
-    /// node. At the top level the two coincide; inside a subcontext
-    /// body the anchor reaches back to the root (`.t(^/row @|
-    /// count)` — the whole-table total from any capsa).
-    pub anchored: bool,
-    /// `(name)` — navigate from the node marked `name` (most
-    /// recent mark under that name in scope). Exclusive with
-    /// `anchored`.
-    pub mark: Option<String>,
+    /// Where the branch starts navigating (see [`Anchor`]).
+    pub anchor: Anchor,
 }
 
 /// A pipeline stage.
@@ -201,10 +233,13 @@ pub enum Projection {
 /// group — a breadcrumb push.
 #[derive(Debug, Clone)]
 pub enum PathElem {
-    /// `.name` (bare, node context) — mark the current node under
-    /// `name` in the thread's mark store; `(name)` anchors on it
-    /// later. Not a hop: navigation continues from the same node.
-    Mark(String),
+    /// `.name` (bare, node context) — mark the current node in the
+    /// thread's mark array, under `name` when one is given; a bare
+    /// `.` marks anonymously (the slot is still `(N)`-addressable,
+    /// and `(.)`/`(@)` see it). Names may not be purely numeric —
+    /// positions number themselves. Not a hop: navigation
+    /// continues from the same node.
+    Mark(Option<String>),
     Step(Step),
     Group(Group),
     /// `.(body)` / `.name(body)` inside a path pattern: evaluate the
@@ -309,20 +344,16 @@ pub enum Operand {
     /// A descending path from the current node, with an optional
     /// projection. Empty `steps` + a projection is a projection of the
     /// current node (`::size`); non-empty `steps` navigate first
-    /// (`/address::city`).
+    /// (`/address::city`). The anchor mirrors the branch anchor:
+    /// `[;;;short = ^/tags/*;;;short]` compares against a set
+    /// gathered elsewhere (existentially, like any multi-valued
+    /// operand); `(name)`/`(N)`/`(.)` start from one marked node;
+    /// `(@)`/`(@name)` union the values gathered from every
+    /// matching mark. An unset anchor yields no values.
     Rel {
         steps: Vec<PathElem>,
         projection: Option<Projection>,
-        /// `^` — the operand navigates from the arbor root rather
-        /// than the current node, mirroring the branch anchor:
-        /// `[;;;short = ^/tags/*;;;short]` compares against a set
-        /// gathered elsewhere in the arbor (existentially, like any
-        /// multi-valued operand).
-        anchored: bool,
-        /// `(name)` — the operand navigates from the node marked
-        /// `name`. Exclusive with `anchored`; an unset mark yields
-        /// no values.
-        mark: Option<String>,
+        anchor: Anchor,
     },
     /// A literal string or number.
     Lit(Value),

@@ -53,16 +53,11 @@ fn branch_ends_bare_leaf(b: &Branch) -> bool {
 }
 
 fn branch(b: &Branch) -> String {
-    // The `^` anchor is semantic (navigate from the root, which
-    // differs from the current node inside a subcontext body), so
-    // it reprints whenever set.
+    // Anchors are semantic (the root differs from the current
+    // node inside a subcontext body; marks are the thread's own),
+    // so they reprint whenever set.
     let mut out = String::new();
-    if b.anchored {
-        out.push('^');
-    }
-    if let Some(m) = &b.mark {
-        out.push_str(&format!("({m})"));
-    }
+    out.push_str(&anchor(&b.anchor));
     for e in &b.steps {
         out.push_str(&elem(e));
     }
@@ -76,11 +71,26 @@ fn branch(b: &Branch) -> String {
     out
 }
 
+/// An anchor's canonical spelling; empty for the default.
+fn anchor(a: &crate::ast::Anchor) -> String {
+    use crate::ast::Anchor;
+    match a {
+        Anchor::Current => String::new(),
+        Anchor::Root => "^".to_string(),
+        Anchor::Mark(m) => format!("({m})"),
+        Anchor::MarkIndex(n) => format!("({n})"),
+        Anchor::MarkTop => "(.)".to_string(),
+        Anchor::MarksAll => "(@)".to_string(),
+        Anchor::MarksNamed(m) => format!("(@{m})"),
+    }
+}
+
 fn elem(e: &PathElem) -> String {
     match e {
         // A mark prints spaced for the same lexing reason as the
-        // named push below.
-        PathElem::Mark(name) => format!(" .{name} "),
+        // named push below; the anonymous mark is a lone dot.
+        PathElem::Mark(Some(name)) => format!(" .{name} "),
+        PathElem::Mark(None) => " . ".to_string(),
         PathElem::Step(s) => step(s),
         PathElem::Group(g) => group(g),
         PathElem::Push { name, body } => {
@@ -372,16 +382,10 @@ fn operand(o: &Operand) -> String {
         Operand::Rel {
             steps,
             projection: p,
-            anchored,
-            mark,
+            anchor: a,
         } => {
             let mut out = String::new();
-            if *anchored {
-                out.push('^');
-            }
-            if let Some(m) = mark {
-                out.push_str(&format!("({m})"));
-            }
+            out.push_str(&anchor(a));
             out.extend(steps.iter().map(elem));
             if let Some(p) = p {
                 out.push_str(&projection(p));
