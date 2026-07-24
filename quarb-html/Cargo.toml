@@ -3,7 +3,7 @@ name = "quarb-html"
 description = "HTML adapter for the Quarb query engine"
 keywords = ["query", "html", "quarb", "arbor"]
 categories = ["parser-implementations", "web-programming"]
-version = "0.5.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.5.0" }
+quarb = { path = "../quarb", version = "0.6.0" }
 scraper.workspace = true

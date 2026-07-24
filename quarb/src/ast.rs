@@ -90,6 +90,18 @@ pub enum Stage {
     /// an empty list), it emits ONE thread with a null topic — the
     /// row-multiplying half of OPTIONAL MATCH / LEFT JOIN.
     Spread { outer: bool },
+    /// `| /path…` — a navigation stage: resume navigation from each
+    /// capsa's node (or from `^` / a `(name)` mark), fanning out
+    /// into one capsa per result with registers and marks carried
+    /// forward — the pipeline spelling of a path continuation. The
+    /// steps behave in every respect (predicates, marks, groups,
+    /// the navigation-predicate scope law) as if written in the
+    /// path. Legal only in navigation mode — no live topic; after a
+    /// projection, a push (`| .`) files the topic and navigation
+    /// resumes. A trailing projection moves the thread to scalar
+    /// mode exactly like a branch projection. Refused under `@|`
+    /// and `$|`: hops are per-thread.
+    Nav(Branch),
     /// `$| stage` — the map pipe, the scope-dual of `@|`: where
     /// `@|` hands its stage ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per

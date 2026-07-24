@@ -100,6 +100,11 @@ const CORPUS: &[&str] = &[
     // now() and call operands (2026-07-12, the duration-parsing
     // round; f(x, args) reflects as its (x | f(args)) desugaring)
     "/log/*[/at:: > now() - 12h] | (td(5d3h5min)) | (tp('02/15/2024', '%m/%d/%Y'))",
+    // navigation stages (2026-07-23, pipeline navigation): plain,
+    // projected, root- and mark-anchored, quantified — a branch in
+    // stage position, wrapped in the nav kind
+    "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
+    "/a .m | /b | ^/c:::name | . | (m)/d(->e)+::x",
 ];
 
 /// kind → sorted property keys, as locked. `param` is reserved
@@ -140,6 +145,10 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: match/when (2026-07-11, the value
     // match).
     ("match", &[]),
+    // v1 additive growth: nav (2026-07-23, pipeline navigation —
+    // a branch in stage position; its contents reflect with the
+    // ordinary branch kinds).
+    ("nav", &[]),
     ("neg", &[]),
     ("not", &[]),
     // v1 additive growth: now (2026-07-12, the invocation instant;

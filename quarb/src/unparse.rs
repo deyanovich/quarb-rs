@@ -69,6 +69,10 @@ fn branch(b: &Branch) -> String {
     if let Some(p) = &b.projection {
         out.push_str(&projection(p));
     }
+    // A final mark (or named push) prints with a trailing space
+    // for lexing; at the branch end the joiner supplies its own
+    // spacing.
+    out.truncate(out.trim_end().len());
     out
 }
 
@@ -605,6 +609,7 @@ fn stage(st: &Stage) -> String {
                 .to_string();
             format!("$| {body}")
         }
+        Stage::Nav(b) => format!("| {}", branch(b)),
         Stage::Push(None) => "| .".to_string(),
         Stage::Push(Some(n)) => format!("| .{n}"),
         Stage::Subcontext { name, body } => match name {
@@ -613,14 +618,15 @@ fn stage(st: &Stage) -> String {
         },
         // Only some operand spellings are self-delimiting after `|`
         // (the starts pipe_item's expression arms accept: a paren,
-        // a quoted string, a path or projection, the `$` family,
-        // `@-`); everything else — `(3)`, `(now())`, `(@*)`,
-        // `(^/a)` — must keep parens, or the reparse reads it as a
-        // function name.
+        // a quoted string, a projection, the `$` family, `@-`);
+        // everything else — `(3)`, `(now())`, `(@*)`, `(^/a)` —
+        // must keep parens, or the reparse reads it as a function
+        // name. A bare PATH must keep parens too: unparenthesized
+        // it would reparse as a navigation stage.
         Stage::Expr(e) => {
             let text = operand(e);
             let delimited =
-                text.starts_with(['(', '\'', '"', '/', ':', ';', '$']) || text.starts_with("@-");
+                text.starts_with(['(', '\'', '"', ':', ';', '$']) || text.starts_with("@-");
             if delimited {
                 format!("| {text}")
             } else {

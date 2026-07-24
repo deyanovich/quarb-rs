@@ -421,7 +421,10 @@ pub fn apply_scalar(
             };
             let (wv, wu) = written.clone().unwrap_or_else(|| (*value, base.clone()));
             let rounded = match call.name.as_str() {
-                "round" => wv.round(),
+                "round" => match round_digits(call) {
+                    Some(d) => round_to(wv, d),
+                    None => wv.round(),
+                },
                 "floor" => wv.floor(),
                 _ => wv.ceil(),
             };
@@ -432,7 +435,16 @@ pub fn apply_scalar(
                 written: Some((rounded, wu)),
             }]
         }
-        "round" => vec![numeric_scalar(&topic, |n| Value::Int(n.round() as i64))],
+        // Bare `round` reads to an integer; `round(d)` keeps `d`
+        // decimal places and stays a float (`round(0)` included —
+        // the argument form always answers in the topic's float
+        // world, the bare form in the integer one). Serialization
+        // stays shortest-round-trip — `round(d)` is the in-query
+        // remedy for presenting arithmetic like 68.99000000000001.
+        "round" => vec![numeric_scalar(&topic, |n| match round_digits(call) {
+            Some(d) => Value::Float(round_to(n, d)),
+            None => Value::Int(n.round() as i64),
+        })],
         "floor" => vec![numeric_scalar(&topic, |n| Value::Int(n.floor() as i64))],
         "ceil" => vec![numeric_scalar(&topic, |n| Value::Int(n.ceil() as i64))],
         "abs" => vec![match topic {
@@ -489,6 +501,31 @@ pub fn apply_scalar(
 /// none.
 fn numeric_scalar(topic: &Value, f: impl Fn(f64) -> Value) -> Value {
     topic.numeric().map(f).unwrap_or(Value::Null)
+}
+
+/// The digits argument of `round(d)`, when one was given. A
+/// non-integer argument reads as absent, like `arg_str`'s fallback.
+fn round_digits(call: &FnCall) -> Option<i64> {
+    match call.args.first() {
+        Some(Arg::Lit(Value::Int(d))) => Some(*d),
+        _ => None,
+    }
+}
+
+/// Round to `d` decimal places (negative `d` reaches left of the
+/// point, SQL-style). Scale-round-descale over f64: the answer is
+/// the nearest representable double, so `68.99000000000001 |
+/// round(2)` prints `68.99`. A scaling overflow (astronomically
+/// large topic with large `d`) leaves the value untouched — beyond
+/// f64's 17 significant digits the rounding is an identity anyway.
+fn round_to(n: f64, d: i64) -> f64 {
+    let factor = 10f64.powi(d.clamp(-30, 30) as i32);
+    let scaled = n * factor;
+    if scaled.is_finite() {
+        scaled.round() / factor
+    } else {
+        n
+    }
 }
 
 /// Apply a reducing aggregate to the whole value list. The
@@ -1273,6 +1310,61 @@ mod tests {
         assert_eq!(sc("abs", Value::Int(-4)), vec![Value::Int(4)]);
         assert_eq!(sc("abs", Value::Float(-1.5)), vec![Value::Float(1.5)]);
         assert_eq!(sc("round", Value::Str("n/a".into())), vec![Value::Null]);
+    }
+
+    fn sc_args(name: &str, args: Vec<Arg>, topic: Value) -> Vec<Value> {
+        let call = FnCall {
+            name: name.into(),
+            args,
+        };
+        apply_scalar(&call, topic, &crate::quantity::scale_expr)
+    }
+
+    #[test]
+    fn round_with_digits() {
+        let d = |n: i64| vec![Arg::Lit(Value::Int(n))];
+        // The motivating case: arithmetic noise prints clean.
+        assert_eq!(
+            sc_args("round", d(2), Value::Float(68.99000000000001)),
+            vec![Value::Float(68.99)]
+        );
+        assert_eq!(
+            sc_args("round", d(2), Value::Float(3.5700000000000003)),
+            vec![Value::Float(3.57)]
+        );
+        // The argument form always answers float, `round(0)` included.
+        assert_eq!(
+            sc_args("round", d(0), Value::Float(2.5)),
+            vec![Value::Float(3.0)]
+        );
+        // Negative digits reach left of the point, SQL-style.
+        assert_eq!(
+            sc_args("round", d(-1), Value::Float(2568.5)),
+            vec![Value::Float(2570.0)]
+        );
+        // Numeric reading still applies; no reading is still null.
+        assert_eq!(
+            sc_args("round", d(1), Value::Str("2.44".into())),
+            vec![Value::Float(2.4)]
+        );
+        assert_eq!(
+            sc_args("round", d(2), Value::Str("n/a".into())),
+            vec![Value::Null]
+        );
+        // A quantity rounds in its display unit and stays one.
+        let q = Value::Quantity {
+            value: 3.14159,
+            base: "m".into(),
+            written: Some((3.14159, "m".into())),
+        };
+        assert_eq!(
+            sc_args("round", d(2), q),
+            vec![Value::Quantity {
+                value: 3.14,
+                base: "m".into(),
+                written: Some((3.14, "m".into())),
+            }]
+        );
     }
 
     #[test]

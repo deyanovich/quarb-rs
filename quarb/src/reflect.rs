@@ -507,6 +507,10 @@ impl QueryArbor {
                 );
                 self.walk_args(&call.args, id);
             }
+            Stage::Nav(b) => {
+                let id = self.intern(Some("nav"), Vec::new(), Some(parent));
+                self.walk_branch(b, id);
+            }
             Stage::Push(name) => {
                 let mut props = Vec::new();
                 if let Some(n) = name {

@@ -188,6 +188,45 @@ struct Parser<'a> {
 /// smallest stacks in play — test threads (2 MB) and wasm.
 const MAX_NEST: usize = 64;
 
+/// The static execution mode between pipeline stages (spec:
+/// Execution Modes). Navigation mode: the thread is a node with no
+/// live topic — hops may fan out. Scalar mode: a projection or
+/// function has produced a live topic — a hop would drop it, so
+/// path-shaped stages refuse until a push (`| .`) files the topic
+/// and returns the thread to navigation mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipeMode {
+    Nav,
+    Scalar,
+}
+
+/// A stage's mode-out given its mode-in. Pushes of every spelling
+/// return to navigation mode (the push files the topic; spec:
+/// "Pushes transition from scalar mode back to navigation mode").
+/// Filters and positional selection preserve the mode; everything
+/// that produces or transforms a topic enters scalar mode; a
+/// navigation stage ends in the mode its optional projection
+/// implies.
+fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
+    match stage {
+        Stage::Nav(b) => {
+            if b.projection.is_some() {
+                PipeMode::Scalar
+            } else {
+                PipeMode::Nav
+            }
+        }
+        Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } => PipeMode::Nav,
+        Stage::Filter(_) | Stage::Select(_) => cur,
+        Stage::Func(_)
+        | Stage::Expr(_)
+        | Stage::Agg(_)
+        | Stage::Recall(_)
+        | Stage::Spread { .. }
+        | Stage::Map(_) => PipeMode::Scalar,
+    }
+}
+
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
         self.toks.get(self.pos)
@@ -271,8 +310,19 @@ impl Parser<'_> {
             self.union_element(&mut branches, &mut pipeline)?;
         }
 
-        // Pipeline over the whole union.
-        self.pipeline_items(&mut pipeline)?;
+        // Pipeline over the whole union. The entering mode is
+        // static: a projected branch enters in scalar mode, plain
+        // navigation in navigation mode; stages spliced from a
+        // fragment have already advanced it.
+        let mut mode = if branches.iter().any(|b| b.projection.is_some()) {
+            PipeMode::Scalar
+        } else {
+            PipeMode::Nav
+        };
+        for s in &pipeline {
+            mode = stage_mode_out(s, mode);
+        }
+        self.pipeline_items(&mut pipeline, mode)?;
         Ok(Query {
             correlations: Vec::new(),
             outer: false,
@@ -323,34 +373,60 @@ impl Parser<'_> {
 
     /// Parse pipeline stages onto `pipeline` until something that is
     /// not a pipe. Shared by queries and pipeline-fragment bodies.
-    fn pipeline_items(&mut self, pipeline: &mut Vec<Stage>) -> Result<()> {
+    /// `mode` is the static execution mode entering the first stage
+    /// (spec: Execution Modes) — it decides whether a path-shaped
+    /// stage is navigation or an error, and each stage's mode-out
+    /// feeds the next.
+    fn pipeline_items(&mut self, pipeline: &mut Vec<Stage>, mut mode: PipeMode) -> Result<()> {
         loop {
             match self.peek() {
                 Some(Token::Pipe) => {
                     self.pos += 1;
                     if matches!(self.peek(), Some(Token::Amp)) {
+                        let before = pipeline.len();
                         self.invoke_pipeline_fragment("|", pipeline)?;
+                        for s in &pipeline[before..] {
+                            mode = stage_mode_out(s, mode);
+                        }
                         continue;
                     }
-                    pipeline.push(self.pipe_item()?);
+                    let stage = self.pipe_item(mode)?;
+                    mode = stage_mode_out(&stage, mode);
+                    pipeline.push(stage);
                 }
                 // `$| stage` — the map pipe.
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
-                    pipeline.push(Stage::Map(Box::new(self.map_stage()?)));
+                    let stage = Stage::Map(Box::new(self.map_stage()?));
+                    mode = stage_mode_out(&stage, mode);
+                    pipeline.push(stage);
                 }
                 Some(Token::At) => {
                     self.pos += 1;
                     self.expect(Token::Pipe, "'|' after '@' for aggregation")?;
                     if matches!(self.peek(), Some(Token::Amp)) {
+                        let before = pipeline.len();
                         self.invoke_pipeline_fragment("@|", pipeline)?;
+                        for s in &pipeline[before..] {
+                            mode = stage_mode_out(s, mode);
+                        }
                         continue;
+                    }
+                    // Hops are per-thread; `@|` aggregates the
+                    // whole context.
+                    if self.nav_stage_ahead() {
+                        return Err(QuarbError::Parse(
+                            "navigation is per-thread; write '| /path' \
+                             ('@|' aggregates the whole context — hops don't take it)"
+                                .into(),
+                        ));
                     }
                     // `@| [n]` / `@| [a..b]` — positional selection
                     // from the whole context.
                     if matches!(self.peek(), Some(Token::LBracket)) {
                         match self.predicate()? {
                             pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => {
+                                // Select preserves the mode.
                                 pipeline.push(Stage::Select(pred));
                                 continue;
                             }
@@ -375,7 +451,9 @@ impl Parser<'_> {
                     }
                     validate_window_shift(&call)?;
                     validate_keyed(&call)?;
-                    pipeline.push(Stage::Agg(call));
+                    let stage = Stage::Agg(call);
+                    mode = stage_mode_out(&stage, mode);
+                    pipeline.push(stage);
                 }
                 _ => break,
             }
@@ -383,9 +461,62 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Parse one pipeline stage after a `|`: a recall, a push, a
-    /// subcontext, or a function.
-    fn pipe_item(&mut self) -> Result<Stage> {
+    /// Parse one pipeline stage after a `|`: a navigation stage, a
+    /// recall, a push, a subcontext, or a function. `mode` is the
+    /// static execution mode entering this stage: path-shaped
+    /// stages are navigation in navigation mode and an error in
+    /// scalar mode (a live topic would be dropped — file it first).
+    fn pipe_item(&mut self, mode: PipeMode) -> Result<Stage> {
+        // A stage that starts like a path is a navigation stage —
+        // the pipeline spelling of a path continuation.
+        if self.nav_stage_ahead() {
+            match mode {
+                PipeMode::Scalar => {
+                    // A parenthesized start keeps its expression
+                    // reading (the documented escape); a bare axis
+                    // start is a hop, and a hop would drop the
+                    // live topic.
+                    if !matches!(self.peek(), Some(Token::LParen)) {
+                        return Err(QuarbError::Parse(
+                            "cannot navigate in scalar mode — the topic is live \
+                             and a hop would drop it; file it first with '| .' \
+                             (or '| .name') and navigation resumes. \
+                             (Parenthesize the path for a value expression.)"
+                                .into(),
+                        ));
+                    }
+                }
+                PipeMode::Nav => {
+                    // `(` is ambiguous: a quantified-walk group
+                    // (`| (->e)+`) or a parenthesized expression
+                    // (`| (/kids/*::name)`). Try the branch
+                    // reading; fall back to the expression.
+                    if matches!(self.peek(), Some(Token::LParen))
+                        && !self.mark_anchor_ahead()
+                    {
+                        let save = self.pos;
+                        if let Ok(b) = self.branch()
+                            && !self.expr_continues()
+                        {
+                            return Ok(Stage::Nav(b));
+                        }
+                        self.pos = save;
+                    } else {
+                        // A dangling expression operator after the
+                        // branch (`| /price:: * 2`) means the stage
+                        // was arithmetic all along — keep the
+                        // operand reading. A bare path is a hop.
+                        let save = self.pos;
+                        let b = self.branch()?;
+                        if !self.expr_continues() {
+                            return Ok(Stage::Nav(b));
+                        }
+                        self.pos = save;
+                        return Ok(Stage::Expr(self.additive()?));
+                    }
+                }
+            }
+        }
         match self.peek() {
             // `| $.name`, `| $_`, `| $ord`, and any arithmetic over
             // them are value expressions; a plain recall is just the
@@ -523,15 +654,14 @@ impl Parser<'_> {
                 )),
             },
             // A value-expression stage starts with a projection, a
-            // relative path, a parenthesized group, or an
-            // interpolated string: `| ::price * ::qty`,
-            // `| "${::name} (${::age})"`.
+            // parenthesized group, or an interpolated string:
+            // `| ::price * ::qty`, `| "${::name} (${::age})"`.
+            // (A bare path start is a navigation stage, handled
+            // above; parenthesized paths remain expressions.)
             Some(
                 Token::ColonColon
                 | Token::ColonColonColon
                 | Token::SemiSemiSemi
-                | Token::Slash
-                | Token::SlashSlash
                 | Token::LParen
                 | Token::Interp(_),
             ) => Ok(Stage::Expr(self.additive()?)),
@@ -574,6 +704,50 @@ impl Parser<'_> {
                 validate_record(&call)?;
                 Ok(Stage::Func(call))
             }
+        }
+    }
+
+    /// Whether the next tokens start a navigation stage: an axis
+    /// token, the root anchor, a `(name)` mark anchor followed by a
+    /// path continuation, or an axis-led group (a quantified walk).
+    /// A `(` that opens anything else stays an expression.
+    fn nav_stage_ahead(&self) -> bool {
+        let axis = |t: &Token| {
+            matches!(
+                t,
+                Token::Slash
+                    | Token::SlashSlash
+                    | Token::Backslash
+                    | Token::BackslashBackslash
+                    | Token::Gt
+                    | Token::Lt
+                    | Token::FollowingSiblings(_)
+                    | Token::PrecedingSiblings(_)
+                    | Token::ArrowOut
+                    | Token::ArrowIn
+            )
+        };
+        match self.peek() {
+            Some(t) if axis(t) => true,
+            Some(Token::Caret) => true,
+            Some(Token::LParen) => {
+                self.mark_anchor_ahead()
+                    || self.toks.get(self.pos + 1).is_some_and(axis)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the next token continues a value expression after a
+    /// complete operand — an arithmetic operator or a conditional
+    /// `?`. Decides branch-vs-expression for a path-shaped stage.
+    fn expr_continues(&self) -> bool {
+        match self.peek() {
+            Some(Token::Name { text, quoted: false, .. }) => {
+                matches!(text.as_str(), "+" | "-" | "*" | "div" | "idiv" | "mod")
+            }
+            Some(Token::Question) => true,
+            _ => false,
         }
     }
 
@@ -661,7 +835,10 @@ impl Parser<'_> {
         // else is a navigation query (which may carry a pipeline).
         let body = if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
             let mut stages = Vec::new();
-            self.pipeline_items(&mut stages)?;
+            // A fragment body's splice-time mode is unknowable at
+            // definition time; parse permissively (navigation mode)
+            // — the splice site's own stages still typecheck.
+            self.pipeline_items(&mut stages, PipeMode::Nav)?;
             if stages.is_empty() {
                 return Err(QuarbError::Parse(format!(
                     "fragment '&{name}' has an empty body"
@@ -1094,7 +1271,7 @@ impl Parser<'_> {
                     nest_depth: 0,
                 };
                 let mut stages = Vec::new();
-                p.pipeline_items(&mut stages).map_err(wrap)?;
+                p.pipeline_items(&mut stages, PipeMode::Nav).map_err(wrap)?;
                 if p.pos != tokens.len() {
                     return Err(QuarbError::Parse(format!(
                         "macro '&{name}' expanded to text with trailing \
@@ -2065,7 +2242,10 @@ impl Parser<'_> {
     /// stage parser, minus what needs a real capsa: pushes and
     /// subcontexts refuse.
     fn inline_stage(&mut self) -> Result<Stage> {
-        let stage = self.pipe_item()?;
+        // Expression pipe tails live on the scalar plane; a
+        // path-shaped stage errors in pipe_item before it can
+        // become navigation.
+        let stage = self.pipe_item(PipeMode::Scalar)?;
         match &stage {
             Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } => {
                 Err(QuarbError::Parse(
@@ -2084,6 +2264,16 @@ impl Parser<'_> {
     /// any per-value stage transforms them. Pushes and subcontexts
     /// refuse, as in inline pipes.
     fn map_stage(&mut self) -> Result<Stage> {
+        // Hops are per-thread; `$|` transforms elements of a list
+        // topic in place.
+        if self.nav_stage_ahead() {
+            return Err(QuarbError::Parse(
+                "navigation doesn't ride the map pipe; '$|' transforms \
+                 the elements of a list topic — write '| /path' as its \
+                 own stage"
+                    .into(),
+            ));
+        }
         if matches!(self.peek(), Some(Token::LBracket)) {
             let pred = self.predicate()?;
             return Ok(match pred {
@@ -3239,6 +3429,11 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
             }
         }
         Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => subst_operand(e, map),
+        Stage::Nav(b) => {
+            for elem in &mut b.steps {
+                subst_elem(elem, map);
+            }
+        }
         Stage::Subcontext { body, .. } => subst_query(body, map),
         Stage::Filter(e) => subst_pred_expr(e, map),
         Stage::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),

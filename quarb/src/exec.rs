@@ -190,6 +190,9 @@ fn uses_shell_stage(stage: &Stage) -> bool {
             _ => false,
         },
         Stage::Expr(o) | Stage::ExprPush { expr: o, .. } => uses_shell_operand(o),
+        // A navigation stage is a branch in stage position — scan
+        // its steps like any branch's.
+        Stage::Nav(b) => b.steps.iter().any(uses_shell_elem),
         _ => false,
     }
 }
@@ -387,6 +390,16 @@ fn eval_query_caps_outer(
 fn stage_projects(stage: &Stage) -> bool {
     match stage {
         Stage::Select(_) | Stage::Filter(_) => false,
+        // A bare push leaves the topic as it was — the runtime
+        // any-topic check in [`to_result`] carries the typing —
+        // and in node context it MARKS, which must not value-type
+        // the query. (The computed pushes set the topic and stay
+        // value-typing, in the default arm.)
+        Stage::Push(_) => false,
+        // A navigation stage re-types by its own projection —
+        // handled in the [`pipeline_projected`] fold (it can also
+        // RESET a projected pipeline back to nodes).
+        Stage::Nav(b) => b.projection.is_some(),
         // `group` produces list topics (value-typed); the other keyed
         // aggregates only reorder or filter. (`ungroup` is handled by
         // the fold in [`pipeline_projected`].)
@@ -412,6 +425,10 @@ fn pipeline_projected(query: &Query) -> bool {
             Stage::Agg(call) if call.name == "ungroup" => {
                 projected = before_group.pop().unwrap_or(false);
             }
+            // A navigation stage rebuilds the capsae: without a
+            // projection the context is node-typed again no matter
+            // what came before; with one it is value-typed.
+            Stage::Nav(b) => projected = b.projection.is_some(),
             s => projected = projected || stage_projects(s),
         }
     }
@@ -447,7 +464,7 @@ fn union_branches(
             start
         };
         for (node, register, marks, arrived) in
-            navigate_paths(&branch.steps, adapter, from, trace, outer, seed)
+            navigate_paths(&branch.steps, adapter, from, trace, outer, seed, &[])
         {
             caps.push(Capsa {
                 node,
@@ -819,6 +836,57 @@ fn apply_stage(
                 })
             })
             .collect(),
+        // A navigation stage: resume navigation from each capsa's
+        // node (or from `^` / its `(name)` mark), registers and
+        // marks carried forward — the pipeline spelling of a path
+        // continuation. The parser admits it only in navigation
+        // mode, so no live topic is dropped here. Steps behave
+        // exactly as in the path: same predicate scope law (no
+        // capsa of their own), same group/breadcrumb machinery,
+        // same (node, register) dedup as a branch union.
+        Stage::Nav(branch) => {
+            let mut out = Vec::new();
+            for c in &caps {
+                let from = if let Some(m) = &branch.mark {
+                    // The thread's own pebble; an unset mark
+                    // yields nothing, like every anchor miss.
+                    match c.marks.iter().rev().find(|k| &k.name == m) {
+                        Some(k) => k.node,
+                        None => continue,
+                    }
+                } else if branch.anchored {
+                    adapter.root()
+                } else {
+                    c.node
+                };
+                for (node, register, marks, arrived) in navigate_paths(
+                    &branch.steps,
+                    adapter,
+                    from,
+                    trace,
+                    outer,
+                    &c.marks,
+                    &c.register,
+                ) {
+                    out.push(Capsa {
+                        node,
+                        register,
+                        marks,
+                        arrived,
+                        topic: branch
+                            .projection
+                            .as_ref()
+                            .map(|p| project(adapter, node, p)),
+                        members: Vec::new(),
+                        captures: c.captures.clone(),
+                        bindings: c.bindings.clone(),
+                    });
+                }
+            }
+            let mut seen = HashSet::new();
+            out.retain(|c| seen.insert((c.node, reg_key(&c.register))));
+            out
+        }
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: the shared push spelling is
         // context-typed. A scalar goes to the register, a node to
@@ -865,6 +933,8 @@ fn apply_stage(
                     name: name.clone(),
                     value: value.clone(),
                 });
+                // Visible as the topic; the push still returns
+                // the thread to navigation mode (see ExprPush).
                 c.topic = Some(value);
                 c
             })
@@ -914,6 +984,11 @@ fn apply_stage(
                     name: name.clone(),
                     value: value.clone(),
                 });
+                // The pushed value stays visible as the topic —
+                // but the PUSH is what returns the thread to
+                // navigation mode: a following hop is legal and
+                // rebuilds the capsae, the filed value safe in
+                // the register (spec: Execution Modes).
                 c.topic = Some(value);
                 c
             })
@@ -1971,9 +2046,10 @@ fn navigate_paths(
     trace: &Trace,
     outer: Option<&Scope<'_>>,
     seed_marks: &[Mark],
+    seed_register: &[Reg],
 ) -> Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> {
     let mut ctx: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> =
-        vec![(start, Vec::new(), seed_marks.to_vec(), Vec::new())];
+        vec![(start, seed_register.to_vec(), seed_marks.to_vec(), Vec::new())];
     for elem in elems {
         // A mark is not a hop: label the current node in place and
         // keep the crossing record intact.
@@ -2069,7 +2145,7 @@ fn navigate_from(
     seed_marks: &[Mark],
 ) -> Vec<NodeId> {
     dedup(
-        navigate_paths(elems, adapter, start, trace, outer, seed_marks)
+        navigate_paths(elems, adapter, start, trace, outer, seed_marks, &[])
             .into_iter()
             .map(|(n, _, _, _)| n)
             .collect(),
@@ -5348,5 +5424,79 @@ mod tests {
             &Value::Str("^chap".into()),
             sc
         ));
+    }
+
+    #[test]
+    fn nav_stage_resumes_navigation() {
+        let t = MockTree::sample();
+        // A path-shaped stage fans out per thread — the pipeline
+        // spelling of a path continuation.
+        assert_eq!(run("/* | /*", &t), vec![2, 3, 5, 6]);
+        // The register rides across the hop: collect at both
+        // levels, lay out as a record.
+        let vs = vals("/* | .dir(:::name) | /* | .file(:::name) | %.", &t);
+        assert_eq!(vs.len(), 4);
+        let Value::Record(fields) = &vs[0] else {
+            panic!("expected a record, got {:?}", vs[0]);
+        };
+        assert_eq!(
+            fields[0],
+            ("dir".to_string(), Value::Str("a".into())),
+            "first column is the ancestor's push"
+        );
+        assert_eq!(fields[1], ("file".to_string(), Value::Str("x.rs".into())));
+        // A trailing projection ends the stage in scalar mode,
+        // exactly like a branch projection.
+        assert_eq!(
+            vals("/a | /*:::name", &t),
+            vec![Value::Str("x.rs".into()), Value::Str("y.txt".into())]
+        );
+        // `^` — the anchored stage navigates from the root.
+        assert_eq!(run("/a/x.rs | ^/b", &t), vec![4]);
+        // `(m)` — anchor on the thread's own pebble; both the
+        // path-side and the pipe-side mark spellings feed it.
+        assert_eq!(run("/a .m /x.rs | (m)/y.txt", &t), vec![3]);
+        assert_eq!(run("/a | .m | /x.rs | (m)/y.txt", &t), vec![3]);
+        // Arrows hop crosslinks as stages too.
+        assert_eq!(run("/a/x.rs | ->ref", &t), vec![7]);
+        // File-first: a projection enters scalar mode, the push
+        // returns to navigation mode, and the hop is legal again.
+        assert_eq!(run("/a | :::name | . | /*", &t), vec![2, 3]);
+    }
+
+    #[test]
+    fn nav_stage_mode_discipline() {
+        let refuse = |q: &str| {
+            parse(&lex(q).unwrap())
+                .expect_err("should refuse")
+                .to_string()
+        };
+        // Scalar mode: a hop would drop the live topic.
+        assert!(refuse("/a:::name | /b").contains("scalar mode"));
+        assert!(refuse("/a | :::name | /b").contains("scalar mode"));
+        // Hops are per-thread: neither `@|` nor `$|` takes them.
+        assert!(refuse("/a @| /b").contains("per-thread"));
+        assert!(refuse("/a | ... $| /b").contains("map pipe"));
+    }
+
+    #[test]
+    fn pushes_return_to_navigation_mode() {
+        let t = MockTree::sample();
+        // A computed push files the value (and shows it as the
+        // topic, as ever) — but the thread is back in navigation
+        // mode: the hop is legal, and it rebuilds the capsae with
+        // the filed value safe in the register.
+        let vs = vals("/* | .dir(:::name) | /*[:::name = x.rs] | %.", &t);
+        assert_eq!(vs.len(), 1);
+        let Value::Record(fields) = &vs[0] else {
+            panic!("expected a record, got {:?}", vs[0]);
+        };
+        assert_eq!(fields[0], ("dir".to_string(), Value::Str("a".into())));
+        // A bare push files the projected topic and reopens
+        // navigation the same way.
+        assert_eq!(
+            vals("/a:::name | . | $.", &t),
+            vec![Value::Str("a".into())]
+        );
     }
 }

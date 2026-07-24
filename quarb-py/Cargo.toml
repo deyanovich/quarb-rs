@@ -20,24 +20,24 @@ name = "_quarb"
 crate-type = ["cdylib"]
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.5.0" }
-quarb-json = { path = "../quarb-json", version = "0.5.0" }
-quarb-yaml = { path = "../quarb-yaml", version = "0.5.0" }
-quarb-toml = { path = "../quarb-toml", version = "0.5.0" }
-quarb-csv = { path = "../quarb-csv", version = "0.5.0" }
-quarb-xml = { path = "../quarb-xml", version = "0.5.0" }
-quarb-html = { path = "../quarb-html", version = "0.5.0" }
-quarb-markdown = { path = "../quarb-markdown", version = "0.5.0" }
-quarb-sqlite = { path = "../quarb-sqlite", version = "0.5.0", features = ["bundled"] }
-quarb-kaiv = { path = "../quarb-kaiv", version = "0.5.0" }
-quarb-fs = { path = "../quarb-fs", version = "0.5.0" }
-quarb-git = { path = "../quarb-git", version = "0.5.0" }
-quarb-archive = { path = "../quarb-archive", version = "0.5.0" }
-quarb-xlsx = { path = "../quarb-xlsx", version = "0.5.0" }
-quarb-code = { path = "../quarb-code", version = "0.5.0" }
-quarb-compose = { path = "../quarb-compose", version = "0.5.0" }
-quarb-mount = { path = "../quarb-mount", version = "0.5.0" }
-quarb-xpath = { path = "../quarb-xpath", version = "0.5.0" }
-quarb-jq = { path = "../quarb-jq", version = "0.5.0" }
-quarb-sql = { path = "../quarb-sql", version = "0.5.0" }
+quarb = { path = "../quarb", version = "0.6.0" }
+quarb-json = { path = "../quarb-json", version = "0.6.0" }
+quarb-yaml = { path = "../quarb-yaml", version = "0.6.0" }
+quarb-toml = { path = "../quarb-toml", version = "0.6.0" }
+quarb-csv = { path = "../quarb-csv", version = "0.6.0" }
+quarb-xml = { path = "../quarb-xml", version = "0.6.0" }
+quarb-html = { path = "../quarb-html", version = "0.6.0" }
+quarb-markdown = { path = "../quarb-markdown", version = "0.6.0" }
+quarb-sqlite = { path = "../quarb-sqlite", version = "0.6.0", features = ["bundled"] }
+quarb-kaiv = { path = "../quarb-kaiv", version = "0.6.0" }
+quarb-fs = { path = "../quarb-fs", version = "0.6.0" }
+quarb-git = { path = "../quarb-git", version = "0.6.0" }
+quarb-archive = { path = "../quarb-archive", version = "0.6.0" }
+quarb-xlsx = { path = "../quarb-xlsx", version = "0.6.0" }
+quarb-code = { path = "../quarb-code", version = "0.6.0" }
+quarb-compose = { path = "../quarb-compose", version = "0.6.0" }
+quarb-mount = { path = "../quarb-mount", version = "0.6.0" }
+quarb-xpath = { path = "../quarb-xpath", version = "0.6.0" }
+quarb-jq = { path = "../quarb-jq", version = "0.6.0" }
+quarb-sql = { path = "../quarb-sql", version = "0.6.0" }
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py38"] }
