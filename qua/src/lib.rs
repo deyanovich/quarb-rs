@@ -15,6 +15,7 @@ use clap::Parser;
 use quarb::{AllowShell, AstAdapter, NodeId, QuantifierBound, QueryResult, Value, WithNow};
 use quarb_archive::ArchiveAdapter;
 use quarb_atrep::AtrepAdapter;
+use quarb_athena::AthenaAdapter;
 use quarb_bigquery::BigqueryAdapter;
 use quarb_code::CodeAdapter;
 use quarb_compose::ComposeAdapter;
@@ -35,6 +36,9 @@ use quarb_kubernetes::KubernetesAdapter;
 use quarb_maildir::MaildirAdapter;
 use quarb_metatheca::MetathecaAdapter;
 use quarb_ldap::LdapAdapter;
+use quarb_cosmos::CosmosAdapter;
+use quarb_dynamodb::DynamodbAdapter;
+use quarb_kafka::KafkaAdapter;
 use quarb_mongodb::MongodbAdapter;
 use quarb_mssql::MssqlAdapter;
 use quarb_oracle::OracleAdapter;
@@ -912,6 +916,45 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         );
     }
 
+    // DynamoDB: dynamodb://[REGION][?endpoint=URL].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("dynamodb:")
+    {
+        let adapter = DynamodbAdapter::connect(s).context("connecting to DynamoDB")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Kafka: kafka://HOST:PORT[,…][?topics=…&from=…&until=…].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("kafka:")
+    {
+        let adapter = KafkaAdapter::connect(s).context("connecting to Kafka")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Cosmos DB: cosmos://ACCOUNT/DATABASE[?endpoint=URL].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("cosmos://")
+    {
+        let adapter = CosmosAdapter::connect(s).context("connecting to Cosmos DB")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
     // A SQL Server database: mssql://USER:PASS@HOST[:PORT]/DB.
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("mssql://")
@@ -1084,6 +1127,40 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
+    // Athena: the S3 datalake's query layer. Billed by bytes
+    // scanned, so the same ladder as BigQuery: full pushdown,
+    // else a filtered fetch, else the lazy scan.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("athena:")
+    {
+        if let Some(plan) = pushdown_plan(cli, query, None) {
+            match quarb_athena::raw_query(
+                s,
+                &plan.sql,
+                plan.order_table.as_deref(),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
+            ) {
+                Ok((cols, rows)) => {
+                    print_raw(&cols, rows)?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    if cli.explain {
+                        eprintln!("pushdown: plan not executed ({e}); scanning");
+                    }
+                }
+            }
+        }
+        let adapter = match partial_plan(cli, query) {
+            Some(p) => AthenaAdapter::connect_filtered(s, &p.table, &p.where_sql),
+            None => AthenaAdapter::connect(s),
+        }
+        .context("connecting to Athena")?;
+        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+    }
+
     // A MySQL/MariaDB URL connects and introspects the database.
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("mysql://")
@@ -1187,7 +1264,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     // Object stores (gs:// / s3://), composed by default —
     // grafting a bucket of JSON/CSV/source files is the point.
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
-        && (s.starts_with("gs://") || s.starts_with("s3://"))
+        && (s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://"))
     {
         let adapter =
             ComposeAdapter::new(ObjstoreAdapter::connect(s).context("connecting to bucket")?);
@@ -1852,6 +1929,34 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     if let Some(s) = p.to_str()
+        && s.starts_with("dynamodb:")
+    {
+        let a = Rc::new(DynamodbAdapter::connect(s).context("connecting to DynamoDB")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("kafka:")
+    {
+        let a = Rc::new(KafkaAdapter::connect(s).context("connecting to Kafka")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("cosmos://")
+    {
+        let a = Rc::new(CosmosAdapter::connect(s).context("connecting to Cosmos DB")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("athena:")
+    {
+        let a = Rc::new(AthenaAdapter::connect(s).context("connecting to Athena")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
         && let Some(repo) = s.strip_prefix("git:")
     {
         let a = Rc::new(
@@ -1925,7 +2030,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     if let Some(t) = p.to_str()
-        && (t.starts_with("gs://") || t.starts_with("s3://"))
+        && (t.starts_with("gs://") || t.starts_with("s3://") || t.starts_with("az://"))
     {
         let a = Rc::new(ComposeAdapter::new(
             ObjstoreAdapter::connect(t).context("connecting to bucket")?,

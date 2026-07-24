@@ -1,0 +1,14 @@
+[package]
+name = "quarb-aws"
+description = "Shared AWS plumbing for the Quarb adapters: SigV4 signing and the credential chain"
+keywords = ["query", "aws", "sigv4", "quarb"]
+categories = ["api-bindings", "authentication"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.8.0" }

@@ -44,7 +44,8 @@ through its dialektos),
 [`quarb-postgres`](quarb-postgres/), [`quarb-mysql`](quarb-mysql/),
 [`quarb-bigquery`](quarb-bigquery/),
 [`quarb-mssql`](quarb-mssql/) (SQL Server),
-[`quarb-oracle`](quarb-oracle/).
+[`quarb-oracle`](quarb-oracle/),
+[`quarb-athena`](quarb-athena/) (the AWS datalake's SQL view).
 
 **Graph** — [`quarb-neo4j`](quarb-neo4j/).
 
@@ -57,7 +58,11 @@ symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
 [`quarb-firebase`](quarb-firebase/),
 [`quarb-firestore`](quarb-firestore/),
 [`quarb-datastore`](quarb-datastore/),
-[`quarb-mongodb`](quarb-mongodb/) (document stores),
+[`quarb-mongodb`](quarb-mongodb/),
+[`quarb-dynamodb`](quarb-dynamodb/),
+[`quarb-cosmos`](quarb-cosmos/) (document stores),
+[`quarb-kafka`](quarb-kafka/) (Kafka topics as bounded
+snapshots; entity history and stream-table joins),
 [`quarb-cbor`](quarb-cbor/) (CBOR, on the JSON mapping),
 [`quarb-ldap`](quarb-ldap/) (LDAP directories),
 [`quarb-kubernetes`](quarb-kubernetes/) (cluster state via
@@ -66,7 +71,12 @@ kubectl),
 repos, issues, and the social graph as edge fabric),
 [`quarb-gitlab`](quarb-gitlab/) (the GitLab API via glab:
 nested groups as the tree, CI pipelines, member edges),
-[`quarb-objstore`](quarb-objstore/) (GCS/S3 object stores).
+[`quarb-objstore`](quarb-objstore/) (GCS / S3 / Azure Blob
+object stores, private buckets signed; R2 and other
+S3-compatibles via `?endpoint=`).
+
+**Shared infrastructure** — [`quarb-aws`](quarb-aws/) (SigV4
+signing and the AWS credential chain, no SDK).
 
 **Composition and protocol** — [`quarb-mount`](quarb-mount/)
 (compose adapters under one root),

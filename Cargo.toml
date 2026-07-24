@@ -12,6 +12,9 @@ members = [
     "quarb-maildir",
     "quarb-metatheca",
     "quarb-atrep",
+    "quarb-athena",
+    "quarb-aws",
+    "quarb-dynamodb",
     "quarb-html",
     "quarb-xlsx",
     "quarb-xml",
@@ -28,12 +31,14 @@ members = [
     "quarb-github",
     "quarb-gitlab",
     "quarb-gsheet",
+    "quarb-kafka",
     "quarb-kubernetes",
     "quarb-mongodb",
     "quarb-mssql",
     "quarb-oracle",
     "quarb-ldap",
     "quarb-cbor",
+    "quarb-cosmos",
     "quarb-mount",
     "quarb-session",
     "quarb-xpath",
@@ -55,7 +60,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.7.0" }
+quarb = { path = "../quarb", version = "0.8.0" }
 thiserror.workspace = true
