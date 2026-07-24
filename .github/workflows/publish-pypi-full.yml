@@ -47,8 +47,12 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # windows-msvc parked: the tree is not Windows-portable
+          # yet (apotheca uses unix-only file locking; qua's
+          # --edit tempfile path calls libc::dup2). Restore the
+          # entry once both are cfg-gated:
+          #   - os: windows-latest
+          #     target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -71,8 +75,13 @@ jobs:
             --strip
             --manifest-path qua/Cargo.toml
             --out dist
-          manylinux: auto
-          python-version: "3.12"
+          # 2_28, not auto: the manylinux2014 image's gcc uses the
+          # legacy C++ ABI, which DuckDB refuses to build under
+          # ("does not provide extensions for this (legacy) CXX
+          # ABI"). The 2_28 image's toolchain uses the modern ABI.
+          # (maturin-action takes no python-version input; the
+          # wheel is a `bin` build and needs none.)
+          manylinux: 2_28
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
