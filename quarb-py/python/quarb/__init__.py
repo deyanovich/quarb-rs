@@ -58,6 +58,7 @@ open = _ext.open
 mount = _ext.mount
 translate = _ext.translate
 highlight = _ext.highlight
+parse_defs = _ext.parse_defs
 
 # The string-faithful layer: the qua CLI's exact rendering.
 run = _ext.run
@@ -68,6 +69,7 @@ __all__ = [
     "mount",
     "translate",
     "highlight",
+    "parse_defs",
     "__version__",
     "Document",
     "Quantity",

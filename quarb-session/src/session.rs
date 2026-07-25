@@ -42,10 +42,19 @@ impl Session {
         }
     }
 
+    /// Swap the executor under a running session — an in-session
+    /// remount (`:mount`). History and the macro table stay: `&N`
+    /// re-runs against the new source set.
+    pub fn set_executor(&mut self, executor: Box<dyn Executor>) {
+        self.executor = executor;
+    }
+
     /// Seed the macro table from a `--defs` file (validated first).
+    /// Stored stripped of `#` comment lines: the table is prepended
+    /// to query text, and the query lexer has no comment syntax.
     pub fn seed_defs(&mut self, text: &str) -> Result<()> {
         quarb::parse_defs(text).context("parsing --defs")?;
-        self.defs_text = format!("{text}\n");
+        self.defs_text = format!("{}\n", quarb::strip_defs_comments(text));
         self.persist();
         Ok(())
     }
@@ -148,5 +157,31 @@ impl Session {
         self.snapshots.clear();
         self.line_no = 1;
         self.persist();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemStore;
+
+    struct NullExec;
+    impl Executor for NullExec {
+        fn run(&self, _query: &str) -> anyhow::Result<Vec<Cell>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A commented defs file seeds a table the query lexer can take:
+    /// the stored text is prepended to every line, and the lexer has
+    /// no comment syntax, so `#` lines must not survive seeding.
+    #[test]
+    fn seed_defs_strips_comments() {
+        let mut s = Session::new(Box::new(NullExec), Box::new(MemStore));
+        s.seed_defs("# a library header\ndef &a: /x;\n# and a note\ndef &b: /y;")
+            .unwrap();
+        assert!(!s.history().contains('#'), "history: {}", s.history());
+        assert!(s.history().contains("def &a"));
+        assert!(s.history().contains("def &b"));
     }
 }

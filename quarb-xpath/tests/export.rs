@@ -50,7 +50,7 @@ fn refusals() {
     assert!(err("//book[::t =~ /x/]").contains("regex"));
     assert!(err("//*.rs").contains("glob"));
     assert!(err("//book<block>").contains("trait"));
-    assert!(err("/a <=> /b[::x = $*1::x]").contains("correlation"));
+    assert!(err("/a <=> /b[::x = $$::x]").contains("correlation"));
     assert!(err("//book | upper").contains("pipeline"));
     assert!(err("//book @| mean").contains("count() and sum()"));
 }

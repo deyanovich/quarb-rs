@@ -23,6 +23,39 @@ mod session;
 mod store;
 
 pub use doc::{Doc, Options};
+
+/// One mount source: a path, optionally under an explicit mount name
+/// (the `NAME=TARGET` spelling); unnamed sources mount under their
+/// file stem.
+#[derive(Clone, Debug)]
+pub struct MountSpec {
+    pub name: Option<String>,
+    pub path: std::path::PathBuf,
+}
+
+impl MountSpec {
+    /// Parse a CLI argument: `NAME=TARGET` when the left side is a
+    /// plain mount name (letters, digits, `_`, `-`), else a bare
+    /// path.
+    pub fn parse(arg: &str) -> MountSpec {
+        if let Some((name, target)) = arg.split_once('=')
+            && !name.is_empty()
+            && !target.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return MountSpec {
+                name: Some(name.to_string()),
+                path: std::path::PathBuf::from(target),
+            };
+        }
+        MountSpec {
+            name: None,
+            path: std::path::PathBuf::from(arg),
+        }
+    }
+}
 pub use local::LocalExecutor;
 pub use session::Session;
 pub use store::{MemStore, SessionState, Store};
@@ -72,3 +105,33 @@ pub trait Executor {
 mod daemon;
 #[cfg(feature = "native")]
 pub use daemon::DaemonExecutor;
+
+#[cfg(test)]
+mod mount_spec_tests {
+    use super::MountSpec;
+
+    #[test]
+    fn name_target_splits() {
+        let spec = MountSpec::parse("t=data/titanic.csv");
+        assert_eq!(spec.name.as_deref(), Some("t"));
+        assert_eq!(spec.path.to_str(), Some("data/titanic.csv"));
+        let spec = MountSpec::parse("births-2=x.json");
+        assert_eq!(spec.name.as_deref(), Some("births-2"));
+    }
+
+    #[test]
+    fn bare_paths_stay_bare() {
+        for arg in [
+            "titanic.csv",
+            "git:.",
+            // a left side that isn't a plain mount name is path text
+            "a/b=c.json",
+            "=x.json",
+            "name=",
+        ] {
+            let spec = MountSpec::parse(arg);
+            assert!(spec.name.is_none(), "{arg} should not split");
+            assert_eq!(spec.path.to_str(), Some(arg));
+        }
+    }
+}

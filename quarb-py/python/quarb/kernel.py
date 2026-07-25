@@ -22,6 +22,11 @@ queries against the session's mounts; a small directive family
 - ``%translate LANG QUERY`` — show a jq / xpath / sql query as
   Quarb text.
 
+A cell holding only ``def``/``macro`` statements (and ``#``
+comments) extends the session's fragment table instead of
+running: the names it defines resolve in every later cell, so an
+early cell can build the notebook's small analysis library.
+
 Record streams render as HTML tables; everything else as plain
 lines. The wrapper delegates all protocol plumbing to ipykernel
 (``pip install quarb[jupyter]``).
@@ -141,10 +146,18 @@ def _make_kernel_class():
                     if not silent and out:
                         self._send_text(out + "\n")
                 if query_lines:
-                    result = self.qsession.run("\n".join(query_lines))
-                    self.pyns["_"] = result
-                    if not silent:
-                        self._send_result(result)
+                    text = "\n".join(query_lines)
+                    # A defs-only cell extends the session's fragment
+                    # table: its names resolve in every later cell.
+                    if Session.is_defs(text):
+                        out = self.qsession.add_defs(text)
+                        if not silent and out:
+                            self._send_text(out + "\n")
+                    else:
+                        result = self.qsession.run(text)
+                        self.pyns["_"] = result
+                        if not silent:
+                            self._send_result(result)
             except Exception as e:  # noqa: BLE001 — kernel must not die
                 if not silent:
                     self.send_response(

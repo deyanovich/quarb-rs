@@ -24,6 +24,10 @@ Magics
     quantities as ``quarb.Quantity``), and convert via ``.df`` /
     ``.df_magnitudes()``.
 
+A ``%%quarb`` cell holding only ``def``/``macro`` statements
+(and ``#`` comments) extends the session's fragment table
+instead of running — its names resolve in every later cell.
+
 The in-process engine holds mounted documents for the notebook
 session — the same economy ``qua --resident`` buys the CLI —
 so re-querying costs no re-parse.
@@ -60,7 +64,16 @@ def load_ipython_extension(ipython):
 
         @cell_magic("quarb")
         def quarb_cell(self, line, cell):
-            """%%quarb [NAME] — the cell body is the query."""
-            return self.session.run(cell.strip(), line.strip() or None)
+            """%%quarb [NAME] — the cell body is the query.
+
+            A body holding only ``def``/``macro`` statements extends
+            the session's fragment table; the names resolve in every
+            later ``%quarb`` / ``%%quarb`` cell.
+            """
+            body = cell.strip()
+            if Session.is_defs(body):
+                print(self.session.add_defs(body))
+                return None
+            return self.session.run(body, line.strip() or None)
 
     ipython.register_magics(QuarbMagics)

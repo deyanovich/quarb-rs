@@ -160,6 +160,14 @@ pub enum RegRef {
     /// latest value pushed under that name. Unnamed regulae are
     /// invisible to it (they stay reachable positionally).
     Record,
+    /// `%%.` — the FULL register view, as a record: the named
+    /// regulae exactly as `%.` renders them, plus every anonymous
+    /// regula keyed `#N` by its 1-based register position (the
+    /// same number `$.N` recalls it by). `#` cannot appear in a
+    /// push name, so the keys cannot collide — names themselves
+    /// MAY be numeric (the pivot macro writes data-valued column
+    /// names).
+    FullRecord,
 }
 
 /// A pipeline-stage function call: `name` or `name(arg, …)`.

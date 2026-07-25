@@ -649,16 +649,26 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{def \&f(\$x): ...;}, \texttt{\&f(::age)},
 \texttt{--defs}, \texttt{--expand}
   & \live fragments: parse-time expansion with call-by-name
-    \texttt{\$param} forms, defs files, and the unparser
+    \texttt{\$param} forms, defs files (\texttt{\#} line comments
+    stripped in \texttt{parse\_defs}), and the unparser
     (\texttt{quarb::unparse}) rendering any parsed query back to
-    canonical text (\texttt{--expand} = macroexpand) \\
+    canonical text (\texttt{--expand} = macroexpand); correlation
+    chains and inline-pipe splices as bodies;
+    \texttt{rec}/\texttt{group} field-name collisions are parse
+    errors (\texttt{validate\_record\_convention}) \\
 \texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | rec("k", \$1)},
 \texttt{quai}
   & \live match captures (filter-stage \texttt{=\textasciitilde}
     binds groups onto the capsa) and the interactive session
     (living-query lines with rollback, session defs,
     \texttt{:show}/\texttt{:undo}; retired from \texttt{qua} in
-    favor of the standalone \texttt{quai} crate) \\
+    favor of the standalone \texttt{quai} crate;
+    \texttt{NAME=TARGET} mount aliases via
+    \texttt{quarb\_session::MountSpec} and in-session
+    \texttt{:mount} via \texttt{Session::set\_executor} ---
+    in-process mode only; the Python \texttt{Session}/kernel
+    accrete defs-only cells through the \texttt{parse\_defs}
+    binding) \\
 \texttt{@| window(-2..0) | mean}, \texttt{@| window(..0) | sum},
 \texttt{@| shift(1, ::k)}
   & \live window functions: offset-range spans over context
@@ -692,16 +702,24 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{| rec(\$*1/name::, /amt::)}
   & \live correlated subqueries: \texttt{\$\$} steps a capsa-scope
     operand out to the invoking capsa (\texttt{\$\$.name},
-    \texttt{\$\$\_}, \texttt{\$\$ord}; stacking
-    \texttt{\$\$\$} steps further) — wide crosstabs, groupwise
-    transforms; and the correlation keeps its \emph{witness}, so
-    \texttt{\$*k} in pipeline stages projects the joined side into
-    output (\texttt{SELECT a.x, b.y}) \\
-\texttt{E1 <=> E2[/k:: = \$*1/k:: and …]}
-  & \live correlation (context join): one tuple binds the whole
-    predicate, and \texttt{\$*N} may navigate from its context node
-    (\texttt{\$*1/field::}), so joins work where keys are children,
-    e.g. JSON \\
+    \texttt{\$\$\_}, \texttt{\$\$ord}; the node form
+    \texttt{\$\$::prop} / \texttt{\$\$/child::x} re-anchors on the
+    invoking capsa's node; stacking \texttt{\$\$\$} steps further)
+    — wide crosstabs, groupwise transforms; and the correlation
+    keeps its \emph{witness}, so \texttt{\$*k} in pipeline stages
+    projects the joined side into output (\texttt{SELECT a.x, b.y}) \\
+\texttt{A <=> B[/k:: = \$\$/k:: and …]}
+  & \live correlation, \emph{driver-first} (2026-07-25): the first
+    expression drives (SQL's \texttt{FROM}); each joined
+    expression carries its ON clause in its final step's brackets,
+    reaching the driver as \texttt{\$\$…} and earlier entries as
+    \texttt{\$*k}; \texttt{<=>?}\ marks the expression it precedes
+    nullable (\texttt{LEFT JOIN}); one tuple binds the whole
+    predicate set, searched depth-first with per-entry pruning,
+    and \texttt{\$*N} may navigate from its context node
+    (\texttt{\$*1/field::}), so joins work where keys are
+    children, e.g. JSON. Misplaced correlated references are
+    parse errors, never silent nulls \\
 \texttt{::ref\textasciitilde>}, \texttt{::'\$ref'\textasciitilde>/city}
   & \live cross-reference resolution (JSON: follow a \texttt{\$ref}
     JSON Pointer) \\

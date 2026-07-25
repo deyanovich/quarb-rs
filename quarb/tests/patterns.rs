@@ -63,8 +63,8 @@ fn groups_in_operand_position() {
     assert_eq!(canon("/*[(::a = 1 || ::b)]"), "/*[(::a = 1 || ::b)]");
     assert_eq!(canon("/*[(not ::a and ::b)]"), "/*[(!::a && ::b)]");
     for q in [
-        "//user <=>? //order[::uid = $*1::id]::amt | ...?",
-        "//u <=> //v <=>? //order[::uid = $*2::id]",
+        "//order::amt <=>? //user[::id = $$::uid] | ...?",
+        "//u <=> //v <=>? //order[::uid = $*1::id]",
         "//commit[;;;short = ^/tags/*;;;short]",
         "/movie .m <-ACTED_IN[::born > (m)::released] | rec(::name, (m)::title)",
         "/c/* | (::kind ?= 'a' ? 1 : ~(^b) ? 2 : 0)",

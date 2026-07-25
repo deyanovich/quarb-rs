@@ -44,8 +44,11 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         strict: false,
         dialect: None,
         from_table: String::new(),
-        join_on_left_cols: Vec::new(),
+        join_on_cols: Vec::new(),
         join_table: None,
+        from_sql: String::new(),
+        join_sql: None,
+        in_on: false,
         aggregate: false,
     };
     let query = ex.query()?;
@@ -79,15 +82,16 @@ fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
 pub struct Pushdown {
     pub sql: String,
     pub order_table: Option<String>,
-    /// Present when the plan contains a witness JOIN: the left
-    /// table and the left-side columns its ON equalities bind
-    /// (collected structurally from the `$*1` operands, so query
-    /// text cannot spoof them).
+    /// Present when the plan contains a witness JOIN: the joined
+    /// table and the columns its ON equalities bind on it
+    /// (collected structurally from the arbor, so query text
+    /// cannot spoof them).
     /// The plan is only sound if those columns form a unique key
-    /// of the left table (else SQL multiplies rows where Quarb's
-    /// existential binding does not) — the *driver* must verify
-    /// against its catalog before executing, and fall back to the
-    /// scan if it cannot.
+    /// of the joined table — each FROM row must find at most one
+    /// witness, else SQL multiplies rows where Quarb's existential
+    /// binding does not. The *driver* must verify against its
+    /// catalog before executing, and fall back to the scan if it
+    /// cannot.
     pub join_left: Option<(String, Vec<String>)>,
 }
 
@@ -130,23 +134,25 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         strict: true,
         dialect,
         from_table: String::new(),
-        join_on_left_cols: Vec::new(),
+        join_on_cols: Vec::new(),
         join_table: None,
+        from_sql: String::new(),
+        join_sql: None,
+        in_on: false,
         aggregate: false,
     };
     let sql = ex.query()?;
     let order_table = if ex.aggregate {
         None
     } else {
-        // Rows come back in the result context's document order:
-        // the joined table's under a correlation, else the FROM
-        // table's.
-        Some(ex.join_table.clone().unwrap_or(ex.from_table.clone()))
+        // Rows come back in the driver's document order — the FROM
+        // table's (driver-first correlation).
+        Some(ex.from_table.clone())
     };
     let join_left = ex
         .join_table
-        .is_some()
-        .then(|| (ex.from_table.clone(), ex.join_on_left_cols.clone()));
+        .clone()
+        .map(|t| (t, ex.join_on_cols.clone()));
     Ok(Pushdown {
         sql,
         order_table,
@@ -339,8 +345,11 @@ pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
         strict: true,
         dialect: None,
         from_table: String::new(),
-        join_on_left_cols: Vec::new(),
+        join_on_cols: Vec::new(),
         join_table: None,
+        from_sql: String::new(),
+        join_sql: None,
+        in_on: false,
         aggregate: false,
     };
     ex.partial()
@@ -375,8 +384,11 @@ struct Exporter {
     /// leaves such filters on the client-side graft.
     dialect: Option<Dialect>,
     from_table: String,
-    join_on_left_cols: Vec<String>,
+    join_on_cols: Vec<String>,
     join_table: Option<String>,
+    from_sql: String,
+    join_sql: Option<String>,
+    in_on: bool,
     aggregate: bool,
 }
 
@@ -516,34 +528,40 @@ impl Exporter {
             ));
         }
         if let Some(corr) = corrs.first() {
-            // Left table from the correlation context.
-            let (ltable, lpreds) = self.table_branch(self.kids(*corr, "branch")[0])?;
-            if !lpreds.is_empty() {
-                return Err(SqlError::Unsupported(
-                    "predicates on the correlation context (put them on the joined side)".into(),
-                ));
-            }
-            let (rtable, rpreds) = self.table_branch(branches[0])?;
+            // Driver-first: the query's own branch is the FROM
+            // table (the driver); the correlation entry is the
+            // joined table, whose `$$` equalities form the ON.
+            let (ltable, lpreds) = self.table_branch(branches[0])?;
+            let (rtable, rpreds) = self.table_branch(self.kids(*corr, "branch")[0])?;
             // The SQL renderings of the two table names (validated
             // or quoted); the raw names stay in the plan metadata,
             // which the driver matches against its catalog.
             let lsql = self.sql_ident(&ltable, "table name")?;
             let rsql = self.sql_ident(&rtable, "table name")?;
-            // Split the joined side's predicates: $*1 equalities
-            // form the ON, the rest the WHERE.
+            self.from_sql = lsql.clone();
+            self.join_sql = Some(rsql.clone());
+            // The driver's own predicates are plain WHERE.
+            let driver_conds: Vec<NodeId> = lpreds;
+            // Split the joined expression's predicates: `$$`
+            // equalities form the ON, the rest the WHERE.
             let mut on = Vec::new();
             let mut wheres = Vec::new();
             for p in rpreds {
-                self.split_join_pred(p, &lsql, &rsql, &mut on, &mut wheres)?;
+                self.split_join_pred(p, &rsql, &mut on, &mut wheres)?;
             }
             if on.is_empty() {
                 return Err(SqlError::Unsupported(
-                    "a correlation without a '$*1' equality (no JOIN condition)".into(),
+                    "a correlation without a '$$' equality (no JOIN condition)".into(),
                 ));
             }
+            for p in driver_conds {
+                let cond = self.predicate_cond(p, Some(&lsql.clone()))?;
+                wheres.push(cond);
+            }
             self.notes.push(
-                "JOIN: Quarb's binding is existential (one row per joined-side row); \
-                 SQL multiplies rows when several left rows match"
+                "JOIN: Quarb's binding is existential (one row per FROM row, \
+                 bound to its first witness); SQL multiplies rows when \
+                 several joined rows match"
                     .to_string(),
             );
             sel.from = lsql.clone();
@@ -551,12 +569,19 @@ impl Exporter {
             self.join_table = Some(rtable);
             sel.join = Some((rsql.clone(), on.join(" AND ")));
             sel.wheres = wheres;
-            // A terminal projection on the joined branch is a
-            // one-column select of the result context's table.
+            // A terminal projection on the driving branch is a
+            // one-column select of the FROM table.
             if let Some(proj) = self.kid(branches[0], "projection") {
                 let col = self.projection_col(proj)?;
                 let col = self.sql_ident(&col, "column name")?;
-                sel.select.push(format!("{rsql}.{col}"));
+                sel.select.push(format!("{lsql}.{col}"));
+            }
+            if self.kid(self.kids(*corr, "branch")[0], "projection").is_some() {
+                return Err(SqlError::Unsupported(
+                    "a projection on the joined expression (project the witness \
+                     in the pipeline: '$*1::col')"
+                        .into(),
+                ));
             }
             self.pipeline(q, &mut sel, Some((&lsql, &rsql)))?;
         } else {
@@ -862,30 +887,56 @@ impl Exporter {
                 })
             }
             "context" => {
-                // `$*k::col` — k names the correlation operand: 1 is
-                // the left/FROM side, 2 the joined side (the `qual`
-                // table in a join context). Anything else is outside
-                // the verified-safe set. Outside a join (`qual` is
-                // None) there is no table for either to name, so
-                // refuse — the `__LEFT__` placeholder would leak
-                // into the emitted SQL unsubstituted.
+                // `$*1::col` — the joined expression's witness, in
+                // pipeline position: the joined table's column.
+                // Anything else is outside the verified-safe set.
                 let p = self
                     .kid(o, "projection")
                     .ok_or_else(|| SqlError::Unsupported("a bare '$*' reference".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
-                if qual.is_none() {
+                if self.in_on {
+                    return Err(SqlError::Unsupported(
+                        "a '$*' reference inside the ON (the driver is '$$')".into(),
+                    ));
+                }
+                let Some(join) = self.join_sql.clone() else {
                     return Err(SqlError::Unsupported(
                         "a '$*' reference outside a correlation join".into(),
                     ));
-                }
+                };
                 match self.prop(o, "index") {
-                    None | Some(Value::Int(1)) => Ok(format!("__LEFT__.{col}")),
-                    Some(Value::Int(2)) => Ok(format!("{}.{col}", qual.expect("checked above"))),
+                    Some(Value::Int(1)) => Ok(format!("{join}.{col}")),
+                    None => Err(SqlError::Unsupported("a bare '$*' reference".into())),
                     Some(v) => Err(SqlError::Unsupported(format!(
                         "pushdown: $*{v} beyond a two-branch correlation"
                     ))),
                 }
+            }
+            "outer" => {
+                // `$$::col` — the driver, legal only inside the
+                // joined expression's ON bracket (elsewhere the
+                // engine reads an enclosing subcontext scope).
+                if !self.in_on {
+                    return Err(SqlError::Unsupported(
+                        "a '$$' reference outside the join's ON".into(),
+                    ));
+                }
+                let kids = self.arbor.children(o);
+                let inner = *kids
+                    .first()
+                    .ok_or_else(|| SqlError::Unsupported("an empty '$$' reference".into()))?;
+                if self.kind(inner) != "path" || self.kid(inner, "step").is_some() {
+                    return Err(SqlError::Unsupported(
+                        "a '$$' reference beyond a plain column ($$::col)".into(),
+                    ));
+                }
+                let p = self
+                    .kid(inner, "projection")
+                    .ok_or_else(|| SqlError::Unsupported("a bare '$$' reference".into()))?;
+                let col = self.projection_col(p)?;
+                let col = self.sql_ident(&col, "column name")?;
+                Ok(format!("{}.{col}", self.from_sql.clone()))
             }
             "arith" => {
                 let op = self.prop_s(o, "op");
@@ -1011,7 +1062,6 @@ impl Exporter {
     fn split_join_pred(
         &mut self,
         p: NodeId,
-        ltable: &str,
         rtable: &str,
         on: &mut Vec<String>,
         wheres: &mut Vec<String>,
@@ -1037,16 +1087,19 @@ impl Exporter {
             conjuncts(self, c, &mut parts);
         }
         for e in parts {
-            let uses_ctx = self.subtree_has(e, "context");
-            let cond = self.pred_expr(e, Some(rtable))?.replace("__LEFT__", ltable);
-            if uses_ctx && self.kind(e) == "compare" && self.prop_s(e, "op") == "=" {
-                // Record which left-table columns the ON binds —
-                // the driver's uniqueness obligation (see
+            let uses_driver = self.subtree_has(e, "outer");
+            self.in_on = true;
+            let cond = self.pred_expr(e, Some(rtable));
+            self.in_on = false;
+            let cond = cond?;
+            if uses_driver && self.kind(e) == "compare" && self.prop_s(e, "op") == "=" {
+                // Record which joined-table columns the ON binds —
+                // the uniqueness obligation (see
                 // Pushdown::join_left). Collected from the arbor's
-                // `$*1` operand nodes, never from the rendered SQL
-                // text, so neither a literal nor an unusual column
-                // name can corrupt the obligation.
-                self.collect_left_cols(e)?;
+                // bare-column operand nodes, never from the
+                // rendered SQL text, so neither a literal nor an
+                // unusual column name can corrupt the obligation.
+                self.collect_join_cols(e)?;
                 on.push(cond);
             } else {
                 wheres.push(cond);
@@ -1055,19 +1108,24 @@ impl Exporter {
         Ok(())
     }
 
-    /// The left-table columns a `$*1::col` operand binds, anywhere
-    /// in `e`'s subtree, appended to the join obligation with their
-    /// raw (catalog) names.
-    fn collect_left_cols(&mut self, e: NodeId) -> Result<(), SqlError> {
-        if self.kind(e) == "context"
-            && matches!(self.prop(e, "index"), None | Some(Value::Int(1)))
+    /// The joined-table columns the ON equality binds: every bare
+    /// column operand (`::col`) in `e`'s subtree, appended to the
+    /// join obligation with their raw (catalog) names.
+    fn collect_join_cols(&mut self, e: NodeId) -> Result<(), SqlError> {
+        // The `$$…` side is the driver — not part of the joined
+        // table's obligation.
+        if self.kind(e) == "outer" {
+            return Ok(());
+        }
+        if self.kind(e) == "path"
+            && self.kid(e, "step").is_none()
             && let Some(p) = self.kid(e, "projection")
         {
             let col = self.projection_col(p)?;
-            self.join_on_left_cols.push(col);
+            self.join_on_cols.push(col);
         }
         for c in self.arbor.children(e) {
-            self.collect_left_cols(c)?;
+            self.collect_join_cols(c)?;
         }
         Ok(())
     }
@@ -1104,7 +1162,7 @@ impl Exporter {
             match self.kind(s).as_str() {
                 "expr" => {
                     let kids = self.arbor.children(s);
-                    pending_col = Some(self.operand(kids[0], join.map(|(_, r)| r))?);
+                    pending_col = Some(self.operand(kids[0], join.map(|(l, _)| l))?);
                 }
                 "func" => {
                     let name = self.prop_s(s, "name");
@@ -1234,7 +1292,7 @@ impl Exporter {
                                 ));
                             }
                             let kids = self.arbor.children(s);
-                            let e = self.operand(kids[0], join.map(|(_, r)| r))?;
+                            let e = self.operand(kids[0], join.map(|(l, _)| l))?;
                             sel.order_by = Some((e, false));
                         }
                         "reverse" => match &mut sel.order_by {
@@ -1265,7 +1323,7 @@ impl Exporter {
                             }
                             let kids = self.arbor.children(s);
                             let n = self.prop_s(kids[0], "value");
-                            let e = self.operand(kids[1], join.map(|(_, r)| r))?;
+                            let e = self.operand(kids[1], join.map(|(l, _)| l))?;
                             sel.order_by = Some((e, true));
                             sel.limit = Some(n);
                         }
@@ -1347,7 +1405,7 @@ impl Exporter {
             .rev()
             .find(|&&k| self.kind(k) != "literal")
             .ok_or_else(|| SqlError::Unsupported("a literal group key".into()))?;
-        self.operand(*key, join.map(|(_, r)| r))
+        self.operand(*key, join.map(|(l, _)| l))
     }
 
     /// A HAVING filter: `$_` and `$.name` refer to the aggregate.
@@ -1386,20 +1444,12 @@ impl Exporter {
             let k = kids[i];
             if self.kind(k) == "literal" {
                 let name = self.prop_s(k, "value");
-                let value = self.operand(kids[i + 1], join.map(|(_, r)| r))?;
-                let value = match join {
-                    Some((l, _)) => value.replace("__LEFT__", l),
-                    None => value,
-                };
+                let value = self.operand(kids[i + 1], join.map(|(l, _)| l))?;
                 let name = self.alias(&name)?;
                 fields.push(format!("{value} AS {name}"));
                 i += 2;
             } else {
-                let value = self.operand(k, join.map(|(_, r)| r))?;
-                let value = match join {
-                    Some((l, _)) => value.replace("__LEFT__", l),
-                    None => value,
-                };
+                let value = self.operand(k, join.map(|(l, _)| l))?;
                 fields.push(value);
                 i += 1;
             }

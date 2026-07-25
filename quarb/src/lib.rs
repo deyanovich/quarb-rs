@@ -83,10 +83,25 @@ pub fn run_traced(query: &str, adapter: &impl AstAdapter) -> Result<Vec<(NodeId,
 }
 
 /// Parse a definitions file — `def &name(params): body;` statements
-/// only — into a fragment table for [`run_with_defs`].
+/// only — into a fragment table for [`run_with_defs`]. Lines whose
+/// first non-blank character is `#` are comments: a defs file is a
+/// library, and a library wants a header. (Query text proper has no
+/// comment syntax — queries are one-liners; the annotation lives in
+/// the defs file.)
 pub fn parse_defs(text: &str) -> Result<Defs> {
-    let tokens = lexer::lex(text)?;
+    let tokens = lexer::lex(&strip_defs_comments(text))?;
     parser::parse_defs(&tokens)
+}
+
+/// Blank out the `#` comment lines of a defs file, preserving line
+/// structure. Session layers that *prepend defs text to query text*
+/// (quai, the notebook kernels) must store the stripped form — the
+/// query lexer itself has no comment syntax.
+pub fn strip_defs_comments(text: &str) -> String {
+    text.lines()
+        .map(|l| if l.trim_start().starts_with('#') { "" } else { l })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Like [`run`], with a pre-seeded fragment table (a `--defs` file);

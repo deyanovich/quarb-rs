@@ -14,36 +14,52 @@ use crate::ast::{
 };
 use crate::value::Value;
 
-/// Render `query` as canonical query text.
+/// Render `query` as canonical query text. Driver-first: the
+/// query's own branches lead, each joined expression follows its
+/// `<=>` (the outer marker glued to the operator), and the driving
+/// pipeline closes the text.
 pub fn unparse(query: &Query) -> String {
-    let mut out = String::new();
-    for corr in &query.correlations {
-        out.push_str(&unparse(corr));
+    let main_pipes = query
+        .pipeline
+        .first()
+        .is_some_and(|s| stage(s).starts_with('|'));
+    let n = query.correlations.len();
+    let mut out = branches_join(query, n == 0 && main_pipes);
+    for (i, corr) in query.correlations.iter().enumerate() {
         out.push_str(if corr.outer { " <=>? " } else { " <=> " });
+        let followed_by_main_pipe = (i + 1 == n) && main_pipes;
+        let own_pipes = corr
+            .pipeline
+            .first()
+            .is_some_and(|s| stage(s).starts_with('|'));
+        out.push_str(&branches_join(corr, followed_by_main_pipe || own_pipes));
+        // A non-final entry may retain its own pre-join pipeline.
+        for stage_ast in &corr.pipeline {
+            out.push(' ');
+            out.push_str(&stage(stage_ast));
+        }
     }
-    out.push_str(&query_body(query));
-    out
-}
-
-fn query_body(q: &Query) -> String {
-    let mut parts: Vec<String> = q.branches.iter().map(branch).collect();
-    // A trailing leaf anchor before a plain pipe would reparse as
-    // the map pipe (`/a$ | f` relexes as `/a $| f` — the token
-    // stream cannot spell them apart), so such a branch reprints
-    // as a single-alternative group: `(/a$) | f`.
-    if let (Some(last), Some(first)) = (q.branches.last(), q.pipeline.first())
-        && branch_ends_bare_leaf(last)
-        && stage(first).starts_with('|')
-    {
-        let text = parts.pop().expect("branches and parts zip");
-        parts.push(format!("({text})"));
-    }
-    let mut out = parts.join(" || ");
-    for stage_ast in &q.pipeline {
+    for stage_ast in &query.pipeline {
         out.push(' ');
         out.push_str(&stage(stage_ast));
     }
     out
+}
+
+/// The union of a query's branches. A trailing leaf anchor before a
+/// plain pipe would reparse as the map pipe (`/a$ | f` relexes as
+/// `/a $| f` — the token stream cannot spell them apart), so such a
+/// branch reprints as a single-alternative group: `(/a$) | f`.
+fn branches_join(q: &Query, followed_by_plain_pipe: bool) -> String {
+    let mut parts: Vec<String> = q.branches.iter().map(branch).collect();
+    if followed_by_plain_pipe
+        && let Some(last) = q.branches.last()
+        && branch_ends_bare_leaf(last)
+    {
+        let text = parts.pop().expect("branches and parts zip");
+        parts.push(format!("({text})"));
+    }
+    parts.join(" || ")
 }
 
 /// Whether a branch's emitted text ends with the bare leaf anchor
@@ -442,7 +458,17 @@ fn operand(o: &Operand) -> String {
         Operand::Capture(n) => format!("${n}"),
         // The outer-scope wrapper prefixes one more `$` to the inner
         // spelling (`$.x` → `$$.x`).
-        Operand::Outer(inner) => format!("${}", operand(inner)),
+        // Each `Outer` wrap adds one `$`. Capsa-scope inners
+        // (`$.name`, `$_`) already start with a dollar; the node
+        // form (`::prop`, `/child::x`) needs the full `$$` spelled.
+        Operand::Outer(inner) => {
+            let s = operand(inner);
+            if s.starts_with('$') {
+                format!("${s}")
+            } else {
+                format!("$${s}")
+            }
+        }
         // An interpolated string reprints double-quoted, with its
         // escapes restored and each hole's expression unparsed.
         Operand::Interp(segs) => {
@@ -674,6 +700,7 @@ fn reg(r: &RegRef) -> String {
         RegRef::Named(n) => format!("$.{n}"),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
+        RegRef::FullRecord => "%%.".to_string(),
     }
 }
 

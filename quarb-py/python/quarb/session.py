@@ -19,7 +19,13 @@ import subprocess
 from html import escape
 from pathlib import Path
 
-from . import Document, Quantity, mount as _mount, open as _open
+from . import (
+    Document,
+    Quantity,
+    mount as _mount,
+    open as _open,
+    parse_defs as _parse_defs,
+)
 
 
 class QuarbResult:
@@ -127,6 +133,49 @@ class Session:
         self.resident: dict[str, list[str]] = {}
         self.default: str | None = None
         self.qua = qua
+        # The session's fragment table as definition text, prepended
+        # to every query so `&name` refs resolve across cells — the
+        # same text-level mechanism quai uses for its `&N` history.
+        self.defs_text = ""
+
+    # -- definitions ---------------------------------------------
+    @staticmethod
+    def is_defs(text: str) -> bool:
+        """Whether `text` is definitions only (a defs-file shape)."""
+        head = text.lstrip()
+        if not (head.startswith("def ") or head.startswith("macro ")
+                or head.startswith("#")):
+            return False
+        try:
+            _parse_defs(text)
+        except ValueError:
+            return False
+        return True
+
+    def add_defs(self, text: str) -> str:
+        """Add `def`/`macro` statements to the session's table.
+
+        Validated against the whole standing table first, so a bad
+        cell leaves the table untouched. The names defined here
+        resolve in every later query, whichever document it runs
+        against. Stored stripped of `#` comment lines: the table is
+        prepended to query text, and the query lexer itself has no
+        comment syntax.
+        """
+        stripped = "\n".join(
+            "" if line.lstrip().startswith("#") else line
+            for line in text.splitlines()
+        )
+        candidate = f"{self.defs_text}{stripped}\n"
+        _parse_defs(candidate)  # raises ValueError with the position
+        self.defs_text = candidate
+        names = [
+            tok.split("(")[0].split(":")[0].strip()
+            for line in text.splitlines()
+            for tok in [line.strip().removeprefix("def ").removeprefix("macro ")]
+            if line.strip().startswith(("def ", "macro "))
+        ]
+        return "defined: " + ", ".join(n for n in names if n)
 
     # -- mounting ------------------------------------------------
     def mount(self, line: str) -> str:
@@ -231,6 +280,10 @@ class Session:
 
     def run(self, query: str, name: str | None = None) -> QuarbResult:
         picked = self._pick(name)
+        if self.defs_text:
+            # Prepend the fragment table; the engine takes inline
+            # defs ahead of the query in one text.
+            query = f"{self.defs_text}{query}"
         if picked in self.resident:
             argv = [self.qua, "--resident", query, *self.resident[picked]]
             proc = subprocess.run(argv, capture_output=True, text=True)

@@ -139,14 +139,13 @@ fn recall_resolution_is_scope_aware() {
         vec![Value::Str("d".to_string())]
     );
     // `$*1` inside a subcontext body of a correlated query means
-    // the outer correlation's first operand, not the body's own
-    // branches: both context refs resolve to the /a/* branch (one
-    // deduped node — before the fix the inner one resolved to
-    // /c/*, and this printed ["a", "c"]).
-    let src = r#"/a/* <=> /b/*[::x = $*1::x] | .s(/c/*[::y = $*1::y] @| count) | $.s"#;
+    // the join's first entry (/b/*), not the body's own branches:
+    // the context ref resolves to the /b/* branch (one deduped
+    // node — before the fix the inner one resolved to /c/*).
+    let src = r#"/a/* <=> /b/*[::x = $$::x] | .s(/c/*[::y = $*1::y] @| count) | $.s"#;
     assert_eq!(
         vals(src, "//context::index~>/step[1]::matcher"),
-        vec![Value::Str("a".to_string())]
+        vec![Value::Str("b".to_string())]
     );
 }
 

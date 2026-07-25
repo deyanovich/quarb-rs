@@ -18,7 +18,6 @@ use quarb::{AllowShell, NodeId, QueryResult, WithNow};
 
 #[cfg(feature = "native")]
 use std::path::Path;
-#[cfg(feature = "native")]
 use std::rc::Rc;
 
 /// Options that shape how native sources open (unused on wasm, which
@@ -52,7 +51,6 @@ pub enum Doc {
     Xlsx(quarb_xlsx::XlsxAdapter),
     #[cfg(feature = "native")]
     Code(quarb_code::CodeAdapter),
-    #[cfg(feature = "native")]
     Mount(quarb_mount::MountAdapter),
 }
 
@@ -124,7 +122,6 @@ impl Doc {
             Doc::Xlsx(a) => go!(a),
             #[cfg(feature = "native")]
             Doc::Code(a) => go!(a),
-            #[cfg(feature = "native")]
             Doc::Mount(a) => go!(a),
         }
     }
@@ -150,9 +147,56 @@ impl Doc {
             Doc::Xlsx(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Code(a) => a.locator(node),
-            #[cfg(feature = "native")]
             Doc::Mount(a) => generic_locator(a, node),
         }
+    }
+
+    /// Mount several already-parsed text documents as named children
+    /// of one root — the wasm-safe face of [`Doc::mount_specs`], for
+    /// callers that hold text rather than paths (the browser
+    /// playground's uploaded files). `parts` is `(name, format,
+    /// text)`; formats are those of [`Doc::parse`].
+    pub fn mount_texts(parts: &[(String, String, String)]) -> Result<Doc> {
+        let mut mounts: Vec<quarb_mount::Mount> = Vec::new();
+        for (name, format, text) in parts {
+            if mounts.iter().any(|m| &m.name == name) {
+                bail!("two sources mount as '{name}'; give each a distinct name");
+            }
+            let adapter = Doc::parse(text, format)
+                .with_context(|| format!("parsing '{name}' as {format}"))?
+                .into_boxed()?;
+            mounts.push(quarb_mount::Mount {
+                name: name.clone(),
+                adapter,
+            });
+        }
+        Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
+    }
+
+    /// Box this source as a shared adapter — a mount child.
+    fn into_boxed(self) -> Result<Box<dyn quarb::AstAdapter>> {
+        use quarb_mount::Shared;
+        Ok(match self {
+            Doc::Json(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Csv(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Html(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Fs(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::FsDeep(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Git(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Archive(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Xlsx(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
+            Doc::Code(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
+        })
     }
 }
 
@@ -246,49 +290,45 @@ impl Doc {
     /// mount name), so a single query — including a `<=>` join — spans
     /// them all.
     pub fn mount(paths: &[std::path::PathBuf], opts: &Options) -> Result<Doc> {
+        let specs: Vec<crate::MountSpec> = paths
+            .iter()
+            .map(|p| crate::MountSpec {
+                name: None,
+                path: p.clone(),
+            })
+            .collect();
+        Doc::mount_specs(&specs, opts)
+    }
+
+    /// [`Doc::mount`] with optional explicit mount names
+    /// (`NAME=TARGET`); an unnamed spec mounts under its file stem.
+    pub fn mount_specs(specs: &[crate::MountSpec], opts: &Options) -> Result<Doc> {
         let mut mounts: Vec<quarb_mount::Mount> = Vec::new();
-        for (i, p) in paths.iter().enumerate() {
-            let stem = p
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("doc{i}"));
-            if mounts.iter().any(|m| m.name == stem) {
+        for (i, spec) in specs.iter().enumerate() {
+            let name = spec.name.clone().unwrap_or_else(|| {
+                spec.path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("doc{i}"))
+            });
+            if mounts.iter().any(|m| m.name == name) {
                 bail!(
-                    "input '{}' mounts as '{stem}', colliding with an earlier input of the \
-                     same file stem; give each a distinct basename",
-                    p.display()
+                    "input '{}' mounts as '{name}', colliding with an earlier input of the \
+                     same name; give each a distinct basename (or a NAME=TARGET alias)",
+                    spec.path.display()
                 );
             }
-            let adapter = Doc::open(p, opts)?.into_boxed()?;
-            mounts.push(quarb_mount::Mount { name: stem, adapter });
+            let adapter = Doc::open(&spec.path, opts)?.into_boxed()?;
+            mounts.push(quarb_mount::Mount { name, adapter });
         }
         Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
     }
 
-    /// Box this source as a shared adapter — a mount child.
-    fn into_boxed(self) -> Result<Box<dyn quarb::AstAdapter>> {
-        use quarb_mount::Shared;
-        Ok(match self {
-            Doc::Json(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Csv(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Html(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Fs(a) => Box::new(Shared(Rc::new(a))),
-            Doc::FsDeep(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Git(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Archive(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Xlsx(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Code(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
-        })
-    }
 }
 
 /// A name-path locator built from the adapter trait alone
 /// (`parent`/`name`) — used for a mount, whose per-source render
 /// functions we do not keep.
-#[cfg(feature = "native")]
 fn generic_locator<A: quarb::AstAdapter>(a: &A, node: NodeId) -> String {
     let mut parts = Vec::new();
     let mut cur = Some(node);

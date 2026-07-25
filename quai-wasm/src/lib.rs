@@ -75,6 +75,36 @@ impl QuaiSession {
         })
     }
 
+    /// Open a session over *several* documents mounted as named
+    /// children of one root, so a single query — including a `<=>`
+    /// join — spans them all (`/name/...` paths). `sources_json` is a
+    /// JSON array of `{"name", "format", "text"}` objects; names must
+    /// be distinct.
+    pub fn mount(sources_json: &str, now_millis: f64) -> Result<QuaiSession, JsError> {
+        let sources: serde_json::Value = serde_json::from_str(sources_json)
+            .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
+        let mut parts: Vec<(String, String, String)> = Vec::new();
+        for s in sources.as_array().into_iter().flatten() {
+            let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+            match (field("name"), field("format"), field("text")) {
+                (Some(n), Some(f), Some(t)) => parts.push((n, f, t)),
+                _ => {
+                    return Err(JsError::new(
+                        "each source needs string fields name, format, text",
+                    ));
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Err(JsError::new("no sources to mount"));
+        }
+        let doc = Doc::mount_texts(&parts).map_err(|e| JsError::new(&format!("{e:#}")))?;
+        let executor = Box::new(LocalExecutor::new(doc, now_parts(now_millis), false));
+        Ok(QuaiSession {
+            session: Session::new(executor, Box::new(MemStore)),
+        })
+    }
+
     /// The `&N` a fresh line will claim.
     #[wasm_bindgen(getter)]
     pub fn line(&self) -> usize {

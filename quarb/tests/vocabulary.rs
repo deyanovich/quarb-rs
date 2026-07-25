@@ -42,11 +42,13 @@ const CORPUS: &[&str] = &[
     // register recalls, topic, ordinal filter, positional selection
     "/x | .n(::a * ::b) | $.n | .named | . | .(::a + 1) \
      | [$ord mod 2 = 1] @| [2..-1] @| [3]",
-    "/x | $_ | @. | %. | $. | $.2",
+    "/x | $_ | @. | %. | %%. | $. | $.2",
     // subcontexts, named and bare
     "/users/* | .total(/orders/*/amt:: @| sum) | .(//y @| count)",
-    // correlation: roles, context refs with and without index
-    "//user <=> //order[::uid = $*1::id and ::amt > $*::limit]::",
+    // correlation (driver-first): the ON clause references the
+    // driver as `$$::…`, earlier entries as `$*k`, the candidate
+    // itself as `$*`; a second entry exercises the indexed ref
+    "//user <=> //order[::uid = $$::id and ::amt > $*::limit] <=> //note[::oid = $*1::id]",
     // match captures
     "/row | [::name =~ /^(\\w+), (\\w+)/] | rec('k', $1, 'j', $2)",
     // window spans: closed, open-start, open-end; keyed; shift
@@ -82,8 +84,9 @@ const CORPUS: &[&str] = &[
     "/a | rec(::n, 'bin', (::x < 2 ? 'lo' : ::x < 9 ? 'mid' : 'hi'))",
     // the spread
     "/a->e | @-::roles | ... | ...",
-    // the outer spread and the outer correlation (2026-07-11)
-    "//user <=>? //order[::uid = $*1::id]::amt | ...?",
+    // the outer spread and the outer correlation (2026-07-11;
+    // driver-first since 2026-07-25)
+    "//order::amt <=>? //user[::id = $$::uid] | ...?",
     // the anchored operand (2026-07-11)
     "//commit[;;;short = ^/tags/*;;;short]",
     // marks and the (name) anchor (2026-07-11)

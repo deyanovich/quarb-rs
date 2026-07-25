@@ -138,7 +138,7 @@ fn sql_shapes() {
     // JOIN with projection of both sides (the witness)
     assert_eq!(
         values(
-            "/albums/* <=> /tracks/*[::album_id = $*1::id and ::secs > 400] \
+            "/tracks/*[::secs > 400] <=> /albums/*[::id = $$::album_id] \
              | rec(\"album\", $*1::title, ::title)"
         ),
         vec![

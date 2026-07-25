@@ -603,10 +603,10 @@ impl QueryArbor {
         }
     }
 
-    /// The correlation operands under `query`, in `$*k` order: a
-    /// nested query child (a left operand — correlations chain
-    /// leftward) contributes its own operands first, then the
-    /// sibling branches follow. A plain query yields its branches.
+    /// The correlation operands under `query`, in `$*k` order: the
+    /// joined expressions (nested query children, in join order)
+    /// contribute their operands first, then the driver's own
+    /// branches follow. A plain query yields its branches.
     fn correlation_operands(&self, query: usize) -> Vec<usize> {
         let mut out = Vec::new();
         for &c in &self.nodes[query].children {
@@ -1119,6 +1119,7 @@ fn reg_spelling(r: &RegRef) -> String {
         RegRef::Named(n) => format!("$.{n}"),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
+        RegRef::FullRecord => "%%.".to_string(),
     }
 }
 
@@ -1368,11 +1369,12 @@ mod tests {
     #[test]
     fn resolve_context_index_to_correlation_operand() {
         let a = QueryArbor::parse(
-            "/a/* <=> /b/*[::x = $*1::x] <=> /c/*[::y = $*2::y] | rec($*1::n, $*3::n)",
+            "/a/* <=> /b/*[::x = $$::x] <=> /c/*[::y = $*1::y] | rec($*1::n, $*2::m)",
         )
         .unwrap();
-        // Operands in $*k order are the correlation's branches,
-        // left spine first: /a/*, /b/*, /c/*.
+        // Operands in $*k order are the joined expressions'
+        // branches, in join order: /b/* is $*1, /c/* is $*2. The
+        // driver (/a/*) is referenced as `$$`, not numbered.
         let first_matcher = |b: NodeId| {
             let step = a
                 .children(b)
@@ -1391,7 +1393,7 @@ mod tests {
             };
             let branch = a.resolve(ctx, "index", None).expect("operand resolves");
             assert_eq!(a.name(branch).as_deref(), Some("branch"));
-            assert_eq!(first_matcher(branch), ["a", "b", "c"][k - 1], "$*{k}");
+            assert_eq!(first_matcher(branch), ["b", "c"][k - 1], "$*{k}");
         }
     }
 

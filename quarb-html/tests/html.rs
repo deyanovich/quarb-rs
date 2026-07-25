@@ -184,18 +184,21 @@ fn correlated_join_shares_one_binding() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         quarb::QueryResult::Nodes(_) => panic!("expected values"),
     };
+    // Driver-first: the orders drive, each pinned to ONE user
+    // (the ON clause reaches the driver as `$$`) — both
+    // conditions must hold under the same binding.
     let join = concat!(
-        r#"//li[::class="user"] <=> "#,
-        r#"//li[::class="order"][::data-uid = $*1::data-id "#,
-        r#"and ::data-amount > $*1::data-limit]::"#,
+        r#"//li[::class="order"]:: <=> "#,
+        r#"//li[::class="user"][::data-id = $$::data-uid "#,
+        r#"and ::data-limit < $$::data-amount]"#,
     );
     assert_eq!(run(join), vec!["order-A"]);
     // Stacked brackets are a conjunction, so they share the binding
     // and must give the identical result.
     let stacked = concat!(
-        r#"//li[::class="user"] <=> "#,
-        r#"//li[::class="order"][::data-uid = $*1::data-id]"#,
-        r#"[::data-amount > $*1::data-limit]::"#,
+        r#"//li[::class="order"]:: <=> "#,
+        r#"//li[::class="user"][::data-id = $$::data-uid]"#,
+        r#"[::data-limit < $$::data-amount]"#,
     );
     assert_eq!(run(stacked), vec!["order-A"]);
 }

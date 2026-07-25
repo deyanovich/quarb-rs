@@ -17,9 +17,10 @@
 //!   → `@|` reductions; `GROUP BY k` → `@| group(::k)` with the
 //!   aggregate riding the plain pipe and `HAVING` a filter after
 //!   it.
-//! - `JOIN t2 ON t2.b = t1.a` → correlation: `/t1/* <=>
-//!   /t2/*[::b = $*1::a]`, with two-sided select lists projected
-//!   through the witness (`$*1::col`).
+//! - `JOIN t2 ON t2.b = t1.a` → correlation (driver-first): `/t1/*
+//!   <=> /t2/*[::b = $$::a]` — the FROM table drives, the ON rides
+//!   the joined expression — with the joined side's select columns
+//!   projected through the witness (`$*1::col`).
 //! - `ORDER BY` → `@| sort_by(…)` (`DESC` via `@| reverse`, or a
 //!   numeric `-` key when mixed); `LIMIT n` → `@| [..n]`.
 //!
@@ -477,11 +478,16 @@ impl Parser {
 // ---------------------------------------------------------------
 
 /// The tables in scope: (name, alias). The first is the FROM table
-/// (correlation context `$*1` when a JOIN is present); the second
-/// the JOIN table.
+/// — the driver under driver-first correlation; the second the
+/// JOIN table, whose witness the pipeline reads as `$*1`.
 struct Scope {
     from: (String, Option<String>),
     join: Option<(String, Option<String>)>,
+    /// Whether operands are being emitted inside the joined
+    /// expression's ON bracket (driver = `$$::col`, joined side
+    /// bare) rather than in pipeline position (driver bare,
+    /// joined side = `$*1::col`).
+    on_clause: bool,
 }
 
 impl Scope {
@@ -510,15 +516,28 @@ impl Scope {
         }
     }
 
-    /// The operand for `col`: `::col`, or `$*1::col` for the left
-    /// side under a join (whose result context is the right side).
+    /// The operand for `col`. In pipeline position the driver's
+    /// columns are bare and the joined table's ride its witness
+    /// (`$*1::col`); inside the ON bracket the joined table's are
+    /// bare and the driver is reached as `$$::col`.
     fn operand(&self, col: &ColRef) -> Result<String, SqlError> {
         let key = quarb_key(&col.column)?;
-        Ok(if self.join.is_some() && self.is_left(col)? {
-            format!("$*1::{key}")
-        } else {
-            format!("::{key}")
+        Ok(match (self.join.is_some(), self.on_clause) {
+            (false, _) => format!("::{key}"),
+            (true, false) if self.is_left(col)? => format!("::{key}"),
+            (true, false) => format!("$*1::{key}"),
+            (true, true) if self.is_left(col)? => format!("$$::{key}"),
+            (true, true) => format!("::{key}"),
         })
+    }
+
+    /// This scope, switched to ON-bracket emission.
+    fn on(&self) -> Scope {
+        Scope {
+            from: self.from.clone(),
+            join: self.join.clone(),
+            on_clause: true,
+        }
     }
 }
 
@@ -759,6 +778,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     let scope = Scope {
         from: (from_table.clone(), from_alias),
         join: join.clone(),
+        on_clause: false,
     };
 
     let where_cond = p.kw("WHERE").then(|| p.cond()).transpose()?;
@@ -812,7 +832,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let (left_col, right_col) = if scope.is_left(l)? { (l, r) } else { (r, l) };
         write!(
             q,
-            "/{}/* <=> /{}/*[::{} = $*1::{}",
+            "/{}/* <=> /{}/*[::{} = $$::{}",
             quarb_key(&from_table)?,
             quarb_key(jt)?,
             quarb_key(&right_col.column)?,
@@ -820,12 +840,12 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         )
         .unwrap();
         if let Some(w) = &where_cond {
-            write!(q, " and {}", emit_cond(w, &scope, &mut notes)?).unwrap();
+            write!(q, " and {}", emit_cond(w, &scope.on(), &mut notes)?).unwrap();
         }
         q.push(']');
         notes.push(
-            "JOIN: existential semantics — one result row per joined-table row, \
-             bound to its first witness"
+            "JOIN: existential semantics — one result row per FROM-table row, \
+             the joined table bound to its first witness"
                 .to_string(),
         );
     } else {

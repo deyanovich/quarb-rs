@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use quarb_session::{
-    DaemonExecutor, Doc, FileStore, LocalExecutor, MemStore, Options, Session, Store,
+    DaemonExecutor, Doc, FileStore, LocalExecutor, MemStore, MountSpec, Options, Session, Store,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -28,8 +28,10 @@ struct Cli {
     /// (.json/.yaml/.toml/.csv/.tsv/.xml/.html/.md), a SQLite,
     /// spreadsheet, or archive file, a source file, or `git:PATH`.
     /// Several sources mount as named children of one root, so a
-    /// single query — including a `<=>` join — spans them all.
-    paths: Vec<PathBuf>,
+    /// single query — including a `<=>` join — spans them all;
+    /// `NAME=TARGET` picks the mount name explicitly. `:mount`
+    /// adds a source mid-session.
+    paths: Vec<String>,
 
     /// Include hidden entries (filesystem only).
     #[arg(long)]
@@ -75,16 +77,44 @@ struct Cli {
     cache: bool,
 }
 
+/// What an in-session `:mount` needs to rebuild the executor; absent
+/// under `--daemon` (the daemon's arbor is pinned at start).
+struct Remount {
+    specs: Vec<MountSpec>,
+    opts: Options,
+    now: (i64, u32),
+    allow_shell: bool,
+}
+
+/// Build the in-process executor over the current mount specs.
+fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
+    let doc = match remount.specs.as_slice() {
+        [one] if one.name.is_none() => Doc::open(&one.path, &remount.opts)?,
+        many => Doc::mount_specs(many, &remount.opts)?,
+    };
+    Ok(Box::new(LocalExecutor::with_respec(
+        doc,
+        remount.now,
+        remount.allow_shell,
+        remount.specs.clone(),
+        remount.opts,
+    )))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.paths.is_empty() {
         anyhow::bail!("quai needs at least one source (a directory, a document, or git:PATH)");
     }
+    let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
+    let raw_paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
+    let mut remount: Option<Remount> = None;
     let mut session = if cli.daemon {
         // The daemon holds the arbor (via `qua --resident`); the store
-        // persists the macro history across runs.
+        // persists the macro history across runs. Raw args pass
+        // through: `qua` itself understands NAME=TARGET.
         let executor = Box::new(DaemonExecutor::new(
-            cli.paths.clone(),
+            raw_paths.clone(),
             cli.now.clone(),
             cli.allow_shell,
             cli.hidden,
@@ -92,7 +122,7 @@ fn main() -> Result<()> {
             cli.descend,
             cli.cache,
         )?);
-        let store: Box<dyn Store> = match FileStore::new(&cli.paths) {
+        let store: Box<dyn Store> = match FileStore::new(&raw_paths) {
             Ok(fs) => Box::new(fs),
             Err(_) => Box::new(MemStore),
         };
@@ -104,18 +134,14 @@ fn main() -> Result<()> {
             respect_ignore: !cli.no_ignore,
             descend: cli.descend,
         };
-        let doc = match cli.paths.as_slice() {
-            [one] => Doc::open(one, &opts)?,
-            many => Doc::mount(many, &opts)?,
-        };
-        // with_respec lets a `&N!` reading re-open the source live.
-        let executor = Box::new(LocalExecutor::with_respec(
-            doc,
-            now,
-            cli.allow_shell,
-            cli.paths.clone(),
+        let ctx = Remount {
+            specs,
             opts,
-        ));
+            now,
+            allow_shell: cli.allow_shell,
+        };
+        let executor = local_executor(&ctx)?;
+        remount = Some(ctx);
         Session::new(executor, Box::new(MemStore))
     };
     if let Some(p) = &cli.defs {
@@ -123,17 +149,12 @@ fn main() -> Result<()> {
             std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
         session.seed_defs(&text)?;
     }
-    let sources = cli
-        .paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let sources = cli.paths.join(", ");
     let mode = if cli.daemon { "daemon-backed" } else { "in-process" };
     println!(
         "quai — interactive Quarb over {sources} ({mode}).  :help for commands, :quit (or Ctrl-D) to leave."
     );
-    repl(&mut session)
+    repl(&mut session, &mut remount)
 }
 
 /// Bind the invocation instant: `--now` pins it; otherwise the clock,
@@ -154,7 +175,7 @@ fn bind_now(spec: Option<&str>) -> Result<(i64, u32)> {
     }
 }
 
-fn repl(session: &mut Session) -> Result<()> {
+fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {
     use rustyline::error::ReadlineError;
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     // A real line editor: backspace, arrow keys, and Up/Down history
@@ -185,7 +206,7 @@ fn repl(session: &mut Session) -> Result<()> {
         let _ = rl.add_history_entry(line); // Up/Down recalls prior lines
         // A `:` command (a query cannot start with a lone `:`).
         if line.starts_with(':') && !line.starts_with("::") {
-            if command(session, line) {
+            if command(session, remount, line) {
                 break;
             }
             continue;
@@ -282,7 +303,51 @@ fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
 }
 
 /// Handle a `:` command; returns true to exit the loop.
-fn command(session: &mut Session, line: &str) -> bool {
+fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> bool {
+    if let Some(arg) = line.strip_prefix(":mount ").map(str::trim)
+        && !arg.is_empty()
+    {
+        match remount {
+            None => println!(
+                "note: :mount is in-process only — under --daemon the arbor is \
+                 pinned at start; restart quai with the source added"
+            ),
+            Some(ctx) => {
+                let was_single =
+                    matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
+                ctx.specs.push(MountSpec::parse(arg));
+                match local_executor(ctx) {
+                    Ok(executor) => {
+                        session.set_executor(executor);
+                        let names: Vec<String> = ctx
+                            .specs
+                            .iter()
+                            .map(|s| {
+                                s.name.clone().unwrap_or_else(|| {
+                                    s.path
+                                        .file_stem()
+                                        .map(|x| x.to_string_lossy().into_owned())
+                                        .unwrap_or_default()
+                                })
+                            })
+                            .collect();
+                        println!("mounted: /{}", names.join(", /"));
+                        if was_single {
+                            println!(
+                                "note: sources now mount as named children — earlier \
+                                 lines wrote root-relative paths"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        ctx.specs.pop();
+                        eprintln!("error: {e:#}");
+                    }
+                }
+            }
+        }
+        return false;
+    }
     match line {
         ":q" | ":quit" => return true,
         ":help" | ":?" => {
@@ -292,6 +357,7 @@ fn command(session: &mut Session, line: &str) -> bool {
                  &N#           replay line N's frozen output (as it was when it ran)\n  \
                  &N!           re-run line N live — re-reads the source; diverges from &N# under drift\n  \
                  def &x: …;    add a named fragment to the session\n  \
+                 :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
                  :history      show the macro table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"

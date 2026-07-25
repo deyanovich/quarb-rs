@@ -745,6 +745,17 @@ fn translate(source: &str, lang: &str) -> PyResult<String> {
     Ok(q)
 }
 
+/// Validate `text` as a definitions file — `def`/`macro` statements
+/// only, `#` line comments allowed — raising ValueError on the first
+/// malformed statement. The session layer uses this to accept a
+/// defs-only cell into its cross-cell fragment table.
+#[pyfunction]
+fn parse_defs(text: &str) -> PyResult<()> {
+    quarb::parse_defs(text)
+        .map(|_| ())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Execute `query` against `input` parsed as `format` and return
 /// the result lines as strings — the qua CLI's exact rendering.
 /// The low-level layer; prefer [`loads`] + [`Document`] for typed
@@ -788,6 +799,7 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(mount, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_defs, m)?)?;
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;

@@ -79,3 +79,9 @@ def mount(paths: list[str], descend: bool = False) -> Document:
 def highlight(query: str) -> str:
     """The query with ANSI syntax-highlighting escapes."""
     ...
+
+def parse_defs(text: str) -> None:
+    """Validate ``text`` as a definitions file (``def``/``macro``
+    statements, ``#`` line comments); raises ValueError on the
+    first malformed statement."""
+    ...

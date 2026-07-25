@@ -18,7 +18,7 @@ pub struct LocalExecutor {
     /// `None` when the source can't be re-opened (wasm pasted text,
     /// which never drifts anyway).
     #[cfg(feature = "native")]
-    respec: Option<(Vec<std::path::PathBuf>, crate::Options)>,
+    respec: Option<(Vec<crate::MountSpec>, crate::Options)>,
 }
 
 impl LocalExecutor {
@@ -40,14 +40,14 @@ impl LocalExecutor {
         doc: Doc,
         now: (i64, u32),
         allow_shell: bool,
-        paths: Vec<std::path::PathBuf>,
+        specs: Vec<crate::MountSpec>,
         opts: crate::Options,
     ) -> Self {
         Self {
             doc,
             now,
             allow_shell,
-            respec: Some((paths, opts)),
+            respec: Some((specs, opts)),
         }
     }
 }
@@ -70,10 +70,10 @@ impl Executor for LocalExecutor {
 
     fn run_fresh(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
         #[cfg(feature = "native")]
-        if let Some((paths, opts)) = &self.respec {
-            let fresh = match paths.as_slice() {
-                [one] => Doc::open(one, opts)?,
-                many => Doc::mount(many, opts)?,
+        if let Some((specs, opts)) = &self.respec {
+            let fresh = match specs.as_slice() {
+                [one] if one.name.is_none() => Doc::open(&one.path, opts)?,
+                many => Doc::mount_specs(many, opts)?,
             };
             return run_doc(&fresh, query, self.now, self.allow_shell);
         }

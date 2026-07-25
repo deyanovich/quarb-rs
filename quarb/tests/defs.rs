@@ -160,6 +160,32 @@ fn defs_files() {
     assert!(parse_defs("def &a: /x; /row").is_err());
 }
 
+/// A defs file is a library, and a library wants a header: lines
+/// whose first non-blank character is `#` are comments.
+#[test]
+fn defs_file_comments() {
+    let defs = parse_defs(
+        "# birth-record fragments\n\
+         #   (verified against titanic-births.json)\n\
+         def &adults: /row[::Age >= 18];\n\
+         \n\
+         # Julian to Gregorian, 1900-1917\n\
+         def &gregorian: | tp(\"%Y-%m-%d\") | ($_ + 12d);\n",
+    )
+    .unwrap();
+    assert_eq!(
+        expand("&adults", &defs).unwrap(),
+        "/row[::Age >= 18]"
+    );
+    assert_eq!(
+        expand("/x | &gregorian", &defs).unwrap(),
+        "/x | tp('%Y-%m-%d') | $_ + '12d'"
+    );
+    // only a line-leading `#` comments; `#` has no meaning inside a
+    // definition body, so a mid-line `#` still errors as query text
+    assert!(parse_defs("def &a: /x # trailing;\n").is_err());
+}
+
 /// Unparsing is a fixpoint: parse → unparse → parse → unparse is
 /// stable, across the syntax surface.
 #[test]
@@ -173,8 +199,9 @@ fn unparse_fixpoint() {
         "/row @| group(::Pclass) | top(2, ::Fare) @| ungroup | rec($.Pclass, ::Name)",
         "/row | .who | [$ord mod 2 = 1] | $.who",
         "/row | .a(::x) | %. @| [2..-1]",
+        "/row | .(::x) | .b(::y) | %%.",
         "/users/* | .total(/orders/*/amt:: @| sum) | $.total",
-        "//user <=> //order[::uid = $*1::id and ::amt > $*1::limit]::",
+        "//user <=> //order[::uid = $$::id and ::amt > $$::limit]",
         "//p[not (::a = 1 or ::b = 2)]",
         "/x | s/foo/bar/g | trim",
         "/x | (:::index + 1) * 3",
@@ -191,7 +218,7 @@ fn unparse_fixpoint() {
         "//h2>>p:: @| join(' ')",
         "//aside<<?*;;;tag || //a[1]>>!p",
         "/row | .d(::dept) | .m(^/row[::dept = $$.d]::pay @| mean) | $.m - $$_",
-        "/users/* <=> /orders/*[/uid:: = $*1/id::] | rec('who', $*1/name::, 'amt', /amt::)",
+        "/users/* <=> /orders/*[/uid:: = $$/id::] | rec(::name, 'amt', $*1/amt::)",
         "/tracks/* | rec(::title, 'artist', ::album_id~>::artist_id~>::name)",
         "/invoices/* | ::qty * ::track_id~>::price @| group(::customer) | sum",
         // Round-trip regressions (2026-07-21 review): constant and

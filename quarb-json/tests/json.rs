@@ -172,7 +172,7 @@ fn metadata_and_aggregation() {
 }
 
 /// A correlated join over JSON, where the join keys are *children*
-/// (fields), not properties — reachable only because `$*N` can now
+/// (fields), not properties — reachable only because `$$` can
 /// navigate. Ada has limit 100, Bo limit 500; order-1 (amount 200)
 /// exceeds its own user Ada's limit, order-2 (amount 300) does not
 /// exceed Bo's 500. Both conditions must bind to the same user.
@@ -193,12 +193,12 @@ fn correlated_join_navigates_from_context() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         quarb::QueryResult::Nodes(_) => panic!("expected values"),
     };
-    let join = "/users/* <=> /orders/*\
-        [/uid:: = $*1/id:: and /amount:: > $*1/limit::]/amount::";
+    let join = "/orders/* <=> /users/*\
+        [/id:: = $$/uid:: and $$/amount:: > /limit::] | /amount::";
     assert_eq!(vals(join), vec!["200"]);
     // stacked brackets share the binding, so identical result
-    let stacked = "/users/* <=> /orders/*\
-        [/uid:: = $*1/id::][/amount:: > $*1/limit::]/amount::";
+    let stacked = "/orders/* <=> /users/*\
+        [/id:: = $$/uid::][$$/amount:: > /limit::] | /amount::";
     assert_eq!(vals(stacked), vec!["200"]);
 }
 
@@ -226,7 +226,7 @@ fn join_projection() {
                   "orders": [{"uid": 1, "amt": 30}, {"uid": 2, "amt": 45}, {"uid": 1, "amt": 99}]}"#;
     let adapter = JsonAdapter::parse(doc).unwrap();
     let got = match quarb::run(
-        "/users/* <=> /orders/*[/uid:: = $*1/id::] | rec(\"who\", $*1/name::, \"amt\", /amt::)",
+        "/orders/* <=> /users/*[/id:: = $$/uid::] | rec(\"who\", $*1/name::, \"amt\", /amt::)",
         &adapter,
     )
     .unwrap()

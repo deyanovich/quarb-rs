@@ -54,6 +54,27 @@ def test_cell_magic_records_and_df(shell, tmp_path_factory):
     assert str(r.df["draw"][0]) == "142.5 W"
 
 
+def test_cross_cell_defs(shell, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("nbdefs")
+    (tmp / "crew.json").write_text(
+        '{"crew": [{"name": "Ada", "born": "1881-12-25"}]}'
+    )
+    shell.run_line_magic("quarb_mount", str(tmp / "crew.json"))
+    # A defs-only cell extends the fragment table...
+    r = shell.run_cell_magic(
+        "quarb", "",
+        "# Julian to Gregorian, 1900-1917\n"
+        "def &gregorian: | tp('%Y-%m-%d') | $_ + '12d';",
+    )
+    assert r is None
+    # ...and a later cell resolves the name. The fragment's tp()
+    # yields a typed instant, which lands as a datetime.
+    r = shell.run_cell_magic(
+        "quarb", "", '/crew/* | rec(::name, "g", (::born | &gregorian))'
+    )
+    assert [rec["g"].date().isoformat() for rec in r.records] == ["1882-01-06"]
+
+
 def test_named_documents(shell, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("nb3")
     (tmp / "a.json").write_text('{"x": 1}')
@@ -99,5 +120,5 @@ def test_session_multimount_joins(tmp_path):
     s = Session()
     msg = s.mount(f"{tmp_path / 'a.yaml'} {db}")
     assert "a+b" in msg and "/a" in msg and "/b" in msg
-    r = s.run("/a/rows/* <=> /b/t/*[::k = $*1/k::] | rec('k', $*1/k::, 'v', ::v)")
+    r = s.run("/b/t/* <=> /a/rows/*[/k:: = $$::k] | rec('k', $*1/k::, 'v', ::v)")
     assert r.records == [{"k": "x", "v": 1}, {"k": "y", "v": 2}]

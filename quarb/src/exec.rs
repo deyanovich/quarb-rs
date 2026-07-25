@@ -147,6 +147,10 @@ struct Scope<'a> {
     /// The invoking capsa's scope, one subcontext out (`$$.name`,
     /// `$$_`, `$$ord`); `None` at the top level.
     outer: Option<&'a Scope<'a>>,
+    /// The capsa's own node, where the scope belongs to a capsa —
+    /// what a `$$`-wrapped node operand (`$$::prop`, `$$/child::x`)
+    /// reads one scope out. `None` for navigation scopes.
+    node: Option<NodeId>,
 }
 
 const NO_SCOPE: Scope<'static> = Scope {
@@ -160,6 +164,7 @@ const NO_SCOPE: Scope<'static> = Scope {
     arrived: &[],
     peers: None,
     outer: None,
+    node: None,
 };
 
 /// The result of evaluating a query: a node set, or\,---\,after a
@@ -341,31 +346,6 @@ fn eval_query_outer(
     base: &Trace,
     outer: Option<&Scope<'_>>,
 ) -> QueryResult {
-    let mut contexts = base.contexts.clone();
-    let mut outers = base.outer.clone();
-    for corr in &query.correlations {
-        // The left of `<=>` must be a node context.
-        let prior = Correlation {
-            contexts: contexts.clone(),
-            outer: outers.clone(),
-            witnesses: Default::default(),
-        };
-        let ctx = match eval_query(corr, adapter, start, &prior) {
-            QueryResult::Nodes(ns) => ns,
-            QueryResult::Values(_) => Vec::new(),
-        };
-        contexts.push(ctx);
-        outers.push(corr.outer);
-    }
-    let trace = Correlation {
-        contexts,
-        outer: outers,
-        witnesses: Default::default(),
-    };
-    let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
-    for stage in &query.pipeline {
-        caps = apply_stage(stage, caps, adapter, &trace, outer);
-    }
     // Whether the query is value-typed is a static property: it holds
     // if any branch projects (`::`) or any pipeline stage produces
     // values. This must not depend on how many nodes matched\,---\,
@@ -373,7 +353,8 @@ fn eval_query_outer(
     // list of values, not a node set. Node-preserving stages
     // (positional selection, keyed aggregates) keep a node context a
     // node context.
-    to_result(caps, pipeline_projected(query))
+    let (caps, projected) = eval_query_caps_outer(query, adapter, start, base, outer);
+    to_result(caps, projected)
 }
 
 /// [`eval_query`]'s capsa-level form: the final capsae plus the
@@ -394,20 +375,22 @@ fn eval_query_caps_outer(
     base: &Trace,
     outer: Option<&Scope<'_>>,
 ) -> (Vec<Capsa>, bool) {
+    let first_new = base.contexts.len();
     let mut contexts = base.contexts.clone();
     let mut outers = base.outer.clone();
+    // Driver-first: the query's own branches drive; each joined
+    // expression materializes as a context, its correlated final-
+    // step predicates (the ON clause) lifted out for the gate below.
+    let mut on_preds: Vec<Vec<PredExpr>> = Vec::new();
     for corr in &query.correlations {
-        let prior = Correlation {
-            contexts: contexts.clone(),
-            outer: outers.clone(),
-            witnesses: Default::default(),
-        };
-        let ctx = match eval_query(corr, adapter, start, &prior) {
+        let (nav, on) = split_on(corr);
+        let ctx = match eval_query(&nav, adapter, start, &Correlation::default()) {
             QueryResult::Nodes(ns) => ns,
             QueryResult::Values(_) => Vec::new(),
         };
         contexts.push(ctx);
         outers.push(corr.outer);
+        on_preds.push(on);
     }
     let trace = Correlation {
         contexts,
@@ -415,10 +398,133 @@ fn eval_query_caps_outer(
         witnesses: Default::default(),
     };
     let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
+    if !query.correlations.is_empty() {
+        caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
+    }
     for stage in &query.pipeline {
         caps = apply_stage(stage, caps, adapter, &trace, outer);
     }
     (caps, pipeline_projected(query))
+}
+
+/// Split a joined expression into its plain navigation and its ON
+/// clause: the final-step predicates that mention `$*k` or `$$…`
+/// are lifted out, to be evaluated per driving capsa by
+/// [`correlate_gate`]; everything else materializes once.
+fn split_on(entry: &Query) -> (Query, Vec<PredExpr>) {
+    let mut nav = entry.clone();
+    let mut on = Vec::new();
+    for b in &mut nav.branches {
+        if let Some(PathElem::Step(s)) = b.steps.last_mut() {
+            s.predicates.retain_mut(|p| match p {
+                Predicate::Expr(e)
+                    if crate::parser::max_ctx_pred_expr(e) > 0
+                        || crate::parser::pred_mentions_outer(e) =>
+                {
+                    on.push(e.clone());
+                    false
+                }
+                _ => true,
+            });
+        }
+    }
+    (nav, on)
+}
+
+/// The join gate: for each driving capsa, search the joined
+/// contexts for a tuple satisfying every ON clause — entry `i`'s
+/// predicates evaluated against entry `i`'s candidate node, with
+/// the driver reachable as `$$…` and earlier entries as `$*k`. The
+/// first satisfying tuple (document order) is kept as the witness;
+/// an outer entry (`<=>?`) offers a null binding after its real
+/// candidates are exhausted, its own ON vacuous under it. A capsa
+/// no tuple admits is dropped.
+fn correlate_gate(
+    adapter: &impl AstAdapter,
+    caps: Vec<Capsa>,
+    trace: &Trace,
+    first_new: usize,
+    on_preds: &[Vec<PredExpr>],
+    outer: Option<&Scope<'_>>,
+) -> Vec<Capsa> {
+    caps.into_iter()
+        .filter_map(|mut c| {
+            let tuple = {
+                let driver = Scope {
+                    register: &c.register,
+                    topic: c.topic.as_ref(),
+                    ordinal: None,
+                    captures: &c.captures,
+                    marks: &c.marks,
+                    bindings: &[],
+                    edge: None,
+                    arrived: &c.arrived,
+                    peers: None,
+                    outer,
+                    node: Some(c.node),
+                };
+                // Base contexts (an enclosing trace) stay unbound —
+                // the placement rules keep ON clauses from
+                // referencing them.
+                let mut bound: Vec<Option<NodeId>> = vec![None; first_new];
+                if bind_entries(adapter, &driver, on_preds, trace, first_new, &mut bound) {
+                    Some(bound)
+                } else {
+                    None
+                }
+            };
+            let tuple = tuple?;
+            trace
+                .witnesses
+                .borrow_mut()
+                .entry(c.node.0)
+                .or_insert_with(|| tuple.clone());
+            c.bindings = tuple;
+            Some(c)
+        })
+        .collect()
+}
+
+/// Depth-first search over the joined contexts, one entry at a
+/// time. `bound` holds the partial tuple; entry `i` binds context
+/// `first_new + i`.
+fn bind_entries(
+    adapter: &impl AstAdapter,
+    driver: &Scope<'_>,
+    on_preds: &[Vec<PredExpr>],
+    trace: &Trace,
+    first_new: usize,
+    bound: &mut Vec<Option<NodeId>>,
+) -> bool {
+    let i = bound.len() - first_new;
+    if i == on_preds.len() {
+        return true;
+    }
+    let ctx_idx = bound.len();
+    let candidates: Vec<NodeId> = trace.contexts[ctx_idx].clone();
+    for cand in candidates {
+        bound.push(Some(cand));
+        let scope = Scope {
+            outer: Some(driver),
+            ..NO_SCOPE
+        };
+        let ok = on_preds[i]
+            .iter()
+            .all(|e| eval_pred_expr(adapter, cand, e, trace, bound, scope))
+            && bind_entries(adapter, driver, on_preds, trace, first_new, bound);
+        if ok {
+            return true;
+        }
+        bound.pop();
+    }
+    if trace.outer.get(ctx_idx).copied().unwrap_or(false) {
+        bound.push(None);
+        if bind_entries(adapter, driver, on_preds, trace, first_new, bound) {
+            return true;
+        }
+        bound.pop();
+    }
+    false
 }
 
 /// Whether a pipeline stage turns the context value-typed. Positional
@@ -670,6 +776,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -703,6 +810,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -944,6 +1052,7 @@ fn apply_stage(
                 // `$$.name` / `$$_` / `$$ord` reach it (correlated
                 // subqueries).
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -973,6 +1082,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -995,6 +1105,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -1138,6 +1249,7 @@ fn apply_stage(
             .enumerate()
             .filter_map(|(i, mut c)| {
                 let scope = Scope {
+                    node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
@@ -1240,6 +1352,7 @@ fn keyed_agg(
                     e,
                     trace,
                     Scope {
+                        node: Some(c.node),
                         register: &c.register,
                         topic: c.topic.as_ref(),
                         ordinal: Some(i + 1),
@@ -1280,6 +1393,7 @@ fn keyed_agg(
         let mut groups: Vec<Group> = Vec::new();
         for (i, c) in caps.into_iter().enumerate() {
             let scope = Scope {
+                node: Some(c.node),
                 register: &c.register,
                 topic: c.topic.as_ref(),
                 ordinal: Some(i + 1),
@@ -1428,6 +1542,7 @@ fn peer_lists(
     let mut of = Vec::with_capacity(caps.len());
     for (i, c) in caps.iter().enumerate() {
         let scope = Scope {
+            node: Some(c.node),
             register: &c.register,
             topic: c.topic.as_ref(),
             ordinal: Some(i + 1),
@@ -2046,6 +2161,25 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
                         Some((_, v)) => *v = reg.value.clone(),
                         None => fields.push((name.clone(), reg.value.clone())),
                     }
+                }
+            }
+            Value::Record(fields)
+        }
+        // The full view: the named regulae exactly as `%.` renders
+        // them, plus each anonymous regula keyed `#N` by its
+        // 1-based register position — the number `$.N` recalls it
+        // by. `#` cannot appear in a push name, so the keys cannot
+        // collide (names MAY be numeric — the pivot macro writes
+        // data-valued column names).
+        RegRef::FullRecord => {
+            let mut fields: Vec<(String, Value)> = Vec::new();
+            for (i, reg) in register.iter().enumerate() {
+                match &reg.name {
+                    Some(name) => match fields.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, v)) => *v = reg.value.clone(),
+                        None => fields.push((name.clone(), reg.value.clone())),
+                    },
+                    None => fields.push((format!("#{}", i + 1), reg.value.clone())),
                 }
             }
             Value::Record(fields)
@@ -3514,10 +3648,12 @@ fn eval_operand(
         // Unreachable: parameters are substituted at expansion time.
         Operand::Param(_) => vec![Value::Null],
         // `$$…` — the same operand, one scope out: the invoking
-        // capsa of the enclosing subcontext body. Null at the top
+        // capsa of the enclosing subcontext body (or, in an ON
+        // clause, the driving capsa). Node operands (`$$::prop`)
+        // re-anchor on the invoking capsa's node. Null at the top
         // level, where no enclosing scope exists.
         Operand::Outer(inner) => match scope.outer {
-            Some(o) => eval_operand(adapter, node, inner, trace, bound, *o),
+            Some(o) => eval_operand(adapter, o.node.unwrap_or(node), inner, trace, bound, *o),
             None => vec![Value::Null],
         },
         // An interpolated string: each hole contributes its first
@@ -4339,17 +4475,30 @@ mod tests {
     #[test]
     fn correlation() {
         let t = MockTree::sample();
+        // Driver-first: the first expression drives; the joined
+        // expression's ON clause references the driver as `$$…`.
         // Nodes at the same depth as `a` (depth 1): a and b.
-        assert_eq!(run("//a <=> //*[:::depth = $*1:::depth]", &t), vec![1, 4]);
+        assert_eq!(run("//* <=> //a[:::depth = $$:::depth]", &t), vec![1, 4]);
         // All .rs files except the one `x.rs` names (join by name).
         assert_eq!(
-            run("//x.rs <=> //*.rs[:::name != $*1:::name]", &t),
+            run("//*.rs <=> //x.rs[:::name != $$:::name]", &t),
             vec![5, 7]
         );
-        // Chained: nodes whose depth matches a AND name matches x.rs.
+        // Chained: an unconstrained second entry binds its first
+        // candidate; the depth condition still filters the driver.
         assert_eq!(
-            run("//a <=> //x.rs <=> //*[:::depth = $*1:::depth]", &t),
+            run("//* <=> //a[:::depth = $$:::depth] <=> //x.rs", &t),
             vec![1, 4]
+        );
+        // A later entry may reference an earlier one's witness
+        // (`$*1`): x.rs sits at depth 2, the a-witness at depth 1,
+        // so no driver survives the second ON.
+        assert!(
+            run(
+                "//* <=> //a[:::depth = $$:::depth] <=> //x.rs[:::depth = $*1:::depth]",
+                &t
+            )
+            .is_empty()
         );
     }
 
@@ -5301,45 +5450,44 @@ mod tests {
     #[test]
     fn outer_correlation() {
         let t = MockTree::sample();
-        // Left context: /a's children (x.rs, y.txt). Rows: every
-        // .rs file. Only x.rs finds a same-named partner; the
+        // Rows: every .rs file (the driver). Joined: /a's children
+        // with a matching name. Only x.rs finds a partner; the
         // outer marker keeps the other rows with a null witness.
-        let q = "/a/* <=> ^//*.rs[:::name = $*1:::name]";
+        let q = "//*.rs <=> /a/*[:::name = $$:::name]";
         assert_eq!(run(q, &t), vec![2]);
-        let q = "/a/* <=>? ^//*.rs[:::name = $*1:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = $$:::name]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
         // The witness reads back: the partner's name, or null.
         assert_eq!(
-            vals("/a/* <=>? ^//*.rs[:::name = $*1:::name] | $*1:::name", &t),
+            vals("//*.rs <=>? /a/*[:::name = $$:::name] | $*1:::name", &t),
             vec![Value::Str("x.rs".into()), Value::Null, Value::Null]
         );
         // The anti-join: a pipeline filter is the WHERE clause,
         // evaluated under the capsa's witness (null-propagating),
         // so testing the null slot keeps only the unmatched rows.
-        let q = "/a/* <=>? ^//*.rs[:::name = $*1:::name] | [not $*1:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = $$:::name] | [not $*1:::name]";
         assert_eq!(run(q, &t), vec![5, 7]);
         // And the matched-only filter is its complement.
-        let q = "/a/* <=>? ^//*.rs[:::name = $*1:::name] | [$*1:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = $$:::name] | [$*1:::name]";
         assert_eq!(run(q, &t), vec![2]);
     }
 
     #[test]
     fn outer_correlation_indirect_ctx() {
         let t = MockTree::sample();
-        // A `$*k` reference reached *indirectly* — through a value
-        // match's arm, or a nested step predicate — must still be
-        // made vacuous under the outer join's null binding, exactly
-        // as a bare `$*1:::name` is (see `outer_correlation`).
-        // Otherwise the unmatched rows (z.rs, w.rs) are wrongly
-        // dropped, so semantically equivalent spellings diverge.
-        let q = "/a/* <=>? ^//*.rs[(:::name ?= $*1:::name ? 1 : 0) = 1]";
+        // A correlated reference reached *indirectly* — through a
+        // value match's arm, or a nested step predicate — is still
+        // part of the entry's ON clause, skipped under the outer
+        // join's null binding exactly as a bare one is. Otherwise
+        // the unmatched rows (z.rs, w.rs) are wrongly dropped, and
+        // semantically equivalent spellings diverge.
+        let q = "//*.rs <=>? /a/*[(:::name ?= $$:::name ? 1 : 0) = 1]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
-        // The same reference, this time buried in a nested step
-        // predicate (`$*1` inside the `/*` step's `[...]`) rather
-        // than a value match. The `.rs` rows are leaves, so no real
-        // binding admits any of them; only the null binding — made
-        // vacuous once the step predicate is walked — keeps them.
-        let q = "/a/* <=>? ^//*.rs[/*[$*1:::name = :::name]]";
+        // The same reference, buried in a nested step predicate
+        // (`$$` inside the `/*` step's `[...]`). /a's children are
+        // leaves, so no real binding admits any driver; only the
+        // null binding keeps them.
+        let q = "//*.rs <=>? /a/*[/*[$$:::name = :::name]]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
     }
 

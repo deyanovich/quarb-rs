@@ -45,8 +45,11 @@ fn mounts_are_named_children() {
 /// across two *formats* — as a correlation.
 #[test]
 fn cross_document_join() {
+    // Driver-first: the rows drive, each joined to its city (the
+    // ON clause reaching the driver as `$$`), and the witness's
+    // country projects in the pipeline.
     assert_eq!(
-        values(r#"//people/row <=> //cities/cities/*[/city:: = $*1::city]/country::"#),
+        values(r#"//people/row <=> //cities/cities/*[/city:: = $$::city] | $*1/country::"#),
         vec!["FR", "UK"]
     );
 }

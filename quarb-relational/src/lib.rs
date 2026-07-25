@@ -268,16 +268,18 @@ impl AstAdapter for RelationalModel {
                 let n = self.data(t).rows.len();
                 (0..n).map(|r| Self::row_node(t, r)).collect()
             }
-            // A row's children are its text-valued cells — one
-            // leaf per string column, so composition can graft a
-            // JSON string there and navigation can descend into
-            // it. Non-string columns stay properties only.
+            // A row's children are its cells — one leaf per
+            // column, mirroring dual exposure: every scalar field
+            // answers as a child node and as a property. (String
+            // cells additionally let composition graft a JSON
+            // document in place.) NULL cells stay properties only,
+            // as an absent child is how "no value" navigates.
             Some((t, Some(r))) => {
                 let Some(row) = self.data(t).rows.get(r) else {
                     return Vec::new();
                 };
                 (0..row.values.len())
-                    .filter(|&c| matches!(row.values[c], Value::Str(_)))
+                    .filter(|&c| !matches!(row.values[c], Value::Null))
                     .map(|c| Self::cell_node(t, r, c))
                     .collect()
             }
@@ -454,10 +456,12 @@ mod tests {
         let table = RelationalModel::table_node(0);
         let rows = m.children(table);
         assert_eq!(rows.len(), 2);
-        // A row's children are its text-valued cells only — `data`,
-        // not the integer `id`.
+        // A row's children are its cells — every non-null column,
+        // mirroring dual exposure (`id` and `data` both).
         let cells = m.children(rows[0]);
-        assert_eq!(cells.len(), 1);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(m.name(cells[0]).as_deref(), Some("id"));
+        let cells = cells[1..].to_vec();
         assert_eq!(m.name(cells[0]).as_deref(), Some("data"));
         // The cell carries its value through default_value (the
         // hook composition reads to graft), and is childless.

@@ -265,28 +265,53 @@ impl Parser<'_> {
                 self.parse_macro()?;
             }
         }
-        // A chain of expressions joined by `<=>`; all but the last
-        // become the final query's correlation contexts.
-        let mut exprs = vec![self.parse_query()?];
-        while matches!(self.peek(), Some(Token::Correlate)) {
-            self.pos += 1;
-            // `<=>?` — the outer marker flags the entry to its
-            // LEFT: that context may bind null.
-            if matches!(self.peek(), Some(Token::Question)) {
-                self.pos += 1;
-                if let Some(prev) = exprs.last_mut() {
-                    prev.outer = true;
-                }
-            }
-            exprs.push(self.parse_query()?);
-        }
+        let query = self.parse_chain()?;
         if let Some(tok) = self.peek() {
             return Err(QuarbError::Parse(format!(
                 "unexpected trailing input at token {tok:?}"
             )));
         }
-        let mut query = exprs.pop().unwrap();
-        query.correlations = exprs;
+        validate_correlation_refs(&query)?;
+        Ok(query)
+    }
+
+    /// A chain of expressions joined by `<=>`. The FIRST expression
+    /// drives (SQL's FROM); each subsequent one is a joined
+    /// expression whose correlated predicates — the ON clause —
+    /// reference the driver as `$$…` and earlier joined expressions
+    /// as `$*k`. Shared by top-level queries and `def` bodies (a
+    /// fragment may name a whole join).
+    fn parse_chain(&mut self) -> Result<Query> {
+        let mut query = self.parse_query()?;
+        while matches!(self.peek(), Some(Token::Correlate)) {
+            self.pos += 1;
+            // `<=>?` — the outer marker flags the expression it
+            // precedes: that context may bind null (LEFT JOIN).
+            let outer = if matches!(self.peek(), Some(Token::Question)) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            };
+            let mut entry = self.parse_query()?;
+            if !entry.correlations.is_empty() {
+                return Err(QuarbError::Parse(
+                    "a joined expression cannot itself carry a \
+                     correlation — chains are flat; splice a \
+                     chain-carrying fragment at driver position"
+                        .into(),
+                ));
+            }
+            entry.outer = outer;
+            query.correlations.push(entry);
+        }
+        // The pipeline written after the last joined expression is
+        // the driver's continuation (`A <=> B[on] | rec(...)` recs
+        // the driving thread); a pipeline on an earlier entry stays
+        // that entry's own pre-join shaping.
+        if let Some(last) = query.correlations.last_mut() {
+            query.pipeline.append(&mut last.pipeline);
+        }
         Ok(query)
     }
 
@@ -299,15 +324,18 @@ impl Parser<'_> {
         // if it stands alone, pipeline) splice in.
         let mut branches = Vec::new();
         let mut pipeline = Vec::new();
-        self.union_element(&mut branches, &mut pipeline)?;
+        let mut correlations = Vec::new();
+        self.union_element(&mut branches, &mut pipeline, &mut correlations)?;
         while matches!(self.peek(), Some(Token::PipePipe)) {
-            if !pipeline.is_empty() {
+            if !pipeline.is_empty() || !correlations.is_empty() {
                 return Err(QuarbError::Parse(
-                    "a fragment carrying a pipeline must stand alone, not in a union".into(),
+                    "a fragment carrying a pipeline or a correlation must \
+                     stand alone, not in a union"
+                        .into(),
                 ));
             }
             self.pos += 1;
-            self.union_element(&mut branches, &mut pipeline)?;
+            self.union_element(&mut branches, &mut pipeline, &mut correlations)?;
         }
 
         // Pipeline over the whole union. The entering mode is
@@ -324,7 +352,7 @@ impl Parser<'_> {
         }
         self.pipeline_items(&mut pipeline, mode)?;
         Ok(Query {
-            correlations: Vec::new(),
+            correlations,
             outer: false,
             branches,
             pipeline,
@@ -337,17 +365,21 @@ impl Parser<'_> {
         &mut self,
         branches: &mut Vec<Branch>,
         pipeline: &mut Vec<Stage>,
+        correlations: &mut Vec<Query>,
     ) -> Result<()> {
         if matches!(self.peek(), Some(Token::Amp)) {
             let alone = branches.is_empty();
             let q = self.invoke_query_fragment()?;
-            if !q.pipeline.is_empty() && !alone {
+            if (!q.pipeline.is_empty() || !q.correlations.is_empty()) && !alone {
                 return Err(QuarbError::Parse(
-                    "a fragment carrying a pipeline must stand alone, not in a union".into(),
+                    "a fragment carrying a pipeline or a correlation must \
+                     stand alone, not in a union"
+                        .into(),
                 ));
             }
             branches.extend(q.branches);
             pipeline.extend(q.pipeline);
+            correlations.extend(q.correlations);
             if matches!(self.peek(), Some(Token::LBracket)) {
                 return Err(QuarbError::Parse(
                     "a fragment does not take trailing predicates; \
@@ -560,9 +592,16 @@ impl Parser<'_> {
                     args: vec![arg],
                 }))
             }
-            // `| %.` — the named register view, as a record.
+            // `| %.` — the named register view, as a record;
+            // `| %%.` — the full view, anonymous regulae included
+            // under their positions.
             Some(Token::Percent) => {
                 self.pos += 1;
+                if matches!(self.peek(), Some(Token::Percent)) {
+                    self.pos += 1;
+                    self.expect_dot()?;
+                    return Ok(Stage::Recall(RegRef::FullRecord));
+                }
                 self.expect_dot()?;
                 Ok(Stage::Recall(RegRef::Record))
             }
@@ -615,7 +654,10 @@ impl Parser<'_> {
                         });
                     }
                     self.pos = save;
-                    let expr = self.additive()?;
+                    // The push's own parentheses delimit the body, so
+                    // a conditional needs no second pair:
+                    // `.born(::quarter ? … : …)`.
+                    let expr = self.cond_expr()?;
                     self.expect(Token::RParen, "')' to close a subcontext")?;
                     Ok(Stage::ExprPush { name, expr })
                 } else {
@@ -847,7 +889,8 @@ impl Parser<'_> {
 
         self.def_params = params.clone();
         // A body starting with a pipe is a pipeline fragment; anything
-        // else is a navigation query (which may carry a pipeline).
+        // else is a navigation query (which may carry a pipeline, and
+        // may be a correlation chain).
         let body = if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
             let mut stages = Vec::new();
             // A fragment body's splice-time mode is unknowable at
@@ -861,7 +904,28 @@ impl Parser<'_> {
             }
             DefBody::Pipeline(stages)
         } else {
-            DefBody::Query(self.parse_query()?)
+            // A stage-shaped body without its pipe is the classic
+            // slip — point at the spelling instead of the grammar.
+            if matches!(self.peek(),
+                Some(Token::Name { text, quoted: false, .. }) if text.starts_with('.'))
+                && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' body looks like a pipeline stage; \
+                     a pipeline fragment starts with its pipe: \
+                     'def &{name}: | .push(...) ;'"
+                )));
+            }
+            // Placement of correlated references is checked at the
+            // splice site, where the join's shape is known — not
+            // here.
+            DefBody::Query(self.parse_chain().map_err(|e| {
+                QuarbError::Parse(format!(
+                    "in fragment '&{name}' body: {e} (a pipeline \
+                     fragment's body starts with its pipe: \
+                     'def &{name}: | ...')"
+                ))
+            })?)
         };
         self.def_params.clear();
         self.expect(Token::Semi, "';' to end the definition")?;
@@ -1128,7 +1192,9 @@ impl Parser<'_> {
             self.pos += 1;
             if !matches!(self.peek(), Some(Token::RParen)) {
                 loop {
-                    args.push(self.additive()?);
+                    // Same relaxation as function arguments: a
+                    // conditional argument stands bare.
+                    args.push(self.cond_expr()?);
                     if matches!(self.peek(), Some(Token::Comma)) {
                         self.pos += 1;
                     } else {
@@ -1513,7 +1579,10 @@ impl Parser<'_> {
                 return Ok(Arg::Range(start, end));
             }
         }
-        match self.additive()? {
+        // Function parentheses already delimit each argument, so a
+        // conditional argument needs no second pair:
+        // `rec("age", ::Age ? ::Age * 1 : 1912 - $.born)`.
+        match self.cond_expr()? {
             Operand::Lit(v) => Ok(Arg::Lit(v)),
             expr => Ok(Arg::Expr(expr)),
         }
@@ -2188,9 +2257,22 @@ impl Parser<'_> {
             let mut stages = Vec::new();
             loop {
                 match self.peek() {
+                    Some(Token::Pipe)
+                        if matches!(self.toks.get(self.pos + 1), Some(Token::Amp)) =>
+                    {
+                        self.pos += 1;
+                        self.invoke_inline_fragment("|", &mut stages)?;
+                    }
                     Some(Token::Pipe) => {
                         self.pos += 1;
                         stages.push(self.inline_stage()?);
+                    }
+                    Some(Token::At)
+                        if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe))
+                            && matches!(self.toks.get(self.pos + 2), Some(Token::Amp)) =>
+                    {
+                        self.pos += 2;
+                        self.invoke_inline_fragment("@|", &mut stages)?;
                     }
                     Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                         self.pos += 2;
@@ -2286,6 +2368,33 @@ impl Parser<'_> {
             PredExpr::Truthy(op) => op,
             other => Operand::Group(Box::new(other)),
         })
+    }
+
+    /// A fragment invocation inside an inline pipe: splice its
+    /// stages, holding them to the inline rules — a pipe inside an
+    /// expression transforms a value, so a spliced stage may not
+    /// push or navigate.
+    fn invoke_inline_fragment(
+        &mut self,
+        pipe: &'static str,
+        stages: &mut Vec<Stage>,
+    ) -> Result<()> {
+        let before = stages.len();
+        self.invoke_pipeline_fragment(pipe, stages)?;
+        for stage in &stages[before..] {
+            if matches!(
+                stage,
+                Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } | Stage::Nav(_)
+            ) {
+                return Err(QuarbError::Parse(
+                    "a fragment spliced inside an expression pipe may \
+                     not push or navigate (pushes belong to real \
+                     capsae; use it as a pipeline stage instead)"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// One `| ...` stage of an inline pipe. The pipeline's own
@@ -2437,18 +2546,52 @@ impl Parser<'_> {
             self.pos += 1;
             depth += 1;
         }
-        let inner = self.operand()?;
+        // `$$::prop`, `$$:::name`, `$$/child::x` — the node form:
+        // the final `$` is the spelling's last dollar, and what
+        // follows is a relative path/projection read from the
+        // invoking capsa's node.
+        let inner = if matches!(self.peek(), Some(Token::Dollar))
+            && matches!(
+                self.toks.get(self.pos + 1),
+                Some(
+                    Token::ColonColon
+                        | Token::ColonColonColon
+                        | Token::SemiSemiSemi
+                        | Token::Slash
+                        | Token::SlashSlash
+                )
+            ) {
+            self.pos += 1;
+            let mut steps = Vec::new();
+            while matches!(self.peek(), Some(Token::Slash | Token::SlashSlash)) {
+                steps.push(self.path_elem()?);
+            }
+            let projection = self.projection()?;
+            Operand::Rel {
+                steps,
+                projection,
+                anchor: Anchor::Current,
+            }
+        } else {
+            self.operand()?
+        };
         match inner {
             Operand::Recall(_) | Operand::Topic | Operand::Ordinal | Operand::Capture(_) => {}
+            // `$$::prop`, `$$/child::x` — the invoking capsa's NODE,
+            // navigated and projected like any relative path. This is
+            // how a joined expression's ON clause reaches the driver
+            // (`A <=> B[::uid = $$::id]`), and how a subcontext body
+            // reaches the capsa it serves.
+            Operand::Rel { .. } => {}
             Operand::Ctx { .. } => {
                 return Err(QuarbError::Parse(
-                    "the context-history accessor '$$*' is reserved (unbuilt);                      '$$' steps a capsa-scope operand out one level                      ($$.name, $$_, $$ord)"
+                    "the context-history accessor '$$*' is reserved (unbuilt);                      '$$' steps a capsa-scope operand out one level                      ($$.name, $$_, $$ord, $$::prop)"
                         .into(),
                 ));
             }
             _ => {
                 return Err(QuarbError::Parse(
-                    "'$$' takes a capsa-scope operand ($$.name, $$_, $$ord, $$1)".into(),
+                    "'$$' takes a capsa-scope operand ($$.name, $$_, $$ord, $$1, $$::prop)".into(),
                 ));
             }
         }
@@ -3212,19 +3355,44 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             "{what} needs at least one field, e.g. {what}(::name)"
         )));
     }
+    // Field names are fully static — literals or auto-named
+    // projections — so a collision is a parse error, never a
+    // record with duplicate keys.
+    let mut names: Vec<String> = Vec::new();
+    let mut check = |name: &str| -> Result<()> {
+        if names.iter().any(|n| n == name) {
+            return Err(QuarbError::Parse(format!(
+                "{what} names the field '{name}' twice — name one \
+                 explicitly: {what}(\"other-{name}\", ...)"
+            )));
+        }
+        names.push(name.to_string());
+        Ok(())
+    };
     let mut i = 0;
     while i < call.args.len() {
         match &call.args[i] {
             // A literal string names the following argument.
-            Arg::Lit(Value::Str(_)) => {
+            Arg::Lit(Value::Str(name)) => {
                 if i + 1 >= call.args.len() {
                     return Err(QuarbError::Parse(format!(
                         "{what} has a trailing field name with no value"
                     )));
                 }
+                check(name)?;
                 i += 2;
             }
-            Arg::Expr(e) if crate::ast::auto_field_name(e).is_some() => i += 1,
+            Arg::Expr(e) => {
+                let Some(name) = crate::ast::auto_field_name(e) else {
+                    return Err(QuarbError::Parse(format!(
+                        "a {what} field needs a name: precede a computed value with a \
+                         literal, e.g. {what}(\"total\", ::price * ::qty)"
+                    )));
+                };
+                let name = name.to_string();
+                check(&name)?;
+                i += 1;
+            }
             _ => {
                 return Err(QuarbError::Parse(format!(
                     "a {what} field needs a name: precede a computed value with a \
@@ -3573,6 +3741,304 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
     }
 }
 
+/// The largest `$*k` index mentioned under an AST piece — 0 when
+/// none. Backs the driver-first placement rules: correlated
+/// references live on a joined expression's final step (its ON
+/// clause) and in the driver's pipeline, nowhere else.
+fn max_ctx_query(q: &Query) -> usize {
+    q.correlations
+        .iter()
+        .map(max_ctx_query)
+        .chain(q.branches.iter().flat_map(|b| b.steps.iter().map(max_ctx_elem)))
+        .chain(q.pipeline.iter().map(max_ctx_stage))
+        .max()
+        .unwrap_or(0)
+}
+
+fn max_ctx_elem(elem: &PathElem) -> usize {
+    match elem {
+        PathElem::Mark(_) => 0,
+        PathElem::Step(s) => max_ctx_step(s),
+        PathElem::Group(g) => g
+            .alts
+            .iter()
+            .flat_map(|alt| alt.iter().map(max_ctx_elem))
+            .chain(g.predicates.iter().map(max_ctx_pred))
+            .max()
+            .unwrap_or(0),
+        PathElem::Push { body, .. } => match body {
+            PushBody::Query(q) => max_ctx_query(q),
+            PushBody::Expr(e) => max_ctx_operand(e),
+        },
+    }
+}
+
+fn max_ctx_step(s: &Step) -> usize {
+    s.predicates.iter().map(max_ctx_pred).max().unwrap_or(0)
+}
+
+fn max_ctx_pred(p: &Predicate) -> usize {
+    match p {
+        Predicate::Expr(e) => max_ctx_pred_expr(e),
+        Predicate::Index(_) | Predicate::Range(_, _) => 0,
+    }
+}
+
+pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
+    match e {
+        PredExpr::Or(a, b) | PredExpr::And(a, b) => max_ctx_pred_expr(a).max(max_ctx_pred_expr(b)),
+        PredExpr::Not(a) => max_ctx_pred_expr(a),
+        PredExpr::Compare(l, _, r) => max_ctx_operand(l).max(max_ctx_operand(r)),
+        PredExpr::Truthy(o) => max_ctx_operand(o),
+    }
+}
+
+fn max_ctx_stage(st: &Stage) -> usize {
+    match st {
+        Stage::Func(call) | Stage::Agg(call) => call
+            .args
+            .iter()
+            .map(|a| match a {
+                Arg::Expr(e) => max_ctx_operand(e),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0),
+        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => max_ctx_operand(e),
+        Stage::Nav(b) => b.steps.iter().map(max_ctx_elem).max().unwrap_or(0),
+        Stage::Subcontext { body, .. } => max_ctx_query(body),
+        Stage::Filter(e) => max_ctx_pred_expr(e),
+        Stage::Select(p) => max_ctx_pred(p),
+        Stage::Map(inner) => max_ctx_stage(inner),
+        Stage::Push(_) | Stage::Recall(_) | Stage::Spread { .. } => 0,
+    }
+}
+
+fn max_ctx_operand(o: &Operand) -> usize {
+    match o {
+        Operand::Ctx { index, steps, .. } => index
+            .unwrap_or(0)
+            .max(steps.iter().map(max_ctx_elem).max().unwrap_or(0)),
+        Operand::Rel { steps, .. } => steps.iter().map(max_ctx_elem).max().unwrap_or(0),
+        Operand::Arith { left, right, .. } => max_ctx_operand(left).max(max_ctx_operand(right)),
+        Operand::Neg(inner) | Operand::Outer(inner) => max_ctx_operand(inner),
+        Operand::Group(e) => max_ctx_pred_expr(e),
+        Operand::Piped { expr, stages } => max_ctx_operand(expr)
+            .max(stages.iter().map(max_ctx_stage).max().unwrap_or(0)),
+        Operand::Cond { cond, then, other } => max_ctx_pred_expr(cond)
+            .max(max_ctx_operand(then))
+            .max(max_ctx_operand(other)),
+        Operand::Match {
+            scrutinee,
+            arms,
+            other,
+        } => max_ctx_operand(scrutinee)
+            .max(
+                arms.iter()
+                    .map(|(t, _, r)| max_ctx_operand(t).max(max_ctx_operand(r)))
+                    .max()
+                    .unwrap_or(0),
+            )
+            .max(max_ctx_operand(other)),
+        Operand::Interp(segs) => segs
+            .iter()
+            .map(|seg| match seg {
+                InterpSeg::Expr(e) => max_ctx_operand(e),
+                InterpSeg::Text(_) => 0,
+            })
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Enforce the driver-first placement of correlated references:
+/// the first expression drives and cannot mention `$*k`; each
+/// joined expression's ON clause (its final step's brackets) may
+/// reference strictly earlier entries (and the driver as `$$…`);
+/// the driver's pipeline reads any witness back.
+fn validate_correlation_refs(q: &Query) -> Result<()> {
+    let n = q.correlations.len();
+    for b in &q.branches {
+        for elem in &b.steps {
+            if max_ctx_elem(elem) > 0 {
+                return Err(QuarbError::Parse(
+                    "the first expression drives the join and cannot \
+                     reference '$*k'; join conditions belong on the \
+                     joined expression: 'A <=> B[::x = $$::x]'"
+                        .into(),
+                ));
+            }
+        }
+    }
+    for st in &q.pipeline {
+        let m = max_ctx_stage(st);
+        if m > n {
+            return Err(QuarbError::Parse(format!(
+                "the pipeline references '$*{m}', but only {n} \
+                 expression(s) are joined"
+            )));
+        }
+    }
+    for (i, entry) in q.correlations.iter().enumerate() {
+        let k = i + 1;
+        for b in &entry.branches {
+            let last = b.steps.len().saturating_sub(1);
+            for (j, elem) in b.steps.iter().enumerate() {
+                let m = max_ctx_elem(elem);
+                if m == 0 && !elem_mentions_outer(elem) {
+                    continue;
+                }
+                if j != last || !matches!(elem, PathElem::Step(_)) {
+                    return Err(QuarbError::Parse(
+                        "join conditions belong in the joined \
+                         expression's final step's brackets"
+                            .into(),
+                    ));
+                }
+                if m >= k {
+                    return Err(QuarbError::Parse(format!(
+                        "joined expression #{k} references '$*{m}'; it may \
+                         only reference expressions joined before it \
+                         ('$*1'..'$*{}') — the driver is '$$'",
+                        k - 1
+                    )));
+                }
+            }
+            // A positional predicate after a correlated one would
+            // select before the join takes effect — ambiguous.
+            if let Some(PathElem::Step(s)) = b.steps.last() {
+                let mut seen_corr = false;
+                for p in &s.predicates {
+                    match p {
+                        Predicate::Expr(e)
+                            if max_ctx_pred_expr(e) > 0 || pred_mentions_outer(e) =>
+                        {
+                            seen_corr = true;
+                        }
+                        Predicate::Index(_) | Predicate::Range(_, _) if seen_corr => {
+                            return Err(QuarbError::Parse(
+                                "positional selection after a join condition \
+                                 is ambiguous — select before the join \
+                                 condition, or in the pipeline"
+                                    .into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for st in &entry.pipeline {
+            if max_ctx_stage(st) > 0 {
+                return Err(QuarbError::Parse(
+                    "a joined expression's own pipeline shapes its context \
+                     before the join and cannot reference '$*k'; join \
+                     conditions belong in its final step's brackets"
+                        .into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a predicate expression mentions the invoking capsa
+/// (`$$…`) anywhere — the other half of an ON clause.
+pub(crate) fn pred_mentions_outer(e: &PredExpr) -> bool {
+    match e {
+        PredExpr::Or(a, b) | PredExpr::And(a, b) => {
+            pred_mentions_outer(a) || pred_mentions_outer(b)
+        }
+        PredExpr::Not(a) => pred_mentions_outer(a),
+        PredExpr::Compare(l, _, r) => op_mentions_outer(l) || op_mentions_outer(r),
+        PredExpr::Truthy(o) => op_mentions_outer(o),
+    }
+}
+
+fn op_mentions_outer(o: &Operand) -> bool {
+    match o {
+        Operand::Outer(_) => true,
+        Operand::Ctx { steps, .. } | Operand::Rel { steps, .. } => {
+            steps.iter().any(elem_mentions_outer)
+        }
+        Operand::Arith { left, right, .. } => {
+            op_mentions_outer(left) || op_mentions_outer(right)
+        }
+        Operand::Neg(inner) => op_mentions_outer(inner),
+        Operand::Group(e) => pred_mentions_outer(e),
+        Operand::Piped { expr, stages } => {
+            op_mentions_outer(expr) || stages.iter().any(stage_mentions_outer)
+        }
+        Operand::Cond { cond, then, other } => {
+            pred_mentions_outer(cond)
+                || op_mentions_outer(then)
+                || op_mentions_outer(other)
+        }
+        Operand::Match {
+            scrutinee,
+            arms,
+            other,
+        } => {
+            op_mentions_outer(scrutinee)
+                || arms
+                    .iter()
+                    .any(|(t, _, r)| op_mentions_outer(t) || op_mentions_outer(r))
+                || op_mentions_outer(other)
+        }
+        Operand::Interp(segs) => segs.iter().any(|seg| match seg {
+            InterpSeg::Expr(e) => op_mentions_outer(e),
+            InterpSeg::Text(_) => false,
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn elem_mentions_outer(e: &PathElem) -> bool {
+    match e {
+        PathElem::Mark(_) => false,
+        PathElem::Step(s) => s.predicates.iter().any(|p| match p {
+            Predicate::Expr(e) => pred_mentions_outer(e),
+            _ => false,
+        }),
+        PathElem::Group(g) => {
+            g.alts.iter().any(|alt| alt.iter().any(elem_mentions_outer))
+                || g.predicates.iter().any(|p| match p {
+                    Predicate::Expr(e) => pred_mentions_outer(e),
+                    _ => false,
+                })
+        }
+        PathElem::Push { body, .. } => match body {
+            PushBody::Query(q) => query_mentions_outer(q),
+            PushBody::Expr(e) => op_mentions_outer(e),
+        },
+    }
+}
+
+fn stage_mentions_outer(st: &Stage) -> bool {
+    match st {
+        Stage::Func(call) | Stage::Agg(call) => call.args.iter().any(|a| match a {
+            Arg::Expr(e) => op_mentions_outer(e),
+            _ => false,
+        }),
+        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => op_mentions_outer(e),
+        Stage::Nav(b) => b.steps.iter().any(elem_mentions_outer),
+        Stage::Subcontext { body, .. } => query_mentions_outer(body),
+        Stage::Filter(e) => pred_mentions_outer(e),
+        Stage::Select(Predicate::Expr(e)) => pred_mentions_outer(e),
+        Stage::Map(inner) => stage_mentions_outer(inner),
+        _ => false,
+    }
+}
+
+fn query_mentions_outer(q: &Query) -> bool {
+    q.branches
+        .iter()
+        .any(|b| b.steps.iter().any(elem_mentions_outer))
+        || q.pipeline.iter().any(stage_mentions_outer)
+        || q.correlations.iter().any(query_mentions_outer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3604,6 +4070,144 @@ mod tests {
         // A modest algebra still normalizes.
         let toks = lexer::lex("//*<(a&&b)||(c&&d)>").unwrap();
         assert!(parse(&toks).is_ok());
+    }
+
+    #[test]
+    fn record_field_names_must_be_unique() {
+        for q in [
+            "/r/* | rec(::name, ::name)",
+            "/r/* | rec(\"a\", ::x, \"a\", ::y)",
+            "/r/* | rec(\"name\", ::x, ::name)",
+            "/r/* @| group(::k, ::k) | count",
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            let err = parse(&toks).expect_err(q).to_string();
+            assert!(err.contains("twice"), "{q}: {err}");
+        }
+        // Distinct names stay fine, literal or auto-named.
+        let toks = lexer::lex("/r/* | rec(::name, \"other\", ::name)").unwrap();
+        assert!(parse(&toks).is_ok());
+    }
+
+    #[test]
+    fn fragment_bodies_cover_chains_and_inline_pipes() {
+        // A def may name a whole correlation; invoking it stands
+        // alone, takes a pipe tail, and extends with further
+        // entries.
+        for q in [
+            "def &j: /a/* <=> /b/*[::x = $$::x]; &j @| count",
+            "def &j: /a/* <=> /b/*[::x = $$::x]; &j | [not $*1::x]",
+            "def &j: /a/* <=> /b/*[::x = $$::x]; &j <=> /c/*[::y = $*1::y]",
+            // pipeline fragments splice inside inline pipes
+            "def &g: | trim | upper; /r/* | .u((::name | &g))",
+            "def &g2: | tp(\"%Y-%m-%d\") | ($_ + 12d); /r/* | .d((::when | &g2))",
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            assert!(parse(&toks).is_ok(), "should parse: {q}");
+        }
+        for (q, needle) in [
+            // an entry cannot itself carry a correlation
+            (
+                "def &j: /a/* <=> /b/*[::x = $$::x]; /d/* <=> &j",
+                "chains are flat",
+            ),
+            // a chain fragment cannot join a union
+            (
+                "def &j: /a/* <=> /b/*[::x = $$::x]; /d/* || &j",
+                "stand alone",
+            ),
+            // a stage-shaped def body points at the leading pipe
+            ("def &p: .x(::a); /r/*", "starts with its pipe"),
+            // spliced pushes stay out of inline pipes
+            (
+                "def &p: | .x(::a); /r/* | .u((::name | &p))",
+                "may not push or navigate",
+            ),
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            let err = parse(&toks).expect_err(q).to_string();
+            assert!(err.contains(needle), "{q}: {err}");
+        }
+    }
+
+    #[test]
+    fn full_register_view_and_numeric_push_names() {
+        // `%%.` parses as its own recall; `%.` stays itself — and
+        // numeric push names stay legal (the pivot macro writes
+        // data-valued column names like `.1(...)`); `%%.` keys
+        // anonymous slots `#N`, which no push name can spell.
+        for q in [
+            "/r/* | .(::a) | %%.",
+            "/r/* | .x(::a) | %. | %%.",
+            "/r/* | .1(::a) | %.",
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            assert!(parse(&toks).is_ok(), "should parse: {q}");
+        }
+    }
+
+    #[test]
+    fn driver_first_placement_rules() {
+        // Legal: ON on the joined expression ($$ = driver, $*k =
+        // earlier entries), witnesses read back in the pipeline.
+        for q in [
+            "/a/* <=> /b/*[::x = $$::x]",
+            "/a/* <=>? /b/*[::x = $$::x] | [not $*1::x]",
+            "/a/* <=> /b/*[::x = $$::x] <=> /c/*[::y = $*1::y] | rec($*1::n, $*2::m)",
+            "/a/* <=> /b/*[$$/kid::x = ::x]",
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            assert!(parse(&toks).is_ok(), "should parse: {q}");
+        }
+        // The driver cannot reference the join from its own steps.
+        for (q, needle) in [
+            ("/a/*[::x = $*1::x] <=> /b/*", "first expression drives"),
+            // A joined expression cannot reference itself or later
+            // entries.
+            ("/a/* <=> /b/*[::x = $*1::x]", "joined expression #1"),
+            ("/a/* <=> /b/*[::x = $*2::x] <=> /c/*", "joined expression #1"),
+            // The pipeline cannot outrun the join count.
+            ("/a/* <=> /b/* | rec($*2::n)", "only 1 expression"),
+            // Join conditions sit on the final step.
+            ("/a/* <=> /b[$$::x]/c/*", "final step"),
+            // Positional selection after an ON clause is ambiguous.
+            (
+                "/a/* <=> /b/*[::x = $$::x][1]",
+                "positional selection after a join condition",
+            ),
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            let err = parse(&toks).expect_err(q).to_string();
+            assert!(err.contains(needle), "{q}: {err}");
+        }
+    }
+
+    #[test]
+    fn bare_conditionals_in_delimited_positions() {
+        // A push body, a function argument, and a fragment argument
+        // are already parenthesized — a conditional inside them
+        // needs no second pair.
+        for q in [
+            // push body: plain conditional, chained ladder, value match
+            "/r/* | .born(::quarter ? 1890 : 0)",
+            "/r/* | .born(::a ? 1 : ::b ? 2 : 3)",
+            "/r/* | .port(::e ?= \"C\" ? 1 : \"Q\" ? 2 : 0)",
+            // a path-existence condition
+            "/r/* | .kind(/em ? \"has\" : \"none\")",
+            // a pipe-tail branch inside the bare conditional
+            "/r/* | .y(::quarter ? (::quarter | s/ Q.*$//) * 1 : 0)",
+            // function arguments: rec named field, group key
+            "/r/* | rec(\"age\", ::Age ? ::Age * 1 : 0)",
+            "/r/* @| group(\"src\", ::Age ? \"manifest\" : \"records\") | count",
+            // fragment argument
+            "def &f($x): /r/*[::a = $x]; &f(::b ? 1 : 2)",
+            // the old double-parens spelling must keep parsing
+            "/r/* | .born((::quarter ? 1890 : 0))",
+            "/r/* | rec(\"age\", (( ::Age ? 1 : 0 )))",
+        ] {
+            let toks = lexer::lex(q).unwrap();
+            assert!(parse(&toks).is_ok(), "should parse: {q}");
+        }
     }
 
     #[test]

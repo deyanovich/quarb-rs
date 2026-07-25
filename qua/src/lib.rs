@@ -334,7 +334,8 @@ pub fn cli_main() -> anyhow::Result<()> {
 
     // A --defs file holds definitions only; validate it as such,
     // then let its statements precede the query, where inline defs
-    // (and duplicate detection) already work.
+    // (and duplicate detection) already work. Prepended stripped of
+    // `#` comment lines — the query lexer has no comment syntax.
     if let Some(defs_path) = &cli.defs {
         let text = std::fs::read_to_string(defs_path)
             .with_context(|| format!("reading {}", defs_path.display()))?;
@@ -342,7 +343,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
         quarb::parse_defs(&text)
             .with_context(|| format!("parsing definitions in {}", defs_path.display()))?;
-        cli.query = format!("{text}\n{}", cli.query);
+        cli.query = format!("{}\n{}", quarb::strip_defs_comments(&text), cli.query);
     }
 
     // --expand: print the fragment-expanded canonical query and

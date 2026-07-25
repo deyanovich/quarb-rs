@@ -80,6 +80,35 @@ def test_kernel_directives_and_errors(kernel):
     assert status == "ok"
 
 
+def test_kernel_cross_cell_defs(kernel, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("kdefs")
+    (tmp / "crew.json").write_text(
+        '{"crew": [{"name": "Ada", "born": "1881-12-25"}]}'
+    )
+    run_cell(kernel, f"%mount {tmp / 'crew.json'}")
+    # A defs-only cell extends the fragment table, with comments.
+    status, out = run_cell(
+        kernel,
+        "# Julian to Gregorian, 1900-1917\n"
+        "def &gregorian: | tp('%Y-%m-%d') | $_ + '12d';",
+    )
+    assert status == "ok"
+    streams = [o for o in out if o["msg_type"] == "stream"]
+    assert streams and "&gregorian" in streams[0]["content"]["text"]
+    # A later cell resolves the name.
+    convert = '/crew/* | rec(::name, "g", (::born | &gregorian))'
+    status, out = run_cell(kernel, convert)
+    assert status == "ok"
+    result = [o for o in out if o["msg_type"] == "execute_result"]
+    # The fragment's tp() yields a typed instant: a datetime repr.
+    assert result and "1882, 1, 6" in result[0]["content"]["data"]["text/plain"]
+    # A malformed defs cell leaves the table untouched.
+    status, _ = run_cell(kernel, "def &broken: ;")
+    assert status == "error"
+    status, out = run_cell(kernel, convert)
+    assert status == "ok"
+
+
 def test_kernel_completion(kernel, tmp_path_factory):
     import json as _json
     tmp = tmp_path_factory.mktemp("kc")

@@ -69,7 +69,7 @@ def test_mount_cross_source_join(tmp_path):
     d = quarb.mount([str(tmp_path / "fleet.yaml"), str(db)])
     assert d.values("/*") == ["/fleet", "/cmdb"]
     rows = d.records(
-        "/fleet/hosts/* <=> /cmdb/hosts/*[::name = $*1/name::] "
+        "/cmdb/hosts/* <=> /fleet/hosts/*[/name:: = $$::name] "
         "| rec('host', $*1/name::, 'owner', ::owner)"
     )
     assert rows == [
