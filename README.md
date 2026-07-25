@@ -51,7 +51,9 @@ PostgreSQL).
 
 **Graph** — [`quarb-neo4j`](quarb-neo4j/),
 [`quarb-kuzu`](quarb-kuzu/) (embedded, file-based — the DuckDB
-of graphs; behind qua's opt-in `kuzu` feature),
+of graphs; behind qua's opt-in `kuzu` feature — see that
+feature's note in `qua/Cargo.toml` for the two linker
+workarounds it currently needs),
 [`quarb-neptune`](quarb-neptune/) (openCypher over SigV4),
 [`quarb-memgraph`](quarb-memgraph/) (Bolt),
 [`quarb-falkordb`](quarb-falkordb/) (Cypher over the Redis

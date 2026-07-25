@@ -59,6 +59,7 @@ enum Doc {
     Xlsx(quarb_xlsx::XlsxAdapter),
     Code(quarb_code::CodeAdapter),
     Mount(quarb_mount::MountAdapter),
+    Remote(Dyn),
 }
 
 /// A name-path locator built from the adapter trait alone
@@ -133,6 +134,7 @@ impl Doc {
             Doc::Xlsx(a) => go!(a),
             Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
+            Doc::Remote(a) => go!(a),
         }
     }
 
@@ -153,7 +155,144 @@ impl Doc {
             Doc::Xlsx(a) => a.locator(node),
             Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
+            Doc::Remote(a) => generic_locator(a, node),
         }
+    }
+}
+
+
+/// A boxed adapter behind the one trait — the remote targets'
+/// uniform carrier (no Box blanket impl exists upstream).
+struct Dyn(Box<dyn AstAdapter>);
+
+impl AstAdapter for Dyn {
+    fn root(&self) -> NodeId {
+        self.0.root()
+    }
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        self.0.children(node)
+    }
+    fn name(&self, node: NodeId) -> Option<String> {
+        self.0.name(node)
+    }
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.0.parent(node)
+    }
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        self.0.traits(node)
+    }
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        self.0.property(node, name)
+    }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.0.children_named(node, name)
+    }
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        self.0.default_value(node)
+    }
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        self.0.metadata(node, key)
+    }
+    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.0.links(node)
+    }
+    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.0.backlinks(node)
+    }
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        self.0.resolve(node, property, hint)
+    }
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<Value> {
+        self.0.link_property(source, label, target, name)
+    }
+    fn quantifier_bound(&self) -> usize {
+        self.0.quantifier_bound()
+    }
+    fn invocation_instant(&self) -> Option<(i64, u32)> {
+        self.0.invocation_instant()
+    }
+    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
+        self.0.unit_scale(expr)
+    }
+}
+
+/// Open a remote (scheme-prefixed) target, mirroring the qua
+/// CLI's dispatch for every adapter the Python package bundles.
+/// Deliberately absent: DuckDB / Kuzu / Oracle / MySQL / SQL
+/// Server / MongoDB (heavy builds or client libraries — the
+/// `quarb-full` package ships the complete CLI), and Athena /
+/// BigQuery (bytes-billed services belong behind the CLI's
+/// pushdown, not a scanning library).
+fn open_remote(s: &str) -> Option<Result<Doc, String>> {
+    use std::rc::Rc;
+    macro_rules! arm {
+        ($e:expr) => {
+            Some(
+                $e.map(|a| Doc::Remote(Dyn(Box::new(quarb_mount::Shared(Rc::new(a))))))
+                    .map_err(|e| e.to_string()),
+            )
+        };
+    }
+    if s.starts_with("neo4j://") {
+        arm!(quarb_neo4j::Neo4jAdapter::connect(s))
+    } else if s.starts_with("neptune://") {
+        arm!(quarb_neptune::NeptuneAdapter::connect(s))
+    } else if s.starts_with("arango://") {
+        arm!(quarb_arangodb::ArangoAdapter::connect(s))
+    } else if s.starts_with("sparql:") {
+        arm!(quarb_sparql::SparqlAdapter::connect(s))
+    } else if s.starts_with("dynamodb:") {
+        arm!(quarb_dynamodb::DynamodbAdapter::connect(s))
+    } else if s.starts_with("cosmos://") {
+        arm!(quarb_cosmos::CosmosAdapter::connect(s))
+    } else if s.starts_with("redis://") || s.starts_with("rediss://") {
+        arm!(quarb_redis::RedisAdapter::connect(s))
+    } else if s.starts_with("falkor://") || s.starts_with("falkors://") {
+        arm!(quarb_falkordb::FalkorAdapter::connect(s))
+    } else if s.starts_with("memgraph://") {
+        arm!(quarb_memgraph::MemgraphAdapter::connect(s))
+    } else if s.starts_with("age://") {
+        arm!(quarb_age::AgeAdapter::connect(s))
+    } else if s.starts_with("kafka://") || s.starts_with("kafka:") {
+        arm!(quarb_kafka::KafkaAdapter::connect(s))
+    } else if s.starts_with("postgres://") || s.starts_with("postgresql://") {
+        arm!(quarb_postgres::PostgresAdapter::connect(s))
+    } else if s.starts_with("ldap://") || s.starts_with("ldaps://") {
+        arm!(quarb_ldap::LdapAdapter::connect(s))
+    } else if s.starts_with("firestore://") {
+        arm!(quarb_firestore::FirestoreAdapter::connect(s))
+    } else if s.starts_with("firebase://") {
+        arm!(quarb_firebase::FirebaseAdapter::connect(s))
+    } else if s.starts_with("datastore://") {
+        arm!(quarb_datastore::DatastoreAdapter::connect(s))
+    } else if s.starts_with("gsheet://") {
+        arm!(quarb_gsheet::GsheetAdapter::connect(s))
+    } else if s.starts_with("github:") {
+        arm!(quarb_github::GithubAdapter::connect(s))
+    } else if s.starts_with("gitlab:") {
+        arm!(quarb_gitlab::GitlabAdapter::connect(s))
+    } else if s.starts_with("k8s:") || s.starts_with("kubernetes:") {
+        arm!(quarb_kubernetes::KubernetesAdapter::connect(s))
+    } else if s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://") {
+        arm!(quarb_objstore::ObjstoreAdapter::connect(s)
+            .map(|a| quarb_compose::ComposeAdapter::new(a)))
+    } else if let Some(vault) = s
+        .strip_prefix("metatheca:")
+        .or_else(|| s.strip_prefix("mt:"))
+    {
+        arm!(quarb_metatheca::MetathecaAdapter::open(Path::new(vault)))
+    } else if let Some(mb) = s.strip_prefix("mail:") {
+        arm!(quarb_maildir::MaildirAdapter::open(Path::new(mb)))
+    } else if let Some(cmd) = s.strip_prefix("serve:") {
+        arm!(quarb_serve::ServeAdapter::spawn(cmd))
+    } else {
+        None
     }
 }
 
@@ -176,6 +315,7 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
             Doc::Xlsx(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Code(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Mount(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Remote(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
         })
     };
     // Reuse open()'s kind-dispatch (it reads/parses), then box the
@@ -505,6 +645,10 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 #[pyo3(signature = (path, descend=false))]
 fn open(path: &str, descend: bool) -> PyResult<Document> {
     let err = |e: String| PyValueError::new_err(e);
+    if let Some(remote) = open_remote(path) {
+        let doc = remote.map_err(err)?;
+        return Ok(Document { doc, fmt: "remote".into() });
+    }
     if let Some(repo) = path.strip_prefix("git:") {
         let a = quarb_git::GitAdapter::open(Path::new(repo)).map_err(|e| err(e.to_string()))?;
         return Ok(Document { doc: Doc::Git(a), fmt: "git".into() });

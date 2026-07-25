@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quai"
-version = "0.3.0"
+version = "0.9.0"  # aligned with the engine release, like quarb and quarb-full
 description = "Interactive Quarb — a session REPL where every line becomes a reusable query (&1, &2, …)"
 readme = "README.md"
 requires-python = ">=3.8"

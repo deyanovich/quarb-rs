@@ -15,10 +15,14 @@ name = "qua"
 path = "src/main.rs"
 
 [features]
-# Kùzu bundles a large C++ build (and, on GCC 15, currently
-# needs CXXFLAGS="-include cstdint" for its vendored thrift), so
-# the embedded-graph target is opt-in:
-#   cargo install qua --features kuzu
+# Kùzu bundles a large C++ build; the embedded-graph target is
+# opt-in, and the build currently needs two workarounds (both
+# upstream kuzu issues):
+#   - GCC 15: CXXFLAGS="-include cstdint" (vendored thrift)
+#   - kuzu and DuckDB both bundle mbedtls, so linking them into
+#     one binary needs RUSTFLAGS="-C link-arg=-Wl,-z,muldefs"
+#   RUSTFLAGS="-C link-arg=-Wl,-z,muldefs" \
+#     cargo install qua --features kuzu
 kuzu = ["dep:quarb-kuzu"]
 
 [dependencies]

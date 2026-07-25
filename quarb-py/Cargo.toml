@@ -1,9 +1,9 @@
 [package]
 name = "quarb-py"
-# Decoupled from the workspace version: the Python package on PyPI
-# follows its own release cadence, independent of the quarb Rust
-# crates on crates.io.
-version = "0.6.0"  # PyPI patch cadence, decoupled from the crates.io fleet
+# The PyPI release mirrors the engine release, same number —
+# `pip install quarb` 0.9.0 is engine 0.9.0 (the earlier
+# decoupled 0.3.x–0.6.x cadence confused version comparisons).
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,6 +22,30 @@ crate-type = ["cdylib"]
 [dependencies]
 quarb = { path = "../quarb", version = "0.9.0" }
 quarb-json = { path = "../quarb-json", version = "0.9.0" }
+quarb-age = { path = "../quarb-age", version = "0.9.0" }
+quarb-arangodb = { path = "../quarb-arangodb", version = "0.9.0" }
+quarb-cosmos = { path = "../quarb-cosmos", version = "0.9.0" }
+quarb-datastore = { path = "../quarb-datastore", version = "0.9.0" }
+quarb-dynamodb = { path = "../quarb-dynamodb", version = "0.9.0" }
+quarb-falkordb = { path = "../quarb-falkordb", version = "0.9.0" }
+quarb-firebase = { path = "../quarb-firebase", version = "0.9.0" }
+quarb-firestore = { path = "../quarb-firestore", version = "0.9.0" }
+quarb-github = { path = "../quarb-github", version = "0.9.0" }
+quarb-gitlab = { path = "../quarb-gitlab", version = "0.9.0" }
+quarb-gsheet = { path = "../quarb-gsheet", version = "0.9.0" }
+quarb-kafka = { path = "../quarb-kafka", version = "0.9.0" }
+quarb-kubernetes = { path = "../quarb-kubernetes", version = "0.9.0" }
+quarb-ldap = { path = "../quarb-ldap", version = "0.9.0" }
+quarb-maildir = { path = "../quarb-maildir", version = "0.9.0" }
+quarb-memgraph = { path = "../quarb-memgraph", version = "0.9.0" }
+quarb-metatheca = { path = "../quarb-metatheca", version = "0.9.0" }
+quarb-neo4j = { path = "../quarb-neo4j", version = "0.9.0" }
+quarb-neptune = { path = "../quarb-neptune", version = "0.9.0" }
+quarb-objstore = { path = "../quarb-objstore", version = "0.9.0" }
+quarb-postgres = { path = "../quarb-postgres", version = "0.9.0" }
+quarb-redis = { path = "../quarb-redis", version = "0.9.0" }
+quarb-serve = { path = "../quarb-serve", version = "0.9.0" }
+quarb-sparql = { path = "../quarb-sparql", version = "0.9.0" }
 quarb-yaml = { path = "../quarb-yaml", version = "0.9.0" }
 quarb-toml = { path = "../quarb-toml", version = "0.9.0" }
 quarb-csv = { path = "../quarb-csv", version = "0.9.0" }
