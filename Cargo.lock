@@ -147,6 +147,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -418,6 +424,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "backoff"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62ddb9cb1ec0a098ad4bbf9344d0713fa193ae1a80af55febcff2627b6a00c1"
+dependencies = [
+ "futures-core",
+ "getrandom 0.2.17",
+ "instant",
+ "pin-project-lite",
+ "rand 0.8.7",
+ "tokio",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -584,6 +604,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bzip2"
@@ -685,7 +708,30 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
+]
+
+[[package]]
+name = "chrono-tz"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d59ae0466b83e838b81a54256c39d5d7c20b9d7daa10510a242d9b75abd5936e"
+dependencies = [
+ "chrono",
+ "chrono-tz-build",
+ "phf 0.11.3",
+]
+
+[[package]]
+name = "chrono-tz-build"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "433e39f13c9a060046954e0592a8d0a4bcb1040125cbf91cb8ee58964cfb350f"
+dependencies = [
+ "parse-zoneinfo",
+ "phf 0.11.3",
+ "phf_codegen 0.11.3",
 ]
 
 [[package]]
@@ -775,6 +821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,6 +842,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
 dependencies = [
  "encoding_rs",
+]
+
+[[package]]
+name = "codespan-reporting"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3538270d33cc669650c4b093848450d380def10c331d38c768e34cac80576e6e"
+dependencies = [
+ "termcolor",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -899,6 +964,16 @@ name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
 dependencies = [
  "core-foundation-sys",
  "libc",
@@ -1111,6 +1186,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "cxx"
+version = "1.0.138"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3956d60afa98653c5a57f60d7056edd513bfe0307ef6fb06f6167400c3884459"
+dependencies = [
+ "cc",
+ "cxxbridge-cmd",
+ "cxxbridge-flags",
+ "cxxbridge-macro",
+ "foldhash",
+ "link-cplusplus",
+]
+
+[[package]]
+name = "cxx-build"
+version = "1.0.138"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a4b7522f539fe056f1d6fc8577d8ab731451f6f33a89b1e5912e22b76c553e7"
+dependencies = [
+ "cc",
+ "codespan-reporting",
+ "proc-macro2",
+ "quote",
+ "scratch",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cxxbridge-cmd"
+version = "1.0.138"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f01e92ab4ce9fd4d16e3bb11b158d98cbdcca803c1417aa43130a6526fbf208"
+dependencies = [
+ "clap",
+ "codespan-reporting",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cxxbridge-flags"
+version = "1.0.138"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c41cbfab344869e70998b388923f7d1266588f56c8ca284abf259b1c1ffc695"
+
+[[package]]
+name = "cxxbridge-macro"
+version = "1.0.138"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88d82a2f759f0ad3eae43b96604efd42b1d4729a35a6f2dc7bdb797ae25d9284"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "darling"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1186,10 +1320,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "deadpool"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "421fe0f90f2ab22016f32a9881be5134fdd71c65298917084b0c7477cbc3856e"
+dependencies = [
+ "async-trait",
+ "deadpool-runtime",
+ "num_cpus",
+ "retain_mut",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool-runtime"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
 name = "deflate64"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6b926516df9c60bfa16e107b21086399f8285a44ca9711344b9e553c5146e2"
+
+[[package]]
+name = "delegate"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ee5df75c70b95bd3aacc8e2fd098797692fb1d54121019c4de481e42f04c8a1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "der"
@@ -1798,6 +1962,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hermit-abi"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2208,6 +2378,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "instant"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "integer-encoding"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2324,6 +2503,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0183960d436e5d2adbb420ed4f41aaff50814b29b191c565cc06df1e68ac4f98"
 
 [[package]]
+name = "kuzu"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06952b00b1a2eabf4caf1426672395f9b1def04207d984af204693dec3da287a"
+dependencies = [
+ "cmake",
+ "cxx",
+ "cxx-build",
+ "rust_decimal",
+ "rustversion",
+ "time",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2359,7 +2553,7 @@ dependencies = [
  "percent-encoding",
  "ring 0.16.20",
  "rustls 0.21.12",
- "rustls-native-certs",
+ "rustls-native-certs 0.6.3",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.24.1",
@@ -2476,6 +2670,15 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "link-cplusplus"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f78c730aaa7d0b9336a299029ea49f9ee53b0ed06e9202e8cb7db9bae7b8c82"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -2795,6 +2998,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "neo4rs"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43dd99fe7dbc68f754759874d83ec2ca43a61ab7d51c10353d024094805382be"
+dependencies = [
+ "async-trait",
+ "backoff",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "deadpool",
+ "delegate",
+ "futures",
+ "log",
+ "neo4rs-macros",
+ "paste",
+ "pin-project-lite",
+ "rustls-native-certs 0.7.3",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "neo4rs-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53a0d57c55d2d1dc62a2b1d16a0a1079eb78d67c36bdf468d582ab4482ec7002"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2902,6 +3143,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2960,6 +3211,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
+name = "openssl-probe"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
 name = "oracle"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3012,6 +3269,15 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "parse-zoneinfo"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f2a05b18d44e2957b88f96ba460715e295bc1d7510468a2f3d3b44535d26c24"
+dependencies = [
+ "regex",
 ]
 
 [[package]]
@@ -3400,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3410,13 +3676,15 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
  "kaiv",
  "libc",
  "quarb",
+ "quarb-age",
+ "quarb-arangodb",
  "quarb-archive",
  "quarb-athena",
  "quarb-atrep",
@@ -3429,6 +3697,7 @@ dependencies = [
  "quarb-datastore",
  "quarb-duckdb",
  "quarb-dynamodb",
+ "quarb-falkordb",
  "quarb-firebase",
  "quarb-firestore",
  "quarb-fs",
@@ -3443,19 +3712,24 @@ dependencies = [
  "quarb-kafka",
  "quarb-kaiv",
  "quarb-kubernetes",
+ "quarb-kuzu",
  "quarb-ldap",
  "quarb-maildir",
  "quarb-markdown",
+ "quarb-memgraph",
  "quarb-metatheca",
  "quarb-mongodb",
  "quarb-mount",
  "quarb-mssql",
  "quarb-mysql",
  "quarb-neo4j",
+ "quarb-neptune",
  "quarb-objstore",
  "quarb-oracle",
  "quarb-postgres",
+ "quarb-redis",
  "quarb-serve",
+ "quarb-sparql",
  "quarb-sql",
  "quarb-sqlite",
  "quarb-toml",
@@ -3468,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "quai"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3479,7 +3753,7 @@ dependencies = [
 
 [[package]]
 name = "quai-wasm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -3490,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "colligo",
  "globset",
@@ -3503,8 +3777,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-age"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "quarb-arangodb"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "serde_json",
+ "thiserror 2.0.19",
+ "ureq",
+]
+
+[[package]]
 name = "quarb-archive"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -3515,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-athena"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -3527,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-atrep"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "atrep",
  "quarb",
@@ -3537,14 +3832,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-aws"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3556,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cbor"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ciborium",
  "quarb",
@@ -3566,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "tempfile",
@@ -3580,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -3599,7 +3894,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cosmos"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3609,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-csv"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "csv",
  "quarb",
@@ -3617,7 +3912,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-datastore"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3627,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "duckdb",
  "quarb",
@@ -3638,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-dynamodb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -3648,8 +3943,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-falkordb"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "redis",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "quarb-firebase"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3659,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firestore"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3669,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-fs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -3678,7 +3982,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-git"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.19",
@@ -3686,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-github"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3696,7 +4000,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gitlab"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3706,7 +4010,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3717,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-html"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "scraper",
@@ -3725,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-imap"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.19",
@@ -3733,7 +4037,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-jq"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-json",
@@ -3742,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3750,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kafka"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "rskafka",
@@ -3763,7 +4067,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -3771,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kubernetes"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3780,8 +4084,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-kuzu"
+version = "0.9.0"
+dependencies = [
+ "cxx-build",
+ "kuzu",
+ "quarb",
+ "tempfile",
+ "thiserror 2.0.19",
+ "time",
+]
+
+[[package]]
 name = "quarb-ldap"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ldap3",
  "quarb",
@@ -3790,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.19",
@@ -3798,15 +4114,26 @@ dependencies = [
 
 [[package]]
 name = "quarb-markdown"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
 ]
 
 [[package]]
+name = "quarb-memgraph"
+version = "0.9.0"
+dependencies = [
+ "neo4rs",
+ "quarb",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "quarb-metatheca"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "metatheca",
  "quarb",
@@ -3817,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mongodb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "mongodb",
  "quarb",
@@ -3826,7 +4153,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mount"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-csv",
@@ -3835,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mssql"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3847,7 +4174,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3858,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -3867,8 +4194,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-neptune"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "quarb-aws",
+ "serde_json",
+ "thiserror 2.0.19",
+ "ureq",
+]
+
+[[package]]
 name = "quarb-objstore"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -3880,7 +4218,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-oracle"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "oracle",
  "quarb",
@@ -3890,7 +4228,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-postgres"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3901,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-py"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -3927,15 +4265,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-redis"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "redis",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "quarb-relational"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-serve"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kaiv",
  "quarb",
@@ -3946,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-session"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "quarb",
@@ -3968,8 +4316,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-sparql"
+version = "0.9.0"
+dependencies = [
+ "quarb",
+ "serde_json",
+ "thiserror 2.0.19",
+ "ureq",
+]
+
+[[package]]
 name = "quarb-sql"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
@@ -3979,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -3990,7 +4348,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-toml"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -3999,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -4016,7 +4374,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "calamine",
  "quarb",
@@ -4027,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xml"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -4036,7 +4394,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xpath"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb",
  "quarb-xml",
@@ -4045,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-yaml"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -4250,6 +4608,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0b9503711b03773e43b31668c7b5bd279ee7cd9b7d18cff7c23a42cc1d08e5a"
+dependencies = [
+ "arcstr",
+ "combine",
+ "itoa",
+ "percent-encoding",
+ "rustls 0.23.42",
+ "rustls-native-certs 0.8.4",
+ "ryu",
+ "socket2",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4350,6 +4726,12 @@ name = "resolv-conf"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
+
+[[package]]
+name = "retain_mut"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4389f1d5789befaf6029ebd9f7dac4af7f7e3d61b69d4f30e2ac02b57e7712b0"
 
 [[package]]
 name = "ring"
@@ -4596,10 +4978,35 @@ version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9aace74cb666635c918e9c12bc0d348266037aa8eb599b5cba565709a8dff00"
 dependencies = [
- "openssl-probe",
- "rustls-pemfile",
+ "openssl-probe 0.1.6",
+ "rustls-pemfile 1.0.4",
  "schannel",
- "security-framework",
+ "security-framework 2.11.1",
+]
+
+[[package]]
+name = "rustls-native-certs"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5bfb394eeed242e909609f56089eecfe5fda225042e8b171791b9c95f5931e5"
+dependencies = [
+ "openssl-probe 0.1.6",
+ "rustls-pemfile 2.2.0",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework 2.11.1",
+]
+
+[[package]]
+name = "rustls-native-certs"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+dependencies = [
+ "openssl-probe 0.2.1",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework 3.7.0",
 ]
 
 [[package]]
@@ -4609,6 +5016,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
  "base64 0.21.7",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -4717,6 +5133,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scratch"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
+
+[[package]]
 name = "sct"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4739,7 +5161,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
 dependencies = [
  "bitflags",
- "core-foundation",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
+dependencies = [
+ "bitflags",
+ "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -5346,7 +5781,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
  "bitflags",
- "core-foundation",
+ "core-foundation 0.9.4",
  "system-configuration-sys",
 ]
 
@@ -5420,6 +5855,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5477,8 +5921,8 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "pretty-hex",
- "rustls-native-certs",
- "rustls-pemfile",
+ "rustls-native-certs 0.6.3",
+ "rustls-pemfile 1.0.4",
  "thiserror 1.0.69",
  "tokio-rustls 0.24.1",
  "tokio-util",
@@ -5559,6 +6003,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6444,6 +6889,12 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "xz2"

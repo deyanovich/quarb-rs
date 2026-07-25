@@ -38,7 +38,16 @@ use quarb_metatheca::MetathecaAdapter;
 use quarb_ldap::LdapAdapter;
 use quarb_cosmos::CosmosAdapter;
 use quarb_dynamodb::DynamodbAdapter;
+use quarb_age::AgeAdapter;
+use quarb_arangodb::ArangoAdapter;
+use quarb_falkordb::FalkorAdapter;
+use quarb_memgraph::MemgraphAdapter;
+use quarb_neptune::NeptuneAdapter;
+use quarb_redis::RedisAdapter;
+use quarb_sparql::SparqlAdapter;
 use quarb_kafka::KafkaAdapter;
+#[cfg(feature = "kuzu")]
+use quarb_kuzu::KuzuAdapter;
 use quarb_mongodb::MongodbAdapter;
 use quarb_mssql::MssqlAdapter;
 use quarb_oracle::OracleAdapter;
@@ -921,6 +930,124 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         && s.starts_with("dynamodb:")
     {
         let adapter = DynamodbAdapter::connect(s).context("connecting to DynamoDB")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Neptune: neptune://HOST[?region&key&endpoint].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("neptune://")
+    {
+        let adapter = NeptuneAdapter::connect(s).context("connecting to Neptune")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Redis: redis://HOST[:PORT][/DB][?scan=GLOB].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("redis://")
+    {
+        let adapter = RedisAdapter::connect(s).context("connecting to Redis")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Redis TLS: rediss:// variant.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("rediss://")
+    {
+        let adapter = RedisAdapter::connect(s).context("connecting to Redis")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // FalkorDB: falkor://HOST[:PORT]/GRAPH[?key=].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("falkor://")
+    {
+        let adapter = FalkorAdapter::connect(s).context("connecting to FalkorDB")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Memgraph: memgraph://HOST[:7687][?key=].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("memgraph://")
+    {
+        let adapter = MemgraphAdapter::connect(s).context("connecting to Memgraph")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // ArangoDB: arango://USER:PASS@HOST[:8529]/DB.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("arango://")
+    {
+        let adapter = ArangoAdapter::connect(s).context("connecting to ArangoDB")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // SPARQL: sparql:URL[#limit&key&lang].
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("sparql:")
+    {
+        let adapter = SparqlAdapter::connect(s).context("connecting to the SPARQL endpoint")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Apache AGE: age://[USER[:PASS]@]HOST[:PORT]/DB/GRAPH.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("age://")
+    {
+        let adapter = AgeAdapter::connect(s).context("connecting to AGE")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Kùzu: kuzu:PATH (opt-in: built with --features kuzu).
+    #[cfg(feature = "kuzu")]
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && s.starts_with("kuzu:")
+    {
+        let adapter = KuzuAdapter::open(s).context("opening Kuzu database")?;
         return run(
             query,
             &adapter,
@@ -1932,6 +2059,70 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("dynamodb:")
     {
         let a = Rc::new(DynamodbAdapter::connect(s).context("connecting to DynamoDB")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("neptune://")
+    {
+        let a = Rc::new(NeptuneAdapter::connect(s).context("connecting to Neptune")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("redis://")
+    {
+        let a = Rc::new(RedisAdapter::connect(s).context("connecting to Redis")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("rediss://")
+    {
+        let a = Rc::new(RedisAdapter::connect(s).context("connecting to Redis")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("falkor://")
+    {
+        let a = Rc::new(FalkorAdapter::connect(s).context("connecting to FalkorDB")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("memgraph://")
+    {
+        let a = Rc::new(MemgraphAdapter::connect(s).context("connecting to Memgraph")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("arango://")
+    {
+        let a = Rc::new(ArangoAdapter::connect(s).context("connecting to ArangoDB")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("sparql:")
+    {
+        let a = Rc::new(SparqlAdapter::connect(s).context("connecting to the SPARQL endpoint")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && s.starts_with("age://")
+    {
+        let a = Rc::new(AgeAdapter::connect(s).context("connecting to AGE")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    #[cfg(feature = "kuzu")]
+    if let Some(s) = p.to_str()
+        && s.starts_with("kuzu:")
+    {
+        let a = Rc::new(KuzuAdapter::open(s).context("opening Kuzu database")?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }

@@ -1,0 +1,18 @@
+[package]
+name = "quarb-neptune"
+description = "Amazon Neptune (openCypher) adapter for the Quarb query engine"
+keywords = ["query", "neptune", "graph", "quarb", "aws"]
+categories = ["api-bindings", "database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.9.0" }
+quarb-aws = { path = "../quarb-aws", version = "0.9.0" }
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true

@@ -10,8 +10,11 @@ members = [
     "quarb-toml",
     "quarb-markdown",
     "quarb-maildir",
+    "quarb-memgraph",
     "quarb-metatheca",
+    "quarb-age",
     "quarb-atrep",
+    "quarb-arangodb",
     "quarb-athena",
     "quarb-aws",
     "quarb-dynamodb",
@@ -25,6 +28,7 @@ members = [
     "quarb-csv",
     "quarb-datastore",
     "quarb-duckdb",
+    "quarb-falkordb",
     "quarb-firebase",
     "quarb-firestore",
     "quarb-git",
@@ -33,12 +37,14 @@ members = [
     "quarb-gsheet",
     "quarb-kafka",
     "quarb-kubernetes",
+    "quarb-kuzu",
     "quarb-mongodb",
     "quarb-mssql",
     "quarb-oracle",
     "quarb-ldap",
     "quarb-cbor",
     "quarb-cosmos",
+    "quarb-neptune",
     "quarb-mount",
     "quarb-session",
     "quarb-xpath",
@@ -51,16 +57,18 @@ members = [
     "quarb-neo4j",
     "quarb-objstore",
     "quarb-postgres",
+    "quarb-redis",
     "quarb-relational",
     "quarb-serve",
     "quarb-sql",
+    "quarb-sparql",
     "quarb-sqlite",
     "quarb-wasm",
     "quai-wasm",
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

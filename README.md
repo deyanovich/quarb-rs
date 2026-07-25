@@ -45,9 +45,20 @@ through its dialektos),
 [`quarb-bigquery`](quarb-bigquery/),
 [`quarb-mssql`](quarb-mssql/) (SQL Server),
 [`quarb-oracle`](quarb-oracle/),
-[`quarb-athena`](quarb-athena/) (the AWS datalake's SQL view).
+[`quarb-athena`](quarb-athena/) (the AWS datalake's SQL view),
+[`quarb-age`](quarb-age/) (Apache AGE: openCypher inside
+PostgreSQL).
 
-**Graph** — [`quarb-neo4j`](quarb-neo4j/).
+**Graph** — [`quarb-neo4j`](quarb-neo4j/),
+[`quarb-kuzu`](quarb-kuzu/) (embedded, file-based — the DuckDB
+of graphs; behind qua's opt-in `kuzu` feature),
+[`quarb-neptune`](quarb-neptune/) (openCypher over SigV4),
+[`quarb-memgraph`](quarb-memgraph/) (Bolt),
+[`quarb-falkordb`](quarb-falkordb/) (Cypher over the Redis
+protocol), [`quarb-arangodb`](quarb-arangodb/) (documents +
+edge collections), [`quarb-sparql`](quarb-sparql/) (any SPARQL
+endpoint — Wikidata included — by the triples-as-arbors
+mapping).
 
 **Source adapters** — [`quarb-fs`](quarb-fs/) (file systems, with
 symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
@@ -63,6 +74,8 @@ symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
 [`quarb-cosmos`](quarb-cosmos/) (document stores),
 [`quarb-kafka`](quarb-kafka/) (Kafka topics as bounded
 snapshots; entity history and stream-table joins),
+[`quarb-redis`](quarb-redis/) (the colon-namespace keyspace as
+a tree; typed structures, streams, TTLs as durations),
 [`quarb-cbor`](quarb-cbor/) (CBOR, on the JSON mapping),
 [`quarb-ldap`](quarb-ldap/) (LDAP directories),
 [`quarb-kubernetes`](quarb-kubernetes/) (cluster state via

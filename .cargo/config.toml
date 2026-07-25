@@ -4,3 +4,10 @@
 # the `getrandom = { features = ["wasm_js"] }` dep in quarb-wasm.
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+# kuzu 0.11.3's vendored thrift misses <cstdint> includes, which
+# GCC 15 rejects; force the include until upstream catches up.
+# crates.io consumers opt into kuzu via qua's `kuzu` feature and
+# need the same flag on affected toolchains (documented there).
+[env]
+CXXFLAGS = "-include cstdint"

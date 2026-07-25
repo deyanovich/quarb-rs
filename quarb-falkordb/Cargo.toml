@@ -1,0 +1,16 @@
+[package]
+name = "quarb-falkordb"
+description = "FalkorDB graph adapter for the Quarb query engine"
+keywords = ["query", "falkordb", "graph", "quarb", "redisgraph"]
+categories = ["api-bindings", "database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.9.0" }
+redis = { version = "1", default-features = false, features = ["tls-rustls"] }
+thiserror.workspace = true
