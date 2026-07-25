@@ -282,11 +282,19 @@ fn open_remote(s: &str) -> Option<Result<Doc, String>> {
     } else if s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://") {
         arm!(quarb_objstore::ObjstoreAdapter::connect(s)
             .map(|a| quarb_compose::ComposeAdapter::new(a)))
-    } else if let Some(vault) = s
-        .strip_prefix("metatheca:")
-        .or_else(|| s.strip_prefix("mt:"))
-    {
-        arm!(quarb_metatheca::MetathecaAdapter::open(Path::new(vault)))
+    } else if s.starts_with("metatheca:") || s.starts_with("mt:") {
+        #[cfg(unix)]
+        {
+            let vault = s
+                .strip_prefix("metatheca:")
+                .or_else(|| s.strip_prefix("mt:"))
+                .unwrap();
+            return arm!(quarb_metatheca::MetathecaAdapter::open(Path::new(vault)));
+        }
+        #[cfg(not(unix))]
+        {
+            Some(Err("metatheca vaults are unix-only".to_string()))
+        }
     } else if let Some(mb) = s.strip_prefix("mail:") {
         arm!(quarb_maildir::MaildirAdapter::open(Path::new(mb)))
     } else if let Some(cmd) = s.strip_prefix("serve:") {
