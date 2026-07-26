@@ -86,12 +86,76 @@ struct Remount {
     allow_shell: bool,
 }
 
+/// Whether a target names an adapter scheme (qua's dispatch) rather
+/// than a file. `git:` stays with the session's own opener.
+fn is_schemed(s: &str) -> bool {
+    !s.starts_with("git:")
+        && s.split_once(':').is_some_and(|(sch, _)| {
+            sch.len() >= 2 && sch.chars().all(|c| c.is_ascii_alphanumeric() || c == '+')
+        })
+}
+
+/// Open one mount spec: adapter schemes go through qua's dispatch
+/// (the whole fleet — gcl:, kafka:, neo4j://, …), everything else
+/// through the session's file opener.
+fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
+    let s = spec.path.to_string_lossy();
+    if is_schemed(&s) {
+        let (adapter, render) = qua::open_target(&s, &qua::OpenOpts::default())?;
+        return Ok((Doc::Boxed(quarb_session::doc::Dyn(adapter), render), true));
+    }
+    Ok((Doc::open(&spec.path, opts)?, false))
+}
+
 /// Build the in-process executor over the current mount specs.
 fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
+    let mut schemed = false;
     let doc = match remount.specs.as_slice() {
-        [one] if one.name.is_none() => Doc::open(&one.path, &remount.opts)?,
-        many => Doc::mount_specs(many, &remount.opts)?,
+        [one] if one.name.is_none() => {
+            let (doc, sch) = build_doc(one, &remount.opts)?;
+            schemed |= sch;
+            doc
+        }
+        many => {
+            let mut parts: Vec<(String, Doc)> = Vec::new();
+            for spec in many {
+                let (doc, sch) = build_doc(spec, &remount.opts)?;
+                schemed |= sch;
+                let name = spec.name.clone().unwrap_or_else(|| {
+                    if sch {
+                        // A scheme target has no useful file stem;
+                        // require an explicit mount name.
+                        String::new()
+                    } else {
+                        spec.path
+                            .file_stem()
+                            .map(|x| x.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    }
+                });
+                if name.is_empty() {
+                    anyhow::bail!(
+                        "'{}': a scheme target in a mount needs an explicit \
+                         name — spell it NAME={}",
+                        spec.path.display(),
+                        spec.path.display()
+                    );
+                }
+                parts.push((name, doc));
+            }
+            Doc::mount_docs(parts)?
+        }
     };
+    // Live re-reads (&N!) re-open through the file path machinery,
+    // which scheme targets bypass; their sessions read the standing
+    // snapshot for both &N and &N!.
+    if schemed {
+        return Ok(Box::new(LocalExecutor::new(
+            doc,
+            remount.now,
+            remount.allow_shell,
+        )));
+    }
     Ok(Box::new(LocalExecutor::with_respec(
         doc,
         remount.now,

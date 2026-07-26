@@ -1,0 +1,17 @@
+[package]
+name = "quarb-cflogs"
+description = "Cloudflare edge-log adapter for the Quarb query engine: bounded Logpull snapshots as an arbor"
+keywords = ["logging", "cloudflare", "logpull", "quarb", "query"]
+categories = ["api-bindings", "development-tools::debugging"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.11.0" }
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true

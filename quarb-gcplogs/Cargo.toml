@@ -1,0 +1,16 @@
+[package]
+name = "quarb-gcplogs"
+description = "Google Cloud Logging adapter for the Quarb query engine: bounded log snapshots as an arbor"
+keywords = ["logging", "gcp", "stackdriver", "quarb", "query"]
+categories = ["api-bindings", "development-tools::debugging"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.11.0" }
+serde_json.workspace = true
+thiserror.workspace = true

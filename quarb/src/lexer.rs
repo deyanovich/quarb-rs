@@ -147,6 +147,23 @@ fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '+')
 }
 
+/// Whether `text` is the date-and-time head of an ISO instant —
+/// `YYYY-MM-DDT` followed only by time characters. The gate that
+/// lets the word lexer keep a time's colons.
+fn is_iso_datetime_prefix(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() >= 11
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b'T'
+        && b[11..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || matches!(c, b':' | b'.' | b'+' | b'-' | b'Z'))
+}
+
 /// Tokenize `input` into the subset's token stream.
 pub fn lex(input: &str) -> Result<Vec<Token>> {
     let chars: Vec<char> = input.chars().collect();
@@ -567,6 +584,19 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     // name, or `/x.rs(...)` would lose its filename.
                     if ch == '.' && at(i + 1) == Some('(') && !text.is_empty() {
                         break;
+                    }
+                    // A full ISO instant keeps its colons: once the
+                    // text reads `YYYY-MM-DDT…`, a `:` followed by a
+                    // digit is a time separator, not a projection —
+                    // so `[::at > 2026-07-25T14:16:10Z]` lexes as one
+                    // literal (the temporal reading does the rest).
+                    if ch == ':'
+                        && is_iso_datetime_prefix(&text)
+                        && at(i + 1).is_some_and(|c| c.is_ascii_digit())
+                    {
+                        text.push(ch);
+                        i += 1;
+                        continue;
                     }
                     if is_name_char(ch) {
                         text.push(ch);
@@ -997,5 +1027,31 @@ mod regex_and_search_tests {
         // that honestly rather than lexing as `=` then `>`.
         let err = lex("//a => b").unwrap_err();
         assert!(matches!(err, QuarbError::Unsupported(_)), "got {err:?}");
+    }
+}
+
+#[cfg(test)]
+mod iso_instant_tests {
+    use super::*;
+
+    /// Full ISO instants lex as one name token — the colons are
+    /// time separators once the `YYYY-MM-DDT` head is seen — and
+    /// nothing else's colons are affected.
+    #[test]
+    fn full_iso_instants_lex_whole() {
+        let toks = lex("[::at > 2026-07-25T14:16:10Z]").unwrap();
+        assert!(toks.iter().any(|t| matches!(
+            t, Token::Name { text, .. } if text == "2026-07-25T14:16:10Z")));
+        // Offsets and fractional seconds ride along.
+        let toks = lex("[::at > 2026-07-25T14:16:10.500+02:00]").unwrap();
+        assert!(toks.iter().any(|t| matches!(
+            t, Token::Name { text, .. } if text == "2026-07-25T14:16:10.500+02:00")));
+        // Bare dates unchanged; projections unchanged.
+        let toks = lex("/x[::born > 2026-01-01]::name").unwrap();
+        assert!(toks.iter().any(|t| matches!(
+            t, Token::Name { text, .. } if text == "2026-01-01")));
+        assert!(toks.iter().filter(|t| matches!(t, Token::ColonColon)).count() >= 2);
+        // A name that merely starts with digits keeps ending at ':'.
+        assert!(lex("/entry[::k = 'a:b']").is_ok());
     }
 }

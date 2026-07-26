@@ -330,3 +330,27 @@ fn raw_query_join_uniqueness_gate() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// A database that never touched a filesystem: serialize the test
+/// db to bytes, reopen with from_bytes (the browser-upload path),
+/// and query — FK resolution included.
+#[test]
+fn from_bytes_roundtrip() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT,
+                              artist_id INTEGER REFERENCES artists(id));
+         INSERT INTO artists VALUES (1, 'Holst');
+         INSERT INTO tracks VALUES (1, 'Jupiter', 1), (2, 'Mars', 1);",
+    )
+    .unwrap();
+    let bytes: Vec<u8> = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+    drop(conn);
+    let a = SqliteAdapter::from_bytes(&bytes).unwrap();
+    let got = match quarb::run("/tracks/*[::artist_id~>::name = 'Holst']::title", &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("expected values"),
+    };
+    assert_eq!(got, vec!["Jupiter", "Mars"]);
+}

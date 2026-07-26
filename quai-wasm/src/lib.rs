@@ -36,6 +36,41 @@ fn now_parts(now_millis: f64) -> (i64, u32) {
     (secs as i64, nanos.min(999_999_999))
 }
 
+/// Standard base64 (with or without padding) — enough to carry an
+/// uploaded database across the JS boundary without a dependency.
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let chars: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let mut out = Vec::with_capacity(chars.len() * 3 / 4);
+    for chunk in chars.chunks(4) {
+        let mut acc = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            acc |= val(c)? << (18 - 6 * i);
+        }
+        let n = chunk.len();
+        if n < 2 {
+            return None;
+        }
+        out.push((acc >> 16) as u8);
+        if n > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if n > 3 {
+            out.push(acc as u8);
+        }
+    }
+    Some(out)
+}
+
 /// Match a bare capture ref `&<digits><suffix>` (the whole line).
 fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
     line.strip_suffix(suffix)?
@@ -78,27 +113,48 @@ impl QuaiSession {
     /// Open a session over *several* documents mounted as named
     /// children of one root, so a single query — including a `<=>`
     /// join — spans them all (`/name/...` paths). `sources_json` is a
-    /// JSON array of `{"name", "format", "text"}` objects; names must
-    /// be distinct.
+    /// JSON array of `{"name", "format", "text"}` objects — or, for
+    /// binary sources (an uploaded `.db`), `{"name", "format":
+    /// "sqlite", "bytes_b64"}`. Names must be distinct. A single
+    /// source mounts at the root, path-bare, exactly as the
+    /// one-document constructor does.
     pub fn mount(sources_json: &str, now_millis: f64) -> Result<QuaiSession, JsError> {
         let sources: serde_json::Value = serde_json::from_str(sources_json)
             .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
-        let mut parts: Vec<(String, String, String)> = Vec::new();
+        let mut parts: Vec<(String, Doc)> = Vec::new();
         for s in sources.as_array().into_iter().flatten() {
             let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
-            match (field("name"), field("format"), field("text")) {
-                (Some(n), Some(f), Some(t)) => parts.push((n, f, t)),
-                _ => {
-                    return Err(JsError::new(
-                        "each source needs string fields name, format, text",
-                    ));
+            let (Some(name), Some(format)) = (field("name"), field("format")) else {
+                return Err(JsError::new("each source needs name and format"));
+            };
+            let doc = if let Some(b64) = field("bytes_b64") {
+                let bytes = b64_decode(&b64)
+                    .ok_or_else(|| JsError::new(&format!("'{name}': bad base64")))?;
+                match format.as_str() {
+                    "sqlite" | "db" => Doc::sqlite_bytes(&bytes)
+                        .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?,
+                    other => {
+                        return Err(JsError::new(&format!(
+                            "'{name}': binary sources must be sqlite, not {other}"
+                        )));
+                    }
                 }
-            }
+            } else if let Some(text) = field("text") {
+                Doc::parse(&text, &format)
+                    .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?
+            } else {
+                return Err(JsError::new(&format!(
+                    "'{name}': a source needs text or bytes_b64"
+                )));
+            };
+            parts.push((name, doc));
         }
-        if parts.is_empty() {
-            return Err(JsError::new("no sources to mount"));
-        }
-        let doc = Doc::mount_texts(&parts).map_err(|e| JsError::new(&format!("{e:#}")))?;
+        let doc = match parts.len() {
+            0 => return Err(JsError::new("no sources to mount")),
+            // A single source stays path-bare at the root.
+            1 => parts.remove(0).1,
+            _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}")))?,
+        };
         let executor = Box::new(LocalExecutor::new(doc, now_parts(now_millis), false));
         Ok(QuaiSession {
             session: Session::new(executor, Box::new(MemStore)),

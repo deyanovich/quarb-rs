@@ -31,6 +31,11 @@ members = [
     "quarb-falkordb",
     "quarb-firebase",
     "quarb-firestore",
+    "quarb-azlogs",
+    "quarb-cflogs",
+    "quarb-cwlogs",
+    "quarb-ddlogs",
+    "quarb-gcplogs",
     "quarb-git",
     "quarb-github",
     "quarb-gitlab",
@@ -68,7 +73,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]
@@ -83,7 +88,7 @@ globset = "0.4"
 serde_json = { version = "1", features = ["preserve_order"] }
 scraper = "0.20"
 csv = "1.4"
-rusqlite = "0.32"
+rusqlite = "0.40"
 ureq = { version = "2", features = ["json"] }
 zip = "2"
 tar = "0.4"

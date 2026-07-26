@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.10.0" }
-metatheca = "0.1.3"
+quarb = { path = "../quarb", version = "0.11.0" }
+metatheca = "0.1.5"
 serde_json.workspace = true
 thiserror.workspace = true
 

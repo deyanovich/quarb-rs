@@ -32,6 +32,11 @@ use quarb_gsheet::GsheetAdapter;
 use quarb_html::HtmlAdapter;
 use quarb_imap::ImapAdapter;
 use quarb_json::JsonAdapter;
+use quarb_azlogs::AzlAdapter;
+use quarb_cflogs::CflAdapter;
+use quarb_cwlogs::CwlAdapter;
+use quarb_ddlogs::DdlAdapter;
+use quarb_gcplogs::GclAdapter;
 use quarb_kubernetes::KubernetesAdapter;
 use quarb_maildir::MaildirAdapter;
 use quarb_metatheca::MetathecaAdapter;
@@ -65,7 +70,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Query a filesystem tree, a JSON, XML, HTML, or CSV document.
-#[derive(Parser)]
+#[derive(Parser, Default)]
 #[command(version, about)]
 struct Cli {
     /// Quarb query, e.g. '//*.rs', '/users/*/name::', or '//a::href'.
@@ -904,6 +909,73 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         && (s.starts_with("k8s:") || s.starts_with("kubernetes:"))
     {
         let adapter = KubernetesAdapter::connect(s).context("connecting to Kubernetes")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Cloud Logging: gcl:PROJECT?since=1h&filter=…&limit=N — a
+    // bounded snapshot, through gcloud.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("gcl:") || s.starts_with("gcplogs:"))
+    {
+        let adapter = GclAdapter::open(s).context("reading Cloud Logging")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // CloudWatch Logs: cwl:[GROUP]?since=1h&filter=…&limit=N —
+    // the same bounded snapshot over SigV4.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("cwl:") || s.starts_with("cloudwatch:"))
+    {
+        let adapter = CwlAdapter::open(s).context("reading CloudWatch Logs")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Datadog Logs: ddl:?since=1h&query=…&limit=N.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("ddl:") || s.starts_with("datadog:"))
+    {
+        let adapter = DdlAdapter::open(s).context("reading Datadog Logs")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Azure Monitor Logs: azl:WORKSPACE?table=…&since=1h&limit=N.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("azl:") || s.starts_with("azlogs:"))
+    {
+        let adapter = AzlAdapter::open(s).context("reading Azure Monitor Logs")?;
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
+    }
+
+    // Cloudflare edge logs: cfl:ZONE?since=1h&limit=N.
+    if let Some(s) = path.as_ref().and_then(|p| p.to_str())
+        && (s.starts_with("cfl:") || s.starts_with("cflogs:"))
+    {
+        let adapter = CflAdapter::open(s).context("reading Cloudflare logs")?;
         return run(
             query,
             &adapter,
@@ -1933,7 +2005,33 @@ fn split_alias(p: &Path) -> Option<(String, PathBuf)> {
 }
 
 /// A boxed adapter and its locator renderer, ready to mount.
-type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
+pub type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
+
+/// The subset of the CLI that opening a target consults — the
+/// public face for session tools (quai) that mount through qua's
+/// dispatch without a full CLI.
+#[derive(Default)]
+pub struct OpenOpts {
+    pub hidden: bool,
+    pub no_ignore: bool,
+    pub descend: bool,
+    pub refs: Option<PathBuf>,
+}
+
+/// Open any target qua speaks — filesystem paths, documents, and
+/// the full adapter-scheme fleet (`gcl:`, `kafka:`, `neo4j://`,
+/// …) — as a boxed adapter plus its locator renderer. The door
+/// session tools use to mount what the CLI mounts.
+pub fn open_target(target: &str, opts: &OpenOpts) -> anyhow::Result<Mounted> {
+    let cli = Cli {
+        hidden: opts.hidden,
+        no_ignore: opts.no_ignore,
+        descend: opts.descend,
+        refs: opts.refs.clone(),
+        ..Cli::default()
+    };
+    open_mount(Path::new(target), &cli)
+}
 
 /// Mount kaiv text by its extension's pipeline stage: `.kaiv` is
 /// canonical, `.daiv` is authored (compile + denormalize), `.raiv`
@@ -2039,6 +2137,41 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && (s.starts_with("k8s:") || s.starts_with("kubernetes:"))
     {
         let a = Rc::new(KubernetesAdapter::connect(s).context("connecting to Kubernetes")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("gcl:") || s.starts_with("gcplogs:"))
+    {
+        let a = Rc::new(GclAdapter::open(s).context("reading Cloud Logging")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("cwl:") || s.starts_with("cloudwatch:"))
+    {
+        let a = Rc::new(CwlAdapter::open(s).context("reading CloudWatch Logs")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("ddl:") || s.starts_with("datadog:"))
+    {
+        let a = Rc::new(DdlAdapter::open(s).context("reading Datadog Logs")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("azl:") || s.starts_with("azlogs:"))
+    {
+        let a = Rc::new(AzlAdapter::open(s).context("reading Azure Monitor Logs")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    if let Some(s) = p.to_str()
+        && (s.starts_with("cfl:") || s.starts_with("cflogs:"))
+    {
+        let a = Rc::new(CflAdapter::open(s).context("reading Cloudflare logs")?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }

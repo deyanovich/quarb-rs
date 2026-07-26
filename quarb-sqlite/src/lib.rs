@@ -201,6 +201,16 @@ impl SqliteAdapter {
         Ok(SqliteAdapter { model })
     }
 
+    /// Open a database held entirely in memory — the bytes of a
+    /// `.db` file that never touched a filesystem (the browser's
+    /// uploaded files). Deserializes read-only, then materializes
+    /// eagerly, as [`SqliteAdapter::load`] does.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SqliteError> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), true)?;
+        Self::load(&conn)
+    }
+
     /// Materialize every user table of an open connection, eagerly
     /// (in-memory databases, tests).
     pub fn load(conn: &Connection) -> Result<Self, SqliteError> {

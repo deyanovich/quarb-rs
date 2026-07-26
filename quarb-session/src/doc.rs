@@ -37,7 +37,6 @@ pub enum Doc {
     Csv(quarb_csv::CsvAdapter),
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
-    #[cfg(feature = "native")]
     Sqlite(quarb_sqlite::SqliteAdapter),
     #[cfg(feature = "native")]
     Fs(quarb_fs::FsAdapter),
@@ -52,6 +51,74 @@ pub enum Doc {
     #[cfg(feature = "native")]
     Code(quarb_code::CodeAdapter),
     Mount(quarb_mount::MountAdapter),
+    /// Any adapter behind the object-safe trait, with its locator
+    /// renderer — the carrier for scheme targets opened through
+    /// qua's dispatch (`gcl:`, `kafka:`, `neo4j://`, …).
+    #[cfg(feature = "native")]
+    Boxed(Dyn, Box<dyn Fn(NodeId) -> String>),
+}
+
+/// A boxed adapter as an adapter — plain delegation (the
+/// quarb-py `Dyn` pattern).
+#[cfg(feature = "native")]
+pub struct Dyn(pub Box<dyn quarb::AstAdapter>);
+
+#[cfg(feature = "native")]
+impl quarb::AstAdapter for Dyn {
+    fn root(&self) -> NodeId {
+        self.0.root()
+    }
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        self.0.children(node)
+    }
+    fn name(&self, node: NodeId) -> Option<String> {
+        self.0.name(node)
+    }
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.0.parent(node)
+    }
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        self.0.traits(node)
+    }
+    fn property(&self, node: NodeId, name: &str) -> Option<quarb::Value> {
+        self.0.property(node, name)
+    }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.0.children_named(node, name)
+    }
+    fn default_value(&self, node: NodeId) -> Option<quarb::Value> {
+        self.0.default_value(node)
+    }
+    fn metadata(&self, node: NodeId, key: &str) -> Option<quarb::Value> {
+        self.0.metadata(node, key)
+    }
+    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.0.links(node)
+    }
+    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.0.backlinks(node)
+    }
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        self.0.resolve(node, property, hint)
+    }
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<quarb::Value> {
+        self.0.link_property(source, label, target, name)
+    }
+    fn quantifier_bound(&self) -> usize {
+        self.0.quantifier_bound()
+    }
+    fn invocation_instant(&self) -> Option<(i64, u32)> {
+        self.0.invocation_instant()
+    }
+    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
+        self.0.unit_scale(expr)
+    }
 }
 
 impl Doc {
@@ -108,7 +175,6 @@ impl Doc {
             Doc::Csv(a) => go!(a),
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
-            #[cfg(feature = "native")]
             Doc::Sqlite(a) => go!(a),
             #[cfg(feature = "native")]
             Doc::Fs(a) => go!(a),
@@ -123,6 +189,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
+            #[cfg(feature = "native")]
+            Doc::Boxed(a, _) => go!(a),
         }
     }
 
@@ -133,7 +201,6 @@ impl Doc {
             Doc::Csv(a) => a.locator(node),
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
-            #[cfg(feature = "native")]
             Doc::Sqlite(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Fs(a) => a.path(node).display().to_string(),
@@ -148,29 +215,50 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
+            #[cfg(feature = "native")]
+            Doc::Boxed(_, render) => render(node),
         }
     }
 
-    /// Mount several already-parsed text documents as named children
-    /// of one root — the wasm-safe face of [`Doc::mount_specs`], for
-    /// callers that hold text rather than paths (the browser
-    /// playground's uploaded files). `parts` is `(name, format,
-    /// text)`; formats are those of [`Doc::parse`].
-    pub fn mount_texts(parts: &[(String, String, String)]) -> Result<Doc> {
+    /// Open a SQLite database from its file bytes — a `.db` that
+    /// never touched a filesystem (the browser's uploaded files).
+    pub fn sqlite_bytes(bytes: &[u8]) -> Result<Doc> {
+        Ok(Doc::Sqlite(
+            quarb_sqlite::SqliteAdapter::from_bytes(bytes)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("opening SQLite bytes")?,
+        ))
+    }
+
+    /// Mount already-built documents as named children of one root —
+    /// the general wasm-safe mount, for callers that assembled their
+    /// `Doc`s from text or bytes rather than paths.
+    pub fn mount_docs(parts: Vec<(String, Doc)>) -> Result<Doc> {
         let mut mounts: Vec<quarb_mount::Mount> = Vec::new();
-        for (name, format, text) in parts {
-            if mounts.iter().any(|m| &m.name == name) {
+        for (name, doc) in parts {
+            if mounts.iter().any(|m| m.name == name) {
                 bail!("two sources mount as '{name}'; give each a distinct name");
             }
-            let adapter = Doc::parse(text, format)
-                .with_context(|| format!("parsing '{name}' as {format}"))?
-                .into_boxed()?;
             mounts.push(quarb_mount::Mount {
-                name: name.clone(),
-                adapter,
+                name,
+                adapter: doc.into_boxed()?,
             });
         }
         Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
+    }
+
+    /// Mount several already-parsed text documents as named children
+    /// of one root — [`Doc::mount_docs`] over [`Doc::parse`], for
+    /// callers that hold text (the browser playground's paste
+    /// boxes). `parts` is `(name, format, text)`.
+    pub fn mount_texts(parts: &[(String, String, String)]) -> Result<Doc> {
+        let mut docs: Vec<(String, Doc)> = Vec::new();
+        for (name, format, text) in parts {
+            let doc = Doc::parse(text, format)
+                .with_context(|| format!("parsing '{name}' as {format}"))?;
+            docs.push((name.clone(), doc));
+        }
+        Doc::mount_docs(docs)
     }
 
     /// Box this source as a shared adapter — a mount child.
@@ -181,7 +269,6 @@ impl Doc {
             Doc::Csv(a) => Box::new(Shared(Rc::new(a))),
             Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
             Doc::Html(a) => Box::new(Shared(Rc::new(a))),
-            #[cfg(feature = "native")]
             Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
             Doc::Fs(a) => Box::new(Shared(Rc::new(a))),
@@ -196,6 +283,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => Box::new(Shared(Rc::new(a))),
             Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
+            #[cfg(feature = "native")]
+            Doc::Boxed(a, _) => a.0,
         })
     }
 }

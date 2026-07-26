@@ -370,6 +370,87 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   auth behave exactly as kubectl does. Read-only. Target:
   \texttt{k8s:} / \texttt{k8s:CONTEXT} (alias
   \texttt{kubernetes:}). \\
+\texttt{quarb-gcplogs} & Google Cloud Logging as a bounded
+  snapshot — never a tail: the target must carry
+  \texttt{since=} (a gcloud freshness duration or an ISO
+  instant) and/or \texttt{limit=}, and an unbounded mount is
+  refused. Entries oldest-first at the root as \texttt{/entry}
+  children (the \texttt{/row} convention); severity as text
+  property, lowercased trait
+  (\texttt{/entry<error>}), and ordered numeric rank
+  (\texttt{;;;severity}, GCP's enum values); timestamps as
+  typed instants; \texttt{::trace} the bare trace id — the
+  \texttt{<=>} join key across services. Unknown property
+  names fall through payload top level → labels → resource
+  labels → httpRequest. \texttt{filter=} passes a raw Cloud
+  Logging filter to the server (the mount-side cut);
+  \texttt{until=} joins it as a timestamp clause. Transport is
+  \texttt{gcloud logging read --format=json} over subprocess
+  (kubectl posture; \texttt{QUARB\_GCLOUD} overrides —
+  the bottled test fixture's hook; \texttt{account=} picks the
+  gcloud account). Read-only. Target:
+  \texttt{gcl:PROJECT?since=1h\&filter=…\&limit=N} (alias
+  \texttt{gcplogs:}). \\
+\texttt{quarb-cwlogs} & AWS CloudWatch Logs, the gcplogs
+  design sheet over SigV4 (shared \texttt{quarb-aws} signing,
+  credential chain, region resolution): bounded snapshots
+  (\texttt{since=}/\texttt{limit=} mandatory), log groups as
+  short-named root children with lazily fetched \texttt{/entry}
+  events (or one group's entries at the root when the target
+  names it), JSON messages decoded with property fallthrough
+  (\texttt{::level}, \texttt{::requestId} — the cross-group
+  join key), \texttt{filter=} as a server-side CloudWatch
+  filter pattern, \texttt{;;;group}/\texttt{;;;stream}/
+  \texttt{;;;received}/\texttt{;;;id} metadata.
+  \texttt{endpoint=} overrides the URL (LocalStack; the
+  bottled \texttt{cwlogs-server.py} fixture). Read-only.
+  Target: \texttt{cwl:[GROUP]?since=1h\&filter=…\&limit=N}
+  (alias \texttt{cloudwatch:}). \\
+\texttt{quarb-azlogs} & Azure Monitor Logs through the Log
+  Analytics KQL endpoint — the adapter composes the KQL itself
+  (bounded table scan, \texttt{filter=} as a \texttt{| where}
+  clause, \texttt{take} from \texttt{limit=}); \texttt{table=}
+  and a bound are mandatory. One table's rows at the root as
+  \texttt{/entry}, a comma list as root children per table.
+  Columns are properties (\texttt{datetime} as instants,
+  \texttt{dynamic} decoded into subtrees with fallthrough);
+  \texttt{::OperationId} is the correlation key; the default
+  value is \texttt{Message} or the \texttt{Name}+
+  \texttt{ResultCode} request line. Bearer token from
+  \texttt{\$AZURE\_LOG\_TOKEN} or the az CLI
+  (\texttt{QUARB\_AZ}); \texttt{endpoint=} overrides (the
+  bottled \texttt{azlogs-server.py}). Read-only. Target:
+  \texttt{azl:WORKSPACE?table=…\&since=1h\&limit=N} (alias
+  \texttt{azlogs:}). \\
+\texttt{quarb-cflogs} & Cloudflare edge logs, Logpull-shaped:
+  \texttt{GET zones/\{zone\}/logs/received} NDJSON, one flat
+  record per request, fields as properties under their own
+  names plus minted \texttt{::ray} and \texttt{::timestamp};
+  the default value is the request line; \texttt{;;;cache} the
+  cache status. \texttt{since=} is mandatory (Logpull demands a
+  range; \texttt{until} clamps a minute behind now). The Ray ID
+  is what the origin sees as \texttt{cf-ray}, so mounting the
+  edge next to origin logs makes request reconstruction
+  cross-provider — one \texttt{<=>} on the ray, another on the
+  origin's own trace. \texttt{\$CLOUDFLARE\_API\_TOKEN};
+  \texttt{endpoint=} replays Logpush archives (the bottled
+  \texttt{cflogs-server.py}). Read-only. Target:
+  \texttt{cfl:ZONE\_ID?since=1h\&limit=N} (alias
+  \texttt{cflogs:}). \\
+\texttt{quarb-ddlogs} & Datadog Logs through the v2 search API
+  (\texttt{POST /api/v2/logs/events/search}, cursor-paginated):
+  bounded snapshots (\texttt{since=}/\texttt{limit=} mandatory),
+  \texttt{query=} as Datadog's own search syntax run
+  server-side. Severity is Datadog's \texttt{::status} plus the
+  family trait and ordered \texttt{;;;severity} rank;
+  \texttt{::trace} is minted from \texttt{dd.trace\_id}; tags
+  split into fallthrough properties (\texttt{env:prod} answers
+  \texttt{::env}); custom attributes navigate as children. Auth
+  \texttt{\$DD\_API\_KEY}/\texttt{\$DD\_APP\_KEY}, site from
+  \texttt{site=}/\texttt{\$DD\_SITE}; \texttt{endpoint=}
+  overrides (the bottled \texttt{ddlogs-server.py}). Read-only.
+  Target: \texttt{ddl:?since=1h\&query=…\&limit=N} (alias
+  \texttt{datadog:}). \\
 \texttt{quarb-github} & GitHub, three shapes in their native
   registers. The tree mirrors github.com URLs: users/orgs at
   the root (addressed by login — the root does not enumerate),

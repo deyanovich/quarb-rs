@@ -397,6 +397,14 @@ impl Parser<'_> {
                         .into(),
                 ));
             }
+            if matches!(self.peek(), Some(Token::Lt)) {
+                return Err(QuarbError::Parse(
+                    "a fragment does not take a trailing trait selector; \
+                     put the trait inside a definition: \
+                     'def &errs: /entry<error> ;'"
+                        .into(),
+                ));
+            }
         } else {
             branches.push(self.branch()?);
         }

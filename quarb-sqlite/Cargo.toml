@@ -11,9 +11,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.10.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.10.0" }
-rusqlite.workspace = true
+quarb = { path = "../quarb", version = "0.11.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.11.0" }
+rusqlite = { workspace = true, features = ["serialize"] }
 thiserror.workspace = true
 
 [dev-dependencies]
