@@ -125,6 +125,27 @@ pub fn run_traced_with_defs(
     Ok(exec::eval_traced(&ast, adapter))
 }
 
+/// True if `query` (inline defs allowed) opens with an expression
+/// head or a lone root anchor and never navigates a document: every
+/// branch is a step-less, projection-less root anchor and there are
+/// no correlations. Such a query can run against a bare root with
+/// no mounted target — the calculator invocation (spec: The
+/// Expression Head). Unparseable text answers `false`; the caller's
+/// normal run path owns the error message.
+pub fn is_calculator(query: &str) -> bool {
+    let Ok(tokens) = lexer::lex(query) else {
+        return false;
+    };
+    let Ok(ast) = parser::parse_with_defs(&tokens, Defs::default()) else {
+        return false;
+    };
+    ast.correlations.is_empty()
+        && !ast.branches.is_empty()
+        && ast.branches.iter().all(|b| {
+            matches!(b.anchor, ast::Anchor::Root) && b.steps.is_empty() && b.projection.is_none()
+        })
+}
+
 /// Parse `query` (expanding defs) and render it back to canonical
 /// query text — the expansion lens (`qua --expand`). Pure fragments
 /// only: a data-aware macro (`&name!`) needs [`expand_with`].

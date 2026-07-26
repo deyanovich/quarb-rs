@@ -390,9 +390,30 @@ pub fn apply_scalar(
         // untouched; only the written display form changes). A
         // dimension mismatch or a non-quantity topic is null —
         // this is also the sanctioned road where arithmetic
-        // refuses to guess (numbers never lift into ±).
+        // refuses to guess (numbers never lift into ±). Unit-shaped
+        // TEXT lifts through the unital reading first: invoking
+        // convert by name is explicit intent, so `2KiB |
+        // convert(B)` needs no separate `| quantity` (ruling #12's
+        // author-spelling scope).
         "convert" => {
             let target = arg_str(call, 0, "").to_string();
+            let lifted;
+            let topic = match &topic {
+                Value::Str(s) => {
+                    match crate::quantity::parse_unit_text_with(s, scale) {
+                        Some((value, base, wv, wu)) => {
+                            lifted = Value::Quantity {
+                                value,
+                                base,
+                                written: Some((wv, wu)),
+                            };
+                            &lifted
+                        }
+                        None => &topic,
+                    }
+                }
+                t => t,
+            };
             vec![match &topic {
                 Value::Quantity { value, base, .. } => match scale(&target) {
                     Some((factor, tbase)) if &tbase == base => Value::Quantity {

@@ -109,6 +109,18 @@ fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
 
 /// Build the in-process executor over the current mount specs.
 fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
+    // No source at all: the calculator session — a bare root for
+    // expression-headed lines (`= expr`; spec: The Expression
+    // Head). `:mount` grafts real sources in later; until then &N!
+    // reads the same bare root as &N.
+    if remount.specs.is_empty() {
+        let doc = Doc::parse("{}", "json").map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(Box::new(LocalExecutor::new(
+            doc,
+            remount.now,
+            remount.allow_shell,
+        )));
+    }
     let mut schemed = false;
     let doc = match remount.specs.as_slice() {
         [one] if one.name.is_none() => {
@@ -166,9 +178,17 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
 }
 
 fn main() -> Result<()> {
+    // Offline kaiv resolution by default, as in qua: registry
+    // imports come from built-ins, local bases, or the warm cache
+    // — never a surprise fetch. `KAIV_OFFLINE=0` opts back in.
+    if std::env::var_os("KAIV_OFFLINE").is_none() {
+        unsafe {
+            std::env::set_var("KAIV_OFFLINE", "1");
+        }
+    }
     let cli = Cli::parse();
-    if cli.paths.is_empty() {
-        anyhow::bail!("quai needs at least one source (a directory, a document, or git:PATH)");
+    if cli.paths.is_empty() && cli.daemon {
+        anyhow::bail!("--daemon needs at least one source (a directory, a document, or git:PATH)");
     }
     let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
     let raw_paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
@@ -213,7 +233,11 @@ fn main() -> Result<()> {
             std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
         session.seed_defs(&text)?;
     }
-    let sources = cli.paths.join(", ");
+    let sources = if cli.paths.is_empty() {
+        "a bare root — calculator session; lines open with '= expr', :mount adds sources".to_string()
+    } else {
+        cli.paths.join(", ")
+    };
     let mode = if cli.daemon { "daemon-backed" } else { "in-process" };
     println!(
         "quai — interactive Quarb over {sources} ({mode}).  :help for commands, :quit (or Ctrl-D) to leave."

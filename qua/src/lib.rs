@@ -289,6 +289,17 @@ pub fn cli_main() -> anyhow::Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // A query engine never fetches over the network by surprise:
+    // kaiv `.!units` / `.!types` registry imports resolve from the
+    // frozen built-in set, local `.!registry` bases, or the warm
+    // kaiv cache — not f.kaiv.io. `KAIV_OFFLINE=0` re-enables the
+    // fetch explicitly (single-threaded here, so set_var is safe).
+    if std::env::var_os("KAIV_OFFLINE").is_none() {
+        unsafe {
+            std::env::set_var("KAIV_OFFLINE", "1");
+        }
+    }
+
     let mut cli = Cli::parse();
 
     // A target may ride the query as a scheme prefix —
@@ -1647,10 +1658,23 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
             Some(path.as_path()),
         ),
-        None => {
-            if std::io::stdin().is_terminal() {
-                anyhow::bail!("no input: give a directory, a file, or pipe a document to stdin");
+        // No target and no pipe: an expression-headed query runs as
+        // a calculator against a bare root; anything that navigates
+        // is refused loudly (silent emptiness would read as data).
+        None if std::io::stdin().is_terminal() => {
+            if !quarb::is_calculator(&cli.query) {
+                // A query that fails to parse should say so — not
+                // masquerade as a missing target.
+                quarb::expand(&cli.query, &quarb::Defs::default())
+                    .context("parsing the query")?;
+                anyhow::bail!(
+                    "no input: give a directory, a file, or pipe a document to \
+                     stdin — an expression head '= expr' runs without one"
+                );
             }
+            ("{}".to_owned(), None)
+        }
+        None => {
             let mut text = String::new();
             std::io::stdin().read_to_string(&mut text)?;
             (text, None)

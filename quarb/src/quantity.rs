@@ -62,6 +62,11 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
         // 1 GiB = 2^30 B, never confused. The table matches kaiv's
         // (harmonized by ruling 2026-07-18).
         "B" => (1.0, "B"),
+        // The bit — the kaiv spec's information base is the bit
+        // with B = 8 b; quarb keeps B as the stored base, so the
+        // bit is 1/8. Prefixed bits ride the generic machinery
+        // (kb, Mb, Gb — link rates), decimal prefixes only.
+        "b" => (0.125, "B"),
         "KiB" => (1024.0, "B"),
         "MiB" => (1_048_576.0, "B"),
         "GiB" => (1_073_741_824.0, "B"),
@@ -118,7 +123,8 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
 fn prefixable(stem: &str) -> bool {
     matches!(
         stem,
-        "B" | "m"
+        "B" | "b"
+            | "m"
             | "s"
             | "g"
             | "A"
@@ -163,7 +169,9 @@ pub fn unit_scale(name: &str) -> Option<(f64, &'static str)> {
             // never a size ("mB" is the MB typo, "dB" a decibel),
             // so reading it as 10^-3 B would order a real figure
             // below every genuine size. Refuse, like capital KB.
-            if stem == "B" && *pow < 0 {
+            // The bit refuses the same way ("mb" is the Mb typo,
+            // "db" the decibel again — never a millibit).
+            if (stem == "B" || stem == "b") && *pow < 0 {
                 return None;
             }
             let (f, base) = full_name_scale(stem)?;
@@ -416,6 +424,15 @@ mod tests {
         assert_eq!(unit_scale("GiB"), Some((1_073_741_824.0, "B")));
         assert_eq!(unit_scale("TB"), Some((1e12, "B")));
         assert_eq!(unit_scale("TiB"), Some((1_099_511_627_776.0, "B")));
+        // The bit: the kaiv spec's information base (B = 8 b),
+        // stored on the byte base at 1/8. Decimal prefixes ride
+        // (link rates); shrinking prefixes refuse like B's ("mb"
+        // is the Mb typo, "db" the decibel — never a millibit).
+        assert_eq!(unit_scale("b"), Some((0.125, "B")));
+        assert_eq!(unit_scale("kb"), Some((125.0, "B")));
+        assert_eq!(unit_scale("Gb"), Some((1.25e8, "B")));
+        assert_eq!(unit_scale("mb"), None);
+        assert_eq!(unit_scale("db"), None);
         // The seam, settled: a gibibyte outranks a gigabyte.
         let gb = unit_scale("GB").unwrap().0;
         let gib = unit_scale("GiB").unwrap().0;

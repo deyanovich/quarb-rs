@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.11.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.11.0" }
+quarb = { path = "../quarb", version = "0.12.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.12.0" }
 duckdb = { version = "1", features = ["bundled"] }
 thiserror.workspace = true
 

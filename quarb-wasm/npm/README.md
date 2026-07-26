@@ -1,0 +1,76 @@
+# @quarb/wasm
+
+[Quarb](https://quarb.org) — the arboreal query engine —
+compiled to WebAssembly, with TypeScript types. One path
+language over JSON, YAML, TOML, CSV/TSV, XML, HTML, and
+Markdown, running entirely client-side: no server, no native
+dependency, the same engine that powers the
+[playground](https://demo.quarb.org) and the Quarb Scraper
+browser extension.
+
+## Install
+
+```sh
+npm install @quarb/wasm
+```
+
+## Use
+
+```ts
+import { query } from '@quarb/wasm';
+
+const rows = await query(
+  'json',
+  '{"users": [{"name": "ada", "age": 36}, {"name": "lin", "age": 7}]}',
+  '/users/*[::age >= 18]::name'
+);
+// ["ada"]
+```
+
+`query()` initializes the engine on first call — browsers and
+bundlers fetch the `.wasm` next to the module, Node reads it
+from disk — and returns the result lines, throwing on a parse
+or execution error. Scrape HTML the same way:
+
+```ts
+const links = await query('html', html, '//a::href');
+```
+
+For explicit control (custom wasm location, one-time init, the
+raw result envelope):
+
+```ts
+import { initQuarb, run, version } from '@quarb/wasm';
+
+await initQuarb();                     // or initQuarb(bytes)
+version();                             // "0.12.0"
+const envelope = JSON.parse(run('csv', csv, '/row @| count', Date.now()));
+// {ok: true, lines: ["891"]} — or {ok: false, error: "..."}
+```
+
+## The language in one breath
+
+Paths navigate (`/users/*`, `//a`), predicates filter
+(`[::age >= 18]`), `::key` projects values, `|` pipes each
+result through transforms, `@|` aggregates across all of them,
+`<=>` joins across sources, and `= expr` opens a scalar
+expression with no document at all. The
+[user guide](https://quarb.org/guide.html) walks the whole
+language on real transcripts; the
+[cookbooks](https://quarb.org/cookbooks/) translate from jq,
+XPath, pandas, CSS selectors, and BeautifulSoup idioms; the
+[specification](https://quarb.org/spec/latest) is the
+authoritative reference.
+
+## Scope
+
+This package bundles the text-format adapters listed above.
+The full engine — 40+ adapters from SQLite and Postgres to
+Kafka, S3, and cloud log services, plus the `qua` CLI and the
+`quai` interactive session — ships as
+[Rust crates](https://crates.io/crates/quarb) and a
+[Python package](https://pypi.org/project/quarb/).
+
+## License
+
+MIT or Apache-2.0, at your option.

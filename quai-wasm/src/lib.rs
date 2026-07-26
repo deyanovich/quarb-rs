@@ -199,6 +199,40 @@ impl QuaiSession {
         }
     }
 
+    /// Run one notebook-shaped cell, mirroring the Quarb kernel: a
+    /// defs-only cell (allowing `#` comment lines) extends the macro
+    /// table; anything else runs whole as a query — newlines are
+    /// whitespace to the engine, and a cell may carry inline `def`s
+    /// ahead of its query (the pivot-macro shape).
+    pub fn run_cell(&mut self, text: &str) -> String {
+        let stripped = quarb::strip_defs_comments(text);
+        let t = stripped.trim();
+        if t.is_empty() {
+            return envelope("", vec![], None, None);
+        }
+        if (t.starts_with("def ") || t.starts_with("macro "))
+            && quarb::parse_defs(t).is_ok()
+        {
+            return match self.session.add_def(t) {
+                Ok(()) => envelope("", vec![], Some("definitions added".into()), None),
+                Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
+            };
+        }
+        let label = format!("&{}", self.session.line_no());
+        match self.session.eval(t) {
+            Ok(cells) => {
+                let lines = cells.iter().map(|c| c.display()).collect();
+                let note = if self.session.commit(t, cells) {
+                    None
+                } else {
+                    Some(format!("{label} is not referenceable"))
+                };
+                envelope(&label, lines, note, None)
+            }
+            Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
+        }
+    }
+
     /// Run one input line, returning a JSON envelope (label, lines,
     /// note, error). Mirrors the native REPL's dispatch: `def`/`macro`
     /// definitions, `&N#` frozen recall, `&N!` live re-read, and

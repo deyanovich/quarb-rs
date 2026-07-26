@@ -3714,11 +3714,19 @@ fn eval_operand(
         // still reachable.
         // Arithmetic: each side contributes its first value; the
         // combination rules (numeric readings, null propagation,
-        // overflow promotion) live in `arith`.
+        // overflow promotion) live in `arith`. A shaped LITERAL
+        // operand types itself first (ruling #12): the author's own
+        // spelling — `1900-01-01 + 12d`, `2h + 30min`, `1500m +
+        // 2km` — is unambiguous, unlike data text (Rel reads never
+        // retype) or comparison criteria (which stay criteria and
+        // coerce at the use site).
         Operand::Arith { op, left, right } => {
+            let scale = |e: &str| adapter.unit_scale(e);
             let l = operand_scalar_bound(adapter, node, left, trace, bound, scope);
             let r = operand_scalar_bound(adapter, node, right, trace, bound, scope);
-            vec![arith(*op, &l, &r, &|e| adapter.unit_scale(e))]
+            let l = retype_shaped_lit(left, l, &scale);
+            let r = retype_shaped_lit(right, r, &scale);
+            vec![arith(*op, &l, &r, &scale)]
         }
         Operand::Neg(inner) => {
             let v = operand_scalar_bound(adapter, node, inner, trace, bound, scope);
@@ -3777,6 +3785,42 @@ fn eval_operand(
 /// text — the adapter's [`crate::adapter::AstAdapter::unit_scale`],
 /// threaded so custom units resolve where comparisons happen.
 pub(crate) type UnitScale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
+
+/// A shaped literal in arithmetic position types itself (ruling
+/// #12): instant text becomes an Instant, span text a Duration
+/// (builtin units first, then the mounted unit table), unit text a
+/// Quantity. Only an `Operand::Lit` retypes — a data read (`Rel`)
+/// keeps its text, and comparisons never call this, so criteria
+/// keep coercing at the use site. A bare number stays a number:
+/// the no-guess and scaling-factor rules in `arith` still apply.
+fn retype_shaped_lit(op: &Operand, v: Value, scale: UnitScale) -> Value {
+    if !matches!(op, Operand::Lit(_)) {
+        return v;
+    }
+    let Value::Str(s) = &v else {
+        return v;
+    };
+    if let Some((secs, nanos, offset_min)) = crate::temporal::parse_iso(s) {
+        return Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+        };
+    }
+    if let Some((secs, nanos)) =
+        crate::temporal::parse_span(s).or_else(|| crate::temporal::span_from_units(s, scale))
+    {
+        return Value::Duration { secs, nanos };
+    }
+    if let Some((value, base, wv, wu)) = crate::quantity::parse_unit_text_with(s, scale) {
+        return Value::Quantity {
+            value,
+            base,
+            written: Some((wv, wu)),
+        };
+    }
+    v
+}
 
 /// The durational reading, extended by the mounted unit table:
 /// builtin span text first (`min`/`h`/`d` keep their engine

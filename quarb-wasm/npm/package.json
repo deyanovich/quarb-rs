@@ -1,0 +1,51 @@
+{
+  "name": "@quarb/wasm",
+  "version": "0.12.0",
+  "description": "Quarb — the arboreal query engine — compiled to WebAssembly, with TypeScript types. Query JSON, YAML, TOML, CSV, XML, HTML, and Markdown with one path language, entirely client-side.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./quarb_wasm.js": "./quarb_wasm.js",
+    "./quarb_wasm_bg.wasm": "./quarb_wasm_bg.wasm"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "quarb_wasm.js",
+    "quarb_wasm.d.ts",
+    "quarb_wasm_bg.wasm",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "sideEffects": false,
+  "license": "MIT OR Apache-2.0",
+  "author": "Bojan Durickovic <dev@deyanovich.org>",
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/quarb/engine"
+  },
+  "homepage": "https://quarb.org",
+  "keywords": [
+    "quarb",
+    "query",
+    "query-language",
+    "wasm",
+    "webassembly",
+    "json",
+    "yaml",
+    "toml",
+    "csv",
+    "xml",
+    "html",
+    "markdown",
+    "jq",
+    "xpath",
+    "scraping"
+  ]
+}

@@ -56,6 +56,7 @@ pub fn parse_with_data(
         pattern_depth: 0,
         predicate_depth: 0,
         nest_depth: 0,
+        subquery_depth: 0,
     };
     p.parse()
 }
@@ -72,6 +73,7 @@ pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
         pattern_depth: 0,
         predicate_depth: 0,
         nest_depth: 0,
+        subquery_depth: 0,
     };
     while p.at_def() || p.at_macro() {
         if p.at_def() {
@@ -179,6 +181,13 @@ struct Parser<'a> {
     /// stack overflow (an abort, not an error) — and macro expansion
     /// re-enters the parser, so adversarial *data* can reach this.
     nest_depth: usize,
+    /// How many try-a-query fallback sites enclose the current
+    /// position (subcontext bodies, pattern pushes). Inside one, the
+    /// expression head is off: those sites probe `parse_query` and
+    /// fall back to a value expression, and the head would make the
+    /// probe spuriously succeed with a root anchor where the value
+    /// reading (anchored at the current node) is the meaning.
+    subquery_depth: usize,
 }
 
 /// Nesting depth past which parsing refuses (see
@@ -367,6 +376,38 @@ impl Parser<'_> {
         pipeline: &mut Vec<Stage>,
         correlations: &mut Vec<Query>,
     ) -> Result<()> {
+        // The expression head: a query may open with `= expr`
+        // instead of navigation — `= 2 + 2`, `= 1900-01-01 |
+        // &gregorian`. Sugar for `^ | (expr)`: one row from the
+        // root anchor, the expression's value as its topic (the
+        // calculator entry — no document navigation required). The
+        // sigil is collision-free: no query form starts with `=`
+        // (equality is infix, inside predicates), so parentheses
+        // keep every navigational meaning they had. Off inside
+        // try-a-query fallback sites (subquery_depth): a subcontext
+        // body's value reading, anchored at the current node, is
+        // the meaning there.
+        if branches.is_empty()
+            && self.subquery_depth == 0
+            && matches!(self.peek(), Some(Token::Eq))
+        {
+            self.pos += 1;
+            let expr = self.additive()?;
+            branches.push(Branch {
+                steps: Vec::new(),
+                projection: None,
+                anchor: Anchor::Root,
+            });
+            pipeline.push(Stage::Expr(expr));
+            if matches!(self.peek(), Some(Token::PipePipe)) {
+                return Err(QuarbError::Parse(
+                    "an expression head stands alone; it cannot join a \
+                     union — pipe from it instead: '= expr | …'"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
         if matches!(self.peek(), Some(Token::Amp)) {
             let alone = branches.is_empty();
             let q = self.invoke_query_fragment()?;
@@ -652,7 +693,10 @@ impl Parser<'_> {
                     // the fallback when the query reading does not
                     // reach the closing parenthesis.
                     let save = self.pos;
-                    if let Ok(body) = self.parse_query()
+                    self.subquery_depth += 1;
+                    let tried = self.parse_query();
+                    self.subquery_depth -= 1;
+                    if let Ok(body) = tried
                         && matches!(self.peek(), Some(Token::RParen))
                     {
                         self.pos += 1;
@@ -1358,6 +1402,7 @@ impl Parser<'_> {
                     pattern_depth: 0,
                     predicate_depth: 0,
                     nest_depth: 0,
+                    subquery_depth: 0,
                 };
                 let mut stages = Vec::new();
                 p.pipeline_items(&mut stages, PipeMode::Nav).map_err(wrap)?;
@@ -1895,7 +1940,10 @@ impl Parser<'_> {
         // literal name again, and its own patterns re-open scope.
         let depth = std::mem::take(&mut self.pattern_depth);
         let save = self.pos;
-        let body = if let Ok(q) = self.parse_query()
+        self.subquery_depth += 1;
+        let tried = self.parse_query();
+        self.subquery_depth -= 1;
+        let body = if let Ok(q) = tried
             && matches!(self.peek(), Some(Token::RParen))
         {
             PushBody::Query(Box::new(q))
@@ -2532,6 +2580,7 @@ impl Parser<'_> {
             pattern_depth: 0,
             predicate_depth: 0,
             nest_depth: 0,
+            subquery_depth: 0,
         };
         let expr = p.additive().map_err(context)?;
         if p.pos != tokens.len() {
@@ -3176,7 +3225,8 @@ impl Parser<'_> {
             Some(Token::Name { text, .. }) => {
                 return Err(QuarbError::Parse(format!(
                     "expected a navigation operator before '{text}' \
-                     (queries are root-anchored; start with '/')"
+                     (queries are root-anchored; start with '/', or open \
+                     with an expression head: '= expr')"
                 )));
             }
             _ => {
