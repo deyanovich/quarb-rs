@@ -11,7 +11,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.13.0" }
+quarb = { path = "../quarb", version = "0.14.0" }
 rskafka = { version = "0.6", features = ["transport-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde_json.workspace = true

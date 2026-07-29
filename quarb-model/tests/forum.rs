@@ -21,8 +21,8 @@ fn forum() -> ModelAdapter<SqliteAdapter> {
     let base = SqliteAdapter::load(&conn).unwrap();
     let model = parse_model(
         r#"
-        node ips:     /posts/*::ip;
-        node cookies: /posts/*::cookie;
+        node /ips/ip:         /posts/*::ip     | unique;
+        node /cookies/cookie: /posts/*::cookie | unique;
         ref /posts/*::ip     --> ips;
         ref /posts/*::cookie --> cookies;
         edge /posts/*: ::cookie -- ::ip;
@@ -48,7 +48,11 @@ fn derived_containers_are_root_siblings() {
     // string-keyed distinct: 4 cookies, 3 ips
     assert_eq!(values(&a, "/cookies/* @| count"), vec!["4"]);
     assert_eq!(values(&a, "/ips/* @| count"), vec!["3"]);
-    assert_eq!(values(&a, "/cookies/ck-2::id"), vec!["ck-2"]);
+    // Children answer to their role, never to their value: the
+    // value is reached by projection or predicate.
+    assert_eq!(values(&a, "/cookies/cookie @| count"), vec!["4"]);
+    assert_eq!(values(&a, "/cookies/ck-2 @| count"), vec!["0"]);
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']::id"), vec!["ck-2"]);
 }
 
 #[test]
@@ -56,27 +60,39 @@ fn declared_refs_resolve_and_backlink() {
     let a = forum();
     // a base row resolves its ip into the container
     assert_eq!(values(&a, "/posts/1::ip-->::id"), vec!["ip-a"]);
-    // a container node's backlinks are the rows that carried it
-    assert_eq!(values(&a, "/cookies/ck-2<-cookie::id"), vec!["2", "3"]);
+    // Forward, the hop is named for the role it lands on.
+    assert_eq!(values(&a, "/posts/1--ip::"), vec!["ip-a"]);
+    // Backward it lands on a row, so it is named for the row.
+    // `--cookie` from a cookie node names no relation at all: it
+    // would have to land on something that is not a cookie.
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']--posts::id"), vec!["2", "3"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-2']--cookie @| count"),
+        vec!["0"]
+    );
 }
 
 #[test]
-fn container_labeled_pair_edges_close() {
+fn pair_edges_close_the_walk() {
     let a = forum();
-    // the payoff: (--ips--cookies)+ walks the bipartite component,
-    // no junction spelled twice. ck-1..ck-3 chain over ip-a/ip-b.
-    let mut got = values(&a, "/cookies/ck-1(--ips--cookies)+::id");
+    // the payoff: every hop names the role it lands on, and the
+    // junction is never spelled twice. ck-1..ck-3 chain over
+    // ip-a/ip-b.
+    let mut got = values(&a, "/cookies/cookie[:: = 'ck-1'](--ip--cookie)+::id");
     got.sort();
     assert_eq!(got, vec!["ck-2", "ck-3"]);
     // ck-9 shares no ip: alone
-    assert_eq!(values(&a, "/cookies/ck-9(--ips--cookies)+::id @| count"), vec!["0"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-9'](--ip--cookie)+::id @| count"),
+        vec!["0"]
+    );
     // parallel edge collapsed: ck-1 has exactly one ip neighbour
-    assert_eq!(values(&a, "/cookies/ck-1--ips @| count"), vec!["1"]);
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-1']--ip @| count"), vec!["1"]);
 }
 
 #[test]
 fn derived_nodes_carry_container_traits() {
     let a = forum();
     assert_eq!(values(&a, "/ips/*<ip> @| count"), vec!["3"]);
-    assert_eq!(values(&a, "/cookies/ck-1<cookie>::id"), vec!["ck-1"]);
+    assert_eq!(values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::id"), vec!["ck-1"]);
 }

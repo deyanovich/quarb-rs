@@ -169,11 +169,13 @@ struct Cli {
     refs: Option<PathBuf>,
 
     /// A model file declaring derived arbor structure over the
-    /// source(s): 'node NAME: query;' derives a value container,
-    /// 'ref /path/*::f --> C;' a scoped reference, 'edge /path/*:
-    /// ::a -- ::b;' container-labeled pair edges, 'mount NAME: t;' a
-    /// source the model opens itself. The graph the data only
-    /// implies, made navigable — over any adapter.
+    /// source(s): 'node /ips/ip: query;' derives a container whose
+    /// children play the role 'ip', 'ref /path/*::f --> C;' a scoped
+    /// reference, 'rel A -> B[cond];' a relation no value carries,
+    /// 'edge /path/*: ::a -- ::b;' pair edges, 'mount NAME: t;' a
+    /// source the model opens itself. Every hop is named for the role
+    /// it lands on. The graph the data only implies, made navigable —
+    /// over any adapter.
     #[arg(long, value_name = "FILE")]
     model: Option<PathBuf>,
 

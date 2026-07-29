@@ -68,7 +68,7 @@ struct Cli {
     refs: Option<PathBuf>,
 
     /// A model file declaring derived arbor structure over the
-    /// source(s) — 'node'/'ref'/'edge'/'mount' statements (see
+    /// source(s) — 'node'/'ref'/'rel'/'edge'/'mount' statements (see
     /// `qua --help`). The session runs every line against the
     /// enriched view.
     #[arg(long, value_name = "FILE")]

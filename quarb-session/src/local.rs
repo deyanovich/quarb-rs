@@ -14,8 +14,8 @@ pub struct LocalExecutor {
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
-    /// A `--model` file enriching the source with derived structure.
-    #[cfg(feature = "native")]
+    /// A `--model` file enriching the source with derived structure
+    /// (wasm-safe — the playground uses it too).
     model: Option<quarb_model::Model>,
     /// The source spec, kept so a `&N!` reading can re-materialize.
     /// `None` when the source can't be re-opened (wasm pasted text,
@@ -33,14 +33,12 @@ impl LocalExecutor {
             allow_shell,
             #[cfg(feature = "native")]
             respec: None,
-            #[cfg(feature = "native")]
             model: None,
         }
     }
 
     /// Attach a `--model` file: the session runs every query against
     /// the enriched view.
-    #[cfg(feature = "native")]
     pub fn with_model(mut self, model: Option<quarb_model::Model>) -> Self {
         self.model = model;
         self
@@ -61,7 +59,6 @@ impl LocalExecutor {
             now,
             allow_shell,
             respec: Some((specs, opts)),
-            #[cfg(feature = "native")]
             model: None,
         }
     }
@@ -79,7 +76,6 @@ fn run_doc(doc: &Doc, query: &str, now: (i64, u32), allow_shell: bool) -> anyhow
 }
 
 /// [`run_doc`], against a model-enriched view.
-#[cfg(feature = "native")]
 fn run_doc_modeled(
     doc: &Doc,
     query: &str,
@@ -101,7 +97,6 @@ fn run_doc_modeled(
 
 impl Executor for LocalExecutor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
-        #[cfg(feature = "native")]
         if let Some(model) = &self.model {
             return run_doc_modeled(&self.doc, query, self.now, self.allow_shell, model);
         }

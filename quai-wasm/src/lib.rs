@@ -71,6 +71,49 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Build a mounted [`Doc`] from a `sources_json` array of
+/// `{"name", "format", "text"}` (or `"bytes_b64"` for sqlite). A
+/// single source mounts path-bare at the root; several mount as
+/// named children. Shared by [`QuaiSession::mount`] and
+/// [`QuaiSession::mount_with_model`].
+fn build_doc(sources_json: &str) -> Result<Doc, JsError> {
+    let sources: serde_json::Value = serde_json::from_str(sources_json)
+        .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
+    let mut parts: Vec<(String, Doc)> = Vec::new();
+    for s in sources.as_array().into_iter().flatten() {
+        let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+        let (Some(name), Some(format)) = (field("name"), field("format")) else {
+            return Err(JsError::new("each source needs name and format"));
+        };
+        let doc = if let Some(b64) = field("bytes_b64") {
+            let bytes =
+                b64_decode(&b64).ok_or_else(|| JsError::new(&format!("'{name}': bad base64")))?;
+            match format.as_str() {
+                "sqlite" | "db" => Doc::sqlite_bytes(&bytes)
+                    .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?,
+                other => {
+                    return Err(JsError::new(&format!(
+                        "'{name}': binary sources must be sqlite, not {other}"
+                    )));
+                }
+            }
+        } else if let Some(text) = field("text") {
+            Doc::parse(&text, &format).map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?
+        } else {
+            return Err(JsError::new(&format!(
+                "'{name}': a source needs text or bytes_b64"
+            )));
+        };
+        parts.push((name, doc));
+    }
+    match parts.len() {
+        0 => Err(JsError::new("no sources to mount")),
+        // A single source stays path-bare at the root.
+        1 => Ok(parts.remove(0).1),
+        _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}"))),
+    }
+}
+
 /// Match a bare capture ref `&<digits><suffix>` (the whole line).
 fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
     line.strip_suffix(suffix)?
@@ -119,43 +162,32 @@ impl QuaiSession {
     /// source mounts at the root, path-bare, exactly as the
     /// one-document constructor does.
     pub fn mount(sources_json: &str, now_millis: f64) -> Result<QuaiSession, JsError> {
-        let sources: serde_json::Value = serde_json::from_str(sources_json)
-            .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
-        let mut parts: Vec<(String, Doc)> = Vec::new();
-        for s in sources.as_array().into_iter().flatten() {
-            let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
-            let (Some(name), Some(format)) = (field("name"), field("format")) else {
-                return Err(JsError::new("each source needs name and format"));
-            };
-            let doc = if let Some(b64) = field("bytes_b64") {
-                let bytes = b64_decode(&b64)
-                    .ok_or_else(|| JsError::new(&format!("'{name}': bad base64")))?;
-                match format.as_str() {
-                    "sqlite" | "db" => Doc::sqlite_bytes(&bytes)
-                        .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?,
-                    other => {
-                        return Err(JsError::new(&format!(
-                            "'{name}': binary sources must be sqlite, not {other}"
-                        )));
-                    }
-                }
-            } else if let Some(text) = field("text") {
-                Doc::parse(&text, &format)
-                    .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?
-            } else {
-                return Err(JsError::new(&format!(
-                    "'{name}': a source needs text or bytes_b64"
-                )));
-            };
-            parts.push((name, doc));
-        }
-        let doc = match parts.len() {
-            0 => return Err(JsError::new("no sources to mount")),
-            // A single source stays path-bare at the root.
-            1 => parts.remove(0).1,
-            _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}")))?,
-        };
+        let doc = build_doc(sources_json)?;
         let executor = Box::new(LocalExecutor::new(doc, now_parts(now_millis), false));
+        Ok(QuaiSession {
+            session: Session::new(executor, Box::new(MemStore)),
+        })
+    }
+
+    /// [`mount`], enriched by a `--model` file (`model_text`): the
+    /// session runs every line against the derived structure the
+    /// model declares over the mounted sources — value containers,
+    /// references, and pair edges. The model's own `mount` statements
+    /// are ignored here (the sources come from the caller, not from
+    /// disk the wasm cannot read); its `node`/`ref`/`edge`/`def`
+    /// statements apply.
+    #[wasm_bindgen(js_name = mountWithModel)]
+    pub fn mount_with_model(
+        sources_json: &str,
+        model_text: &str,
+        now_millis: f64,
+    ) -> Result<QuaiSession, JsError> {
+        let doc = build_doc(sources_json)?;
+        let model = quarb_model::parse_model(model_text)
+            .map_err(|e| JsError::new(&format!("parsing model: {e}")))?;
+        let executor = Box::new(
+            LocalExecutor::new(doc, now_parts(now_millis), false).with_model(Some(model)),
+        );
         Ok(QuaiSession {
             session: Session::new(executor, Box::new(MemStore)),
         })

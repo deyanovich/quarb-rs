@@ -182,8 +182,8 @@ impl Doc {
     /// `quarb::run` expands.
     /// The concrete adapter behind this `Doc`, as `&dyn` — the base a
     /// `--model` enrichment layer wraps (one match, so the model
-    /// paths avoid duplicating the variant arms).
-    #[cfg(feature = "native")]
+    /// paths avoid duplicating the variant arms). Wasm-safe; the
+    /// native-only variants are compiled in only under `native`.
     fn base_dyn(&self) -> &dyn quarb::AstAdapter {
         match self {
             Doc::Json(a) => a,
@@ -191,11 +191,17 @@ impl Doc {
             Doc::Xml(a) => a,
             Doc::Html(a) => a,
             Doc::Sqlite(a) => a,
+            #[cfg(feature = "native")]
             Doc::Fs(a) => a,
+            #[cfg(feature = "native")]
             Doc::FsDeep(a) => a,
+            #[cfg(feature = "native")]
             Doc::Git(a) => a,
+            #[cfg(feature = "native")]
             Doc::Archive(a) => a,
+            #[cfg(feature = "native")]
             Doc::Xlsx(a) => a,
+            #[cfg(feature = "native")]
             Doc::Code(a) => a,
             Doc::Mount(a) => a,
             Doc::Boxed(a, _) => &*a.0,
@@ -206,7 +212,6 @@ impl Doc {
     /// derived containers, references, and edges the model declares,
     /// over this `Doc`'s base. `now` binds `now()` for the base and
     /// its constructor queries alike.
-    #[cfg(feature = "native")]
     pub fn run_modeled(
         &self,
         query: &str,
@@ -231,7 +236,6 @@ impl Doc {
 
     /// Render a node from a model-enriched run: `/container/value`
     /// for derived nodes, the base's own renderer otherwise.
-    #[cfg(feature = "native")]
     pub fn render_modeled(&self, node: NodeId, model: &quarb_model::Model) -> String {
         let enriched =
             quarb_model::ModelAdapter::new(quarb_model::Borrowed(self.base_dyn()), model.clone());
