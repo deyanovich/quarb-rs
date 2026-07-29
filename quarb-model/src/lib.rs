@@ -622,7 +622,9 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
             let c = ((node.0 & !MODEL_TAG) >> CIDX_SHIFT) as usize;
             let v = (node.0 & VAL_MASK) as usize;
             return match self.prior.get(c)?.member(v)? {
-                Member::Value(val) => Some(val),
+                // elevated members have no named properties — the
+                // value lives on the bare projection only
+                Member::Value(_) => None,
                 Member::Node(n) => self.base.property(n, name),
             };
         }
@@ -739,12 +741,14 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         match self.decode(node) {
-            // An elevated node's own value answers `::id` (and any
-            // name), so it prints like a row with one column; an
-            // aliased node answers with the source's own properties.
+            // An aliased node answers with the source's own
+            // properties. An elevated node has exactly one datum —
+            // its value, on the *bare* projection (`::`) — and no
+            // named properties: answering any name with the value
+            // would let `::cookie` on an ip node return the ip.
             Some((_, v)) if v > 0 => match self.aliased(node) {
                 Some(base) => self.base.property(base, name),
-                None => self.elevated(node),
+                None => None,
             },
             Some(_) => None,
             None => self.base.property(node, name),

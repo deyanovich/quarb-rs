@@ -52,14 +52,17 @@ fn derived_containers_are_root_siblings() {
     // value is reached by projection or predicate.
     assert_eq!(values(&a, "/cookies/cookie @| count"), vec!["4"]);
     assert_eq!(values(&a, "/cookies/ck-2 @| count"), vec!["0"]);
-    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']::id"), vec!["ck-2"]);
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']::"), vec!["ck-2"]);
+    // an elevated node has no named properties: its one datum lives
+    // on the bare projection, so a column name answers nothing
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']::cookie"), vec![""]);
 }
 
 #[test]
 fn declared_refs_resolve_and_backlink() {
     let a = forum();
     // a base row resolves its ip into the container
-    assert_eq!(values(&a, "/posts/1::ip-->::id"), vec!["ip-a"]);
+    assert_eq!(values(&a, "/posts/1::ip-->::"), vec!["ip-a"]);
     // Forward, the hop is named for the role it lands on.
     assert_eq!(values(&a, "/posts/1--ip::"), vec!["ip-a"]);
     // Backward it lands on a row, so it is named for the row.
@@ -78,12 +81,12 @@ fn pair_edges_close_the_walk() {
     // the payoff: every hop names the role it lands on, and the
     // junction is never spelled twice. ck-1..ck-3 chain over
     // ip-a/ip-b.
-    let mut got = values(&a, "/cookies/cookie[:: = 'ck-1'](--ip--cookie)+::id");
+    let mut got = values(&a, "/cookies/cookie[:: = 'ck-1'](--ip--cookie)+::");
     got.sort();
     assert_eq!(got, vec!["ck-2", "ck-3"]);
     // ck-9 shares no ip: alone
     assert_eq!(
-        values(&a, "/cookies/cookie[:: = 'ck-9'](--ip--cookie)+::id @| count"),
+        values(&a, "/cookies/cookie[:: = 'ck-9'](--ip--cookie)+:: @| count"),
         vec!["0"]
     );
     // parallel edge collapsed: ck-1 has exactly one ip neighbour
@@ -94,5 +97,5 @@ fn pair_edges_close_the_walk() {
 fn derived_nodes_carry_container_traits() {
     let a = forum();
     assert_eq!(values(&a, "/ips/*<ip> @| count"), vec!["3"]);
-    assert_eq!(values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::id"), vec!["ck-1"]);
+    assert_eq!(values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::"), vec!["ck-1"]);
 }
