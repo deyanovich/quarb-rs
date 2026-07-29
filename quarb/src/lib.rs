@@ -20,9 +20,9 @@
 //! `| .(expr)` subcontexts for grouped aggregation. It also does
 //! correlation: `E1 <=> E2[…$*1…]` joins two contexts, a predicate
 //! referencing a prior expression's context via `$*N`. It also
-//! resolves cross-references: `::prop~>` maps a reference to its
+//! resolves cross-references: `::prop-->` maps a reference to its
 //! target node (a JSON adapter follows a `$ref` JSON Pointer). The
-//! reverse resolution `<~` and pattern search `=>` are not built yet.
+//! reverse resolution `<--` and pattern search `=>` are not built yet.
 //! See `doc/impl.tex`.
 //!
 //! ```

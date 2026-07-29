@@ -3,9 +3,9 @@
 //! A relational database maps onto the arbor as a two-level tree
 //! with the schema's foreign keys as its crosslink fabric: tables
 //! as the unnamed root's children, rows named by primary key,
-//! columns as properties, and declared foreign keys driving `~>`
+//! columns as properties, and declared foreign keys driving `-->`
 //! resolution (with chains), `->`/`<-` crosslinks labeled by
-//! column, and `<~` reverse resolution. The resolution hint names a
+//! column, and `<--` reverse resolution. The resolution hint names a
 //! target table for undeclared references.
 //!
 //! This crate is engine-independent: an engine adapter
@@ -15,7 +15,7 @@
 //!
 //! **Loading model: catalog eager, rows lazy.** The schema is read
 //! once at open; a table's rows materialize on *first touch* —
-//! navigating into the table, a `~>` resolution landing in it, a
+//! navigating into the table, a `-->` resolution landing in it, a
 //! backlink scan crossing it, or its `;;;n-rows` — via the
 //! driver-supplied [`Fetcher`], and are cached for the adapter's
 //! lifetime. Untouched tables are never read, so `/artists/2::name`
@@ -29,6 +29,30 @@
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::OnceCell;
 use std::collections::HashMap;
+
+/// Parse a declared-references document — the client-side rung of
+/// the reference-provenance ladder, for substrates whose catalog
+/// cannot hold the mapping (a schemaless store, or a schema whose
+/// containers are views): `{"refs": {"field": "container", ...}}`.
+/// A field is a bare column name, or `table.column` to scope the
+/// declaration to one table. Returns the (field, container) pairs
+/// in document order.
+pub fn parse_refs(text: &str) -> Result<Vec<(String, String)>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let map = doc
+        .get("refs")
+        .and_then(|r| r.as_object())
+        .ok_or_else(|| "expected {\"refs\": {\"field\": \"container\", ...}}".to_string())?;
+    let mut out = Vec::new();
+    for (field, target) in map {
+        let container = target
+            .as_str()
+            .ok_or_else(|| format!("ref target for '{field}' must be a string"))?;
+        out.push((field.clone(), container.to_string()));
+    }
+    Ok(out)
+}
 
 /// One table's shape, as introspected by an engine adapter.
 pub struct TableSpec {
@@ -60,7 +84,7 @@ struct Row {
     values: Vec<Value>,
 }
 
-/// A table's materialized rows plus the key index for `~>`.
+/// A table's materialized rows plus the key index for `-->`.
 struct TableData {
     rows: Vec<Row>,
     by_key: HashMap<String, usize>,
@@ -89,6 +113,12 @@ const ROW_MASK: u64 = (1 << ROW_BITS) - 1;
 pub struct RelationalModel {
     tables: Vec<LazyTable>,
     fetcher: Fetcher,
+    /// Per (referencing table, column) value index, built on the
+    /// first backlink scan over that column: value -> row indices.
+    /// Backlinks (and `<--`) otherwise re-scan the referencing
+    /// table per call, which turns a quantified walk over a large
+    /// edge table into repeated full scans.
+    backidx: std::cell::RefCell<HashMap<(usize, usize), std::rc::Rc<HashMap<String, Vec<usize>>>>>,
 }
 
 fn materialize(spec: &TableSpec, rows_in: Vec<RowSpec>) -> TableData {
@@ -130,6 +160,7 @@ impl RelationalModel {
             fetcher: Box::new(|_, spec| {
                 unreachable!("eager model refetched table '{}'", spec.name)
             }),
+            backidx: Default::default(),
         }
     }
 
@@ -145,7 +176,26 @@ impl RelationalModel {
                 })
                 .collect(),
             fetcher,
+            backidx: Default::default(),
         }
+    }
+
+    /// The value index for one referencing (table, column), built on
+    /// first use: column value -> indices of the rows holding it.
+    fn back_index(&self, t: usize, col: usize) -> std::rc::Rc<HashMap<String, Vec<usize>>> {
+        if let Some(idx) = self.backidx.borrow().get(&(t, col)) {
+            return idx.clone();
+        }
+        let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (r, row) in self.data(t).rows.iter().enumerate() {
+            if matches!(row.values[col], Value::Null) {
+                continue;
+            }
+            map.entry(row.values[col].to_string()).or_default().push(r);
+        }
+        let idx = std::rc::Rc::new(map);
+        self.backidx.borrow_mut().insert((t, col), idx.clone());
+        idx
     }
 
     /// A table's rows, materializing them on first touch.
@@ -223,10 +273,7 @@ impl RelationalModel {
             .columns
             .iter()
             .position(|c| c == column)?;
-        let idx = data
-            .rows
-            .iter()
-            .position(|r| r.values[col].to_string() == value.to_string())?;
+        let idx = *self.back_index(t, col).get(&value.to_string())?.first()?;
         Some(Self::row_node(t, idx))
     }
 
@@ -351,7 +398,7 @@ impl AstAdapter for RelationalModel {
 
     /// Follow a reference column to its target row. A declared
     /// foreign key knows its target; the hint names a target table
-    /// for undeclared references (`::owner~>users`, resolved
+    /// for undeclared references (`::owner-->users`, resolved
     /// against that table's key).
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let (t, r) = self.entry(node)?;
@@ -389,8 +436,11 @@ impl AstAdapter for RelationalModel {
         out
     }
 
-    /// Which rows point here: scan every table with a FK into this
-    /// row's table and keep the rows whose FK value matches. Loads
+    /// Which rows point here: every table with a FK into this row's
+    /// table contributes the rows whose FK value matches, through
+    /// the per-column value index (built on the first scan — a
+    /// quantified walk over an edge table asks this per hop, and a
+    /// linear re-scan per call turns the walk quadratic). Loads
     /// each referencing table.
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let Some((tt, Some(tr))) = self.entry(node) else {
@@ -413,11 +463,8 @@ impl AstAdapter for RelationalModel {
                         None => continue,
                     }
                 };
-                let data = self.data(t);
-                for (r, row) in data.rows.iter().enumerate() {
-                    if row.values[*col].to_string() == key
-                        && !matches!(row.values[*col], Value::Null)
-                    {
+                if let Some(rows) = self.back_index(t, *col).get(&key) {
+                    for &r in rows {
                         out.push((
                             self.tables[t].spec.columns[*col].clone(),
                             Self::row_node(t, r),

@@ -2443,6 +2443,34 @@ fn arrived_edge(
                 target: from,
             }
         }
+        // The headless arrow: the edge context still records the
+        // edge's true direction — the walk just declined to assert
+        // it. Outgoing is tried first.
+        Axis::BothLink => {
+            if let Some(label) = adapter
+                .links(from)
+                .into_iter()
+                .find(|(l, t)| *t == succ && matches_label(&step.matcher, l))
+                .map(|(l, _)| l)
+            {
+                EdgeCtx {
+                    source: from,
+                    label,
+                    target: succ,
+                }
+            } else {
+                let label = adapter
+                    .backlinks(from)
+                    .into_iter()
+                    .find(|(l, s)| *s == succ && matches_label(&step.matcher, l))
+                    .map(|(l, _)| l)?;
+                EdgeCtx {
+                    source: succ,
+                    label,
+                    target: from,
+                }
+            }
+        }
         Axis::Resolve { property, .. } => EdgeCtx {
             source: from,
             label: property.clone(),
@@ -3040,6 +3068,51 @@ fn apply_step(
                 },
             );
             out.extend(kept.into_iter().map(|(_, source)| source));
+        }
+        // `--` — both directions under one matcher: the node's
+        // outgoing crosslinks and its backlinks, each edge kept
+        // with its true direction so the edge context (`$-`) still
+        // reports source and target faithfully.
+        Axis::BothLink => {
+            let matched: Vec<(String, NodeId, bool)> = adapter
+                .links(node)
+                .into_iter()
+                .map(|(label, target)| (label, target, true))
+                .chain(
+                    adapter
+                        .backlinks(node)
+                        .into_iter()
+                        .map(|(label, source)| (label, source, false)),
+                )
+                .filter(|(label, other, _)| {
+                    matches_label(&step.matcher, label) && tests_ok(adapter, *other, step)
+                })
+                .collect();
+            let kept = apply_predicates(
+                adapter,
+                matched,
+                step,
+                trace,
+                outer,
+                marks,
+                |(_, n, _)| *n,
+                |(label, other, outgoing)| {
+                    Some(if *outgoing {
+                        EdgeCtx {
+                            source: node,
+                            label: label.clone(),
+                            target: *other,
+                        }
+                    } else {
+                        EdgeCtx {
+                            source: *other,
+                            label: label.clone(),
+                            target: node,
+                        }
+                    })
+                },
+            );
+            out.extend(kept.into_iter().map(|(_, other, _)| other));
         }
         Axis::Resolve { property, hint } => {
             let matched: Vec<NodeId> = adapter

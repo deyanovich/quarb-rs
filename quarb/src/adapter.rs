@@ -8,7 +8,7 @@
 //! [`default_value`](AstAdapter::default_value),
 //! [`metadata`](AstAdapter::metadata)). The projection methods have
 //! defaults, so an adapter can implement only what its domain
-//! supports. Crosslink resolution (`~>`) and pattern search (`=>`)
+//! supports. Crosslink resolution (`-->`) and pattern search (`=>`)
 //! are still planned. See `doc/impl.tex`.
 
 use crate::value::Value;

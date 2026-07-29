@@ -65,7 +65,7 @@ fn groups_in_operand_position() {
     for q in [
         "//order::amt <=>? //user[::id = $$::uid] | ...?",
         "//u <=> //v <=>? //order[::uid = $*1::id]",
-        "//commit[;;;short = ^/tags/*;;;short]",
+        "//commit[::::short = ^/tags/*::::short]",
         "/movie .m <-ACTED_IN[::born > (m)::released] | rec(::name, (m)::title)",
         "/c/* | (::kind ?= 'a' ? 1 : ~(^b) ? 2 : 0)",
         "/tags/* | .t(:::name) | `cloc --git ${$.t}` | rec($.t, 'lines', $_)",
@@ -223,4 +223,49 @@ fn defs_substitute_into_groups() {
     // a fragment parameter inside a grouped step's predicate
     let src = "def &chain($n): /employees(/reports[::id = $n])+; &chain(7)";
     assert_eq!(canon(src), "/employees(/reports[::id = 7])+");
+}
+
+#[test]
+fn headless_arrow_round_trips() {
+    // `--` — the either-direction crosslink — parses in path,
+    // group, and predicate-operand position, and reprints as
+    // itself. Glued after a row name it is still the hop, like
+    // `->` (the name lexer breaks on the dash run).
+    assert_eq!(canon("/posts/5--ip"), "/posts/5--ip");
+    assert_eq!(
+        canon("/cookies/c1(--cookie--ip--ip--cookie)+::id"),
+        "/cookies/c1(--cookie--ip--ip--cookie)+::id"
+    );
+    assert_eq!(canon("/a(--*--*)+::name"), "/a(--*--*)+::name");
+    assert_eq!(canon("/ips/*[--ip]::id"), "/ips/*[--ip]::id");
+    // A dash-leading matcher keeps a separating space on reprint,
+    // so the axis survives the round trip.
+    assert_eq!(canon("/a-- -b"), "/a-- -b");
+}
+
+#[test]
+fn resolution_respell_canonicalizes() {
+    // `-->` / `<--` are canonical; the tilde forms remain accepted
+    // and canonicalize on unparse, like `;;;` to `::::`.
+    assert_eq!(canon("/tracks/1::album_id~>::title"), "/tracks/1::album_id-->::title");
+    assert_eq!(canon("/tracks/1::album_id-->::title"), "/tracks/1::album_id-->::title");
+    assert_eq!(canon("/loan::book~>shelf"), "/loan::book-->shelf");
+    assert_eq!(canon("/page::id<~"), "/page::id<--");
+    assert_eq!(canon("/page::id<--cite"), "/page::id<--cite");
+    // the digit guard holds: `<-3` is still a comparison shape
+    assert_eq!(canon("/x[::a <-3]"), "/x[::a < -3]");
+}
+
+#[test]
+fn tail_colon_aliases_canonicalize() {
+    // `:-` and `:--` — the tail-colon spellings — are permanent
+    // typing-friendly aliases of `->` and `-->`.
+    assert_eq!(canon("/employees/6(:-manager_id)+::name"), "/employees/6(->manager_id)+::name");
+    assert_eq!(canon("/tracks/1::album_id:--::title"), "/tracks/1::album_id-->::title");
+    assert_eq!(canon("/a:-b"), "/a->b");
+    // a conditional's glued else-negative is untouched
+    assert_eq!(
+        canon("/x | (::a ?= 1 ? 2 :-3)"),
+        canon("/x | (::a ?= 1 ? 2 : -3)")
+    );
 }

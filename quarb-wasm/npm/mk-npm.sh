@@ -6,12 +6,20 @@ set -eu
 cd "$(dirname "$0")/.."
 
 wasm-pack build --target web --release
+(cd ../quai-wasm && wasm-pack build --target web --release)
 
 DIST=npm/dist
 rm -rf "$DIST"
 mkdir -p "$DIST"
 cp pkg/quarb_wasm.js pkg/quarb_wasm_bg.wasm pkg/quarb_wasm.d.ts "$DIST/"
-cp npm/package.json npm/index.js npm/index.d.ts npm/README.md "$DIST/"
+cp ../quai-wasm/pkg/quai_wasm.js ../quai-wasm/pkg/quai_wasm_bg.wasm \
+   ../quai-wasm/pkg/quai_wasm.d.ts "$DIST/"
+cp npm/index.js npm/index.d.ts \
+   npm/quai.js npm/quai.d.ts npm/README.md "$DIST/"
+# The manifest lives as a template so `npm publish` in npm/ has no
+# package.json to publish — only the assembled dist is a package
+# (0.12.0 shipped broken from here; npm 12 ignored private:true).
+cp npm/package.tmpl.json "$DIST/package.json"
 cp ../LICENSE-MIT ../LICENSE-APACHE "$DIST/"
 
 # The package version tracks the workspace version.

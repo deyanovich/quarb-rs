@@ -448,7 +448,7 @@ impl Exporter {
             match self.kind(*n).as_str() {
                 "step" => {
                     let axis = self.prop_s(*n, "axis");
-                    if matches!(axis.as_str(), "->" | "<-" | "~>" | "<~") {
+                    if matches!(axis.as_str(), "->" | "<-" | "--" | "-->" | "<--") {
                         return Err(SqlError::Unsupported(
                             "partial pushdown: crosslink/resolution axes could reach \
                              the filtered table"
@@ -864,7 +864,7 @@ impl Exporter {
                     // A step here is either navigation (refused) or
                     // a resolution chain (refused with the reason).
                     let s = self.kids(o, "step")[0];
-                    if self.prop_s(s, "axis") == "~>" {
+                    if self.prop_s(s, "axis") == "-->" {
                         return Err(SqlError::Unsupported(
                             "a '~>' resolution chain: the foreign-key targets live in \
                              the schema, not the query — spell the join with '<=>' to \

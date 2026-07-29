@@ -22,11 +22,14 @@ use std::rc::Rc;
 
 /// Options that shape how native sources open (unused on wasm, which
 /// only parses text).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Options {
     pub hidden: bool,
     pub respect_ignore: bool,
     pub descend: bool,
+    /// Declared references, `(field, container)` pairs — the parsed
+    /// `--refs` document, consumed by the SQLite mounts.
+    pub refs: Rc<Vec<(String, String)>>,
 }
 
 /// A materialized source: one variant per adapter family. JSON-model
@@ -54,16 +57,13 @@ pub enum Doc {
     /// Any adapter behind the object-safe trait, with its locator
     /// renderer — the carrier for scheme targets opened through
     /// qua's dispatch (`gcl:`, `kafka:`, `neo4j://`, …).
-    #[cfg(feature = "native")]
     Boxed(Dyn, Box<dyn Fn(NodeId) -> String>),
 }
 
 /// A boxed adapter as an adapter — plain delegation (the
 /// quarb-py `Dyn` pattern).
-#[cfg(feature = "native")]
 pub struct Dyn(pub Box<dyn quarb::AstAdapter>);
 
-#[cfg(feature = "native")]
 impl quarb::AstAdapter for Dyn {
     fn root(&self) -> NodeId {
         self.0.root()
@@ -122,11 +122,37 @@ impl quarb::AstAdapter for Dyn {
 }
 
 impl Doc {
+    /// The kaiv door: the adapter is Rc-shared between the Doc and
+    /// its locator renderer (the `Shared` pattern qua's scheme
+    /// mounts use), riding the Boxed variant.
+    fn boxed_kaiv(a: quarb_kaiv::KaivAdapter) -> Doc {
+        let a = std::rc::Rc::new(a);
+        let r = a.clone();
+        Doc::Boxed(
+            Dyn(Box::new(quarb_mount::Shared(a))),
+            Box::new(move |n| r.locator(n)),
+        )
+    }
+
     /// Parse a text document by format name — the wasm entry point,
     /// and the text tail of the native `open`. Formats: json, yaml,
-    /// toml, csv, tsv, xml, html, markdown, jsonl/ndjson.
+    /// toml, csv, tsv, xml, html, markdown, jsonl/ndjson, kaiv/daiv.
     pub fn parse(input: &str, format: &str) -> Result<Doc> {
         match format {
+            // kaiv rides the Boxed door (no dedicated variant): the
+            // offline resolver — a browser mount has no filesystem
+            // or registry, so `.!units`/`.!types` imports beyond the
+            // embedded core fail with kaiv's own pointed error.
+            "kaiv" => {
+                let a = quarb_kaiv::KaivAdapter::parse_kaiv(input)
+                    .map_err(|e| anyhow::anyhow!("parsing kaiv: {e}"))?;
+                return Ok(Self::boxed_kaiv(a));
+            }
+            "daiv" => {
+                let a = quarb_kaiv::KaivAdapter::parse_daiv(input)
+                    .map_err(|e| anyhow::anyhow!("parsing daiv: {e}"))?;
+                return Ok(Self::boxed_kaiv(a));
+            }
             "json" => quarb_json::JsonAdapter::parse(input)
                 .map(Doc::Json)
                 .context("parsing JSON"),
@@ -154,6 +180,64 @@ impl Doc {
     /// instant and shell permission. The query text carries any macro
     /// definitions inline (the session prepends its table), which
     /// `quarb::run` expands.
+    /// The concrete adapter behind this `Doc`, as `&dyn` — the base a
+    /// `--model` enrichment layer wraps (one match, so the model
+    /// paths avoid duplicating the variant arms).
+    #[cfg(feature = "native")]
+    fn base_dyn(&self) -> &dyn quarb::AstAdapter {
+        match self {
+            Doc::Json(a) => a,
+            Doc::Csv(a) => a,
+            Doc::Xml(a) => a,
+            Doc::Html(a) => a,
+            Doc::Sqlite(a) => a,
+            Doc::Fs(a) => a,
+            Doc::FsDeep(a) => a,
+            Doc::Git(a) => a,
+            Doc::Archive(a) => a,
+            Doc::Xlsx(a) => a,
+            Doc::Code(a) => a,
+            Doc::Mount(a) => a,
+            Doc::Boxed(a, _) => &*a.0,
+        }
+    }
+
+    /// Run against a `--model`-enriched view of this source: the
+    /// derived containers, references, and edges the model declares,
+    /// over this `Doc`'s base. `now` binds `now()` for the base and
+    /// its constructor queries alike.
+    #[cfg(feature = "native")]
+    pub fn run_modeled(
+        &self,
+        query: &str,
+        now: (i64, u32),
+        allow_shell: bool,
+        model: &quarb_model::Model,
+    ) -> quarb::Result<QueryResult> {
+        let (secs, nanos) = now;
+        let base = quarb_model::Borrowed(self.base_dyn());
+        let nowed = WithNow {
+            inner: &base,
+            secs,
+            nanos,
+        };
+        let enriched = quarb_model::ModelAdapter::new(nowed, model.clone());
+        if allow_shell {
+            quarb::run(query, &AllowShell { inner: &enriched })
+        } else {
+            quarb::run(query, &enriched)
+        }
+    }
+
+    /// Render a node from a model-enriched run: `/container/value`
+    /// for derived nodes, the base's own renderer otherwise.
+    #[cfg(feature = "native")]
+    pub fn render_modeled(&self, node: NodeId, model: &quarb_model::Model) -> String {
+        let enriched =
+            quarb_model::ModelAdapter::new(quarb_model::Borrowed(self.base_dyn()), model.clone());
+        enriched.locator(node, |bn| self.render(bn))
+    }
+
     pub fn run(&self, query: &str, now: (i64, u32), allow_shell: bool) -> quarb::Result<QueryResult> {
         let (secs, nanos) = now;
         macro_rules! go {
@@ -189,7 +273,6 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
-            #[cfg(feature = "native")]
             Doc::Boxed(a, _) => go!(a),
         }
     }
@@ -215,7 +298,6 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
-            #[cfg(feature = "native")]
             Doc::Boxed(_, render) => render(node),
         }
     }
@@ -283,7 +365,6 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Code(a) => Box::new(Shared(Rc::new(a))),
             Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
-            #[cfg(feature = "native")]
             Doc::Boxed(a, _) => a.0,
         })
     }
@@ -341,7 +422,8 @@ impl Doc {
             return Ok(Doc::Xlsx(a));
         }
         if is_sqlite(path) {
-            let a = quarb_sqlite::SqliteAdapter::open(path).context("opening SQLite database")?;
+            let a = quarb_sqlite::SqliteAdapter::open_with_refs(path, &opts.refs)
+                .context("opening SQLite database")?;
             return Ok(Doc::Sqlite(a));
         }
         if is_archive(path) {

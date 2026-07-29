@@ -354,3 +354,186 @@ fn from_bytes_roundtrip() {
     };
     assert_eq!(got, vec!["Jupiter", "Mars"]);
 }
+
+/// The declared-references fixture: one flat table whose two TEXT
+/// columns are identities, plus the SELECT DISTINCT dimension views
+/// over them — the ad-hoc bipartite graph a schema without foreign
+/// keys only implies.
+fn forum() -> SqliteAdapter {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE posts (
+          id INTEGER PRIMARY KEY,
+          ip TEXT NOT NULL,
+          cookie TEXT NOT NULL
+        );
+        INSERT INTO posts VALUES
+          (1, 'ip-a', 'ck-1'),
+          (2, 'ip-a', 'ck-2'),
+          (3, 'ip-b', 'ck-2'),
+          (4, 'ip-b', 'ck-3'),
+          (5, 'ip-c', 'ck-9');
+        CREATE VIEW cookies AS SELECT DISTINCT cookie AS id FROM posts;
+        CREATE VIEW ips     AS SELECT DISTINCT ip     AS id FROM posts;
+        "#,
+    )
+    .unwrap();
+    let refs = [
+        ("cookie".to_string(), "cookies".to_string()),
+        ("ip".to_string(), "ips".to_string()),
+    ];
+    SqliteAdapter::load_with_refs(&conn, &refs).unwrap()
+}
+
+fn forum_nodes(query: &str) -> Vec<String> {
+    let a = forum();
+    match quarb::run(query, &a).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| a.locator(n)).collect(),
+        quarb::QueryResult::Values(_) => panic!("expected nodes"),
+    }
+}
+
+fn forum_values(query: &str) -> Vec<String> {
+    let a = forum();
+    match quarb::run(query, &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    }
+}
+
+#[test]
+fn views_are_containers() {
+    // views join the catalog beside the tables
+    assert_eq!(forum_nodes("/*"), vec!["/cookies", "/ips", "/posts"]);
+    // a single-column view's rows are named by that column, the way
+    // a single-column primary key names a table's rows
+    assert_eq!(forum_nodes("/cookies/ck-2"), vec!["/cookies/ck-2"]);
+    assert_eq!(forum_values("/ips/* @| count"), vec!["3"]);
+}
+
+#[test]
+fn declared_refs_are_crosslinks() {
+    // the refs document supplies what the schema never declared:
+    // forward, reverse, and resolution — the full fabric
+    assert_eq!(forum_nodes("/posts/1->cookie"), vec!["/cookies/ck-1"]);
+    assert_eq!(forum_values("/posts/1::ip~>::id"), vec!["ip-a"]);
+    assert_eq!(
+        forum_nodes("/cookies/ck-2<-cookie"),
+        vec!["/posts/2", "/posts/3"]
+    );
+}
+
+#[test]
+fn declared_refs_quantify() {
+    // the bipartite closure: cookie -> its posts -> their ips ->
+    // other posts there -> their cookies, transitively. The edge is
+    // entered by the matched column and left by the other, so the
+    // undirected value graph needs no alternation.
+    assert_eq!(
+        forum_values("/cookies/ck-1(<-cookie->ip<-ip->cookie)+::id"),
+        vec!["ck-2", "ck-3"]
+    );
+    // ck-9 shares no ip: a different component
+    assert_eq!(
+        forum_values("/cookies/ck-9(<-cookie->ip<-ip->cookie)+::id @| count"),
+        vec!["0"]
+    );
+}
+
+#[test]
+fn scoped_refs_and_precedence() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE users (id TEXT PRIMARY KEY, boss TEXT);
+        CREATE TABLE rooms (id TEXT PRIMARY KEY, owner TEXT REFERENCES users(id));
+        INSERT INTO users VALUES ('u1', NULL), ('u2', 'u1');
+        INSERT INTO rooms VALUES ('r1', 'u2');
+        "#,
+    )
+    .unwrap();
+    // a scoped field binds only in its table; a declared FK wins
+    // over a refs entry on the same column; a container's key
+    // pointing at the container itself is the identity, not an edge
+    let refs = [
+        ("users.boss".to_string(), "users".to_string()),
+        ("owner".to_string(), "rooms".to_string()),
+        ("id".to_string(), "users".to_string()),
+    ];
+    let a = SqliteAdapter::load_with_refs(&conn, &refs).unwrap();
+    let run_nodes = |q: &str| match quarb::run(q, &a).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns
+            .into_iter()
+            .map(|n| a.locator(n))
+            .collect::<Vec<String>>(),
+        _ => panic!("expected nodes"),
+    };
+    // users.boss: scoped declaration works (self-referencing table)
+    assert_eq!(run_nodes("/users/u2->boss"), vec!["/users/u1"]);
+    // rooms.owner: the declared FK to users still wins over the
+    // refs entry pointing at rooms
+    assert_eq!(run_nodes("/rooms/r1->owner"), vec!["/users/u2"]);
+    // users.id: no self-loop was synthesized
+    assert!(run_nodes("/users/u1->id").is_empty());
+}
+
+#[test]
+fn headless_arrow_walks_both_directions() {
+    // `--` follows the crosslink whichever way it exists here: from
+    // a value node it is the backlink fan, from an edge row the
+    // outgoing reference — so the bipartite closure spells without
+    // direction claims, and the wildcard form walks the whole
+    // component (both node kinds).
+    assert_eq!(
+        forum_nodes("/posts/1--cookie"),
+        vec!["/cookies/ck-1"]
+    );
+    assert_eq!(
+        forum_nodes("/cookies/ck-2--cookie"),
+        vec!["/posts/2", "/posts/3"]
+    );
+    assert_eq!(
+        forum_values("/cookies/ck-1(--cookie--ip--ip--cookie)+::id"),
+        vec!["ck-2", "ck-3"]
+    );
+    // ck-1 .. ck-3 chain over ip-a/ip-b: the component holds the
+    // other two cookies and both ips.
+    assert_eq!(
+        forum_values("/cookies/ck-1(--*--*)+::id @| count"),
+        vec!["4"]
+    );
+}
+
+#[test]
+fn headless_arrow_union_on_self_reference() {
+    // On a self-referencing FK the headless arrow is the union of
+    // both directions: manager and reports under one matcher.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE employees (
+          id INTEGER PRIMARY KEY,
+          name TEXT,
+          manager_id INTEGER REFERENCES employees(id)
+        );
+        INSERT INTO employees VALUES
+          (1, 'Ada', NULL),
+          (2, 'Bo',  1),
+          (3, 'Cy',  1),
+          (4, 'Dee', 2);
+        "#,
+    )
+    .unwrap();
+    let a = SqliteAdapter::load(&conn).unwrap();
+    let vals = |q: &str| match quarb::run(q, &a).unwrap() {
+        quarb::QueryResult::Values(vs) => {
+            vs.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+        }
+        _ => panic!("expected values"),
+    };
+    // Bo's neighbors under manager_id: his manager and his report.
+    assert_eq!(vals("/employees/2--manager_id::name"), vec!["Ada", "Dee"]);
+    // The whole org is one undirected component from any seat.
+    assert_eq!(vals("/employees/4(--manager_id)+::name @| count"), vec!["3"]);
+}

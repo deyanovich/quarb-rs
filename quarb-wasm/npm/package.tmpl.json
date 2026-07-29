@@ -1,7 +1,7 @@
 {
   "name": "@quarb/wasm",
   "version": "0.12.0",
-  "description": "Quarb — the arboreal query engine — compiled to WebAssembly, with TypeScript types. Query JSON, YAML, TOML, CSV, XML, HTML, and Markdown with one path language, entirely client-side.",
+  "description": "Quarb \u2014 the arboreal query engine \u2014 compiled to WebAssembly, with TypeScript types. One-shot queries over JSON, YAML, TOML, CSV, XML, HTML, and Markdown, plus the quai session engine (multi-source mounts, joins, &N history, kaiv, SQLite) \u2014 entirely client-side.",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
@@ -11,7 +11,13 @@
       "default": "./index.js"
     },
     "./quarb_wasm.js": "./quarb_wasm.js",
-    "./quarb_wasm_bg.wasm": "./quarb_wasm_bg.wasm"
+    "./quarb_wasm_bg.wasm": "./quarb_wasm_bg.wasm",
+    "./quai": {
+      "types": "./quai.d.ts",
+      "default": "./quai.js"
+    },
+    "./quai_wasm.js": "./quai_wasm.js",
+    "./quai_wasm_bg.wasm": "./quai_wasm_bg.wasm"
   },
   "files": [
     "index.js",
@@ -21,14 +27,19 @@
     "quarb_wasm_bg.wasm",
     "README.md",
     "LICENSE-MIT",
-    "LICENSE-APACHE"
+    "LICENSE-APACHE",
+    "quai.js",
+    "quai.d.ts",
+    "quai_wasm.js",
+    "quai_wasm.d.ts",
+    "quai_wasm_bg.wasm"
   ],
   "sideEffects": false,
   "license": "MIT OR Apache-2.0",
   "author": "Bojan Durickovic <dev@deyanovich.org>",
   "repository": {
     "type": "git",
-    "url": "https://gitlab.com/quarb/engine"
+    "url": "git+https://gitlab.com/quarb/engine.git"
   },
   "homepage": "https://quarb.org",
   "keywords": [

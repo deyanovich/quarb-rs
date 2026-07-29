@@ -61,6 +61,19 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     defs: Option<PathBuf>,
 
+    /// A declared-references document: '{"refs": {"field":
+    /// "container", ...}}' — the edges the substrate's own catalog
+    /// does not hold, consumed by SQLite mounts (see `qua --help`).
+    #[arg(long, value_name = "FILE")]
+    refs: Option<PathBuf>,
+
+    /// A model file declaring derived arbor structure over the
+    /// source(s) — 'node'/'ref'/'edge'/'mount' statements (see
+    /// `qua --help`). The session runs every line against the
+    /// enriched view.
+    #[arg(long, value_name = "FILE")]
+    model: Option<PathBuf>,
+
     /// Back the session with a resident `qua` daemon: materialize the
     /// source once in a background process (shared across quai runs
     /// and with other clients) instead of in-process, and persist the
@@ -173,7 +186,7 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         remount.now,
         remount.allow_shell,
         remount.specs.clone(),
-        remount.opts,
+        remount.opts.clone(),
     )))
 }
 
@@ -186,7 +199,26 @@ fn main() -> Result<()> {
             std::env::set_var("KAIV_OFFLINE", "1");
         }
     }
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // A --model file may declare its own sources; parse it and inject
+    // the mounts (relative targets resolved against the model file's
+    // directory) as NAME=TARGET inputs, ahead of any positional ones.
+    let model = match &cli.model {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
+            let m = quarb_model::parse_model(&text)
+                .map_err(|e| anyhow::anyhow!("parsing model {}: {e}", path.display()))?;
+            let base_dir = path.parent();
+            for mt in m.mounts.iter().rev() {
+                let target = quarb_model::resolve_mount_target(&mt.target, base_dir);
+                cli.paths.insert(0, format!("{}={}", mt.name, target));
+            }
+            Some(m)
+        }
+        None => None,
+    };
     if cli.paths.is_empty() && cli.daemon {
         anyhow::bail!("--daemon needs at least one source (a directory, a document, or git:PATH)");
     }
@@ -205,6 +237,8 @@ fn main() -> Result<()> {
             cli.no_ignore,
             cli.descend,
             cli.cache,
+            cli.refs.clone(),
+            cli.model.clone(),
         )?);
         let store: Box<dyn Store> = match FileStore::new(&raw_paths) {
             Ok(fs) => Box::new(fs),
@@ -213,10 +247,20 @@ fn main() -> Result<()> {
         Session::new(executor, store)
     } else {
         let now = bind_now(cli.now.as_deref())?;
+        let refs = match &cli.refs {
+            Some(f) => {
+                let text = std::fs::read_to_string(f)
+                    .with_context(|| format!("reading refs file {}", f.display()))?;
+                quarb_relational::parse_refs(&text)
+                    .map_err(|e| anyhow::anyhow!("parsing refs: {e}"))?
+            }
+            None => Vec::new(),
+        };
         let opts = Options {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
             descend: cli.descend,
+            refs: std::rc::Rc::new(refs),
         };
         let ctx = Remount {
             specs,
@@ -224,9 +268,9 @@ fn main() -> Result<()> {
             now,
             allow_shell: cli.allow_shell,
         };
-        let executor = local_executor(&ctx)?;
+        let executor = (*local_executor(&ctx)?).with_model(model.clone());
         remount = Some(ctx);
-        Session::new(executor, Box::new(MemStore))
+        Session::new(Box::new(executor), Box::new(MemStore))
     };
     if let Some(p) = &cli.defs {
         let text =

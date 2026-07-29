@@ -1,8 +1,8 @@
 [package]
-name = "quarb-sql"
-description = "SQL importer for the Quarb query engine"
-keywords = ["query", "sql", "importer", "quarb"]
-categories = ["parser-implementations", "database"]
+name = "quarb-model"
+description = "Model files: derived arbor structure over any Quarb source"
+keywords = ["query", "model", "graph", "quarb"]
+categories = ["database", "data-structures"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,7 @@ homepage.workspace = true
 
 [dependencies]
 quarb = { path = "../quarb", version = "0.13.0" }
-thiserror.workspace = true
 
 [dev-dependencies]
 quarb-sqlite = { path = "../quarb-sqlite" }
-rusqlite.workspace = true
+rusqlite = { workspace = true }

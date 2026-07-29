@@ -570,6 +570,13 @@ pub enum Axis {
     OutLink,
     /// `<-` — incoming crosslink; the matcher matches the edge label.
     InLink,
+    /// `--` — either-direction crosslink: the union of `->` and
+    /// `<-` under one matcher. The headless member of the arrow
+    /// family — an edge followed without asserting its direction;
+    /// on typed data (a value node vs. the rows referencing it)
+    /// only one direction usually exists, so the spelling drops
+    /// the direction claim the data never needed.
+    BothLink,
     /// `::prop~>hint` — resolve a cross-reference: the adapter maps
     /// `(node, property, hint)` to a target node.
     Resolve {

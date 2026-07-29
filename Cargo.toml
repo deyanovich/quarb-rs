@@ -51,6 +51,7 @@ members = [
     "quarb-cosmos",
     "quarb-neptune",
     "quarb-mount",
+    "quarb-model",
     "quarb-session",
     "quarb-xpath",
     "quarb-jq",
@@ -73,7 +74,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

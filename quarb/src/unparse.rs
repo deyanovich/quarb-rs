@@ -167,10 +167,11 @@ fn step(s: &Step) -> String {
         Axis::PrecedingSiblings(r) => out.push_str(&format!("<<{}", reach_mark(r))),
         Axis::OutLink => out.push_str("->"),
         Axis::InLink => out.push_str("<-"),
+        Axis::BothLink => out.push_str("--"),
         Axis::Resolve { property, hint } => {
             out.push_str("::");
             out.push_str(&name_text(property));
-            out.push_str("~>");
+            out.push_str("-->");
             if let Some(h) = hint {
                 out.push_str(&name_text(h));
             }
@@ -180,7 +181,7 @@ fn step(s: &Step) -> String {
         Axis::ReverseResolve { property, hint } => {
             out.push_str("::");
             out.push_str(&name_text(property));
-            out.push_str("<~");
+            out.push_str("<--");
             if let Some(h) = hint {
                 out.push_str(&name_text(h));
             }
@@ -195,6 +196,9 @@ fn step(s: &Step) -> String {
     // the space is meaning-preserving everywhere.
     let glue_breaks = match &s.axis {
         Axis::InLink => m.starts_with(|c: char| c.is_ascii_digit()),
+        // `--` then a dash-leading matcher would fuse into a longer
+        // dash run on reparse.
+        Axis::BothLink => m.starts_with('-'),
         Axis::PrevSibling => m.starts_with('-'),
         _ => false,
     };
@@ -313,7 +317,7 @@ fn projection(p: &Projection) -> String {
         Projection::Property(None) => "::".to_string(),
         Projection::Property(Some(k)) => format!("::{}", proj_name(k)),
         Projection::CoreMeta(k) => format!(":::{}", proj_name(k)),
-        Projection::AdapterMeta(k) => format!(";;;{}", proj_name(k)),
+        Projection::AdapterMeta(k) => format!("::::{}", proj_name(k)),
     }
 }
 
@@ -724,16 +728,17 @@ mod tests {
         once
     }
 
-    // Finding: `;;;` is the canonical adapter-metadata spelling; the
+    // Finding: `::::` is the canonical adapter-metadata spelling; the
     // deprecated `::;` alias must parse to the same AST and reprint
-    // as `;;;`.
+    // as `::::`.
     #[test]
     fn adapter_meta_alias_canonicalizes() {
-        assert_eq!(rt("//*.txt::;size"), "//*.txt;;;size");
-        assert_eq!(rt("//*.txt;;;size"), "//*.txt;;;size");
+        assert_eq!(rt("//*.txt::;size"), "//*.txt::::size");
+        assert_eq!(rt("//*.txt;;;size"), "//*.txt::::size");
+        assert_eq!(rt("//*.txt::::size"), "//*.txt::::size");
         assert_eq!(
             rt("/commits/*[::;short = ^/tags/*::;short]"),
-            "/commits/*[;;;short = ^/tags/*;;;short]"
+            "/commits/*[::::short = ^/tags/*::::short]"
         );
         // The def statement terminator still lexes as a single `;`.
         assert_eq!(rt("def &f: //x;;;size; &f"), rt("def &f: //x::;size; &f"));
@@ -747,7 +752,7 @@ mod tests {
         assert_eq!(assert_fixpoint("/x::'and'"), "/x::'and'");
         assert_eq!(assert_fixpoint("/x::'or'"), "/x::'or'");
         assert_eq!(assert_fixpoint("/x:::'not'"), "/x:::'not'");
-        assert_eq!(assert_fixpoint("/x;;;'and'"), "/x;;;'and'");
+        assert_eq!(assert_fixpoint("/x::::'and'"), "/x::::'and'");
         // A near-miss name is not a keyword and stays bare.
         assert_eq!(assert_fixpoint("/x::android"), "/x::android");
     }

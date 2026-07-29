@@ -170,7 +170,7 @@ struct Parser<'a> {
     /// the scope (their operand paths are not pattern content).
     pattern_depth: usize,
     /// How many predicates enclose the current position. Inside one,
-    /// reverse resolution (`<~`) is refused: it walks the whole arbor
+    /// reverse resolution (`<--`) is refused: it walks the whole arbor
     /// per candidate node, so the spec restricts a predicate's nested
     /// paths to descending navigation and outgoing edges (`<-` — an
     /// adapter-indexed backlink — is allowed).
@@ -834,6 +834,7 @@ impl Parser<'_> {
                     | Token::PrecedingSiblings(_)
                     | Token::ArrowOut
                     | Token::ArrowIn
+                    | Token::DashDash
             )
         };
         match self.peek() {
@@ -1510,6 +1511,7 @@ impl Parser<'_> {
                         | Token::BackslashBackslash
                         | Token::ArrowOut
                         | Token::ArrowIn
+                        | Token::DashDash
                         | Token::ColonColon
                         | Token::ColonColonColon
                         | Token::SemiSemiSemi
@@ -1641,7 +1643,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse an optional trailing projection (`::`, `:::`, `;;;`).
+    /// Parse an optional trailing projection (`::`, `:::`, `::::`).
     fn projection(&mut self) -> Result<Option<Projection>> {
         let proj = match self.peek() {
             Some(Token::ColonColon) => {
@@ -1654,7 +1656,7 @@ impl Parser<'_> {
             }
             Some(Token::SemiSemiSemi) => {
                 self.pos += 1;
-                Projection::AdapterMeta(self.require_projection_name("adapter metadata `;;;`")?)
+                Projection::AdapterMeta(self.require_projection_name("adapter metadata `::::`")?)
             }
             _ => return Ok(None),
         };
@@ -2054,7 +2056,7 @@ impl Parser<'_> {
             Some(Token::Name { text, .. }) => text.clone(),
             _ => {
                 return Err(QuarbError::Parse(
-                    "expected a property name before '~>' or '<~'".into(),
+                    "expected a property name before '-->' or '<--'".into(),
                 ));
             }
         };
@@ -2062,9 +2064,9 @@ impl Parser<'_> {
         if reverse && self.predicate_depth > 0 {
             // Reverse resolution scans the whole arbor per candidate
             // node; a predicate's nested paths must stay descending
-            // (outgoing `->`/`~>` and incoming `<-` are fine).
+            // (outgoing `->`/`-->` and incoming `<-` are fine).
             return Err(QuarbError::Parse(
-                "reverse resolution '<~' is not allowed inside a predicate \
+                "reverse resolution '<--' is not allowed inside a predicate \
                  (it would scan the whole arbor per node); rewrite as a \
                  descending path or an incoming edge '<-'"
                     .into(),
@@ -2547,6 +2549,7 @@ impl Parser<'_> {
                         | Token::SlashSlash
                         | Token::ArrowOut
                         | Token::ArrowIn
+                        | Token::DashDash
                         | Token::LParen
                 )
             ) {
@@ -2682,6 +2685,7 @@ impl Parser<'_> {
                                 | Token::SlashSlash
                                 | Token::ArrowOut
                                 | Token::ArrowIn
+                                | Token::DashDash
                                 | Token::LParen
                         )
                     ) {
@@ -2716,6 +2720,7 @@ impl Parser<'_> {
                                 | Token::SlashSlash
                                 | Token::ArrowOut
                                 | Token::ArrowIn
+                                | Token::DashDash
                                 | Token::LParen
                         )
                     ) {
@@ -2740,7 +2745,9 @@ impl Parser<'_> {
             // A relative path operand. It may descend (`/`, `//`) or
             // follow a crosslink (`->`, `<-`), so a structural
             // predicate can ask "has any outgoing link?" with `[->*]`.
-            Some(Token::Slash | Token::SlashSlash | Token::ArrowOut | Token::ArrowIn) => {
+            Some(
+                Token::Slash | Token::SlashSlash | Token::ArrowOut | Token::ArrowIn | Token::DashDash,
+            ) => {
                 let mut steps = Vec::new();
                 loop {
                     if self.is_resolution_ahead() {
@@ -2754,6 +2761,7 @@ impl Parser<'_> {
                                 | Token::SlashSlash
                                 | Token::ArrowOut
                                 | Token::ArrowIn
+                                | Token::DashDash
                                 | Token::LParen
                         )
                     ) {
@@ -2786,6 +2794,7 @@ impl Parser<'_> {
                                 | Token::SlashSlash
                                 | Token::ArrowOut
                                 | Token::ArrowIn
+                                | Token::DashDash
                                 | Token::LParen
                         )
                     ) {
@@ -3222,6 +3231,7 @@ impl Parser<'_> {
             Some(Token::PrecedingSiblings(mark)) => Axis::PrecedingSiblings(mark_reach(*mark)),
             Some(Token::ArrowOut) => Axis::OutLink,
             Some(Token::ArrowIn) => Axis::InLink,
+            Some(Token::DashDash) => Axis::BothLink,
             Some(Token::Name { text, .. }) => {
                 return Err(QuarbError::Parse(format!(
                     "expected a navigation operator before '{text}' \
@@ -4348,7 +4358,7 @@ mod tests {
 
     #[test]
     fn reverse_resolution_refused_inside_predicate() {
-        // `<~` walks the whole arbor per node, so it is refused inside a
+        // `<--` walks the whole arbor per node, so it is refused inside a
         // predicate — but stays legal in top-level navigation, and the
         // bounded incoming edge `<-` is allowed in predicates.
         assert!(parse(&lexer::lex("//a[::r<~]").unwrap()).is_err());

@@ -7,8 +7,8 @@
 //! `INTEGER`/`REAL` → numbers, text as itself, blobs as a size
 //! placeholder), and hands the result to [`RelationalModel`].
 //!
-//! The arbor mapping, the foreign-key reference machinery (`~>`
-//! chains, `->`/`<-` crosslinks, `<~` reverse resolution, the
+//! The arbor mapping, the foreign-key reference machinery (`-->`
+//! chains, `->`/`<-` crosslinks, `<--` reverse resolution, the
 //! table-naming hint), and the metadata surface are documented on
 //! the shared model.
 
@@ -48,18 +48,27 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Introspect the schema: every user table's spec, via PRAGMAs.
-fn specs(conn: &Connection) -> Result<Vec<TableSpec>, SqliteError> {
-    let names: Vec<String> = conn
+/// Introspect the schema: every user table's and view's spec, via
+/// PRAGMAs. Views are containers like tables — a single-column view
+/// (the `SELECT DISTINCT` dimension idiom) is named by that column,
+/// the way a single-column primary key names a table's rows.
+/// `refs` is the declared-references document: each `(field,
+/// container)` pair synthesizes a foreign-key edge from every
+/// matching column (bare `column`, or `table.column` to scope) to
+/// the target container's key, unless the schema already declares
+/// one there.
+fn specs(conn: &Connection, refs: &[(String, String)]) -> Result<Vec<TableSpec>, SqliteError> {
+    let named: Vec<(String, bool)> = conn
         .prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' \
+            "SELECT name, type = 'view' FROM sqlite_master \
+             WHERE type IN ('table', 'view') \
              AND name NOT LIKE 'sqlite_%' ORDER BY name",
         )?
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
 
     let mut out = Vec::new();
-    for name in names {
+    for (name, is_view) in named {
         // Columns and the primary key (a single-column pk names the
         // rows; a composite or absent pk falls back to rowid).
         let mut columns = Vec::new();
@@ -77,7 +86,14 @@ fn specs(conn: &Connection) -> Result<Vec<TableSpec>, SqliteError> {
             }
         }
         pk_cols.sort();
-        let pk = (pk_cols.len() == 1).then(|| pk_cols[0].1);
+        // A single-column primary key names the rows. A view has no
+        // primary key ever; when it projects exactly one column —
+        // the `SELECT DISTINCT` dimension idiom — that column is
+        // the row's identity, so it names the rows (and keys `-->`
+        // resolution into the view).
+        let pk = (pk_cols.len() == 1)
+            .then(|| pk_cols[0].1)
+            .or_else(|| (is_view && columns.len() == 1).then_some(0));
 
         // Declared foreign keys (an omitted target column means the
         // target's primary key).
@@ -93,6 +109,24 @@ fn specs(conn: &Connection) -> Result<Vec<TableSpec>, SqliteError> {
                 if let Some(idx) = columns.iter().position(|c| *c == from) {
                     fks.push((idx, target, to.unwrap_or_default()));
                 }
+            }
+        }
+        // Declared client-side references: synthesize an edge to the
+        // target container's key for every matching column the
+        // schema does not already cover.
+        for (field, container) in refs {
+            let col = match field.split_once('.') {
+                Some((table, col)) if table == name => col,
+                Some(_) => continue,
+                None => field.as_str(),
+            };
+            if let Some(idx) = columns.iter().position(|c| c == col)
+                && !fks.iter().any(|(i, _, _)| *i == idx)
+                // A container's key column pointing at the container
+                // itself is the identity, not an edge.
+                && !(*container == name && pk == Some(idx))
+            {
+                fks.push((idx, container.clone(), String::new()));
             }
         }
         out.push(TableSpec {
@@ -169,7 +203,17 @@ impl SqliteAdapter {
     /// table's rows on first touch (the connection stays owned by
     /// the adapter).
     pub fn open(path: &std::path::Path) -> Result<Self, SqliteError> {
-        Self::open_impl(path, None)
+        Self::open_impl(path, None, &[])
+    }
+
+    /// [`open`], with a declared-references document: each `(field,
+    /// container)` pair supplies the edge the schema does not
+    /// declare (see [`quarb_relational::parse_refs`]).
+    pub fn open_with_refs(
+        path: &std::path::Path,
+        refs: &[(String, String)],
+    ) -> Result<Self, SqliteError> {
+        Self::open_impl(path, None, refs)
     }
 
     /// [`open`], with one table's fetch filtered by a WHERE clause
@@ -179,15 +223,26 @@ impl SqliteAdapter {
         table: &str,
         where_sql: &str,
     ) -> Result<Self, SqliteError> {
-        Self::open_impl(path, Some((table.to_string(), where_sql.to_string())))
+        Self::open_impl(path, Some((table.to_string(), where_sql.to_string())), &[])
+    }
+
+    /// [`open_filtered`], with a declared-references document.
+    pub fn open_filtered_with_refs(
+        path: &std::path::Path,
+        table: &str,
+        where_sql: &str,
+        refs: &[(String, String)],
+    ) -> Result<Self, SqliteError> {
+        Self::open_impl(path, Some((table.to_string(), where_sql.to_string())), refs)
     }
 
     fn open_impl(
         path: &std::path::Path,
         filter: Option<(String, String)>,
+        refs: &[(String, String)],
     ) -> Result<Self, SqliteError> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let specs = specs(&conn)?;
+        let specs = specs(&conn, refs)?;
         let model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
@@ -214,8 +269,16 @@ impl SqliteAdapter {
     /// Materialize every user table of an open connection, eagerly
     /// (in-memory databases, tests).
     pub fn load(conn: &Connection) -> Result<Self, SqliteError> {
+        Self::load_with_refs(conn, &[])
+    }
+
+    /// [`load`], with a declared-references document.
+    pub fn load_with_refs(
+        conn: &Connection,
+        refs: &[(String, String)],
+    ) -> Result<Self, SqliteError> {
         let mut input = Vec::new();
-        for spec in specs(conn)? {
+        for spec in specs(conn, refs)? {
             let rows = fetch_rows_where(conn, &spec, None)?;
             input.push((spec, rows));
         }
@@ -304,7 +367,7 @@ pub fn raw_query(
     }
     let sql = match order_table {
         Some(t) => {
-            let key = specs(&conn)?
+            let key = specs(&conn, &[])?
                 .into_iter()
                 .find(|s| s.name == t)
                 .and_then(|s| s.pk.map(|i| s.columns[i].clone()))

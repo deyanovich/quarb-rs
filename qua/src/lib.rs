@@ -136,6 +136,12 @@ struct Cli {
     #[arg(long)]
     explain: bool,
 
+    /// Hidden: read query lines on stdin and write each back as
+    /// syntax-highlighted HTML (the playground's span classes) —
+    /// the hook documentation builds use to color transcripts.
+    #[arg(long = "highlight-html", hide = true)]
+    highlight_html: bool,
+
     /// Save the result instead of printing it: `.json` writes a
     /// JSON array, any other extension a SQLite table (records
     /// become columns) — both first-class inputs for later queries.
@@ -152,11 +158,24 @@ struct Cli {
     #[arg(long)]
     descend: bool,
 
-    /// A declared-references document for schemaless databases
-    /// (Firebase): '{"refs": {"field": "container", ...}}' — bare
-    /// '~>' and '->' crosslinks work for the declared fields.
+    /// A declared-references document: '{"refs": {"field":
+    /// "container", ...}}' — the edges the substrate's own catalog
+    /// does not hold. On a SQLite database each declared field gains
+    /// the full crosslink fabric ('-->', '->', '<-', '<--') into the
+    /// target container (a table, or a view — e.g. a SELECT DISTINCT
+    /// dimension view); a field may be scoped as 'table.column'. On
+    /// Firebase, bare '-->' and '->' work for the declared fields.
     #[arg(long, value_name = "FILE")]
     refs: Option<PathBuf>,
+
+    /// A model file declaring derived arbor structure over the
+    /// source(s): 'node NAME: query;' derives a value container,
+    /// 'ref /path/*::f --> C;' a scoped reference, 'edge /path/*:
+    /// ::a -- ::b;' container-labeled pair edges, 'mount NAME: t;' a
+    /// source the model opens itself. The graph the data only
+    /// implies, made navigable — over any adapter.
+    #[arg(long, value_name = "FILE")]
+    model: Option<PathBuf>,
 
     /// Override the quantifier bound N_max: the depth to which the
     /// open-ended path quantifiers (+, *, {m,}) expand, and the
@@ -248,6 +267,10 @@ thread_local! {
     /// adapter with it, so every occurrence in a query denotes the
     /// same point and evaluation never reads a clock.
     static NOW_INSTANT: std::cell::Cell<(i64, u32)> = const { std::cell::Cell::new((0, 0)) };
+    /// The --model file, parsed. Set once in `main`; `run` wraps
+    /// every adapter in a `ModelAdapter` and composes its locator.
+    static MODEL: std::cell::RefCell<Option<quarb_model::Model>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]
@@ -301,6 +324,16 @@ pub fn cli_main() -> anyhow::Result<()> {
     }
 
     let mut cli = Cli::parse();
+
+    // The highlight filter: no query, no target — a pure lexer
+    // pass, line in, HTML line out.
+    if cli.highlight_html {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            println!("{}", quarb::highlight::highlight_html(&line?));
+        }
+        return Ok(());
+    }
 
     // A target may ride the query as a scheme prefix —
     // `qua 'github:/torvalds/linux::stars'` is
@@ -405,6 +438,27 @@ pub fn cli_main() -> anyhow::Result<()> {
     };
     NOW_INSTANT.with(|c| c.set(now));
 
+    // A --model file declares derived arbor structure; parse it once
+    // and `run` wraps every mounted source in the enrichment layer.
+    if let Some(model_path) = &cli.model {
+        let text = std::fs::read_to_string(model_path)
+            .with_context(|| format!("reading {}", model_path.display()))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
+        let model = quarb_model::parse_model(&text)
+            .map_err(|e| anyhow::anyhow!("parsing model {}: {e}", model_path.display()))?;
+        // A model's `mount` statements name sources it opens itself:
+        // inject them as `NAME=TARGET` inputs, resolving relative
+        // targets against the model file's directory. They lead, so
+        // any positional CLI targets merge after (a collision under
+        // the multi-mount root is refused there).
+        let base_dir = model_path.parent();
+        for m in &model.mounts {
+            let target = quarb_model::resolve_mount_target(&m.target, base_dir);
+            cli.paths.insert(0, PathBuf::from(format!("{}={}", m.name, target)));
+        }
+        MODEL.with(|m| *m.borrow_mut() = Some(model));
+    }
+
     // Enable the AST cache before dispatch, so both a normal run and
     // a resident daemon's per-query parses consult it.
     if cli.cache || cli.cache_dir.is_some() {
@@ -470,6 +524,7 @@ fn resident_socket(cli: &Cli) -> anyhow::Result<PathBuf> {
         &cli.now,
         &cli.refs,
         &cli.defs,
+        &cli.model,
         cli.no_pushdown,
     )
         .hash(&mut h);
@@ -780,9 +835,42 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
     Ok(f)
 }
 
+/// Read and parse the `--refs` document into the relational form,
+/// `(field, container)` pairs. (The Firebase adapter parses the
+/// same file into its own path-shaped form.) Empty when no --refs.
+fn relational_refs(refs: &Option<PathBuf>) -> anyhow::Result<Vec<(String, String)>> {
+    match refs {
+        Some(f) => {
+            let text = std::fs::read_to_string(f)
+                .with_context(|| format!("reading refs file {}", f.display()))?;
+            quarb_relational::parse_refs(&text)
+                .map_err(|e| anyhow::anyhow!("parsing refs: {e}"))
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Run one query text against the CLI's inputs, printing results —
 /// the whole adapter dispatch.
 fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
+    // A refs document only means something to an adapter that
+    // consumes it; passing one alongside targets that all ignore it
+    // deserves a loud note, not silence.
+    if cli.refs.is_some() {
+        let consumes = |p: &PathBuf| {
+            let target = split_alias(p).map(|(_, t)| t).unwrap_or_else(|| p.clone());
+            is_sqlite(&target)
+                || target
+                    .to_str()
+                    .is_some_and(|s| s.starts_with("firebase://"))
+        };
+        if !cli.paths.iter().any(consumes) {
+            eprintln!(
+                "qua: --refs: no target consumes a declared-references document \
+                 (SQLite databases and firebase:// do); ignoring it"
+            );
+        }
+    }
     // Several inputs are mounted as named children of one root; a
     // single `NAME=TARGET` input mounts too, so its name is real.
     if cli.paths.len() >= 2 || cli.paths.iter().any(|p| split_alias(p).is_some()) {
@@ -1644,9 +1732,10 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
+        let refs = relational_refs(&cli.refs)?;
         let adapter = match partial_plan(cli, query) {
-            Some(pl) => SqliteAdapter::open_filtered(p, &pl.table, &pl.where_sql),
-            None => SqliteAdapter::open(p),
+            Some(pl) => SqliteAdapter::open_filtered_with_refs(p, &pl.table, &pl.where_sql, &refs),
+            None => SqliteAdapter::open_with_refs(p, &refs),
         }
         .context("opening SQLite database")?;
         let src = p.display().to_string();
@@ -2447,7 +2536,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.pointer(n))));
     }
     if is_sqlite(p) {
-        let a = Rc::new(SqliteAdapter::open(p).context("opening SQLite database")?);
+        let refs = relational_refs(&cli.refs)?;
+        let a = Rc::new(
+            SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
+        );
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
@@ -2566,6 +2658,25 @@ fn run_relational<A: AstAdapter>(
 /// Run `query` against `adapter`, printing node locations (via
 /// `render`) or projected values, one per line.
 fn run<A: AstAdapter>(
+    query: &str,
+    adapter: &A,
+    render: impl Fn(NodeId) -> String,
+    kaiv_source: Option<&str>,
+) -> anyhow::Result<()> {
+    // A --model file enriches every source with derived structure,
+    // and its derived nodes render through the composed locator.
+    if let Some(model) = MODEL.with(|m| m.borrow().clone()) {
+        let enriched = quarb_model::ModelAdapter::new(quarb_model::Borrowed(adapter), model);
+        let base_render = &render;
+        let model_render = |n: NodeId| enriched.locator(n, base_render);
+        return run_dispatch(query, &enriched, model_render, kaiv_source);
+    }
+    run_dispatch(query, adapter, render, kaiv_source)
+}
+
+/// The resident check and wrap chain, shared by the plain and
+/// model-enriched paths.
+fn run_dispatch<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,

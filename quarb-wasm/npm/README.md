@@ -48,6 +48,33 @@ const envelope = JSON.parse(run('csv', csv, '/row @| count', Date.now()));
 // {ok: true, lines: ["891"]} — or {ok: false, error: "..."}
 ```
 
+## Sessions: `@quarb/wasm/quai`
+
+The second entry point is the **session engine** — the build
+behind the [quai playground](https://demo.quarb.org/quai/) and
+the Quarb Chrome extension. Mount several named sources (json,
+yaml, toml, csv, xml, html, markdown, **kaiv**, SQLite bytes)
+as children of one root and join across them; every line
+becomes `&N` and is reusable:
+
+```ts
+import { mount } from '@quarb/wasm/quai';
+
+const session = await mount([
+  { name: 'page',   format: 'html', text: html },
+  { name: 'orders', format: 'json', text: ordersJson },
+]);
+const r = JSON.parse(session.run(
+  '/page//a <=> /orders/rows/*[::url = $$::href] | rec("url", ::href, "total", $*1::total)'
+));
+// r = {label: "&1", lines: [...], note, error}
+```
+
+`session.run(line)` is the REPL dispatch (queries, `def`s,
+`&N`/`&N#` recalls, `= expr` scalars); `session.run_cell(text)`
+runs a notebook cell as a unit; `state()`/`restore()` carry
+the macro table across remounts.
+
 ## The language in one breath
 
 Paths navigate (`/users/*`, `//a`), predicates filter

@@ -21,11 +21,14 @@
 //! `"//"`, `::op` is `"+"` — so introspection reads in the language's
 //! own vocabulary.
 //!
-//! The vocabulary is **locked (v1)** and is a compatibility surface:
+//! The vocabulary is **locked (v2)** and is a compatibility surface:
 //! node kinds, property keys, and spellings keep their meaning;
 //! growth is additive only (new kinds and keys may appear, existing
-//! ones never change or vanish). The root carries the version as
-//! `;;;vocabulary`, and [`QueryArbor::inventory`] exposes the
+//! ones never change or vanish). v2 (2026-07-28) respelled the
+//! resolution axes canonically (`~>` → `-->`, `<~` → `<--`, ruling
+//! #14) and added the `--` axis; v1 consumers reading axis
+//! spellings see the new canon. The root carries the version as
+//! `::::vocabulary`, and [`QueryArbor::inventory`] exposes the
 //! kind → property-key map for conformance checking (the
 //! `vocabulary` test locks it). `param` is *reserved*: it names a
 //! fragment parameter in the walker, but reflection sees expanded
@@ -78,7 +81,7 @@ struct RNode {
 /// A parsed query exposed as an arbor.
 pub struct QueryArbor {
     nodes: Vec<RNode>,
-    /// The original query text (root `;;;source`).
+    /// The original query text (root `::::source`).
     source: String,
 }
 
@@ -1077,8 +1080,9 @@ fn axis_spelling(a: &Axis) -> String {
         Axis::PrecedingSiblings(Reach::Distal) => "<<!".to_string(),
         Axis::OutLink => "->".to_string(),
         Axis::InLink => "<-".to_string(),
-        Axis::Resolve { .. } => "~>".to_string(),
-        Axis::ReverseResolve { .. } => "<~".to_string(),
+        Axis::BothLink => "--".to_string(),
+        Axis::Resolve { .. } => "-->".to_string(),
+        Axis::ReverseResolve { .. } => "<--".to_string(),
     }
 }
 
@@ -1281,7 +1285,7 @@ impl AstAdapter for QueryArbor {
                 "source" => Some(Value::Str(self.source.clone())),
                 // The locked vocabulary version (growth is additive
                 // within a version; a break would bump it).
-                "vocabulary" => Some(Value::Int(1)),
+                "vocabulary" => Some(Value::Int(2)),
                 _ => None,
             };
         }

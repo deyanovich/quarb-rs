@@ -25,7 +25,7 @@ const REGISTER: &str = "\x1b[36m"; // cyan — $. $* @. %. register refs
 /// never wins over the sigil it opens (`:::` before `::`, `<=>?`
 /// before `<=>`).
 const OPERATORS: &[&str] = &[
-    ";;;", ":::", "::;", "::", "<=>?", "<=>", "~>", "<~", "->", "<-", "@|", "&&", "||", "=~", "?=",
+    "::::", ";;;", ":::", "::;", "::", ":--", ":-", "<=>?", "<=>", "-->", "<--", "~>", "<~", "->", "<-", "--", "@|", "&&", "||", "=~", "?=",
     ">=", "<=", "!=", "*=", "|", "!", "=", "<", ">", "+", "{", "}", "?", "(", ")", "[", "]", ",",
 ];
 
@@ -169,7 +169,13 @@ fn scan(src: &str) -> Vec<(Option<Class>, &str)> {
         // a plain name (property / edge / matcher), left verbatim.
         if is_name_start(c) {
             let start = i;
-            while i < b.len() && is_name_char(b[i] as char) {
+            // A `-` inside a name ends it when it opens a link
+            // operator (`->`, `--`, `-->`) — mirroring the lexer, so
+            // a glued `x-->y` colors the arrow, not `x--` as a name.
+            while i < b.len()
+                && is_name_char(b[i] as char)
+                && !(b[i] == b'-' && matches!(b.get(i + 1), Some(b'>') | Some(b'-')))
+            {
                 i += 1;
             }
             let word = &src[start..i];

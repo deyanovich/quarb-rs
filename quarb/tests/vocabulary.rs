@@ -23,7 +23,7 @@ const CORPUS: &[&str] = &[
     "/a || /b::x | upper @| join(', ')",
     // the axis zoo (child, both reaches each way, siblings — one
     // step and the reach family — links)
-    "/a//b//?c//!d\\e\\\\f\\\\?g\\\\!h>i<j->k<-l/*",
+    "/a//b//?c//!d\\e\\\\f\\\\?g\\\\!h>i<j->k<-l--m/*",
     "/a>>b>>?c>>!d<<e<<?f<<!g",
     // glob and regex matchers
     "/src/*.rs//~(^ch[0-9]+$)",
@@ -276,7 +276,7 @@ fn spellings_are_locked() {
         collect("step", "axis"),
         set(&[
             "/", "//", "//?", "//!", "\\", "\\\\", "\\\\?", "\\\\!", ">", "<", ">>", ">>?", ">>!",
-            "<<", "<<?", "<<!", "->", "<-", "~>", "<~",
+            "<<", "<<?", "<<!", "->", "<-", "--", "-->", "<--",
         ])
     );
     assert_eq!(
@@ -312,7 +312,7 @@ fn root_carries_the_version() {
     let arbor = QueryArbor::parse("/x").unwrap();
     assert_eq!(
         arbor.metadata(arbor.root(), "vocabulary"),
-        Some(Value::Int(1))
+        Some(Value::Int(2))
     );
     assert_eq!(
         arbor.metadata(arbor.root(), "source"),

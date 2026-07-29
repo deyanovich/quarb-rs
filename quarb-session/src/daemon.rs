@@ -41,9 +41,19 @@ impl DaemonExecutor {
         no_ignore: bool,
         descend: bool,
         cache: bool,
+        refs: Option<PathBuf>,
+        model: Option<PathBuf>,
     ) -> Result<Self> {
         let qua = resolve_qua();
         let mut flags = Vec::new();
+        if let Some(f) = refs {
+            flags.push("--refs".to_string());
+            flags.push(f.display().to_string());
+        }
+        if let Some(f) = model {
+            flags.push("--model".to_string());
+            flags.push(f.display().to_string());
+        }
         if allow_shell {
             flags.push("--allow-shell".to_string());
         }

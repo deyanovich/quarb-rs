@@ -48,8 +48,10 @@ pub enum Token {
     ColonColon,
     /// `:::` — core-metadata projection.
     ColonColonColon,
-    /// `;;;` — adapter-metadata projection. The historical
-    /// spelling `::;` is accepted as a deprecated alias.
+    /// `::::` — adapter-metadata projection (canonical: the
+    /// projection ladder by colon count). The historical spellings
+    /// `;;;` and `::;` are accepted as deprecated aliases and
+    /// canonicalize on unparse.
     SemiSemiSemi,
     /// `|` — pipe / trait alternation.
     Pipe,
@@ -83,6 +85,8 @@ pub enum Token {
     ArrowOut,
     /// `<-` — incoming crosslink.
     ArrowIn,
+    /// `--` — either-direction crosslink (the headless arrow).
+    DashDash,
     /// `@` — register/aggregation sigil.
     At,
     /// `%` — the record sigil (`%.`, the named register view).
@@ -97,9 +101,11 @@ pub enum Token {
     Semi,
     /// `<=>` — correlation operator.
     Correlate,
-    /// `~>` — cross-reference resolution.
+    /// `-->` — cross-reference resolution (`-->` is the deprecated
+    /// alias; both lex to this token and unparse canonically).
     Resolve,
-    /// `<~` — reverse cross-reference resolution.
+    /// `<--` — reverse cross-reference resolution (`<--` is the
+    /// deprecated alias).
     ReverseResolve,
     /// `{n}`, `{m,n}`, `{m,}` — a path-pattern repetition
     /// quantifier. `{n}` carries `(n, Some(n))`; `{m,}` carries
@@ -291,6 +297,20 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::ArrowOut);
                 i += 2;
             }
+            // `-->` — resolution, canonical spelling: one dash
+            // more than the direct edge, for the extra step through
+            // the value. Longest match: before `--`.
+            '-' if at(i + 1) == Some('-') && at(i + 2) == Some('>') => {
+                tokens.push(Token::Resolve);
+                i += 3;
+            }
+            // `--` — the headless arrow — carved out of the dash
+            // run like `->`; the name lexer breaks on it too, so a
+            // glued `/posts/5--ip` reads as row 5 then the hop.
+            '-' if at(i + 1) == Some('-') => {
+                tokens.push(Token::DashDash);
+                i += 2;
+            }
             '<' if at(i + 1) == Some('<') => {
                 let mark = match at(i + 2) {
                     Some(m @ ('?' | '!')) => {
@@ -301,6 +321,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 };
                 tokens.push(Token::PrecedingSiblings(mark));
                 i += 2;
+            }
+            // `<--` — reverse resolution, canonical spelling.
+            // Longest match: before `<-`; the digit guard mirrors
+            // `<-`'s so `<--3` stays a comparison shape, not a hop.
+            '<' if at(i + 1) == Some('-')
+                && at(i + 2) == Some('-')
+                && !at(i + 3).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                tokens.push(Token::ReverseResolve);
+                i += 3;
             }
             // `<-` is the incoming crosslink, but `<-<digit>` is a
             // less-than against a negative literal (`::a<-3`),
@@ -374,16 +404,43 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Dollar);
                 i += 1;
             }
+            // ':-' / ':--' — the tail-colon spellings of '->' and
+            // '-->' (the colon marks the arrow's tail): permanent
+            // typing-friendly aliases, canonicalizing on unparse.
+            // The digit guard mirrors '<-': a conditional's glued
+            // else-branch negative (': -3') stays a colon + number.
+            ':' if at(i + 1) == Some('-')
+                && at(i + 2) == Some('-')
+                && !at(i + 3).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                tokens.push(Token::Resolve);
+                i += 3;
+            }
+            ':' if at(i + 1) == Some('-')
+                && at(i + 2) != Some('-')
+                && !at(i + 2).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                tokens.push(Token::ArrowOut);
+                i += 2;
+            }
             ':' => {
                 // A single ':' is the definition separator
-                // (`def &name: body;`); '::'/':::' are the projection
-                // family ('::;' lexes as the deprecated alias of ';;;').
+                // (`def &name: body;`); '::'/':::'/'::::' are the
+                // projection ladder ('::;' and ';;;' lex as the
+                // deprecated aliases of '::::').
                 if at(i + 1) != Some(':') {
                     tokens.push(Token::Colon);
                     i += 1;
                     continue;
                 }
                 match at(i + 2) {
+                    // '::::' — adapter metadata, canonical: the
+                    // projection ladder by colon count (more colons,
+                    // more meta). Longest match before ':::'.
+                    Some(':') if at(i + 3) == Some(':') => {
+                        tokens.push(Token::SemiSemiSemi);
+                        i += 4;
+                    }
                     Some(':') => {
                         tokens.push(Token::ColonColonColon);
                         i += 3;
@@ -472,7 +529,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 let mut text = String::from("@");
                 i += 1;
                 while let Some(ch) = at(i) {
-                    if ch == '-' && at(i + 1) == Some('>') {
+                    if ch == '-' && matches!(at(i + 1), Some('>') | Some('-')) {
                         break;
                     }
                     if is_name_char(ch) {
@@ -519,7 +576,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             '~' => {
                 if at(i + 1) != Some('(') {
                     return Err(QuarbError::Lex(
-                        "'~' must introduce a regex '~(...)' or a resolution '~>'".into(),
+                        "'~' must introduce a regex '~(...)' or a resolution '-->'".into(),
                     ));
                 }
                 let (body, next) = read_balanced(&chars, i + 2)?;
@@ -563,8 +620,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             c if is_name_char(c) => {
                 let mut text = String::new();
                 while let Some(ch) = at(i) {
-                    // `-` ends the name if it starts a `->` crosslink.
-                    if ch == '-' && at(i + 1) == Some('>') {
+                    // `-` ends the name if it starts a `->` or `--`
+                    // crosslink. A name with a literal double hyphen
+                    // stays reachable quoted, as with `->`.
+                    if ch == '-' && matches!(at(i + 1), Some('>') | Some('-')) {
                         break;
                     }
                     // `*` ends the name if it starts a `*=` contains

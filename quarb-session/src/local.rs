@@ -14,6 +14,9 @@ pub struct LocalExecutor {
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
+    /// A `--model` file enriching the source with derived structure.
+    #[cfg(feature = "native")]
+    model: Option<quarb_model::Model>,
     /// The source spec, kept so a `&N!` reading can re-materialize.
     /// `None` when the source can't be re-opened (wasm pasted text,
     /// which never drifts anyway).
@@ -30,7 +33,17 @@ impl LocalExecutor {
             allow_shell,
             #[cfg(feature = "native")]
             respec: None,
+            #[cfg(feature = "native")]
+            model: None,
         }
+    }
+
+    /// Attach a `--model` file: the session runs every query against
+    /// the enriched view.
+    #[cfg(feature = "native")]
+    pub fn with_model(mut self, model: Option<quarb_model::Model>) -> Self {
+        self.model = model;
+        self
     }
 
     /// A native executor that can re-materialize its source for a
@@ -48,6 +61,8 @@ impl LocalExecutor {
             now,
             allow_shell,
             respec: Some((specs, opts)),
+            #[cfg(feature = "native")]
+            model: None,
         }
     }
 }
@@ -63,8 +78,33 @@ fn run_doc(doc: &Doc, query: &str, now: (i64, u32), allow_shell: bool) -> anyhow
     })
 }
 
+/// [`run_doc`], against a model-enriched view.
+#[cfg(feature = "native")]
+fn run_doc_modeled(
+    doc: &Doc,
+    query: &str,
+    now: (i64, u32),
+    allow_shell: bool,
+    model: &quarb_model::Model,
+) -> anyhow::Result<Vec<Cell>> {
+    let result = doc
+        .run_modeled(query, now, allow_shell, model)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(match result {
+        QueryResult::Nodes(nodes) => nodes
+            .into_iter()
+            .map(|n| Cell::Node(doc.render_modeled(n, model)))
+            .collect(),
+        QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
+    })
+}
+
 impl Executor for LocalExecutor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
+        #[cfg(feature = "native")]
+        if let Some(model) = &self.model {
+            return run_doc_modeled(&self.doc, query, self.now, self.allow_shell, model);
+        }
         run_doc(&self.doc, query, self.now, self.allow_shell)
     }
 
