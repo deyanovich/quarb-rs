@@ -51,10 +51,209 @@ fn expansion_errors() {
     assert!(err("def &r: &r; /x").contains("unknown fragment '&r'"));
     // params are scoped to their def body
     assert!(err("def &f($x): /row[$x > 1]; /row[$x > 1]").contains("after '$'"));
-    // fragments take pipeline filters, not trailing predicates
-    assert!(err("def &a: /row; &a[::x > 1]").contains("pipeline filter"));
-    // ... and pipe projections, not trailing ones
-    assert!(err("def &a: /row; &a::name").contains("through the pipe"));
+}
+
+/// Path-position splicing (ruling #17): invocations are legal
+/// mid-path, in groups, and as predicate operands; trailing
+/// refinement group-wraps.
+#[test]
+fn path_splice() {
+    // mid-path: the walk continues through the fragment
+    assert_eq!(
+        exp("def &card: //div[::kind = 'card']; //section&card/h3::"),
+        "//section//div[::kind = 'card']/h3::"
+    );
+    // the article-17 guard: a group body under a written quantifier
+    assert_eq!(
+        exp("def &clean: (<-cookie->ip<-ip->cookie); /cookies/C&clean+ @| count"),
+        "/cookies/C(<-cookie->ip<-ip->cookie)+ @| count"
+    );
+    // trailing predicate group-wraps (expression predicates only)
+    assert_eq!(
+        exp("def &a: /row; &a[::x > 1]"),
+        "(/row)[::x > 1]"
+    );
+    // trailing projection: the body ends the branch
+    assert_eq!(exp("def &a: /row; &a::name"), "/row::name");
+    // a projected body ends the branch where it stands
+    assert_eq!(
+        exp("def &price: /span[::kind = 'p']::; //div&price @| max"),
+        "//div/span[::kind = 'p']:: @| max"
+    );
+    // quantifier + reach on a plain body wrap it as a group
+    assert_eq!(
+        exp("def &down: /wrap; /root&down{2,3}?/leaf::"),
+        "/root(/wrap){2,3}?/leaf::"
+    );
+    // two fragments splice in sequence
+    assert_eq!(
+        exp("def &a: /x; def &b: /y[1]; /root&a&b::"),
+        "/root/x/y[1]::"
+    );
+}
+
+#[test]
+fn union_body_as_group() {
+    // a union body mid-path becomes a path-pattern group
+    assert_eq!(
+        exp("def &either: /a || /b; /x&either/c::"),
+        "/x(/a|/b)/c::"
+    );
+    // ... adopting a written quantifier directly
+    assert_eq!(exp("def &either: /a || /b; /x&either{2}"), "/x(/a|/b){2}");
+    // at branch head a bare union splices whole (the historical
+    // behavior) — the group form appears only under refinement
+    assert_eq!(exp("def &either: /a || /b; &either @| count"), "/a || /b @| count");
+    assert_eq!(exp("def &either: /a || /b; &either+ @| count"), "(/a|/b)+ @| count");
+    // a projected union splices whole at head, as before
+    assert_eq!(
+        exp("def &two: /a::x || /b::y; &two @| count"),
+        "/a::x || /b::y @| count"
+    );
+}
+
+#[test]
+fn group_splice() {
+    // an invocation inside a group alternative
+    assert_eq!(
+        exp("def &hop: <-cookie; /x(&hop|->ip)+ @| count"),
+        "/x(<-cookie|->ip)+ @| count"
+    );
+    // a group-bodied fragment nests
+    assert_eq!(
+        exp("def &pair: (/a/b); /x(&pair|/c){1,2}"),
+        "/x((/a/b)|/c){1,2}"
+    );
+}
+
+/// Predicate fragments (`def &vis: [cond];`) and operand splices.
+#[test]
+fn predicate_splice() {
+    // a guard refines the step before it
+    assert_eq!(
+        exp("def &vis: [not ::style =~ /none/]; //div&vis/h3::"),
+        "//div[!::style =~ 'none']/h3::"
+    );
+    // bracket predicates after a guard join the same predicate run
+    assert_eq!(
+        exp("def &vis: [::s]; //span&vis[::k = 'p']::"),
+        "//span[::s][::k = 'p']::"
+    );
+    // ... and a group's match set
+    assert_eq!(
+        exp("def &deep: [::d > 2]; /x(/wrap)+&deep"),
+        "/x(/wrap)+[::d > 2]"
+    );
+    // ... and rides the plain pipe as a per-capsa filter
+    assert_eq!(
+        exp("def &vis: [not ::style =~ /none/]; //div | &vis | ::id"),
+        "//div | [!::style =~ 'none'] | ::id"
+    );
+    // as an operand it reads as a boolean
+    assert_eq!(
+        exp("def &vis: [::x > 1]; //div[&vis && ::y = 2]::"),
+        "//div[(::x > 1) && ::y = 2]::"
+    );
+    // a bare navigation body in a predicate is an existence test
+    assert_eq!(
+        exp("def &guard: /flag; //row[&guard]::"),
+        "//row[/flag]::"
+    );
+    // a projected body compares by value
+    assert_eq!(
+        exp("def &price: /span::; //div[&price > 10]::"),
+        "//div[/span:: > 10]::"
+    );
+    // an anchored body is the `^`-operand pattern
+    assert_eq!(
+        exp("def &top: ^/set/*::x; /row[::x = &top]::"),
+        "/row[::x = ^/set/*::x]::"
+    );
+    // parameters substitute inside a guard
+    assert_eq!(
+        exp("def &min($n): [::price > $n]; //div&min(10)::"),
+        "//div[::price > 10]::"
+    );
+}
+
+#[test]
+fn path_splice_errors() {
+    let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
+    // a pipeline-carrying body cannot enter a walk
+    assert!(err("def &s: /row | upper; /x&s").contains("carries a pipeline"));
+    // ... nor a correlation
+    assert!(
+        err("def &j: /a <=> /b[::x = $$::x]; /x&j").contains("carries a correlation")
+    );
+    // ... nor a re-anchoring body
+    assert!(err("def &t: ^/a; /x&t").contains("re-anchors"));
+    // a projected body cannot continue the walk
+    assert!(err("def &p: /a::x; /root&p/child").contains("cannot continue past it"));
+    // ... nor stand in a group alternative
+    assert!(err("def &p: /a::x; /root(&p|/b)").contains("group alternative walks on"));
+    // positional refinement keeps the group teaching error
+    assert!(err("def &a: /row; &a[2]").contains("expression predicates only"));
+    // the trait refusal is unchanged (a step carries traits; a
+    // splice has no single step)
+    assert!(err("def &a: /row; &a<block>").contains("trailing trait selector"));
+    // a guard needs something to refine
+    assert!(err("def &vis: [::x]; &vis").contains("nothing precedes"));
+    // reverse resolution stays out of predicates, spliced or not
+    assert!(
+        err("def &back: ::id<--; /row[&back]::").contains("reverse resolution")
+    );
+    // trailing-refinement refusals survive for pipeline-carrying
+    // bodies, where refine-through-the-pipe is still the truth
+    assert!(
+        err("def &s: /row | upper; &s[::x > 1]").contains("pipeline filter")
+    );
+    assert!(err("def &s: /row | upper; &s::name").contains("through the pipe"));
+}
+
+#[test]
+fn macro_path_splice() {
+    // a macro expansion splices mid-path (the brace quantifier's
+    // canonical form is the explicit group)
+    assert_eq!(
+        exp(r#"macro &hop($n): ^ | "/w{${$n}}"; /x&hop(2)/leaf::"#),
+        "/x(/w){2}/leaf::"
+    );
+    // ... and under a written quantifier
+    assert_eq!(
+        exp(r#"macro &pair: ^ | "(/a/b)"; /x&pair+ @| count"#),
+        "/x(/a/b)+ @| count"
+    );
+    // ... and as an operand
+    assert_eq!(
+        exp(r#"macro &lim: ^ | "10"; //div[::price > &lim]::"#),
+        "//div[::price > 10]::"
+    );
+    // a pipeline expansion refuses at path position
+    assert!(
+        expand(r#"macro &m: ^ | "| upper"; /x&m"#, &Defs::default())
+            .unwrap_err()
+            .to_string()
+            .contains("at path position it must expand to navigation steps")
+    );
+    // several branch-shaped values would silently concatenate into
+    // one path; the expansion lint refuses instead
+    assert!(
+        expand(
+            r#"macro &m(@xs): /xs/* | "//div[::k = ${::form}]"; &m(1, 2) @| count"#,
+            &Defs::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("branch-shaped values")
+    );
+    // the ledger holds at the new sites: generated text sees only
+    // earlier definitions
+    assert!(
+        expand(r#"macro &r: ^ | "/x&r"; /a&r"#, &Defs::default())
+            .unwrap_err()
+            .to_string()
+            .contains("unknown fragment '&r'")
+    );
 }
 
 /// Procedural macros: the body is a query evaluated at expansion
@@ -236,6 +435,12 @@ fn unparse_fixpoint() {
         "//a <- 3",
         "//a < -x",
         "def &f: /a$; &f | upper",
+        // Path-position splices (ruling #17): the expansions must
+        // themselves round-trip.
+        "def &clean: (<-a->b); /x&clean+ @| count",
+        "def &g: /a || /b; /x&g{2}",
+        "def &p: /price::; //row[&p > 10]::name",
+        "def &vis: [not ::style =~ /none/]; //div&vis/h3::",
     ];
     for q in queries {
         let once = exp(q);

@@ -167,6 +167,37 @@ pub fn parse_iso(s: &str) -> Option<(i64, u32, Option<i16>)> {
     Some((secs, nanos, offset))
 }
 
+/// Parse the compact ISO-8601 basic UTC form, exactly
+/// `YYYYMMDDTHHmmSSZ` (16 characters fixed-width) — the shape kaiv
+/// writes for provenance timestamps. A bridge for kaiv-side data
+/// only; Quarb's own literal grammar stays dashed-extended
+/// (`parse_iso`). Returns UTC (secs, 0 nanos, `Some(0)` offset).
+pub fn parse_iso_compact(s: &str) -> Option<(i64, u32, Option<i16>)> {
+    let b = s.as_bytes();
+    if b.len() != 16
+        || b[8] != b'T'
+        || b[15] != b'Z'
+        || !b[..8].iter().all(u8::is_ascii_digit)
+        || !b[9..15].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(4..6)?.parse().ok()?;
+    let day: u32 = s.get(6..8)?.parse().ok()?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    let hour: i64 = s.get(9..11)?.parse().ok()?;
+    let minute: i64 = s.get(11..13)?.parse().ok()?;
+    let second: i64 = s.get(13..15)?.parse().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let secs = days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+    Some((secs, 0, Some(0)))
+}
+
 /// Format an instant as ISO-8601. The preserved offset shifts the
 /// displayed wall clock and prints as `±HH:MM` (`Z` for zero); with
 /// no offset the instant prints in UTC without a designator, and a
@@ -198,6 +229,17 @@ pub fn format_instant(secs: i64, nanos: u32, offset: Option<i16>) -> String {
         }
     }
     out
+}
+
+/// Format a UTC instant in the compact ISO-8601 basic spelling
+/// `YYYYMMDDTHHmmSSZ` — the exact shape kaiv's builder validates
+/// for `@ts` provenance. Nanos truncate (kaiv's grammar has no
+/// sub-second field); a preserved display offset does not shift
+/// the digits (the instant is already UTC). Callers must guard:
+/// a year outside 0000–9999 yields a string of the wrong width.
+pub fn format_instant_compact(secs: i64) -> String {
+    let (y, mo, d, h, mi, s) = components(secs);
+    format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z")
 }
 
 /// Format a duration as ISO-8601: `P{d}DT{h}H{m}M{s}S`, zero parts
@@ -825,6 +867,41 @@ mod tests {
             "2024-02-15T14:26:40+01:00"
         );
         assert_eq!(parse_iso("not a date"), None);
+    }
+
+    #[test]
+    fn iso_compact_parse_and_format() {
+        // The compact form agrees with the dashed form on the timeline.
+        assert_eq!(
+            parse_iso_compact("20240215T132640Z"),
+            parse_iso("2024-02-15T13:26:40Z")
+        );
+        // Leap day passes the same civil validation as the dashed form.
+        let (leap, _, _) = parse_iso("2024-02-29").unwrap();
+        assert_eq!(parse_iso_compact("20240229T000000Z"), Some((leap, 0, Some(0))));
+        // Shape violations: wrong length, separators, lowercase z,
+        // bad month/day, out-of-range time.
+        for bad in [
+            "2024-02-15T13:26:40Z",
+            "20240215T132640",
+            "20240215t132640Z",
+            "20240215T132640z",
+            "20241315T132640Z",
+            "20230229T000000Z",
+            "20240215T246060Z",
+            "20240215 132640Z",
+        ] {
+            assert_eq!(parse_iso_compact(bad), None, "{bad}");
+        }
+        // parse_iso itself still rejects the compact spelling.
+        assert_eq!(parse_iso("20240215T132640Z"), None);
+        // Round trip through the compact formatter; nanos truncate.
+        let (secs, _, _) = parse_iso_compact("20240215T132640Z").unwrap();
+        assert_eq!(format_instant_compact(secs), "20240215T132640Z");
+        assert_eq!(
+            parse_iso_compact(&format_instant_compact(secs)),
+            Some((secs, 0, Some(0)))
+        );
     }
 
     #[test]

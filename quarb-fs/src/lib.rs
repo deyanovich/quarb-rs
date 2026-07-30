@@ -258,6 +258,23 @@ impl AstAdapter for FsAdapter {
         }
     }
 
+    /// Data provenance: the entry's canonical absolute path as the
+    /// source, its mtime as the instant (the same derivation as
+    /// `::::modified`, so the two always agree). No dpid — the
+    /// filesystem assigns none.
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        let path = &self.paths[node.0 as usize];
+        quarb::Provenance {
+            source: Some(path.display().to_string()),
+            instant: std::fs::metadata(path)
+                .ok()
+                .and_then(|md| md.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| (d.as_secs() as i64, d.subsec_nanos(), None)),
+            dpid: None,
+        }
+    }
+
     /// A symlink node has one outgoing crosslink, labelled `target`,
     /// to the node it points at (when that node is within the tree).
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {

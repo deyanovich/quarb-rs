@@ -13,9 +13,9 @@
 //!   `<inline>`, plus `<heading>` for `h1`–`h6` and `<link>` for an
 //!   anchor with an `href`.
 //! - Attributes are properties: `::href`, `::class`, `::id`. The
-//!   default projection (`::`) and `::text` are the element's text
-//!   content; `;;;tag`, `;;;id`, `;;;classes`, and any `;;;attr`
-//!   expose metadata.
+//!   default projection (`::`) is the element's text content;
+//!   `::::tag`, `::::classes`, `::::attrs`, and `::::n-attrs`
+//!   expose adapter metadata.
 //! - An anchor's fragment `href` resolves: `::href~>` follows
 //!   `#section` to the element with `id="section"`.
 
@@ -250,8 +250,6 @@ impl AstAdapter for HtmlAdapter {
         out
     }
 
-    /// `::text` is the element's text content; any other name is an
-    /// attribute value.
     /// Attributes, by name (`::href`). Element text is the bare
     /// projection (`::`) — no attribute name is shadowed.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
@@ -265,10 +263,13 @@ impl AstAdapter for HtmlAdapter {
         Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
     }
 
-    /// `;;;tag`, `;;;classes` (the class attribute, split), and
-    /// `;;;n-attrs` — facts about the element, never its data:
-    /// attributes are properties (`::href`), text is the bare
-    /// projection.
+    /// `::::tag`, `::::classes` (the class attribute, split),
+    /// `::::attrs` (the attribute names, sorted — the parser does
+    /// not preserve source order), and `::::n-attrs` — facts about
+    /// the element, never its data: attribute values are properties
+    /// (`::href`), text is the bare projection. `attrs` is what
+    /// makes a renamed attribute discoverable: enumerate the names,
+    /// probe the values by shape.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
@@ -280,6 +281,16 @@ impl AstAdapter for HtmlAdapter {
                         .collect(),
                 )
             }),
+            "attrs" => {
+                let mut names: Vec<&str> = n.attrs.iter().map(|(k, _)| k.as_str()).collect();
+                names.sort_unstable();
+                Some(Value::List(
+                    names
+                        .into_iter()
+                        .map(|k| Value::Str(k.to_string()))
+                        .collect(),
+                ))
+            }
             "n-attrs" => Some(Value::Int(n.attrs.len() as i64)),
             _ => None,
         }

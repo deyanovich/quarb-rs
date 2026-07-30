@@ -254,3 +254,30 @@ fn flags_can_include_ignored_and_hidden() {
         vec!["src/main.rs", "target/junk.rs"]
     );
 }
+
+#[test]
+fn provenance_is_path_and_mtime() {
+    let dir = sample_tree();
+    let root = dir.path().canonicalize().unwrap();
+    // :::source is the entry's canonical absolute path.
+    assert_eq!(
+        values("//guide.txt:::source", &dir),
+        vec![root.join("docs/guide.txt").display().to_string()]
+    );
+    // :::instant is the mtime — always in agreement with the
+    // adapter-metadata spelling.
+    assert_eq!(
+        values("//guide.txt:::instant", &dir),
+        values("//guide.txt;;;modified", &dir)
+    );
+    // No dpid: the filesystem assigns none (null displays empty).
+    assert_eq!(values("//guide.txt:::dpid", &dir), vec![""]);
+    // The composite carries source and instant only.
+    let composite = values("//guide.txt:::provenance", &dir);
+    let expected = format!(
+        "?{}@{}",
+        root.join("docs/guide.txt").display(),
+        values("//guide.txt:::instant", &dir)[0]
+    );
+    assert_eq!(composite, vec![expected]);
+}

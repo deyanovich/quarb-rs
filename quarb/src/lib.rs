@@ -53,7 +53,7 @@ pub mod temporal;
 mod unparse;
 mod value;
 
-pub use adapter::{AllowShell, AstAdapter, NodeId, QuantifierBound, WithNow};
+pub use adapter::{AllowShell, AstAdapter, NodeId, Provenance, QuantifierBound, WithNow};
 pub use error::{QuarbError, Result};
 pub use exec::QueryResult;
 pub use parser::Defs;

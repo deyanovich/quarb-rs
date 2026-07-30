@@ -365,6 +365,7 @@ fn mount(paths: Vec<String>, descend: bool) -> PyResult<Document> {
         let adapter = open_boxed(path, descend).map_err(PyValueError::new_err)?;
         mounts.push(quarb_mount::Mount {
             name: stem,
+            target: Some(path.clone()),
             adapter,
         });
     }

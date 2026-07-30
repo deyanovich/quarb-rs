@@ -99,3 +99,22 @@ fn derived_nodes_carry_container_traits() {
     assert_eq!(values(&a, "/ips/*<ip> @| count"), vec!["3"]);
     assert_eq!(values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::"), vec!["ck-1"]);
 }
+
+#[test]
+fn elevated_nodes_answer_derivation_provenance_only() {
+    let a = forum();
+    // An elevated value is something the model made: its source is
+    // the derivation, and no row's components leak through it.
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-1']:::source"),
+        vec!["model:/cookies"]
+    );
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-1']:::provenance"),
+        vec!["?model:/cookies"]
+    );
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-1']:::instant"), vec![""]);
+    assert_eq!(values(&a, "/cookies:::source"), vec!["model:/cookies"]);
+    // Base rows forward to the base adapter (which records none).
+    assert_eq!(values(&a, "/posts/1:::source"), vec![""]);
+}

@@ -17,10 +17,12 @@ fn mounted() -> MountAdapter {
     MountAdapter::new(vec![
         Mount {
             name: "people".into(),
+            target: Some("data/people.csv".into()),
             adapter: Box::new(people),
         },
         Mount {
             name: "cities".into(),
+            target: None,
             adapter: Box::new(cities),
         },
     ])
@@ -117,6 +119,7 @@ fn graph_values(query: &str) -> Vec<String> {
     // forward the calls.
     let adapter = MountAdapter::new(vec![Mount {
         name: "g".into(),
+        target: None,
         adapter: Box::new(Shared(std::rc::Rc::new(Graph))),
     }]);
     match quarb::run(query, &adapter).unwrap() {
@@ -139,4 +142,62 @@ fn mount_forwards_children_named_alias() {
 #[test]
 fn mount_forwards_link_property() {
     assert_eq!(graph_values("/g/a->knows[$-::since = 2016]:::name"), vec!["b"]);
+}
+
+/// The mount layer fills a missing `:::source` — target where one
+/// was recorded, mount name otherwise — and an inner adapter's own
+/// components always win.
+#[test]
+fn mount_fills_provenance_source() {
+    // Target recorded → the real-world address, not the alias.
+    assert_eq!(
+        values("/people/row[1]:::source"),
+        vec!["data/people.csv"]
+    );
+    // No target → the mount name stands in.
+    assert_eq!(values("/cities:::source"), vec!["cities"]);
+    // No inner instant/dpid to inherit, so the composite is source-only.
+    assert_eq!(
+        values("/people/row[1]:::provenance"),
+        vec!["?data/people.csv"]
+    );
+
+    // Inner wins: an adapter that answers its own source keeps it.
+    struct Sourced;
+    impl AstAdapter for Sourced {
+        fn root(&self) -> NodeId {
+            NodeId(0)
+        }
+        fn children(&self, node: NodeId) -> Vec<NodeId> {
+            if node.0 == 0 { vec![NodeId(1)] } else { vec![] }
+        }
+        fn name(&self, node: NodeId) -> Option<String> {
+            (node.0 == 1).then(|| "leaf".to_string())
+        }
+        fn parent(&self, node: NodeId) -> Option<NodeId> {
+            (node.0 == 1).then_some(NodeId(0))
+        }
+        fn provenance(&self, node: NodeId) -> quarb::Provenance {
+            quarb::Provenance {
+                source: (node.0 == 1).then(|| "sensor://23".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+    let adapter = MountAdapter::new(vec![Mount {
+        name: "s".into(),
+        target: Some("bundle.tar".into()),
+        adapter: Box::new(Sourced),
+    }]);
+    let got = match quarb::run("/s/leaf:::source", &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("expected values"),
+    };
+    assert_eq!(got, vec!["sensor://23"]);
+    // The mount root itself has no inner source — the target fills.
+    let got = match quarb::run("/s:::source", &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("expected values"),
+    };
+    assert_eq!(got, vec!["bundle.tar"]);
 }

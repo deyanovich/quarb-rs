@@ -135,13 +135,16 @@ struct Def {
 
 /// A fragment body: a navigation query (which may carry its own
 /// pipeline), a pipeline fragment (each stage's pipe is implied by
-/// its variant), or a procedural macro — a query evaluated at
-/// expansion time against the invocation's expansion arbor, whose
-/// text results become the expansion.
+/// its variant), a predicate fragment (`def &vis: [cond];` — a
+/// guard, spliced onto the step before it or read as a boolean
+/// operand), or a procedural macro — a query evaluated at expansion
+/// time against the invocation's expansion arbor, whose text
+/// results become the expansion.
 #[derive(Debug, Clone)]
 enum DefBody {
     Query(Query),
     Pipeline(Vec<Stage>),
+    Predicates(Vec<Predicate>),
     Macro(Query),
 }
 
@@ -196,6 +199,77 @@ struct Parser<'a> {
 /// stack frames through the group/operand dual reading) fits the
 /// smallest stacks in play — test threads (2 MB) and wasm.
 const MAX_NEST: usize = 64;
+
+/// Where a path-position splice stands (spec: Bodies and Splice
+/// Positions) — inside a branch's walk, or as (part of) a group
+/// alternative. The distinction matters only for projections: a
+/// projected body may end a branch, but a group alternative walks on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplicePos {
+    MidPath,
+    GroupAlt,
+}
+
+/// Whether a fragment body (or a macro expansion) is plain
+/// navigation the branch machinery can splice into a walk: no
+/// pipeline, no correlation, every branch starting at the current
+/// node — and, for a union, no projections (a multi-branch splice
+/// becomes a path-pattern group, and groups carry no projections).
+fn splices_as_path(q: &Query) -> bool {
+    q.correlations.is_empty()
+        && q.pipeline.is_empty()
+        && q.branches.iter().all(|b| b.anchor == Anchor::Current)
+        && (q.branches.len() == 1 || q.branches.iter().all(|b| b.projection.is_none()))
+}
+
+/// Wrap spliced elements in a path-pattern group carrying the
+/// trailing refinement. A body that is already exactly one bare
+/// group (the `def &clean: (…);` idiom) adopts the refinement
+/// directly, so the canonical form stays flat: `/cookies/C&clean+`
+/// prints as `/cookies/C(…)+`, not `((…))+`.
+fn group_wrap(
+    elems: Vec<PathElem>,
+    quant: Quant,
+    predicates: Vec<Predicate>,
+    reach: Reach,
+) -> Vec<PathElem> {
+    if elems.len() == 1
+        && let Some(PathElem::Group(g)) = elems.first()
+        && g.quant
+            == (Quant {
+                min: 1,
+                max: Some(1),
+            })
+        && g.predicates.is_empty()
+        && g.reach == Reach::All
+    {
+        let Some(PathElem::Group(mut g)) = elems.into_iter().next() else {
+            unreachable!("shape checked above");
+        };
+        g.quant = quant;
+        g.predicates = predicates;
+        g.reach = reach;
+        return vec![PathElem::Group(g)];
+    }
+    vec![PathElem::Group(Group {
+        alts: vec![elems],
+        quant,
+        predicates,
+        reach,
+    })]
+}
+
+/// Whether any step in these elements walks reverse resolution
+/// (`<--`) — refused inside predicates, where a def body parsed at
+/// depth zero could otherwise smuggle it in. Push bodies parse in
+/// their own scopes and stay out of the walk.
+fn walks_reverse_resolve(elems: &[PathElem]) -> bool {
+    elems.iter().any(|e| match e {
+        PathElem::Step(s) => matches!(s.axis, Axis::ReverseResolve { .. }),
+        PathElem::Group(g) => g.alts.iter().any(|a| walks_reverse_resolve(a)),
+        PathElem::Mark(_) | PathElem::Push { .. } => false,
+    })
+}
 
 /// The static execution mode between pipeline stages (spec:
 /// Execution Modes). Navigation mode: the thread is a node with no
@@ -410,7 +484,38 @@ impl Parser<'_> {
         }
         if matches!(self.peek(), Some(Token::Amp)) {
             let alone = branches.is_empty();
-            let q = self.invoke_query_fragment()?;
+            // A predicate fragment refines a preceding element;
+            // route it through the branch machinery, which reports
+            // that nothing precedes it here.
+            if matches!(self.peek_invocation_body(), Some(DefBody::Predicates(_))) {
+                branches.push(self.branch()?);
+                return Ok(());
+            }
+            let (name, q, quant) = self.invoke_query_fragment()?;
+            if quant.is_some() && !splices_as_path(&q) {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' carries a pipeline, a correlation, \
+                     or an anchor; a quantifier cannot ride it — quantify \
+                     plain navigation"
+                )));
+            }
+            // A plain-navigation body that is refined or continued
+            // goes through the branch machinery, where mid-path
+            // splicing lives (`&card/h3::`, `&clean+`, `&m[p]`). A
+            // bare one splices whole — the historical head
+            // behavior, `&either` ≡ `/a || /b` — as do bodies
+            // carrying a pipeline, a correlation, an anchor, or a
+            // projected union.
+            if splices_as_path(&q)
+                && (q.branches.len() == 1
+                    || quant.is_some()
+                    || self.splice_refinement_ahead())
+            {
+                let (elems, projection) =
+                    self.finish_splice(&name, q.branches, quant, SplicePos::MidPath)?;
+                branches.push(self.branch_tail(Anchor::Current, elems, projection)?);
+                return Ok(());
+            }
             if (!q.pipeline.is_empty() || !q.correlations.is_empty()) && !alone {
                 return Err(QuarbError::Parse(
                     "a fragment carrying a pipeline or a correlation must \
@@ -423,8 +528,9 @@ impl Parser<'_> {
             correlations.extend(q.correlations);
             if matches!(self.peek(), Some(Token::LBracket)) {
                 return Err(QuarbError::Parse(
-                    "a fragment does not take trailing predicates; \
-                     refine it with a pipeline filter: '&name | [cond]'"
+                    "a fragment carrying a pipeline, a correlation, or an \
+                     anchor does not take trailing predicates; refine it \
+                     with a pipeline filter: '&name | [cond]'"
                         .into(),
                 ));
             }
@@ -433,8 +539,9 @@ impl Parser<'_> {
                 Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi)
             ) {
                 return Err(QuarbError::Parse(
-                    "a fragment does not take a trailing projection; \
-                     project it through the pipe: '&name | ::key'"
+                    "a fragment carrying a pipeline, a correlation, or an \
+                     anchor does not take a trailing projection; project \
+                     it through the pipe: '&name | ::key'"
                         .into(),
                 ));
             }
@@ -450,6 +557,53 @@ impl Parser<'_> {
             branches.push(self.branch()?);
         }
         Ok(())
+    }
+
+    /// The defined body of the invocation ahead (`&name…`), for
+    /// splice-site routing; `None` when the name is unknown (the
+    /// invocation path itself reports that).
+    fn peek_invocation_body(&self) -> Option<&DefBody> {
+        match self.toks.get(self.pos + 1) {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => self.defs.get(text).map(|d| &d.body),
+            _ => None,
+        }
+    }
+
+    /// Whether the tokens after a head-position invocation refine or
+    /// continue it — a quantifier, predicates, a projection, another
+    /// hop or invocation — which routes the splice through the
+    /// branch machinery instead of the historical whole splice.
+    fn splice_refinement_ahead(&self) -> bool {
+        match self.peek() {
+            Some(
+                Token::Quant { .. }
+                | Token::LBracket
+                | Token::Amp
+                | Token::Slash
+                | Token::SlashSlash
+                | Token::Backslash
+                | Token::BackslashBackslash
+                | Token::ArrowOut
+                | Token::ArrowIn
+                | Token::DashDash
+                | Token::LParen
+                | Token::ColonColon
+                | Token::ColonColonColon
+                | Token::SemiSemiSemi
+                | Token::Lt
+                | Token::Gt,
+            ) => true,
+            Some(Token::Name {
+                text,
+                quoted: false,
+                glued: true,
+            }) => text == "+" || text == "*",
+            _ => false,
+        }
     }
 
     /// Parse pipeline stages onto `pipeline` until something that is
@@ -941,10 +1095,17 @@ impl Parser<'_> {
         self.expect(Token::Colon, "':' between the fragment name and its body")?;
 
         self.def_params = params.clone();
-        // A body starting with a pipe is a pipeline fragment; anything
-        // else is a navigation query (which may carry a pipeline, and
-        // may be a correlation chain).
-        let body = if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
+        // A body starting with a pipe is a pipeline fragment; one
+        // starting with `[` is a predicate fragment (a reusable
+        // guard); anything else is a navigation query (which may
+        // carry a pipeline, and may be a correlation chain).
+        let body = if matches!(self.peek(), Some(Token::LBracket)) {
+            let mut preds = Vec::new();
+            while matches!(self.peek(), Some(Token::LBracket)) {
+                preds.push(self.predicate()?);
+            }
+            DefBody::Predicates(preds)
+        } else if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
             let mut stages = Vec::new();
             // A fragment body's splice-time mode is unknowable at
             // definition time; parse permissively (navigation mode)
@@ -1117,6 +1278,49 @@ impl Parser<'_> {
     /// expansion arbor, run the body against it, and join the text
     /// results.
     fn expand_macro_text(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<String> {
+        let values = self.expand_macro_values(name, def, args)?;
+        let text = values.join(" ");
+        if text.trim().is_empty() {
+            return Err(QuarbError::Parse(format!(
+                "macro '&{name}' expanded to nothing"
+            )));
+        }
+        Ok(text)
+    }
+
+    /// Expand a macro invocation at a path or operand position:
+    /// join like [`Self::expand_macro_text`], but first refuse the
+    /// silent-concatenation trap — several branch-shaped output
+    /// values would space-join into one accidental deep path
+    /// (`/a /b` reads as `/a/b`, which runs and finds nothing).
+    fn expand_macro_path_text(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<String> {
+        let values = self.expand_macro_values(name, def, args)?;
+        let nav_start = |v: &str| {
+            let t = v.trim_start();
+            ["/", "\\", "->", "<-", "--", "(", "^", ">", "<"]
+                .iter()
+                .any(|op| t.starts_with(op))
+        };
+        if values.len() >= 2 && values.iter().all(|v| nav_start(v)) {
+            return Err(QuarbError::Parse(format!(
+                "macro '&{name}' expanded to {} branch-shaped values; \
+                 space-joined they would read as one path — join them \
+                 into a union (@| join(' || ')) or emit a single group",
+                values.len()
+            )));
+        }
+        let text = values.join(" ");
+        if text.trim().is_empty() {
+            return Err(QuarbError::Parse(format!(
+                "macro '&{name}' expanded to nothing"
+            )));
+        }
+        Ok(text)
+    }
+
+    /// The expansion's raw output values (each `.to_string()`ed),
+    /// before joining — see [`Self::expand_macro_text`].
+    fn expand_macro_values(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<Vec<String>> {
         let n = def.params.len();
         let arity_ok = match def.rest {
             Some(_) => args.len() >= n,
@@ -1206,25 +1410,19 @@ impl Parser<'_> {
                 )));
             }
         };
-        let text = values
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if text.trim().is_empty() {
-            return Err(QuarbError::Parse(format!(
-                "macro '&{name}' expanded to nothing"
-            )));
-        }
-        Ok(text)
+        Ok(values.iter().map(|v| v.to_string()).collect())
     }
 
     /// Parse `&name`, `&name(arg, …)`, or the data-aware `&name!(…)`
-    /// and return the name, the argument forms, and whether the `!`
-    /// was spelled.
-    fn invocation(&mut self) -> Result<(String, Vec<Operand>, bool)> {
+    /// and return the name, the argument forms, whether the `!` was
+    /// spelled, and a glued quantifier. `+`/`*` are name characters,
+    /// so `&clean+` lexes as one name token — when the full name is
+    /// not in the ledger but the stripped one is, the tail is the
+    /// splice's quantifier (path positions consume it; the others
+    /// refuse it).
+    fn invocation(&mut self) -> Result<(String, Vec<Operand>, bool, Option<Quant>)> {
         self.expect(Token::Amp, "'&'")?;
-        let name = match self.bump() {
+        let mut name = match self.bump() {
             Some(Token::Name {
                 text,
                 quoted: false,
@@ -1236,6 +1434,18 @@ impl Parser<'_> {
                 ));
             }
         };
+        let mut quant = None;
+        if self.defs.get(&name).is_none()
+            && let Some(stripped) = name.strip_suffix(['+', '*'])
+            && self.defs.get(stripped).is_some()
+        {
+            quant = Some(if name.ends_with('+') {
+                Quant { min: 1, max: None }
+            } else {
+                Quant { min: 0, max: None }
+            });
+            name = stripped.to_string();
+        }
         let bang = matches!(self.peek(), Some(Token::Bang));
         if bang {
             self.pos += 1;
@@ -1257,7 +1467,7 @@ impl Parser<'_> {
             }
             self.expect(Token::RParen, "')' to close fragment arguments")?;
         }
-        Ok((name, args, bang))
+        Ok((name, args, bang, quant))
     }
 
     /// Enforce the `!` signage both ways: a data-aware macro must be
@@ -1296,14 +1506,15 @@ impl Parser<'_> {
     }
 
     /// Expand a query-fragment invocation into its (substituted)
-    /// query.
-    fn invoke_query_fragment(&mut self) -> Result<Query> {
-        let (name, args, bang) = self.invocation()?;
+    /// query, returning the fragment's name and glued quantifier
+    /// for splice-site handling.
+    fn invoke_query_fragment(&mut self) -> Result<(String, Query, Option<Quant>)> {
+        let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
             return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
         };
         self.check_bang(&name, &def, bang)?;
-        match def.body {
+        let q = match def.body {
             DefBody::Query(mut q) => {
                 let map = self.bind(&name, &def.params, args)?;
                 subst_query(
@@ -1313,14 +1524,23 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
-                Ok(q)
+                q
             }
-            DefBody::Pipeline(_) => Err(QuarbError::Parse(format!(
-                "'&{name}' is a pipeline fragment; invoke it after a pipe"
-            ))),
+            DefBody::Pipeline(_) => {
+                return Err(QuarbError::Parse(format!(
+                    "'&{name}' is a pipeline fragment; invoke it after a pipe"
+                )));
+            }
+            DefBody::Predicates(_) => {
+                return Err(QuarbError::Parse(format!(
+                    "'&{name}' is a predicate fragment; it refines the \
+                     step before it ('/div&{name}') or reads as a \
+                     condition ('[&{name}]')"
+                )));
+            }
             // A macro expands to text, reparsed here as a query.
             DefBody::Macro(_) => {
-                let text = self.expand_macro_text(&name, &def, args)?;
+                let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
                     QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
                 };
@@ -1331,9 +1551,10 @@ impl Parser<'_> {
                          ('{text}'); invoke it after a pipe"
                     )));
                 }
-                parse_with_data(&tokens, self.defs.before(&name), self.data).map_err(wrap)
+                parse_with_data(&tokens, self.defs.before(&name), self.data).map_err(wrap)?
             }
-        }
+        };
+        Ok((name, q, quant))
     }
 
     /// Expand a pipeline-fragment invocation onto `pipeline`. The
@@ -1343,10 +1564,16 @@ impl Parser<'_> {
         pipe: &'static str,
         pipeline: &mut Vec<Stage>,
     ) -> Result<()> {
-        let (name, args, bang) = self.invocation()?;
+        let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
             return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
         };
+        if quant.is_some() {
+            return Err(QuarbError::Parse(format!(
+                "a quantifier doesn't ride the pipe; quantify '&{name}' \
+                 at path position"
+            )));
+        }
         self.check_bang(&name, &def, bang)?;
         match def.body {
             DefBody::Pipeline(stages) => {
@@ -1370,6 +1597,38 @@ impl Parser<'_> {
             DefBody::Query(_) => Err(QuarbError::Parse(format!(
                 "'&{name}' is a query fragment; invoke it at path position"
             ))),
+            // A predicate fragment on the plain pipe is the guard as
+            // a per-capsa filter — `| &vis` ≡ `| [cond]` per predicate.
+            DefBody::Predicates(preds) => {
+                if pipe != "|" {
+                    return Err(QuarbError::Parse(format!(
+                        "'@|' aggregates the whole context; the predicate \
+                         fragment '&{name}' filters per capsa — invoke it \
+                         with '|'"
+                    )));
+                }
+                let map = self.bind(&name, &def.params, args)?;
+                let subst = Subst {
+                    outer: &map,
+                    hole: &map,
+                };
+                for pred in preds {
+                    match pred {
+                        Predicate::Expr(mut e) => {
+                            subst_pred_expr(&mut e, &subst);
+                            pipeline.push(Stage::Filter(e));
+                        }
+                        _ => {
+                            return Err(QuarbError::Parse(format!(
+                                "the predicate fragment '&{name}' holds a \
+                                 positional predicate; select positionally \
+                                 with '@| [n]'"
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            }
             // A macro expands to text; here it must be a stage
             // sequence whose first pipe matches the invocation.
             DefBody::Macro(_) => {
@@ -1433,9 +1692,21 @@ impl Parser<'_> {
         } else {
             self.mark_anchor().unwrap_or(Anchor::Current)
         };
+        self.branch_tail(anchor, Vec::new(), None)
+    }
 
-        let mut steps = Vec::new();
-        while let Some(tok) = self.peek() {
+    /// A branch's step loop and projection, continuing from
+    /// already-spliced elements (empty for a plain branch). A
+    /// projection carried in by a splice ends the walk immediately.
+    fn branch_tail(
+        &mut self,
+        anchor: Anchor,
+        mut steps: Vec<PathElem>,
+        mut projection: Option<Projection>,
+    ) -> Result<Branch> {
+        while projection.is_none()
+            && let Some(tok) = self.peek()
+        {
             if matches!(
                 tok,
                 Token::Pipe
@@ -1444,9 +1715,13 @@ impl Parser<'_> {
                     | Token::RParen
                     | Token::Correlate
                     | Token::Semi
-                    | Token::Amp
             ) {
                 break;
+            }
+            // A fragment invocation splices into the walk.
+            if matches!(tok, Token::Amp) {
+                projection = self.splice_path_fragment(&mut steps, SplicePos::MidPath)?;
+                continue;
             }
             // `$|` at pipeline level is the map pipe — a stage, not a
             // path step; end the branch so `pipeline_items` sees it.
@@ -1470,7 +1745,9 @@ impl Parser<'_> {
             steps.push(self.path_elem()?);
         }
 
-        let projection = self.projection()?;
+        if projection.is_none() {
+            projection = self.projection()?;
+        }
 
         if steps.is_empty() && projection.is_none() && anchor == Anchor::Current {
             return Err(QuarbError::Parse(
@@ -1482,6 +1759,286 @@ impl Parser<'_> {
             projection,
             anchor,
         })
+    }
+
+    /// Expand a fragment invocation at a path position and splice it
+    /// into the walk: elements extend `steps` (a predicate fragment
+    /// instead refines the element just walked), and a projection
+    /// carried by the body ends the branch. Trailing refinement — a
+    /// quantifier, predicates, a reach mark — group-wraps the
+    /// spliced elements.
+    fn splice_path_fragment(
+        &mut self,
+        steps: &mut Vec<PathElem>,
+        at: SplicePos,
+    ) -> Result<Option<Projection>> {
+        let (name, args, bang, quant) = self.invocation()?;
+        let Some(def) = self.defs.get(&name).cloned() else {
+            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+        };
+        self.check_bang(&name, &def, bang)?;
+        let q = match def.body {
+            DefBody::Predicates(preds) => {
+                if quant.is_some() {
+                    return Err(QuarbError::Parse(format!(
+                        "the predicate fragment '&{name}' refines what \
+                         precedes it; a quantifier cannot ride it"
+                    )));
+                }
+                let map = self.bind(&name, &def.params, args)?;
+                self.attach_predicate_fragment(&name, preds, &map, steps)?;
+                // Bracket predicates written after the guard belong
+                // to the same element — `&vis[p]` is one predicate
+                // run, like `[vis][p]` spelled by hand.
+                while matches!(self.peek(), Some(Token::LBracket)) {
+                    let p = self.predicate()?;
+                    self.attach_predicate_fragment(&name, vec![p], &HashMap::new(), steps)?;
+                }
+                return Ok(None);
+            }
+            DefBody::Pipeline(_) => {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' carries a pipeline; a pipe leaves \
+                     navigation — invoke it at branch head or as a \
+                     pipeline stage, not inside a walk"
+                )));
+            }
+            DefBody::Query(mut q) => {
+                let map = self.bind(&name, &def.params, args)?;
+                subst_query(
+                    &mut q,
+                    &Subst {
+                        outer: &map,
+                        hole: &map,
+                    },
+                );
+                q
+            }
+            DefBody::Macro(_) => {
+                let text = self.expand_macro_path_text(&name, &def, args)?;
+                self.parse_expansion_query(&name, &text)?
+            }
+        };
+        // The category rule at path positions: the body must be pure
+        // navigation, continuing the walk from where it stands.
+        if !q.correlations.is_empty() {
+            return Err(QuarbError::Parse(format!(
+                "fragment '&{name}' carries a correlation; a chain \
+                 splices at driver position only"
+            )));
+        }
+        if !q.pipeline.is_empty() {
+            return Err(QuarbError::Parse(format!(
+                "fragment '&{name}' carries a pipeline; a pipe leaves \
+                 navigation — invoke it at branch head or as a pipeline \
+                 stage, not inside a walk"
+            )));
+        }
+        if q.branches.iter().any(|b| b.anchor != Anchor::Current) {
+            return Err(QuarbError::Parse(format!(
+                "fragment '&{name}' re-anchors; mid-path splicing \
+                 continues the walk — invoke it at branch head"
+            )));
+        }
+        let (elems, projection) = self.finish_splice(&name, q.branches, quant, at)?;
+        steps.extend(elems);
+        Ok(projection)
+    }
+
+    /// Turn a spliced body's branches into walk elements and apply
+    /// any trailing refinement. A union body splices as a
+    /// path-pattern group, one alternative per branch — under a
+    /// quantifier, alternation takes the group's simple-path
+    /// semantics.
+    fn finish_splice(
+        &mut self,
+        name: &str,
+        branches: Vec<Branch>,
+        glued_quant: Option<Quant>,
+        at: SplicePos,
+    ) -> Result<(Vec<PathElem>, Option<Projection>)> {
+        let (mut elems, projection) = if branches.len() == 1 {
+            let b = branches.into_iter().next().expect("non-empty");
+            (b.steps, b.projection)
+        } else {
+            if branches.iter().any(|b| b.projection.is_some()) {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' is a projected union; it splices \
+                     whole at branch head, not inside a walk"
+                )));
+            }
+            let alts: Vec<Vec<PathElem>> = branches.into_iter().map(|b| b.steps).collect();
+            (
+                vec![PathElem::Group(Group {
+                    alts,
+                    quant: Quant {
+                        min: 1,
+                        max: Some(1),
+                    },
+                    predicates: Vec::new(),
+                    reach: Reach::All,
+                })],
+                None,
+            )
+        };
+
+        // Trailing refinement: `&clean+` ≡ `(…)+`, `&m[p]` ≡ `(…)[p]`
+        // (expression predicates only, like any group). A glued
+        // quantifier rode in on the name token; a brace one is its
+        // own token, parsed here.
+        let quant = match glued_quant {
+            Some(q) => Some(q),
+            None => self.group_quant()?,
+        };
+        if quant.is_some() || matches!(self.peek(), Some(Token::LBracket)) {
+            if projection.is_some() {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' ends in a projection; refinement \
+                     cannot follow it — refine through the pipe instead"
+                )));
+            }
+            let predicates = self.group_predicates()?;
+            let reach = self.reach();
+            elems = group_wrap(
+                elems,
+                quant.unwrap_or(Quant {
+                    min: 1,
+                    max: Some(1),
+                }),
+                predicates,
+                reach,
+            );
+        }
+
+        if projection.is_some() {
+            let continues = matches!(
+                self.peek(),
+                Some(
+                    Token::Slash
+                        | Token::SlashSlash
+                        | Token::Backslash
+                        | Token::BackslashBackslash
+                        | Token::ArrowOut
+                        | Token::ArrowIn
+                        | Token::DashDash
+                        | Token::LParen
+                        | Token::Amp
+                        | Token::ColonColon
+                        | Token::ColonColonColon
+                        | Token::SemiSemiSemi
+                )
+            );
+            if at == SplicePos::GroupAlt {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' ends in a projection; a group \
+                     alternative walks on — invoke it where the branch ends"
+                )));
+            }
+            if continues {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' ends in a projection; navigation \
+                     cannot continue past it — invoke it where the branch \
+                     ends"
+                )));
+            }
+        }
+        // `<trait>` after an invocation was never legal and stays so
+        // — a splice has no single step to carry traits. (`&frag<sib`,
+        // the previous-sibling axis, continues the walk as usual: the
+        // trait shape is `<name>` with nothing walkable after.)
+        if matches!(self.peek(), Some(Token::Lt))
+            && matches!(self.toks.get(self.pos + 1), Some(Token::Name { .. }))
+            && matches!(self.toks.get(self.pos + 2), Some(Token::Gt))
+            && !matches!(
+                self.toks.get(self.pos + 3),
+                Some(Token::Name { .. } | Token::Regex(_))
+            )
+        {
+            return Err(QuarbError::Parse(
+                "a fragment does not take a trailing trait selector; \
+                 put the trait inside a definition: \
+                 'def &errs: /entry<error> ;'"
+                    .into(),
+            ));
+        }
+        Ok((elems, projection))
+    }
+
+    /// Splice a predicate fragment: its predicates refine the
+    /// element just walked (a step, or a group's match set).
+    fn attach_predicate_fragment(
+        &self,
+        name: &str,
+        mut preds: Vec<Predicate>,
+        map: &HashMap<String, Operand>,
+        steps: &mut [PathElem],
+    ) -> Result<()> {
+        let subst = Subst {
+            outer: map,
+            hole: map,
+        };
+        for pred in &mut preds {
+            if let Predicate::Expr(e) = pred {
+                subst_pred_expr(e, &subst);
+            }
+        }
+        match steps.last_mut() {
+            Some(PathElem::Step(s)) => {
+                s.predicates.extend(preds);
+                Ok(())
+            }
+            Some(PathElem::Group(g)) => {
+                if preds.iter().any(|p| !matches!(p, Predicate::Expr(_))) {
+                    return Err(QuarbError::Parse(
+                        "a group takes expression predicates only \
+                         (positional selection has no order across \
+                         repetition tiers)"
+                            .into(),
+                    ));
+                }
+                g.predicates.extend(preds);
+                Ok(())
+            }
+            Some(PathElem::Mark(_) | PathElem::Push { .. }) => Err(QuarbError::Parse(format!(
+                "the predicate fragment '&{name}' refines a hop or a \
+                 group; a mark or a push takes no predicates"
+            ))),
+            None => Err(QuarbError::Parse(format!(
+                "the predicate fragment '&{name}' refines the step \
+                 before it; nothing precedes it here — walk first \
+                 ('/div&{name}')"
+            ))),
+        }
+    }
+
+    /// Re-parse a macro's expansion text at a path position: a full
+    /// program (definitions allowed), against the ledger as it stood
+    /// before the macro, with the splice site's predicate and
+    /// pattern scopes inherited — generated text obeys the same
+    /// contextual restrictions hand-written text would.
+    fn parse_expansion_query(&self, name: &str, text: &str) -> Result<Query> {
+        let wrap =
+            |e: QuarbError| QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"));
+        let tokens = lexer::lex(text).map_err(wrap)?;
+        if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
+            return Err(QuarbError::Parse(format!(
+                "macro '&{name}' expanded to a pipeline fragment \
+                 ('{text}'); at path position it must expand to \
+                 navigation steps"
+            )));
+        }
+        let mut p = Parser {
+            toks: &tokens,
+            pos: 0,
+            defs: self.defs.before(name),
+            def_params: Vec::new(),
+            data: self.data,
+            pattern_depth: self.pattern_depth,
+            predicate_depth: self.predicate_depth,
+            nest_depth: 0,
+            subquery_depth: 0,
+        };
+        p.parse().map_err(wrap)
     }
 
     /// Peek-only form of [`Self::mark_anchor`], for match guards.
@@ -1897,6 +2454,10 @@ impl Parser<'_> {
         loop {
             match self.peek() {
                 Some(Token::Pipe | Token::RParen) | None => break,
+                // A fragment invocation splices into the alternative.
+                Some(Token::Amp) => {
+                    self.splice_path_fragment(&mut elems, SplicePos::GroupAlt)?;
+                }
                 // `.(body)` / `.name(body)` — a breadcrumb pushed as
                 // the path walks.
                 Some(Token::Name {
@@ -3102,10 +3663,181 @@ impl Parser<'_> {
                     projection,
                 })
             }
+            // A fragment invocation as an operand: a predicate
+            // fragment reads as a boolean, a navigation body as a
+            // relative path (a bare one is an existence test, like
+            // any path operand), a piped body under the inline
+            // rules, a macro by its expansion.
+            Some(Token::Amp) => self.splice_operand_fragment(),
             other => Err(QuarbError::Parse(format!(
                 "expected a value or path in a predicate, found {other:?}"
             ))),
         }
+    }
+
+    /// Expand a fragment invocation in operand position.
+    fn splice_operand_fragment(&mut self) -> Result<Operand> {
+        let (name, args, bang, quant) = self.invocation()?;
+        let Some(def) = self.defs.get(&name).cloned() else {
+            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+        };
+        if quant.is_some() {
+            return Err(QuarbError::Parse(format!(
+                "a quantifier doesn't ride '&{name}' in operand position; \
+                 put the quantified group inside the definition"
+            )));
+        }
+        self.check_bang(&name, &def, bang)?;
+        match def.body {
+            DefBody::Predicates(preds) => {
+                let map = self.bind(&name, &def.params, args)?;
+                let subst = Subst {
+                    outer: &map,
+                    hole: &map,
+                };
+                let mut conj: Option<PredExpr> = None;
+                for pred in preds {
+                    let Predicate::Expr(mut e) = pred else {
+                        return Err(QuarbError::Parse(format!(
+                            "the predicate fragment '&{name}' holds a \
+                             positional predicate; a condition operand \
+                             needs an expression"
+                        )));
+                    };
+                    subst_pred_expr(&mut e, &subst);
+                    conj = Some(match conj {
+                        Some(prev) => PredExpr::And(Box::new(prev), Box::new(e)),
+                        None => e,
+                    });
+                }
+                let conj = conj.expect("a predicate body holds at least one predicate");
+                Ok(Operand::Group(Box::new(conj)))
+            }
+            DefBody::Pipeline(_) => Err(QuarbError::Parse(format!(
+                "'&{name}' is a pipeline fragment; invoke it after a pipe"
+            ))),
+            DefBody::Query(mut q) => {
+                let map = self.bind(&name, &def.params, args)?;
+                subst_query(
+                    &mut q,
+                    &Subst {
+                        outer: &map,
+                        hole: &map,
+                    },
+                );
+                self.operand_from_query(&name, q)
+            }
+            DefBody::Macro(_) => {
+                let text = self.expand_macro_path_text(&name, &def, args)?;
+                let wrap = |e: QuarbError| {
+                    QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                };
+                let tokens = lexer::lex(&text).map_err(wrap)?;
+                let mut p = Parser {
+                    toks: &tokens,
+                    pos: 0,
+                    defs: self.defs.before(&name),
+                    def_params: Vec::new(),
+                    data: self.data,
+                    // Predicates reset pattern scope; the predicate
+                    // scope itself is inherited, so generated text
+                    // obeys the same restrictions hand-written
+                    // operands would (`<--` stays refused).
+                    pattern_depth: 0,
+                    predicate_depth: self.predicate_depth,
+                    nest_depth: 0,
+                    subquery_depth: 0,
+                };
+                let op = p.cond_expr().map_err(wrap)?;
+                if p.pos != tokens.len() {
+                    return Err(QuarbError::Parse(format!(
+                        "macro '&{name}' expanded to text with trailing \
+                         content ('{text}')"
+                    )));
+                }
+                Ok(op)
+            }
+        }
+    }
+
+    /// A navigation body as an operand: a relative path — any
+    /// anchor, operand paths carry them — with the body's pipeline
+    /// (if any) riding as an operand pipe tail under the inline
+    /// rules.
+    fn operand_from_query(&self, name: &str, q: Query) -> Result<Operand> {
+        if !q.correlations.is_empty() {
+            return Err(QuarbError::Parse(format!(
+                "fragment '&{name}' carries a correlation; a chain \
+                 splices at driver position only"
+            )));
+        }
+        let rel = if q.branches.len() == 1 {
+            let b = q.branches.into_iter().next().expect("non-empty");
+            Operand::Rel {
+                steps: b.steps,
+                projection: b.projection,
+                anchor: b.anchor,
+            }
+        } else {
+            if q.branches
+                .iter()
+                .any(|b| b.anchor != Anchor::Current || b.projection.is_some())
+            {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' is a projected or anchored union; \
+                     in operand position a union body must be plain \
+                     navigation from the current node"
+                )));
+            }
+            let alts: Vec<Vec<PathElem>> = q.branches.into_iter().map(|b| b.steps).collect();
+            Operand::Rel {
+                steps: vec![PathElem::Group(Group {
+                    alts,
+                    quant: Quant {
+                        min: 1,
+                        max: Some(1),
+                    },
+                    predicates: Vec::new(),
+                    reach: Reach::All,
+                })],
+                projection: None,
+                anchor: Anchor::Current,
+            }
+        };
+        // A def body parses at predicate depth zero, so re-validate
+        // the one contextual restriction a splice could smuggle into
+        // a predicate: reverse resolution scans the whole arbor per
+        // candidate node.
+        if self.predicate_depth > 0
+            && let Operand::Rel { steps, .. } = &rel
+            && walks_reverse_resolve(steps)
+        {
+            return Err(QuarbError::Parse(format!(
+                "fragment '&{name}' walks reverse resolution '<--', \
+                 which is not allowed inside a predicate (it would scan \
+                 the whole arbor per node); rewrite as a descending path \
+                 or an incoming edge '<-'"
+            )));
+        }
+        if q.pipeline.is_empty() {
+            return Ok(rel);
+        }
+        for stage in &q.pipeline {
+            if matches!(
+                stage,
+                Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } | Stage::Nav(_)
+            ) {
+                return Err(QuarbError::Parse(format!(
+                    "fragment '&{name}' carries a pipeline that pushes or \
+                     navigates; an operand pipe transforms a value \
+                     (pushes belong to real capsae)"
+                )));
+            }
+        }
+        Ok(Operand::Piped {
+            expr: Box::new(rel),
+            stages: q.pipeline,
+        })
     }
 
     fn cmp_op(&mut self) -> Option<CmpOp> {

@@ -61,6 +61,23 @@ fn attributes_as_properties() {
     assert_eq!(values("//h1:::traits"), vec!["block, heading"]);
 }
 
+/// `::::attrs` enumerates attribute NAMES, in document order — the
+/// discovery half of the attribute story (`::name` reads a value,
+/// `::::attrs` says which names exist, so a renamed attribute stays
+/// probeable by its value's shape).
+#[test]
+fn attribute_names_as_metadata() {
+    assert_eq!(values("//html;;;attrs"), vec!["lang"]);
+    assert_eq!(values("//p;;;attrs"), vec!["class"]);
+    // token test, like `::::classes`: which elements carry an href?
+    assert_eq!(
+        nodes("//*[::::attrs *= 'href']"),
+        vec!["/html/body/main/a[1]", "/html/body/main/a[2]"]
+    );
+    // no attributes → an empty list, not a miss
+    assert_eq!(values("//ul;;;attrs"), vec![""]);
+}
+
 #[test]
 fn structural_traits() {
     // headings

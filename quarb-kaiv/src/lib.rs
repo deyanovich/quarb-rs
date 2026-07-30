@@ -10,28 +10,31 @@
 //! - Containers (namespace segments, array elements) are nodes;
 //!   fields are typed *properties* on their container AND leaf
 //!   child nodes, so per-field provenance is addressable:
-//!   `/@results/0::age` reads the value, `/@results/0/age;;;dpid`
+//!   `/@results/0::age` reads the value, `/@results/0/age::::dpid`
 //!   reads where it came from.
 //! - Core types mint typed values (`!int` → integer, `!bool` →
 //!   boolean, `!null` → null); the std/time types with a date part
 //!   mint *instants* (a `datetime`'s written offset is kept for
 //!   display); `!b64` and any other named type ride as text with
-//!   the type name in `;;;type`.
+//!   the type name in `::::type`.
 //! - Unit-annotated types (`!float:km`) mint QUANTITIES: the value
 //!   scales to its dimension's base through kaiv's frozen unit
 //!   table, so `42 km` filters against `5000 m` or `30mi` and a
 //!   criterion may be written in any compatible unit (spec: The
 //!   Quantital Fragment). Pure-time units mint Durations; the
-//!   written unit stays on display and in `;;;unit`.
-//! - Provenance surfaces as leaf metadata: `;;;source` (the
-//!   declared id), `;;;source-uri` (its declared URI),
-//!   `;;;timestamp`, `;;;dpid`.
+//!   written unit stays on display and in `::::unit`.
+//! - Provenance surfaces twice. Raw, as leaf adapter metadata:
+//!   `::::source` (the declared id), `::::source-uri` (its declared
+//!   URI), `::::timestamp` (the compact string), `::::dpid`. And
+//!   resolved, as the core data-provenance keys: `:::source` (the
+//!   URI), `:::instant` (a typed Instant), `:::dpid`, and their
+//!   composite `:::provenance`.
 //! - Authored sugar (variables, blocks, `+:=`, maps, units,
 //!   named-type imports) is resolved by kaiv's own compiler before
 //!   mounting, and `$field` references are denormalized to their
 //!   values — what mounts is always the canonical document.
 //!
-//! This closes the emit→mount loop: `qua --daiv` output re-mounts
+//! This closes the emit→mount loop: `qua --kaiv` output re-mounts
 //! (`/@results/*::field`), so typed results graft beside any other
 //! substrate and join against their own source.
 
@@ -180,7 +183,7 @@ fn unquote(name: &str) -> String {
     }
 }
 
-/// The typed value for a canonical type name, plus the `;;;type`
+/// The typed value for a canonical type name, plus the `::::type`
 /// metadata where the name is worth keeping (non-core, named
 /// types). Named types from kaiv's embedded standard libraries
 /// resolve through their declared ordering class: `..num` mints
@@ -337,7 +340,7 @@ impl KaivAdapter {
         // import's `.faiv` definitions join the customs table, so
         // custom units scale to base exactly like built-ins; an
         // unresolvable library is skipped, and its units keep the
-        // text-plus-`;;;unit` fallback.
+        // text-plus-`::::unit` fallback.
         let mut layer1: Vec<(String, String)> = Vec::new();
         let mut unit_libs: Vec<String> = Vec::new();
         for line in &lines {
@@ -379,7 +382,7 @@ impl KaivAdapter {
                     // (one ontology per dimension of time), a
                     // dimensionless one stays a plain number, and
                     // an unresolvable custom unit keeps the old
-                    // text-plus-;;;unit behavior (the .faiv
+                    // text-plus-::::unit behavior (the .faiv
                     // registry route is a recorded seam).
                     let minted = l.unit.and_then(|unit| {
                         let n: f64 = value.trim().parse().ok()?;
@@ -555,6 +558,33 @@ impl AstAdapter for KaivAdapter {
         }
     }
 
+    /// The resolved data-provenance triple (`:::source` /
+    /// `:::instant` / `:::dpid`): the leaf's own `?src@ts#dpid`,
+    /// with the source id resolved through the document's `.?`
+    /// declarations to its URI (the id alone does not travel across
+    /// mounts; the raw id stays on `::::source`) and the compact
+    /// timestamp bridged to a typed Instant. Containers answer
+    /// nothing — a mount layer above fills what it knows.
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        let Some(l) = self.node(node).and_then(|n| n.leaf.as_ref()) else {
+            return quarb::Provenance::default();
+        };
+        quarb::Provenance {
+            source: l.source.as_ref().map(|id| {
+                self.sources
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .map(|(_, uri)| uri.clone())
+                    .unwrap_or_else(|| id.clone())
+            }),
+            instant: l
+                .timestamp
+                .as_deref()
+                .and_then(quarb::temporal::parse_iso_compact),
+            dpid: l.dpid.clone(),
+        }
+    }
+
     /// Criterion text resolves through the document's own unit
     /// imports as well as the built-in table, so
     /// `[::range < '50kellicam']` means what the mounted document
@@ -622,6 +652,33 @@ mod tests {
             ["https://sensors.example.com/1"]
         );
         assert_eq!(values(&a, "/readings/temp;;;dpid"), ["req-42"]);
+        // The resolved core tier: URI-resolved source, the compact
+        // timestamp bridged to a typed Instant (displays dashed),
+        // dpid passed through, and the composite. The raw string
+        // stays on the adapter tier (`::::timestamp` above).
+        assert_eq!(
+            values(&a, "/readings/temp:::source"),
+            ["https://sensors.example.com/1"]
+        );
+        assert_eq!(
+            values(&a, "/readings/temp:::instant"),
+            ["2025-01-15T09:30:00Z"]
+        );
+        assert_eq!(values(&a, "/readings/temp:::dpid"), ["req-42"]);
+        assert_eq!(
+            values(&a, "/readings/temp:::provenance"),
+            ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42"]
+        );
+        assert_eq!(values(&a, "/readings/temp::::timestamp"), ["20250115T093000Z"]);
+        // A typed temporal criterion over the bridged instant.
+        assert_eq!(
+            values(&a, "//*[:::instant > 2025-01-01]::"),
+            ["100"]
+        );
+        // Containers and provenance-less leaves answer honest nulls
+        // (null displays as the empty string).
+        assert_eq!(values(&a, "/readings:::provenance"), [""]);
+        assert_eq!(values(&a, "/trip/length:::source"), [""]);
         assert_eq!(values(&a, "/trip/length;;;unit"), ["km"]);
         // Unit-annotated: a quantity, filterable in ANY compatible
         // unit — the criterion converts through the same table.

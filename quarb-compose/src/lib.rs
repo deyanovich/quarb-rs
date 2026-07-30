@@ -356,6 +356,31 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    /// A graft is a provenance layer: the grafted document's own
+    /// components win, and the outer *leaf* it was parsed from fills
+    /// the rest (with an fs outer: the file's path and mtime). The
+    /// jar-style composite locator is deliberately not the source —
+    /// `?src` names a document, and the intra-document address is
+    /// dpid's job.
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        match self.split(node) {
+            Some((g, inner)) => {
+                // Clone what we need out of the borrow before calling
+                // into `self.outer` (which may re-enter the graft
+                // tables).
+                let (inner_prov, outer_leaf) = {
+                    let grafts = self.grafts.borrow();
+                    (
+                        grafts[g].inner.adapter().provenance(inner),
+                        grafts[g].outer,
+                    )
+                };
+                inner_prov.or(self.outer.provenance(outer_leaf))
+            }
+            None => self.outer.provenance(node),
+        }
+    }
+
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         match self.split(node) {
             Some((g, inner)) => {

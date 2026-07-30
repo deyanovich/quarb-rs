@@ -2741,6 +2741,35 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         "id-path" => Some(Value::Str(ancestor_path(adapter, node, |_, n| {
             Some(n.0.to_string())
         }))),
+        // Data provenance: the layered, adapter-supplied triple and
+        // its composite. Absent components answer null — honest
+        // absence, never the invocation clock.
+        "source" => Some(
+            adapter
+                .provenance(node)
+                .source
+                .map_or(Value::Null, Value::Str),
+        ),
+        "instant" => Some(adapter.provenance(node).instant.map_or(
+            Value::Null,
+            |(secs, nanos, offset_min)| Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+            },
+        )),
+        "dpid" => Some(
+            adapter
+                .provenance(node)
+                .dpid
+                .map_or(Value::Null, Value::Str),
+        ),
+        "provenance" => Some(
+            adapter
+                .provenance(node)
+                .canonical()
+                .map_or(Value::Null, Value::Str),
+        ),
         _ => None,
     }
 }
@@ -4230,6 +4259,7 @@ fn dedup(nodes: Vec<NodeId>) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::Provenance;
     use crate::lexer::lex;
     use crate::parser::parse;
     use std::collections::HashMap;
@@ -4345,6 +4375,8 @@ mod tests {
         links: HashMap<u64, Vec<(String, u64)>>,
         /// Edge properties: (source, label, target) -> [(name, value)].
         edge_props: HashMap<(u64, String, u64), Vec<(String, Value)>>,
+        /// Per-node data provenance overrides.
+        prov: HashMap<u64, Provenance>,
     }
 
     impl MockTree {
@@ -4378,6 +4410,7 @@ mod tests {
                 kids,
                 links,
                 edge_props: HashMap::new(),
+                prov: HashMap::new(),
             }
         }
 
@@ -4416,6 +4449,7 @@ mod tests {
                 kids,
                 links: HashMap::new(),
                 edge_props: HashMap::new(),
+                prov: HashMap::new(),
             }
         }
 
@@ -4525,6 +4559,9 @@ mod tests {
                 .iter()
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.clone())
+        }
+        fn provenance(&self, node: NodeId) -> Provenance {
+            self.prov.get(&node.0).cloned().unwrap_or_default()
         }
     }
 
@@ -5129,6 +5166,7 @@ mod tests {
             kids,
             links: HashMap::new(),
             edge_props: HashMap::new(),
+            prov: HashMap::new(),
         };
         // the first p child of the root — even though no p is the
         // root's first *child*
@@ -5181,6 +5219,7 @@ mod tests {
             kids,
             links: HashMap::new(),
             edge_props: HashMap::new(),
+            prov: HashMap::new(),
         };
         // //p matches nodes 2, 3, 6, 7 in document order
         assert_eq!(run("//p[2..3]", &t), vec![3, 6]);
@@ -5383,6 +5422,90 @@ mod tests {
             vals("//w.rs:::id-path", &t),
             vec![Value::Str("/4/6/7".into())]
         );
+    }
+
+    #[test]
+    fn provenance_core_metadata() {
+        let mut t = MockTree::sample();
+        // x.rs carries a full triple; y.txt only a source; z.rs only
+        // a dpid; everything else answers honest nulls.
+        let (secs, nanos, off) = crate::temporal::parse_iso("2026-04-07T02:00:01Z").unwrap();
+        t.prov.insert(
+            2,
+            Provenance {
+                source: Some("api-gateway".into()),
+                instant: Some((secs, nanos, off)),
+                dpid: Some("request-42".into()),
+            },
+        );
+        t.prov.insert(
+            3,
+            Provenance {
+                source: Some("api-gateway".into()),
+                ..Default::default()
+            },
+        );
+        t.prov.insert(
+            5,
+            Provenance {
+                dpid: Some("row-7".into()),
+                ..Default::default()
+            },
+        );
+        // Components, typed.
+        assert_eq!(
+            vals("/a/x.rs:::source", &t),
+            vec![Value::Str("api-gateway".into())]
+        );
+        assert_eq!(
+            vals("/a/x.rs:::instant", &t),
+            vec![Value::Instant {
+                secs,
+                nanos,
+                offset_min: off
+            }]
+        );
+        assert_eq!(
+            vals("/a/x.rs:::dpid", &t),
+            vec![Value::Str("request-42".into())]
+        );
+        // The composite follows kaiv's optionality grammar.
+        assert_eq!(
+            vals("/a/x.rs:::provenance", &t),
+            vec![Value::Str(
+                "?api-gateway@2026-04-07T02:00:01Z#request-42".into()
+            )]
+        );
+        assert_eq!(
+            vals("/a/y.txt:::provenance", &t),
+            vec![Value::Str("?api-gateway".into())]
+        );
+        assert_eq!(
+            vals("/b/z.rs:::provenance", &t),
+            vec![Value::Str("?#row-7".into())]
+        );
+        // Honest nulls where nothing is recorded.
+        assert_eq!(vals("/b/deep:::source", &t), vec![Value::Null]);
+        assert_eq!(vals("/b/deep:::instant", &t), vec![Value::Null]);
+        assert_eq!(vals("/b/deep:::provenance", &t), vec![Value::Null]);
+        // Typed temporal comparison in a criterion.
+        assert_eq!(run("//*[:::instant > 2020-01-01]", &t), vec![2]);
+        assert_eq!(run("//*[:::instant > 2030-01-01]", &t), Vec::<u64>::new());
+        // Layering: inner wins per component, outer fills the rest.
+        let inner = Provenance {
+            source: Some("leaf".into()),
+            ..Default::default()
+        };
+        let outer = Provenance {
+            source: Some("mount".into()),
+            dpid: Some("d1".into()),
+            ..Default::default()
+        };
+        let merged = inner.or(outer);
+        assert_eq!(merged.source.as_deref(), Some("leaf"));
+        assert_eq!(merged.dpid.as_deref(), Some("d1"));
+        assert!(merged.instant.is_none());
+        assert_eq!(Provenance::default().canonical(), None);
     }
 
     #[test]

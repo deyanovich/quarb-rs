@@ -899,7 +899,11 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 );
             }
             let (adapter, render) = open_mount(&target, cli)?;
-            mounts.push(Mount { name, adapter });
+            mounts.push(Mount {
+                name,
+                target: Some(target.display().to_string()),
+                adapter,
+            });
             renders.push(render);
         }
         let sources = cli
@@ -2762,7 +2766,10 @@ fn run_inner<A: AstAdapter>(
     }
     if let Some(source) = kaiv_source {
         let rows = quarb::run_traced(query, adapter)?;
-        print!("{}", emit_kaiv(&rows, source, render)?);
+        print!(
+            "{}",
+            emit_kaiv(&rows, source, &render, |n| adapter.provenance(n))?
+        );
         return Ok(());
     }
     let save = SAVE_TARGET.with(|t| t.borrow().clone());
@@ -2924,24 +2931,78 @@ fn sqlite_value(v: &Value) -> rusqlite::types::Value {
 
 /// Render traced results as canonical kaiv. Each result becomes one
 /// leaf (or one leaf per record field) under `/@results/N`, typed by
-/// the value's kind; provenance carries the source document (`?q`)
-/// and the origin node's locator, identifier-sanitized, as `#dpid`.
-/// A value canonical kaiv cannot hold on a flat line falls back to
-/// its JSON text (quoted, single-line) as `str`.
+/// the value's kind. Provenance is per value, from the origin node's
+/// own `:::provenance`: its source is declared (`.?`) and referenced
+/// per distinct source string (`?q`, the run's joined inputs, is the
+/// fallback for nodes recording none), its instant emits as kaiv's
+/// compact `@ts`, and its dpid passes through — the origin node's
+/// locator, identifier-sanitized, stands in where the source
+/// assigned none. A value canonical kaiv cannot hold on a flat line
+/// falls back to its JSON text (quoted, single-line) as `str`.
 fn emit_kaiv(
     rows: &[(NodeId, Option<Value>)],
     source: &str,
     render: impl Fn(NodeId) -> String,
+    prov_of: impl Fn(NodeId) -> quarb::Provenance,
 ) -> anyhow::Result<String> {
     use kaiv::{KaivBuilder, Provenance};
     let err = |e: kaiv::PipelineError| anyhow::anyhow!("emitting kaiv: {e}");
     let mut b = KaivBuilder::new();
     b.declare_source("q", source).map_err(err)?;
+    // Declare each distinct row source once, in first-appearance
+    // order, under a sanitized id (`q` is reserved; collisions
+    // suffix). A source the builder refuses maps to the fallback.
+    let mut source_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut used_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::from(["q".to_string()]);
+    for (node, _) in rows {
+        let Some(src) = prov_of(*node).source else {
+            continue;
+        };
+        if source_ids.contains_key(&src) {
+            continue;
+        }
+        let mut id = ident_of(&src);
+        if !used_ids.insert(id.clone()) {
+            let mut k = 2;
+            loop {
+                let candidate = format!("{id}-{k}");
+                if used_ids.insert(candidate.clone()) {
+                    id = candidate;
+                    break;
+                }
+                k += 1;
+            }
+        }
+        let id = match b.declare_source(&id, &src) {
+            Ok(()) => id,
+            Err(_) => "q".to_string(),
+        };
+        source_ids.insert(src, id);
+    }
     for (i, (node, topic)) in rows.iter().enumerate() {
+        let rp = prov_of(*node);
         let prov = Provenance {
-            source: Some("q".to_string()),
-            timestamp: None,
-            dpid: Some(ident_of(&render(*node))),
+            source: Some(
+                rp.source
+                    .as_ref()
+                    .and_then(|s| source_ids.get(s).cloned())
+                    .unwrap_or_else(|| "q".to_string()),
+            ),
+            // kaiv's `@ts` is the 16-char compact form; an instant a
+            // compact stamp cannot hold (a year outside 0000–9999)
+            // is dropped rather than emitted invalid.
+            timestamp: rp
+                .instant
+                .map(|(secs, _, _)| quarb::temporal::format_instant_compact(secs))
+                .filter(|t| t.len() == 16),
+            dpid: Some(
+                rp.dpid
+                    .as_deref()
+                    .map(ident_of)
+                    .unwrap_or_else(|| ident_of(&render(*node))),
+            ),
         };
         // Sanitization can collide distinct field names ("a b" and
         // "a-b" both become "a-b"); suffix rather than abort.
@@ -3121,5 +3182,52 @@ mod tests {
         assert_eq!(split_scheme_query("github:torvalds/linux"), None);
         assert_eq!(split_scheme_query("git:/repo"), None);
         assert_eq!(split_scheme_query("/a/b::c"), None);
+    }
+
+    #[test]
+    fn emit_kaiv_provenance_per_row() {
+        use quarb::{NodeId, Provenance, Value};
+        let rows = vec![
+            (NodeId(1), Some(Value::Int(7))),
+            (NodeId(2), Some(Value::Int(9))),
+            (NodeId(3), Some(Value::Int(11))),
+        ];
+        let render = |n: NodeId| format!("/row/{}", n.0);
+        // Node 1: a full triple. Node 2: same source, no ts/dpid.
+        // Node 3: nothing — falls back to `q` + locator dpid.
+        let (secs, _, _) = quarb::temporal::parse_iso("2026-07-17T12:00:00Z").unwrap();
+        let prov_of = move |n: NodeId| match n.0 {
+            1 => Provenance {
+                source: Some("https://sensors.example.com/1".into()),
+                instant: Some((secs, 0, Some(0))),
+                dpid: Some("req-42".into()),
+            },
+            2 => Provenance {
+                source: Some("https://sensors.example.com/1".into()),
+                ..Default::default()
+            },
+            _ => Provenance::default(),
+        };
+        let out = super::emit_kaiv(&rows, "a.daiv, b.csv", render, prov_of).unwrap();
+        // One declaration per distinct source, after the fallback.
+        assert!(out.contains(".?q a.daiv, b.csv\n"));
+        assert_eq!(out.matches("sensors.example.com").count(), 1);
+        // The declared id carries the compact instant and the
+        // pass-through dpid on row 0 (authored block form); row 1
+        // shares the source but falls back to its locator dpid; row
+        // 2 rides `q`.
+        let id = "https-sensors-example-com-1";
+        assert!(out.contains(&format!("!int?{id}@20260717T120000Z#req-42\nvalue=7")));
+        assert!(out.contains(&format!("!int?{id}#row-2\nvalue=9")));
+        assert!(out.contains("!int?q#row-3\nvalue=11"));
+
+        // Provenance-less rows emit exactly the pre-upgrade shape.
+        let plain = super::emit_kaiv(&rows, "data.json", |n: NodeId| format!("/r/{}", n.0), |_| {
+            Provenance::default()
+        })
+        .unwrap();
+        assert!(plain.contains(".?q data.json\n"));
+        assert!(plain.contains("!int?q#r-1\nvalue=7"));
+        assert!(!plain.contains(".?q-"));
     }
 }

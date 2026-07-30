@@ -104,3 +104,24 @@ fn grafted_ids_fit_the_mount_inner_window() {
         quarb::QueryResult::Values(_) => panic!("expected nodes"),
     }
 }
+
+/// A grafted node's data provenance falls through to the outer leaf
+/// it was parsed from: the file's path and mtime, exactly as the
+/// file itself answers them.
+#[test]
+fn grafted_nodes_inherit_outer_leaf_provenance() {
+    let dir = fixture("prov");
+    let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
+    // Inside the graft and on the file: same source, same instant.
+    assert_eq!(
+        values(&a, "/store.json/books/*[/t:: = 'Dune']:::source"),
+        values(&a, "/store.json:::source")
+    );
+    assert_eq!(
+        values(&a, "/store.json/books/*[/t:: = 'Dune']:::instant"),
+        values(&a, "/store.json:::instant")
+    );
+    // The source is the real file path, not the jar-style locator.
+    assert!(values(&a, "/store.json/books:::source")[0].ends_with("store.json"));
+    assert!(!values(&a, "/store.json/books:::source")[0].contains('!'));
+}

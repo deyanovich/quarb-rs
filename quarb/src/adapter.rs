@@ -21,6 +21,62 @@ use crate::value::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u64);
 
+/// Per-node data provenance: the three optional components behind
+/// the `:::source` / `:::instant` / `:::dpid` core-metadata keys and
+/// their composite `:::provenance` (`?src@ts#dpid`, kaiv's
+/// spelling). A component is present only where the source genuinely
+/// records it; wrapper adapters layer them ([`or`](Self::or), inner
+/// wins per component).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Provenance {
+    /// Where the datum came from (a URI, a path, a repo).
+    pub source: Option<String>,
+    /// The datum's own instant — `(secs, nanos, offset_min)`, the
+    /// shape `Value::Instant` carries. Never the invocation clock.
+    pub instant: Option<(i64, u32, Option<i16>)>,
+    /// The source-assigned data-point identifier (kaiv `#dpid`).
+    pub dpid: Option<String>,
+}
+
+impl Provenance {
+    /// Component-wise layering: `self` (inner, more specific) wins;
+    /// missing components fill from `outer`.
+    pub fn or(self, outer: Provenance) -> Provenance {
+        Provenance {
+            source: self.source.or(outer.source),
+            instant: self.instant.or(outer.instant),
+            dpid: self.dpid.or(outer.dpid),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.source.is_none() && self.instant.is_none() && self.dpid.is_none()
+    }
+
+    /// The composite canonical text `?src@ts#dpid` — kaiv's
+    /// optionality grammar (`?src`, `?src@ts`, `?@ts#dpid`, …), the
+    /// instant in Quarb's dashed-extended display form. `None` when
+    /// fully empty.
+    pub fn canonical(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut out = String::from("?");
+        if let Some(src) = &self.source {
+            out.push_str(src);
+        }
+        if let Some((secs, nanos, offset)) = self.instant {
+            out.push('@');
+            out.push_str(&crate::temporal::format_instant(secs, nanos, offset));
+        }
+        if let Some(dpid) = &self.dpid {
+            out.push('#');
+            out.push_str(dpid);
+        }
+        Some(out)
+    }
+}
+
 /// The interface a data source implements to be queried by Quarb.
 ///
 /// An adapter maps its native structure onto the arbor model: a tree
@@ -82,7 +138,7 @@ pub trait AstAdapter {
         None
     }
 
-    /// Adapter-defined metadata — `;;;key` (a filesystem adapter's
+    /// Adapter-defined metadata — `::::key` (a filesystem adapter's
     /// `size`, `modified`, `permissions`, …). `None` if absent.
     fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> {
         None
@@ -151,6 +207,18 @@ pub trait AstAdapter {
     /// [`WithNow`] wrapper.
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         None
+    }
+
+    /// The data provenance of `node` — the `:::source` /
+    /// `:::instant` / `:::dpid` / `:::provenance` core-metadata
+    /// keys. Empty by default: an adapter answers only the
+    /// components its substrate genuinely records (never the
+    /// invocation clock); wrapper adapters fill missing components
+    /// from what they know — the mount its target, a graft its
+    /// outer leaf, a model its derivation — and forward the rest
+    /// inward, so resolution is nearest-ancestor per component.
+    fn provenance(&self, _node: NodeId) -> Provenance {
+        Provenance::default()
     }
 
     /// The scale of a unit expression — (factor, canonical SI-base
@@ -228,6 +296,9 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         self.inner.invocation_instant()
     }
+    fn provenance(&self, node: NodeId) -> Provenance {
+        self.inner.provenance(node)
+    }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.inner.unit_scale(expr)
     }
@@ -294,6 +365,9 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
     }
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         self.inner.invocation_instant()
+    }
+    fn provenance(&self, node: NodeId) -> Provenance {
+        self.inner.provenance(node)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.inner.unit_scale(expr)
@@ -363,6 +437,12 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
     }
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         Some((self.secs, self.nanos))
+    }
+    // Forwarding, not synthesizing: the pinned invocation instant
+    // never becomes a node's `:::instant` — absence is the true
+    // answer for a source that records no time.
+    fn provenance(&self, node: NodeId) -> Provenance {
+        self.inner.provenance(node)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.inner.unit_scale(expr)

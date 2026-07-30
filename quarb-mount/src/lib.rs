@@ -22,6 +22,11 @@ use quarb::{AstAdapter, NodeId, Value};
 /// adapter itself.
 pub struct Mount {
     pub name: String,
+    /// The target the mount was opened from (a path, a URL, a
+    /// connection string), retained as the provenance layer's
+    /// `:::source` fill. `None` when the host constructed the
+    /// adapter without one; the mount name then stands in.
+    pub target: Option<String>,
     pub adapter: Box<dyn AstAdapter>,
 }
 
@@ -221,6 +226,26 @@ impl AstAdapter for MountAdapter {
             .max()
             .unwrap_or(32)
     }
+
+    /// The mount is a provenance layer: the inner adapter answers
+    /// first with what its substrate records, and the mount fills a
+    /// missing `:::source` with its target (the real-world address;
+    /// the query-local mount name only as a fallback).
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        match self.decode(node) {
+            None => quarb::Provenance::default(),
+            Some((m, inner)) => {
+                let mount = &self.mounts[m];
+                mount.adapter.provenance(inner).or(quarb::Provenance {
+                    source: mount
+                        .target
+                        .clone()
+                        .or_else(|| Some(mount.name.clone())),
+                    ..Default::default()
+                })
+            }
+        }
+    }
 }
 
 /// A shared handle to a concrete adapter, so a host can both mount
@@ -283,6 +308,9 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         self.0.invocation_instant()
+    }
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        self.0.provenance(node)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.0.unit_scale(expr)

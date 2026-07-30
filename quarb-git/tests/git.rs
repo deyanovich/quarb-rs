@@ -142,3 +142,28 @@ fn tag_metadata() {
         ["start"]
     );
 }
+
+#[test]
+fn provenance_repo_and_commit_instant() {
+    let dir = fixture("prov");
+    let a = GitAdapter::open(&dir).unwrap();
+    // A commit's :::instant is its author date — the same instant
+    // ::date mints; ref aliases answer for their commit.
+    assert_eq!(values(&a, "/HEAD:::instant"), values(&a, "/HEAD::date"));
+    // A tree entry answers "this repo, as of that commit".
+    assert_eq!(
+        values(&a, "/tags/start/src/lib.rs:::instant"),
+        ["2020-01-01T00:00:00Z"]
+    );
+    // The source is the repository path, on every node; structural
+    // dirs have no commit ancestor, so no instant (null displays
+    // empty), and git assigns no dpid.
+    assert_eq!(values(&a, "/commits:::source"), [dir.display().to_string()]);
+    assert_eq!(values(&a, "/commits:::instant"), [""]);
+    assert_eq!(values(&a, "/HEAD:::dpid"), [""]);
+    // The composite: repo, plus the commit instant where one exists.
+    assert_eq!(
+        values(&a, "/tags/start:::provenance"),
+        [format!("?{}@2020-01-01T00:00:00Z", dir.display())]
+    );
+}

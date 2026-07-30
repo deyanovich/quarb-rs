@@ -327,6 +327,9 @@ impl Doc {
             }
             mounts.push(quarb_mount::Mount {
                 name,
+                // Assembled from text/bytes: no real-world address to
+                // record — the mount name stands in for :::source.
+                target: None,
                 adapter: doc.into_boxed()?,
             });
         }
@@ -494,7 +497,11 @@ impl Doc {
                 );
             }
             let adapter = Doc::open(&spec.path, opts)?.into_boxed()?;
-            mounts.push(quarb_mount::Mount { name, adapter });
+            mounts.push(quarb_mount::Mount {
+                name,
+                target: Some(spec.path.display().to_string()),
+                adapter,
+            });
         }
         Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
     }

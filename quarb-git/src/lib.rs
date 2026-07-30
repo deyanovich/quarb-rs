@@ -424,6 +424,19 @@ impl GitAdapter {
             _ => None,
         }
     }
+
+    /// The nearest commit-backed ancestor, the node itself included:
+    /// a tree entry answers through the commit it was reached under.
+    fn commit_ancestor(&self, node: NodeId) -> Option<String> {
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if let Some(h) = self.commit_of(n) {
+                return Some(h);
+            }
+            cur = self.nodes.borrow()[n.0 as usize].parent;
+        }
+        None
+    }
 }
 
 /// Split `rev-list --format=…%x1e` output into `(hash, body)`
@@ -628,6 +641,23 @@ impl AstAdapter for GitAdapter {
             ),
             _ => return None,
         })
+    }
+
+    /// Data provenance: the repository path as the source; the
+    /// nearest commit-backed ancestor's author date as the instant
+    /// (a tree entry answers "this repo, as of that commit" — the
+    /// same instant `::date` mints). The structural dirs and the
+    /// root have no commit ancestor and answer source only. No
+    /// dpid — the commit hash stays on `::hash` / `::::short`.
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        quarb::Provenance {
+            source: Some(self.repo.display().to_string()),
+            instant: self
+                .commit_ancestor(node)
+                .and_then(|h| self.commit_info(&h))
+                .map(|info| (info.date, 0, info.date_offset)),
+            dpid: None,
+        }
     }
 
     /// A blob's content (text, lossily decoded).

@@ -152,3 +152,15 @@ fn a_membership_criterion_belongs_to_a_node_constructor() {
     got.sort();
     assert_eq!(got, vec!["a1", "b2"]);
 }
+
+#[test]
+fn an_aliased_node_forwards_base_provenance() {
+    let a = ops(MODEL);
+    // An aliased node IS its base row under a role: it answers the
+    // base's provenance (none here — sqlite records none), never a
+    // model:/ derivation stamp.
+    assert_eq!(
+        values(&a, "/deploys/deploy[::rev = 'b2']:::source"),
+        vec![""]
+    );
+}

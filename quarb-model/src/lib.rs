@@ -641,6 +641,15 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
         }
         self.base.default_value(node)
     }
+    // Minimal on purpose: base nodes forward; prior-container nodes
+    // answer default (constructor queries never project
+    // `:::provenance` mid-derivation).
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        if node.0 & MODEL_TAG != 0 {
+            return quarb::Provenance::default();
+        }
+        self.base.provenance(node)
+    }
 }
 
 impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
@@ -773,6 +782,25 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             }
             Some(_) => None,
             None => self.base.metadata(node, key),
+        }
+    }
+
+    /// Data provenance. An aliased node *is* its base node under a
+    /// role, so it answers that node's provenance. An elevated node
+    /// is a new value the model made: it answers a derivation source
+    /// only (`model:/container`), never the components of any row it
+    /// was computed from — the same no-leak discipline `property`
+    /// applies to elevated values.
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        match self.decode(node) {
+            Some((c, _)) => match self.aliased(node) {
+                Some(base) => self.base.provenance(base),
+                None => quarb::Provenance {
+                    source: Some(format!("model:/{}", self.containers()[c].name)),
+                    ..Default::default()
+                },
+            },
+            None => self.base.provenance(node),
         }
     }
 
@@ -939,6 +967,9 @@ impl AstAdapter for Borrowed<'_> {
     }
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         self.0.invocation_instant()
+    }
+    fn provenance(&self, n: NodeId) -> quarb::Provenance {
+        self.0.provenance(n)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.0.unit_scale(expr)
