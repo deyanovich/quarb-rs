@@ -3,7 +3,9 @@
 [Quarb](https://quarb.org) — the arboreal query engine —
 compiled to WebAssembly, with TypeScript types. One path
 language over JSON, YAML, TOML, CSV/TSV, XML, HTML, and
-Markdown, running entirely client-side: no server, no native
+Markdown — including the text-level reading of HTML, Markdown,
+and plain text (sections, paragraphs, quotes, lists) — running
+entirely client-side: no server, no native
 dependency, the same engine that powers the
 [playground](https://demo.quarb.org) and the Quarb Scraper
 browser extension.

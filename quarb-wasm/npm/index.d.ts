@@ -9,7 +9,10 @@ export type Format =
   | 'tsv'
   | 'xml'
   | 'html'
-  | 'markdown';
+  | 'markdown'
+  | 'text-html'
+  | 'text-markdown'
+  | 'text';
 
 /**
  * Initialize the engine once; subsequent calls share the load.

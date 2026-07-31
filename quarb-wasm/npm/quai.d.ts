@@ -19,6 +19,9 @@ export interface Source {
     | 'xml'
     | 'html'
     | 'markdown'
+    | 'text-html'
+    | 'text-markdown'
+    | 'text'
     | 'kaiv'
     | 'daiv'
     | 'sqlite';
