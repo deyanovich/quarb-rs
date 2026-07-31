@@ -23,6 +23,9 @@ quarb-csv = { path = "../quarb-csv" }
 quarb-xml = { path = "../quarb-xml" }
 quarb-html = { path = "../quarb-html" }
 quarb-markdown = { path = "../quarb-markdown" }
+quarb-text = { path = "../quarb-text" }
+quarb-text-html = { path = "../quarb-text-html" }
+quarb-text-markdown = { path = "../quarb-text-markdown" }
 wasm-bindgen = "0.2"
 serde_json.workspace = true
 # scraper (via quarb-html) → ahash → getrandom: the JS backend

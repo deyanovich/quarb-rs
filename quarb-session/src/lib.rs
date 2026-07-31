@@ -99,6 +99,14 @@ pub trait Executor {
     fn run_fresh(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
         self.run(query)
     }
+
+    /// Run a query and render its results as exportable markup
+    /// (`md`, `html`, `txt`) — structural through the text-level
+    /// vocabulary for node results, projection lines otherwise.
+    /// Unsupported by default.
+    fn export(&self, _query: &str, _kind: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this session's executor does not support rendered export")
+    }
 }
 
 #[cfg(feature = "native")]

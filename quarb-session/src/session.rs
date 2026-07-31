@@ -91,6 +91,18 @@ impl Session {
         self.executor.run_fresh(&self.combined(line))
     }
 
+    /// Run a line and render its results as exportable markup
+    /// (`md`, `html`, `txt`) — the panel's rendered-export path.
+    /// History refs resolve inline, exactly as in [`eval`](Self::eval);
+    /// an empty line exports the whole document.
+    pub fn export(&self, line: &str, kind: &str) -> Result<String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return self.executor.export("", kind);
+        }
+        self.executor.export(&self.combined(line), kind)
+    }
+
     /// Register an accepted line as `&N` and capture its output as the
     /// frozen footprint for `&N#`. Returns whether the line's shape
     /// could be a macro body (so `&N` will resolve); either way the

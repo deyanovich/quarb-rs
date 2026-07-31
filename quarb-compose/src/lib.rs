@@ -40,6 +40,7 @@ enum Inner {
     Json(quarb_json::JsonAdapter),
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
+    Text(quarb_text::TextModel),
     Csv(quarb_csv::CsvAdapter),
     Code(quarb_code::CodeAdapter),
     /// A grafted archive, itself composed so its own parseable
@@ -53,6 +54,7 @@ impl Inner {
             Inner::Json(a) => a,
             Inner::Xml(a) => a,
             Inner::Html(a) => a,
+            Inner::Text(a) => a,
             Inner::Csv(a) => a,
             Inner::Code(a) => a,
             Inner::Archive(a) => &**a,
@@ -64,6 +66,7 @@ impl Inner {
             Inner::Json(a) => a.pointer(node),
             Inner::Xml(a) => a.locator(node),
             Inner::Html(a) => a.locator(node),
+            Inner::Text(a) => a.locator(node),
             Inner::Csv(a) => a.locator(node),
             Inner::Code(a) => a.locator(node),
             Inner::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
@@ -100,6 +103,9 @@ fn parse_inner(name: &str, content: &str) -> Option<Inner> {
         "yaml" | "yml" => return quarb_yaml::parse(content).ok().map(Inner::Json),
         "toml" => return quarb_toml::parse(content).ok().map(Inner::Json),
         "md" | "markdown" => return Some(Inner::Html(quarb_markdown::parse(content))),
+        // Plain text grafts at the text level (blank-line
+        // paragraphs); html/md keep their DOM-level graft.
+        "txt" => return Some(Inner::Text(quarb_text::TextModel::parse_plain(content))),
         "csv" => return quarb_csv::CsvAdapter::parse(content).ok().map(Inner::Csv),
         "tsv" => {
             return quarb_csv::CsvAdapter::parse_with_delimiter(content, b'\t')

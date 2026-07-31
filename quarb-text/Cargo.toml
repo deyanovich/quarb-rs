@@ -1,0 +1,14 @@
+[package]
+name = "quarb-text"
+description = "Shared text-level document semantics for the Quarb query engine"
+keywords = ["query", "text", "document", "quarb", "arbor"]
+categories = ["parser-implementations", "text-processing"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.16.0" }

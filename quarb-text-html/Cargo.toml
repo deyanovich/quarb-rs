@@ -1,0 +1,19 @@
+[package]
+name = "quarb-text-html"
+description = "HTML producer for the Quarb text level"
+keywords = ["query", "html", "text", "quarb", "arbor"]
+categories = ["parser-implementations", "web-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb-text = { path = "../quarb-text", version = "0.16.0" }
+scraper.workspace = true
+ego-tree = "0.6"
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.16.0" }

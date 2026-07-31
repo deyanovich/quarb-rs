@@ -25,7 +25,8 @@ pub fn version() -> String {
 }
 
 /// Execute `query` against `input` parsed as `format`
-/// (json | yaml | toml | csv | tsv | xml | html | markdown).
+/// (json | yaml | toml | csv | tsv | xml | html | markdown |
+/// text-html | text-markdown | text).
 /// `now_millis` is the invocation instant for `now()`, as from
 /// `Date.now()`. Returns a JSON envelope; never throws.
 #[wasm_bindgen]
@@ -57,6 +58,21 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
         }
         "markdown" => {
             let a = quarb_markdown::parse(input);
+            go(query, &a, |n| a.locator(n), secs, nanos)
+        }
+        // The text level: the shared section/paragraph vocabulary,
+        // produced per source format ("text" is plain text —
+        // blank-line paragraphs).
+        "text-html" => {
+            let a = quarb_text_html::parse(input);
+            go(query, &a, |n| a.locator(n), secs, nanos)
+        }
+        "text-markdown" => {
+            let a = quarb_text_markdown::parse(input);
+            go(query, &a, |n| a.locator(n), secs, nanos)
+        }
+        "text" => {
+            let a = quarb_text::TextModel::parse_plain(input);
             go(query, &a, |n| a.locator(n), secs, nanos)
         }
         other => Err(format!("unknown format: {other}")),

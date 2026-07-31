@@ -50,6 +50,7 @@ enum Doc {
     Csv(quarb_csv::CsvAdapter),
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
+    Text(quarb_text::TextModel),
     Sqlite(quarb_sqlite::SqliteAdapter),
     Kaiv(quarb_kaiv::KaivAdapter),
     Fs(quarb_fs::FsAdapter),
@@ -104,6 +105,12 @@ impl Doc {
                 .map_err(|e| format!("parsing XML: {e}")),
             "html" => Ok(Doc::Html(quarb_html::HtmlAdapter::parse(input))),
             "markdown" => Ok(Doc::Html(quarb_markdown::parse(input))),
+            // The text level: the shared section/paragraph
+            // vocabulary, produced per source format ("text" is
+            // plain text — blank-line paragraphs).
+            "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
+            "text-markdown" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
+            "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -125,6 +132,7 @@ impl Doc {
             Doc::Csv(a) => go!(a),
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
             Doc::Sqlite(a) => go!(a),
             Doc::Kaiv(a) => go!(a),
             Doc::Fs(a) => go!(a),
@@ -144,6 +152,7 @@ impl Doc {
             Doc::Csv(a) => a.locator(node),
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
+            Doc::Text(a) => a.locator(node),
             Doc::Sqlite(a) => a.locator(node),
             Doc::Kaiv(a) => a.locator(node),
             Doc::Fs(a) => a.path(node).display().to_string(),
@@ -314,6 +323,7 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
             Doc::Csv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Xml(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Html(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Text(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Sqlite(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Kaiv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Fs(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
@@ -392,6 +402,7 @@ fn format_of(path: &Path) -> Option<&'static str> {
         Some("xml") => Some("xml"),
         Some("html" | "htm") => Some("html"),
         Some("md" | "markdown") => Some("markdown"),
+        Some("txt") => Some("text"),
         _ => None,
     }
 }

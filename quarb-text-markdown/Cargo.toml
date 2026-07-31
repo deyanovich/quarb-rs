@@ -1,0 +1,18 @@
+[package]
+name = "quarb-text-markdown"
+description = "Markdown producer for the Quarb text level"
+keywords = ["query", "markdown", "text", "quarb", "arbor"]
+categories = ["parser-implementations", "text-processing"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb-text = { path = "../quarb-text", version = "0.16.0" }
+pulldown-cmark = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.16.0" }

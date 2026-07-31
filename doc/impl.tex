@@ -148,6 +148,30 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-html} & The HTML adapter (tags as names, block/inline
   as traits, attributes as properties, anchor fragments resolve).
   Depends on \texttt{quarb} and \texttt{scraper}. \\
+\texttt{quarb-text} & The shared text-level model — the relational
+  pattern for documents: producers lower their format into one
+  block-event vocabulary (the atrep shape: kind, taxis, lemma,
+  body, hypograph), and this crate alone implements the adapter.
+  Sections with explicit title (\texttt{::lemma}) + body are
+  derived from the flat heading stream by the outline rule;
+  paragraphs, blockquotes (attribution as \texttt{::hypograph}),
+  lists, and verbatim blocks (\texttt{::::lang}) complete the
+  vocabulary; tables denormalize into nested lists carrying the
+  \texttt{<table>} trait. Bare \texttt{::} is the flattened prose
+  of the subtree. Plain text (\texttt{.txt}, blank-line
+  paragraphs) mounts here by default; \texttt{text:} forces the
+  reading for html/md. Depends on \texttt{quarb}. \\
+\texttt{quarb-text-html} & The HTML producer for the text level:
+  soup dropped (nav, chrome, scripts, forms, media), wrappers
+  transparent, headings flat into the shared derivation, trailing
+  \texttt{cite}/\texttt{footer}/\texttt{figcaption} as quote
+  attribution. Depends on \texttt{quarb-text} and
+  \texttt{scraper}. \\
+\texttt{quarb-text-markdown} & The Markdown producer for the text
+  level, mapping pulldown-cmark events directly (no HTML
+  round-trip): heading levels, list ordinals, fence languages,
+  and pipe tables come from the source. Depends on
+  \texttt{quarb-text} and \texttt{pulldown-cmark}. \\
 \texttt{quarb-xml} & The XML adapter (qualified tags as names,
   attributes as properties, \texttt{id}/\texttt{xml:id} references
   resolve; strict well-formedness, no traits). Depends on

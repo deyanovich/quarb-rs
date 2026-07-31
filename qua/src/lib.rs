@@ -927,6 +927,32 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     }
     let path = cli.paths.first().cloned();
 
+    // A `text:` prefix forces the text-level reading of a document
+    // whose extension would otherwise pick the DOM-level adapter
+    // (html, md); the producer is chosen by the remaining
+    // extension, with `<` sniffing markup for the rest and plain
+    // paragraphs as the fallback.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("text:"))
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading {}", target.display()))?;
+        let text = match text.strip_prefix('\u{feff}') {
+            Some(rest) => rest.to_owned(),
+            None => text,
+        };
+        let adapter = text_level(&text, Some(target));
+        let src = target.display().to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
+
     // A directory is a filesystem query; everything else is a
     // document read from a file or stdin.
     if let Some(path) = &path
@@ -1813,6 +1839,12 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             let adapter = quarb_markdown::parse(&text);
             return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
+        // Plain text mounts at the text level: blank-line-separated
+        // paragraphs (`text:` forces the same reading for html/md).
+        if ext == "txt" {
+            let adapter = quarb_text::TextModel::parse_plain(&text);
+            return run(query, &adapter, |n| adapter.locator(n), kaiv);
+        }
         if matches!(ext, "jsonl" | "ndjson") {
             let adapter = JsonAdapter::parse_lines(&text).context("parsing JSONL")?;
             return run(query, &adapter, |n| adapter.pointer(n), kaiv);
@@ -2102,6 +2134,23 @@ fn is_html(path: Option<&Path>, text: &str) -> bool {
     by_ext || text.trim_start().starts_with('<')
 }
 
+/// The text-level reading of a document (`text:` targets and
+/// `.txt` files): the producer is chosen by extension, `<` sniffs
+/// markup for the rest, plain paragraphs are the fallback.
+fn text_level(text: &str, path: Option<&Path>) -> quarb_text::TextModel {
+    let ext = path
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("html" | "htm") => quarb_text_html::parse(text),
+        Some("md" | "markdown") => quarb_text_markdown::parse(text),
+        Some("txt") => quarb_text::TextModel::parse_plain(text),
+        _ if text.trim_start().starts_with('<') => quarb_text_html::parse(text),
+        _ => quarb_text::TextModel::parse_plain(text),
+    }
+}
+
 /// An input argument's explicit mount alias: `NAME=TARGET` mounts
 /// TARGET as `/NAME`. The prefix must look like a mount name (a
 /// letter or `_`, then letters, digits, `_`, `-`) and the argument
@@ -2200,6 +2249,23 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && let Some(cmd) = s.strip_prefix("serve:")
     {
         let a = Rc::new(ServeAdapter::spawn(cmd).context("spawning served adapter")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    // A `text:` prefix forces the text-level reading, matching the
+    // single-input flow.
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("text:")
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading {}", target.display()))?;
+        let text = match text.strip_prefix('\u{feff}') {
+            Some(rest) => rest.to_owned(),
+            None => text,
+        };
+        let a = Rc::new(text_level(&text, Some(target)));
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
@@ -2590,6 +2656,13 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         }
         if matches!(ext, "md" | "markdown") {
             let a = Rc::new(quarb_markdown::parse(&text));
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
+        // Plain text mounts at the text level, matching the
+        // single-input flow.
+        if ext == "txt" {
+            let a = Rc::new(quarb_text::TextModel::parse_plain(&text));
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
         }

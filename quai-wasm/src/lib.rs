@@ -193,6 +193,17 @@ impl QuaiSession {
         })
     }
 
+    /// Run a line and render its results as exportable markup:
+    /// `kind` is `md`, `html`, or `txt`. Text-level node results
+    /// render structurally (sections back to headings, lists to
+    /// lists); anything else degrades to prose lines. History refs
+    /// (`&N`) resolve as in a normal line.
+    pub fn render(&self, line: &str, kind: &str) -> Result<String, JsError> {
+        self.session
+            .export(line, kind)
+            .map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
     /// The `&N` a fresh line will claim.
     #[wasm_bindgen(getter)]
     pub fn line(&self) -> usize {

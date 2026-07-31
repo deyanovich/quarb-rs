@@ -38,6 +38,17 @@ through its dialektos),
 [`quarb-xlsx`](quarb-xlsx/) (xlsx/docx),
 [`quarb-archive`](quarb-archive/) (zip/tar).
 
+**The text level** — [`quarb-text`](quarb-text/) (the shared
+model: sections with explicit title + body derived from flat
+headings, paragraphs, quotes, lists, verbatim blocks, tables
+denormalized to lists — one adapter, per-format producers, the
+relational pattern for documents),
+[`quarb-text-html`](quarb-text-html/) and
+[`quarb-text-markdown`](quarb-text-markdown/) (producers: the
+same substrates as quarb-html/quarb-markdown, read at the text
+level — `qua text:page.html` forces it; `.txt` mounts here by
+default).
+
 **Relational adapters** —
 [`quarb-relational`](quarb-relational/) (the shared model),
 [`quarb-sqlite`](quarb-sqlite/), [`quarb-duckdb`](quarb-duckdb/),

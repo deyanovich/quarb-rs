@@ -40,6 +40,7 @@ pub enum Doc {
     Csv(quarb_csv::CsvAdapter),
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
+    Text(quarb_text::TextModel),
     Sqlite(quarb_sqlite::SqliteAdapter),
     #[cfg(feature = "native")]
     Fs(quarb_fs::FsAdapter),
@@ -172,6 +173,12 @@ impl Doc {
                 .context("parsing XML"),
             "html" => Ok(Doc::Html(quarb_html::HtmlAdapter::parse(input))),
             "markdown" | "md" => Ok(Doc::Html(quarb_markdown::parse(input))),
+            // The text level: the shared section/paragraph
+            // vocabulary, produced per source format ("text" is
+            // plain text — blank-line paragraphs).
+            "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
+            "text-markdown" | "text-md" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
+            "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
             other => bail!("unknown format: {other}"),
         }
     }
@@ -190,6 +197,7 @@ impl Doc {
             Doc::Csv(a) => a,
             Doc::Xml(a) => a,
             Doc::Html(a) => a,
+            Doc::Text(a) => a,
             Doc::Sqlite(a) => a,
             #[cfg(feature = "native")]
             Doc::Fs(a) => a,
@@ -205,6 +213,36 @@ impl Doc {
             Doc::Code(a) => a,
             Doc::Mount(a) => a,
             Doc::Boxed(a, _) => &*a.0,
+        }
+    }
+
+    /// Run `query` and render its results as exportable markup:
+    /// `md`/`markdown`, `html`, or `txt`/`text`. Node results render
+    /// structurally through the text vocabulary — sections back to
+    /// headings, lists to lists — and kinds outside it degrade to
+    /// prose paragraphs; value results render as lines.
+    pub fn export(
+        &self,
+        query: &str,
+        now: (i64, u32),
+        allow_shell: bool,
+        kind: &str,
+    ) -> Result<String> {
+        let render = quarb_text::Render::from_name(kind)
+            .ok_or_else(|| anyhow::anyhow!("unknown export format: {kind} (md, html, txt)"))?;
+        // An empty query exports the whole document.
+        if query.trim().is_empty() {
+            let base = self.base_dyn();
+            return Ok(quarb_text::render_nodes(base, &[base.root()], render));
+        }
+        match self
+            .run(query, now, allow_shell)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        {
+            QueryResult::Nodes(nodes) => {
+                Ok(quarb_text::render_nodes(self.base_dyn(), &nodes, render))
+            }
+            QueryResult::Values(values) => Ok(quarb_text::render::render_values(&values, render)),
         }
     }
 
@@ -263,6 +301,7 @@ impl Doc {
             Doc::Csv(a) => go!(a),
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
             Doc::Sqlite(a) => go!(a),
             #[cfg(feature = "native")]
             Doc::Fs(a) => go!(a),
@@ -288,6 +327,7 @@ impl Doc {
             Doc::Csv(a) => a.locator(node),
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
+            Doc::Text(a) => a.locator(node),
             Doc::Sqlite(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Fs(a) => a.path(node).display().to_string(),
@@ -358,6 +398,7 @@ impl Doc {
             Doc::Csv(a) => Box::new(Shared(Rc::new(a))),
             Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
             Doc::Html(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Text(a) => Box::new(Shared(Rc::new(a))),
             Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
             Doc::Fs(a) => Box::new(Shared(Rc::new(a))),
@@ -412,6 +453,33 @@ impl Doc {
                 quarb_git::GitAdapter::open(Path::new(repo)).context("opening git repository")?;
             return Ok(Doc::Git(a));
         }
+        // A `text:` prefix forces the text-level reading, matching
+        // qua's dispatch: producer by extension, `<` sniffing
+        // markup, plain paragraphs as the fallback.
+        if let Some(rest) = s.strip_prefix("text:")
+            && !rest.is_empty()
+        {
+            let target = Path::new(rest);
+            let text = std::fs::read_to_string(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let text = text
+                .strip_prefix('\u{feff}')
+                .map(str::to_owned)
+                .unwrap_or(text);
+            let format = match target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("html" | "htm") => "text-html",
+                Some("md" | "markdown") => "text-markdown",
+                Some("txt") => "text",
+                _ if text.trim_start().starts_with('<') => "text-html",
+                _ => "text",
+            };
+            return Doc::parse(&text, format);
+        }
 
         let ext = path
             .extension()
@@ -451,6 +519,7 @@ impl Doc {
             Some("yaml" | "yml") => Doc::parse(&text, "yaml"),
             Some("toml") => Doc::parse(&text, "toml"),
             Some("md" | "markdown") => Doc::parse(&text, "markdown"),
+            Some("txt") => Doc::parse(&text, "text"),
             Some("jsonl" | "ndjson") => Doc::parse(&text, "jsonl"),
             _ => {
                 if is_xml(path, &text) {

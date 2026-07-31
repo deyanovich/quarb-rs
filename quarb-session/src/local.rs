@@ -114,4 +114,11 @@ impl Executor for LocalExecutor {
         }
         self.run(query)
     }
+
+    fn export(&self, query: &str, kind: &str) -> anyhow::Result<String> {
+        if self.model.is_some() {
+            anyhow::bail!("rendered export over a --model session is not supported yet");
+        }
+        self.doc.export(query, self.now, self.allow_shell, kind)
+    }
 }

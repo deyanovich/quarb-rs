@@ -33,8 +33,10 @@ fn grafts_parse_lazily_and_compose() {
     assert_eq!(values(&a, "/store.json/books/*[/p:: < 8]/t::"), ["Emma"]);
     // CSV grafts too.
     assert_eq!(values(&a, "/names.csv/*[::qty > 1]::name"), ["Ada"]);
-    // A plain text file stays a leaf.
-    assert_eq!(values(&a, "/plain.txt/* @| count"), ["0"]);
+    // A plain text file grafts at the text level: blank-line
+    // paragraphs under the leaf.
+    assert_eq!(values(&a, "/plain.txt/* @| count"), ["1"]);
+    assert_eq!(values(&a, "/plain.txt/paragraph::"), ["not a tree"]);
     assert_eq!(values(&a, "/plain.txt::"), ["not a tree"]);
     // Inner parents climb back out to the outer tree.
     assert_eq!(

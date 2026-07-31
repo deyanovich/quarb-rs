@@ -1,6 +1,6 @@
 [package]
 name = "quarb"
-description = "Query engine for arbors (tree-spanned graphs)"
+description = "Query engine for arbors (arboreal graphs - tree-spanned or tree-dominated graphs)"
 keywords = ["query", "arbor", "graph", "xpath", "jq"]
 categories = ["parser-implementations", "data-structures"]
 version.workspace = true
