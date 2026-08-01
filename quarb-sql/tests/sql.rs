@@ -421,22 +421,22 @@ fn pushdown_gate() {
 fn partial_pushdown_gate() {
     use quarb_sql::partial_pushdown;
     // In: a strict leading predicate with an unpushable pipeline.
-    let p = partial_pushdown("/events/*[::kind = \"rare\"] | ::amount @| group(\"b\", ::amount idiv 100) | count | .n | %.").unwrap();
+    let p = partial_pushdown("/events/*[::kind = \"rare\"] | ::amount @| group(\"b\", ::amount idiv 100) | count | .n | %.", None).unwrap();
     assert_eq!(p.table, "events");
     assert_eq!(p.where_sql, "kind = 'rare'");
     // Only the LEADING expression run pushes; positional first = out.
     assert!(
-        partial_pushdown("/t/*[2][::a = 1] | ::a @| group(\"g\", ::a) | count | .n | %.").is_none()
+        partial_pushdown("/t/*[2][::a = 1] | ::a @| group(\"g\", ::a) | count | .n | %.", None).is_none()
     );
     // Reaching the table twice (a ^-anchored subcontext) = out.
-    assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n").is_none());
+    assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n", None).is_none());
     // Crosslink/resolution axes = out.
-    assert!(partial_pushdown("/t/*[::a = 1]::b~>::c").is_none());
+    assert!(partial_pushdown("/t/*[::a = 1]::b~>::c", None).is_none());
     // Metadata = out (a filtered ;;;n-rows would lie).
-    assert!(partial_pushdown("/t/*[::a = 1] | ;;;table").is_none());
+    assert!(partial_pushdown("/t/*[::a = 1] | ;;;table", None).is_none());
     // Non-strict predicates (LIKE folding) = out.
     assert!(
-        partial_pushdown("/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.")
+        partial_pushdown("/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.", None)
             .is_none()
     );
 }

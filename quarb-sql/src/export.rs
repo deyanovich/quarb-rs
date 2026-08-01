@@ -191,6 +191,65 @@ fn json_extract(dialect: Dialect, qual: Option<&str>, col: &str, path: &[String]
     }
 }
 
+/// Wrap a JSON-path condition in the dialect's validity guard,
+/// where a cheap one exists. SQLite and MySQL error the whole
+/// statement on one malformed-JSON row — which turned every
+/// pushdown over a dirty table into a silent fallback scan — and
+/// the graft excludes such rows anyway (no parse, no subtree), so
+/// the guard is observationally identical. SQL Server gets ISJSON;
+/// Oracle's JSON_VALUE is lax already; PostgreSQL has no guard
+/// short of the ::jsonb cast itself (an invalid row errors and the
+/// caller falls back to the scan).
+fn json_valid_guard(dialect: Dialect, qual: Option<&str>, col: &str, cond: String) -> String {
+    let qcol = match qual {
+        Some(q) => format!("{q}.{col}"),
+        None => col.to_string(),
+    };
+    match dialect {
+        Dialect::Sqlite => format!("(json_valid({qcol}) AND {cond})"),
+        Dialect::MySql => format!("(JSON_VALID({qcol}) AND {cond})"),
+        Dialect::Mssql => format!("(ISJSON({qcol}) = 1 AND {cond})"),
+        Dialect::Postgres | Dialect::Oracle => format!("({cond})"),
+    }
+}
+
+/// The dialect's JSON type probe at a fixed path — non-NULL iff
+/// the path exists. A JSON `null` value reports its type ('null'),
+/// so existence still sees it, matching the graft, where a
+/// null-valued key is a node. Only the dialects with a native
+/// probe participate.
+fn json_type_probe(
+    dialect: Dialect,
+    qual: Option<&str>,
+    col: &str,
+    path: &[String],
+) -> Option<String> {
+    let qcol = match qual {
+        Some(q) => format!("{q}.{col}"),
+        None => col.to_string(),
+    };
+    match dialect {
+        Dialect::Sqlite => Some(format!("json_type({qcol}, '$.{}')", path.join("."))),
+        Dialect::Postgres => Some(format!(
+            "jsonb_typeof({qcol}::jsonb #> '{{{}}}')",
+            path.join(",")
+        )),
+        Dialect::MySql | Dialect::Mssql | Dialect::Oracle => None,
+    }
+}
+
+/// Flip a comparison for a swapped operand order (`lit OP path` →
+/// `path OP' lit`).
+fn flip_op(op: &str) -> String {
+    match op {
+        "<" => ">".into(),
+        "<=" => ">=".into(),
+        ">" => "<".into(),
+        ">=" => "<=".into(),
+        other => other.into(),
+    }
+}
+
 /// SQL keywords that must not appear as a bare identifier or `AS`
 /// alias — quoting them portably differs by dialect, so strict
 /// mode refuses and export mode quotes with double quotes plus a
@@ -329,12 +388,20 @@ pub struct Partial {
 /// (backlinks and reverse resolution into the table would too);
 /// and no `:::` / `;;;` metadata anywhere (a filtered `;;;n-rows`
 /// would lie).
-pub fn partial_pushdown(quarb: &str) -> Option<Partial> {
-    partial_pushdown_explained(quarb).ok()
+pub fn partial_pushdown(quarb: &str, dialect: Option<Dialect>) -> Option<Partial> {
+    partial_pushdown_explained(quarb, dialect).ok()
 }
 
-/// [`partial_pushdown`], keeping the refusal reason.
-pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
+/// [`partial_pushdown`], keeping the refusal reason. `dialect`
+/// enables the JSON-column prefilters — the strict fixed-path
+/// string equality, plus the relaxed superset forms (numeric
+/// comparisons, existence) that are safe here and only here,
+/// because the caller re-runs the original query over the
+/// fetched subset.
+pub fn partial_pushdown_explained(
+    quarb: &str,
+    dialect: Option<Dialect>,
+) -> Result<Partial, SqlError> {
     refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
@@ -343,7 +410,7 @@ pub fn partial_pushdown_explained(quarb: &str) -> Result<Partial, SqlError> {
         arbor,
         notes: Vec::new(),
         strict: true,
-        dialect: None,
+        dialect,
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
@@ -430,13 +497,13 @@ impl Exporter {
             .ok_or_else(|| SqlError::Unsupported("empty query".into()))?;
         if self.kid(q, "query").is_some() {
             return Err(SqlError::Unsupported(
-                "partial pushdown: correlations address other tables".into(),
+                "correlations address other tables".into(),
             ));
         }
         let branches = self.kids(q, "branch");
         if branches.len() != 1 {
             return Err(SqlError::Unsupported(
-                "partial pushdown: a branch union".into(),
+                "a branch union".into(),
             ));
         }
         let (table, preds) = self.table_branch(branches[0])?;
@@ -450,7 +517,7 @@ impl Exporter {
                     let axis = self.prop_s(*n, "axis");
                     if matches!(axis.as_str(), "->" | "<-" | "--" | "-->" | "<--") {
                         return Err(SqlError::Unsupported(
-                            "partial pushdown: crosslink/resolution axes could reach \
+                            "crosslink/resolution axes could reach \
                              the filtered table"
                                 .into(),
                         ));
@@ -461,7 +528,7 @@ impl Exporter {
                 }
                 "projection" if self.prop_s(*n, "kind") != "property" => {
                     return Err(SqlError::Unsupported(
-                        "partial pushdown: metadata would observe the filtering \
+                        "metadata would observe the filtering \
                          (;;;n-rows, :::index)"
                             .into(),
                     ));
@@ -471,28 +538,250 @@ impl Exporter {
         }
         if table_mentions != 1 {
             return Err(SqlError::Unsupported(
-                "partial pushdown: the table is reached more than once".into(),
+                "the table is reached more than once".into(),
             ));
         }
 
-        // The leading run of expression predicates, strictly
-        // translated.
+        // The leading run of expression predicates. Strict
+        // translation first; a predicate the strict translator
+        // refuses tries the relaxed prefilter ladder — superset
+        // semantics: the fetched set may hold extra rows, because
+        // the caller re-runs the ORIGINAL query, which re-applies
+        // every predicate; it must never lose a matching row. An
+        // untranslatable predicate is skipped, not fatal — a
+        // shorter conjunction is still a superset filter. A
+        // positional predicate (index/range) ends the run:
+        // predicates after it filter a positionally-selected
+        // subsequence.
         let mut conds = Vec::new();
         for p in preds {
             if self.prop_s(p, "kind") != "expr" {
                 break;
             }
-            conds.push(self.predicate_cond(p, None)?);
+            match self.predicate_cond(p, None) {
+                Ok(c) => conds.push(c),
+                Err(_) => {
+                    if let Some(c) = self.prefilter_cond(p) {
+                        conds.push(c);
+                    }
+                }
+            }
         }
         if conds.is_empty() {
             return Err(SqlError::Unsupported(
-                "partial pushdown: no leading expression predicates to push".into(),
+                "no leading expression predicates to push".into(),
             ));
         }
         Ok(Partial {
             table,
             where_sql: conds.join(" AND "),
         })
+    }
+
+    /// The relaxed prefilter for one refused expression predicate:
+    /// the AND of whatever conjuncts translate, each a superset of
+    /// the rows its Quarb counterpart keeps. None when nothing
+    /// does — the predicate stays entirely on the engine.
+    fn prefilter_cond(&mut self, p: NodeId) -> Option<String> {
+        let parts: Vec<String> = self
+            .arbor
+            .children(p)
+            .into_iter()
+            .filter_map(|c| {
+                self.pred_expr(c, None)
+                    .ok()
+                    .or_else(|| self.prefilter_expr(c))
+            })
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" AND "))
+        }
+    }
+
+    /// One conjunct's superset prefilter — fixed-path JSON shapes
+    /// only, per dialect. Every form here is proven to keep every
+    /// row the graft would match (extras are fine; the engine
+    /// re-checks). The proofs lean on three graft facts: absent
+    /// paths match no comparison; `value_eq`/`value_cmp` coerce
+    /// numeric-looking strings numerically; and Str-to-Str
+    /// ordering is bytewise.
+    fn prefilter_expr(&mut self, e: NodeId) -> Option<String> {
+        let dialect = self.dialect?;
+        match self.kind(e).as_str() {
+            // A bare truthy path: existence (with `::`, value
+            // truthiness — existence is its superset). The type
+            // probe sees JSON null too, as the graft does.
+            "path" => {
+                let (col, path) = self.json_path_loose(e)?;
+                let probe = json_type_probe(dialect, None, &col, &path)?;
+                Some(json_valid_guard(
+                    dialect,
+                    None,
+                    &col,
+                    format!("{probe} IS NOT NULL"),
+                ))
+            }
+            "compare" => {
+                let op = self.prop_s(e, "op");
+                let kids = self.arbor.children(e);
+                if kids.len() != 2 {
+                    return None;
+                }
+                for (pi, li) in [(0usize, 1usize), (1, 0)] {
+                    let Some((col, path)) = self.json_path(kids[pi]) else {
+                        continue;
+                    };
+                    if self.kind(kids[li]) != "literal" {
+                        continue;
+                    }
+                    let ty = self.prop_s(kids[li], "type");
+                    if ty == "null" {
+                        return None;
+                    }
+                    let raw = self
+                        .prop(kids[li], "value")
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    let op = if pi == 0 { op.clone() } else { flip_op(&op) };
+                    return self.json_prefilter(dialect, &col, &path, &op, &ty, &raw);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the dialect's superset prefilter for
+    /// `json_path OP literal`.
+    fn json_prefilter(
+        &self,
+        d: Dialect,
+        col: &str,
+        path: &[String],
+        op: &str,
+        lit_ty: &str,
+        raw: &str,
+    ) -> Option<String> {
+        if !matches!(op, "=" | "!=" | "<" | "<=" | ">" | ">=") {
+            return None;
+        }
+        // `!=` matches every present path whose value isn't the
+        // literal — including JSON null and cross-typed values —
+        // so its floor is existence.
+        if op == "!=" {
+            let probe = json_type_probe(d, None, col, path)?;
+            return Some(json_valid_guard(
+                d,
+                None,
+                col,
+                format!("{probe} IS NOT NULL"),
+            ));
+        }
+        let numeric_lit = raw.trim().parse::<f64>().is_ok_and(|f| f.is_finite())
+            && (lit_ty != "text" || !raw.trim().is_empty());
+        if numeric_lit {
+            let num: f64 = raw.trim().parse().ok()?;
+            // Past 2^53 the engines' exact integers and the
+            // graft's f64 part ways at the boundary.
+            if num.abs() >= 9_007_199_254_740_992.0 {
+                return None;
+            }
+            let lit = raw.trim();
+            match d {
+                // Typed extract: JSON numbers compare numerically
+                // (both sides parse the same source text to f64);
+                // string values escape through the type probe —
+                // the graft may coerce them, the server must not
+                // drop them.
+                Dialect::Sqlite => {
+                    let ex = json_extract(d, None, col, path);
+                    let ty = json_type_probe(d, None, col, path)?;
+                    Some(json_valid_guard(
+                        d,
+                        None,
+                        col,
+                        format!("({ex} {op} {lit} OR {ty} = 'text')"),
+                    ))
+                }
+                // float8 is the graft's f64; jsonb numbers print
+                // exactly, so the cast parses the same decimal.
+                // Strings escape; everything else can't match.
+                Dialect::Postgres => {
+                    let text = json_extract(d, None, col, path);
+                    let ty = json_type_probe(d, None, col, path)?;
+                    Some(format!(
+                        "(CASE WHEN {ty} = 'number' THEN ({text})::float8 {op} {lit} \
+                         WHEN {ty} = 'string' THEN true ELSE false END)"
+                    ))
+                }
+                Dialect::MySql | Dialect::Mssql | Dialect::Oracle => None,
+            }
+        } else if lit_ty == "text" {
+            if raw.contains('\'') || raw.contains('\\') {
+                return None;
+            }
+            match d {
+                // Typed extract again: string values order bytewise
+                // on both sides; numbers and booleans sit below
+                // text in SQLite's cross-type order, so `<` keeps
+                // them (extras, re-checked) and `>` drops them
+                // (the graft refuses to order Str against them).
+                Dialect::Sqlite => {
+                    let ex = json_extract(d, None, col, path);
+                    Some(json_valid_guard(
+                        d,
+                        None,
+                        col,
+                        format!("{ex} {op} '{raw}'"),
+                    ))
+                }
+                // Text ordering elsewhere runs into collation; the
+                // engine keeps those.
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// [`json_path`], loosened for existence: the projection may
+    /// be absent (a bare structural path) as well as the bare
+    /// `::`.
+    fn json_path_loose(&self, o: NodeId) -> Option<(String, Vec<String>)> {
+        if self.json_path(o).is_some() {
+            return self.json_path(o);
+        }
+        if self.kind(o) != "path" || self.kid(o, "projection").is_some() {
+            return None;
+        }
+        let steps = self.kids(o, "step");
+        if steps.len() < 2 {
+            return None;
+        }
+        let mut names = Vec::with_capacity(steps.len());
+        for s in &steps {
+            if self.prop_s(*s, "axis") != "/"
+                || self.prop_s(*s, "matcher-kind") != "name"
+                || self.kid(*s, "predicate").is_some()
+            {
+                return None;
+            }
+            let name = self.prop_s(*s, "matcher");
+            let plain = !name.is_empty()
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !plain {
+                return None;
+            }
+            names.push(name);
+        }
+        let col = names.remove(0);
+        Some((col, names))
     }
 
     fn walk_all(&self, n: NodeId) -> Vec<NodeId> {
@@ -663,9 +952,9 @@ impl Exporter {
                 // its negation is true). Not provably identical without
                 // the schema — the pushdown paths refuse it and scan.
                 if self.strict {
-                    return Err(SqlError::Unsupported(
-                        "pushdown: 'not(...)' drops the NULL rows Quarb keeps \
-                         (SQL NOT propagates UNKNOWN)"
+                    return Err(SqlError::Semantics(
+                        "SQL NOT propagates UNKNOWN, dropping the NULL rows \
+                         Quarb keeps"
                             .into(),
                     ));
                 }
@@ -715,15 +1004,18 @@ impl Exporter {
                 // JSON-column-path pushdown: `[/col/a/b:: = 'lit']`
                 // navigates into a JSON column and compares a fixed
                 // path to a string literal. Only this exact shape —
-                // fixed object path, string equality — is provably
-                // identical to the client-side graft (each engine's
-                // scalar extractor unquotes to text, and an absent
-                // path or non-string value excludes the row on both
-                // sides, matching Quarb's `value_eq`). Numeric casts,
-                // `!=`, wildcards, and deeper predicates are *not*
-                // handled here, so they fall through to the ordinary
-                // operand logic below, which refuses the navigation
-                // and scans. Enabled only when a dialect is set.
+                // fixed object path, string equality, and a literal
+                // that does NOT look numeric — is provably identical
+                // to the client-side graft (each engine's scalar
+                // extractor unquotes to text, and an absent path or
+                // non-string value excludes the row on both sides,
+                // matching Quarb's `value_eq` on non-numeric text).
+                // Numeric casts, `!=`, wildcards, and deeper
+                // predicates fall through to the ordinary operand
+                // logic below, which refuses the navigation; the
+                // partial-pushdown prefilter ladder picks those up
+                // with superset semantics. Enabled only when a
+                // dialect is set.
                 if op == "="
                     && let Some(dialect) = self.dialect
                 {
@@ -731,9 +1023,56 @@ impl Exporter {
                         if self.is_text_literal(kids[li])
                             && let Some((col, path)) = self.json_path(kids[pi])
                         {
+                            // Quarb's value_eq compares numeric-looking
+                            // strings numerically — '150' matches the
+                            // JSON number 150, and the string "150.0".
+                            // No engine's text extractor coerces that
+                            // way, so the pushed compare would drop
+                            // rows the graft keeps. Refuse; the
+                            // prefilter ladder handles it as a
+                            // superset.
+                            let raw = self
+                                .prop(kids[li], "value")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            if raw.trim().parse::<f64>().is_ok() {
+                                return Err(SqlError::Semantics(
+                                    "a numeric-looking text literal against a \
+                                     JSON path compares numerically in Quarb \
+                                     (value coercion); no SQL extractor \
+                                     matches that"
+                                        .into(),
+                                ));
+                            }
                             let lit = self.operand(kids[li], qual)?;
                             let extract = json_extract(dialect, qual, &col, &path);
-                            return Ok(format!("{extract} = {lit}"));
+                            return Ok(json_valid_guard(
+                                dialect,
+                                qual,
+                                &col,
+                                format!("{extract} = {lit}"),
+                            ));
+                        }
+                    }
+                }
+                // Any other JSON-path comparison: name the real
+                // reason, not the generic flat-rows refusal — only
+                // fixed-path string equality is provably identical
+                // (Quarb coerces numeric-looking values; no
+                // engine's extractor matches that). The partial
+                // prefilter ladder covers these shapes.
+                if self.dialect.is_some() {
+                    for side in [kids[0], kids[1]] {
+                        if self.json_path(side).is_some()
+                            || self.json_path_loose(side).is_some()
+                        {
+                            return Err(SqlError::Semantics(
+                                "a JSON-path comparison pushes whole only as \
+                                 fixed-path string equality (Quarb coerces \
+                                 numeric-looking values; no extractor matches \
+                                 that); this shape rides the partial prefilter"
+                                    .into(),
+                            ));
                         }
                     }
                 }
@@ -750,8 +1089,8 @@ impl Exporter {
                         // the display translation keeps `<>` and notes
                         // the divergence.
                         if self.strict {
-                            return Err(SqlError::Unsupported(
-                                "pushdown: '!=' drops the NULL rows Quarb keeps \
+                            return Err(SqlError::Semantics(
+                                "'!=' drops the NULL rows Quarb keeps \
                                  (SQL '<>' is UNKNOWN for NULL; use '!= null' \
                                  for IS NOT NULL)"
                                     .into(),
@@ -767,8 +1106,8 @@ impl Exporter {
                     "<" | "<=" | ">" | ">=" => format!("{l} {op} {r}"),
                     "*=" => {
                         if self.strict {
-                            return Err(SqlError::Unsupported(
-                                "pushdown: LIKE case folding differs per engine".into(),
+                            return Err(SqlError::Semantics(
+                                "LIKE case folding differs per engine".into(),
                             ));
                         }
                         // The pattern must be a text literal: a
@@ -801,9 +1140,9 @@ impl Exporter {
                         format!("{l} LIKE '%{pat}%' ESCAPE '\\'")
                     }
                     "=~" | "!~" => {
-                        return Err(SqlError::Unsupported(
-                            "regex matching (REGEXP dialects disagree; use *= or spell \
-                             the SQL by hand)"
+                        return Err(SqlError::Semantics(
+                            "regex matching means a different REGEXP engine per \
+                             backend; regexes run engine-side"
                                 .into(),
                         ));
                     }
@@ -815,8 +1154,8 @@ impl Exporter {
             // A bare truthy operand.
             _ => {
                 if self.strict {
-                    return Err(SqlError::Unsupported(
-                        "pushdown: truthiness diverges (0 and '' are falsy in Quarb)".into(),
+                    return Err(SqlError::Semantics(
+                        "truthiness diverges (0 and '' are falsy in Quarb)".into(),
                     ));
                 }
                 self.notes.push(
@@ -847,8 +1186,8 @@ impl Exporter {
                         // the caller scan. (The display translation
                         // keeps its best-effort `''`-doubling.)
                         if self.strict && (s.contains('\'') || s.contains('\\')) {
-                            return Err(SqlError::Unsupported(
-                                "pushdown: a text literal with a quote or backslash \
+                            return Err(SqlError::Semantics(
+                                "a text literal with a quote or backslash \
                                  has no escaping portable across SQL dialects"
                                     .into(),
                             ));
@@ -1191,6 +1530,18 @@ impl Exporter {
                             grouped = Some((key.clone(), agg.clone(), agg));
                         }
                         other => {
+                            // sort/unique/top and kin are spellable
+                            // in SQL but with the backend's own
+                            // collation and duplicate semantics —
+                            // name the divergence, not a missing
+                            // feature.
+                            if matches!(other, "sort" | "sort_by" | "unique" | "top" | "bottom") {
+                                return Err(SqlError::Semantics(format!(
+                                    "'{other}' means the backend's collation and \
+                                     duplicate semantics; one engine-side ordering \
+                                     keeps it identical everywhere"
+                                )));
+                            }
                             return Err(SqlError::Unsupported(format!(
                                 "the '{other}' pipeline function"
                             )));
@@ -1256,8 +1607,8 @@ impl Exporter {
                         }
                         "group" => {
                             if self.strict {
-                                return Err(SqlError::Unsupported(
-                                    "pushdown: GROUP BY result order is unordered in SQL".into(),
+                                return Err(SqlError::Semantics(
+                                    "GROUP BY result order is unordered in SQL".into(),
                                 ));
                             }
                             self.notes.push(
@@ -1271,8 +1622,8 @@ impl Exporter {
                         }
                         "sort_by" => {
                             if self.strict {
-                                return Err(SqlError::Unsupported(
-                                    "pushdown: ORDER BY collations differ per engine".into(),
+                                return Err(SqlError::Semantics(
+                                    "ORDER BY collations differ per engine".into(),
                                 ));
                             }
                             // A sort after a positional selection
@@ -1305,8 +1656,8 @@ impl Exporter {
                         },
                         "top" => {
                             if self.strict {
-                                return Err(SqlError::Unsupported(
-                                    "pushdown: ORDER BY collations differ per engine".into(),
+                                return Err(SqlError::Semantics(
+                                    "ORDER BY collations differ per engine".into(),
                                 ));
                             }
                             if sel.limit.is_some() {
@@ -1495,23 +1846,26 @@ mod null_and_literal_tests {
         let sql = |d| pushdown(q, Some(d)).unwrap().sql;
         assert_eq!(
             sql(Dialect::Postgres),
-            "SELECT id FROM orders WHERE (data::jsonb #>> '{meta,tier}') = 'gold'"
+            "SELECT id FROM orders WHERE ((data::jsonb #>> '{meta,tier}') = 'gold')"
         );
         assert_eq!(
             sql(Dialect::MySql),
-            "SELECT id FROM orders WHERE JSON_UNQUOTE(JSON_EXTRACT(data, '$.meta.tier')) = 'gold'"
+            "SELECT id FROM orders WHERE (JSON_VALID(data) AND \
+             JSON_UNQUOTE(JSON_EXTRACT(data, '$.meta.tier')) = 'gold')"
         );
         assert_eq!(
             sql(Dialect::Sqlite),
-            "SELECT id FROM orders WHERE json_extract(data, '$.meta.tier') = 'gold'"
+            "SELECT id FROM orders WHERE (json_valid(data) AND \
+             json_extract(data, '$.meta.tier') = 'gold')"
         );
         assert_eq!(
             sql(Dialect::Mssql),
-            "SELECT id FROM orders WHERE JSON_VALUE(data, '$.meta.tier') = 'gold'"
+            "SELECT id FROM orders WHERE (ISJSON(data) = 1 AND \
+             JSON_VALUE(data, '$.meta.tier') = 'gold')"
         );
         assert_eq!(
             sql(Dialect::Oracle),
-            "SELECT id FROM orders WHERE JSON_VALUE(data, '$.meta.tier') = 'gold'"
+            "SELECT id FROM orders WHERE (JSON_VALUE(data, '$.meta.tier') = 'gold')"
         );
         // With no dialect, the JSON navigation is not pushable — it
         // falls back to the client-side graft.
@@ -1527,6 +1881,103 @@ mod null_and_literal_tests {
         assert!(pushdown("/o/*[/data/n:: > 2]::id", d).is_none());
         assert!(pushdown("/o/*[/data/tier:: != 'gold']::id", d).is_none());
         assert!(pushdown("/o/*[/data/items/*/sku:: = 'A1']::id", d).is_none());
+    }
+
+    #[test]
+    fn json_pushdown_refuses_numeric_looking_literal() {
+        // value_eq coerces numeric-looking strings ('150' matches
+        // the JSON number 150 and the string "150.0"); no engine's
+        // extractor does, so the push would drop rows.
+        let q = "/orders/*[/data/total:: = '150']::id";
+        assert!(pushdown(q, Some(Dialect::Sqlite)).is_none());
+        assert!(pushdown(q, Some(Dialect::Postgres)).is_none());
+    }
+
+    #[test]
+    fn partial_json_prefilters_sqlite() {
+        // Exact string equality rides the strict gate.
+        let p = partial_pushdown(
+            "/orders/*[/payload/customer/geo/city:: = 'Lyon']::id",
+            Some(Dialect::Sqlite),
+        )
+        .unwrap();
+        assert_eq!(p.table, "orders");
+        assert_eq!(
+            p.where_sql,
+            "(json_valid(payload) AND \
+             json_extract(payload, '$.customer.geo.city') = 'Lyon')"
+        );
+        // Numeric comparison: typed compare, text values escape.
+        let p = partial_pushdown(
+            "/orders/*[/payload/total:: > 150]::id",
+            Some(Dialect::Sqlite),
+        )
+        .unwrap();
+        assert_eq!(
+            p.where_sql,
+            "(json_valid(payload) AND (json_extract(payload, '$.total') > 150 \
+             OR json_type(payload, '$.total') = 'text'))"
+        );
+        // Bare existence.
+        let p = partial_pushdown("/orders/*[/payload/gift]::id", Some(Dialect::Sqlite)).unwrap();
+        assert_eq!(
+            p.where_sql,
+            "(json_valid(payload) AND json_type(payload, '$.gift') IS NOT NULL)"
+        );
+        // != floors at existence.
+        let p = partial_pushdown(
+            "/orders/*[/payload/status:: != 'x']::id",
+            Some(Dialect::Sqlite),
+        )
+        .unwrap();
+        assert_eq!(
+            p.where_sql,
+            "(json_valid(payload) AND json_type(payload, '$.status') IS NOT NULL)"
+        );
+        // A flipped literal flips the operator.
+        let p = partial_pushdown(
+            "/orders/*[150 < /payload/total::]::id",
+            Some(Dialect::Sqlite),
+        )
+        .unwrap();
+        assert!(p.where_sql.contains("> 150"), "{}", p.where_sql);
+        // Without a dialect, JSON predicates stay on the engine.
+        assert!(partial_pushdown("/orders/*[/payload/gift]::id", None).is_none());
+    }
+
+    #[test]
+    fn partial_json_prefilters_postgres() {
+        let p = partial_pushdown(
+            "/orders/*[/payload/total:: > 150]::id",
+            Some(Dialect::Postgres),
+        )
+        .unwrap();
+        assert_eq!(
+            p.where_sql,
+            "(CASE WHEN jsonb_typeof(payload::jsonb #> '{total}') = 'number' \
+             THEN ((payload::jsonb #>> '{total}'))::float8 > 150 \
+             WHEN jsonb_typeof(payload::jsonb #> '{total}') = 'string' \
+             THEN true ELSE false END)"
+        );
+        let p =
+            partial_pushdown("/orders/*[/payload/gift]::id", Some(Dialect::Postgres)).unwrap();
+        assert_eq!(
+            p.where_sql,
+            "(jsonb_typeof(payload::jsonb #> '{gift}') IS NOT NULL)"
+        );
+    }
+
+    #[test]
+    fn partial_skips_untranslatable_keeps_prefix() {
+        // A refused predicate no prefilter covers is skipped — the
+        // shorter conjunction is still a superset (the engine
+        // re-applies the original) — rather than aborting the plan.
+        let p = partial_pushdown(
+            "/orders/*[::status = 'shipped'][/payload/line_items/*/sku:: = 'X']::id",
+            Some(Dialect::Sqlite),
+        )
+        .unwrap();
+        assert_eq!(p.where_sql, "status = 'shipped'");
     }
 
     #[test]
@@ -1559,8 +2010,8 @@ mod null_and_literal_tests {
         // paths refuse (and scan), full and partial alike.
         assert!(pushdown("/t/*[::x != 5] | ::x", None).is_none());
         assert!(pushdown("/t/*[!::x = 5] | ::x", None).is_none());
-        assert!(partial_pushdown(&format!("/t/*[::x != 5]{GROUPED}")).is_none());
-        assert!(partial_pushdown(&format!("/t/*[!::x = 5]{GROUPED}")).is_none());
+        assert!(partial_pushdown(&format!("/t/*[::x != 5]{GROUPED}"), None).is_none());
+        assert!(partial_pushdown(&format!("/t/*[!::x = 5]{GROUPED}"), None).is_none());
         // The display translation still emits `<>`, flagged with a note.
         let t = export("/t/*[::x != 5] | ::x").unwrap();
         assert_eq!(t.query, "SELECT x FROM t WHERE x <> 5");
@@ -1574,7 +2025,7 @@ mod null_and_literal_tests {
         // pushdown refuses; a clean literal still pushes.
         assert!(pushdown("/files/*[::path = \"C:\\temp\"] | ::path", None).is_none());
         assert!(pushdown("/t/*[::name = \"it's\"] | ::name", None).is_none());
-        assert!(partial_pushdown(&format!("/t/*[::name = \"it's\"]{GROUPED}")).is_none());
+        assert!(partial_pushdown(&format!("/t/*[::name = \"it's\"]{GROUPED}"), None).is_none());
         assert_eq!(
             pushdown("/t/*[::name = \"rare\"] | ::name", None).unwrap().sql,
             "SELECT name FROM t WHERE name = 'rare'"

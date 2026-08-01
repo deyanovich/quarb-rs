@@ -1,6 +1,7 @@
-# qua
+# quarb
 
-Python bindings for the [Quarb][quarb] query engine. Quarb reads
+Python bindings for the [Quarb][quarb] query engine — `import
+quarb`, plus `qua`, its command-line face. Quarb reads
 structured text as an *arbor* — a tree-spanned graph — and runs
 one query language over all of it, generalizing what XPath does
 for XML and jq does for JSON to JSON, YAML, TOML, CSV/TSV, XML,

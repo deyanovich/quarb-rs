@@ -659,9 +659,25 @@ hold this), so the rungs trade only latency and transfer:
     one sees unfiltered rows), a single \texttt{/table/*} branch
     with no correlations, the table reached exactly once, no
     crosslink/resolution axes, no \texttt{:::}/\texttt{;;;}
-    metadata (each would observe the filtering). Measured:
-    unpushable grouping over a 1\%-selective filter, 2.31\,s
-    vs.\ 0.081\,s.
+    metadata (each would observe the filtering). Since the
+    JSON-column round (2026-07-31), refused predicates in the
+    leading run degrade to \emph{superset prefilters} instead
+    of aborting the plan: fixed-path JSON comparisons emit
+    per-dialect forms proven never to drop a matching row
+    (SQLite typed extract with a \texttt{json\_type='text'}
+    escape hatch, PostgreSQL \texttt{jsonb\_typeof} CASE with
+    \texttt{::float8}; existence and \texttt{!=} floor at
+    \texttt{json\_type IS NOT NULL}) — extras are re-checked
+    by the re-run, and a server-rejected prefilter surfaces
+    through an eager prefetch and falls back to the scan
+    rather than answering empty. Full JSON string-equality
+    pushdown carries the dialect's validity guard
+    (\texttt{json\_valid} and kin) and refuses
+    numeric-looking literals (Quarb's \texttt{value\_eq}
+    coerces those numerically; no extractor matches that).
+    Measured: unpushable grouping over a 1\%-selective filter,
+    2.31\,s vs.\ 0.081\,s; JSON numeric compare over 200k
+    rows, 1.46\,s scanned vs.\ 0.25\,s prefiltered.
   \item \textbf{Lazy scan}: catalog-eager, rows-lazy per table
     (Section on \texttt{quarb-relational}); correct for
     everything, always the fallback.

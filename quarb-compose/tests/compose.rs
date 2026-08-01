@@ -127,3 +127,27 @@ fn grafted_nodes_inherit_outer_leaf_provenance() {
     assert!(values(&a, "/store.json/books:::source")[0].ends_with("store.json"));
     assert!(!values(&a, "/store.json/books:::source")[0].contains('!'));
 }
+
+/// `::key` dual exposure answers *at* the graft root, not only one
+/// level in: the outer leaf holding the JSON text is also the
+/// grafted document's root.
+#[test]
+fn dual_exposure_at_graft_root() {
+    let dir = std::env::temp_dir().join("quarb-compose-dualroot-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("meta.json"),
+        r#"{"device":"phone","geo":{"city":"London"}}"#,
+    )
+    .unwrap();
+    let fs = quarb_fs::FsAdapter::new(&dir).unwrap();
+    let a = quarb_compose::ComposeAdapter::new(fs);
+    // The file node IS the graft root: the fs adapter has no
+    // ::device for it, so the property falls through to the
+    // grafted document's root.
+    let got = match quarb::run("/'meta.json'::device", &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("expected values"),
+    };
+    assert_eq!(got, ["phone"]);
+}

@@ -802,6 +802,47 @@ fn apply_stage(
                 c
             })
             .collect(),
+        // `default(fallback)`: the topic when non-null, else the
+        // fallback — which may be an expression evaluated against
+        // the capsa's own node, making `(a) | default((b))` the
+        // coalesce idiom (chainable; ruling #21). Literal
+        // fallbacks keep working through stdlib for adapter-free
+        // callers.
+        Stage::Func(call) if call.name == "default" => caps
+            .into_iter()
+            .map(|mut c| {
+                let topic = c.topic.take().unwrap_or(Value::Null);
+                let v = if matches!(topic, Value::Null) {
+                    match call.args.first() {
+                        Some(Arg::Lit(v)) => v.clone(),
+                        Some(Arg::Expr(e)) => operand_scalar(
+                            adapter,
+                            c.node,
+                            e,
+                            trace,
+                            Scope {
+                                node: Some(c.node),
+                                register: &c.register,
+                                topic: None,
+                                ordinal: None,
+                                captures: &c.captures,
+                                marks: &c.marks,
+                                bindings: &c.bindings,
+                                edge: None,
+                                arrived: &c.arrived,
+                                peers,
+                                outer,
+                            },
+                        ),
+                        _ => Value::Null,
+                    }
+                } else {
+                    topic
+                };
+                c.topic = Some(v);
+                c
+            })
+            .collect(),
         // `record(...)` (alias `rec`) builds a record per capsa: expression fields
         // evaluate against the capsa's node, auto-named by their
         // projection or named by a preceding literal.
@@ -3684,6 +3725,16 @@ fn eval_operand(
         Operand::Piped { expr, stages } => {
             let mut state = eval_operand(adapter, node, expr, trace, bound, scope);
             for stage in stages.iter() {
+                // Absence is `default`'s whole job: an unmatched
+                // path yields no values at all, which would starve
+                // the stage — seed the null it exists to replace,
+                // so `(a) | default((b))` coalesces missing paths
+                // too (ruling #21).
+                if state.is_empty()
+                    && matches!(stage, Stage::Func(c) if c.name == "default")
+                {
+                    state.push(Value::Null);
+                }
                 // A lone list value explodes into a context for the
                 // aggregating forms.
                 if matches!(stage, Stage::Agg(_) | Stage::Select(_))

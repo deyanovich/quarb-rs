@@ -198,6 +198,26 @@ impl RelationalModel {
         idx
     }
 
+    /// Force `table`'s rows now, surfacing the fetch error the
+    /// lazy path swallows into an empty table — the door for
+    /// callers that must fall back rather than answer empty (a
+    /// partial-pushdown prefilter the server rejects must send
+    /// the caller to the scan). A no-op once materialized.
+    pub fn prefetch(&self, table: &str) -> Result<(), String> {
+        let t = self
+            .tables
+            .iter()
+            .position(|tb| tb.spec.name == table)
+            .ok_or_else(|| format!("no table named {table}"))?;
+        let tb = &self.tables[t];
+        if tb.data.get().is_some() {
+            return Ok(());
+        }
+        let rows = (self.fetcher)(t, &tb.spec)?;
+        let _ = tb.data.set(materialize(&tb.spec, rows));
+        Ok(())
+    }
+
     /// A table's rows, materializing them on first touch.
     fn data(&self, t: usize) -> &TableData {
         let table = &self.tables[t];

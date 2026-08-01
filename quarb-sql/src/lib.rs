@@ -58,6 +58,11 @@ pub enum SqlError {
     Syntax(String),
     #[error("unsupported SQL construct: {0}")]
     Unsupported(String),
+    /// SQL can spell the construct, but with provably different
+    /// semantics (NULL propagation, collation, coercion) — the
+    /// refusal names the divergence, not a missing feature.
+    #[error("semantic mismatch: {0}")]
+    Semantics(String),
 }
 
 /// A successful translation: the Quarb query, plus notes on known

@@ -1308,11 +1308,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => MssqlAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => MssqlAdapter::connect(s),
-        }
-        .context("connecting to SQL Server")?;
+        let adapter = match partial_plan(cli, query, Some(quarb_sql::Dialect::Mssql)) {
+            Some(pl) => {
+                let a = MssqlAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to SQL Server")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        MssqlAdapter::connect(s).context("connecting to SQL Server")?
+                    }
+                }
+            }
+            None => MssqlAdapter::connect(s).context("connecting to SQL Server")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1338,11 +1351,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => OracleAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => OracleAdapter::connect(s),
-        }
-        .context("connecting to Oracle")?;
+        let adapter = match partial_plan(cli, query, Some(quarb_sql::Dialect::Oracle)) {
+            Some(pl) => {
+                let a = OracleAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to Oracle")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        OracleAdapter::connect(s).context("connecting to Oracle")?
+                    }
+                }
+            }
+            None => OracleAdapter::connect(s).context("connecting to Oracle")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1450,11 +1476,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => BigqueryAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => BigqueryAdapter::connect(s),
-        }
-        .context("connecting to BigQuery")?;
+        let adapter = match partial_plan(cli, query, None) {
+            Some(pl) => {
+                let a = BigqueryAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to BigQuery")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        BigqueryAdapter::connect(s).context("connecting to BigQuery")?
+                    }
+                }
+            }
+            None => BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1484,11 +1523,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => AthenaAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => AthenaAdapter::connect(s),
-        }
-        .context("connecting to Athena")?;
+        let adapter = match partial_plan(cli, query, None) {
+            Some(pl) => {
+                let a = AthenaAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to Athena")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        AthenaAdapter::connect(s).context("connecting to Athena")?
+                    }
+                }
+            }
+            None => AthenaAdapter::connect(s).context("connecting to Athena")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1519,11 +1571,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => MysqlAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => MysqlAdapter::connect(s),
-        }
-        .context("connecting to MySQL")?;
+        let adapter = match partial_plan(cli, query, Some(quarb_sql::Dialect::MySql)) {
+            Some(pl) => {
+                let a = MysqlAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to MySQL")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        MysqlAdapter::connect(s).context("connecting to MySQL")?
+                    }
+                }
+            }
+            None => MysqlAdapter::connect(s).context("connecting to MySQL")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1556,11 +1621,24 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan(cli, query) {
-            Some(p) => PostgresAdapter::connect_filtered(s, &p.table, &p.where_sql),
-            None => PostgresAdapter::connect(s),
-        }
-        .context("connecting to PostgreSQL")?;
+        let adapter = match partial_plan(cli, query, Some(quarb_sql::Dialect::Postgres)) {
+            Some(pl) => {
+                let a = PostgresAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
+                    .context("connecting to PostgreSQL")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        PostgresAdapter::connect(s).context("connecting to PostgreSQL")?
+                    }
+                }
+            }
+            None => PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
+        };
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
@@ -1765,11 +1843,26 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
         }
         let refs = relational_refs(&cli.refs)?;
-        let adapter = match partial_plan(cli, query) {
-            Some(pl) => SqliteAdapter::open_filtered_with_refs(p, &pl.table, &pl.where_sql, &refs),
-            None => SqliteAdapter::open_with_refs(p, &refs),
-        }
-        .context("opening SQLite database")?;
+        let adapter = match partial_plan(cli, query, Some(quarb_sql::Dialect::Sqlite)) {
+            Some(pl) => {
+                let a = SqliteAdapter::open_filtered_with_refs(p, &pl.table, &pl.where_sql, &refs)
+                    .context("opening SQLite database")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        if cli.explain {
+                            eprintln!(
+                                "partial pushdown: prefilter rejected ({e}); scanning"
+                            );
+                        }
+                        SqliteAdapter::open_with_refs(p, &refs)
+                            .context("opening SQLite database")?
+                    }
+                }
+            }
+            None => SqliteAdapter::open_with_refs(p, &refs)
+                .context("opening SQLite database")?,
+        };
         let src = p.display().to_string();
         return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
@@ -1922,11 +2015,15 @@ fn pushdown_applies(cli: &Cli) -> bool {
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
 /// --explain commentary. Tried only after full pushdown refused.
-fn partial_plan(cli: &Cli, query: &str) -> Option<quarb_sql::Partial> {
+fn partial_plan(
+    cli: &Cli,
+    query: &str,
+    dialect: Option<quarb_sql::Dialect>,
+) -> Option<quarb_sql::Partial> {
     if !pushdown_applies(cli) {
         return None;
     }
-    match quarb_sql::partial_pushdown_explained(query) {
+    match quarb_sql::partial_pushdown_explained(query, dialect) {
         Ok(p) => {
             if cli.explain {
                 eprintln!(
@@ -1962,7 +2059,10 @@ fn pushdown_plan(
         Ok(plan) => {
             if cli.explain {
                 match &plan.order_table {
-                    Some(t) => eprintln!("pushdown: {} -- ordered by {t}'s key", plan.sql),
+                    Some(t) => eprintln!(
+                        "pushdown: {} -- driver appends ORDER BY the {t} key",
+                        plan.sql
+                    ),
                     None => eprintln!("pushdown: {}", plan.sql),
                 }
             }
@@ -2175,6 +2275,23 @@ fn split_alias(p: &Path) -> Option<(String, PathBuf)> {
 /// A boxed adapter and its locator renderer, ready to mount.
 pub type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
 
+/// Mount a relational adapter with the same JSON-column graft the
+/// single-input flow applies: `run_relational` wraps every
+/// relational adapter in `ComposeAdapter`, and a mount must too —
+/// otherwise a text column full of JSON navigates as a subtree in
+/// one flow and comes back flat in the other.
+fn mounted_relational<A: AstAdapter + 'static>(
+    inner: A,
+    outer_loc: impl Fn(&A, NodeId) -> String + 'static,
+) -> Mounted {
+    let a = Rc::new(ComposeAdapter::new(inner));
+    let r = a.clone();
+    (
+        Box::new(Shared(a)),
+        Box::new(move |n| r.locator(n, |o| outer_loc(r.outer(), o))),
+    )
+}
+
 /// The subset of the CLI that opening a target consults — the
 /// public face for session tools (quai) that mount through qua's
 /// dispatch without a full CLI.
@@ -2286,16 +2403,18 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if let Some(s) = p.to_str()
         && s.starts_with("mssql://")
     {
-        let a = Rc::new(MssqlAdapter::connect(s).context("connecting to SQL Server")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            MssqlAdapter::connect(s).context("connecting to SQL Server")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(s) = p.to_str()
         && s.starts_with("oracle://")
     {
-        let a = Rc::new(OracleAdapter::connect(s).context("connecting to Oracle")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            OracleAdapter::connect(s).context("connecting to Oracle")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(s) = p.to_str()
         && (s.starts_with("ldap://") || s.starts_with("ldaps://"))
@@ -2462,9 +2581,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if let Some(s) = p.to_str()
         && s.starts_with("athena:")
     {
-        let a = Rc::new(AthenaAdapter::connect(s).context("connecting to Athena")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            AthenaAdapter::connect(s).context("connecting to Athena")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(s) = p.to_str()
         && let Some(repo) = s.strip_prefix("git:")
@@ -2507,23 +2627,26 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if let Some(s) = p.to_str()
         && s.starts_with("bigquery://")
     {
-        let a = Rc::new(BigqueryAdapter::connect(s).context("connecting to BigQuery")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(s) = p.to_str()
         && s.starts_with("mysql://")
     {
-        let a = Rc::new(MysqlAdapter::connect(s).context("connecting to MySQL")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            MysqlAdapter::connect(s).context("connecting to MySQL")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(s) = p.to_str()
         && is_pg_config(s)
     {
-        let a = Rc::new(PostgresAdapter::connect(s).context("connecting to PostgreSQL")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
+            |a, n| a.locator(n),
+        ));
     }
     if let Some(t) = p.to_str()
         && let Some(mb) = t.strip_prefix("mail:")
@@ -2582,9 +2705,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
-        let a = Rc::new(DuckdbAdapter::open(p).context("opening DuckDB database")?);
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        return Ok(mounted_relational(
+            DuckdbAdapter::open(p).context("opening DuckDB database")?,
+            |a, n| a.locator(n),
+        ));
     }
     if is_archive(p) {
         let a = Rc::new(ComposeAdapter::new(
@@ -2609,11 +2733,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     }
     if is_sqlite(p) {
         let refs = relational_refs(&cli.refs)?;
-        let a = Rc::new(
+        return Ok(mounted_relational(
             SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
-        );
-        let r = a.clone();
-        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+            |a, n| a.locator(n),
+        ));
     }
     let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
     // Strip a leading UTF-8 BOM, as the single-input flow does: it

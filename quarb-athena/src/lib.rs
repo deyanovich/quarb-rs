@@ -368,6 +368,13 @@ impl AthenaAdapter {
     }
 
     /// A human-readable locator: `/table/key` for rows.
+    /// Surface a filtered fetch's error now (see
+    /// `RelationalModel::prefetch`): the partial-pushdown caller
+    /// falls back to the scan instead of answering empty.
+    pub fn prefetch(&self, table: &str) -> Result<(), String> {
+        self.model.prefetch(table)
+    }
+
     pub fn locator(&self, node: NodeId) -> String {
         self.model.locator(node)
     }

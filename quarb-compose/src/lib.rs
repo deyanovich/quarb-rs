@@ -344,7 +344,16 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 .inner
                 .adapter()
                 .property(inner, name),
-            None => self.outer.property(node, name),
+            // The graft root IS the outer leaf, so a property the
+            // outer can't answer falls through to the grafted
+            // document's root — `::key` dual exposure works *at*
+            // the graft, not only one level in.
+            None => self.outer.property(node, name).or_else(|| {
+                let g = self.graft_at(node)?;
+                let grafts = self.grafts.borrow();
+                let a = grafts[g].inner.adapter();
+                a.property(a.root(), name)
+            }),
         }
     }
 

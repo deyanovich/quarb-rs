@@ -278,7 +278,7 @@ fn filtered_open_matches_scan() {
     }
     let q = "/events/*[::kind = \"a\"] | ::amount @| group(\"half\", ::amount idiv 25) \
              | count | .n | %.";
-    let plan = quarb_sql::partial_pushdown(q).expect("partial plan");
+    let plan = quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect("partial plan");
     let run = |a: &SqliteAdapter| -> Vec<String> {
         match quarb::run(q, a).unwrap() {
             quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
@@ -536,4 +536,69 @@ fn headless_arrow_union_on_self_reference() {
     assert_eq!(vals("/employees/2--manager_id::name"), vec!["Ada", "Dee"]);
     // The whole org is one undirected component from any seat.
     assert_eq!(vals("/employees/4(--manager_id)+::name @| count"), vec!["3"]);
+}
+
+/// JSON-column prefilter identity on an adversarial table: mixed
+/// number/string/null/invalid rows, numeric-coercing literals —
+/// the filtered fetch (superset prefilter) re-running the ORIGINAL
+/// query equals the plain scan.
+#[test]
+fn json_prefilter_matches_scan_on_adversarial_rows() {
+    let dir = std::env::temp_dir().join("quarb-sqlite-jsonpre-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coerce.db");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE t (id INTEGER PRIMARY KEY, j TEXT);
+             INSERT INTO t VALUES
+               (1,'{"x":150}'),(2,'{"x":"150"}'),(3,'{"x":"abc"}'),
+               (4,'{"x":null}'),(5,'not json at all'),(6,'{"y":1}'),
+               (7,'{"x":"150.0"}'),(8,'{"x":150.0}');"#,
+        )
+        .unwrap();
+    }
+    let run = |a: &SqliteAdapter, q: &str| -> Vec<String> {
+        match quarb::run(q, a).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            _ => panic!("expected values"),
+        }
+    };
+    for q in [
+        "/t/*[/j/x:: = '150']::id",
+        "/t/*[/j/x:: > 100]::id",
+        "/t/*[/j/x:: != '150']::id",
+        "/t/*[/j/x:: > 'a']::id",
+        "/t/*[/j/x]::id",
+    ] {
+        let plan = quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite))
+            .unwrap_or_else(|| panic!("no partial plan for {q}"));
+        let filtered = SqliteAdapter::open_filtered(&path, &plan.table, &plan.where_sql).unwrap();
+        filtered.prefetch(&plan.table).unwrap();
+        let plain = SqliteAdapter::open(&path).unwrap();
+        assert_eq!(run(&filtered, q), run(&plain, q), "query: {q}");
+    }
+}
+
+/// A prefilter the server rejects surfaces through prefetch — the
+/// caller falls back to the scan instead of answering empty.
+#[test]
+fn prefetch_surfaces_bad_filter() {
+    let dir = std::env::temp_dir().join("quarb-sqlite-prefetch-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pf.db");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT);
+             INSERT INTO t VALUES (1,'a');",
+        )
+        .unwrap();
+    }
+    let bad = SqliteAdapter::open_filtered(&path, "t", "no_such_function(x)").unwrap();
+    assert!(bad.prefetch("t").is_err());
+    let good = SqliteAdapter::open_filtered(&path, "t", "x = 'a'").unwrap();
+    assert!(good.prefetch("t").is_ok());
 }
