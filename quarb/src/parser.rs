@@ -57,8 +57,38 @@ pub fn parse_with_data(
         predicate_depth: 0,
         nest_depth: 0,
         subquery_depth: 0,
+        captures: std::cell::RefCell::new(Vec::new()),
+        first_steps: std::cell::RefCell::new(Vec::new()),
     };
     p.parse()
+}
+
+/// Parse fully (so every diagnostic still fires), returning each
+/// DIRECTLY-invoked macro's generated text before its re-expansion
+/// — the `macroexpand-1` lens (`qua --expand-1`). One entry per
+/// direct invocation, in source order; invocations nested inside
+/// generated text expand in nested parsers and do not report here
+/// (run again on the printed text to take the next step).
+pub fn parse_first_steps(
+    tokens: &[Token],
+    defs: Defs,
+    data: Option<&dyn AstAdapter>,
+) -> Result<Vec<String>> {
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        defs,
+        def_params: Vec::new(),
+        data,
+        pattern_depth: 0,
+        predicate_depth: 0,
+        nest_depth: 0,
+        subquery_depth: 0,
+        captures: std::cell::RefCell::new(Vec::new()),
+        first_steps: std::cell::RefCell::new(Vec::new()),
+    };
+    p.parse()?;
+    Ok(p.first_steps.into_inner())
 }
 
 /// Parse a token stream containing only `def` statements into a
@@ -74,6 +104,8 @@ pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
         predicate_depth: 0,
         nest_depth: 0,
         subquery_depth: 0,
+        captures: std::cell::RefCell::new(Vec::new()),
+        first_steps: std::cell::RefCell::new(Vec::new()),
     };
     while p.at_def() || p.at_macro() {
         if p.at_def() {
@@ -156,6 +188,26 @@ fn stage_pipe(stage: &Stage) -> &'static str {
     }
 }
 
+/// One macro expansion's contribution to a register name, for the
+/// ruling-#22 sweep: what the generated text itself pushed and
+/// recalled. Recorded only for names no argument invited.
+struct CaptureRec {
+    mac: String,
+    reg: String,
+    pushes: usize,
+    recalls: usize,
+}
+
+/// The union of register names a macro's arguments invite (ruling
+/// #22) — computed before the arguments are consumed by expansion.
+fn invites_of(args: &[Operand]) -> std::collections::BTreeSet<String> {
+    let mut s = std::collections::BTreeSet::new();
+    for a in args {
+        s.extend(crate::reflect::operand_invites(a));
+    }
+    s
+}
+
 struct Parser<'a> {
     toks: &'a [Token],
     pos: usize,
@@ -191,6 +243,16 @@ struct Parser<'a> {
     /// probe spuriously succeed with a root anchor where the value
     /// reading (anchored at the current node) is the meaning.
     subquery_depth: usize,
+    /// Ruling #22 (invited capture): the uninvited register pushes
+    /// of each macro expansion this parser directly initiated, held
+    /// for the end-of-parse sweep. `RefCell` because expansion runs
+    /// behind `&self`.
+    captures: std::cell::RefCell<Vec<CaptureRec>>,
+    /// The generated text of each macro expansion this parser
+    /// directly initiated, in source order — `macroexpand-1`'s raw
+    /// material (`qua --expand-1`). Nested invocations expand in
+    /// nested parsers and do not report here.
+    first_steps: std::cell::RefCell<Vec<String>>,
 }
 
 /// Nesting depth past which parsing refuses (see
@@ -355,6 +417,7 @@ impl Parser<'_> {
             )));
         }
         validate_correlation_refs(&query)?;
+        self.sweep_captures(&query)?;
         Ok(query)
     }
 
@@ -1273,6 +1336,76 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// Ruling #22 (invited capture), the recording half: after a
+    /// macro expansion parses, note every register name its
+    /// generated text pushes that no argument invited, with the
+    /// expansion's own usage counts. The sweep at end of parse
+    /// compares them against whole-unit usage.
+    fn record_captures(
+        &self,
+        name: &str,
+        invited: &std::collections::BTreeSet<String>,
+        usage: crate::reflect::RegUsage,
+    ) {
+        if usage.pushes.is_empty() {
+            return;
+        }
+        let mut caps = self.captures.borrow_mut();
+        for (reg, n) in &usage.pushes {
+            if invited.contains(reg) {
+                continue;
+            }
+            caps.push(CaptureRec {
+                mac: name.to_string(),
+                reg: reg.clone(),
+                pushes: *n,
+                recalls: usage.recalls.get(reg).copied().unwrap_or(0),
+            });
+        }
+    }
+
+    /// Ruling #22, the sweep: an uninvited macro-pushed register
+    /// name must not be used anywhere else in this parse unit —
+    /// whole-unit push/recall counts may not exceed what the
+    /// recorded expansions themselves contributed. Deliberate
+    /// anaphora stays legal by riding an argument (the `aif`
+    /// shape); the accidental-capture pitfall (LISP's broken
+    /// `swap`, the reason gensym exists) refuses with the invite
+    /// spelled out.
+    fn sweep_captures(&self, q: &Query) -> Result<()> {
+        let caps = self.captures.borrow();
+        if caps.is_empty() {
+            return Ok(());
+        }
+        let global = crate::reflect::usage_of_query(q);
+        let mut own: std::collections::BTreeMap<&str, (usize, usize, &str)> =
+            std::collections::BTreeMap::new();
+        for c in caps.iter() {
+            let e = own.entry(c.reg.as_str()).or_insert((0, 0, c.mac.as_str()));
+            e.0 += c.pushes;
+            e.1 += c.recalls;
+        }
+        for (reg, (_p, r, mac)) in own {
+            // The hazard is a recall OUTSIDE the expansion binding
+            // to the macro's push. Surrounding pushes of the same
+            // name stay legal (ordinary shadowing, nothing reads
+            // through the macro's push) — recall counts alone
+            // decide, so a pivot-style push sweep feeding `%.`
+            // never trips the lint.
+            let gr = global.recalls.get(reg).copied().unwrap_or(0);
+            if gr > r {
+                return Err(QuarbError::Parse(format!(
+                    "macro '&{mac}' pushes the register '.{reg}', and the \
+                     surrounding query recalls '$.{reg}' — capture must \
+                     be invited through an argument: pass '$.{reg}' (or \
+                     the bare name) to '&{mac}', or rename the emitted \
+                     push"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Expand a macro invocation to query text: bind arguments
     /// (literals by value, forms by their unparsed text), build the
     /// expansion arbor, run the body against it, and join the text
@@ -1285,6 +1418,7 @@ impl Parser<'_> {
                 "macro '&{name}' expanded to nothing"
             )));
         }
+        self.first_steps.borrow_mut().push(text.clone());
         Ok(text)
     }
 
@@ -1315,6 +1449,7 @@ impl Parser<'_> {
                 "macro '&{name}' expanded to nothing"
             )));
         }
+        self.first_steps.borrow_mut().push(text.clone());
         Ok(text)
     }
 
@@ -1540,6 +1675,7 @@ impl Parser<'_> {
             }
             // A macro expands to text, reparsed here as a query.
             DefBody::Macro(_) => {
+                let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
                     QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
@@ -1551,7 +1687,10 @@ impl Parser<'_> {
                          ('{text}'); invoke it after a pipe"
                     )));
                 }
-                parse_with_data(&tokens, self.defs.before(&name), self.data).map_err(wrap)?
+                let q =
+                    parse_with_data(&tokens, self.defs.before(&name), self.data).map_err(wrap)?;
+                self.record_captures(&name, &invited, crate::reflect::usage_of_query(&q));
+                q
             }
         };
         Ok((name, q, quant))
@@ -1632,6 +1771,7 @@ impl Parser<'_> {
             // A macro expands to text; here it must be a stage
             // sequence whose first pipe matches the invocation.
             DefBody::Macro(_) => {
+                let invited = invites_of(&args);
                 let text = self.expand_macro_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
                     QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
@@ -1643,7 +1783,9 @@ impl Parser<'_> {
                     _ => {
                         return Err(QuarbError::Parse(format!(
                             "macro '&{name}' expanded to a query fragment \
-                             ('{text}'); invoke it at path position"
+                             ('{text}'); invoke it at path position — or \
+                             have the body emit a leading '| ' to splice \
+                             as pipeline stages"
                         )));
                     }
                 };
@@ -1663,6 +1805,8 @@ impl Parser<'_> {
                     predicate_depth: 0,
                     nest_depth: 0,
                     subquery_depth: 0,
+                    captures: std::cell::RefCell::new(Vec::new()),
+                    first_steps: std::cell::RefCell::new(Vec::new()),
                 };
                 let mut stages = Vec::new();
                 p.pipeline_items(&mut stages, PipeMode::Nav).map_err(wrap)?;
@@ -1672,6 +1816,7 @@ impl Parser<'_> {
                          content ('{text}')"
                     )));
                 }
+                self.record_captures(&name, &invited, crate::reflect::usage_of_stages(&stages));
                 pipeline.extend(stages);
                 Ok(())
             }
@@ -1815,8 +1960,11 @@ impl Parser<'_> {
                 q
             }
             DefBody::Macro(_) => {
+                let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
-                self.parse_expansion_query(&name, &text)?
+                let q = self.parse_expansion_query(&name, &text)?;
+                self.record_captures(&name, &invited, crate::reflect::usage_of_query(&q));
+                q
             }
         };
         // The category rule at path positions: the body must be pure
@@ -2037,6 +2185,8 @@ impl Parser<'_> {
             predicate_depth: self.predicate_depth,
             nest_depth: 0,
             subquery_depth: 0,
+            captures: std::cell::RefCell::new(Vec::new()),
+            first_steps: std::cell::RefCell::new(Vec::new()),
         };
         p.parse().map_err(wrap)
     }
@@ -3145,6 +3295,8 @@ impl Parser<'_> {
             predicate_depth: 0,
             nest_depth: 0,
             subquery_depth: 0,
+            captures: std::cell::RefCell::new(Vec::new()),
+            first_steps: std::cell::RefCell::new(Vec::new()),
         };
         let expr = p.additive().map_err(context)?;
         if p.pos != tokens.len() {
@@ -3403,6 +3555,22 @@ impl Parser<'_> {
                         ));
                     }
                     return Ok(Operand::Now);
+                }
+                // The record convention breaks the call-operand
+                // duality: `rec("name", x)` reads name-first, but
+                // `(x0 | rec(rest))` rides the first argument as the
+                // topic — the field name becomes data and the record
+                // silently re-keys. Refuse rather than re-key; the
+                // pipe form spells the topic-riding meaning honestly.
+                if matches!(call.name.as_str(), "rec" | "record") {
+                    return Err(QuarbError::Parse(format!(
+                        "'{n}(...)' as an operand would ride its first \
+                         field as the topic ('{n}(x, ...)' is \
+                         '(x | {n}(...))'), silently re-keying the \
+                         record; spell the pipe form '(x | {n}(...))' \
+                         explicitly if that is meant",
+                        n = call.name
+                    )));
                 }
                 let mut args = call.args.into_iter();
                 let first = match args.next() {
@@ -3728,6 +3896,7 @@ impl Parser<'_> {
                 self.operand_from_query(&name, q)
             }
             DefBody::Macro(_) => {
+                let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
                     QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
@@ -3747,6 +3916,8 @@ impl Parser<'_> {
                     predicate_depth: self.predicate_depth,
                     nest_depth: 0,
                     subquery_depth: 0,
+                    captures: std::cell::RefCell::new(Vec::new()),
+                    first_steps: std::cell::RefCell::new(Vec::new()),
                 };
                 let op = p.cond_expr().map_err(wrap)?;
                 if p.pos != tokens.len() {
@@ -3755,6 +3926,7 @@ impl Parser<'_> {
                          content ('{text}')"
                     )));
                 }
+                self.record_captures(&name, &invited, crate::reflect::usage_of_operand(&op));
                 Ok(op)
             }
         }

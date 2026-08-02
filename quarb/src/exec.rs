@@ -193,6 +193,37 @@ struct Correlation {
 
 type Trace = Correlation;
 
+thread_local! {
+    /// The first execution refusal recorded during an eval.
+    /// Evaluation is single-threaded per query and has no error
+    /// channel below the entry points; this cell carries a
+    /// refusal (e.g. a quantifier walk cut off at the bound) out
+    /// to [`eval`]'s callers, which convert it to an error. First
+    /// write wins; the entry points clear it before evaluating.
+    static REFUSAL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn record_refusal(msg: String) {
+    REFUSAL.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.is_none() {
+            *r = Some(msg);
+        }
+    });
+}
+
+fn clear_refusal() {
+    REFUSAL.with(|r| *r.borrow_mut() = None);
+}
+
+/// Take the refusal recorded during the last [`eval`] /
+/// [`eval_traced`], if any. The caller that observes it must treat
+/// the accompanying result as void.
+pub fn take_refusal() -> Option<String> {
+    REFUSAL.with(|r| r.borrow_mut().take())
+}
+
 /// Evaluate `query` from the root.
 /// Refuse a query that uses the `sh(...)` stage unless the adapter
 /// allows it (`qua --allow-shell`). Query text stays inert data by
@@ -303,6 +334,7 @@ fn uses_shell_operand(o: &Operand) -> bool {
 }
 
 pub fn eval(query: &Query, adapter: &impl AstAdapter) -> QueryResult {
+    clear_refusal();
     eval_query(query, adapter, adapter.root(), &Correlation::default())
 }
 
@@ -311,6 +343,7 @@ pub fn eval(query: &Query, adapter: &impl AstAdapter) -> QueryResult {
 /// each result value still knows which node produced it. A `None`
 /// topic is a node result (no projection ran).
 pub fn eval_traced(query: &Query, adapter: &impl AstAdapter) -> Vec<(NodeId, Option<Value>)> {
+    clear_refusal();
     let (caps, projected) =
         eval_query_caps(query, adapter, adapter.root(), &Correlation::default());
     caps.into_iter()
@@ -2527,13 +2560,21 @@ fn arrived_edge(
 }
 
 /// Expand a path-pattern group from one anchor path. Repetitions run
-/// from 1 to the effective bound (`min(n, N_max)` — the adapter's
-/// quantifier bound caps open forms); each repetition is the union
-/// over the group's alternatives; results collect at every count
-/// `>= min`, with count 0 contributing the anchor itself when the
-/// quantifier admits zero repetitions (`*`, `{0,n}`). The group's
-/// reach then keeps all matches, or only those at the smallest (`?`)
-/// or largest (`!`) repetition count.
+/// from 1 to the quantifier's ceiling (open forms: the adapter's
+/// bound `N_max`); each repetition is the union over the group's
+/// alternatives; results collect at every count `>= min`, with
+/// count 0 contributing the anchor itself when the quantifier
+/// admits zero repetitions (`*`, `{0,n}`). The group's reach then
+/// keeps all matches, or only those at the smallest (`?`) or
+/// largest (`!`) repetition count.
+///
+/// The bound is a refusal, not an ellipsis: an explicit `{m,n}`
+/// beyond `N_max` refuses up front, and an open-ended walk that
+/// still has edges to take when `N_max` rounds are spent refuses
+/// rather than passing off its first `N_max` rounds as the
+/// closure. A walk whose frontier drains before the bound — or a
+/// proximal reach that found its nearest tier — is complete and
+/// stays silent.
 fn expand_group(
     adapter: &impl AstAdapter,
     group: &Group,
@@ -2542,7 +2583,23 @@ fn expand_group(
     outer: Option<&Scope<'_>>,
 ) -> Vec<GPath> {
     let n_max = adapter.quantifier_bound();
-    let hi = group.quant.max.map_or(n_max, |n| n.min(n_max));
+    if let Some(n) = group.quant.max {
+        if n > n_max {
+            record_refusal(format!(
+                "the pattern's explicit ceiling ({n}) exceeds the \
+                 quantifier bound ({n_max}); raise --quantifier-bound"
+            ));
+            return Vec::new();
+        }
+    } else if group.quant.min > n_max {
+        record_refusal(format!(
+            "the pattern's minimum ({}) exceeds the quantifier bound \
+             ({n_max}); raise --quantifier-bound",
+            group.quant.min
+        ));
+        return Vec::new();
+    }
+    let hi = group.quant.max.unwrap_or(n_max);
     // The group's predicates filter matches BEFORE reach — the
     // walk continues from the full frontier, but only survivors
     // are candidates. `(...)+[P]?` is therefore "the nearest
@@ -2553,6 +2610,7 @@ fn expand_group(
         matches.push((anchor.clone(), 0));
     }
     let mut frontier = vec![anchor];
+    let mut answered = false;
     for count in 1..=hi {
         let mut next = Vec::new();
         for path in &frontier {
@@ -2576,8 +2634,35 @@ fn expand_group(
             // first tier with a survivor is the answer — stop
             // expanding.
             if group.reach == Reach::Proximal && matches.len() > before {
+                answered = true;
                 break;
             }
+        }
+    }
+    // An open-ended walk that spent all N_max rounds with paths
+    // still in flight: probe one more round. If anything is still
+    // walkable the closure is truncated — refuse out loud instead
+    // of returning it as if complete.
+    if group.quant.max.is_none() && !answered && !frontier.is_empty() {
+        let mut probe = Vec::new();
+        for path in &frontier {
+            for alt in &group.alts {
+                probe.extend(expand_elems(adapter, alt, vec![path.clone()], trace, outer));
+                if !probe.is_empty() {
+                    break;
+                }
+            }
+            if !probe.is_empty() {
+                break;
+            }
+        }
+        if !probe.is_empty() {
+            record_refusal(format!(
+                "quantifier bound reached at round {n_max} with edges \
+                 still to take — the closure would be silently \
+                 incomplete; raise --quantifier-bound"
+            ));
+            return Vec::new();
         }
     }
     let extreme = match group.reach {
@@ -4797,7 +4882,7 @@ mod tests {
     }
 
     #[test]
-    fn quantifier_bound_clamps_open_forms() {
+    fn quantifier_bound_refuses_out_loud() {
         /// The lists tree with a quantifier bound of 2.
         struct Bounded(MockTree);
         impl AstAdapter for Bounded {
@@ -4821,12 +4906,93 @@ mod tests {
             }
         }
         let t = Bounded(MockTree::lists());
-        // The third li (node 7) sits beyond the bound.
-        assert_eq!(run("/div(/ul/li)+", &t), vec![3, 5]);
-        // An explicit max also clamps: min(3, N_max) = 2.
-        assert_eq!(run("/div(/ul/li){1,3}", &t), vec![3, 5]);
-        // A min beyond the bound can never be reached.
-        assert!(run("/div(/ul/li){3,}", &t).is_empty());
+        // The third li sits beyond the bound: the walk still has
+        // edges to take when the rounds run out, so the closure
+        // would be silently incomplete — refused, out loud.
+        let refusal = |q: &str| {
+            let out = run(q, &t);
+            let msg = take_refusal();
+            (out, msg)
+        };
+        let (out, msg) = refusal("/div(/ul/li)+");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("quantifier bound reached"));
+        // An explicit ceiling beyond the bound refuses up front —
+        // never a silent clamp, never a silent empty.
+        let (out, msg) = refusal("/div(/ul/li){1,3}");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("explicit ceiling"));
+        // A minimum beyond the bound can never be satisfied.
+        let (out, msg) = refusal("/div(/ul/li){3,}");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("minimum"));
+        // An explicit ceiling INSIDE the bound is the user asking
+        // for exactly that depth: complete at n, silent.
+        let (out, msg) = refusal("/div(/ul/li){1,2}");
+        assert_eq!(out, vec![3, 5]);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn bound_hit_with_drained_frontier_is_complete() {
+        /// The lists tree bounded at exactly its chain depth.
+        struct Exact(MockTree);
+        impl AstAdapter for Exact {
+            fn root(&self) -> NodeId {
+                self.0.root()
+            }
+            fn children(&self, node: NodeId) -> Vec<NodeId> {
+                self.0.children(node)
+            }
+            fn name(&self, node: NodeId) -> Option<String> {
+                self.0.name(node)
+            }
+            fn parent(&self, node: NodeId) -> Option<NodeId> {
+                self.0.parent(node)
+            }
+            fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+                self.0.links(node)
+            }
+            fn quantifier_bound(&self) -> usize {
+                3
+            }
+        }
+        let t = Exact(MockTree::lists());
+        // Three rounds reach all three li's and the probe round
+        // finds nothing more: the closure is complete — no refusal.
+        assert_eq!(run("/div(/ul/li)+", &t), vec![3, 5, 7]);
+        assert!(take_refusal().is_none());
+    }
+
+    #[test]
+    fn proximal_answer_within_bound_is_complete() {
+        /// The mgr cycle bounded below its circumference.
+        struct Tight(MockTree);
+        impl AstAdapter for Tight {
+            fn root(&self) -> NodeId {
+                self.0.root()
+            }
+            fn children(&self, node: NodeId) -> Vec<NodeId> {
+                self.0.children(node)
+            }
+            fn name(&self, node: NodeId) -> Option<String> {
+                self.0.name(node)
+            }
+            fn parent(&self, node: NodeId) -> Option<NodeId> {
+                self.0.parent(node)
+            }
+            fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+                self.0.links(node)
+            }
+            fn quantifier_bound(&self) -> usize {
+                2
+            }
+        }
+        let t = Tight(MockTree::cyclic());
+        // The nearest tier with a survivor is the whole answer —
+        // a live frontier past it is irrelevant, not a truncation.
+        assert_eq!(run("//x.rs(->mgr)+?", &t), vec![5]);
+        assert!(take_refusal().is_none());
     }
 
     #[test]

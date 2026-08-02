@@ -126,6 +126,13 @@ struct Cli {
     #[arg(long)]
     expand: bool,
 
+    /// Expand each directly-invoked macro ONE step and print its
+    /// generated text before re-expansion, one line per invocation
+    /// (macroexpand-1); run the printed text again to take the
+    /// next step, --expand for the fixed point.
+    #[arg(long = "expand-1", conflicts_with = "expand")]
+    expand_1: bool,
+
     /// Disable SQL pushdown for database inputs (always evaluate
     /// through the adapter's scan path).
     #[arg(long = "no-pushdown")]
@@ -251,6 +258,7 @@ thread_local! {
     /// Whether this invocation is `--expand` (print the expanded
     /// query instead of running it). Set once in `main`.
     static EXPAND_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static EXPAND1_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -413,6 +421,19 @@ pub fn cli_main() -> anyhow::Result<()> {
         EXPAND_FLAG.with(|f| f.set(true));
     }
 
+    // --expand-1: one ledger step, printed and stop (macroexpand-1).
+    if cli.expand_1 {
+        if cli.paths.is_empty() {
+            for t in quarb::expand_first(&cli.query, &quarb::Defs::default())
+                .context("expanding the query")?
+            {
+                println!("{t}");
+            }
+            return Ok(());
+        }
+        EXPAND1_FLAG.with(|f| f.set(true));
+    }
+
     if let Some(path) = &cli.save {
         SAVE_TARGET.with(|t| *t.borrow_mut() = Some((path.clone(), cli.save_as.clone())));
     }
@@ -473,7 +494,7 @@ pub fn cli_main() -> anyhow::Result<()> {
 
     if cli.resident || cli.resident_serve {
         anyhow::ensure!(
-            !cli.kaiv && cli.save.is_none() && !cli.expand,
+            !cli.kaiv && cli.save.is_none() && !cli.expand && !cli.expand_1,
             "--resident does not combine with --kaiv/--save/--expand"
         );
         anyhow::ensure!(
@@ -2008,6 +2029,7 @@ fn pushdown_applies(cli: &Cli) -> bool {
     !cli.no_pushdown
         && !cli.kaiv
         && !EXPAND_FLAG.with(|f| f.get())
+        && !EXPAND1_FLAG.with(|f| f.get())
         && cli.save.is_none()
         && !cli.resident
         && !cli.resident_serve
@@ -2952,6 +2974,14 @@ fn run_inner<A: AstAdapter>(
 ) -> anyhow::Result<()> {
     // --expand with an input: expansion with the dataset at hand,
     // so data-aware macros (&name!) can read it.
+    if EXPAND1_FLAG.with(|f| f.get()) {
+        for t in quarb::expand_first_with(query, &quarb::Defs::default(), adapter)
+            .context("expanding the query")?
+        {
+            println!("{t}");
+        }
+        return Ok(());
+    }
     if EXPAND_FLAG.with(|f| f.get()) {
         println!(
             "{}",

@@ -1293,6 +1293,121 @@ impl AstAdapter for QueryArbor {
     }
 }
 
+// --- Ruling #22 (invited capture) raw material -----------------
+//
+// Named register pushes and recalls per name, counted by riding
+// the reflection walk — coverage tracks the reflection vocabulary,
+// so every construct the vocabulary knows contributes. Used by the
+// parser's macro-hygiene lint: an uninvited macro-pushed name must
+// not be used anywhere else in the parse unit.
+
+pub(crate) struct RegUsage {
+    pub(crate) pushes: std::collections::BTreeMap<String, usize>,
+    pub(crate) recalls: std::collections::BTreeMap<String, usize>,
+}
+
+fn scratch_arbor() -> QueryArbor {
+    let mut arbor = QueryArbor {
+        nodes: Vec::new(),
+        source: String::new(),
+    };
+    arbor.intern(None, Vec::new(), None);
+    arbor
+}
+
+fn node_prop<'a>(n: &'a RNode, key: &str) -> Option<&'a Value> {
+    n.props.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+fn collect_usage(arbor: &QueryArbor) -> RegUsage {
+    let mut u = RegUsage {
+        pushes: Default::default(),
+        recalls: Default::default(),
+    };
+    for n in &arbor.nodes {
+        match n.name.as_deref() {
+            Some("push") | Some("expr-push") => {
+                if let Some(Value::Str(s)) = node_prop(n, "name") {
+                    *u.pushes.entry(s.clone()).or_insert(0) += 1;
+                }
+            }
+            Some("recall") => {
+                if let Some(Value::Str(s)) = node_prop(n, "ref") {
+                    if let Some(name) = s.strip_prefix("$.") {
+                        if !name.is_empty() {
+                            *u.recalls.entry(name.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    u
+}
+
+pub(crate) fn usage_of_query(q: &Query) -> RegUsage {
+    let mut a = scratch_arbor();
+    a.walk_query(q, 0, None);
+    collect_usage(&a)
+}
+
+pub(crate) fn usage_of_stages(stages: &[Stage]) -> RegUsage {
+    let mut a = scratch_arbor();
+    for s in stages {
+        a.walk_stage(s, 0);
+    }
+    collect_usage(&a)
+}
+
+pub(crate) fn usage_of_operand(op: &Operand) -> RegUsage {
+    let mut a = scratch_arbor();
+    a.walk_operand(op, 0);
+    collect_usage(&a)
+}
+
+/// The register names an argument can "invite" through the
+/// parentheses (ruling #22): named recalls or pushes anywhere in
+/// the argument, bare step matchers, and string-literal values —
+/// every way a caller can hand a name in. A macro-pushed register
+/// with an invited name is deliberate anaphora; one without is the
+/// classic capture pitfall, and the lint refuses it.
+pub(crate) fn operand_invites(op: &Operand) -> std::collections::BTreeSet<String> {
+    let mut a = scratch_arbor();
+    a.walk_operand(op, 0);
+    let mut names = std::collections::BTreeSet::new();
+    for n in &a.nodes {
+        match n.name.as_deref() {
+            Some("push") | Some("expr-push") | Some("subcontext") => {
+                if let Some(Value::Str(s)) = node_prop(n, "name") {
+                    names.insert(s.clone());
+                }
+            }
+            Some("recall") => {
+                if let Some(Value::Str(s)) = node_prop(n, "ref") {
+                    if let Some(x) = s.strip_prefix("$.") {
+                        if !x.is_empty() {
+                            names.insert(x.to_string());
+                        }
+                    }
+                }
+            }
+            Some("step") => {
+                if let Some(Value::Str(s)) = node_prop(n, "matcher") {
+                    names.insert(s.clone());
+                }
+            }
+            Some("literal") => {
+                if let Some(Value::Str(s)) = node_prop(n, "value") {
+                    names.insert(s.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

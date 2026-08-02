@@ -59,6 +59,18 @@ pub use exec::QueryResult;
 pub use parser::Defs;
 pub use value::Value;
 
+/// Convert a refusal recorded during evaluation into an error. The
+/// eval layer below the entry points has no error channel; a walk
+/// that would return a silently incomplete answer (e.g. a
+/// quantifier cut off at the bound) records a refusal instead, and
+/// the entry points surface it here.
+fn checked<T>(result: T) -> Result<T> {
+    match exec::take_refusal() {
+        Some(msg) => Err(QuarbError::Refused(msg)),
+        None => Ok(result),
+    }
+}
+
 /// Lex, parse, and evaluate `query` against `adapter`.
 ///
 /// Returns the [`QueryResult`] — a node set, or scalar values if the
@@ -68,7 +80,7 @@ pub fn run(query: &str, adapter: &impl AstAdapter) -> Result<QueryResult> {
     let tokens = lexer::lex(query)?;
     let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
-    Ok(exec::eval(&ast, adapter))
+    checked(exec::eval(&ast, adapter))
 }
 
 /// Like [`run`], but returning the final capsae as `(node, topic)`
@@ -79,7 +91,7 @@ pub fn run_traced(query: &str, adapter: &impl AstAdapter) -> Result<Vec<(NodeId,
     let tokens = lexer::lex(query)?;
     let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
-    Ok(exec::eval_traced(&ast, adapter))
+    checked(exec::eval_traced(&ast, adapter))
 }
 
 /// Parse a definitions file — `def &name(params): body;` statements
@@ -110,7 +122,7 @@ pub fn run_with_defs(query: &str, defs: &Defs, adapter: &impl AstAdapter) -> Res
     let tokens = lexer::lex(query)?;
     let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
-    Ok(exec::eval(&ast, adapter))
+    checked(exec::eval(&ast, adapter))
 }
 
 /// Like [`run_traced`], with a pre-seeded fragment table.
@@ -122,7 +134,7 @@ pub fn run_traced_with_defs(
     let tokens = lexer::lex(query)?;
     let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
-    Ok(exec::eval_traced(&ast, adapter))
+    checked(exec::eval_traced(&ast, adapter))
 }
 
 /// True if `query` (inline defs allowed) opens with an expression
@@ -153,6 +165,27 @@ pub fn expand(query: &str, defs: &Defs) -> Result<String> {
     let tokens = lexer::lex(query)?;
     let ast = parser::parse_with_defs(&tokens, defs.clone())?;
     Ok(unparse::unparse(&ast))
+}
+
+/// The `macroexpand-1` lens (`qua --expand-1`): parse fully, but
+/// return each directly-invoked macro's generated text before its
+/// re-expansion — one entry per direct invocation, in source
+/// order. Run the printed text again to take the next step;
+/// [`expand`] is the fixed point.
+pub fn expand_first(query: &str, defs: &Defs) -> Result<Vec<String>> {
+    let tokens = lexer::lex(query)?;
+    parser::parse_first_steps(&tokens, defs.clone(), None)
+}
+
+/// Like [`expand_first`], with the dataset at hand, so data-aware
+/// macros (`&name!`) can read it at expansion time.
+pub fn expand_first_with(
+    query: &str,
+    defs: &Defs,
+    adapter: &impl AstAdapter,
+) -> Result<Vec<String>> {
+    let tokens = lexer::lex(query)?;
+    parser::parse_first_steps(&tokens, defs.clone(), Some(adapter))
 }
 
 /// Like [`expand`], with the dataset at hand, so data-aware macros

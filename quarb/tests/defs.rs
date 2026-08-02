@@ -2,7 +2,7 @@
 //! observable through `expand` (the `qua --expand` engine), and
 //! canonical text must round-trip.
 
-use quarb::{Defs, expand, parse_defs};
+use quarb::{Defs, expand, expand_first, parse_defs};
 
 fn exp(q: &str) -> String {
     expand(q, &Defs::default()).unwrap()
@@ -51,6 +51,99 @@ fn expansion_errors() {
     assert!(err("def &r: &r; /x").contains("unknown fragment '&r'"));
     // params are scoped to their def body
     assert!(err("def &f($x): /row[$x > 1]; /row[$x > 1]").contains("after '$'"));
+}
+
+/// The record convention breaks the call-operand duality — a
+/// leading field name would ride as the topic and silently re-key
+/// the record — so `rec`/`record` refuse operand position (found
+/// porting `aif`: `&f(rec("seen", ::Fare))` reflected and ran as
+/// `('seen' | rec(::Fare))`, keying the record `Fare`).
+#[test]
+fn rec_refuses_call_operand_position() {
+    let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
+    assert!(
+        err("/row[rec('seen', ::Fare) = 1]").contains("re-keying"),
+        "rec as predicate operand must refuse"
+    );
+    assert!(
+        err("macro &f($t): /t | \"| ${::form}\"; /row | &f(rec('seen', ::Fare))")
+            .contains("re-keying"),
+        "rec as macro argument must refuse"
+    );
+    // the honest spelling still parses and round-trips
+    assert_eq!(exp("/row | ('seen' | rec(::Fare))"), "/row | ('seen' | rec(::Fare))");
+}
+
+/// Ruling #22: capture must be invited through an argument. A
+/// macro-pushed register recalled by the surrounding query is the
+/// classic accidental-capture pitfall (LISP's broken `swap`) and
+/// refuses; passing the name — or a `$.name` reference — through
+/// the parentheses is deliberate anaphora (the `aif` shape) and
+/// stays legal. `def` fragments are exempt: their bodies are
+/// literal text the author wrote in plain sight.
+#[test]
+fn invited_capture() {
+    let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
+    // The v=9 accident: uninvited push, outside recall — refused.
+    assert!(
+        err("macro &m($n): //step[1] | \"| .t(9)\"; \
+             ^ | .t(1) | &m(/x) | rec(\"v\", $.t)")
+            .contains("invited through an argument"),
+        "uninvited capture must refuse"
+    );
+    // aif: the caller's branch arrives as an argument carrying
+    // `$.it`, so the emitted `.it` push is invited.
+    assert_eq!(
+        exp("macro &aif($c, $t): /c | \"| .it(${::form}) | ${^/t::form}\"; \
+             /row | &aif(::Fare, ($.it))"),
+        "/row | .it(::Fare) | $.it"
+    );
+    // Pivot shape: uninvited pushes swept up by `%.` — no outside
+    // recall names them, so the lint stays quiet.
+    assert_eq!(
+        exp("macro &m($n): //step[1] | \"| .z(1)\"; /row | &m(/x) | %."),
+        "/row | .z(1) | %."
+    );
+    // Inviting by bare name (the explicit-binding escape): the
+    // argument hands the register name through the parentheses.
+    assert_eq!(
+        exp("macro &m($r): //step[1] | \"| .${::matcher}(9)\"; \
+             ^ | &m(/t) | rec(\"v\", $.t)"),
+        "^ | .t(9) | rec('v', $.t)"
+    );
+    // A def doing the same thing stays legal — bodies are literal.
+    assert_eq!(
+        exp("def &load: | .t(9); ^ | &load | rec(\"v\", $.t)"),
+        "^ | .t(9) | rec('v', $.t)"
+    );
+}
+
+/// `--expand-1` (macroexpand-1): each directly-invoked macro's
+/// generated text, before re-expansion — the `&wrap` chain takes
+/// two visible steps where `--expand` shows only the fixed point.
+#[test]
+fn expand_first_steps() {
+    let q = "def &adults: /row[::Age >= 18]; \
+             macro &wrap($agg): //step[1] | \"&adults @| ${::matcher}\"; \
+             &wrap(/count)";
+    assert_eq!(
+        expand_first(q, &Defs::default()).unwrap(),
+        vec!["&adults @| count".to_string()]
+    );
+    assert_eq!(exp(q), "/row[::Age >= 18] @| count");
+    // No macro invocations: nothing to report (defs are textual).
+    assert_eq!(
+        expand_first("def &a: /x; &a @| count", &Defs::default()).unwrap(),
+        Vec::<String>::new()
+    );
+    // Diagnostics still fire in the -1 lens: the full parse runs.
+    assert!(
+        expand_first("macro &m($n): //step[1] | \"| .t(9)\"; \
+                      ^ | .t(1) | &m(/x) | rec(\"v\", $.t)", &Defs::default())
+            .unwrap_err()
+            .to_string()
+            .contains("invited through an argument")
+    );
 }
 
 /// Path-position splicing (ruling #17): invocations are legal
