@@ -27,7 +27,7 @@
 //! - Inline markup flattens to its text.
 
 use ego_tree::NodeRef;
-use quarb_text::{Block, Container, TextModel};
+use quarb_text::{Block, Cell, Container, TextModel};
 use scraper::{ElementRef, Html, Node as DomNode};
 
 /// Parse `html` and lower it to a text-level document.
@@ -50,6 +50,10 @@ pub fn blocks(html: &str) -> Vec<Block> {
         match work {
             Work::Text(text) => run.push_str(&text),
             Work::Flush => flush(&mut run, &mut out),
+            Work::Open { kind, lemma } => {
+                flush(&mut run, &mut out);
+                out.push(Block::Open { kind, lemma });
+            }
             Work::Close { hypograph } => {
                 flush(&mut run, &mut out);
                 out.push(Block::Close { hypograph });
@@ -65,6 +69,7 @@ enum Work<'a> {
     El(ElementRef<'a>),
     Text(String),
     Flush,
+    Open { kind: Container, lemma: Option<String> },
     Close { hypograph: Option<String> },
 }
 
@@ -106,7 +111,7 @@ fn aria_chrome(el: ElementRef) -> bool {
 /// inline run.
 const TRANSPARENT: &[&str] = &[
     "html", "body", "div", "section", "article", "main", "hgroup", "details", "dialog", "address",
-    "fieldset", "center", "dl", "tbody", "thead", "tfoot", "tr", "td", "th",
+    "fieldset", "center", "tbody", "thead", "tfoot", "tr", "td", "th",
 ];
 
 /// Block elements read as plain paragraphs.
@@ -175,6 +180,25 @@ fn element<'a>(
                 .unwrap_or(1);
             open_list(el, Container::OrderedList { start }, stack, run, out);
         }
+        "dl" => {
+            flush(run, out);
+            out.push(Block::Open {
+                kind: Container::UnorderedList,
+                lemma: None,
+            });
+            stack.push(Work::Close { hypograph: None });
+            for (terms, dds) in dl_groups(el).into_iter().rev() {
+                stack.push(Work::Close { hypograph: None });
+                for dd in dds.into_iter().rev() {
+                    push_children(dd, stack);
+                    stack.push(Work::Flush);
+                }
+                stack.push(Work::Open {
+                    kind: Container::Item,
+                    lemma: Some(terms),
+                });
+            }
+        }
         "li" => {
             flush(run, out);
             out.push(Block::Open {
@@ -216,6 +240,66 @@ fn push_children<'a>(children: Vec<NodeRef<'a, DomNode>>, stack: &mut Vec<Work<'
             stack.push(Work::Text(text.to_string()));
         }
     }
+}
+
+/// A `dl`'s term groups: each run of `dt`s (terms joined with
+/// `, `) paired with its following `dd`s' content children, one
+/// batch per `dd` — HTML's serialization of "items with lemmas",
+/// regrouped.
+type DdBatches<'a> = Vec<Vec<NodeRef<'a, DomNode>>>;
+fn dl_groups<'a>(el: ElementRef<'a>) -> Vec<(String, DdBatches<'a>)> {
+    let mut groups: Vec<(String, DdBatches<'a>)> = Vec::new();
+    let mut terms: Vec<String> = Vec::new();
+    for child in el.children() {
+        let Some(cel) = ElementRef::wrap(child) else {
+            continue;
+        };
+        match cel.value().name() {
+            "dt" => {
+                if !groups.is_empty()
+                    && terms.is_empty()
+                    && groups.last().is_some_and(|(_, dds)| dds.is_empty())
+                {
+                    // consecutive groups without dd stay separate
+                }
+                terms.push(text_of(cel));
+            }
+            "dd" => {
+                if !terms.is_empty() {
+                    groups.push((terms.join(", "), Vec::new()));
+                    terms.clear();
+                }
+                if let Some((_, dds)) = groups.last_mut() {
+                    dds.push(cel.children().collect());
+                }
+            }
+            // div wrappers around dt/dd groups are legal HTML
+            "div" => {
+                for inner in cel.children() {
+                    if let Some(iel) = ElementRef::wrap(inner) {
+                        match iel.value().name() {
+                            "dt" => terms.push(text_of(iel)),
+                            "dd" => {
+                                if !terms.is_empty() {
+                                    groups.push((terms.join(", "), Vec::new()));
+                                    terms.clear();
+                                }
+                                if let Some((_, dds)) = groups.last_mut() {
+                                    dds.push(iel.children().collect());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !terms.is_empty() {
+        groups.push((terms.join(", "), Vec::new()));
+    }
+    groups
 }
 
 /// The first direct child element with `tag`, if any.
@@ -292,7 +376,7 @@ fn verbatim_lang(el: ElementRef) -> Option<String> {
 fn table_block(el: ElementRef) -> Block {
     let mut lemma = None;
     let mut headers: Option<Vec<String>> = None;
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
 
     let mut table_rows: Vec<(ElementRef, bool)> = Vec::new();
     for child in el.children().filter_map(ElementRef::wrap) {
@@ -332,7 +416,10 @@ fn table_block(el: ElementRef) -> Block {
             if lemma.is_none() {
                 lemma = Some(cells[0].1.clone());
             } else {
-                rows.push(vec![cells[0].1.clone()]);
+                rows.push(vec![Cell {
+                    label: None,
+                    text: cells[0].1.clone(),
+                }]);
             }
             first = false;
             continue;
@@ -349,23 +436,41 @@ fn table_block(el: ElementRef) -> Block {
             continue;
         }
         // A row-label row: th first, td values follow — the label
-        // prefixes the first value.
+        // becomes the first value's lemma (a lone label with no
+        // value stands as bare text).
         if cells.len() > 1 && cells[0].0 && cells[1..].iter().all(|(th, _)| !th) {
             let label = &cells[0].1;
             let mut out = Vec::new();
             for (i, (_, t)) in cells[1..].iter().enumerate() {
                 if i == 0 && !label.is_empty() && !t.is_empty() {
-                    out.push(format!("{label}: {t}"));
+                    out.push(Cell {
+                        label: Some(label.clone()),
+                        text: t.clone(),
+                    });
                 } else if i == 0 && !label.is_empty() {
-                    out.push(label.clone());
+                    out.push(Cell {
+                        label: None,
+                        text: label.clone(),
+                    });
                 } else {
-                    out.push(t.clone());
+                    out.push(Cell {
+                        label: None,
+                        text: t.clone(),
+                    });
                 }
             }
             rows.push(out);
             continue;
         }
-        rows.push(cells.into_iter().map(|(_, t)| t).collect());
+        rows.push(
+            cells
+                .into_iter()
+                .map(|(_, t)| Cell {
+                    label: None,
+                    text: t,
+                })
+                .collect(),
+        );
     }
 
     Block::Table {

@@ -17,6 +17,14 @@ pub enum QuarbError {
     #[error("not yet supported: {0}")]
     Unsupported(String),
 
+    /// A failure in the macro-expansion phase — the body ran or
+    /// its output re-parsed and something went wrong there, as
+    /// distinct from reading the query text itself. The inner
+    /// error of a re-parse keeps its own banner; this variant
+    /// names the phase.
+    #[error("expansion error: {0}")]
+    Expansion(String),
+
     /// A query the engine refuses to answer because the result
     /// would be silently wrong or incomplete — the honest
     /// alternative to returning a truncated answer (the same

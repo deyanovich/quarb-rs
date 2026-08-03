@@ -1039,9 +1039,34 @@ impl AstAdapter for AtrepAdapter {
         let n = self.node(node);
         match name {
             "onym" => n.onym.clone().map(Value::Str),
-            "taxis" => n.taxis.map(|t| Value::Int(t as i64)),
-            "lemma" => n.lemma.clone().map(Value::Str),
-            "hypograph" => n.hypograph.clone().map(Value::Str),
+            "taxis" | "ord" => n.taxis.map(|t| Value::Int(t as i64)),
+            "lemma" | "title" => n.lemma.clone().map(Value::Str),
+            "hypograph" | "attribution" => n.hypograph.clone().map(Value::Str),
+            // The anatomy's third member: the body between lemma
+            // and hypograph, derived from the flattened text (the
+            // parts are newline-joined by construction). Friendly
+            // aliases answer beside the Greek — the koine rule.
+            "grammata" | "body" => {
+                let mut s = n.text.as_str();
+                if let Some(lemma) = &n.lemma
+                    && !lemma.is_empty()
+                    && let Some(rest) = s.strip_prefix(lemma.as_str())
+                {
+                    s = rest.strip_prefix('\n').unwrap_or(rest);
+                }
+                if let Some(h) = &n.hypograph
+                    && !h.is_empty()
+                    && let Some(rest) = s.strip_suffix(h.as_str())
+                {
+                    s = rest.strip_suffix('\n').unwrap_or(rest);
+                }
+                let s = s.trim_end();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(Value::Str(s.to_string()))
+                }
+            }
             "text" => Some(Value::Str(n.text.clone())),
             "symbol" => n.symbol.clone().map(Value::Str),
             "sim" => n.name.clone().map(Value::Str),

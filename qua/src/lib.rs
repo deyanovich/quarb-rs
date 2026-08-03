@@ -277,6 +277,9 @@ thread_local! {
     /// adapter with it, so every occurrence in a query denotes the
     /// same point and evaluation never reads a clock.
     static NOW_INSTANT: std::cell::Cell<(i64, u32)> = const { std::cell::Cell::new((0, 0)) };
+    /// Whether --explain should print the executed statement once
+    /// a driver has run one.
+    static EXPLAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The --model file, parsed. Set once in `main`; `run` wraps
     /// every adapter in a `ModelAdapter` and composes its locator.
     static MODEL: std::cell::RefCell<Option<quarb_model::Model>> =
@@ -460,6 +463,9 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
     };
     NOW_INSTANT.with(|c| c.set(now));
+    // Adapters resolving a relative window (`since=30m`) read the
+    // same instant, so a mount is as reproducible as the query.
+    quarb::set_invocation_instant(now.0, now.1);
 
     // A --model file declares derived arbor structure; parse it once
     // and `run` wraps every mounted source in the enrichment layer.
@@ -781,6 +787,10 @@ fn resident_serve_loop<A: AstAdapter>(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default();
                     NOW_INSTANT.with(|c| c.set((since.as_secs() as i64, since.subsec_nanos())));
+                    quarb::set_invocation_instant(
+                        since.as_secs() as i64,
+                        since.subsec_nanos(),
+                    );
                 }
                 let (result, output) =
                     with_stdout_capture(|| run_wrapped(&query, adapter, &render, None));
@@ -1324,6 +1334,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1367,6 +1378,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1492,6 +1504,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1539,6 +1552,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1587,6 +1601,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1637,6 +1652,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1791,6 +1807,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -1858,6 +1875,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
                     if cli.explain {
+                        eprintln!("pushdown: {}", plan.sql);
                         eprintln!("pushdown: plan not executed ({e}); scanning");
                     }
                 }
@@ -2080,13 +2098,13 @@ fn pushdown_plan(
     match quarb_sql::pushdown_explained(query, dialect) {
         Ok(plan) => {
             if cli.explain {
-                match &plan.order_table {
-                    Some(t) => eprintln!(
-                        "pushdown: {} -- driver appends ORDER BY the {t} key",
-                        plan.sql
-                    ),
-                    None => eprintln!("pushdown: {}", plan.sql),
-                }
+                // The plan as exported. What actually ran prints
+                // after execution (the driver resolves the ORDER
+                // BY key from the catalog), verbatim.
+                // What ran prints after execution (print_raw), so
+                // the plan itself is only announced when it does
+                // not run — the refusal branches below.
+                EXPLAIN.with(|e| e.set(true));
             }
             Some(plan)
         }
@@ -2104,6 +2122,14 @@ fn pushdown_plan(
 /// flush at the end, not a syscall per line.
 fn print_raw(cols: &[String], rows: Vec<Vec<Value>>) -> anyhow::Result<()> {
     use std::io::Write as _;
+    // --explain: the statement the driver executed, verbatim,
+    // ORDER BY and all. Recorded at execution because the key is
+    // a per-adapter catalog lookup.
+    if EXPLAIN.with(|e| e.get())
+        && let Some(sql) = quarb_relational::take_executed()
+    {
+        eprintln!("pushdown: {sql}");
+    }
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     for row in rows {

@@ -55,6 +55,46 @@ mod value;
 
 pub use adapter::{AllowShell, AstAdapter, NodeId, Provenance, QuantifierBound, WithNow};
 pub use error::{QuarbError, Result};
+pub mod koine;
+
+/// The invocation instant, pinned once by the tool layer (`qua
+/// --now`, or the clock read once at startup) and read by
+/// adapters that would otherwise consult the wall clock when
+/// resolving a relative window (`since=30m`). A pinned run
+/// replays: evaluation never reads a clock, and neither does a
+/// mount. `None` before the tool sets it — a library embedder
+/// that never pins gets the old wall-clock behavior.
+mod pinned {
+    use std::cell::Cell;
+    thread_local! {
+        pub(super) static NOW: Cell<Option<(i64, u32)>> = const { Cell::new(None) };
+    }
+}
+
+/// Pin the invocation instant for this thread (seconds and nanos
+/// since the epoch). Called once, by the tool, before mounting.
+pub fn set_invocation_instant(secs: i64, nanos: u32) {
+    pinned::NOW.with(|c| c.set(Some((secs, nanos))));
+}
+
+/// The pinned invocation instant, if the tool layer set one.
+pub fn invocation_instant() -> Option<(i64, u32)> {
+    pinned::NOW.with(|c| c.get())
+}
+
+/// The pinned instant in whole seconds, falling back to the wall
+/// clock — the one call an adapter needs when resolving a
+/// relative window. Reading it in `open` (never during
+/// evaluation) keeps a mount as reproducible as a query.
+pub fn now_secs() -> i64 {
+    match invocation_instant() {
+        Some((secs, _)) => secs,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    }
+}
 pub use exec::QueryResult;
 pub use parser::Defs;
 pub use value::Value;

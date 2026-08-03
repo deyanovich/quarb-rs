@@ -383,6 +383,10 @@ pub fn raw_query(
         }
         None => sql.to_string(),
     };
+    // --explain prints what ran: the ORDER BY key is a
+    // catalog lookup made here, so the final statement
+    // exists nowhere earlier.
+    quarb_relational::record_executed(&sql);
     let mut stmt = conn.prepare(&sql)?;
     let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
     let n = cols.len();

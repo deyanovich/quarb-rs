@@ -488,6 +488,10 @@ pub fn raw_query(
         }
         None => sql.to_string(),
     };
+    // --explain prints what ran: the ORDER BY key is a
+    // catalog lookup made here, so the final statement
+    // exists nowhere earlier.
+    quarb_relational::record_executed(&sql);
     let (schema, rows) = client.sql(&sql)?;
     Ok((schema.into_iter().map(|(n, _)| n).collect(), rows))
 }

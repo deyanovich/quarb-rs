@@ -288,6 +288,10 @@ pub fn raw_query(
         }
         None => sql.to_string(),
     };
+    // --explain prints what ran: the ORDER BY key is a
+    // catalog lookup made here, so the final statement
+    // exists nowhere earlier.
+    quarb_relational::record_executed(&sql);
     let mut stmt = conn.prepare(&sql)?;
     // duckdb's column metadata materializes on execution.
     let mut rows = stmt.query([])?;

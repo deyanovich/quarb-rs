@@ -30,10 +30,16 @@
 //!   the document root. A heading inside an open container
 //!   (blockquote, list) is decorative, not sectioning: it lowers
 //!   to a paragraph of its text.
+//! - Every kind admits `::lemma`, `::taxis`, and `::hypograph` —
+//!   the atrep model, where these are universal affordances of a
+//!   block rather than privileges of particular kinds.
 //! - Tables denormalize into nested lists: an `ordered-list`
 //!   carrying the `<table>` trait (`::lemma` = the caption), one
-//!   `ordered-item` per row (`::taxis` = row number), one
-//!   `unordered-item` per cell — `Header: value` where a header
+//!   `ordered-item` per row (`::taxis` = row number, `<row>`
+//!   trait), one `unordered-item` per cell (`<cell>` trait) whose
+//!   `::lemma` is the column name — from the header row in grids,
+//!   from the row's `th` label otherwise; headerless cells carry
+//!   no lemma. A lemma'd item flattens as `lemma: prose`, so a
 //!   row exists, the bare cell text otherwise. Empty cells are
 //!   skipped.
 
@@ -66,14 +72,41 @@ pub enum Block {
     /// as authored.
     Verbatim { lang: Option<String>, text: String },
     /// A table, denormalized here into nested lists (rows =
-    /// ordered items, cells = unordered items, `Header: value`
-    /// when `headers` is present). Header *detection* is the
-    /// producer's job; the lowering rule lives here.
+    /// ordered items with the `<row>` trait, cells = unordered
+    /// items with the `<cell>` trait and the column name as
+    /// `::lemma`). Header *detection* is the producer's job; the
+    /// lowering rule lives here. A cell's own `label` (a row's
+    /// `th`) wins over the positional `headers` entry.
     Table {
         lemma: Option<String>,
         headers: Option<Vec<String>>,
-        rows: Vec<Vec<String>>,
+        rows: Vec<Vec<Cell>>,
     },
+}
+
+/// One table cell as a producer hands it over: the text, plus the
+/// label a row-shaped dialect attaches directly (an infobox row's
+/// `th`). Grid dialects leave `label` empty and let the lowering
+/// zip the header row on by position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell {
+    pub label: Option<String>,
+    pub text: String,
+}
+
+impl From<&str> for Cell {
+    fn from(text: &str) -> Self {
+        Cell {
+            label: None,
+            text: text.to_string(),
+        }
+    }
+}
+
+impl From<String> for Cell {
+    fn from(text: String) -> Self {
+        Cell { label: None, text }
+    }
 }
 
 /// The nesting containers a producer opens and closes explicitly.
@@ -135,6 +168,10 @@ struct Node {
     prose: String,
     /// The node heads a denormalized table (`<table>` trait).
     table: bool,
+    /// The node is a denormalized table row (`<row>` trait).
+    row: bool,
+    /// The node is a denormalized table cell (`<cell>` trait).
+    cell: bool,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -152,6 +189,8 @@ impl Node {
             text: String::new(),
             prose: String::new(),
             table: false,
+            row: false,
+            cell: false,
             parent,
             children: Vec::new(),
         }
@@ -384,12 +423,16 @@ fn push(nodes: &mut Vec<Node>, kind: Kind, parent: NodeId) -> NodeId {
 }
 
 /// Denormalize a table into nested lists (see the module doc).
+/// The column name lands as the cell's `::lemma` — a cell's own
+/// label (a row's `th`) wins over the positional header entry —
+/// and never as folded text: addressing is property projection,
+/// the flattening rule alone spells `lemma: value`.
 fn lower_table(
     nodes: &mut Vec<Node>,
     parent: NodeId,
     lemma: Option<String>,
     headers: Option<Vec<String>>,
-    rows: Vec<Vec<String>>,
+    rows: Vec<Vec<Cell>>,
 ) {
     let list = push(nodes, Kind::OrderedList, parent);
     {
@@ -400,40 +443,53 @@ fn lower_table(
     for (i, row) in rows.into_iter().enumerate() {
         let item = push(nodes, Kind::OrderedItem, list);
         nodes[item.0 as usize].taxis = Some(i as i64 + 1);
+        nodes[item.0 as usize].row = true;
         let cells = push(nodes, Kind::UnorderedList, item);
         for (j, cell) in row.into_iter().enumerate() {
-            let value = normalize_ws(&cell);
+            let value = normalize_ws(&cell.text);
             if value.is_empty() {
                 continue;
             }
-            let header = headers
-                .as_ref()
-                .and_then(|h| h.get(j))
-                .map(|h| normalize_ws(h))
+            let label = cell
+                .label
+                .as_deref()
+                .or_else(|| headers.as_ref().and_then(|h| h.get(j)).map(|h| h.as_str()))
+                .map(normalize_ws)
                 .filter(|h| !h.is_empty());
-            let text = match header {
-                Some(h) => format!("{h}: {value}"),
-                None => value,
-            };
             let cell_item = push(nodes, Kind::UnorderedItem, cells);
-            nodes[cell_item.0 as usize].text = text;
+            let n = &mut nodes[cell_item.0 as usize];
+            n.cell = true;
+            n.lemma = label;
+            n.text = value;
         }
     }
 }
 
 /// Compute every node's flattened prose: lemma first, then the
 /// node's own text, then its children's prose in order, then the
-/// hypograph, block-joined with newlines. Children always carry
-/// larger indices than their parents (nodes are interned in
-/// document order), so one reverse index scan suffices — no
-/// recursion.
+/// hypograph, block-joined with newlines. On a list *item*, the
+/// lemma joins the rest with `: ` instead — an item's lemma names
+/// its content inline (a table cell reads `Outcome: Emus won`, a
+/// definition reads `term: description`), where a section's lemma
+/// opens its block. Children always carry larger indices than
+/// their parents (nodes are interned in document order), so one
+/// reverse index scan suffices — no recursion.
 fn flatten_prose(nodes: &mut [Node]) {
     for i in (0..nodes.len()).rev() {
+        let inline_lemma = matches!(
+            nodes[i].kind,
+            Kind::UnorderedItem | Kind::OrderedItem
+        );
+        let mut lemma_part: Option<String> = None;
         let mut parts: Vec<String> = Vec::new();
         if let Some(lemma) = &nodes[i].lemma
             && !lemma.is_empty()
         {
-            parts.push(lemma.clone());
+            if inline_lemma {
+                lemma_part = Some(lemma.clone());
+            } else {
+                parts.push(lemma.clone());
+            }
         }
         if !nodes[i].text.is_empty() {
             parts.push(nodes[i].text.clone());
@@ -449,7 +505,43 @@ fn flatten_prose(nodes: &mut [Node]) {
         {
             parts.push(hypograph.clone());
         }
-        nodes[i].prose = parts.join("\n");
+        let mut prose = parts.join("\n");
+        if let Some(lemma) = lemma_part {
+            prose = if prose.is_empty() {
+                lemma
+            } else {
+                format!("{lemma}: {prose}")
+            };
+        }
+        nodes[i].prose = prose;
+    }
+}
+
+impl TextModel {
+    /// The body prose: everything between the lemma and the
+    /// hypograph — the simmere anatomy's third member, derived
+    /// from the flattened prose by construction (the lemma joins
+    /// a block on its own line, an item with `: `; the hypograph
+    /// closes on its own line).
+    fn grammata(&self, node: NodeId) -> String {
+        let n = &self.nodes[node.0 as usize];
+        let mut s = n.prose.as_str();
+        if let Some(lemma) = &n.lemma
+            && !lemma.is_empty()
+            && let Some(rest) = s.strip_prefix(lemma.as_str())
+        {
+            s = rest
+                .strip_prefix(": ")
+                .or_else(|| rest.strip_prefix('\n'))
+                .unwrap_or(rest);
+        }
+        if let Some(h) = &n.hypograph
+            && !h.is_empty()
+            && let Some(rest) = s.strip_suffix(h.as_str())
+        {
+            s = rest.strip_suffix('\n').unwrap_or(rest);
+        }
+        s.trim_end().to_string()
     }
 }
 
@@ -482,18 +574,35 @@ impl AstAdapter for TextModel {
         if n.table {
             out.push("table".to_string());
         }
+        if n.row {
+            out.push("row".to_string());
+        }
+        if n.cell {
+            out.push("cell".to_string());
+        }
         out
     }
 
     /// `::lemma` (title), `::hypograph` (footer or attribution),
     /// `::taxis` (ordinal), `::text` (the flattened prose, same as
     /// the bare projection).
+    /// The Greek anatomy — `::lemma`, `::grammata`, `::hypograph`,
+    /// `::taxis` — plus the friendly aliases (`::title`, `::body`,
+    /// `::attribution`, `::ord`), answered here because this
+    /// adapter's property surface IS the vocabulary; on data
+    /// adapters those spellings stay ordinary field names. The
+    /// Greek is canon in docs and reflection preserves whichever
+    /// spelling was written.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match name {
-            "lemma" => n.lemma.clone().map(Value::Str),
-            "hypograph" => n.hypograph.clone().map(Value::Str),
-            "taxis" => n.taxis.map(Value::Int),
+            "lemma" | "title" => n.lemma.clone().map(Value::Str),
+            "hypograph" | "attribution" => n.hypograph.clone().map(Value::Str),
+            "taxis" | "ord" => n.taxis.map(Value::Int),
+            "grammata" | "body" => {
+                let g = self.grammata(node);
+                if g.is_empty() { None } else { Some(Value::Str(g)) }
+            }
             "text" => Some(Value::Str(n.prose.clone())),
             _ => None,
         }

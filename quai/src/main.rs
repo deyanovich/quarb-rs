@@ -290,21 +290,24 @@ fn main() -> Result<()> {
 }
 
 /// Bind the invocation instant: `--now` pins it; otherwise the clock,
-/// read once, so every `now()` in the session denotes one point.
+/// read once, so every `now()` in the session denotes one point — and
+/// the adapters resolve their relative windows against the same one.
 fn bind_now(spec: Option<&str>) -> Result<(i64, u32)> {
-    match spec {
+    let now = match spec {
         Some(text) => {
             let (secs, nanos, _) = quarb::temporal::parse_iso(text)
                 .ok_or_else(|| anyhow::anyhow!("--now needs an ISO-8601 instant, got '{text}'"))?;
-            Ok((secs, nanos))
+            (secs, nanos)
         }
         None => {
             let since = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            Ok((since.as_secs() as i64, since.subsec_nanos()))
+            (since.as_secs() as i64, since.subsec_nanos())
         }
-    }
+    };
+    quarb::set_invocation_instant(now.0, now.1);
+    Ok(now)
 }
 
 fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {

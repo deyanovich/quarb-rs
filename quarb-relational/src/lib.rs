@@ -37,6 +37,28 @@ use std::collections::HashMap;
 /// A field is a bare column name, or `table.column` to scope the
 /// declaration to one table. Returns the (field, container) pairs
 /// in document order.
+/// The statement a driver last executed, verbatim — recorded at
+/// the moment of execution because the ORDER BY key is a
+/// catalog lookup each driver makes for itself, so the final SQL
+/// exists nowhere earlier. `qua --explain` prints what was run,
+/// not a description of what will be.
+mod executed {
+    use std::cell::RefCell;
+    thread_local! {
+        pub(super) static SQL: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+}
+
+/// Record the statement about to be executed (drivers call this).
+pub fn record_executed(sql: &str) {
+    executed::SQL.with(|c| *c.borrow_mut() = Some(sql.to_string()));
+}
+
+/// Take the last recorded statement, if any (the tool layer).
+pub fn take_executed() -> Option<String> {
+    executed::SQL.with(|c| c.borrow_mut().take())
+}
+
 pub fn parse_refs(text: &str) -> Result<Vec<(String, String)>, String> {
     let doc: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;

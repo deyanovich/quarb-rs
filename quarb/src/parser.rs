@@ -1414,7 +1414,7 @@ impl Parser<'_> {
         let values = self.expand_macro_values(name, def, args)?;
         let text = values.join(" ");
         if text.trim().is_empty() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::Expansion(format!(
                 "macro '&{name}' expanded to nothing"
             )));
         }
@@ -1436,7 +1436,7 @@ impl Parser<'_> {
                 .any(|op| t.starts_with(op))
         };
         if values.len() >= 2 && values.iter().all(|v| nav_start(v)) {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::Expansion(format!(
                 "macro '&{name}' expanded to {} branch-shaped values; \
                  space-joined they would read as one path — join them \
                  into a union (@| join(' || ')) or emit a single group",
@@ -1445,7 +1445,7 @@ impl Parser<'_> {
         }
         let text = values.join(" ");
         if text.trim().is_empty() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::Expansion(format!(
                 "macro '&{name}' expanded to nothing"
             )));
         }
@@ -1678,11 +1678,11 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
                 if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::Expansion(format!(
                         "macro '&{name}' expanded to a pipeline fragment \
                          ('{text}'); invoke it after a pipe"
                     )));
@@ -1774,7 +1774,7 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
                 let first = match tokens.first() {
@@ -2166,10 +2166,10 @@ impl Parser<'_> {
     /// contextual restrictions hand-written text would.
     fn parse_expansion_query(&self, name: &str, text: &str) -> Result<Query> {
         let wrap =
-            |e: QuarbError| QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"));
+            |e: QuarbError| QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"));
         let tokens = lexer::lex(text).map_err(wrap)?;
         if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::Expansion(format!(
                 "macro '&{name}' expanded to a pipeline fragment \
                  ('{text}'); at path position it must expand to \
                  navigation steps"
@@ -3899,7 +3899,7 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Parse(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
                 let mut p = Parser {

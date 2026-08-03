@@ -244,10 +244,10 @@ fn decode_rec(o: &Json) -> Option<Rec> {
 impl CflAdapter {
     /// Open a bounded snapshot of the zone's request records.
     pub fn open(target: &str) -> Result<Self, CflError> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        // The pinned invocation instant (`qua --now`, else the
+        // clock read once at startup) resolves `since=`, so a
+        // pinned run's window is reproducible.
+        let now_secs = quarb::now_secs();
         let (t, endpoint) = parse_target(target, now_secs)?;
         let token = std::env::var("CLOUDFLARE_API_TOKEN")
             .ok()

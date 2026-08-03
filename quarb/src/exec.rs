@@ -778,6 +778,33 @@ fn apply_stage(
         // current node's subtree back to JSON — the encode half of
         // the node-mode json pair (decode(json) is the parse half).
         // With a topic present it stays the value serializer.
+        // `| markdown` / `| html` / `| atrep` mirror `| json` on
+        // the document side: a node context renders its subtree
+        // through the koine renderer (sections, paragraphs,
+        // quotes, lists, verbatim — whatever vocabulary the
+        // adapter speaks); a topic value renders as text. The
+        // export button and the pipe are the same verb.
+        Stage::Func(call)
+            if matches!(call.name.as_str(), "markdown" | "html" | "atrep") =>
+        {
+            let kind = crate::koine::Render::from_name(&call.name)
+                .expect("stage names are valid render names");
+            caps.into_iter()
+                .map(|mut c| {
+                    let v = match &c.topic {
+                        Some(t) => Value::Str(crate::koine::render_values(
+                            std::slice::from_ref(t),
+                            kind,
+                        )),
+                        None => {
+                            Value::Str(crate::koine::render_node(adapter, c.node, kind))
+                        }
+                    };
+                    c.topic = Some(v);
+                    c
+                })
+                .collect()
+        }
         Stage::Func(call) if call.name == "json" => caps
             .into_iter()
             .map(|mut c| {

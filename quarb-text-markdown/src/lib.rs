@@ -152,7 +152,11 @@ pub fn blocks(text: &str) -> Vec<Block> {
                 TagEnd::TableRow => {
                     if let Some(t) = table.as_mut() {
                         let row = std::mem::take(&mut t.row);
-                        t.rows.push(row);
+                        t.rows.push(
+                            row.into_iter()
+                                .map(|text| quarb_text::Cell { label: None, text })
+                                .collect(),
+                        );
                     }
                 }
                 TagEnd::Table => {
@@ -192,7 +196,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
 struct TableState {
     in_head: bool,
     headers: Option<Vec<String>>,
-    rows: Vec<Vec<String>>,
+    rows: Vec<Vec<quarb_text::Cell>>,
     row: Vec<String>,
 }
 

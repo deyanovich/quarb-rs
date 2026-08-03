@@ -175,10 +175,9 @@ fn parse_target(target: &str) -> Result<(Target, Option<String>, Option<String>)
                 .find_map(|kv| kv.strip_prefix(&format!("{k}=")).map(percent_decode))
         })
     };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    // The pinned invocation instant resolves `since=` (see
+    // quarb::now_secs) — a pinned run's window replays.
+    let now_ms = quarb::now_secs() * 1000;
     let since_ms = match param("since") {
         None => None,
         Some(s) => Some(if let Some(d) = duration_ms(&s) {

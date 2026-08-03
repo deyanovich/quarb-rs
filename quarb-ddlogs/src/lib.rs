@@ -122,6 +122,20 @@ fn status_rank(s: &str) -> i64 {
     }
 }
 
+/// A duration suffix in seconds (`30m` → 1800), for resolving a
+/// relative window against the pinned invocation instant.
+fn duration_secs(s: &str) -> Option<i64> {
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.parse().ok()?;
+    Some(match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    })
+}
+
 fn is_duration(s: &str) -> bool {
     s.len() >= 2
         && s.ends_with(['s', 'm', 'h', 'd'])
@@ -319,12 +333,32 @@ impl DdlAdapter {
             .unwrap_or_else(|| format!("https://api.{site}"));
         let url = format!("{}/api/v2/logs/events/search", base.trim_end_matches('/'));
 
-        let from = match &t.since {
-            Some(s) if is_duration(s) => format!("now-{s}"),
-            Some(s) => s.clone(),
-            None => "now-15m".into(),
+        // With the invocation instant pinned (`qua --now`), a
+        // relative window resolves against *it* rather than the
+        // provider's clock: the request carries absolute bounds,
+        // so a pinned run replays. Unpinned, the provider's own
+        // `now-…` arithmetic stands as before.
+        let pinned = quarb::invocation_instant().map(|(secs, _)| secs);
+        let (from, to) = match pinned {
+            Some(now) => {
+                let iso = |secs: i64| quarb::temporal::format_instant(secs, 0, Some(0));
+                let from = match &t.since {
+                    Some(s) if is_duration(s) => iso(now - duration_secs(s).unwrap_or(0)),
+                    Some(s) => s.clone(),
+                    None => iso(now - 900),
+                };
+                let to = t.until.clone().unwrap_or_else(|| iso(now));
+                (from, to)
+            }
+            None => {
+                let from = match &t.since {
+                    Some(s) if is_duration(s) => format!("now-{s}"),
+                    Some(s) => s.clone(),
+                    None => "now-15m".into(),
+                };
+                (from, t.until.clone().unwrap_or_else(|| "now".into()))
+            }
         };
-        let to = t.until.clone().unwrap_or_else(|| "now".into());
 
         let mut events: Vec<Event> = Vec::new();
         let mut cursor: Option<String> = None;

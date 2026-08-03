@@ -104,6 +104,20 @@ pub struct AzlAdapter {
     nodes: RefCell<Vec<Node>>,
 }
 
+/// A `since=` duration in seconds, for resolving a relative
+/// window against the pinned invocation instant.
+fn span_secs(s: &str) -> Option<i64> {
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.parse().ok()?;
+    Some(match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    })
+}
+
 /// A KQL timespan for `since=` durations: `30m` → `PT30M`,
 /// `2d` → `P2D`.
 fn kql_ago(s: &str) -> Option<String> {
@@ -220,8 +234,16 @@ fn parse_target(target: &str) -> Result<(Target, Option<String>), AzlError> {
 /// Compose the KQL for one table: the bounded scan.
 fn compose_kql(t: &Target, table: &str) -> String {
     let mut q = table.to_string();
+    // Pinned invocation instant: a relative window becomes an
+    // absolute datetime bound, so the workspace answers against
+    // *our* instant and a pinned run replays. Unpinned, `ago()`
+    // rides the provider's clock as before.
+    let pinned = quarb::invocation_instant().map(|(secs, _)| secs);
     if let Some(s) = &t.since {
-        if let Some(span) = kql_ago(s) {
+        if let (Some(now), Some(d)) = (pinned, span_secs(s)) {
+            let at = quarb::temporal::format_instant(now - d, 0, Some(0));
+            q.push_str(&format!(" | where TimeGenerated >= datetime({at})"));
+        } else if let Some(span) = kql_ago(s) {
             q.push_str(&format!(" | where TimeGenerated >= ago({span})"));
         } else {
             q.push_str(&format!(" | where TimeGenerated >= datetime({s})"));

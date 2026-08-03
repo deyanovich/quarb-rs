@@ -147,6 +147,23 @@ fn severity_rank(s: &str) -> i64 {
     }
 }
 
+/// A freshness duration in seconds, for resolving a relative
+/// window against the pinned invocation instant.
+fn freshness_secs(s: &str) -> Option<i64> {
+    if !is_duration(s) {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: i64 = num.parse().ok()?;
+    Some(match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    })
+}
+
 /// A gcloud freshness duration: `30m`, `1h`, `2d`.
 fn is_duration(s: &str) -> bool {
     s.len() >= 2
@@ -256,10 +273,18 @@ fn compose_filter(t: &Target) -> String {
     {
         clauses.push(format!("({})", f.trim()));
     }
-    if let Some(s) = &t.since
-        && !is_duration(s)
-    {
-        clauses.push(format!("timestamp>=\"{s}\""));
+    if let Some(s) = &t.since {
+        // Pinned invocation instant: a duration window becomes an
+        // absolute bound in the filter (and `--freshness` is
+        // dropped at the call site), so a pinned run replays.
+        match (quarb::invocation_instant(), freshness_secs(s)) {
+            (Some((now, _)), Some(d)) => {
+                let at = quarb::temporal::format_instant(now - d, 0, Some(0));
+                clauses.push(format!("timestamp>=\"{at}\""));
+            }
+            _ if !is_duration(s) => clauses.push(format!("timestamp>=\"{s}\"")),
+            _ => {}
+        }
     }
     if let Some(u) = &t.until {
         clauses.push(format!("timestamp<=\"{u}\""));
@@ -387,8 +412,11 @@ impl GclAdapter {
             .arg("--project")
             .arg(&t.project)
             .arg("--format=json");
+        // Unpinned, the duration rides `--freshness`; pinned, the
+        // absolute bound is already in the filter.
         if let Some(s) = &t.since
             && is_duration(s)
+            && quarb::invocation_instant().is_none()
         {
             cmd.arg(format!("--freshness={s}"));
         }

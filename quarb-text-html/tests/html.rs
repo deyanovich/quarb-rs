@@ -190,3 +190,63 @@ fn infobox_row_labels() {
         ]
     );
 }
+
+fn vals(model: &TextModel, query: &str) -> Vec<String> {
+    match quarb::run(query, model).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    }
+}
+
+/// A `dl` mounts as a list whose items carry `::lemma` — dt is
+/// property projection, dd is content; dl/dt/dd itself is just
+/// HTML's serialization of "items with lemmas" (ruling #25).
+#[test]
+fn definition_lists_mount_as_lemma_items() {
+    let m = quarb_text_html::parse(
+        r#"<dl>
+             <dt>Emu</dt>
+             <dd>A large flightless bird.</dd>
+             <dt>Lewis gun</dt>
+             <dt>Machine gun</dt>
+             <dd>The army's contribution.</dd>
+             <dd>Mounted on a truck.</dd>
+           </dl>"#,
+    );
+    assert_eq!(
+        vals(&m, "//unordered-item::lemma"),
+        vec!["Emu", "Lewis gun, Machine gun"]
+    );
+    assert_eq!(
+        vals(&m, "//unordered-item[::lemma = \"Emu\"]::"),
+        vec!["Emu: A large flightless bird."]
+    );
+    // Two dds fold into the one item, space-joined like li text;
+    // the lemma joins inline.
+    assert_eq!(
+        vals(&m, "//unordered-item[::lemma =~ /Lewis/]::"),
+        vec!["Lewis gun, Machine gun: The army's contribution. Mounted on a truck."]
+    );
+}
+
+/// The infobox dialect: a row's `th` label becomes the value
+/// cell's `::lemma`, addressable without a regex.
+#[test]
+fn row_label_tables_carry_lemmas() {
+    let m = quarb_text_html::parse(
+        r#"<table>
+             <tr><th colspan="2">Emu War</th></tr>
+             <tr><th>Location</th><td>Campion</td></tr>
+             <tr><th>Result</th><td>Emu victory</td></tr>
+           </table>"#,
+    );
+    assert_eq!(vals(&m, "//*<table>::lemma"), vec!["Emu War"]);
+    assert_eq!(
+        vals(&m, "//*<cell>[::lemma = \"Result\"]::"),
+        vec!["Result: Emu victory"]
+    );
+    assert_eq!(
+        vals(&m, "//*<row>[::taxis = 1]/*/*::lemma"),
+        vec!["Location"]
+    );
+}

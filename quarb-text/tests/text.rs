@@ -249,3 +249,272 @@ fn plain_text_paragraphs() {
     );
     assert_eq!(nodes(&m, "//section"), Vec::<String>::new());
 }
+
+/// Ruling #25: the column name is the cell's `::lemma` — property
+/// projection, not folded text — and rows/cells carry traits.
+#[test]
+fn cells_are_addressable_by_lemma() {
+    let m = TextModel::build(vec![Block::Table {
+        lemma: Some("Crew".into()),
+        headers: Some(vec!["Name".into(), "Role".into()]),
+        rows: vec![
+            vec!["Alice".into(), "captain".into()],
+            vec!["Bob".into(), "cook".into()],
+        ],
+    }]);
+    // Address a cell by its column name, no regex in sight.
+    assert_eq!(
+        values(&m, "//*<cell>[::lemma = \"Role\"]::"),
+        vec!["Role: captain", "Role: cook"]
+    );
+    // Scope by row, read by column.
+    assert_eq!(
+        values(&m, "//*<row>[::taxis = 2]/*/*[::lemma = \"Name\"]::"),
+        vec!["Name: Bob"]
+    );
+    // The flattened prose still reads `lemma: value` byte for byte.
+    assert_eq!(
+        values(&m, "//*<cell>[::lemma = \"Name\"]::lemma"),
+        vec!["Name", "Name"]
+    );
+}
+
+/// A per-cell label (a row's `th`, the infobox dialect) wins over
+/// positional headers and lands as the lemma.
+#[test]
+fn row_labels_become_cell_lemmas() {
+    let m = TextModel::build(vec![Block::Table {
+        lemma: None,
+        headers: None,
+        rows: vec![vec![
+            quarb_text::Cell {
+                label: Some("Location".into()),
+                text: "Campion".into(),
+            },
+        ]],
+    }]);
+    assert_eq!(values(&m, "//*<cell>::lemma"), vec!["Location"]);
+    assert_eq!(values(&m, "//*<cell>::"), vec!["Location: Campion"]);
+}
+
+/// An item's lemma is inline: `lemma: prose` — the flatten rule
+/// that makes a lemma'd list read as definitions.
+#[test]
+fn item_lemma_flattens_inline() {
+    let m = TextModel::build(vec![
+        Block::Open {
+            kind: Container::UnorderedList,
+            lemma: None,
+        },
+        Block::Open {
+            kind: Container::Item,
+            lemma: Some("emu".into()),
+        },
+        Block::Paragraph {
+            text: "a large flightless bird".into(),
+        },
+        Block::Close { hypograph: None },
+        Block::Close { hypograph: None },
+    ]);
+    assert_eq!(
+        values(&m, "//unordered-item::"),
+        vec!["emu: a large flightless bird"]
+    );
+    assert_eq!(values(&m, "//unordered-item::lemma"), vec!["emu"]);
+}
+
+/// The serialization stages: `| markdown` / `| html` / `| atrep`
+/// render a node's subtree through the koine renderer — the
+/// export button and the pipe are the same verb.
+#[test]
+fn serialization_stages_render_subtrees() {
+    let m = TextModel::build(vec![
+        Block::Heading {
+            level: 2,
+            lemma: "The \"war\"".into(),
+        },
+        Block::Paragraph {
+            text: "Machine guns were requested.".into(),
+        },
+        Block::Heading {
+            level: 3,
+            lemma: "First attempt".into(),
+        },
+        Block::Paragraph {
+            text: "The birds split into small groups.".into(),
+        },
+    ]);
+    assert_eq!(
+        values(&m, r#"//section[::lemma =~ /war/] | markdown"#),
+        vec![
+            "## The \"war\"\n\nMachine guns were requested.\n\n### First attempt\n\nThe birds split into small groups."
+        ]
+    );
+    assert_eq!(
+        values(&m, r#"//section[::lemma = "First attempt"] | html"#),
+        vec!["<h3>First attempt</h3>\n\n<p>The birds split into small groups.</p>"]
+    );
+    // litogramma: dialektos declaration, relative section depth,
+    // explicit close markers.
+    assert_eq!(
+        values(&m, r#"//section[::lemma = "First attempt"] | atrep"#),
+        vec![
+            "@@@!litogramma\n\n@# First attempt\n\nThe birds split into small groups.\n\n#@"
+        ]
+    );
+}
+
+/// litogramma forms: the epigraph quote, the definition list for
+/// lemma'd items, verbatim with a language genos.
+#[test]
+fn atrep_emits_litogramma_forms() {
+    let m = TextModel::build(vec![
+        Block::Open {
+            kind: Container::Blockquote,
+            lemma: None,
+        },
+        Block::Paragraph {
+            text: "Invulnerable as tanks.".into(),
+        },
+        Block::Close {
+            hypograph: Some("Major Meredith".into()),
+        },
+        Block::Table {
+            lemma: None,
+            headers: None,
+            rows: vec![vec![
+                quarb_text::Cell {
+                    label: Some("Date".into()),
+                    text: "2 November 1932".into(),
+                },
+                quarb_text::Cell {
+                    label: Some("Outcome".into()),
+                    text: "Minimal impact".into(),
+                },
+            ]],
+        },
+        Block::Verbatim {
+            lang: Some("rust".into()),
+            text: "fn main() {}".into(),
+        },
+    ]);
+    let out = &values(&m, "^ | atrep")[0];
+    assert!(out.starts_with("@@@!litogramma\n"), "{out}");
+    assert!(
+        out.contains("@\"/\nInvulnerable as tanks.\n/\"@ Major Meredith"),
+        "{out}"
+    );
+    assert!(
+        out.contains("@:: Date\n@;\n2 November 1932\n;@\n::@"),
+        "{out}"
+    );
+    assert!(out.contains("@@@\"\nfn main() {}\n\"@@@.rust"), "{out}");
+}
+
+/// The atrep parse gate: what `| atrep` emits, atrep's own parser
+/// accepts. Env-gated: needs ATREP_BIN and LITOGRAMMA_DIA.
+#[test]
+fn atrep_output_parses() {
+    let (Ok(bin), Ok(dia)) = (
+        std::env::var("ATREP_BIN"),
+        std::env::var("LITOGRAMMA_DIA"),
+    ) else {
+        eprintln!("skip: set ATREP_BIN and LITOGRAMMA_DIA to run the parse gate");
+        return;
+    };
+    let m = TextModel::build(vec![
+        Block::Heading {
+            level: 2,
+            lemma: "Aftermath".into(),
+        },
+        Block::Paragraph {
+            text: "The emus prevailed.".into(),
+        },
+        Block::Open {
+            kind: Container::UnorderedList,
+            lemma: None,
+        },
+        Block::Open {
+            kind: Container::Item,
+            lemma: None,
+        },
+        Block::Text {
+            text: "a bounty system".into(),
+        },
+        Block::Close { hypograph: None },
+        Block::Close { hypograph: None },
+    ]);
+    let doc = &values(&m, "^ | atrep")[0];
+    let dir = std::env::temp_dir().join("quarb-atrep-gate");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(&dia, dir.join("litogramma.dia")).unwrap();
+    let path = dir.join("gate.atd");
+    std::fs::write(&path, format!("{doc}\n")).unwrap();
+    let out = std::process::Command::new(&bin)
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("run atrep check");
+    assert!(
+        out.status.success(),
+        "atrep rejected the emission:\n{}\n---\n{doc}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Ruling #27: `::grammata` (the body between lemma and
+/// hypograph) and the friendly aliases — `::title`, `::body`,
+/// `::attribution`, `::ord` — answered beside the Greek.
+#[test]
+fn grammata_and_the_friendly_aliases() {
+    let m = TextModel::build(vec![
+        Block::Heading {
+            level: 2,
+            lemma: "Aftermath".into(),
+        },
+        Block::Paragraph {
+            text: "The emus prevailed.".into(),
+        },
+        Block::Table {
+            lemma: None,
+            headers: None,
+            rows: vec![vec![quarb_text::Cell {
+                label: Some("Outcome".into()),
+                text: "Emu victory".into(),
+            }]],
+        },
+        Block::Open {
+            kind: Container::Blockquote,
+            lemma: None,
+        },
+        Block::Paragraph {
+            text: "Invulnerable as tanks.".into(),
+        },
+        Block::Close {
+            hypograph: Some("Major Meredith".into()),
+        },
+    ]);
+    // A section's grammata is its body without the title.
+    assert_eq!(
+        values(&m, "//section[::lemma = \"Aftermath\"]::grammata @| [1] | [$_ =~ /^The emus/] @| count"),
+        vec!["1"]
+    );
+    // A cell's body is the value without the label fold.
+    assert_eq!(values(&m, "//*<cell>::grammata"), vec!["Emu victory"]);
+    assert_eq!(values(&m, "//*<cell>::body"), vec!["Emu victory"]);
+    // Aliases answer beside the Greek, wherever properties go.
+    assert_eq!(values(&m, "//*<cell>::title"), vec!["Outcome"]);
+    assert_eq!(
+        values(&m, "//section[::title = \"Aftermath\"]::lemma"),
+        vec!["Aftermath"]
+    );
+    assert_eq!(
+        values(&m, "//blockquote::attribution"),
+        vec!["Major Meredith"]
+    );
+    assert_eq!(
+        values(&m, "//blockquote::grammata"),
+        vec!["Invulnerable as tanks."]
+    );
+    assert_eq!(values(&m, "//*<row>[::ord = 1]::taxis"), vec!["1"]);
+}
