@@ -93,6 +93,9 @@ impl quarb::AstAdapter for Dyn {
     fn metadata(&self, node: NodeId, key: &str) -> Option<quarb::Value> {
         self.0.metadata(node, key)
     }
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.0.aliased_metadata(node)
+    }
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.0.links(node)
     }

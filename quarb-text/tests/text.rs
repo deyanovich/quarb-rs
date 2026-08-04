@@ -518,3 +518,25 @@ fn grammata_and_the_friendly_aliases() {
     );
     assert_eq!(values(&m, "//*<row>[::ord = 1]::taxis"), vec!["1"]);
 }
+
+/// Ruling #29: a closed-surface adapter answers its annotations
+/// at `::` too — data first, alias only when the node has no
+/// such property, and core metadata never aliased.
+#[test]
+fn closed_surface_adapters_alias_their_metadata() {
+    let m = TextModel::build(vec![
+        Block::Heading { level: 3, lemma: "Aftermath".into() },
+        Block::Verbatim { lang: Some("rust".into()), text: "fn main() {}".into() },
+    ]);
+    // The annotation answers at either depth.
+    assert_eq!(values(&m, "//section::level"), vec!["3"]);
+    assert_eq!(values(&m, "//section::::level"), vec!["3"]);
+    assert_eq!(values(&m, "//verbatim::lang"), vec!["rust"]);
+    // Predicates see the alias too.
+    assert_eq!(values(&m, "//section[::level = 3]::lemma"), vec!["Aftermath"]);
+    // An undeclared metadata key stays four-colon only.
+    assert_eq!(values(&m, "//section::nonesuch"), vec![""]);
+    // Core metadata is never aliased: `::name` is not `:::name`.
+    let names = values(&m, "//section | rec(\"data\", ::name, \"core\", :::name)");
+    assert!(names[0].contains("\"data\": null"), "{names:?}");
+}

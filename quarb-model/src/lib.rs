@@ -785,6 +785,12 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// Model nodes add their own annotations (`n-rows`); base nodes
+    /// keep the mounted adapter's, aliases included.
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.base.aliased_metadata(node)
+    }
+
     /// Data provenance. An aliased node *is* its base node under a
     /// role, so it answers that node's provenance. An elevated node
     /// is a new value the model made: it answers a derivation source

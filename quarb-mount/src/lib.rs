@@ -167,6 +167,16 @@ impl AstAdapter for MountAdapter {
         self.mounts[m].adapter.metadata(inner, key)
     }
 
+    /// Per node, because each mount brings its own list: a git
+    /// mount aliases `short`, the JSON mount beside it aliases
+    /// nothing.
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        match self.decode(node) {
+            Some((m, inner)) => self.mounts[m].adapter.aliased_metadata(inner),
+            None => &[],
+        }
+    }
+
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         match self.decode(node) {
             None => Vec::new(),
@@ -278,6 +288,9 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.0.metadata(node, key)
+    }
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.0.aliased_metadata(node)
     }
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.0.links(node)

@@ -614,6 +614,13 @@ impl AstAdapter for TextModel {
         Some(Value::Str(self.nodes[node.0 as usize].prose.clone()))
     }
 
+    /// Ruling #29: the text level's surface is the vocabulary
+    /// itself — no document can introduce a property name — so
+    /// its two annotations answer at `::` as well.
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        &["level", "lang"]
+    }
+
     /// `::::level` on sections (the source heading level) and
     /// `::::lang` on verbatim blocks (the declared language).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

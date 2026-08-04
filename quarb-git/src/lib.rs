@@ -677,6 +677,19 @@ impl AstAdapter for GitAdapter {
     /// Commits: `;;;short`, `;;;n-parents`, `;;;tags`,
     /// `;;;n-tags`. Entries: `;;;type`, `;;;mode`, `;;;size`,
     /// `;;;hash`.
+    /// Ruling #29: this adapter's property surface is closed — a
+    /// commit object cannot grow fields — so its annotations
+    /// answer at `::` too. `hash` is in the list on purpose:
+    /// commits expose the oid as a property and tree entries as
+    /// metadata, but it is one concept — this node's object id —
+    /// and aliasing is what makes `::hash` answer everywhere in
+    /// the arbor instead of falling silently null on entries.
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        &[
+            "short", "hash", "n-parents", "n-changed", "tags", "n-tags", "type", "mode", "size",
+        ]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if let Some(hash) = self.commit_of(node) {
             return match key {

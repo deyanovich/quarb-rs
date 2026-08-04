@@ -371,6 +371,16 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    /// A graft's own aliases are not merged: a node either belongs
+    /// to the outer document or to a graft, and the alias list is
+    /// consulted only after the owning adapter's `property` misses.
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().aliased_metadata(inner),
+            None => self.outer.aliased_metadata(node),
+        }
+    }
+
     /// A graft is a provenance layer: the grafted document's own
     /// components win, and the outer *leaf* it was parsed from fills
     /// the rest (with an fs outer: the file's path and mtime). The

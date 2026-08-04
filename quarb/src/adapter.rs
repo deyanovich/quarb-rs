@@ -144,6 +144,23 @@ pub trait AstAdapter {
         None
     }
 
+    /// Metadata keys this adapter also answers at `::` (ruling
+    /// #29), for the given node — per node, because a composite
+    /// adapter (a multi-mount, a graft) answers for whichever
+    /// document owns it. Only an adapter whose property surface is *closed* —
+    /// fixed by the adapter, never grown by document content — may
+    /// declare aliases: a git commit cannot sprout a `short` field,
+    /// where a JSON object can sprout anything. Data always wins:
+    /// the engine consults `property` first and falls through only
+    /// when it answers `None` for that node, so an alias can never
+    /// shadow a document. Core metadata (`:::`) is never aliased —
+    /// `name`, `id` and `index` exist on every node, and aliasing
+    /// them would change what `::name` means wherever a document
+    /// happens to lack that field.
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Outgoing crosslinks from `node`, as `(label, target)` pairs,
     /// for `->` navigation (a filesystem adapter's symlinks).
     fn links(&self, _node: NodeId) -> Vec<(String, NodeId)> {
@@ -269,6 +286,9 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.inner.metadata(node, key)
     }
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.inner.aliased_metadata(node)
+    }
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.inner.links(node)
     }
@@ -338,6 +358,9 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
     }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.inner.metadata(node, key)
+    }
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.inner.aliased_metadata(node)
     }
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.inner.links(node)
@@ -410,6 +433,9 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
     }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.inner.metadata(node, key)
+    }
+    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
+        self.inner.aliased_metadata(node)
     }
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.inner.links(node)

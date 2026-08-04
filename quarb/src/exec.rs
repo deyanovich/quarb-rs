@@ -2704,6 +2704,21 @@ fn expand_group(
         .collect()
 }
 
+/// `::name` on a node: the document's property, or — when the
+/// adapter declares the key an alias (ruling #29) and the node
+/// has no such property — its metadata. Data always wins.
+fn property_or_alias(adapter: &impl AstAdapter, node: NodeId, name: &str) -> Value {
+    if let Some(v) = adapter.property(node, name) {
+        return v;
+    }
+    if adapter.aliased_metadata(node).contains(&name)
+        && let Some(v) = adapter.metadata(node, name)
+    {
+        return v;
+    }
+    Value::Null
+}
+
 /// Whether a path's endpoint passes the group's predicates, with
 /// the path's arrived-by edge in scope as `$-`.
 fn group_admits(
@@ -2832,7 +2847,7 @@ fn dedup_paths(paths: Vec<GPath>) -> Vec<GPath> {
 /// Project one node to a scalar value.
 fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection) -> Value {
     match proj {
-        Projection::Property(Some(name)) => adapter.property(node, name).unwrap_or(Value::Null),
+        Projection::Property(Some(name)) => property_or_alias(adapter, node, name),
         Projection::Property(None) => adapter.default_value(node).unwrap_or(Value::Null),
         Projection::CoreMeta(key) => core_meta(adapter, node, key).unwrap_or(Value::Null),
         Projection::AdapterMeta(key) => adapter.metadata(node, key).unwrap_or(Value::Null),
