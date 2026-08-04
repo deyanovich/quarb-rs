@@ -46,6 +46,7 @@ mod lexer;
 mod parser;
 pub mod reflect;
 pub use encoding::{base64, base64_decode, sha256, sha256_hex};
+pub mod complete;
 pub mod highlight;
 pub mod quantity;
 mod stdlib;

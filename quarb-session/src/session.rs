@@ -146,6 +146,13 @@ impl Session {
     }
 
     /// The `&N` a fresh line will claim.
+    /// Tab-completion candidates for a line being edited.
+    /// Session-aware by construction: the executor answers with
+    /// its live arbor when it has one, the syntax tier otherwise.
+    pub fn complete(&self, text: &str, cursor: usize) -> Vec<quarb::complete::Candidate> {
+        self.executor.complete(text, cursor)
+    }
+
     pub fn line_no(&self) -> usize {
         self.line_no
     }

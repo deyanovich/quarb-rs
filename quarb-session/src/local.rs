@@ -115,6 +115,10 @@ impl Executor for LocalExecutor {
         self.run(query)
     }
 
+    fn complete(&self, text: &str, cursor: usize) -> Vec<quarb::complete::Candidate> {
+        quarb::complete::complete_with(text, cursor, self.doc.base_dyn())
+    }
+
     fn export(&self, query: &str, kind: &str) -> anyhow::Result<String> {
         if self.model.is_some() {
             anyhow::bail!("rendered export over a --model session is not supported yet");

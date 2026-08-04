@@ -107,6 +107,15 @@ pub trait Executor {
     fn export(&self, _query: &str, _kind: &str) -> anyhow::Result<String> {
         anyhow::bail!("this session's executor does not support rendered export")
     }
+
+    /// Tab-completion candidates at a byte cursor. The default
+    /// answers the syntax tier (the stdlib registry needs no
+    /// adapter), so even a daemon-backed session completes
+    /// function names; executors with a live arbor override this
+    /// with the data tier — real children, real annotations.
+    fn complete(&self, text: &str, cursor: usize) -> Vec<quarb::complete::Candidate> {
+        quarb::complete::complete(text, cursor)
+    }
 }
 
 #[cfg(feature = "native")]

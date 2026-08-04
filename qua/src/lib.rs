@@ -958,6 +958,25 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     }
     let path = cli.paths.first().cloned();
 
+    // A `lines:` prefix mounts a file as line atoms — every line
+    // a node, `<blank>` traited, totals on the root. The reading
+    // wc/grep -c/cloc assume, given an arbor.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("lines:"))
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading {}", target.display()))?;
+        let adapter = quarb_lines::LinesAdapter::parse(&text);
+        let src = target.display().to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
     // A `text:` prefix forces the text-level reading of a document
     // whose extension would otherwise pick the DOM-level adapter
     // (html, md); the producer is chosen by the remaining
@@ -2414,6 +2433,19 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && let Some(cmd) = s.strip_prefix("serve:")
     {
         let a = Rc::new(ServeAdapter::spawn(cmd).context("spawning served adapter")?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
+    // A `lines:` prefix mounts line atoms, matching the
+    // single-input flow.
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("lines:")
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading {}", target.display()))?;
+        let a = Rc::new(quarb_lines::LinesAdapter::parse(&text));
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }

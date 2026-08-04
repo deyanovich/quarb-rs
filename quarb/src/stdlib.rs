@@ -154,6 +154,23 @@ pub fn known_agg(name: &str) -> bool {
     AGGREGATE.contains(&name) || known_keyed(name)
 }
 
+/// The scalar registry, for enumerating consumers (completion,
+/// highlighting): every per-capsa `|` function.
+pub fn scalar_names() -> &'static [&'static str] {
+    SCALAR
+}
+
+/// The aggregate registry: every `@|` reducer (keyed aggregates
+/// are enumerated separately by [`keyed_names`]).
+pub fn aggregate_names() -> &'static [&'static str] {
+    AGGREGATE
+}
+
+/// The keyed-aggregate registry: `sort_by`, `group`, and friends.
+pub fn keyed_names() -> &'static [&'static str] {
+    KEYED
+}
+
 /// Apply a per-capsa scalar function to a single topic. May return
 /// several values (an expanding function like `lines`).
 pub fn apply_scalar(

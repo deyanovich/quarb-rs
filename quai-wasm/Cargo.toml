@@ -15,8 +15,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # The text-format subset only (no `native` feature): json/yaml/toml/
 # csv/xml/html/markdown, driven by Doc::parse. No daemon, no fs.
-quarb-session = { path = "../quarb-session", default-features = false }
-quarb-model = { path = "../quarb-model", version = "0.20.0" }
+quarb-session = { path = "../quarb-session", default-features = false, features = ["sqlite"] }
+quarb-model = { path = "../quarb-model", version = "0.21.0" }
 quarb = { path = "../quarb" }
 wasm-bindgen = "0.2"
 serde_json.workspace = true

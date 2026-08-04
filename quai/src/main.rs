@@ -225,7 +225,7 @@ fn main() -> Result<()> {
     let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
     let raw_paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
     let mut remount: Option<Remount> = None;
-    let mut session = if cli.daemon {
+    let session = if cli.daemon {
         // The daemon holds the arbor (via `qua --resident`); the store
         // persists the macro history across runs. Raw args pass
         // through: `qua` itself understands NAME=TARGET.
@@ -272,10 +272,11 @@ fn main() -> Result<()> {
         remount = Some(ctx);
         Session::new(Box::new(executor), Box::new(MemStore))
     };
+    let session = std::rc::Rc::new(std::cell::RefCell::new(session));
     if let Some(p) = &cli.defs {
         let text =
             std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-        session.seed_defs(&text)?;
+        session.borrow_mut().seed_defs(&text)?;
     }
     let sources = if cli.paths.is_empty() {
         "a bare root — calculator session; lines open with '= expr', :mount adds sources".to_string()
@@ -286,7 +287,7 @@ fn main() -> Result<()> {
     println!(
         "quai — interactive Quarb over {sources} ({mode}).  :help for commands, :quit (or Ctrl-D) to leave."
     );
-    repl(&mut session, &mut remount)
+    repl(&session, &mut remount)
 }
 
 /// Bind the invocation instant: `--now` pins it; otherwise the clock,
@@ -310,17 +311,25 @@ fn bind_now(spec: Option<&str>) -> Result<(i64, u32)> {
     Ok(now)
 }
 
-fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {
+fn repl(
+    session: &std::rc::Rc<std::cell::RefCell<Session>>,
+    remount: &mut Option<Remount>,
+) -> Result<()> {
     use rustyline::error::ReadlineError;
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     // A real line editor: backspace, arrow keys, and Up/Down history
-    // all work regardless of the terminal's erase-char quirks.
-    let mut rl = rustyline::DefaultEditor::new()?;
+    // all work regardless of the terminal's erase-char quirks — and
+    // Tab completes: the session answers from its live arbor (real
+    // children, real annotations), the stdlib registry otherwise.
+    let mut rl = rustyline::Editor::<QuaiHelper, rustyline::history::DefaultHistory>::new()?;
+    rl.set_helper(Some(QuaiHelper {
+        session: std::rc::Rc::clone(session),
+    }));
     loop {
         let prompt = if color {
-            format!("\x1b[36m&{}\x1b[0m ", session.line_no())
+            format!("\x1b[36m&{}\x1b[0m ", session.borrow().line_no())
         } else {
-            format!("&{} ", session.line_no())
+            format!("&{} ", session.borrow().line_no())
         };
         let input = match rl.readline(&prompt) {
             Ok(l) => l,
@@ -341,7 +350,7 @@ fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {
         let _ = rl.add_history_entry(line); // Up/Down recalls prior lines
         // A `:` command (a query cannot start with a lone `:`).
         if line.starts_with(':') && !line.starts_with("::") {
-            if command(session, remount, line) {
+            if command(&mut session.borrow_mut(), remount, line) {
                 break;
             }
             continue;
@@ -352,7 +361,7 @@ fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {
             || line.starts_with("macro ")
             || line == "macro"
         {
-            if let Err(e) = session.add_def(line) {
+            if let Err(e) = session.borrow_mut().add_def(line) {
                 eprintln!("error: {e:#}");
             }
             continue;
@@ -362,22 +371,73 @@ fn repl(session: &mut Session, remount: &mut Option<Remount>) -> Result<()> {
         // `#`, and its `!` signage rejects a bang on a pure fragment.
         match prepare(line) {
             Err(e) => eprintln!("error: {e}"),
-            Ok(Prepared::Frozen(n)) => match session.frozen(n) {
+            Ok(Prepared::Frozen(n)) => match session.borrow().frozen(n).cloned() {
                 Some(cells) => {
-                    let cells = cells.clone();
                     for c in &cells {
                         println!("{}", c.display());
                     }
-                    session.record_frozen(cells);
+                    session.borrow_mut().record_frozen(cells);
                 }
                 None => eprintln!("error: &{n}# has no captured result (line {n} hasn't run)"),
             },
-            Ok(Prepared::Live(q)) => run_and_commit(session, &q, true),
-            Ok(Prepared::Eval(q)) => run_and_commit(session, &q, false),
+            Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), &q, true),
+            Ok(Prepared::Eval(q)) => run_and_commit(&mut session.borrow_mut(), &q, false),
         }
     }
     Ok(())
 }
+
+/// The rustyline helper: Tab asks the session. Completion is the
+/// only non-default behavior — hints, highlighting, and validation
+/// stay stock (live line-coloring via quarb::highlight is a
+/// recorded idea, not yet wired).
+struct QuaiHelper {
+    session: std::rc::Rc<std::cell::RefCell<Session>>,
+}
+
+impl rustyline::completion::Completer for QuaiHelper {
+    type Candidate = rustyline::completion::Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let cands = self.session.borrow().complete(line, pos);
+        // Replace from the start of the word under the cursor.
+        let head = &line[..pos.min(line.len())];
+        let mut start = head
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+            .map_or(0, |i| i + head[i..].chars().next().map_or(1, char::len_utf8));
+        // Register spellings carry their `$`; widen the span so the
+        // typed sigil isn't doubled.
+        if start > 0
+            && head[..start].ends_with('$')
+            && !cands.is_empty()
+            && cands.iter().all(|c| c.text.starts_with('$'))
+        {
+            start -= 1;
+        }
+        Ok((
+            start,
+            cands
+                .into_iter()
+                .map(|c| rustyline::completion::Pair {
+                    display: c.text.clone(),
+                    replacement: c.text,
+                })
+                .collect(),
+        ))
+    }
+}
+
+impl rustyline::hint::Hinter for QuaiHelper {
+    type Hint = String;
+}
+impl rustyline::highlight::Highlighter for QuaiHelper {}
+impl rustyline::validate::Validator for QuaiHelper {}
+impl rustyline::Helper for QuaiHelper {}
 
 /// Evaluate a query line (against the standing arbor, or `fresh` for a
 /// live re-read), print the result, and register it as `&N`.

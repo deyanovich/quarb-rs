@@ -41,6 +41,7 @@ pub enum Doc {
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
     Text(quarb_text::TextModel),
+    #[cfg(feature = "sqlite")]
     Sqlite(quarb_sqlite::SqliteAdapter),
     #[cfg(feature = "native")]
     Fs(quarb_fs::FsAdapter),
@@ -194,13 +195,14 @@ impl Doc {
     /// `--model` enrichment layer wraps (one match, so the model
     /// paths avoid duplicating the variant arms). Wasm-safe; the
     /// native-only variants are compiled in only under `native`.
-    fn base_dyn(&self) -> &dyn quarb::AstAdapter {
+    pub(crate) fn base_dyn(&self) -> &dyn quarb::AstAdapter {
         match self {
             Doc::Json(a) => a,
             Doc::Csv(a) => a,
             Doc::Xml(a) => a,
             Doc::Html(a) => a,
             Doc::Text(a) => a,
+            #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => a,
             #[cfg(feature = "native")]
             Doc::Fs(a) => a,
@@ -305,6 +307,7 @@ impl Doc {
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
             Doc::Text(a) => go!(a),
+            #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => go!(a),
             #[cfg(feature = "native")]
             Doc::Fs(a) => go!(a),
@@ -331,6 +334,7 @@ impl Doc {
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
             Doc::Text(a) => a.locator(node),
+            #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Fs(a) => a.path(node).display().to_string(),
@@ -351,12 +355,23 @@ impl Doc {
 
     /// Open a SQLite database from its file bytes — a `.db` that
     /// never touched a filesystem (the browser's uploaded files).
+    #[cfg(feature = "sqlite")]
     pub fn sqlite_bytes(bytes: &[u8]) -> Result<Doc> {
         Ok(Doc::Sqlite(
             quarb_sqlite::SqliteAdapter::from_bytes(bytes)
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("opening SQLite bytes")?,
         ))
+    }
+
+    /// The refusal twin: the API is present either way, so a
+    /// consumer compiles against both builds and the absence
+    /// reports itself instead of failing to link.
+    #[cfg(not(feature = "sqlite"))]
+    pub fn sqlite_bytes(_bytes: &[u8]) -> Result<Doc> {
+        anyhow::bail!(
+            "this quarb-session was built without the `sqlite` feature"
+        )
     }
 
     /// Mount already-built documents as named children of one root —
@@ -402,6 +417,7 @@ impl Doc {
             Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
             Doc::Html(a) => Box::new(Shared(Rc::new(a))),
             Doc::Text(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
             Doc::Fs(a) => Box::new(Shared(Rc::new(a))),
@@ -500,9 +516,20 @@ impl Doc {
             return Ok(Doc::Xlsx(a));
         }
         if is_sqlite(path) {
-            let a = quarb_sqlite::SqliteAdapter::open_with_refs(path, &opts.refs)
-                .context("opening SQLite database")?;
-            return Ok(Doc::Sqlite(a));
+            // Refuse, never fall through: a .db is binary, and
+            // letting it reach the text sniffers would trade a
+            // clear absence for a confusing parse error.
+            #[cfg(not(feature = "sqlite"))]
+            anyhow::bail!(
+                "{}: this quarb-session was built without the `sqlite` feature",
+                path.display()
+            );
+            #[cfg(feature = "sqlite")]
+            {
+                let a = quarb_sqlite::SqliteAdapter::open_with_refs(path, &opts.refs)
+                    .context("opening SQLite database")?;
+                return Ok(Doc::Sqlite(a));
+            }
         }
         if is_archive(path) {
             let a = quarb_archive::ArchiveAdapter::open(path).context("opening archive")?;
