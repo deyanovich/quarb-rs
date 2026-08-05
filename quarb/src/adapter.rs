@@ -125,11 +125,29 @@ pub trait AstAdapter {
     /// name test: it may deliberately *alias* — resolve a name to a
     /// node whose edge name differs (git revision syntax landing on
     /// a hash-named commit) — and the engine will not re-filter.
+    /// Container-scoped resolution like that stays child-axis only;
+    /// per-node spelling aliases belong in
+    /// [`answers_to`](Self::answers_to), which this default
+    /// consults.
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.children(node)
             .into_iter()
-            .filter(|&c| self.name(c).as_deref() == Some(name))
+            .filter(|&c| self.answers_to(c, name))
             .collect()
+    }
+
+    /// Whether `node` answers to `name` as a literal spelling
+    /// (ruling #30). The default is canonical equality. An adapter
+    /// may declare per-node aliases — a social feed spelling a
+    /// handle `@alice` while the stripped `alice` is the hop name —
+    /// and the engine consults this wherever a *literal* name is
+    /// matched, on every axis, so one override keeps `/@alice` and
+    /// `//@alice` in agreement. `:::name` stays canonical (locators
+    /// and reflection print it; an alias is a way in, never a way
+    /// out), and name patterns (`~(...)`, `*`) test the canonical
+    /// name only.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.name(node).as_deref() == Some(name)
     }
 
     /// The default projection of `node` — bare `::`, adapter-specific

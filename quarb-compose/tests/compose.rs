@@ -151,3 +151,52 @@ fn dual_exposure_at_graft_root() {
     };
     assert_eq!(got, ["phone"]);
 }
+
+/// Source leaves graft at the level the mount chose: the syntax
+/// level by default (`//function_item` answers), the code level
+/// with `SourceGraft::Code` (declared identifiers are the
+/// names — the filesystem path continues into the program).
+#[test]
+fn source_graft_level_is_per_mount() {
+    use quarb_compose::SourceGraft;
+    let dir = fixture("source-graft");
+    std::fs::write(
+        dir.join("lexer.rs"),
+        "/// Scan.\npub fn lex(input: &str) -> usize {\n    fn is_name_char(c: char) -> bool {\n        c.is_alphanumeric()\n    }\n    input.chars().filter(|c| is_name_char(*c)).count()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("util.py"),
+        "def helper(a, b):\n    return a + b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.c"),
+        "static int helper(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    // Default: the syntax level, exactly as before.
+    let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
+    assert_eq!(values(&a, "/lexer.rs//function_item::name"), ["lex", "is_name_char"]);
+    assert_eq!(values(&a, "//lex @| count"), ["0"]);
+
+    // Opted up: the code level, one namespace — dirs, files,
+    // declarations.
+    let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap())
+        .with_source_graft(SourceGraft::Code);
+    assert_eq!(values(&a, "/lexer.rs/lex/is_name_char @| count"), ["1"]);
+    // lex, is_name_char, the filter closure (a lambda IS a
+    // <function>), and the two helpers.
+    assert_eq!(values(&a, "//*<function>:::name @| count"), ["5"]);
+    assert_eq!(values(&a, "//helper:::name @| count"), ["2"]);
+    assert_eq!(values(&a, "//function_item @| count"), ["0"]);
+    // The locator shows the seam with the bang, the query never
+    // sees it.
+    let node = match quarb::run("//is_name_char", &a).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns[0],
+        _ => panic!("expected nodes"),
+    };
+    let fs_locator = |n| a.outer().path(n).display().to_string();
+    assert!(a.locator(node, fs_locator).ends_with("lexer.rs!/lex/is_name_char"));
+}

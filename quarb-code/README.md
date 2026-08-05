@@ -1,6 +1,29 @@
 # quarb-code
 
-Source-code AST adapter for the Quarb query engine (tree-sitter).
+The code level for the Quarb query engine — cross-language code
+navigation where **function names are node names, not
+properties**: `/lexer/lex/is_name_char` descends module,
+function, nested function — a filepath into the program — where
+the syntax level spells the same question
+`//function_item[::name = "lex"]`.
+
+A declaration's edge name is its declared identifier; the
+remaining constructs keep a small normalized vocabulary (`if`,
+`switch`, `for`, `call`, …); everything else dissolves. Curated
+traits (`<function>`, `<type>`, `<loop>`, …) classify across
+languages, `::signature` / `::doc` / `::callee` are uniform
+properties, `->definition` crosslinks resolve calls to their
+same-file declarations, and the raw grammar kind survives only
+as `::::kind`. Built on the
+[`quarb-tree-sitter`](https://crates.io/crates/quarb-tree-sitter)
+parse (the syntax level, which remains the default reading of
+source files; the `code:` target prefix opts up). Grammars:
+Rust, Python, JavaScript, C.
+
+**History note:** through 0.21.0 this crate name hosted the
+tree-sitter syntax-level adapter, now published as
+`quarb-tree-sitter`. From 0.22.0, `quarb-code` is the code
+level.
 
 Part of [Quarb](https://quarb.org), a query language for *arbors*
 — tree-spanned graphs (a hierarchical backbone enriched with

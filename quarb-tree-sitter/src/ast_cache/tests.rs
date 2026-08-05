@@ -2,7 +2,7 @@
 //! corruption / skew must be rejected (→ `None`, never a wrong arbor).
 
 use super::*;
-use crate::CodeAdapter;
+use crate::TreeSitterAdapter;
 
 const RUST: &str = r#"
 mod m {
@@ -33,15 +33,15 @@ fn lang_of(ext: &str) -> tree_sitter::Language {
 /// Render a query's results to comparable strings (values by
 /// display, node results by locator), so two adapters can be
 /// checked for observational equivalence.
-fn rendered(adapter: &CodeAdapter, query: &str) -> Vec<String> {
+fn rendered(adapter: &TreeSitterAdapter, query: &str) -> Vec<String> {
     match quarb::run(query, adapter).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
         quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| adapter.locator(n)).collect(),
     }
 }
 
-fn adapter_from_nodes(src: &str, nodes: Vec<Node>) -> CodeAdapter {
-    CodeAdapter {
+fn adapter_from_nodes(src: &str, nodes: Vec<Node>) -> TreeSitterAdapter {
+    TreeSitterAdapter {
         source: src.to_string(),
         nodes,
     }
@@ -54,7 +54,7 @@ fn check_round_trip(src: &str, ext: &str) {
     let tag = lang_tag(ext);
     assert_ne!(tag, 0, "unsupported ext {ext}");
     let m = meta(tag, &lang);
-    let a = CodeAdapter::parse_raw(src, ext).unwrap();
+    let a = TreeSitterAdapter::parse_raw(src, ext).unwrap();
 
     let bytes = encode(
         &a.nodes,
@@ -124,7 +124,7 @@ fn valid_bytes(src: &str, ext: &str) -> (Vec<u8>, tree_sitter::Language, u16) {
     let lang = lang_of(ext);
     let tag = lang_tag(ext);
     let m = meta(tag, &lang);
-    let a = CodeAdapter::parse_raw(src, ext).unwrap();
+    let a = TreeSitterAdapter::parse_raw(src, ext).unwrap();
     let bytes = encode(
         &a.nodes,
         tag,
@@ -224,7 +224,7 @@ fn file_store_load_round_trip() {
     let lang = lang_of("c");
     let tag = lang_tag("c");
     let hash = quarb::sha256(C.as_bytes());
-    let a = CodeAdapter::parse_raw(C, "c").unwrap();
+    let a = TreeSitterAdapter::parse_raw(C, "c").unwrap();
 
     // Miss before store.
     assert!(load(&cache, tag, &lang, &hash, C).is_none());
@@ -245,7 +245,7 @@ fn concurrent_store_is_benign() {
     let lang = lang_of("rs");
     let tag = lang_tag("rs");
     let hash = quarb::sha256(RUST.as_bytes());
-    let a = CodeAdapter::parse_raw(RUST, "rs").unwrap();
+    let a = TreeSitterAdapter::parse_raw(RUST, "rs").unwrap();
 
     std::thread::scope(|s| {
         for _ in 0..8 {
@@ -265,8 +265,8 @@ fn set_cache_makes_parse_transparent() {
     crate::set_cache(Some(Cache::new(dir.path().to_path_buf())));
 
     // First parse: miss → parse → store. Second: hit → load.
-    let a = CodeAdapter::parse(RUST, "rs").unwrap(); // populates
-    let b = CodeAdapter::parse(RUST, "rs").unwrap(); // from cache
+    let a = TreeSitterAdapter::parse(RUST, "rs").unwrap(); // populates
+    let b = TreeSitterAdapter::parse(RUST, "rs").unwrap(); // from cache
     for q in ["//function_item::name", "//*;;;kind", "//*;;;start-line"] {
         assert_eq!(
             rendered(&a, q),

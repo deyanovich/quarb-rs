@@ -42,7 +42,8 @@ enum Inner {
     Html(quarb_html::HtmlAdapter),
     Text(quarb_text::TextModel),
     Csv(quarb_csv::CsvAdapter),
-    Code(quarb_code::CodeAdapter),
+    Syntax(quarb_tree_sitter::TreeSitterAdapter),
+    Code(quarb_code::CodeModel),
     /// A grafted archive, itself composed so its own parseable
     /// entries graft in turn.
     Archive(Box<ComposeAdapter<quarb_archive::ArchiveAdapter>>),
@@ -56,6 +57,7 @@ impl Inner {
             Inner::Html(a) => a,
             Inner::Text(a) => a,
             Inner::Csv(a) => a,
+            Inner::Syntax(a) => a,
             Inner::Code(a) => a,
             Inner::Archive(a) => &**a,
         }
@@ -68,10 +70,24 @@ impl Inner {
             Inner::Html(a) => a.locator(node),
             Inner::Text(a) => a.locator(node),
             Inner::Csv(a) => a.locator(node),
+            Inner::Syntax(a) => a.locator(node),
             Inner::Code(a) => a.locator(node),
             Inner::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
         }
     }
+}
+
+/// The level source-file leaves graft at: the syntax level (the
+/// literal parse — the default) or the code level (identifiers
+/// as names). Chosen per mount by the `code:` target prefix, and
+/// inherited by nested composes (an archive inside a `code:`
+/// mount grafts its source entries at the code level too) — the
+/// filesystem-into-declarations namespace has no seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceGraft {
+    #[default]
+    Syntax,
+    Code,
 }
 
 /// Names [`quarb_archive::ArchiveAdapter::open`] can take: the
@@ -83,7 +99,7 @@ fn archive_name(name: &str) -> bool {
 }
 
 /// Parse `content` by `name`'s extension, else by sniffing.
-fn parse_inner(name: &str, content: &str) -> Option<Inner> {
+fn parse_inner(name: &str, content: &str, graft: SourceGraft) -> Option<Inner> {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "json" => {
@@ -112,10 +128,15 @@ fn parse_inner(name: &str, content: &str) -> Option<Inner> {
                 .ok()
                 .map(Inner::Csv);
         }
-        ext if quarb_code::supported(ext) => {
-            return quarb_code::CodeAdapter::parse(content, ext)
-                .ok()
-                .map(Inner::Code);
+        ext if quarb_tree_sitter::supported(ext) => {
+            return match graft {
+                SourceGraft::Syntax => quarb_tree_sitter::TreeSitterAdapter::parse(content, ext)
+                    .ok()
+                    .map(Inner::Syntax),
+                SourceGraft::Code => {
+                    quarb_code::CodeModel::parse(content, ext).ok().map(Inner::Code)
+                }
+            };
         }
         _ => {}
     }
@@ -162,6 +183,8 @@ pub struct ComposeAdapter<A: AstAdapter> {
     /// substrate has one. Enables archive grafts, which are
     /// binary and open by path rather than parsing from text.
     source_path: Option<fn(&A, NodeId) -> Option<PathBuf>>,
+    /// The level source-file leaves graft at.
+    source_graft: SourceGraft,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -173,7 +196,15 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             interned: RefCell::new(HashMap::new()),
             reverse: RefCell::new(Vec::new()),
             source_path: None,
+            source_graft: SourceGraft::default(),
         }
+    }
+
+    /// Choose the level source-file leaves graft at
+    /// (builder-style; the default is the syntax level).
+    pub fn with_source_graft(mut self, graft: SourceGraft) -> Self {
+        self.source_graft = graft;
+        self
     }
 
     /// Like [`new`](Self::new), with a hook mapping outer leaves
@@ -249,7 +280,9 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 && let Some(path) = path_of(&self.outer, node)
                 && let Ok(a) = quarb_archive::ArchiveAdapter::open(&path)
             {
-                let inner = Inner::Archive(Box::new(ComposeAdapter::new(a)));
+                let inner = Inner::Archive(Box::new(
+                    ComposeAdapter::new(a).with_source_graft(self.source_graft),
+                ));
                 let mut grafts = self.grafts.borrow_mut();
                 grafts.push(Graft { outer: node, inner });
                 return Some(grafts.len() - 1);
@@ -258,7 +291,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 Value::Str(s) => s,
                 _ => return None,
             };
-            let inner = parse_inner(&name, &content)?;
+            let inner = parse_inner(&name, &content, self.source_graft)?;
             let mut grafts = self.grafts.borrow_mut();
             grafts.push(Graft { outer: node, inner });
             Some(grafts.len() - 1)

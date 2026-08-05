@@ -58,7 +58,8 @@ enum Doc {
     Git(quarb_git::GitAdapter),
     Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
     Xlsx(quarb_xlsx::XlsxAdapter),
-    Code(quarb_code::CodeAdapter),
+    Syntax(quarb_tree_sitter::TreeSitterAdapter),
+    Code(quarb_code::CodeModel),
     Mount(quarb_mount::MountAdapter),
     Remote(Dyn),
 }
@@ -111,6 +112,20 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
+            // The code level: identifiers as names; the format
+            // name carries the language.
+            "code-rust" => quarb_code::CodeModel::parse(input, "rs")
+                .map(Doc::Code)
+                .map_err(|e| format!("parsing Rust at the code level: {e}")),
+            "code-python" => quarb_code::CodeModel::parse(input, "py")
+                .map(Doc::Code)
+                .map_err(|e| format!("parsing Python at the code level: {e}")),
+            "code-javascript" => quarb_code::CodeModel::parse(input, "js")
+                .map(Doc::Code)
+                .map_err(|e| format!("parsing JavaScript at the code level: {e}")),
+            "code-c" => quarb_code::CodeModel::parse(input, "c")
+                .map(Doc::Code)
+                .map_err(|e| format!("parsing C at the code level: {e}")),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -140,6 +155,7 @@ impl Doc {
             Doc::Git(a) => go!(a),
             Doc::Archive(a) => go!(a),
             Doc::Xlsx(a) => go!(a),
+            Doc::Syntax(a) => go!(a),
             Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
             Doc::Remote(a) => go!(a),
@@ -162,6 +178,7 @@ impl Doc {
             Doc::Git(a) => a.locator(node),
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
             Doc::Xlsx(a) => a.locator(node),
+            Doc::Syntax(a) => a.locator(node),
             Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
             Doc::Remote(a) => generic_locator(a, node),
@@ -331,6 +348,7 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
             Doc::Git(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Archive(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Xlsx(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::Syntax(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Code(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Mount(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Remote(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
@@ -719,8 +737,8 @@ fn open(path: &str, descend: bool) -> PyResult<Document> {
             ),
         ),
         "xlsx" => Doc::Xlsx(quarb_xlsx::XlsxAdapter::open(&p).map_err(|e| err(e.to_string()))?),
-        e if quarb_code::supported(e) => {
-            Doc::Code(quarb_code::CodeAdapter::open(&p).map_err(|e| err(e.to_string()))?)
+        e if quarb_tree_sitter::supported(e) => {
+            Doc::Syntax(quarb_tree_sitter::TreeSitterAdapter::open(&p).map_err(|e| err(e.to_string()))?)
         }
         _ => return load(p, None),
     };

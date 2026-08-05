@@ -1,134 +1,260 @@
-//! Source-code AST adapter for the Quarb query engine.
+//! The code level for the Quarb query engine.
 //!
-//! The trait is named `AstAdapter`; this adapter takes the name
-//! literally: a source file parses (tree-sitter) into its syntax
-//! tree, and the tree is the arbor. Node kinds are the edge names
-//! (`//function_item`, `//call_expression`), a node's value
-//! (`::`) is its source text, and tree-sitter's *fields* become
-//! properties — `::name` on a `function_item` is the function's
-//! name, `::body` its block — so
-//! `//function_item[::name = "main"]` reads as it should.
+//! Cross-language code navigation above the syntax level
+//! (`quarb-tree-sitter`): **function names are node names, not
+//! properties**. `/lexer/lex/is_name_char` descends module,
+//! function, nested function — a filepath into the program —
+//! where the syntax level spells the same question
+//! `//function_item[::name = "lex"]`.
 //!
-//! Only *named* nodes appear (punctuation and keywords are
-//! syntax, not structure). Metadata: `;;;kind`, `;;;field` (this
-//! node's field name in its parent), `;;;start-line` /
-//! `;;;end-line` (1-based), `;;;n-children`. //! Python, JavaScript, by extension (`rs`, `py`, `js`); the
-//! grammar set is compile-time and easily grown.
+//! - **Names.** A declaration's edge name is its declared
+//!   identifier; every other construct in the vocabulary is named
+//!   by its normalized keyword (`if`, `switch`, `for`, `call`);
+//!   everything else dissolves — children hoist, as the text
+//!   level dissolves markup soup. A nameless function-valued
+//!   expression adopts the identifier of the binding receiving
+//!   it (`const lex = () => {}` is a function named `lex`).
+//! - **Traits** classify: `<function>`, `<type>`, `<module>`,
+//!   `<loop>`, `<conditional>`, `<call>`, `<import>`.
+//! - **Properties** are uniform: `::signature` (the declaration
+//!   head), `::doc` (attached documentation), `::callee` (on
+//!   calls); bare `::` is the node's source text.
+//! - **Annotations**: `::::kind` (the raw backend kind — the only
+//!   place tree-sitter vocabulary survives), `::::construct`,
+//!   `::::start-line` / `::::end-line`, `::::lang`,
+//!   `::::n-children`, `::::n-params` — every one aliased to
+//!   `::` (the surface is closed; ruling #29).
+//! - **Crosslinks**: every `call` carries `->definition` edges to
+//!   the same-file declarations matching its callee;
+//!   `//lex<-definition` is find-references.
 //!
-//! Composed (`qua --descend`), source files graft like JSON does
-//! — `//function_item::name` over a whole directory tree is one
-//! query across every parsed file.
+//! The vocabulary and the per-grammar lowering tables are ruled
+//! in the spec (The Code Level, ruling #31) and doubled as
+//! conformance fixtures in this crate's tests. Grammars: Rust,
+//! Python, JavaScript, C — the syntax level's set, each nailed.
 
 use quarb::{AstAdapter, NodeId, Value};
 
-mod ast_cache;
-pub use ast_cache::Cache;
+mod lower;
 
-thread_local! {
-    /// The AST cache for this thread, or `None` (uncached). Set once
-    /// by the CLI from `--cache`; consulted by every `parse` call, so
-    /// single-file and `--descend` (via quarb-compose) both benefit.
-    static CACHE: std::cell::RefCell<Option<Cache>> = const { std::cell::RefCell::new(None) };
+/// A grammar of the code level's set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    Rust,
+    Python,
+    Javascript,
+    C,
 }
 
-/// Enable or disable the persistent AST cache for this thread.
-pub fn set_cache(cache: Option<Cache>) {
-    CACHE.with(|c| *c.borrow_mut() = cache);
+impl Lang {
+    /// The `::::lang` spelling.
+    pub fn name(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::Python => "python",
+            Lang::Javascript => "javascript",
+            Lang::C => "c",
+        }
+    }
 }
 
-/// An error parsing a source file.
-#[derive(Debug, thiserror::Error)]
-pub enum CodeError {
-    #[error("code: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("code: no grammar for extension {0:?}")]
-    Language(String),
-    #[error("code: parse produced no tree")]
-    Parse,
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) struct Node {
-    pub(crate) kind: &'static str,
-    pub(crate) field: Option<&'static str>,
-    pub(crate) parent: Option<NodeId>,
-    pub(crate) children: Vec<NodeId>,
-    /// Byte range into the source.
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) start_line: usize,
-    pub(crate) end_line: usize,
-    /// Field name → child index, for `::field` properties.
-    pub(crate) fields: Vec<(&'static str, usize)>,
-}
-
-/// A parsed source file, exposed as its syntax tree.
-pub struct CodeAdapter {
-    source: String,
-    nodes: Vec<Node>,
-}
-
-/// The grammar for a file extension.
-fn language(ext: &str) -> Option<tree_sitter::Language> {
+/// The grammar for a file extension (lowercased).
+pub fn lang_for_ext(ext: &str) -> Option<Lang> {
     match ext {
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "py" => Some(tree_sitter_python::LANGUAGE.into()),
-        "js" | "mjs" | "cjs" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
+        "rs" => Some(Lang::Rust),
+        "py" => Some(Lang::Python),
+        "js" | "mjs" | "cjs" | "jsx" => Some(Lang::Javascript),
+        "c" | "h" => Some(Lang::C),
         _ => None,
     }
 }
 
-/// Whether an extension has a grammar (for dispatch and grafting).
+/// Whether an extension has a code-level lowering (for dispatch
+/// and grafting). Agrees with `quarb_tree_sitter::supported`.
 pub fn supported(ext: &str) -> bool {
-    language(ext).is_some()
+    lang_for_ext(ext).is_some()
 }
 
-impl CodeAdapter {
-    /// Parse source text as `ext`'s language. When the thread's AST
-    /// cache is enabled (see [`set_cache`]), a cache hit for this
-    /// exact content skips tree-sitter entirely; a miss parses and
-    /// stores. Caching is transparent — the returned adapter is
-    /// identical either way.
-    pub fn parse(text: &str, ext: &str) -> Result<Self, CodeError> {
-        if let Some(cache) = CACHE.with(|c| c.borrow().clone())
-            && let Some(lang) = language(ext)
-        {
-            let tag = ast_cache::lang_tag(ext);
-            if tag != 0 {
-                let hash = quarb::sha256(text.as_bytes());
-                if let Some(nodes) = ast_cache::load(&cache, tag, &lang, &hash, text) {
-                    return Ok(CodeAdapter {
-                        source: text.to_string(),
-                        nodes,
-                    });
-                }
-                let adapter = Self::parse_raw(text, ext)?;
-                ast_cache::store(&cache, &adapter.nodes, tag, &lang, &hash, text.len() as u64);
-                return Ok(adapter);
+/// An error reading a source file at the code level.
+#[derive(Debug, thiserror::Error)]
+pub enum CodeError {
+    #[error("code: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("code: no code-level support for extension {0:?} (rs, py, js, mjs, cjs, jsx, c, h)")]
+    Language(String),
+    #[error(transparent)]
+    Backend(#[from] quarb_tree_sitter::TreeSitterError),
+}
+
+/// One lowered construct — the code level's producer seam, the
+/// parallel of `quarb_text::Block`. A producer emits `Decl`s in
+/// pre-order (a parent precedes its children);
+/// [`CodeModel::build`] derives the arbor. The tree-sitter
+/// producer lives in this crate; another backend supplies the
+/// same stream and nothing above it moves.
+#[derive(Debug)]
+pub struct Decl {
+    /// Index of the parent `Decl`, or `None` for a top-level one.
+    pub parent: Option<usize>,
+    /// The vocabulary word: `function`, `type`, `if`, `call`, …
+    pub construct: &'static str,
+    /// The declared (or adopted) identifier, where one exists.
+    pub name: Option<String>,
+    /// Curated trait set — never backend kinds.
+    pub traits: &'static [&'static str],
+    /// The raw backend kind; surfaces only as `::::kind`.
+    pub kind: String,
+    /// Byte range into the source.
+    pub span: (usize, usize),
+    /// 1-based start/end lines.
+    pub lines: (usize, usize),
+    /// The declaration head, whitespace-collapsed (`::signature`).
+    pub signature: Option<String>,
+    /// Attached documentation, markers stripped (`::doc`).
+    pub doc: Option<String>,
+    /// A call's callee text (`::callee`).
+    pub callee: Option<String>,
+    /// Declared parameter count, functions only (`::::n-params`).
+    pub n_params: Option<i64>,
+}
+
+struct Node {
+    parent: Option<NodeId>,
+    children: Vec<NodeId>,
+    construct: &'static str,
+    name: Option<String>,
+    traits: &'static [&'static str],
+    kind: String,
+    span: (usize, usize),
+    lines: (usize, usize),
+    signature: Option<String>,
+    doc: Option<String>,
+    callee: Option<String>,
+    n_params: Option<i64>,
+    /// `->definition` targets (calls only).
+    links: Vec<NodeId>,
+    /// `<-definition` sources (declarations only).
+    backlinks: Vec<NodeId>,
+}
+
+/// A source file read at the code level.
+pub struct CodeModel {
+    source: String,
+    lang: Lang,
+    nodes: Vec<Node>,
+}
+
+/// Every annotation key answers at `::` too: the property
+/// surface is closed (a source file cannot mint a property —
+/// identifiers become names), so ruling #29 applies in full.
+/// Four colons stay the portable spelling.
+const ALIASED: &[&str] = &[
+    "kind",
+    "construct",
+    "start-line",
+    "end-line",
+    "lang",
+    "n-children",
+    "n-params",
+];
+
+impl CodeModel {
+    /// Derive the arbor from a producer's `Decl` stream — the
+    /// seam. `decls` must be pre-order: a parent precedes its
+    /// children.
+    pub fn build(source: String, lang: Lang, decls: Vec<Decl>) -> Self {
+        let mut nodes = Vec::with_capacity(decls.len() + 1);
+        // nodes[0]: the unnamed file root.
+        nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            construct: "",
+            name: None,
+            traits: &[],
+            kind: String::new(),
+            span: (0, source.len()),
+            lines: (1, source.lines().count().max(1)),
+            signature: None,
+            doc: None,
+            callee: None,
+            n_params: None,
+            links: Vec::new(),
+            backlinks: Vec::new(),
+        });
+        for d in decls {
+            let id = NodeId(nodes.len() as u64);
+            let parent = NodeId(d.parent.map_or(0, |p| p as u64 + 1));
+            nodes.push(Node {
+                parent: Some(parent),
+                children: Vec::new(),
+                construct: d.construct,
+                name: d.name,
+                traits: d.traits,
+                kind: d.kind,
+                span: d.span,
+                lines: d.lines,
+                signature: d.signature,
+                doc: d.doc,
+                callee: d.callee,
+                n_params: d.n_params,
+                links: Vec::new(),
+                backlinks: Vec::new(),
+            });
+            nodes[parent.0 as usize].children.push(id);
+        }
+        let mut model = CodeModel {
+            source,
+            lang,
+            nodes,
+        };
+        model.link_definitions();
+        model
+    }
+
+    /// Resolve every call's callee against the file's named
+    /// function and type declarations — `->definition`, by
+    /// identifier. Unresolved callees carry no edge; an ambiguous
+    /// identifier fans out to every match.
+    fn link_definitions(&mut self) {
+        let mut by_name: std::collections::HashMap<&str, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if matches!(n.construct, "function" | "type")
+                && let Some(name) = &n.name
+            {
+                by_name.entry(name.as_str()).or_default().push(NodeId(i as u64));
             }
         }
-        Self::parse_raw(text, ext)
+        let mut links: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Some(callee) = &n.callee
+                && let Some(ident) = trailing_ident(callee)
+                && let Some(targets) = by_name.get(ident)
+            {
+                links.push((NodeId(i as u64), targets.clone()));
+            }
+        }
+        for (call, targets) in links {
+            for t in &targets {
+                self.nodes[t.0 as usize].backlinks.push(call);
+            }
+            self.nodes[call.0 as usize].links = targets;
+        }
     }
 
-    /// Parse without consulting the cache — the direct tree-sitter
-    /// path, and the miss path of [`parse`].
-    fn parse_raw(text: &str, ext: &str) -> Result<Self, CodeError> {
-        let lang = language(ext).ok_or_else(|| CodeError::Language(ext.to_string()))?;
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&lang)
-            .map_err(|_| CodeError::Language(ext.to_string()))?;
-        let tree = parser.parse(text, None).ok_or(CodeError::Parse)?;
-        let mut nodes = Vec::new();
-        build(&mut nodes, tree.root_node());
-        Ok(CodeAdapter {
-            source: text.to_string(),
-            nodes,
-        })
+    /// Read `text` as `ext`'s language at the code level: the
+    /// backend parse (cached when the thread's AST cache is
+    /// enabled — see `quarb_tree_sitter::set_cache`) lowers
+    /// through the grammar's table.
+    pub fn parse(text: &str, ext: &str) -> Result<Self, CodeError> {
+        let ext = ext.to_ascii_lowercase();
+        let lang = lang_for_ext(&ext).ok_or_else(|| CodeError::Language(ext.clone()))?;
+        let ts = quarb_tree_sitter::TreeSitterAdapter::parse(text, &ext)?;
+        let decls = lower::lower(&ts, lang);
+        Ok(Self::build(text.to_string(), lang, decls))
     }
 
-    /// Parse a file, language by extension.
+    /// Read a file at the code level, language by extension.
     pub fn open(path: &std::path::Path) -> Result<Self, CodeError> {
         let ext = path
             .extension()
@@ -139,79 +265,61 @@ impl CodeAdapter {
         Self::parse(&text, &ext)
     }
 
-    /// A human-readable locator: `/kind[start-line]` chain.
+    /// A human-readable locator: name-or-construct segments, a
+    /// `[n]` index only among same-label siblings —
+    /// `/lexer/lex/is_name_char`, `/main/for/call[3]`.
     pub fn locator(&self, node: NodeId) -> String {
         let mut parts = Vec::new();
-        let mut cur = Some(node);
-        while let Some(n) = cur {
-            let nd = &self.nodes[n.0 as usize];
-            if nd.parent.is_some() {
-                parts.push(format!("{}:{}", nd.kind, nd.start_line));
-            }
-            cur = nd.parent;
+        let mut cur = node;
+        while let Some(parent) = self.nodes[cur.0 as usize].parent {
+            parts.push(self.segment(parent, cur));
+            cur = parent;
         }
         parts.reverse();
         format!("/{}", parts.join("/"))
     }
 
+    fn label(&self, node: NodeId) -> &str {
+        let n = &self.nodes[node.0 as usize];
+        n.name.as_deref().unwrap_or(n.construct)
+    }
+
+    fn segment(&self, parent: NodeId, child: NodeId) -> String {
+        let label = self.label(child);
+        let same: Vec<NodeId> = self.nodes[parent.0 as usize]
+            .children
+            .iter()
+            .copied()
+            .filter(|&c| self.label(c) == label)
+            .collect();
+        if same.len() > 1 {
+            let pos = same.iter().position(|&c| c == child).unwrap() + 1;
+            format!("{label}[{pos}]")
+        } else {
+            label.to_string()
+        }
+    }
+
     fn text_of(&self, n: &Node) -> &str {
-        &self.source[n.start.min(self.source.len())..n.end.min(self.source.len())]
+        &self.source[n.span.0.min(self.source.len())..n.span.1.min(self.source.len())]
     }
 }
 
-/// Intern the named nodes. Uses an explicit stack rather than
-/// recursion so a deeply nested source file (thousands of levels)
-/// can't overflow the call stack. Nodes are interned in the same
-/// pre-order the recursive walk produced.
-fn build(nodes: &mut Vec<Node>, root: tree_sitter::Node<'_>) {
-    // (tree-sitter node, parent id, this node's field in its parent)
-    let mut stack: Vec<(tree_sitter::Node<'_>, Option<NodeId>, Option<&'static str>)> =
-        vec![(root, None, None)];
-    while let Some((ts, parent, field)) = stack.pop() {
-        let id = NodeId(nodes.len() as u64);
-        nodes.push(Node {
-            kind: ts.kind(),
-            field,
-            parent,
-            children: Vec::new(),
-            start: ts.start_byte(),
-            end: ts.end_byte(),
-            start_line: ts.start_position().row + 1,
-            end_line: ts.end_position().row + 1,
-            fields: Vec::new(),
-        });
-        // Record this node with its parent, preserving child order
-        // and the field-name → child-index map.
-        if let Some(p) = parent {
-            let pnode = &mut nodes[p.0 as usize];
-            if let Some(f) = field {
-                pnode.fields.push((f, pnode.children.len()));
-            }
-            pnode.children.push(id);
-        }
-        // Collect named children, then push them reversed so they
-        // pop — and get interned — in source order (a pre-order DFS,
-        // matching the previous recursive numbering).
-        let mut cursor = ts.walk();
-        let mut kids = Vec::new();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.is_named() {
-                    kids.push((child, cursor.field_name()));
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        for (child, f) in kids.into_iter().rev() {
-            stack.push((child, Some(id), f));
-        }
-    }
+/// The trailing identifier of a callee text — `Type::method`,
+/// `obj.method`, and `path.to.f` all resolve by their last
+/// segment.
+fn trailing_ident(callee: &str) -> Option<&str> {
+    let end = callee.trim_end_matches(['!', '?']);
+    let start = end
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .last()
+        .map(|(i, _)| i)?;
+    Some(&end[start..])
 }
 
-impl AstAdapter for CodeAdapter {
+impl AstAdapter for CodeModel {
     fn root(&self) -> NodeId {
         NodeId(0)
     }
@@ -220,31 +328,38 @@ impl AstAdapter for CodeAdapter {
         self.nodes[node.0 as usize].children.clone()
     }
 
-    /// The node kind (`function_item`, `identifier`, ...); the
-    /// root (source_file/module/program) stays unnamed so `/`
-    /// starts at its children.
+    /// The declared identifier, else the construct word; the
+    /// file root stays unnamed.
     fn name(&self, node: NodeId) -> Option<String> {
         let n = &self.nodes[node.0 as usize];
-        n.parent.map(|_| n.kind.to_string())
+        n.parent?;
+        Some(n.name.clone().unwrap_or_else(|| n.construct.to_string()))
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.nodes[node.0 as usize].parent
     }
 
-    /// The kind, as a trait too (`<function_item>` where a trait
-    /// filter reads better than a name step).
     fn traits(&self, node: NodeId) -> Vec<String> {
-        vec![self.nodes[node.0 as usize].kind.to_string()]
+        self.nodes[node.0 as usize]
+            .traits
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
     }
 
-    /// Tree-sitter fields: `::name` on a function is the name
-    /// child's source text.
+    /// The uniform property set: `::signature`, `::doc`,
+    /// `::callee` — the identifier is NOT a property (it is the
+    /// name; `:::name` answers it). Aliased annotation keys fall
+    /// through to `metadata` via [`AstAdapter::aliased_metadata`].
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
-        let (_, idx) = n.fields.iter().find(|(f, _)| *f == name)?;
-        let child = &self.nodes[n.children[*idx].0 as usize];
-        Some(Value::Str(self.text_of(child).to_string()))
+        match name {
+            "signature" => n.signature.clone().map(Value::Str),
+            "doc" => n.doc.clone().map(Value::Str),
+            "callee" => n.callee.clone().map(Value::Str),
+            _ => None,
+        }
     }
 
     /// A node's source text.
@@ -257,12 +372,40 @@ impl AstAdapter for CodeAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
-            "kind" => Some(Value::Str(n.kind.to_string())),
-            "field" => n.field.map(|f| Value::Str(f.to_string())),
-            "start-line" => Some(Value::Int(n.start_line as i64)),
-            "end-line" => Some(Value::Int(n.end_line as i64)),
+            // The raw backend kind — the escape hatch, and the
+            // only place backend vocabulary survives.
+            "kind" => (!n.kind.is_empty()).then(|| Value::Str(n.kind.clone())),
+            "construct" => (!n.construct.is_empty()).then(|| Value::Str(n.construct.to_string())),
+            "start-line" => Some(Value::Int(n.lines.0 as i64)),
+            "end-line" => Some(Value::Int(n.lines.1 as i64)),
+            "lang" => Some(Value::Str(self.lang.name().to_string())),
             "n-children" => Some(Value::Int(n.children.len() as i64)),
+            "n-params" => n.n_params.map(Value::Int),
             _ => None,
         }
+    }
+
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        ALIASED
+    }
+
+    /// `->definition`: a call's edges to the declarations its
+    /// callee resolves to (same file, by identifier).
+    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.nodes[node.0 as usize]
+            .links
+            .iter()
+            .map(|&t| ("definition".to_string(), t))
+            .collect()
+    }
+
+    /// `<-definition`: find-references — every call site whose
+    /// callee resolves here.
+    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.nodes[node.0 as usize]
+            .backlinks
+            .iter()
+            .map(|&s| ("definition".to_string(), s))
+            .collect()
     }
 }

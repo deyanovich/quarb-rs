@@ -4397,6 +4397,10 @@ fn regex_test(a: &Value, b: &Value, want: bool) -> bool {
 fn matches_name(adapter: &impl AstAdapter, node: NodeId, matcher: &Matcher) -> bool {
     match matcher {
         Matcher::Any | Matcher::Dot => true,
+        // A literal name asks the adapter (ruling #30: per-node
+        // aliases answer on every axis); patterns test the
+        // canonical name only.
+        Matcher::Name(n) => adapter.answers_to(node, n),
         _ => adapter
             .name(node)
             .is_some_and(|name| matcher.matches(&name)),

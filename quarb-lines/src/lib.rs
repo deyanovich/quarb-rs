@@ -1,9 +1,9 @@
 //! Line-atom adapter for Quarb.
 //!
 //! Every line of a file is a node — the reading `wc`, `grep -c`,
-//! and `cloc` all quietly assume, given an arbor. The syntax
-//! levels (quarb-code's AST, the text level's prose) know what a
-//! line *means*; this adapter only knows that it *is*, which is
+//! and `cloc` all quietly assume, given an arbor. The higher
+//! levels (the syntax level's AST, the text level's prose) know what
+//! a line *means*; this adapter only knows that it *is*, which is
 //! exactly the half of line-classification that syntax discards:
 //! blank lines and totals are not syntax, so no grammar-driven
 //! reading can count them.

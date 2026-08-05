@@ -1,4 +1,4 @@
-//! Persistent per-file AST cache for [`CodeAdapter`](crate::CodeAdapter):
+//! Persistent per-file AST cache for [`TreeSitterAdapter`](crate::TreeSitterAdapter):
 //! content-addressed, grammar-fingerprint-gated.
 //!
 //! On a cache HIT, [`load`] rebuilds the exact `Vec<Node>` a fresh

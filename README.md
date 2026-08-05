@@ -73,9 +73,22 @@ edge collections), [`quarb-sparql`](quarb-sparql/) (any SPARQL
 endpoint — Wikidata included — by the triples-as-arbors
 mapping).
 
+**The code level** — [`quarb-code`](quarb-code/) (cross-language
+code navigation over the syntax level's parse: declared
+identifiers are node names — `/lexer/lex`, not
+`//function_item[::name = "lex"]` — with a normalized construct
+vocabulary (`if`, `for`, `call`), curated traits
+(`<function>`, `<type>`, `<loop>`), and `->definition`
+crosslinks; `qua 'code:src/main.rs'` forces it, and
+`code:src/` grafts a whole tree — the syntax level stays the
+extension default).
+
 **Source adapters** — [`quarb-fs`](quarb-fs/) (file systems, with
 symlink crosslinks), [`quarb-git`](quarb-git/) (commit graphs),
-[`quarb-code`](quarb-code/) (source-code ASTs via tree-sitter),
+[`quarb-tree-sitter`](quarb-tree-sitter/) (source code as its
+literal syntax tree via tree-sitter — the syntax level; not to be
+confused with `tree-sitter-quarb`, the tree-sitter grammar *for*
+Quarb's own query files),
 [`quarb-kaiv`](quarb-kaiv/) (kaiv typed data),
 [`quarb-imap`](quarb-imap/) and [`quarb-maildir`](quarb-maildir/)
 (mailboxes), [`quarb-gsheet`](quarb-gsheet/) (Google Sheets),

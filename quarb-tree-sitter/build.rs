@@ -11,7 +11,7 @@
 //! closes that gap.
 //!
 //! When `Cargo.lock` is absent (a downstream crates.io build of
-//! quarb-code as a library), the stamp falls back to "nolock"; the
+//! quarb-tree-sitter as a library), the stamp falls back to "nolock"; the
 //! cache stays sound within that build but cannot distinguish
 //! grammar versions across it — such users should clear the cache
 //! on a grammar upgrade. For the `qua` binary, built in this

@@ -17,8 +17,8 @@ use quarb_archive::ArchiveAdapter;
 use quarb_atrep::AtrepAdapter;
 use quarb_athena::AthenaAdapter;
 use quarb_bigquery::BigqueryAdapter;
-use quarb_code::CodeAdapter;
-use quarb_compose::ComposeAdapter;
+use quarb_tree_sitter::TreeSitterAdapter;
+use quarb_compose::{ComposeAdapter, SourceGraft};
 use quarb_csv::CsvAdapter;
 use quarb_datastore::DatastoreAdapter;
 use quarb_duckdb::DuckdbAdapter;
@@ -494,8 +494,8 @@ pub fn cli_main() -> anyhow::Result<()> {
         let dir = cli
             .cache_dir
             .clone()
-            .unwrap_or_else(quarb_code::Cache::default_dir);
-        quarb_code::set_cache(Some(quarb_code::Cache::new(dir)));
+            .unwrap_or_else(quarb_tree_sitter::Cache::default_dir);
+        quarb_tree_sitter::set_cache(Some(quarb_tree_sitter::Cache::new(dir)));
     }
 
     if cli.resident || cli.resident_serve {
@@ -995,6 +995,46 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         };
         let adapter = text_level(&text, Some(target));
         let src = target.display().to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
+    // A `code:` prefix forces the code-level reading of source
+    // whose extension would otherwise pick the syntax level:
+    // declared identifiers as node names (`//lex`, not
+    // `//function_item[::name = "lex"]`). On a directory it
+    // implies the composed, descending view with every supported
+    // source leaf grafted at the code level — the prefix has no
+    // other meaning there — so `qua --descend '//lex' code:src/`
+    // and the flagless spelling agree.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("code:"))
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        let src = target.display().to_string();
+        if target.is_dir() {
+            let opts = FsOptions {
+                hidden: cli.hidden,
+                respect_ignore: !cli.no_ignore,
+            };
+            let adapter = ComposeAdapter::with_source_paths(
+                FsAdapter::with_options(target, opts)?,
+                |fs, n| Some(fs.path(n)),
+            )
+            .with_source_graft(SourceGraft::Code);
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n, |o| adapter.outer().path(o).display().to_string()),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
+        let adapter = quarb_code::CodeModel::open(target)
+            .with_context(|| format!("parsing {} at the code level", target.display()))?;
         return run(
             query,
             &adapter,
@@ -1773,9 +1813,9 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     if let Some(p) = &path
         && p.extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| quarb_code::supported(&e.to_ascii_lowercase()))
+            .is_some_and(|e| quarb_tree_sitter::supported(&e.to_ascii_lowercase()))
     {
-        let adapter = CodeAdapter::open(p).context("parsing source file")?;
+        let adapter = TreeSitterAdapter::open(p).context("parsing source file")?;
         let src = p.display().to_string();
         return run(
             query,
@@ -2466,6 +2506,39 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
+    // A `code:` prefix forces the code-level reading, matching
+    // the single-input flow; a directory mounts the composed,
+    // descending view with source leaves grafted at the code
+    // level.
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("code:")
+        && !rest.is_empty()
+    {
+        let target = Path::new(rest);
+        if target.is_dir() {
+            let opts = FsOptions {
+                hidden: cli.hidden,
+                respect_ignore: !cli.no_ignore,
+            };
+            let a = Rc::new(
+                ComposeAdapter::with_source_paths(FsAdapter::with_options(target, opts)?, |fs, n| {
+                    Some(fs.path(n))
+                })
+                .with_source_graft(SourceGraft::Code),
+            );
+            let r = a.clone();
+            return Ok((
+                Box::new(Shared(a)),
+                Box::new(move |n| r.locator(n, |o| r.outer().path(o).display().to_string())),
+            ));
+        }
+        let a = Rc::new(
+            quarb_code::CodeModel::open(target)
+                .with_context(|| format!("parsing {} at the code level", target.display()))?,
+        );
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
     if let Some(s) = p.to_str()
         && s.starts_with("firestore://")
     {
@@ -2765,9 +2838,9 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     // their syntax tree, matching the single-input flow.
     if p.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| quarb_code::supported(&e.to_ascii_lowercase()))
+        .is_some_and(|e| quarb_tree_sitter::supported(&e.to_ascii_lowercase()))
     {
-        let a = Rc::new(CodeAdapter::open(p).context("parsing source file")?);
+        let a = Rc::new(TreeSitterAdapter::open(p).context("parsing source file")?);
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }

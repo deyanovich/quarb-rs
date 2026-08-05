@@ -54,7 +54,9 @@ pub enum Doc {
     #[cfg(feature = "native")]
     Xlsx(quarb_xlsx::XlsxAdapter),
     #[cfg(feature = "native")]
-    Code(quarb_code::CodeAdapter),
+    Syntax(quarb_tree_sitter::TreeSitterAdapter),
+    #[cfg(feature = "native")]
+    Code(quarb_code::CodeModel),
     Mount(quarb_mount::MountAdapter),
     /// Any adapter behind the object-safe trait, with its locator
     /// renderer — the carrier for scheme targets opened through
@@ -183,6 +185,24 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" | "text-md" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
+            // The code level: identifiers as names; the format
+            // name carries the language.
+            #[cfg(feature = "native")]
+            "code-rust" => quarb_code::CodeModel::parse(input, "rs")
+                .map(Doc::Code)
+                .context("parsing Rust at the code level"),
+            #[cfg(feature = "native")]
+            "code-python" => quarb_code::CodeModel::parse(input, "py")
+                .map(Doc::Code)
+                .context("parsing Python at the code level"),
+            #[cfg(feature = "native")]
+            "code-javascript" => quarb_code::CodeModel::parse(input, "js")
+                .map(Doc::Code)
+                .context("parsing JavaScript at the code level"),
+            #[cfg(feature = "native")]
+            "code-c" => quarb_code::CodeModel::parse(input, "c")
+                .map(Doc::Code)
+                .context("parsing C at the code level"),
             other => bail!("unknown format: {other}"),
         }
     }
@@ -214,6 +234,8 @@ impl Doc {
             Doc::Archive(a) => a,
             #[cfg(feature = "native")]
             Doc::Xlsx(a) => a,
+            #[cfg(feature = "native")]
+            Doc::Syntax(a) => a,
             #[cfg(feature = "native")]
             Doc::Code(a) => a,
             Doc::Mount(a) => a,
@@ -320,6 +342,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Xlsx(a) => go!(a),
             #[cfg(feature = "native")]
+            Doc::Syntax(a) => go!(a),
+            #[cfg(feature = "native")]
             Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
             Doc::Boxed(a, _) => go!(a),
@@ -346,6 +370,8 @@ impl Doc {
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
             #[cfg(feature = "native")]
             Doc::Xlsx(a) => a.locator(node),
+            #[cfg(feature = "native")]
+            Doc::Syntax(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
@@ -430,6 +456,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Xlsx(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
+            Doc::Syntax(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
             Doc::Code(a) => Box::new(Shared(Rc::new(a))),
             Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
             Doc::Boxed(a, _) => a.0,
@@ -499,6 +527,32 @@ impl Doc {
             };
             return Doc::parse(&text, format);
         }
+        // A `code:` prefix forces the code-level reading,
+        // matching qua's dispatch; a directory mounts the
+        // composed, descending view with source leaves grafted
+        // at the code level.
+        if let Some(rest) = s.strip_prefix("code:")
+            && !rest.is_empty()
+        {
+            let target = Path::new(rest);
+            if target.is_dir() {
+                let fsopts = quarb_fs::FsOptions {
+                    hidden: opts.hidden,
+                    respect_ignore: opts.respect_ignore,
+                };
+                let fs = quarb_fs::FsAdapter::with_options(target, fsopts)
+                    .with_context(|| format!("opening directory {}", target.display()))?;
+                return Ok(Doc::FsDeep(
+                    quarb_compose::ComposeAdapter::with_source_paths(fs, |fs, n| {
+                        Some(fs.path(n))
+                    })
+                    .with_source_graft(quarb_compose::SourceGraft::Code),
+                ));
+            }
+            let a = quarb_code::CodeModel::open(target)
+                .with_context(|| format!("parsing {} at the code level", target.display()))?;
+            return Ok(Doc::Code(a));
+        }
 
         let ext = path
             .extension()
@@ -506,10 +560,10 @@ impl Doc {
             .map(|e| e.to_ascii_lowercase());
 
         if let Some(e) = &ext
-            && quarb_code::supported(e)
+            && quarb_tree_sitter::supported(e)
         {
-            let a = quarb_code::CodeAdapter::open(path).context("parsing source file")?;
-            return Ok(Doc::Code(a));
+            let a = quarb_tree_sitter::TreeSitterAdapter::open(path).context("parsing source file")?;
+            return Ok(Doc::Syntax(a));
         }
         if matches!(ext.as_deref(), Some("xlsx" | "xls" | "ods")) {
             let a = quarb_xlsx::XlsxAdapter::open(path).context("opening workbook")?;

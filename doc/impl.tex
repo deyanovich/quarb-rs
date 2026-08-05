@@ -315,15 +315,29 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   what opaque containers refuse; server-side \texttt{.indexOn}
   queries are the recorded v2 path). Target:
   \texttt{firebase://HOST/PATH[?auth=...]}. Read-only. \\
-\texttt{quarb-code} & Source code as its syntax tree
-  (tree-sitter): node kinds as edge names
-  (\texttt{//function\_item}), tree-sitter \emph{fields} as
-  properties (\texttt{::name} on a function is its name),
-  source text as the value, \texttt{;;;start-line} /
+\texttt{quarb-tree-sitter} & Source code as its literal syntax
+  tree — the syntax level (né \texttt{quarb-code}): node kinds
+  as edge names (\texttt{//function\_item}), tree-sitter
+  \emph{fields} as properties (\texttt{::name} on a function is
+  its name), source text as the value, \texttt{;;;start-line} /
   \texttt{;;;kind} / \texttt{;;;field} metadata; named nodes
-  only. Rust / Python / JavaScript by extension, compile-time
-  grammar set. Grafts under composition — \texttt{--descend}
-  queries every function in a directory tree at once. \\
+  only. Rust / Python / JavaScript / C by extension,
+  compile-time grammar set. Grafts under composition —
+  \texttt{--descend} queries every function in a directory tree
+  at once. \\
+\texttt{quarb-code} & Source code at the code level:
+  declaration identifiers are node names
+  (\texttt{/lexer/lex}), anonymous constructs keep a
+  normalized cross-language vocabulary (\texttt{if},
+  \texttt{switch}, \texttt{for}, \texttt{call}), everything
+  else dissolves (children hoist). Curated traits
+  (\texttt{<function>}, \texttt{<type>}, \texttt{<loop>});
+  \texttt{::signature} / \texttt{::doc} / \texttt{::callee};
+  raw backend kind only at \texttt{::::kind} (aliased, closed
+  surface); \texttt{->definition} file-local crosslinks.
+  Opt-in via the \texttt{code:} target prefix;
+  \texttt{code:DIR} grafts every supported source leaf —
+  filesystem into declarations, one namespace. \\
 \texttt{quarb-compose} & Adapter \emph{composition}: wrap any
   adapter and a leaf whose name or content parses (json / xml /
   html / csv, else a sniff) grafts its parsed arbor as children —
