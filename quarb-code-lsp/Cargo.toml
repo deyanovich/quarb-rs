@@ -1,0 +1,23 @@
+[package]
+name = "quarb-code-lsp"
+description = "Language server for the Quarb code level — outline, definition, references, and hover over source code, on LSP JSON-RPC and kaivrpc"
+keywords = ["lsp", "language-server", "code", "navigation", "quarb"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.23.0" }
+quarb-code = { path = "../quarb-code", version = "0.23.0" }
+quarb-tree-sitter = { path = "../quarb-tree-sitter", version = "0.23.0" }
+quarb-compose = { path = "../quarb-compose", version = "0.23.0" }
+quarb-fs = { path = "../quarb-fs", version = "0.23.0" }
+quarb-lsp = { path = "../quarb-lsp", version = "0.23.0" }
+kaivrpc = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

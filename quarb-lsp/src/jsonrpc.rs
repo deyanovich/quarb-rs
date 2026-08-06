@@ -7,9 +7,10 @@
 //! pipes, the path separator, the colon ladder, `$`, and `<`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use quarb_lsp::framing::{notify, read_message, respond, str_at};
 use serde_json::{Value, json};
 
 use crate::core;
@@ -117,14 +118,6 @@ fn lsp_kind(kind: &str) -> u32 {
     }
 }
 
-fn str_at(v: &Value, path: &[&str]) -> String {
-    let mut cur = v;
-    for p in path {
-        cur = &cur[*p];
-    }
-    cur.as_str().unwrap_or("").to_string()
-}
-
 fn publish(w: &mut impl Write, uri: &str, text: &str) -> Result<()> {
     let diags: Vec<Value> = core::diagnostics(text)
         .into_iter()
@@ -144,48 +137,4 @@ fn publish(w: &mut impl Write, uri: &str, text: &str) -> Result<()> {
         "uri": uri,
         "diagnostics": diags
     }))
-}
-
-fn respond(w: &mut impl Write, id: Option<Value>, result: Value) -> Result<()> {
-    write_message(w, &json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "result": result
-    }))
-}
-
-fn notify(w: &mut impl Write, method: &str, params: Value) -> Result<()> {
-    write_message(w, &json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params
-    }))
-}
-
-fn write_message(w: &mut impl Write, v: &Value) -> Result<()> {
-    let body = serde_json::to_string(v)?;
-    write!(w, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
-    w.flush()?;
-    Ok(())
-}
-
-fn read_message(r: &mut impl BufRead) -> Result<Option<Value>> {
-    let mut content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        if r.read_line(&mut line)? == 0 {
-            return Ok(None);
-        }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some(v) = line.strip_prefix("Content-Length:") {
-            content_length = Some(v.trim().parse().context("Content-Length")?);
-        }
-    }
-    let len = content_length.context("missing Content-Length")?;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    Ok(Some(serde_json::from_slice(&buf)?))
 }

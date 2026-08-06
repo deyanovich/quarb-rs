@@ -148,8 +148,9 @@ impl FsAdapter {
 /// Map a lowercased file extension to a file-class trait.
 fn file_class(ext: &str) -> Option<&'static str> {
     let class = match ext {
-        "rs" | "py" | "c" | "cpp" | "cc" | "h" | "hpp" | "js" | "ts" | "go" | "java" | "rb"
-        | "php" | "sh" | "swift" | "kt" | "lua" | "pl" | "scala" | "clj" | "ex" | "hs" => "code",
+        "rs" | "py" | "c" | "cpp" | "cc" | "h" | "hpp" | "js" | "mjs" | "cjs" | "jsx" | "ts"
+        | "go" | "java" | "rb" | "php" | "sh" | "swift" | "kt" | "lua" | "pl" | "scala"
+        | "clj" | "ex" | "hs" => "code",
         "txt" | "md" | "rst" | "adoc" | "org" | "tex" => "text",
         "pdf" | "doc" | "docx" | "odt" | "rtf" | "ps" | "epub" => "document",
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "tiff" | "ico" => "image",
@@ -160,6 +161,20 @@ fn file_class(ext: &str) -> Option<&'static str> {
         _ => return None,
     };
     Some(class)
+}
+
+/// The language trait for source files the code level lowers —
+/// named exactly as the code level's `::::lang` answers, so
+/// `//*<javascript>` covers the whole extension family where
+/// `*.js` names one spelling. Grows with the grammar set.
+fn source_language(ext: &str) -> Option<&'static str> {
+    match ext {
+        "rs" => Some("rust"),
+        "py" => Some("python"),
+        "js" | "mjs" | "cjs" | "jsx" => Some("javascript"),
+        "c" | "h" => Some("c"),
+        _ => None,
+    }
 }
 
 impl AstAdapter for FsAdapter {
@@ -200,10 +215,14 @@ impl AstAdapter for FsAdapter {
                 out.push("file".into());
             }
         }
-        if let Some(ext) = path.extension().and_then(|e| e.to_str())
-            && let Some(class) = file_class(&ext.to_ascii_lowercase())
-        {
-            out.push(class.into());
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_ascii_lowercase();
+            if let Some(class) = file_class(&ext) {
+                out.push(class.into());
+            }
+            if let Some(lang) = source_language(&ext) {
+                out.push(lang.into());
+            }
         }
         out
     }

@@ -813,12 +813,17 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         // An aliased node resolves as the node it stands for.
         let under = self.aliased(node).unwrap_or(node);
-        if self.decode(under).is_none() {
-            if let Some(&target) = self.fabric().resolve.get(&(under, property.to_string())) {
-                return Some(target);
-            }
+        if let Some(&target) = self.fabric().resolve.get(&(under, property.to_string())) {
+            return Some(target);
         }
-        self.base.resolve(under, property, hint)
+        if self.decode(under).is_none() {
+            return self.base.resolve(under, property, hint);
+        }
+        // A purely derived node (a class container, an elevated
+        // value) has no base identity to resolve through — and base
+        // adapters index by their own ids, so a tagged id must never
+        // reach them.
+        None
     }
 
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {

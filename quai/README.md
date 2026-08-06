@@ -40,12 +40,12 @@ and source code — and several at once mount under one root for
 cross-source `<=>` joins.
 
 Try it in the browser at [demo.quarb.org/quai][playground] (no
-install), and read the [graph cookbook][cookbook] for the recipes.
+install), and read the [graph guide][guide] for the recipes.
 `pip install quai` gives the same REPL in Python.
 
 [quarb]: https://quarb.org/
 [playground]: https://demo.quarb.org/quai/
-[cookbook]: https://quarb.org/cookbooks/quai.html
+[guide]: https://quarb.org/guides/quai.html
 
 ## License
 

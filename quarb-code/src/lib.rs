@@ -303,6 +303,41 @@ impl CodeModel {
     fn text_of(&self, n: &Node) -> &str {
         &self.source[n.span.0.min(self.source.len())..n.span.1.min(self.source.len())]
     }
+
+    // ---- inspection API (the door quarb-code-lsp reads through) ----
+
+    /// The parsed source text.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The grammar this model was lowered from.
+    pub fn lang(&self) -> Lang {
+        self.lang
+    }
+
+    /// The declared (or adopted) identifier — `None` on anonymous
+    /// constructs and the file root. Distinguishes a function
+    /// named `switch` from the construct: the identifier is a
+    /// stored fact, not a name-string comparison.
+    pub fn ident(&self, node: NodeId) -> Option<&str> {
+        self.nodes[node.0 as usize].name.as_deref()
+    }
+
+    /// The vocabulary word (`""` on the file root).
+    pub fn construct(&self, node: NodeId) -> &str {
+        self.nodes[node.0 as usize].construct
+    }
+
+    /// Byte range into the source.
+    pub fn span(&self, node: NodeId) -> (usize, usize) {
+        self.nodes[node.0 as usize].span
+    }
+
+    /// 1-based start/end lines.
+    pub fn line_span(&self, node: NodeId) -> (usize, usize) {
+        self.nodes[node.0 as usize].lines
+    }
 }
 
 /// The trailing identifier of a callee text — `Type::method`,

@@ -3699,7 +3699,7 @@ fn extract_captures(
         PredExpr::Not(a) => extract_captures(a, adapter, node, trace, scope),
         PredExpr::Compare(l, CmpOp::Match, r) => {
             let pattern = operand_scalar_bound(adapter, node, r, trace, &[], scope);
-            let re = Regex::new(&pattern.to_string()).ok()?;
+            let re = compiled_regex(&pattern.to_string())?;
             if re.captures_len() <= 1 {
                 return None;
             }
@@ -4374,6 +4374,28 @@ fn run_shell(cmd: &str, topic: Option<&Value>) -> Option<Value> {
     Some(Value::Str(text))
 }
 
+thread_local! {
+    /// Compiled-pattern memo. `=~` predicates evaluate per node,
+    /// and recompiling one pattern for every candidate made a
+    /// workspace-wide regex filter ~10x its equality twin; a
+    /// query's patterns are few, so the memo stays tiny. `None`
+    /// remembers a bad pattern (it never matches — no point
+    /// re-failing per node).
+    static REGEX_MEMO: std::cell::RefCell<HashMap<String, Option<Regex>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The compiled form of `pattern`, memoized; `None` for a bad
+/// pattern. (`Regex` clones share the compiled program.)
+fn compiled_regex(pattern: &str) -> Option<Regex> {
+    REGEX_MEMO.with(|m| {
+        m.borrow_mut()
+            .entry(pattern.to_string())
+            .or_insert_with(|| Regex::new(pattern).ok())
+            .clone()
+    })
+}
+
 /// Regex match: `a` (as text) against `b` (as pattern); `want` selects
 /// match vs non-match. A bad pattern never matches.
 fn regex_test(a: &Value, b: &Value, want: bool) -> bool {
@@ -4385,9 +4407,9 @@ fn regex_test(a: &Value, b: &Value, want: bool) -> bool {
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return !want;
     }
-    match Regex::new(&b.to_string()) {
-        Ok(re) => re.is_match(&a.to_string()) == want,
-        Err(_) => false,
+    match compiled_regex(&b.to_string()) {
+        Some(re) => re.is_match(&a.to_string()) == want,
+        None => false,
     }
 }
 

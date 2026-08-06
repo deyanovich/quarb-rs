@@ -27,6 +27,7 @@ members = [
     "quarb-bigquery",
     "quarb-tree-sitter",
     "quarb-code",
+    "quarb-code-lsp",
     "quarb-compose",
     "quarb-csv",
     "quarb-datastore",
@@ -80,7 +81,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

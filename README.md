@@ -29,6 +29,17 @@ onto the arbor model.
 - [`qm`](qm/) — a mailbox interface for the terminal, on the
   Quarb engine.
 
+**Editor tooling**
+
+- [`quarb-lsp`](quarb-lsp/) — the Quarb language's server:
+  diagnostics from the real parser, completion from the engine's
+  registry; LSP JSON-RPC on stdio, kaivrpc on a Unix socket.
+- [`quarb-code-lsp`](quarb-code-lsp/) — the code level as a
+  language server, a reading tool over source files: outline
+  (SymbolKind from the lowering tables), definition, references,
+  hover, workspace symbols — every answer a code-level query, no
+  resident index; the same two codecs.
+
 **Format adapters** — [`quarb-json`](quarb-json/),
 [`quarb-yaml`](quarb-yaml/), [`quarb-toml`](quarb-toml/),
 [`quarb-csv`](quarb-csv/), [`quarb-xml`](quarb-xml/),
