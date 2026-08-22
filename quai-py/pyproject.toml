@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quai"
-version = "0.23.0"  # LOCKSTEP: bump with the workspace version (the release-train sed targets Cargo.toml; this line must move by hand or by the same sed pattern)
+version = "0.24.0"  # LOCKSTEP: bump with the workspace version (the release-train sed targets Cargo.toml; this line must move by hand or by the same sed pattern)
 description = "Interactive Quarb — a session REPL where every line becomes a reusable query (&1, &2, …)"
 readme = "README.md"
 requires-python = ">=3.8"

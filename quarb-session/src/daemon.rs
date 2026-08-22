@@ -39,7 +39,8 @@ impl DaemonExecutor {
         allow_shell: bool,
         hidden: bool,
         no_ignore: bool,
-        descend: bool,
+        graft: bool,
+        no_graft: bool,
         cache: bool,
         refs: Option<PathBuf>,
         model: Option<PathBuf>,
@@ -63,8 +64,11 @@ impl DaemonExecutor {
         if no_ignore {
             flags.push("--no-ignore".to_string());
         }
-        if descend {
-            flags.push("--descend".to_string());
+        if graft {
+            flags.push("--graft".to_string());
+        }
+        if no_graft {
+            flags.push("--no-graft".to_string());
         }
         // Cache and daemon are layers, not alternatives: the resident
         // arbor's cold start reads parsed ASTs from the on-disk cache,

@@ -3,7 +3,7 @@
 Magics
 ------
 
-``%quarb_mount PATH [PATH ...] [--descend]``
+``%quarb_mount PATH [PATH ...] [--graft | --no-graft]``
     Open documents in-process for the session (directories,
     SQLite, kaiv, ``git:PATH``, archives, XLSX, source files, and
     the text formats). One path becomes the default document;
@@ -49,7 +49,7 @@ def load_ipython_extension(ipython):
 
         @line_magic
         def quarb_mount(self, line):
-            """%quarb_mount PATH [PATH ...] [--descend]"""
+            """%quarb_mount PATH [PATH ...] [--graft | --no-graft]"""
             print(self.session.mount(line))
 
         @line_magic

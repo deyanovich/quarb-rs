@@ -57,6 +57,9 @@ enum Doc {
     FsDeep(quarb_compose::ComposeAdapter<quarb_fs::FsAdapter>),
     Git(quarb_git::GitAdapter),
     Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
+    /// An archive held opaque (`no_graft=True`): the member tree
+    /// with leaves as plain entries — the tar -t view.
+    ArchiveRaw(quarb_archive::ArchiveAdapter),
     Xlsx(quarb_xlsx::XlsxAdapter),
     Syntax(quarb_tree_sitter::TreeSitterAdapter),
     Code(quarb_code::CodeModel),
@@ -154,6 +157,7 @@ impl Doc {
             Doc::FsDeep(a) => go!(a),
             Doc::Git(a) => go!(a),
             Doc::Archive(a) => go!(a),
+            Doc::ArchiveRaw(a) => go!(a),
             Doc::Xlsx(a) => go!(a),
             Doc::Syntax(a) => go!(a),
             Doc::Code(a) => go!(a),
@@ -177,6 +181,7 @@ impl Doc {
             }
             Doc::Git(a) => a.locator(node),
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
+            Doc::ArchiveRaw(a) => a.locator(node),
             Doc::Xlsx(a) => a.locator(node),
             Doc::Syntax(a) => a.locator(node),
             Doc::Code(a) => a.locator(node),
@@ -332,7 +337,7 @@ fn open_remote(s: &str) -> Option<Result<Doc, String>> {
 
 /// Open one source as a boxed, shared adapter — the building block
 /// for a multi-source [`mount`]. Mirrors [`open`]'s kind-dispatch.
-fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> {
+fn open_boxed(path: &str, graft: bool, no_graft: bool) -> Result<Box<dyn AstAdapter>, String> {
     use std::rc::Rc;
     let boxed = |d: Document| -> Result<Box<dyn AstAdapter>, String> {
         Ok(match d.doc {
@@ -347,6 +352,7 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
             Doc::FsDeep(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Git(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Archive(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
+            Doc::ArchiveRaw(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Xlsx(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Syntax(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
             Doc::Code(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
@@ -356,7 +362,7 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
     };
     // Reuse open()'s kind-dispatch (it reads/parses), then box the
     // resulting concrete adapter. Callers hold the GIL.
-    let doc = open(path, descend).map_err(|e| e.to_string())?;
+    let doc = open(path, graft, no_graft, false).map_err(|e| e.to_string())?;
     boxed(doc)
 }
 
@@ -365,16 +371,18 @@ fn open_boxed(path: &str, descend: bool) -> Result<Box<dyn AstAdapter>, String> 
 /// fleet `<=>` a SQLite CMDB). Each source is addressed by its file
 /// stem: `mount(["fleet.yaml", "cmdb.db"])` answers `/fleet/...`
 /// and `/cmdb/...`. A single path just [`open`]s (keeping its typed
-/// rendering). `descend` grafts parseable leaves under directory
-/// mounts.
+/// rendering). `graft` grafts parseable leaves under directory
+/// mounts; `no_graft` holds every boundary opaque. (`descend` is
+/// the pre-0.24 spelling of `graft`, kept as an alias.)
 #[pyfunction]
-#[pyo3(signature = (paths, descend=false))]
-fn mount(paths: Vec<String>, descend: bool) -> PyResult<Document> {
+#[pyo3(signature = (paths, graft=false, no_graft=false, descend=false))]
+fn mount(paths: Vec<String>, graft: bool, no_graft: bool, descend: bool) -> PyResult<Document> {
+    let graft = graft || descend;
     if paths.is_empty() {
         return Err(PyValueError::new_err("mount needs at least one path"));
     }
     if paths.len() == 1 {
-        return open(&paths[0], descend);
+        return open(&paths[0], graft, no_graft, false);
     }
     let mut mounts = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -390,7 +398,7 @@ fn mount(paths: Vec<String>, descend: bool) -> PyResult<Document> {
                  input of the same stem — give each a distinct basename"
             )));
         }
-        let adapter = open_boxed(path, descend).map_err(PyValueError::new_err)?;
+        let adapter = open_boxed(path, graft, no_graft).map_err(PyValueError::new_err)?;
         mounts.push(quarb_mount::Mount {
             name: stem,
             target: Some(path.clone()),
@@ -665,8 +673,11 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 /// Open `path` with the adapter its kind calls for — the full
 /// local fleet, mirroring the qua CLI's dispatch:
 ///
-/// - a directory mounts as a filesystem tree (`descend=True`
-///   grafts parseable leaves — JSON, CSV, code, … — as subtrees);
+/// - a directory mounts as a filesystem tree (`graft=True`
+///   grafts parseable leaves — JSON, CSV, code, … — as subtrees;
+///   `descend=True` is the pre-0.24 spelling, kept as an alias);
+/// - `no_graft=True` disables grafting entirely: archive members
+///   stay opaque entries (the tar -t view);
 /// - `.db` / `.sqlite` / `.sqlite3` opens SQLite;
 /// - `.kaiv` / `.daiv` / `.raiv` mounts typed kaiv (units, instants,
 ///   durations — sibling `.faiv` unit libraries resolve relative to
@@ -680,8 +691,9 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 /// - anything else falls back to text parsing by extension, as
 ///   [`load`] does.
 #[pyfunction]
-#[pyo3(signature = (path, descend=false))]
-fn open(path: &str, descend: bool) -> PyResult<Document> {
+#[pyo3(signature = (path, graft=false, no_graft=false, descend=false))]
+fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Document> {
+    let graft = graft || descend;
     let err = |e: String| PyValueError::new_err(e);
     if let Some(remote) = open_remote(path) {
         let doc = remote.map_err(err)?;
@@ -698,7 +710,7 @@ fn open(path: &str, descend: bool) -> PyResult<Document> {
         }
         let opts = quarb_fs::FsOptions::default();
         let a = quarb_fs::FsAdapter::with_options(&p, opts).map_err(|e| err(e.to_string()))?;
-        return Ok(if descend {
+        return Ok(if graft {
             Document {
                 doc: Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(a, |fs, n| {
                     Some(fs.path(n))
@@ -731,11 +743,14 @@ fn open(path: &str, descend: bool) -> PyResult<Document> {
             .map_err(|e| err(e.to_string()))?;
             Doc::Kaiv(a)
         }
-        "zip" | "tar" | "tgz" | "gz" | "txz" | "xz" | "zst" => Doc::Archive(
-            quarb_compose::ComposeAdapter::new(
-                quarb_archive::ArchiveAdapter::open(&p).map_err(|e| err(e.to_string()))?,
-            ),
-        ),
+        "zip" | "tar" | "tgz" | "gz" | "txz" | "xz" | "zst" => {
+            let a = quarb_archive::ArchiveAdapter::open(&p).map_err(|e| err(e.to_string()))?;
+            if no_graft {
+                Doc::ArchiveRaw(a)
+            } else {
+                Doc::Archive(quarb_compose::ComposeAdapter::new(a))
+            }
+        }
         "xlsx" => Doc::Xlsx(quarb_xlsx::XlsxAdapter::open(&p).map_err(|e| err(e.to_string()))?),
         e if quarb_tree_sitter::supported(e) => {
             Doc::Syntax(quarb_tree_sitter::TreeSitterAdapter::open(&p).map_err(|e| err(e.to_string()))?)

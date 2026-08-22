@@ -159,11 +159,25 @@ struct Cli {
     #[arg(long = "as", value_name = "NAME", default_value = "result")]
     save_as: String,
 
-    /// Descend through parseable file content (composition): a
-    /// .json/.xml/.html/.csv leaf's parsed tree becomes its
-    /// children. Default for archives; opt-in for directories.
-    #[arg(long)]
-    descend: bool,
+    /// Opt a directory mount into grafting (composition): a
+    /// parseable leaf's — .json/.xml/.html/.csv/source — parsed
+    /// tree becomes its children. Archives, buckets, and text
+    /// columns graft by default. (--descend is the pre-0.24
+    /// spelling, kept as an alias.)
+    #[arg(long, alias = "descend")]
+    graft: bool,
+
+    /// Disable grafting entirely: no boundary is crossed —
+    /// archive members, bucket objects, and JSON text columns
+    /// stay opaque leaves, so listings agree with find/tar and
+    /// the server's own column types. Refused with the code:
+    /// prefix, whose meaning is the grafted view.
+    // A future parameterized form (--graft=MOUNT,
+    // --no-graft=PATTERN) narrows these; the bare spellings keep
+    // meaning all-mounts / all-boundaries. The conflict below
+    // then relaxes to "both bare".
+    #[arg(long = "no-graft", conflicts_with = "graft")]
+    no_graft: bool,
 
     /// A declared-references document: '{"refs": {"field":
     /// "container", ...}}' — the edges the substrate's own catalog
@@ -545,7 +559,8 @@ fn resident_socket(cli: &Cli) -> anyhow::Result<PathBuf> {
             .hash(&mut h);
     }
     (
-        cli.descend,
+        cli.graft,
+        cli.no_graft,
         cli.hidden,
         cli.no_ignore,
         cli.allow_shell,
@@ -1006,14 +1021,20 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     // whose extension would otherwise pick the syntax level:
     // declared identifiers as node names (`//lex`, not
     // `//function_item[::name = "lex"]`). On a directory it
-    // implies the composed, descending view with every supported
+    // implies the composed, grafted view with every supported
     // source leaf grafted at the code level — the prefix has no
-    // other meaning there — so `qua --descend '//lex' code:src/`
+    // other meaning there — so `qua --graft '//lex' code:src/`
     // and the flagless spelling agree.
     if let Some(p) = &path
         && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("code:"))
         && !rest.is_empty()
     {
+        if cli.no_graft {
+            anyhow::bail!(
+                "--no-graft refuses the code: prefix: the prefix's whole \
+                 meaning is the grafted code-level view"
+            );
+        }
         let target = Path::new(rest);
         let src = target.display().to_string();
         if target.is_dir() {
@@ -1053,7 +1074,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             respect_ignore: !cli.no_ignore,
         };
         let src = path.display().to_string();
-        if cli.descend {
+        if cli.graft {
             let adapter = ComposeAdapter::with_source_paths(
                 FsAdapter::with_options(path, opts)?,
                 |fs, n| Some(fs.path(n)),
@@ -1417,7 +1438,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => MssqlAdapter::connect(s).context("connecting to SQL Server")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // An Oracle database: oracle://USER:PASS@HOST[:PORT]/SERVICE.
@@ -1461,7 +1482,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => OracleAdapter::connect(s).context("connecting to Oracle")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // An LDAP directory: ldap[s]://[USER:PASS@]HOST[:PORT]/BASE_DN.
@@ -1587,7 +1608,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // Athena: the S3 datalake's query layer. Billed by bytes
@@ -1635,7 +1656,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => AthenaAdapter::connect(s).context("connecting to Athena")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A MySQL/MariaDB URL connects and introspects the database.
@@ -1684,7 +1705,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => MysqlAdapter::connect(s).context("connecting to MySQL")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A PostgreSQL connection string connects and materializes the
@@ -1735,7 +1756,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
         };
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
     }
 
     // A served adapter: `serve:COMMAND` spawns the command and
@@ -1768,9 +1789,19 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
 
     // Object stores (gs:// / s3://), composed by default —
     // grafting a bucket of JSON/CSV/source files is the point.
+    // --no-graft holds the objects opaque (names, sizes, sums).
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && (s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://"))
     {
+        if cli.no_graft {
+            let adapter = ObjstoreAdapter::connect(s).context("connecting to bucket")?;
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(s),
+            );
+        }
         let adapter =
             ComposeAdapter::new(ObjstoreAdapter::connect(s).context("connecting to bucket")?);
         return run(
@@ -1874,16 +1905,27 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         }
         let adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
         let src = p.display().to_string();
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
 
     // Archives are binary: dispatch before the text read (zip/PK
     // or gzip magic, or a .tar extension). Composition is on by
     // default — the point of opening a .docx is the XML inside.
+    // --no-graft keeps the member tree with opaque leaves: the
+    // tar -t view, for sizing and checksumming.
     if let Some(p) = &path
         && is_archive(p)
     {
         let src = p.display().to_string();
+        if cli.no_graft {
+            let adapter = ArchiveAdapter::open(p).context("opening archive")?;
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
         let adapter = ComposeAdapter::new(ArchiveAdapter::open(p).context("opening archive")?);
         return run(
             query,
@@ -1962,7 +2004,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 .context("opening SQLite database")?,
         };
         let src = p.display().to_string();
-        return run_relational(adapter, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
+        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
 
     let (text, path) = match &path {
@@ -2386,11 +2428,21 @@ pub type Mounted = (Box<dyn AstAdapter>, Box<dyn Fn(NodeId) -> String>);
 /// single-input flow applies: `run_relational` wraps every
 /// relational adapter in `ComposeAdapter`, and a mount must too —
 /// otherwise a text column full of JSON navigates as a subtree in
-/// one flow and comes back flat in the other.
+/// one flow and comes back flat in the other. Under --no-graft
+/// both flows skip the wrap.
 fn mounted_relational<A: AstAdapter + 'static>(
+    no_graft: bool,
     inner: A,
     outer_loc: impl Fn(&A, NodeId) -> String + 'static,
 ) -> Mounted {
+    if no_graft {
+        let a = Rc::new(inner);
+        let r = a.clone();
+        return (
+            Box::new(Shared(a)),
+            Box::new(move |n| outer_loc(&r, n)),
+        );
+    }
     let a = Rc::new(ComposeAdapter::new(inner));
     let r = a.clone();
     (
@@ -2406,7 +2458,10 @@ fn mounted_relational<A: AstAdapter + 'static>(
 pub struct OpenOpts {
     pub hidden: bool,
     pub no_ignore: bool,
-    pub descend: bool,
+    /// Opt directory mounts into grafting (the CLI's --graft).
+    pub graft: bool,
+    /// Disable grafting entirely (the CLI's --no-graft).
+    pub no_graft: bool,
     pub refs: Option<PathBuf>,
 }
 
@@ -2418,7 +2473,8 @@ pub fn open_target(target: &str, opts: &OpenOpts) -> anyhow::Result<Mounted> {
     let cli = Cli {
         hidden: opts.hidden,
         no_ignore: opts.no_ignore,
-        descend: opts.descend,
+        graft: opts.graft,
+        no_graft: opts.no_graft,
         refs: opts.refs.clone(),
         ..Cli::default()
     };
@@ -2451,7 +2507,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
         };
-        if cli.descend {
+        if cli.graft {
             let a = Rc::new(ComposeAdapter::with_source_paths(
                 FsAdapter::with_options(p, opts)?,
                 |fs, n| Some(fs.path(n)),
@@ -2508,12 +2564,18 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     }
     // A `code:` prefix forces the code-level reading, matching
     // the single-input flow; a directory mounts the composed,
-    // descending view with source leaves grafted at the code
+    // grafted view with source leaves grafted at the code
     // level.
     if let Some(s) = p.to_str()
         && let Some(rest) = s.strip_prefix("code:")
         && !rest.is_empty()
     {
+        if cli.no_graft {
+            anyhow::bail!(
+                "--no-graft refuses the code: prefix: the prefix's whole \
+                 meaning is the grafted code-level view"
+            );
+        }
         let target = Path::new(rest);
         if target.is_dir() {
             let opts = FsOptions {
@@ -2557,6 +2619,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("mssql://")
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             MssqlAdapter::connect(s).context("connecting to SQL Server")?,
             |a, n| a.locator(n),
         ));
@@ -2565,6 +2628,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("oracle://")
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             OracleAdapter::connect(s).context("connecting to Oracle")?,
             |a, n| a.locator(n),
         ));
@@ -2735,6 +2799,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("athena:")
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             AthenaAdapter::connect(s).context("connecting to Athena")?,
             |a, n| a.locator(n),
         ));
@@ -2781,6 +2846,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("bigquery://")
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
             |a, n| a.locator(n),
         ));
@@ -2789,6 +2855,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && s.starts_with("mysql://")
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             MysqlAdapter::connect(s).context("connecting to MySQL")?,
             |a, n| a.locator(n),
         ));
@@ -2797,6 +2864,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && is_pg_config(s)
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
             |a, n| a.locator(n),
         ));
@@ -2818,6 +2886,11 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if let Some(t) = p.to_str()
         && (t.starts_with("gs://") || t.starts_with("s3://") || t.starts_with("az://"))
     {
+        if cli.no_graft {
+            let a = Rc::new(ObjstoreAdapter::connect(t).context("connecting to bucket")?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
         let a = Rc::new(ComposeAdapter::new(
             ObjstoreAdapter::connect(t).context("connecting to bucket")?,
         ));
@@ -2859,11 +2932,17 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
         return Ok(mounted_relational(
+            cli.no_graft,
             DuckdbAdapter::open(p).context("opening DuckDB database")?,
             |a, n| a.locator(n),
         ));
     }
     if is_archive(p) {
+        if cli.no_graft {
+            let a = Rc::new(ArchiveAdapter::open(p).context("opening archive")?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
         let a = Rc::new(ComposeAdapter::new(
             ArchiveAdapter::open(p).context("opening archive")?,
         ));
@@ -2887,6 +2966,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
     if is_sqlite(p) {
         let refs = relational_refs(&cli.refs)?;
         return Ok(mounted_relational(
+            cli.no_graft,
             SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
             |a, n| a.locator(n),
         ));
@@ -2995,12 +3075,18 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
 /// parses as JSON grafts an inner arbor navigable in place
 /// (`/orders/*/data/user/age`). `outer_loc` is the wrapped
 /// adapter's own locator, threaded through the bang-locator.
+/// Under --no-graft the wrap is skipped: a text column stays the
+/// server's own scalar.
 fn run_relational<A: AstAdapter>(
     inner: A,
+    no_graft: bool,
     query: &str,
     outer_loc: impl Fn(&A, NodeId) -> String,
     kaiv_source: Option<&str>,
 ) -> anyhow::Result<()> {
+    if no_graft {
+        return run(query, &inner, |n| outer_loc(&inner, n), kaiv_source);
+    }
     let adapter = ComposeAdapter::new(inner);
     run(
         query,

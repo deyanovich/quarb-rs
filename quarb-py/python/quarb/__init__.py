@@ -34,7 +34,7 @@ the low-level layer: result lines as strings, exactly as the
 engine's message.
 
 ``quarb.open(path)`` dispatches on the path's kind — directories
-(``descend=True`` grafts parseable leaves), SQLite, kaiv/daiv
+(``graft=True`` grafts parseable leaves), SQLite, kaiv/daiv
 (typed units, instants, durations), git repositories (``git:PATH``),
 archives, XLSX workbooks, and source files — and
 ``quarb.translate(src, "jq"|"xpath"|"sql")`` turns queries you

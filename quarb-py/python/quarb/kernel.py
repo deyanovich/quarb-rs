@@ -11,7 +11,7 @@ queries against the session's mounts; a small directive family
 - ``%python`` — the rest of the cell is Python (build a fixture,
   post-process, plot); the namespace persists, ``session`` is the
   live session, and ``_`` is the last query result.
-- ``%mount PATH [PATH ...] [--descend]`` — open documents
+- ``%mount PATH [PATH ...] [--graft | --no-graft]`` — open documents
   in-process (directories, SQLite, kaiv, ``git:PATH``, archives,
   XLSX, source files, text formats).
 - ``%connect NAME PATH [PATH ...]`` — a resident target set

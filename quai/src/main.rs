@@ -41,10 +41,16 @@ struct Cli {
     #[arg(long = "no-ignore")]
     no_ignore: bool,
 
-    /// Descend through parseable file content: a directory's
+    /// Opt directory mounts into grafting: a directory's
     /// .json/.xml/.csv/… leaves graft their parsed tree as children.
-    #[arg(long)]
-    descend: bool,
+    /// (--descend is the pre-0.24 spelling, kept as an alias.)
+    #[arg(long, alias = "descend")]
+    graft: bool,
+
+    /// Disable grafting entirely: archive members and text columns
+    /// stay opaque leaves; refused with the code: prefix.
+    #[arg(long = "no-graft", conflicts_with = "graft")]
+    no_graft: bool,
 
     /// Allow the `sh(...)` pipeline stage to run external commands.
     #[arg(long)]
@@ -235,7 +241,8 @@ fn main() -> Result<()> {
             cli.allow_shell,
             cli.hidden,
             cli.no_ignore,
-            cli.descend,
+            cli.graft,
+            cli.no_graft,
             cli.cache,
             cli.refs.clone(),
             cli.model.clone(),
@@ -259,7 +266,8 @@ fn main() -> Result<()> {
         let opts = Options {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
-            descend: cli.descend,
+            graft: cli.graft,
+            no_graft: cli.no_graft,
             refs: std::rc::Rc::new(refs),
         };
         let ctx = Remount {

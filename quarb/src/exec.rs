@@ -632,7 +632,7 @@ fn union_branches(
         let seed: &[Mark] = outer.map(|s| s.marks).unwrap_or(&[]);
         for from in anchor_nodes(&branch.anchor, start, adapter.root(), seed) {
         for (node, register, marks, arrived) in
-            navigate_paths(&branch.steps, adapter, from, trace, outer, seed, &[])
+            navigate_paths(&branch.steps, adapter, from, trace, outer, &[], seed, &[])
         {
             caps.push(Capsa {
                 node,
@@ -1099,6 +1099,10 @@ fn apply_stage(
                     from,
                     trace,
                     outer,
+                    // The thread's witness travels with the hop, so
+                    // step predicates on the way read `$*k` per
+                    // thread (the results carry it on, below).
+                    &c.bindings,
                     &c.marks,
                     &c.register,
                 ) {
@@ -2300,13 +2304,16 @@ fn reg_key(register: &[Reg]) -> Vec<(Option<String>, String)> {
 /// Run the navigation path starting from `start`, per-path: each
 /// result carries the register its expansion path's pushes built.
 /// Paths without pattern pushes carry empty registers and dedup by
-/// node — the plain semantics, unchanged.
+/// node — the plain semantics, unchanged. `witness` is the invoking
+/// thread's correlation tuple (empty where there is none): step
+/// predicates and pattern guards along the way read `$*k` under it.
 fn navigate_paths(
     elems: &[PathElem],
     adapter: &impl AstAdapter,
     start: NodeId,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
     seed_marks: &[Mark],
     seed_register: &[Reg],
 ) -> Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> {
@@ -2331,7 +2338,9 @@ fn navigate_paths(
             match elem {
                 PathElem::Step(step) => {
                     let mut succs = Vec::new();
-                    apply_step(adapter, *node, step, trace, outer, marks, &mut succs);
+                    apply_step(
+                        adapter, *node, step, trace, outer, witness, marks, &mut succs,
+                    );
                     next.extend(succs.into_iter().map(|s| {
                         let arrived = arrived_edge(adapter, *node, step, s).into_iter().collect();
                         (s, register.clone(), marks.clone(), arrived)
@@ -2346,7 +2355,7 @@ fn navigate_paths(
                         last_edge: None,
                     };
                     next.extend(
-                        expand_group(adapter, group, anchor, trace, outer)
+                        expand_group(adapter, group, anchor, trace, outer, witness)
                             .into_iter()
                             .map(|p| {
                                 let arrived = p.last_edge.clone().into_iter().collect();
@@ -2404,13 +2413,16 @@ fn navigate_from(
     start: NodeId,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
     seed_marks: &[Mark],
 ) -> Vec<NodeId> {
     dedup(
-        navigate_paths(elems, adapter, start, trace, outer, seed_marks, &[])
-            .into_iter()
-            .map(|(n, _, _, _)| n)
-            .collect(),
+        navigate_paths(
+            elems, adapter, start, trace, outer, witness, seed_marks, &[],
+        )
+        .into_iter()
+        .map(|(n, _, _, _)| n)
+        .collect(),
     )
 }
 
@@ -2608,6 +2620,7 @@ fn expand_group(
     anchor: GPath,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
 ) -> Vec<GPath> {
     let n_max = adapter.quantifier_bound();
     if let Some(n) = group.quant.max {
@@ -2631,7 +2644,7 @@ fn expand_group(
     // walk continues from the full frontier, but only survivors
     // are candidates. `(...)+[P]?` is therefore "the nearest
     // satisfying P": a shortest-path search.
-    let admits = |p: &GPath| group_admits(adapter, group, p, trace, outer);
+    let admits = |p: &GPath| group_admits(adapter, group, p, trace, outer, witness);
     let mut matches: Vec<(GPath, usize)> = Vec::new();
     if group.quant.min == 0 && admits(&anchor) {
         matches.push((anchor.clone(), 0));
@@ -2642,7 +2655,14 @@ fn expand_group(
         let mut next = Vec::new();
         for path in &frontier {
             for alt in &group.alts {
-                next.extend(expand_elems(adapter, alt, vec![path.clone()], trace, outer));
+                next.extend(expand_elems(
+                    adapter,
+                    alt,
+                    vec![path.clone()],
+                    trace,
+                    outer,
+                    witness,
+                ));
             }
         }
         frontier = dedup_paths(next);
@@ -2674,7 +2694,14 @@ fn expand_group(
         let mut probe = Vec::new();
         for path in &frontier {
             for alt in &group.alts {
-                probe.extend(expand_elems(adapter, alt, vec![path.clone()], trace, outer));
+                probe.extend(expand_elems(
+                    adapter,
+                    alt,
+                    vec![path.clone()],
+                    trace,
+                    outer,
+                    witness,
+                ));
                 if !probe.is_empty() {
                     break;
                 }
@@ -2727,6 +2754,7 @@ fn group_admits(
     path: &GPath,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
 ) -> bool {
     if group.predicates.is_empty() {
         return true;
@@ -2739,19 +2767,21 @@ fn group_admits(
             _ => None,
         })
         .collect();
-    exists_binding(
-        adapter,
-        path.node,
-        &exprs,
-        trace,
-        &mut Vec::new(),
-        Scope {
-            outer,
-            edge: path.last_edge.as_ref(),
-            marks: &path.marks,
-            ..NO_SCOPE
-        },
-    )
+    let scope = Scope {
+        outer,
+        edge: path.last_edge.as_ref(),
+        marks: &path.marks,
+        bindings: witness,
+        ..NO_SCOPE
+    };
+    // Under a correlation witness the guard is evaluated per
+    // thread, like a step predicate (see `apply_predicates`).
+    if !witness.is_empty() {
+        return exprs
+            .iter()
+            .all(|e| eval_pred_expr(adapter, path.node, e, trace, witness, scope));
+    }
+    exists_binding(adapter, path.node, &exprs, trace, &mut Vec::new(), scope)
 }
 
 /// Fold one alternative's elements over a set of in-flight paths.
@@ -2765,6 +2795,7 @@ fn expand_elems(
     mut paths: Vec<GPath>,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
 ) -> Vec<GPath> {
     for elem in elems {
         // A mark labels each in-flight path's node in place.
@@ -2788,6 +2819,7 @@ fn expand_elems(
                         step,
                         trace,
                         outer,
+                        witness,
                         &path.marks,
                         &mut succs,
                     );
@@ -2797,7 +2829,14 @@ fn expand_elems(
                     }));
                 }
                 PathElem::Group(inner) => {
-                    next.extend(expand_group(adapter, inner, path.clone(), trace, outer));
+                    next.extend(expand_group(
+                        adapter,
+                        inner,
+                        path.clone(),
+                        trace,
+                        outer,
+                        witness,
+                    ));
                 }
                 PathElem::Mark(_) => unreachable!("handled above"),
                 // A breadcrumb: evaluate from the path's node — with
@@ -2807,6 +2846,7 @@ fn expand_elems(
                     let scope = Scope {
                         edge: path.last_edge.as_ref(),
                         outer,
+                        bindings: witness,
                         ..NO_SCOPE
                     };
                     let value = match body {
@@ -2814,7 +2854,7 @@ fn expand_elems(
                             subcontext_scalar(q, adapter, path.node, trace, Some(&scope))
                         }
                         PushBody::Expr(e) => {
-                            operand_scalar_bound(adapter, path.node, e, trace, &[], scope)
+                            operand_scalar_bound(adapter, path.node, e, trace, witness, scope)
                         }
                     };
                     let mut p = path.clone();
@@ -3004,6 +3044,7 @@ fn apply_step(
     step: &Step,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
     marks: &[Mark],
     out: &mut Vec<NodeId>,
 ) {
@@ -3032,6 +3073,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 |&n| {
@@ -3052,6 +3094,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&(n, _)| n,
                 // The arrived-by edge of a descendant match is its
@@ -3078,6 +3121,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 // Walked direction: from the child up.
@@ -3114,6 +3158,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&(n, _)| n,
                 |&(n, _)| {
@@ -3137,6 +3182,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 |&sib| {
@@ -3159,6 +3205,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 |&sib| {
@@ -3201,6 +3248,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&(n, _)| n,
                 |&(sib, _)| {
@@ -3227,6 +3275,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |(_, n)| *n,
                 |(label, target)| {
@@ -3253,6 +3302,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |(_, n)| *n,
                 // The walked edge points INTO the current node.
@@ -3291,6 +3341,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |(_, n, _)| *n,
                 |(label, other, outgoing)| {
@@ -3323,6 +3374,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 // A resolution edge is labeled by its property.
@@ -3355,6 +3407,7 @@ fn apply_step(
                 step,
                 trace,
                 outer,
+                witness,
                 marks,
                 |&n| n,
                 // Stored direction: the found node's property points
@@ -3438,6 +3491,7 @@ fn apply_predicates<T>(
     step: &Step,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
     marks: &[Mark],
     node_of: impl Fn(&T) -> NodeId,
     edge_of: impl Fn(&T) -> Option<EdgeCtx>,
@@ -3457,22 +3511,40 @@ fn apply_predicates<T>(
                 }
                 items.retain(|item| {
                     let edge = edge_of(item);
+                    // Navigation predicates have no capsa of
+                    // their own; `$$…` still reaches the
+                    // invoking subcontext's capsa. Edge hops
+                    // define `$-` for their own predicates.
+                    let scope = Scope {
+                        outer,
+                        edge: edge.as_ref(),
+                        marks,
+                        bindings: witness,
+                        ..NO_SCOPE
+                    };
+                    // Under a correlation witness — a pipeline
+                    // stage's operand path, or a nested path in
+                    // an ON clause — `$*k` is THIS thread's bound
+                    // node, and the predicates are evaluated
+                    // under it, null-propagating, exactly as the
+                    // stage's own filter is. Re-searching the
+                    // trace here would admit a node under
+                    // whichever tuple happened to fit — the same
+                    // answer for every thread.
+                    if !witness.is_empty() {
+                        return run.iter().all(|e| {
+                            eval_pred_expr(adapter, node_of(item), e, trace, witness, scope)
+                        });
+                    }
+                    // No witness yet (a driver path, a body's own
+                    // navigation): the existential over the trace.
                     exists_binding(
                         adapter,
                         node_of(item),
                         &run,
                         trace,
                         &mut Vec::new(),
-                        // Navigation predicates have no capsa of
-                        // their own; `$$…` still reaches the
-                        // invoking subcontext's capsa. Edge hops
-                        // define `$-` for their own predicates.
-                        Scope {
-                            outer,
-                            edge: edge.as_ref(),
-                            marks,
-                            ..NO_SCOPE
-                        },
+                        scope,
                     )
                 });
             }
@@ -3969,6 +4041,12 @@ fn eval_operand(
             // values gathered from every matching mark
             // (existential, like any multi-valued operand). An
             // unset anchor yields nothing.
+            // In predicates `bound` is the tuple under test; in
+            // pipeline stages it is empty and the capsa's witness
+            // (`scope.bindings`) takes over — the same rule as `$*k`
+            // itself. Either way it travels into the path, so its
+            // step predicates read `$*k` per thread.
+            let witness = if bound.is_empty() { scope.bindings } else { bound };
             let mut nodes = Vec::new();
             for from in anchor_nodes(anchor, node, adapter.root(), scope.marks) {
                 nodes.extend(navigate_from(
@@ -3977,6 +4055,7 @@ fn eval_operand(
                     from,
                     trace,
                     scope.outer,
+                    witness,
                     scope.marks,
                 ));
             }
@@ -4051,7 +4130,7 @@ fn eval_operand(
             let nodes = if steps.is_empty() {
                 vec![base]
             } else {
-                navigate_from(steps, adapter, base, trace, scope.outer, scope.marks)
+                navigate_from(steps, adapter, base, trace, scope.outer, bound, scope.marks)
             };
             match projection {
                 Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
@@ -4857,6 +4936,48 @@ mod tests {
                 &t
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn nested_predicates_read_the_thread_witness() {
+        let t = MockTree::sample();
+        // Driver: every .rs file; joined: the node of the same name,
+        // so each thread's witness is itself (x.rs→2, z.rs→5, w.rs→7).
+        // A root-anchored subexpression in a pipeline filter reads
+        // `$*1`: it must see THIS thread's witness, never search the
+        // trace for some tuple that happens to satisfy it. Only
+        // w.rs's witness sits at depth 3; x.rs's and z.rs's at 2.
+        assert_eq!(
+            run(
+                "//*.rs <=> //*[:::name = $$:::name] \
+                 | [(^//*[:::name = $*1:::name && :::depth = 3])]",
+                &t
+            ),
+            vec![7]
+        );
+        assert_eq!(
+            run(
+                "//*.rs <=> //*[:::name = $$:::name] \
+                 | [(^//*[:::name = $*1:::name && :::depth = 2])]",
+                &t
+            ),
+            vec![2, 5]
+        );
+        // A pipe hop's step predicate reads the same witness: from
+        // each thread, climb to every ancestor and step to its .rs
+        // children other than the witness itself, at depth 2. Only
+        // w.rs's thread reaches one (z.rs, under b); x.rs's and
+        // z.rs's only reach themselves. Under the old re-search any
+        // .rs file was "not the witness" for SOME tuple, admitting
+        // x.rs and z.rs too.
+        assert_eq!(
+            run(
+                "//*.rs <=> //*[:::name = $$:::name] \
+                 | \\\\*/*.rs[:::name != $*1:::name && :::depth = 2]",
+                &t
+            ),
+            vec![5]
         );
     }
 

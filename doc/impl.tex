@@ -323,7 +323,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{;;;kind} / \texttt{;;;field} metadata; named nodes
   only. Rust / Python / JavaScript / C by extension,
   compile-time grammar set. Grafts under composition —
-  \texttt{--descend} queries every function in a directory tree
+  \texttt{--graft} queries every function in a directory tree
   at once. \\
 \texttt{quarb-code} & Source code at the code level:
   declaration identifiers are node names
@@ -346,7 +346,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   the inner root is identified with the outer leaf (no phantom
   node), and locators mark the boundary jar-style
   (\texttt{store.json!/books/1}). \texttt{qua}: default for
-  archives, \texttt{--descend} for directories. \\
+  archives, \texttt{--graft} for directories. \\
 \texttt{quarb-archive} & Zip and tar (\texttt{.tar[.gz]})
   archives as path trees: entry content as the node value,
   \texttt{;;;size} / \texttt{;;;compressed}; zip contents lazy
@@ -842,7 +842,12 @@ root-anchored sequence of hops, each an axis followed by a name:
     invoking capsa's node; stacking \texttt{\$\$\$} steps further)
     — wide crosstabs, groupwise transforms; and the correlation
     keeps its \emph{witness}, so \texttt{\$*k} in pipeline stages
-    projects the joined side into output (\texttt{SELECT a.x, b.y}) \\
+    projects the joined side into output (\texttt{SELECT a.x, b.y});
+    the witness travels into every path a stage's operand or pipe
+    hop navigates, so a nested step predicate
+    (\texttt{(\^{}/c/*[::b\_id = \$*1::id])}) reads the same
+    thread's binding rather than re-searching the trace
+    (2026-08-18) \\
 \texttt{A <=> B[/k:: = \$\$/k:: and …]}
   & \live correlation, \emph{driver-first} (2026-07-25): the first
     expression drives (SQL's \texttt{FROM}); each joined

@@ -20,7 +20,7 @@
 //! source files. The `quarb-code` crate derives *the code level*
 //! from this same parse: declared identifiers as node names.
 //!
-//! Composed (`qua --descend`), source files graft like JSON does
+//! Composed (`qua --graft`), source files graft like JSON does
 //! — `//function_item::name` over a whole directory tree is one
 //! query across every parsed file.
 
@@ -32,7 +32,7 @@ pub use ast_cache::Cache;
 thread_local! {
     /// The AST cache for this thread, or `None` (uncached). Set once
     /// by the CLI from `--cache`; consulted by every `parse` call, so
-    /// single-file and `--descend` (via quarb-compose) both benefit.
+    /// single-file and `--graft` (via quarb-compose) both benefit.
     static CACHE: std::cell::RefCell<Option<Cache>> = const { std::cell::RefCell::new(None) };
 }
 

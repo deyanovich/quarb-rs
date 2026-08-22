@@ -180,13 +180,21 @@ class Session:
     # -- mounting ------------------------------------------------
     def mount(self, line: str) -> str:
         args = shlex.split(line)
-        descend = "--descend" in args
-        paths = [a for a in args if a != "--descend"]
+        # --descend is the pre-0.24 spelling of --graft, kept as
+        # an alias.
+        graft = "--graft" in args or "--descend" in args
+        no_graft = "--no-graft" in args
+        flags = {"--graft", "--descend", "--no-graft"}
+        paths = [a for a in args if a not in flags]
+        if graft and no_graft:
+            raise ValueError("--graft and --no-graft conflict")
         if not paths:
-            raise ValueError("usage: mount PATH [PATH ...] [--descend]")
+            raise ValueError(
+                "usage: mount PATH [PATH ...] [--graft | --no-graft]"
+            )
         if len(paths) == 1:
             name = Path(paths[0].removeprefix("git:")).stem or paths[0]
-            self.docs[name] = _open(paths[0], descend)
+            self.docs[name] = _open(paths[0], graft, no_graft)
             self.default = name
             return f"mounted: {name}"
         # Several paths mount together under one root, so a single
@@ -194,7 +202,7 @@ class Session:
         # the joined stems.
         stems = [Path(p.removeprefix("git:")).stem or p for p in paths]
         name = "+".join(stems)
-        self.docs[name] = _mount(paths, descend)
+        self.docs[name] = _mount(paths, graft, no_graft)
         self.default = name
         return f"mounted: {name} (children: {', '.join('/' + s for s in stems)})"
 

@@ -26,7 +26,10 @@ use std::rc::Rc;
 pub struct Options {
     pub hidden: bool,
     pub respect_ignore: bool,
-    pub descend: bool,
+    /// Opt directory mounts into grafting (qua's --graft).
+    pub graft: bool,
+    /// Disable grafting entirely (qua's --no-graft).
+    pub no_graft: bool,
     /// Declared references, `(field, container)` pairs — the parsed
     /// `--refs` document, consumed by the SQLite mounts.
     pub refs: Rc<Vec<(String, String)>>,
@@ -51,6 +54,10 @@ pub enum Doc {
     Git(quarb_git::GitAdapter),
     #[cfg(feature = "native")]
     Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
+    /// An archive held opaque (`no_graft`): the member tree with
+    /// leaves as plain entries — the tar -t view.
+    #[cfg(feature = "native")]
+    ArchiveRaw(quarb_archive::ArchiveAdapter),
     #[cfg(feature = "native")]
     Xlsx(quarb_xlsx::XlsxAdapter),
     #[cfg(feature = "native")]
@@ -233,6 +240,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Archive(a) => a,
             #[cfg(feature = "native")]
+            Doc::ArchiveRaw(a) => a,
+            #[cfg(feature = "native")]
             Doc::Xlsx(a) => a,
             #[cfg(feature = "native")]
             Doc::Syntax(a) => a,
@@ -340,6 +349,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Archive(a) => go!(a),
             #[cfg(feature = "native")]
+            Doc::ArchiveRaw(a) => go!(a),
+            #[cfg(feature = "native")]
             Doc::Xlsx(a) => go!(a),
             #[cfg(feature = "native")]
             Doc::Syntax(a) => go!(a),
@@ -368,6 +379,8 @@ impl Doc {
             Doc::Git(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
+            #[cfg(feature = "native")]
+            Doc::ArchiveRaw(a) => a.locator(node),
             #[cfg(feature = "native")]
             Doc::Xlsx(a) => a.locator(node),
             #[cfg(feature = "native")]
@@ -454,6 +467,8 @@ impl Doc {
             #[cfg(feature = "native")]
             Doc::Archive(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
+            Doc::ArchiveRaw(a) => Box::new(Shared(Rc::new(a))),
+            #[cfg(feature = "native")]
             Doc::Xlsx(a) => Box::new(Shared(Rc::new(a))),
             #[cfg(feature = "native")]
             Doc::Syntax(a) => Box::new(Shared(Rc::new(a))),
@@ -472,7 +487,7 @@ impl Doc {
 #[cfg(feature = "native")]
 impl Doc {
     /// Open one path as a local source. Directories are filesystem
-    /// trees (`--descend` grafts parseable leaves); `git:PATH` opens a
+    /// trees (`--graft` grafts parseable leaves); `git:PATH` opens a
     /// repository; binary kinds (SQLite, spreadsheets, archives) and
     /// source files dispatch by extension/magic; everything else is a
     /// text document parsed by extension or content sniff.
@@ -484,7 +499,7 @@ impl Doc {
             };
             let fs = quarb_fs::FsAdapter::with_options(path, fsopts)
                 .with_context(|| format!("opening directory {}", path.display()))?;
-            return Ok(if opts.descend {
+            return Ok(if opts.graft {
                 Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(
                     fs,
                     |fs, n| Some(fs.path(n)),
@@ -529,11 +544,17 @@ impl Doc {
         }
         // A `code:` prefix forces the code-level reading,
         // matching qua's dispatch; a directory mounts the
-        // composed, descending view with source leaves grafted
+        // composed, grafted view with source leaves grafted
         // at the code level.
         if let Some(rest) = s.strip_prefix("code:")
             && !rest.is_empty()
         {
+            if opts.no_graft {
+                bail!(
+                    "no_graft refuses the code: prefix: the prefix's whole \
+                     meaning is the grafted code-level view"
+                );
+            }
             let target = Path::new(rest);
             if target.is_dir() {
                 let fsopts = quarb_fs::FsOptions {
@@ -587,7 +608,11 @@ impl Doc {
         }
         if is_archive(path) {
             let a = quarb_archive::ArchiveAdapter::open(path).context("opening archive")?;
-            return Ok(Doc::Archive(quarb_compose::ComposeAdapter::new(a)));
+            return Ok(if opts.no_graft {
+                Doc::ArchiveRaw(a)
+            } else {
+                Doc::Archive(quarb_compose::ComposeAdapter::new(a))
+            });
         }
 
         // Text documents.
