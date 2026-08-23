@@ -18,12 +18,27 @@ type Scale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
 const SCALAR: &[&str] = &[
     "upper",
     "lower",
+    "title",
     "trim",
+    "ltrim",
+    "rtrim",
+    // `cc` counts codepoints, `bc` UTF-8 bytes, `wc` words;
+    // `chars` is the pre-0.25 spelling of `cc`, kept as an alias.
+    "cc",
     "chars",
+    "bc",
     "wc",
+    "lc",
+    "sc",
     "lines",
     "words",
+    "sentences",
     "split",
+    "substr",
+    "pad",
+    "lpad",
+    "rpad",
+    "repeat",
     "round",
     "floor",
     "ceil",
@@ -182,9 +197,145 @@ pub fn apply_scalar(
     match call.name.as_str() {
         "upper" => vec![Value::Str(text.to_uppercase())],
         "lower" => vec![Value::Str(text.to_lowercase())],
+        // Title case, Python-shaped: each word's first alphabetic
+        // character uppercases, the rest of the word lowercases.
+        "title" => {
+            let mut out = String::with_capacity(text.len());
+            let mut boundary = true;
+            for c in text.chars() {
+                if c.is_alphabetic() {
+                    if boundary {
+                        out.extend(c.to_uppercase());
+                        boundary = false;
+                    } else {
+                        out.extend(c.to_lowercase());
+                    }
+                } else {
+                    out.push(c);
+                    boundary = true;
+                }
+            }
+            vec![Value::Str(out)]
+        }
         "trim" => vec![Value::Str(text.trim().to_string())],
-        "chars" => vec![Value::Int(text.chars().count() as i64)],
+        "ltrim" => vec![Value::Str(text.trim_start().to_string())],
+        "rtrim" => vec![Value::Str(text.trim_end().to_string())],
+        // `cc` counts codepoints (né `chars`, the pre-0.25 alias);
+        // `bc` counts UTF-8 bytes; `wc` counts words.
+        "cc" | "chars" => vec![Value::Int(text.chars().count() as i64)],
+        "bc" => vec![Value::Int(text.len() as i64)],
         "wc" => vec![Value::Int(text.split_whitespace().count() as i64)],
+        "lc" => vec![Value::Int(text.lines().count() as i64)],
+        // UAX #29 sentence segmentation (unicode-segmentation):
+        // `sentences` splits (each segment trimmed, empties
+        // dropped), `sc` counts the same segments.
+        "sentences" => {
+            use unicode_segmentation::UnicodeSegmentation;
+            text.unicode_sentences()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| Value::Str(t.to_string()))
+                .collect()
+        }
+        "sc" => {
+            use unicode_segmentation::UnicodeSegmentation;
+            vec![Value::Int(
+                text.unicode_sentences()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .count() as i64,
+            )]
+        }
+        // `substr(a..b)` — the range predicate's spellings, on
+        // characters: `substr(1..3)`, `substr(..3)`, `substr(2..)`,
+        // `substr(..-3)`, `substr(4..-4)`; a bare position
+        // (`substr(3)`) is the `[n]` reading, one character.
+        // 1-based like its ancestors (SQL SUBSTR, XPath
+        // substring, awk/Perl substr).
+        // 1-based, inclusive, negative counts from the end;
+        // out-of-range clamps, a crossed range is the empty
+        // string, and 0 refuses — it is no position.
+        "substr" => {
+            let (a, b) = match call.args.first() {
+                Some(Arg::Range(a, b)) => (*a, *b),
+                Some(Arg::Lit(Value::Int(i))) => (Some(*i), Some(*i)),
+                _ => {
+                    crate::exec::record_refusal(
+                        "substr takes a range — substr(1..3), substr(..3), \
+                         substr(2..), substr(-2..) — or one position"
+                            .into(),
+                    );
+                    return vec![Value::Null];
+                }
+            };
+            if a == Some(0) || b == Some(0) {
+                crate::exec::record_refusal(
+                    "substr(0): positions are 1-based — 1 is the first \
+                     character, -1 the last"
+                        .into(),
+                );
+                return vec![Value::Null];
+            }
+            let n = text.chars().count() as i64;
+            let pos = |i: i64| -> i64 {
+                if i < 0 { n + i + 1 } else { i }
+            };
+            let from = pos(a.unwrap_or(1)).max(1);
+            let to = pos(b.unwrap_or(-1)).min(n);
+            if from > to {
+                vec![Value::Str(String::new())]
+            } else {
+                vec![Value::Str(
+                    text.chars()
+                        .skip(from as usize - 1)
+                        .take((to - from + 1) as usize)
+                        .collect(),
+                )]
+            }
+        }
+        // `pad(n)` centers to n characters (the extra character
+        // of an odd split falls right, as Python's center);
+        // `lpad(n)` / `rpad(n)` pad one side. Spaces by default
+        // (`lpad(n, "0")` with the given text, repeated and cut
+        // to fit, SQL-shaped); text already n or longer passes
+        // through untouched.
+        "pad" => {
+            let n = arg_int(call, 0).unwrap_or(0).max(0) as usize;
+            let fill = arg_str(call, 1, " ");
+            let have = text.chars().count();
+            if have >= n || fill.is_empty() {
+                vec![Value::Str(text.clone())]
+            } else {
+                let left = (n - have) / 2;
+                let right = n - have - left;
+                let l: String = fill.chars().cycle().take(left).collect();
+                let r: String = fill.chars().cycle().take(right).collect();
+                vec![Value::Str(format!("{l}{text}{r}"))]
+            }
+        }
+        "lpad" | "rpad" => {
+            let n = arg_int(call, 0).unwrap_or(0).max(0) as usize;
+            let fill = arg_str(call, 1, " ");
+            let have = text.chars().count();
+            if have >= n || fill.is_empty() {
+                vec![Value::Str(text.clone())]
+            } else {
+                let pad: String =
+                    fill.chars().cycle().take(n - have).collect();
+                vec![Value::Str(if call.name == "lpad" {
+                    format!("{pad}{text}")
+                } else {
+                    format!("{text}{pad}")
+                })]
+            }
+        }
+        // `repeat(n)` — the text n times (0 is the empty string).
+        // The one honest home for repetition: `"a" * 3` stays
+        // null-propagating arithmetic.
+        "repeat" => {
+            let n = arg_int(call, 0).unwrap_or(0).max(0) as usize;
+            vec![Value::Str(text.repeat(n))]
+        }
         "lines" => text.lines().map(|s| Value::Str(s.to_string())).collect(),
         "words" => text
             .split_whitespace()
@@ -989,6 +1140,13 @@ fn join(input: &[Value], sep: &str) -> String {
 
 /// The `n`-th call argument as a literal string, or `default` if
 /// absent (or not a string literal).
+fn arg_int(call: &FnCall, n: usize) -> Option<i64> {
+    match call.args.get(n) {
+        Some(Arg::Lit(Value::Int(i))) => Some(*i),
+        _ => None,
+    }
+}
+
 fn arg_str<'a>(call: &'a FnCall, n: usize, default: &'a str) -> &'a str {
     match call.args.get(n) {
         Some(Arg::Lit(Value::Str(s))) => s,
@@ -1018,6 +1176,102 @@ mod tests {
 
     fn ints(ns: &[i64]) -> Vec<Value> {
         ns.iter().map(|&n| Value::Int(n)).collect()
+    }
+
+    fn scalar_with(name: &str, topic: Value, args: Vec<crate::ast::Arg>) -> Vec<Value> {
+        let call = FnCall {
+            name: name.into(),
+            args,
+        };
+        apply_scalar(&call, topic, &crate::quantity::scale_expr)
+    }
+
+    /// The 0.25 text round: slice/pads/repeat/title, the one-sided
+    /// trims, and the count family (cc codepoints, bc bytes, wc
+    /// words, lc lines; `chars` the pre-0.25 alias of cc).
+    #[test]
+    fn text_round_functions() {
+        use crate::ast::Arg;
+        let s = |t: &str| Value::Str(t.to_string());
+        let int = |n: i64| Arg::Lit(Value::Int(n));
+        let lit = |t: &str| Arg::Lit(Value::Str(t.to_string()));
+        assert_eq!(sc("title", s("emu WAR of 1932")), vec![s("Emu War Of 1932")]);
+        assert_eq!(sc("ltrim", s("  x  ")), vec![s("x  ")]);
+        assert_eq!(sc("rtrim", s("  x  ")), vec![s("  x")]);
+        // counts: codepoints vs bytes vs words vs lines
+        assert_eq!(sc("cc", s("льюис")), vec![Value::Int(5)]);
+        assert_eq!(sc("chars", s("льюис")), vec![Value::Int(5)]);
+        assert_eq!(sc("bc", s("льюис")), vec![Value::Int(10)]);
+        assert_eq!(sc("wc", s("a b c")), vec![Value::Int(3)]);
+        assert_eq!(sc("lc", s("a\nb\nc")), vec![Value::Int(3)]);
+        // Plain UAX #29: terminators followed by space+uppercase
+        // break; a mid-sentence number's dot does not. (The base
+        // algorithm carries no abbreviation list — "Dr. Smith"
+        // splits; that tailoring is locale data, documented as
+        // out of scope.)
+        let prose = s("He paid 3.50 today. Then he slept! Did he?");
+        assert_eq!(
+            sc("sentences", prose.clone()),
+            vec![
+                s("He paid 3.50 today."),
+                s("Then he slept!"),
+                s("Did he?"),
+            ]
+        );
+        assert_eq!(sc("sc", prose), vec![Value::Int(3)]);
+        assert_eq!(
+            sc("sc", s("Dr. Smith went home.")),
+            vec![Value::Int(2)],
+            "the untailored algorithm splits after the abbreviation"
+        );
+        // substr: the range predicate's spellings, on characters
+        let range = |a: Option<i64>, b: Option<i64>| vec![Arg::Range(a, b)];
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), range(Some(2), Some(4))),
+            vec![s("bcd")]
+        );
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), range(None, Some(3))),
+            vec![s("abc")]
+        );
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), range(Some(-2), None)),
+            vec![s("ef")]
+        );
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), range(Some(4), Some(-4))),
+            vec![s("")]
+        );
+        assert_eq!(
+            scalar_with("substr", s("льюис"), range(None, Some(2))),
+            vec![s("ль")]
+        );
+        // a bare position is the [n] reading: one character
+        assert_eq!(scalar_with("substr", s("abcdef"), vec![int(3)]), vec![s("c")]);
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), range(Some(5), Some(3))),
+            vec![s("")]
+        );
+        // pads: to width, spaces by default, custom fill cut to fit
+        assert_eq!(scalar_with("lpad", s("7"), vec![int(3)]), vec![s("  7")]);
+        assert_eq!(
+            scalar_with("lpad", s("7"), vec![int(3), lit("0")]),
+            vec![s("007")]
+        );
+        assert_eq!(
+            scalar_with("rpad", s("ab"), vec![int(5), lit("xy")]),
+            vec![s("abxyx")]
+        );
+        assert_eq!(scalar_with("lpad", s("abcd"), vec![int(3)]), vec![s("abcd")]);
+        // centered: the odd extra falls right (Python's center)
+        assert_eq!(scalar_with("pad", s("ab"), vec![int(5)]), vec![s(" ab  ")]);
+        assert_eq!(
+            scalar_with("pad", s("ab"), vec![int(6), lit("-")]),
+            vec![s("--ab--")]
+        );
+        // repeat: the one honest home for repetition
+        assert_eq!(scalar_with("repeat", s("ab"), vec![int(3)]), vec![s("ababab")]);
+        assert_eq!(scalar_with("repeat", s("ab"), vec![int(0)]), vec![s("")]);
     }
 
     #[test]

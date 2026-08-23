@@ -309,6 +309,32 @@ impl QueryArbor {
 
     fn walk_operand(&mut self, o: &Operand, parent: usize) {
         match o {
+            // A pattern literal reflects as one node whose ::form is
+            // the canonical tight spelling (stars outside quotes).
+            Operand::Pattern(segs) => {
+                let props = vec![(
+                    "form".to_string(),
+                    Value::Str(crate::unparse::operand_text(o)),
+                )];
+                let id = self.intern(Some("pattern"), props, Some(parent));
+                for seg in segs {
+                    match seg {
+                        crate::ast::PatSeg::Star => {
+                            self.intern(Some("star"), Vec::new(), Some(id));
+                        }
+                        crate::ast::PatSeg::Lit(t) => {
+                            self.intern(
+                                Some("literal"),
+                                vec![
+                                    ("value".to_string(), Value::Str(t.clone())),
+                                    ("type".to_string(), Value::Str("text".to_string())),
+                                ],
+                                Some(id),
+                            );
+                        }
+                    }
+                }
+            }
             Operand::Match {
                 scrutinee,
                 arms,
@@ -463,6 +489,25 @@ impl QueryArbor {
                             );
                         }
                         crate::ast::InterpSeg::Expr(e) => self.walk_operand(e, id),
+                        // Ruling #34 wrappers: the strict hole and
+                        // the default hole, each holding its operand
+                        // subtree (the default's fallback second).
+                        crate::ast::InterpSeg::Strict(e, msg) => {
+                            let mut props = Vec::new();
+                            if let Some(m) = msg {
+                                props.push((
+                                    "message".to_string(),
+                                    Value::Str(m.clone()),
+                                ));
+                            }
+                            let hid = self.intern(Some("strict"), props, Some(id));
+                            self.walk_operand(e, hid);
+                        }
+                        crate::ast::InterpSeg::Default(e, f) => {
+                            let hid = self.intern(Some("default"), Vec::new(), Some(id));
+                            self.walk_operand(e, hid);
+                            self.walk_operand(f, hid);
+                        }
                     }
                 }
             }

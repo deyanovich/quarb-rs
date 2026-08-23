@@ -7,7 +7,8 @@
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
+    PathElem,
     PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::stdlib;
@@ -204,7 +205,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn record_refusal(msg: String) {
+pub(crate) fn record_refusal(msg: String) {
     REFUSAL.with(|r| {
         let mut r = r.borrow_mut();
         if r.is_none() {
@@ -323,7 +324,8 @@ fn uses_shell_operand(o: &Operand) -> bool {
                 || uses_shell_operand(other)
         }
         Operand::Interp(segs) => segs.iter().any(|seg| match seg {
-            InterpSeg::Expr(e) => uses_shell_operand(e),
+            InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => uses_shell_operand(e),
+            InterpSeg::Default(e, f) => uses_shell_operand(e) || uses_shell_operand(f),
             InterpSeg::Text(_) => false,
         }),
         Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => {
@@ -680,7 +682,8 @@ fn stage_reads_context(stage: &Stage) -> bool {
             Operand::Neg(inner) | Operand::Outer(inner) => op(inner),
             Operand::Group(e) => pred(e),
             Operand::Interp(segs) => segs.iter().any(|s| match s {
-                InterpSeg::Expr(e) => op(e),
+                InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => op(e),
+                InterpSeg::Default(e, f) => op(e) || op(f),
                 InterpSeg::Text(_) => false,
             }),
             Operand::Cond { cond, then, other } => pred(cond) || op(then) || op(other),
@@ -3699,7 +3702,12 @@ fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool {
                     || op_mentions(other, bound)
             }
             Operand::Interp(segs) => segs.iter().any(|seg| match seg {
-                InterpSeg::Expr(inner) => op_mentions(inner, bound),
+                InterpSeg::Expr(inner) | InterpSeg::Strict(inner, _) => {
+                    op_mentions(inner, bound)
+                }
+                InterpSeg::Default(e, f) => {
+                    op_mentions(e, bound) || op_mentions(f, bound)
+                }
                 InterpSeg::Text(_) => false,
             }),
             _ => false,
@@ -3814,6 +3822,18 @@ fn eval_pred_expr(
         }
         PredExpr::Not(a) => !eval_pred_expr(adapter, node, a, trace, bound, scope),
         PredExpr::Compare(l, op, r) => {
+            // Ruling #33: a pattern literal on `=` / `!=` glob-tests
+            // the left values. The stars are syntax — no Value ever
+            // carries them, so data can never glob. Null does not
+            // participate (like `*=`), which for `!=` keeps the
+            // holes-included reading.
+            if let Operand::Pattern(segs) = r {
+                let lhs = eval_operand(adapter, node, l, trace, bound, scope);
+                return match op {
+                    CmpOp::Ne => lhs.iter().any(|a| !pattern_test(segs, a)),
+                    _ => lhs.iter().any(|a| pattern_test(segs, a)),
+                };
+            }
             let lhs = eval_operand(adapter, node, l, trace, bound, scope);
             let rhs = eval_operand(adapter, node, r, trace, bound, scope);
             // Existential over a node's own multi-valued projections;
@@ -3842,6 +3862,10 @@ fn eval_operand(
 ) -> Vec<Value> {
     match operand {
         Operand::Lit(v) => vec![v.clone()],
+        // A pattern literal is not a value: the grammar admits it
+        // only as a comparison's right operand, where the Compare
+        // arm intercepts it before operand evaluation.
+        Operand::Pattern(_) => Vec::new(),
         // The value match: scrutinee once, arms in order, first hit
         // wins, only the taken branch evaluates. A regex arm tests
         // like `=~`; a value arm compares by the standard equality.
@@ -4017,6 +4041,34 @@ fn eval_operand(
                     InterpSeg::Text(t) => out.push_str(t),
                     InterpSeg::Expr(e) => {
                         let v = operand_scalar_bound(adapter, node, e, trace, bound, scope);
+                        out.push_str(&v.to_string());
+                    }
+                    // Ruling #34: the strict hole refuses instead of
+                    // splicing nothing (the ruling-#24 refusal cell,
+                    // so the runner reports it as a refusal).
+                    InterpSeg::Strict(e, msg) => {
+                        let v = operand_scalar_bound(adapter, node, e, trace, bound, scope);
+                        if matches!(v, Value::Null) {
+                            record_refusal(match msg {
+                                Some(m) => m.clone(),
+                                None => format!(
+                                    "the strict hole '${{{}:?}}' produced nothing",
+                                    crate::unparse::operand_text(e)
+                                ),
+                            });
+                        } else {
+                            out.push_str(&v.to_string());
+                        }
+                    }
+                    // Ruling #34: `:-` is `default(expr, fallback)`,
+                    // bash-faithfully spelled.
+                    InterpSeg::Default(e, f) => {
+                        let v = operand_scalar_bound(adapter, node, e, trace, bound, scope);
+                        let v = if matches!(v, Value::Null) {
+                            operand_scalar_bound(adapter, node, f, trace, bound, scope)
+                        } else {
+                            v
+                        };
                         out.push_str(&v.to_string());
                     }
                 }
@@ -4217,6 +4269,49 @@ fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
             (Value::Null, _) | (_, Value::Null) => false,
             _ => a.to_string().contains(&b.to_string()),
         },
+    }
+}
+
+/// Test one value against a pattern literal (ruling #33). Null
+/// never matches (mirroring `*=`); everything else tests its
+/// string rendering, as the substring operator always has.
+fn pattern_test(segs: &[PatSeg], v: &Value) -> bool {
+    if matches!(v, Value::Null) {
+        return false;
+    }
+    glob_match(segs, &v.to_string())
+}
+
+/// Match `text` against the alternating literal/star segments.
+/// Anchored at both ends; a star spans any run (including empty).
+/// The parser enforces strict alternation, so stars never touch
+/// and the backtracking below stays linear in practice.
+fn glob_match(segs: &[PatSeg], text: &str) -> bool {
+    match segs.split_first() {
+        None => text.is_empty(),
+        Some((PatSeg::Lit(l), rest)) => text
+            .strip_prefix(l.as_str())
+            .is_some_and(|t| glob_match(rest, t)),
+        Some((PatSeg::Star, rest)) => {
+            let Some((PatSeg::Lit(l), after)) = rest.split_first() else {
+                // A trailing star spans the remainder.
+                return rest.is_empty();
+            };
+            // The star yields to each occurrence of the next
+            // literal in turn.
+            let mut from = 0;
+            while let Some(hit) = text[from..].find(l.as_str()) {
+                let at = from + hit;
+                if glob_match(after, &text[at + l.len()..]) {
+                    return true;
+                }
+                from = at + l.len().max(1);
+                if from > text.len() {
+                    break;
+                }
+            }
+            false
+        }
     }
 }
 
@@ -4546,6 +4641,45 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::parse;
     use std::collections::HashMap;
+
+    /// Ruling #33 — the glob matcher behind pattern literals.
+    #[test]
+    fn glob_match_anchors_and_stars() {
+        use PatSeg::{Lit, Star};
+        let lit = |t: &str| Lit(t.to_string());
+        // contains
+        assert!(glob_match(&[Star, lit("web"), Star], "app-web-2"));
+        assert!(!glob_match(&[Star, lit("web"), Star], "app"));
+        // prefix / suffix anchor
+        assert!(glob_match(&[lit("app"), Star], "app-web"));
+        assert!(!glob_match(&[lit("app"), Star], "the-app"));
+        assert!(glob_match(&[Star, lit(".gz")], "data.gz"));
+        assert!(!glob_match(&[Star, lit(".gz")], "data.gz.bak"));
+        // both-anchored multi-segment
+        assert!(glob_match(&[lit("a"), Star, lit("z")], "abcz"));
+        assert!(glob_match(&[lit("a"), Star, lit("z")], "az"));
+        assert!(!glob_match(&[lit("a"), Star, lit("z")], "abc"));
+        // the star spans empty
+        assert!(glob_match(&[Star, lit("x"), Star], "x"));
+        // backtracking: the first occurrence is not the match
+        assert!(glob_match(&[Star, lit("ab"), Star, lit("b")], "ab-ab-b"));
+        // no segments match only the empty text
+        assert!(glob_match(&[] as &[PatSeg], ""));
+        assert!(!glob_match(&[] as &[PatSeg], "x"));
+        // multi-byte text walks char boundaries safely
+        assert!(glob_match(&[Star, lit("gun")], "льюис gun"));
+    }
+
+    /// Ruling #33 — null never matches; `!=` therefore keeps holes.
+    #[test]
+    fn pattern_test_null_semantics() {
+        use PatSeg::{Lit, Star};
+        let p = [Star, Lit("x".into()), Star];
+        assert!(!pattern_test(&p, &Value::Null));
+        assert!(pattern_test(&p, &Value::Str("axb".into())));
+        // non-string values test their string rendering, as `*=` does
+        assert!(pattern_test(&[Star, Lit("42".into()), Star], &Value::Int(142)));
+    }
 
     #[test]
     fn quantital_coercion_and_arith() {

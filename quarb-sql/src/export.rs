@@ -1077,6 +1077,61 @@ impl Exporter {
                     }
                 }
                 let l = self.operand(kids[0], qual)?;
+                // Ruling #33: a pattern literal on `=` pushes as
+                // LIKE — a `%` per star, each literal segment
+                // escaped, in order. Anchoring matches exactly:
+                // LIKE anchors both ends, a flanking star lifts
+                // one. The case-folding caveat is `*=`'s; `!=`
+                // with a pattern rides the scan (NOT LIKE drops
+                // the NULL rows Quarb keeps).
+                if self.kind(kids[1]) == "pattern" {
+                    if op.as_str() != "=" {
+                        return Err(SqlError::Unsupported(format!(
+                            "a pattern literal on '{op}' (only '=' pushes)"
+                        )));
+                    }
+                    // PostgreSQL's LIKE is case-sensitive under its
+                    // deterministic collations — provably what the
+                    // pattern test does — so the strict push is
+                    // sound there (and a prefix pattern is
+                    // index-sargable server-side). Everywhere else
+                    // case folding is ambient state (SQLite pragma,
+                    // MySQL/MSSQL collation), so strict refuses.
+                    if self.strict && self.dialect != Some(Dialect::Postgres) {
+                        return Err(SqlError::Semantics(
+                            "LIKE case folding differs per engine \
+                             (provably case-sensitive only on PostgreSQL)"
+                                .into(),
+                        ));
+                    }
+                    if !self.strict {
+                        self.notes.push(
+                            "pattern → LIKE: Quarb's pattern test is \
+                             case-sensitive; LIKE folds case on \
+                             SQLite/MySQL but not PostgreSQL"
+                                .to_string(),
+                        );
+                    }
+                    let mut like = String::new();
+                    for kid in self.arbor.children(kids[1]) {
+                        match self.kind(kid).as_str() {
+                            "star" => like.push('%'),
+                            _ => {
+                                let raw = self
+                                    .prop(kid, "value")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default();
+                                like.push_str(
+                                    &raw.replace('\\', "\\\\")
+                                        .replace('%', "\\%")
+                                        .replace('_', "\\_")
+                                        .replace('\'', "''"),
+                                );
+                            }
+                        }
+                    }
+                    return Ok(format!("{l} LIKE '{like}' ESCAPE '\\'"));
+                }
                 let r = self.operand(kids[1], qual)?;
                 Ok(match op.as_str() {
                     "=" => format!("{l} = {r}"),
@@ -1105,9 +1160,15 @@ impl Exporter {
                     }
                     "<" | "<=" | ">" | ">=" => format!("{l} {op} {r}"),
                     "*=" => {
-                        if self.strict {
+                        // The same PostgreSQL rung as the pattern
+                        // literal above: LIKE is provably
+                        // case-sensitive there, so `*=` pushes
+                        // strict too.
+                        if self.strict && self.dialect != Some(Dialect::Postgres) {
                             return Err(SqlError::Semantics(
-                                "LIKE case folding differs per engine".into(),
+                                "LIKE case folding differs per engine \
+                                 (provably case-sensitive only on PostgreSQL)"
+                                    .into(),
                             ));
                         }
                         // The pattern must be a text literal: a
@@ -1836,6 +1897,38 @@ mod null_and_literal_tests {
     // Grouped pipeline that never pushes, so `partial_pushdown` hinges
     // only on the leading predicate (mirrors the crate's partial gate).
     const GROUPED: &str = " | ::x @| group(\"g\", ::x) | count | .n | %.";
+
+    #[test]
+    fn pattern_literal_pushes_as_like() {
+        // Ruling #33: segments in order, a `%` per star, LIKE's
+        // metacharacters escaped. Strict push only where LIKE is
+        // provably case-sensitive (PostgreSQL); everywhere else the
+        // pattern rides the scan.
+        let q = "/users/*[::name = 'app-'*]::id";
+        let p = pushdown(q, Some(Dialect::Postgres)).unwrap();
+        assert_eq!(
+            p.sql,
+            "SELECT id FROM users WHERE name LIKE 'app-%' ESCAPE '\\'"
+        );
+        assert!(pushdown(q, Some(Dialect::Sqlite)).is_none());
+        assert!(pushdown(q, Some(Dialect::MySql)).is_none());
+        // contains and multi-segment shapes
+        let p = pushdown("/users/*[::name = *'web'*]::id", Some(Dialect::Postgres)).unwrap();
+        assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
+        let p = pushdown("/users/*[::name = *'a'*'.gz']::id", Some(Dialect::Postgres)).unwrap();
+        assert!(p.sql.contains("LIKE '%a%.gz'"), "{}", p.sql);
+        // LIKE metacharacters in a segment are escaped
+        let p = pushdown("/users/*[::name = *'50%_x'*]::id", Some(Dialect::Postgres)).unwrap();
+        assert!(p.sql.contains("LIKE '%50\\%\\_x%'"), "{}", p.sql);
+        // `!=` with a pattern rides the scan
+        assert!(
+            pushdown("/users/*[::name != *'web'*]::id", Some(Dialect::Postgres)).is_none()
+        );
+        // the `*=` alias gains the same PostgreSQL rung
+        let p = pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Postgres)).unwrap();
+        assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
+        assert!(pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Sqlite)).is_none());
+    }
 
     #[test]
     fn json_column_path_pushdown_per_dialect() {

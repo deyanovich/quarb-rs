@@ -16,7 +16,8 @@
 
 use crate::adapter::AstAdapter;
 use crate::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PathElem,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
+    PathElem,
     PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RegRef, Stage, Step,
     TraitClause,
 };
@@ -847,7 +848,7 @@ impl Parser<'_> {
                         match part {
                             lexer::InterpPart::Text(t) => segs.push(InterpSeg::Text(t)),
                             lexer::InterpPart::Hole(src) => {
-                                segs.push(InterpSeg::Expr(self.parse_hole(&src)?));
+                                segs.push(self.parse_hole(&src)?);
                             }
                         }
                     }
@@ -2313,7 +2314,9 @@ impl Parser<'_> {
             self.expect(Token::RParen, "')' to close function arguments")?;
         }
         // A range argument is `window`'s span; nothing else takes one.
-        if name != "window" && args.iter().any(|a| matches!(a, Arg::Range(_, _))) {
+        if !matches!(name.as_str(), "window" | "substr")
+            && args.iter().any(|a| matches!(a, Arg::Range(_, _)))
+        {
             return Err(QuarbError::Parse(format!(
                 "'{name}' takes no range argument ('window(a..b)' does)"
             )));
@@ -2911,11 +2914,100 @@ impl Parser<'_> {
     fn pred_primary(&mut self) -> Result<PredExpr> {
         let left = self.additive()?;
         if let Some(op) = self.cmp_op() {
+            if matches!(op, CmpOp::Eq | CmpOp::Ne)
+                && let Some(right) = self.pattern_operand()?
+            {
+                return Ok(PredExpr::Compare(left, op, right));
+            }
             let right = self.additive()?;
             Ok(PredExpr::Compare(left, op, right))
         } else {
             Ok(PredExpr::Truthy(left))
         }
+    }
+
+    /// Ruling #33 — a pattern literal after `=` / `!=`: a glued,
+    /// strictly alternating chain of bare `*` and quoted strings —
+    /// `*"sub"*` contains, `"app"*` prefix, `*".gz"` suffix,
+    /// `*"a"*"b"*` multi-segment. Adjacency is the syntax: the
+    /// first token may be spaced (it follows the operator), every
+    /// later one must be glued — a spaced `*` is multiplication's
+    /// spelling and never a pattern segment. Returns None (position
+    /// restored) when the tokens aren't a pattern, so a plain
+    /// string or arithmetic parses as before.
+    fn pattern_operand(&mut self) -> Result<Option<Operand>> {
+        let start = self.pos;
+        let star = |t: &Token| {
+            matches!(t, Token::Name { text, quoted: false, .. } if text == "*")
+        };
+        let is_glued = |t: &Token| match t {
+            Token::Name { glued, .. } => *glued,
+            _ => false,
+        };
+        let mut segs: Vec<PatSeg> = Vec::new();
+        loop {
+            let Some(tok) = self.peek() else { break };
+            let first = segs.is_empty();
+            if !first && matches!(tok, Token::Interp(_)) {
+                return Err(QuarbError::Parse(
+                    "a pattern segment must be a literal string — \
+                     an interpolated \"${...}\" hole cannot glob; \
+                     use =~ for a dynamic pattern"
+                        .into(),
+                ));
+            }
+            if !first && !is_glued(tok) {
+                break;
+            }
+            match tok {
+                t if star(t) => {
+                    if matches!(segs.last(), Some(PatSeg::Star)) {
+                        break;
+                    }
+                    segs.push(PatSeg::Star);
+                }
+                Token::Name {
+                    text, quoted: true, ..
+                } => {
+                    if matches!(segs.last(), Some(PatSeg::Lit(_))) {
+                        break;
+                    }
+                    segs.push(PatSeg::Lit(text.clone()));
+                }
+                _ => break,
+            }
+            self.pos += 1;
+        }
+        let stars = segs.iter().filter(|s| matches!(s, PatSeg::Star)).count();
+        let lits = segs.len() - stars;
+        if stars >= 1 && lits >= 1 {
+            // A glued tail that is neither a star nor a string
+            // (`*"a"*x`, `*"a"3`) is a malformed segment, not a
+            // separate token — refuse rather than half-match.
+            if let Some(t) = self.peek()
+                && is_glued(t)
+            {
+                return Err(QuarbError::Parse(
+                    "a pattern segment must be a quoted string or the \
+                     glob star"
+                        .into(),
+                ));
+            }
+            return Ok(Some(Operand::Pattern(segs)));
+        }
+        if stars == 1 && lits == 0 {
+            // The bare `= *` (and the spaced `= * \"x\"`): a lone
+            // star is not a pattern.
+            return Err(QuarbError::Parse(
+                "a lone '*' is not a pattern — attach it to a string \
+                 (*\"...\"*, \"...\"*), quote it ('*') to compare \
+                 against the literal star, or test existence with the \
+                 bare key"
+                    .into(),
+            ));
+        }
+        self.pos = start;
+        Ok(None)
     }
 
     /// A value expression at additive precedence: `term (+|- term)*`.
@@ -3280,9 +3372,29 @@ impl Parser<'_> {
 
     /// Parse a comparison operand: a relative path/projection, or a
     /// literal.
-    /// Parse one `${...}` hole's source as a value expression, in
-    /// the same fragment table and parameter scope.
-    fn parse_hole(&mut self, src: &str) -> Result<Operand> {
+    /// Parse one `${...}` hole's source, in the same fragment table
+    /// and parameter scope. Ruling #34: the hole may carry a glued
+    /// bash operator — `expr:?` / `expr:?message` (the strict hole)
+    /// or `expr:-fallback` (the default hole) — or a pipe tail
+    /// (`expr | stage ...`); mixing them wants the piped side
+    /// parenthesized.
+    fn parse_hole(&mut self, src: &str) -> Result<InterpSeg> {
+        if let Some((idx, which)) = top_level_bash_op(src) {
+            if idx == 0 || src[..idx].ends_with(|c: char| c.is_whitespace()) {
+                return Err(QuarbError::Parse(format!(
+                    "in '${{{src}}}': '{which}' glues to its expression \
+                     (`${{expr{which}...}}`)"
+                )));
+            }
+            let expr = self.hole_expr(&src[..idx], src)?;
+            let tail = &src[idx + 2..];
+            return Ok(if which == ":?" {
+                let msg = tail.trim();
+                InterpSeg::Strict(expr, (!msg.is_empty()).then(|| msg.to_string()))
+            } else {
+                InterpSeg::Default(expr, self.hole_expr(tail, src)?)
+            });
+        }
         let context = |e: QuarbError| QuarbError::Parse(format!("in '${{{src}}}': {e}"));
         let tokens = lexer::lex(src).map_err(context)?;
         let mut p = Parser {
@@ -3299,9 +3411,88 @@ impl Parser<'_> {
             first_steps: std::cell::RefCell::new(Vec::new()),
         };
         let expr = p.additive().map_err(context)?;
+        // A pipe tail (ruling #34): the operand-pipe stages, exactly
+        // as a parenthesized `(expr | f @| g)` carries them.
+        let mut stages = Vec::new();
+        loop {
+            match p.peek() {
+                Some(Token::Pipe) if matches!(p.toks.get(p.pos + 1), Some(Token::Amp)) => {
+                    p.pos += 1;
+                    p.invoke_inline_fragment("|", &mut stages).map_err(context)?;
+                }
+                Some(Token::Pipe) => {
+                    p.pos += 1;
+                    stages.push(p.inline_stage().map_err(context)?);
+                }
+                Some(Token::At)
+                    if matches!(p.toks.get(p.pos + 1), Some(Token::Pipe))
+                        && matches!(p.toks.get(p.pos + 2), Some(Token::Amp)) =>
+                {
+                    p.pos += 2;
+                    p.invoke_inline_fragment("@|", &mut stages).map_err(context)?;
+                }
+                Some(Token::At) if matches!(p.toks.get(p.pos + 1), Some(Token::Pipe)) => {
+                    p.pos += 2;
+                    stages.push(p.inline_agg_stage().map_err(context)?);
+                }
+                _ => break,
+            }
+        }
         if p.pos != tokens.len() {
             return Err(QuarbError::Parse(format!(
-                "in '${{{src}}}': an interpolation hole holds one value expression"
+                "in '${{{src}}}': an interpolation hole holds one value \
+                 expression (with an optional pipe tail or glued ':?' / ':-')"
+            )));
+        }
+        Ok(InterpSeg::Expr(if stages.is_empty() {
+            expr
+        } else {
+            Operand::Piped {
+                expr: Box::new(expr),
+                stages,
+            }
+        }))
+    }
+
+    /// One side of a hole's bash operator: a value expression with
+    /// no top-level pipe (the operator and a tail combine only with
+    /// the piped side parenthesized).
+    fn hole_expr(&mut self, part: &str, whole: &str) -> Result<Operand> {
+        let context = |e: QuarbError| QuarbError::Parse(format!("in '${{{whole}}}': {e}"));
+        let tokens = lexer::lex(part).map_err(context)?;
+        let mut depth = 0i32;
+        for t in &tokens {
+            match t {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                Token::Pipe if depth == 0 => {
+                    return Err(QuarbError::Parse(format!(
+                        "in '${{{whole}}}': a bash operator and a pipe tail \
+                         are one or the other in a hole (parenthesize the \
+                         piped expression)"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        let mut p = Parser {
+            toks: &tokens,
+            pos: 0,
+            defs: self.defs.clone(),
+            def_params: self.def_params.clone(),
+            data: self.data,
+            pattern_depth: 0,
+            predicate_depth: 0,
+            nest_depth: 0,
+            subquery_depth: 0,
+            captures: std::cell::RefCell::new(Vec::new()),
+            first_steps: std::cell::RefCell::new(Vec::new()),
+        };
+        let expr = p.additive().map_err(context)?;
+        if p.pos != tokens.len() {
+            return Err(QuarbError::Parse(format!(
+                "in '${{{whole}}}': each side of ':?' / ':-' holds one \
+                 value expression"
             )));
         }
         Ok(expr)
@@ -3637,8 +3828,7 @@ impl Parser<'_> {
                     match part {
                         lexer::InterpPart::Text(t) => segs.push(InterpSeg::Text(t)),
                         lexer::InterpPart::Hole(src) => {
-                            let expr = self.parse_hole(&src)?;
-                            segs.push(InterpSeg::Expr(expr));
+                            segs.push(self.parse_hole(&src)?);
                         }
                     }
                 }
@@ -4650,6 +4840,8 @@ fn subst_pred_expr(e: &mut PredExpr, map: &Subst<'_>) {
 
 fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
     match o {
+        // A pattern literal holds no operands: nothing to splice.
+        Operand::Pattern(_) => {}
         Operand::Match {
             scrutinee,
             arms,
@@ -4815,7 +5007,8 @@ fn max_ctx_operand(o: &Operand) -> usize {
         Operand::Interp(segs) => segs
             .iter()
             .map(|seg| match seg {
-                InterpSeg::Expr(e) => max_ctx_operand(e),
+                InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => max_ctx_operand(e),
+                InterpSeg::Default(e, f) => max_ctx_operand(e).max(max_ctx_operand(f)),
                 InterpSeg::Text(_) => 0,
             })
             .max()
@@ -4959,7 +5152,8 @@ fn op_mentions_outer(o: &Operand) -> bool {
                 || op_mentions_outer(other)
         }
         Operand::Interp(segs) => segs.iter().any(|seg| match seg {
-            InterpSeg::Expr(e) => op_mentions_outer(e),
+            InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => op_mentions_outer(e),
+            InterpSeg::Default(e, f) => op_mentions_outer(e) || op_mentions_outer(f),
             InterpSeg::Text(_) => false,
         }),
         _ => false,
@@ -5269,4 +5463,61 @@ mod tests {
         assert!(parse(&lexer::lex("//a::r<~").unwrap()).is_ok());
         assert!(parse(&lexer::lex("//a[<-b]").unwrap()).is_ok());
     }
+}
+
+
+/// Find a top-level bash hole operator (ruling #34): a `:` followed
+/// by `?` or `-`, outside quotes, parens, brackets, and braces, and
+/// not part of a `::` projection run (an ISO instant's time colon
+/// is followed by a digit and never matches). Returns the byte
+/// index of the `:` and the operator's spelling.
+fn top_level_bash_op(src: &str) -> Option<(usize, &'static str)> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    let mut byte = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' | '`' => {
+                let q = c;
+                byte += c.len_utf8();
+                i += 1;
+                while i < chars.len() {
+                    let d = chars[i];
+                    if d == '\\' && q != '\'' && i + 1 < chars.len() {
+                        byte += d.len_utf8() + chars[i + 1].len_utf8();
+                        i += 2;
+                        continue;
+                    }
+                    byte += d.len_utf8();
+                    i += 1;
+                    if d == q {
+                        break;
+                    }
+                }
+                continue;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 => {
+                if chars.get(i + 1) == Some(&':') {
+                    while chars.get(i) == Some(&':') {
+                        byte += 1;
+                        i += 1;
+                    }
+                    continue;
+                }
+                match chars.get(i + 1) {
+                    Some('?') => return Some((byte, ":?")),
+                    Some('-') => return Some((byte, ":-")),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        byte += c.len_utf8();
+        i += 1;
+    }
+    None
 }

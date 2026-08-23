@@ -346,9 +346,26 @@ pub enum PredExpr {
     Truthy(Operand),
 }
 
+/// One segment of a pattern literal on `=` / `!=` (ruling #33):
+/// quoted literal text and the glob star. The stars live outside
+/// the quotes, so the quoted text is always literal and no escape
+/// mechanism exists or is needed; strict alternation is enforced
+/// by the parser (stars never touch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatSeg {
+    Star,
+    Lit(String),
+}
+
 /// An operand: a value relative to the current node, or a literal.
 #[derive(Debug, Clone)]
 pub enum Operand {
+    /// A pattern literal — `*"sub"*`, `"app"*`, `*".gz"`,
+    /// `*"a"*"b"*` — legal only as the right operand of `=` / `!=`
+    /// (the parser assembles it from a glued star/string chain and
+    /// refuses it anywhere else). The stars are syntax, not data: a
+    /// value containing `*` never globs.
+    Pattern(Vec<PatSeg>),
     /// A descending path from the current node, with an optional
     /// projection. Empty `steps` + a projection is a projection of the
     /// current node (`::size`); non-empty `steps` navigate first
@@ -486,6 +503,14 @@ pub enum Operand {
 pub enum InterpSeg {
     Text(String),
     Expr(Operand),
+    /// `${expr:?}` / `${expr:?message}` — the strict hole (ruling
+    /// #34): refuses when the hole would splice nothing, with the
+    /// optional message. Bash's own spelling for "error if unset".
+    Strict(Operand, Option<String>),
+    /// `${expr:-fallback}` — the default hole (ruling #34):
+    /// `default(expr, fallback)`, bash-faithfully spelled. The
+    /// fallback is a full value expression — quote a literal.
+    Default(Operand, Operand),
 }
 
 /// An arithmetic operator (spec: Value Expressions and Arithmetic).

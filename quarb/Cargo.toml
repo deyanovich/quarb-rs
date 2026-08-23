@@ -25,6 +25,7 @@ colligo = ["dep:colligo"]
 thiserror.workspace = true
 globset.workspace = true
 regex = "1"
+unicode-segmentation = "1"
 colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }
 serde_json.workspace = true
 serde_yaml_ng = "0.10.0"

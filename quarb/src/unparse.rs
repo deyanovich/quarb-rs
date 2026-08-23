@@ -9,7 +9,8 @@
 //! (`unparse(parse(unparse(q))) == unparse(q)`).
 
 use crate::ast::{
-    Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PathElem, PredExpr,
+    Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PatSeg, PathElem,
+    PredExpr,
     Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::value::Value;
@@ -339,6 +340,20 @@ fn pred_expr(e: &PredExpr) -> String {
         PredExpr::And(a, b) => format!("{} && {}", pred_term(a), pred_term(b)),
         PredExpr::Not(a) => format!("!{}", pred_term(a)),
         PredExpr::Compare(l, op, r) => {
+            // Ruling #33: the canonical spelling of a literal
+            // substring test is the pattern form — `*= "x"` prints
+            // as `= *'x'*`. A dynamic right operand keeps `*=`
+            // (patterns are literal syntax only).
+            if matches!(op, CmpOp::Contains)
+                && let Operand::Lit(Value::Str(t)) = r
+            {
+                let pat = Operand::Pattern(vec![
+                    PatSeg::Star,
+                    PatSeg::Lit(t.clone()),
+                    PatSeg::Star,
+                ]);
+                return format!("{} = {}", operand(l), operand(&pat));
+            }
             format!("{} {} {}", operand(l), cmp(*op), operand(r))
         }
         PredExpr::Truthy(o) => operand(o),
@@ -413,6 +428,15 @@ fn operand(o: &Operand) -> String {
             out
         }
         Operand::Lit(v) => literal(v),
+        // The canonical tight spelling: stars outside the quotes,
+        // no whitespace inside the chain.
+        Operand::Pattern(segs) => segs
+            .iter()
+            .map(|seg| match seg {
+                PatSeg::Star => "*".to_string(),
+                PatSeg::Lit(t) => literal(&Value::Str(t.clone())),
+            })
+            .collect::<String>(),
         Operand::Arith { op, left, right } => {
             format!("{} {} {}", arith_term(left), arith(*op), arith_term(right))
         }
@@ -490,6 +514,22 @@ fn operand(o: &Operand) -> String {
                     InterpSeg::Expr(e) => {
                         out.push_str("${");
                         out.push_str(&operand(e));
+                        out.push('}');
+                    }
+                    InterpSeg::Strict(e, msg) => {
+                        out.push_str("${");
+                        out.push_str(&operand(e));
+                        out.push_str(":?");
+                        if let Some(m) = msg {
+                            out.push_str(m);
+                        }
+                        out.push('}');
+                    }
+                    InterpSeg::Default(e, f) => {
+                        out.push_str("${");
+                        out.push_str(&operand(e));
+                        out.push_str(":-");
+                        out.push_str(&operand(f));
                         out.push('}');
                     }
                 }
@@ -620,6 +660,22 @@ fn stage(st: &Stage) -> String {
                             InterpSeg::Expr(e) => {
                                 out.push_str("${");
                                 out.push_str(&operand(e));
+                                out.push('}');
+                            }
+                            InterpSeg::Strict(e, msg) => {
+                                out.push_str("${");
+                                out.push_str(&operand(e));
+                                out.push_str(":?");
+                                if let Some(m) = msg {
+                                    out.push_str(m);
+                                }
+                                out.push('}');
+                            }
+                            InterpSeg::Default(e, f) => {
+                                out.push_str("${");
+                                out.push_str(&operand(e));
+                                out.push_str(":-");
+                                out.push_str(&operand(f));
                                 out.push('}');
                             }
                         }
