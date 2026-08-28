@@ -830,7 +830,7 @@ fn run_file(query: &str, path: PathBuf) -> PyResult<Vec<String>> {
 fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
     match doc.execute(query).map_err(PyValueError::new_err)? {
         QueryResult::Nodes(ns) => Ok(ns.into_iter().map(|n| doc.render(n)).collect()),
-        QueryResult::Values(vs) => Ok(vs.into_iter().map(|v| v.to_string()).collect()),
+        QueryResult::Values(vs) => Ok(vs.into_iter().map(|v| v.display_form()).collect()),
     }
 }
 

@@ -250,3 +250,67 @@ fn row_label_tables_carry_lemmas() {
         vec!["Location"]
     );
 }
+
+/// The declared note vocabularies (ruling #35): a noteref callout
+/// declares no family and takes its body's; endnote-typed bodies
+/// land in the endnote family, footnote-typed in the footnote one.
+#[test]
+fn note_vocabularies_carry_their_families() {
+    let m = quarb_text_html::parse(
+        r##"<p>The plan<a epub:type="noteref" href="#en1">1</a>
+             held.
+             The field<a role="doc-noteref" href="#fn1">2</a> did not.</p>
+           <aside epub:type="endnote" id="en1"><p>Filed with the ministry.</p></aside>
+           <aside epub:type="footnote" id="fn1"><p>At Campion.</p></aside>"##,
+    );
+    // marker digits stay out of the prose
+    assert_eq!(
+        vals(&m, "/paragraph::"),
+        ["The plan held. The field did not."]
+    );
+    // each callout took its resolved body's family
+    assert_eq!(
+        vals(&m, "//*<deixis>->endnote::"),
+        ["Filed with the ministry."]
+    );
+    assert_eq!(vals(&m, "//*<deixis>->footnote::"), ["At Campion."]);
+    assert_eq!(vals(&m, "//endnote @| count"), ["2"]);
+    assert_eq!(vals(&m, "//footnote @| count"), ["2"]);
+    // <note> marks the two bodies, whichever family
+    assert_eq!(vals(&m, "//*<note> @| count"), ["2"]);
+    assert_eq!(vals(&m, "//*<dangling> @| count"), ["0"]);
+}
+
+/// EPUB's `marginalia` word (the one declared sidenote-like
+/// vocabulary in HTML space) lands in the aside family: the
+/// element's flow position becomes the insertion-point deixis,
+/// the body goes to the document end, and no `<note>` — content,
+/// not apparatus. Tufte-style CLASSES stay unread: guessing.
+#[test]
+fn marginalia_is_the_aside_family() {
+    let m = quarb_text_html::parse(
+        r##"<p>The advance stalled at the fence line.</p>
+           <aside epub:type="marginalia"><p>See the map.</p></aside>
+           <p>A second push<a epub:type="noteref" href="#mg">2</a> followed.</p>
+           <aside epub:type="marginalia" id="mg"><p>Contested figure.</p></aside>
+           <div class="sidenote">A Tufte class, honestly unread as apparatus.</div>"##,
+    );
+    assert_eq!(
+        vals(&m, "//*<deixis>->aside::"),
+        ["See the map.", "Contested figure."]
+    );
+    // the id-less aside anchors where it stood
+    assert_eq!(
+        vals(&m, r#"/aside[::onym = "m1"]<-aside\*::"#),
+        ["The advance stalled at the fence line."]
+    );
+    // the cited one resolves the noteref through the open family
+    assert_eq!(
+        vals(&m, r#"/aside[::onym = "mg"]<-aside @| count"#),
+        ["2"]
+    );
+    assert_eq!(vals(&m, "//*<note> @| count"), ["0"]);
+    // the Tufte class is ordinary prose, not an aside
+    assert_eq!(vals(&m, "//aside @| count"), ["5"]);
+    assert_eq!(vals(&m, "//*<dangling> @| count"), ["0"]);
+}

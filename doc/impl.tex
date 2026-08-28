@@ -139,7 +139,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-gsheet} & Google Sheets on the
   \texttt{quarb-xlsx} mapping (sheets as tables, first-row
   headers, typed values via \texttt{UNFORMATTED\_VALUE}),
-  fetched from the Sheets API. Auth honesty: the API rejects
+  fetched from the Sheets API. Auth: the API rejects
   gcloud's \texttt{cloud-platform} tokens, so the friction-free
   path is an API key (\texttt{?key=} /
   \texttt{QUARB\_GSHEET\_KEY}; enough for link-readable
@@ -148,8 +148,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-html} & The HTML adapter (tags as names, block/inline
   as traits, attributes as properties, anchor fragments resolve).
   Depends on \texttt{quarb} and \texttt{scraper}. \\
+\texttt{quarb-pdf} & PDF internals as the object graph: indirect
+  objects are nodes named by their declared \texttt{/Type},
+  scalar dictionary entries are properties, references are edges
+  labeled by their key (\texttt{->Kids}, \texttt{<-Parent}; array
+  references hoist to the array's owner), with the reverse index
+  built at load. Depends on \texttt{quarb} and \texttt{lopdf}. \\
 \texttt{quarb-text} & The shared text-level model — the relational
-  pattern for documents: producers lower their format into one
+  pattern for documents: the per-format crates lower their format into one
   block-event vocabulary (the atrep shape: kind, taxis, lemma,
   body, hypograph), and this crate alone implements the adapter.
   Sections with explicit title (\texttt{::lemma}) + body are
@@ -158,20 +164,87 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   lists, and verbatim blocks (\texttt{::::lang}) complete the
   vocabulary; tables denormalize into nested lists carrying the
   \texttt{<table>} trait. Bare \texttt{::} is the flattened prose
-  of the subtree. Plain text (\texttt{.txt}, blank-line
+  of the subtree. The apparatus is first class (litogramma's
+  model): \texttt{footnote}/\texttt{endnote} callouts and bodies
+  share their family name, resolve by (family, onym) into
+  \texttt{->footnote}/\texttt{->endnote} edges, and carry
+  \texttt{<deixis>} (the callout), \texttt{<note>} (the body),
+  and \texttt{<dangling>} traits; the \texttt{aside} family
+  (anchored margin content) rides the same machinery without
+  \texttt{<note>}, and margin-spelled footnotes carry
+  \texttt{::::form}; \texttt{index-mark} nodes expose
+  declared index marks (\texttt{::term}) invisible to the prose. Plain text (\texttt{.txt}, blank-line
   paragraphs) mounts here by default; \texttt{text:} forces the
   reading for html/md. Depends on \texttt{quarb}. \\
-\texttt{quarb-text-html} & The HTML producer for the text level:
+\texttt{quarb-text-docx} & The Word text-level adapter,
+  from declared structure only: outline levels resolved through
+  the style chain (never style names), the accepted view of
+  tracked changes, \texttt{w:tblHeader} header rows, the closed
+  cited quote-style set, both note parts
+  (\texttt{word/footnotes.xml}, \texttt{word/endnotes.xml}), and
+  \texttt{XE} field instructions as index marks. Depends on
+  \texttt{quarb-text}, \texttt{zip}, and \texttt{quick-xml}. \\
+\texttt{quarb-text-epub} & The EPUB text-level adapter: container to
+  rootfile to spine, chapters through the HTML adapter in spine
+  order (\texttt{linear="no"} excluded); the EPUB note vocabulary
+  arrives via \texttt{quarb-text-html}. Depends on
+  \texttt{quarb-text}, \texttt{quarb-text-html}, and
+  \texttt{zip}. \\
+\texttt{quarb-text-html} & The HTML text-level adapter:
   soup dropped (nav, chrome, scripts, forms, media), wrappers
   transparent, headings flat into the shared derivation, trailing
   \texttt{cite}/\texttt{footer}/\texttt{figcaption} as quote
-  attribution. Depends on \texttt{quarb-text} and
+  attribution; notes only from the declared vocabularies
+  (\texttt{epub:type} noteref/footnote/endnote/rearnote/%
+  marginalia, DPUB-ARIA \texttt{role} doc-*), endnote words
+  landing in the endnote family, marginalia in the aside
+  family. Depends on \texttt{quarb-text} and
   \texttt{scraper}. \\
-\texttt{quarb-text-markdown} & The Markdown producer for the text
-  level, mapping pulldown-cmark events directly (no HTML
+\texttt{quarb-text-koine} & The koine adapter — the hub's
+  first rung: a koine/litogramma document (parsed by the
+  \texttt{atrep} crate, settled by \texttt{kanonizo::tasso})
+  lowers into the shared block vocabulary through its
+  dialektos-resolved sim names — enclosing headings by nesting
+  depth, both note families and asides by name, index endos as
+  marks, stichoi tables, refs keeping their key as written.
+  Foreign formats arrive through atrep's endomorphosis
+  importers (\texttt{atrep::endo}) into their mirror dialects —
+  Markdown, HTML, reStructuredText, Org, djot — read by the same
+  name-keyed mapping (flat \texttt{heading-N} endos, flat item
+  runs wrapped, rst footnotes into the shared apparatus). Serves
+  \texttt{koine:} (and \texttt{text:} on
+  \texttt{.atd}/\texttt{.atk}, where the routes converge);
+  \texttt{.xml} dispatches by declared identity (root
+  namespace, DOCTYPE public id, unambiguous root element) into
+  the TEI/DocBook/JATS/USX/OSIS importers, \texttt{?format=}
+  forcing any format; a bare \texttt{<article>} and everything
+  nothing imports yet — LaTeX included — refuse naming the
+  working spelling. Depends on \texttt{quarb-text} and
+  \texttt{atrep}. \\
+\texttt{quarb-text-latex} & The LaTeX text-level adapter: the declared
+  structural subset of a \texttt{.tex} source — declared
+  sectioning commands, footnotes (the at-callout convention
+  normalized to document-end bodies), the endnotes package on
+  its own counter, Tufte sidenotes into the footnote family
+  (\texttt{::::form}), \texttt{\textbackslash marginpar} /
+  \texttt{\textbackslash marginnote} as asides,
+  \texttt{\textbackslash index} marks,
+  quote/quotation, itemize/enumerate, verbatim; prose by drop
+  list and unwrap-by-default, definition argument trains consumed
+  whole. Depends on \texttt{quarb-text}. \\
+\texttt{quarb-text-markdown} & The Markdown text-level
+  adapter, mapping pulldown-cmark events directly (no HTML
   round-trip): heading levels, list ordinals, fence languages,
   and pipe tables come from the source. Depends on
   \texttt{quarb-text} and \texttt{pulldown-cmark}. \\
+\texttt{quarb-text-pdf} & The PDF text-level adapter — the reader's model
+  from the two declared rungs: the \texttt{/Outlines} tree
+  (titles as \texttt{::lemma}, destinations bounding each
+  section's extent) and exact-baseline line geometry
+  (bit-for-bit equal \texttt{y}, \texttt{::::page}/\texttt{::::y}
+  metadata; ToUnicode CMaps decoded, one stated kern constant for
+  word gaps). No \texttt{paragraph} is ever minted. Depends on
+  \texttt{quarb-text}, \texttt{quarb-pdf}, and \texttt{lopdf}. \\
 \texttt{quarb-xml} & The XML adapter (qualified tags as names,
   attributes as properties, \texttt{id}/\texttt{xml:id} references
   resolve; strict well-formedness, no traits). Depends on
@@ -200,7 +273,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   grafting is this adapter's point. GCS: anonymous for public
   buckets, gcloud-token auth otherwise. S3: anonymous only in
   v1 (SigV4 signing is a recorded extension — private buckets
-  refuse honestly). \\
+  refuse). \\
 \texttt{quarb-postgres} & The PostgreSQL catalog driver:
   \texttt{information\_schema} introspection over
   \texttt{tokio-postgres} (internal current-thread runtime,
@@ -257,7 +330,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{translate} imports an XPath expression to Quarb, and
   \texttt{export} walks a Quarb query's reflection arbor (the
   locked vocabulary as the tooling surface) back to XPath —
-  honest refusal and divergence notes both ways. Binaries
+  explicit refusals and divergence notes both ways. Binaries
   \texttt{xpath2quarb} / \texttt{quarb2xpath}; the export side is
   differentially tested against \texttt{xmllint}. \\
 \texttt{quarb-jq} & The jq bridge, both directions:
@@ -791,7 +864,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     chains and inline-pipe splices as bodies;
     \texttt{rec}/\texttt{group} field-name collisions are parse
     errors (\texttt{validate\_record\_convention}) \\
-\texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | rec("k", \$1)},
+\texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | %(k = \$1)},
 \texttt{quai}
   & \live match captures (filter-stage \texttt{=\textasciitilde}
     binds groups onto the capsa) and the interactive session
@@ -834,7 +907,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     branch navigates from the arbor root, so a subcontext can
     consult the whole table (share-of-total columns) \\
 \texttt{.c(\^{}/row[::k = \$\$.k] @| count)},
-\texttt{| rec(\$*1/name::, /amt::)}
+\texttt{| \%(\$*1/name::; /amt::)}
   & \live correlated subqueries: \texttt{\$\$} steps a capsa-scope
     operand out to the invoking capsa (\texttt{\$\$.name},
     \texttt{\$\$\_}, \texttt{\$\$ord}; the node form

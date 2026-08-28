@@ -186,6 +186,9 @@ impl Doc {
                 .context("parsing XML"),
             "html" => Ok(Doc::Html(quarb_html::HtmlAdapter::parse(input))),
             "markdown" | "md" => Ok(Doc::Html(quarb_markdown::parse(input))),
+            // LaTeX source, through the text-level producer — a
+            // pure text parser, so the wasm build carries it too.
+            "tex" | "latex" => Ok(Doc::Text(quarb_text_latex::parse(input))),
             // The text level: the shared section/paragraph
             // vocabulary, produced per source format ("text" is
             // plain text — blank-line paragraphs).
@@ -515,6 +518,113 @@ impl Doc {
                 quarb_git::GitAdapter::open(Path::new(repo)).context("opening git repository")?;
             return Ok(Doc::Git(a));
         }
+        // A `koine:` prefix takes the koine route to the same
+        // reader's model: the native atrep formats today, foreign
+        // formats once atrep grows import homs. Refusals name the
+        // native spelling.
+        if let Some(rest) = s.strip_prefix("koine:")
+            && !rest.is_empty()
+        {
+            // The house ?param syntax: ?format= forces a format.
+            let (path_part, format) = match rest.split_once('?') {
+                Some((p, q)) => {
+                    let mut fmt = None;
+                    for pair in q.split('&') {
+                        match pair.split_once('=') {
+                            Some(("format", v)) => fmt = Some(v.to_string()),
+                            _ => {
+                                return Err(anyhow::anyhow!(
+                                    "unknown koine option {pair:?} — supported: format="
+                                ));
+                            }
+                        }
+                    }
+                    (p, fmt)
+                }
+                None => (rest, None),
+            };
+            let target = Path::new(path_part);
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            let read = || -> Result<String> {
+                let text = std::fs::read_to_string(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                Ok(text
+                    .strip_prefix('\u{feff}')
+                    .map(str::to_owned)
+                    .unwrap_or(text))
+            };
+            if let Some(fmt) = format {
+                let imported = match fmt.as_str() {
+                    "atd" | "atk" => {
+                        let model =
+                            quarb_text_koine::parse_file(target).with_context(|| {
+                                format!("reading {} as an atrep document", target.display())
+                            })?;
+                        return Ok(Doc::Text(model));
+                    }
+                    "md" | "markdown" => quarb_text_koine::parse_markdown(&read()?),
+                    "html" => quarb_text_koine::parse_html(&read()?),
+                    "rst" => quarb_text_koine::parse_rst(&read()?),
+                    "org" => quarb_text_koine::parse_org(&read()?),
+                    "dj" | "djot" => quarb_text_koine::parse_djot(&read()?),
+                    "tei" | "docbook" | "jats" | "usx" | "osis" => {
+                        quarb_text_koine::parse_xml_as(&read()?, &fmt)
+                    }
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "unknown koine format {other:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, atd"
+                        ));
+                    }
+                };
+                return imported.map(Doc::Text).with_context(|| {
+                    format!("importing {} through atrep as {fmt}", target.display())
+                });
+            }
+            let imported = match ext.as_deref() {
+                Some("atd" | "atk") => {
+                    let model = quarb_text_koine::parse_file(target).with_context(|| {
+                        format!("reading {} as an atrep document", target.display())
+                    })?;
+                    return Ok(Doc::Text(model));
+                }
+                Some("md" | "markdown") => quarb_text_koine::parse_markdown(&read()?),
+                Some("html" | "htm") => quarb_text_koine::parse_html(&read()?),
+                Some("rst") => quarb_text_koine::parse_rst(&read()?),
+                Some("org") => quarb_text_koine::parse_org(&read()?),
+                Some("dj" | "djot") => quarb_text_koine::parse_djot(&read()?),
+                Some("xml") => {
+                    let text = read()?;
+                    match quarb_text_koine::detect_xml_kind(&text) {
+                        Some(kind) => quarb_text_koine::parse_xml_as(&text, kind),
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "{} declares no XML identity this route knows — force one with koine:{}?format=tei|docbook|jats|usx|osis",
+                                target.display(),
+                                target.display()
+                            ));
+                        }
+                    }
+                }
+                Some("pdf") => {
+                    return Err(anyhow::anyhow!(
+                        "atrep cannot import a PDF — the print reading is text:{}",
+                        target.display()
+                    ));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "no atrep import for this format yet — the native reading is text:{}",
+                        target.display()
+                    ));
+                }
+            };
+            return imported
+                .map(Doc::Text)
+                .with_context(|| format!("importing {} through atrep", target.display()));
+        }
         // A `text:` prefix forces the text-level reading, matching
         // qua's dispatch: producer by extension, `<` sniffing
         // markup, plain paragraphs as the fallback.
@@ -522,6 +632,43 @@ impl Doc {
             && !rest.is_empty()
         {
             let target = Path::new(rest);
+            // The binary producers dispatch before the text read:
+            // a .docx or .epub is a zip, a .pdf its own format.
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            // Native atrep files converge on the koine route.
+            if let Some("atd" | "atk") = ext.as_deref() {
+                let model = quarb_text_koine::parse_file(target).with_context(|| {
+                    format!("reading {} as an atrep document", target.display())
+                })?;
+                return Ok(Doc::Text(model));
+            }
+            if ext.as_deref() == Some("pdf") {
+                let bytes = std::fs::read(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                let model = quarb_text_pdf::parse(&bytes)
+                    .with_context(|| format!("reading {} as PDF", target.display()))?;
+                let a = std::rc::Rc::new(model);
+                let r = a.clone();
+                return Ok(Doc::Boxed(
+                    Dyn(Box::new(quarb_mount::Shared(a))),
+                    Box::new(move |n| r.locator(n)),
+                ));
+            }
+            if let Some(ext @ ("docx" | "epub")) = ext.as_deref() {
+                let bytes = std::fs::read(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                let model = if ext == "docx" {
+                    quarb_text_docx::parse(&bytes)
+                        .with_context(|| format!("reading {} as Word", target.display()))?
+                } else {
+                    quarb_text_epub::parse(&bytes)
+                        .with_context(|| format!("reading {} as EPUB", target.display()))?
+                };
+                return Ok(Doc::Text(model));
+            }
             let text = std::fs::read_to_string(target)
                 .with_context(|| format!("reading {}", target.display()))?;
             let text = text
@@ -536,6 +683,7 @@ impl Doc {
             {
                 Some("html" | "htm") => "text-html",
                 Some("md" | "markdown") => "text-markdown",
+                Some("tex" | "latex") => "tex",
                 Some("txt") => "text",
                 _ if text.trim_start().starts_with('<') => "text-html",
                 _ => "text",

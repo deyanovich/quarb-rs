@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.25.0" }
-atrep = { version = "0.1.0", default-features = false }
+quarb = { path = "../quarb", version = "0.26.0" }
+atrep = { version = "0.3.0", default-features = false }
 thiserror.workspace = true
 
 [dev-dependencies]

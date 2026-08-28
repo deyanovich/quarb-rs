@@ -1,11 +1,11 @@
-//! Markdown producer for the Quarb text level. Unlike the
+//! Markdown adapter for the Quarb text level. Unlike the
 //! DOM-level `quarb-markdown` (which renders to HTML and serves
 //! `quarb-html`), this crate maps pulldown-cmark's event stream
 //! onto the shared `quarb-text` vocabulary directly — heading
 //! levels, list ordinals, and fence languages come from the
 //! source, with no HTML round-trip.
 //!
-//! Producer rules:
+//! Adapter rules:
 //!
 //! - Headings arrive flat; `quarb-text` derives the enclosing
 //!   section tree.
@@ -21,7 +21,7 @@
 //!   ordinary content, their reference markers are dropped.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use quarb_text::{Block, Container, TextModel};
+use quarb_text::{Block, Container, NoteFamily, TextModel};
 
 /// Parse Markdown `text` and lower it to a text-level document.
 pub fn parse(text: &str) -> TextModel {
@@ -49,6 +49,10 @@ pub fn blocks(text: &str) -> Vec<Block> {
     let mut table: Option<TableState> = None;
     // Fence info of the open code block, taken at its end.
     let mut fence: Option<String> = None;
+    // Footnote callouts met in the open block ([^name] — the
+    // markdown footnote extension declares the footnote family),
+    // emitted after the block in source order.
+    let mut callouts: Vec<String> = Vec::new();
 
     for event in Parser::new_ext(text, opts) {
         match event {
@@ -108,8 +112,20 @@ pub fn blocks(text: &str) -> Vec<Block> {
                 }
                 Tag::TableCell => cap = Some(String::new()),
                 Tag::Image { .. } => image += 1,
-                // Emphasis, links, footnote definitions, …: their
-                // inner text flows.
+                // The footnote body: a note container of the
+                // footnote family; its paragraphs flow inside.
+                Tag::FootnoteDefinition(name) => {
+                    flush(&mut run, &mut out);
+                    out.push(Block::Open {
+                        kind: Container::Note {
+                            onym: name.to_string(),
+                            family: NoteFamily::Footnote,
+                            margin: false,
+                        },
+                        lemma: None,
+                    });
+                }
+                // Emphasis, links, …: their inner text flows.
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -118,11 +134,13 @@ pub fn blocks(text: &str) -> Vec<Block> {
                         level: heading_level(level),
                         lemma: cap.take().unwrap_or_default(),
                     });
+                    drain_callouts(&mut callouts, &mut out);
                 }
                 TagEnd::Paragraph => {
                     out.push(Block::Paragraph {
                         text: cap.take().unwrap_or_default(),
                     });
+                    drain_callouts(&mut callouts, &mut out);
                 }
                 TagEnd::CodeBlock => {
                     // Language recorded at Start; recover it from
@@ -169,6 +187,10 @@ pub fn blocks(text: &str) -> Vec<Block> {
                     }
                 }
                 TagEnd::Image => image = image.saturating_sub(1),
+                TagEnd::FootnoteDefinition => {
+                    flush(&mut run, &mut out);
+                    out.push(Block::Close { hypograph: None });
+                }
                 _ => {}
             },
             Event::Text(t) | Event::Code(t) => {
@@ -178,11 +200,12 @@ pub fn blocks(text: &str) -> Vec<Block> {
             }
             Event::SoftBreak | Event::HardBreak => sink(&mut cap, &mut run, " "),
             Event::Rule => flush(&mut run, &mut out),
-            // Raw HTML, footnote reference markers, task-list
-            // checkboxes, math: not prose.
+            // The callout: a footnote-family reference, no marker
+            // text in the prose (ruling #35).
+            Event::FootnoteReference(name) => callouts.push(name.to_string()),
+            // Raw HTML, task-list checkboxes, math: not prose.
             Event::Html(_)
             | Event::InlineHtml(_)
-            | Event::FootnoteReference(_)
             | Event::TaskListMarker(_)
             | Event::InlineMath(_)
             | Event::DisplayMath(_) => {}
@@ -217,6 +240,16 @@ fn sink(cap: &mut Option<String>, run: &mut String, text: &str) {
     match cap {
         Some(c) => c.push_str(text),
         None => run.push_str(text),
+    }
+}
+
+fn drain_callouts(callouts: &mut Vec<String>, out: &mut Vec<Block>) {
+    for onym in callouts.drain(..) {
+        out.push(Block::NoteRef {
+            onym,
+            family: Some(NoteFamily::Footnote),
+            margin: false,
+        });
     }
 }
 

@@ -44,6 +44,7 @@ const SCALAR: &[&str] = &[
     "ceil",
     "abs",
     "json",
+    "jsonl",
     "xml",
     "markdown",
     "html",
@@ -90,7 +91,7 @@ const SCALAR: &[&str] = &[
 ];
 
 const AGGREGATE: &[&str] = &[
-    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "sort",
+    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "json", "jsonl", "sort",
     "unique", "reverse", "first", "last", "join", "ungroup", "window", "shift",
 ];
 
@@ -684,7 +685,7 @@ pub fn apply_scalar(
         // Serialize the topic as strict JSON text. (`record` is also
         // named here but constructed in the executor, which has the
         // adapter at hand for its expression arguments.)
-        "json" => vec![Value::Str(topic.to_json())],
+        "json" | "jsonl" => vec![Value::Str(topic.to_json())],
         _ => vec![topic],
     }
 }
@@ -736,6 +737,16 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         "stddev" => vec![spread(&input, f64::sqrt, scale)],
         "variance" => vec![spread(&input, |v| v, scale)],
         "join" => vec![Value::Str(join(&input, arg_str(call, 0, "")))],
+        // The stream as one JSON document — an array — or as JSON
+        // Lines, one document per line (ruling #51).
+        "json" => {
+            let items: Vec<String> = input.iter().map(Value::to_json).collect();
+            vec![Value::Str(format!("[{}]", items.join(", ")))]
+        }
+        "jsonl" => {
+            let items: Vec<String> = input.iter().map(Value::to_json).collect();
+            vec![Value::Str(items.join("\n"))]
+        }
         // The order/selection family over an explicit value list —
         // reached from the per-capsa list reductions (`| last` on a
         // group's list topic); the `@|` forms are capsa-preserving

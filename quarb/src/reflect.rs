@@ -412,6 +412,23 @@ impl QueryArbor {
             Operand::Topic => {
                 self.intern(Some("topic"), Vec::new(), Some(parent));
             }
+            Operand::Field { base, name } => {
+                let id = self.intern(
+                    Some("field"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+                self.walk_operand(base, id);
+            }
+            Operand::NamedCaptures => {
+                self.intern(Some("captures"), Vec::new(), Some(parent));
+            }
+            Operand::List(items) => {
+                let id = self.intern(Some("list"), Vec::new(), Some(parent));
+                for item in items {
+                    self.walk_operand(item, id);
+                }
+            }
             Operand::Now => {
                 self.intern(Some("now"), Vec::new(), Some(parent));
             }
@@ -607,6 +624,25 @@ impl QueryArbor {
                     vec![("ref".to_string(), Value::Str(reg_spelling(r)))],
                     Some(parent),
                 );
+            }
+            Stage::RecordWith(call) => {
+                let id = self.intern(Some("record-with"), Vec::new(), Some(parent));
+                self.walk_args(&call.args, id);
+            }
+            Stage::RecordPush {
+                name,
+                call,
+                enriched,
+            } => {
+                let mut props = Vec::new();
+                if let Some(n) = name {
+                    props.push(("name".to_string(), Value::Str(n.clone())));
+                }
+                if *enriched {
+                    props.push(("enriched".to_string(), Value::Bool(true)));
+                }
+                let id = self.intern(Some("record-push"), props, Some(parent));
+                self.walk_args(&call.args, id);
             }
             Stage::Spread { outer } => {
                 let props = if *outer {

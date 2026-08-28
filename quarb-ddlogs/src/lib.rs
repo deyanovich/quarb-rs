@@ -708,6 +708,6 @@ mod tests {
             "/entry<error> <=> /entry[::service = 'gateway'][::trace = $$::trace] \
              | rec(::order, \"edge\", $*1::)",
         );
-        assert_eq!(joined, vec![r#"{"order": "o-1402", "edge": "POST /pay 500"}"#]);
+        assert_eq!(joined, vec!["%(order = 'o-1402'; edge = 'POST /pay 500')"]);
     }
 }

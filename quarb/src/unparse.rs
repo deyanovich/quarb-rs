@@ -94,11 +94,13 @@ fn anchor(a: &crate::ast::Anchor) -> String {
     match a {
         Anchor::Current => String::new(),
         Anchor::Root => "^".to_string(),
-        Anchor::Mark(m) => format!("({m})"),
-        Anchor::MarkIndex(n) => format!("({n})"),
-        Anchor::MarkTop => "(.)".to_string(),
-        Anchor::MarksAll => "(@)".to_string(),
-        Anchor::MarksNamed(m) => format!("(@{m})"),
+        // Double parentheses are the node side (ruling #43); the
+        // single-paren spellings parse as deprecated aliases.
+        Anchor::Mark(m) => format!("(({m}))"),
+        Anchor::MarkIndex(n) => format!("(({n}))"),
+        Anchor::MarkTop => "((.))".to_string(),
+        Anchor::MarksAll => "((@))".to_string(),
+        Anchor::MarksNamed(m) => format!("((@{m}))"),
     }
 }
 
@@ -111,10 +113,10 @@ fn elem(e: &PathElem) -> String {
         PathElem::Step(s) => step(s),
         PathElem::Group(g) => group(g),
         PathElem::Push { name, body } => {
-            // A named push prints spaced: glued, `.name(` would lex
-            // back into the preceding hop's name (the `/x.rs(...)`
-            // rule). The bare `.(` re-lexes safely glued.
-            let lead = if name.is_some() { " ." } else { "." };
+            // A push prints spaced: the push dot stands after
+            // whitespace (ruling #45); glued, it would be a name
+            // character.
+            let lead = " .";
             let n = name.as_deref().unwrap_or("");
             match body {
                 PushBody::Query(q) => format!("{lead}{n}({})", unparse(q)),
@@ -255,11 +257,37 @@ fn step_suffix(s: &Step) -> String {
     out
 }
 
+/// The canonical regex literal (ruling #44): `(/body/mods)`. In
+/// operand position a leading inline-flag group splits out as
+/// trailing modifiers; in name position (`mods` false) it stays
+/// inline, the closer there being strictly `/)`. A slash in the body
+/// escapes.
+fn regex_literal(pat: &str, mods: bool) -> String {
+    let split = || {
+        let rest = pat.strip_prefix("(?")?;
+        let k = rest.find(')')?;
+        let flags = &rest[..k];
+        (!flags.is_empty() && flags.chars().all(|c| matches!(c, 'i' | 'm' | 's' | 'x')))
+            .then(|| (flags.to_string(), rest[k + 1..].to_string()))
+    };
+    let (flags, body) = if mods { split() } else { None }.unwrap_or_default_with(pat);
+    format!("(/{}/{})", body.replace('/', "\\/"), flags)
+}
+
+trait OrPat {
+    fn unwrap_or_default_with(self, pat: &str) -> (String, String);
+}
+impl OrPat for Option<(String, String)> {
+    fn unwrap_or_default_with(self, pat: &str) -> (String, String) {
+        self.unwrap_or_else(|| (String::new(), pat.to_string()))
+    }
+}
+
 fn matcher(m: &Matcher) -> String {
     match m {
         Matcher::Name(n) => name_text(n),
         Matcher::Glob(g) => g.glob().glob().to_string(),
-        Matcher::Regex(r) => format!("~({})", r.as_str()),
+        Matcher::Regex(r) => regex_literal(r.as_str(), false),
         Matcher::Any => "*".to_string(),
         Matcher::Dot => ".".to_string(),
     }
@@ -354,6 +382,14 @@ fn pred_expr(e: &PredExpr) -> String {
                 ]);
                 return format!("{} = {}", operand(l), operand(&pat));
             }
+            // Ruling #44: a match's literal pattern prints as the
+            // regex literal — `=~ (/x/i)` — whichever way it was
+            // spelled (`/x/i`, `(/x/i)`, `'x'`, `~(x)`).
+            if matches!(op, CmpOp::Match | CmpOp::NotMatch)
+                && let Operand::Lit(Value::Str(t)) = r
+            {
+                return format!("{} {} {}", operand(l), cmp(*op), regex_literal(t, true));
+            }
             format!("{} {} {}", operand(l), cmp(*op), operand(r))
         }
         PredExpr::Truthy(o) => operand(o),
@@ -402,10 +438,11 @@ fn operand(o: &Operand) -> String {
             let mut out = format!("({} ?=", operand(scrutinee));
             for (test, regex, result) in arms {
                 if *regex {
-                    let Operand::Lit(pat) = test else {
+                    let Operand::Lit(Value::Str(pat)) = test else {
                         unreachable!("regex arms hold their pattern literal");
                     };
-                    out.push_str(&format!(" ~({pat})"));
+                    out.push(' ');
+                    out.push_str(&regex_literal(pat, true));
                 } else {
                     out.push_str(&format!(" {}", operand(test)));
                 }
@@ -444,6 +481,15 @@ fn operand(o: &Operand) -> String {
         Operand::Group(e) => format!("({})", pred_expr(e)),
         Operand::Recall(r) => reg(r),
         Operand::Topic => "$_".to_string(),
+        Operand::Field { base, name } => match **base {
+            Operand::Topic => format!(":{name}"),
+            _ => format!("{}:{name}", operand(base)),
+        },
+        Operand::NamedCaptures => "%+".to_string(),
+        Operand::List(items) => {
+            let inner: Vec<String> = items.iter().map(operand).collect();
+            format!("@({})", inner.join("; "))
+        }
         Operand::Now => "now()".to_string(),
         Operand::Edge { projection: p } => match p {
             Some(p) => format!("$-{}", projection(p)),
@@ -580,27 +626,8 @@ fn arith(op: ArithOp) -> &'static str {
 
 fn literal(v: &Value) -> String {
     match v {
-        Value::Str(s) => {
-            // Single quotes are verbatim; fall back to double when
-            // the text itself holds one. A double-quoted string is
-            // interpolated, so `"`, `\`, and `$` must be escaped — the
-            // same escaping the `Operand::Interp` arm applies — or the
-            // result fails to reparse (a bare `"` closes the string)
-            // or silently grows a live `${…}` hole.
-            if s.contains('\'') {
-                let mut out = String::from("\"");
-                for c in s.chars() {
-                    if matches!(c, '"' | '\\' | '$') {
-                        out.push('\\');
-                    }
-                    out.push(c);
-                }
-                out.push('"');
-                out
-            } else {
-                format!("'{s}'")
-            }
-        }
+        // The one string-literal rule, shared with the display form.
+        Value::Str(s) => crate::value::quarb_string(s),
         // Null displays as empty text; as a literal it must spell
         // its keyword or the round-trip drops it.
         Value::Null => "null".to_string(),
@@ -686,7 +713,24 @@ fn stage(st: &Stage) -> String {
             out.push('`');
             out
         }
+        // `%(...)` is the record constructor's canonical spelling
+        // (ruling #38); `rec` / `record` are its aliases.
+        Stage::Func(call) if is_record_call(&call.name) => format!("| %{}", record_args(call, "; ")),
         Stage::Func(call) => format!("| {}", fn_call(call)),
+        // `%%(...)`: the record sigil's enriched register view.
+        Stage::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
+        // `.%(...)` / `.name%(...)`: the record push, sigil-spelled.
+        Stage::RecordPush {
+            name,
+            call,
+            enriched,
+        } => {
+            let sigil = if *enriched { "%%" } else { "%" };
+            format!("| .{}{sigil}{}", name.as_deref().unwrap_or(""), record_args(call, "; "))
+        }
+        // `group(...)` follows the record convention: its keys print
+        // as a record's do.
+        Stage::Agg(call) if call.name == "group" => format!("@| group{}", record_args(call, ", ")),
         Stage::Agg(call) => format!("@| {}", fn_call(call)),
         Stage::Spread { outer: false } => "| ...".to_string(),
         Stage::Spread { outer: true } => "| ...?".to_string(),
@@ -715,8 +759,9 @@ fn stage(st: &Stage) -> String {
         // it would reparse as a navigation stage.
         Stage::Expr(e) => {
             let text = operand(e);
-            let delimited =
-                text.starts_with(['(', '\'', '"', ':', ';', '$']) || text.starts_with("@-");
+            let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%'])
+                || text.starts_with("@-")
+                || text.starts_with("@(");
             if delimited {
                 format!("| {text}")
             } else {
@@ -733,23 +778,65 @@ fn stage(st: &Stage) -> String {
     }
 }
 
+fn is_record_call(name: &str) -> bool {
+    matches!(name, "rec" | "record")
+}
+
+/// A key of the record convention prints bare when it is an
+/// identifier (`[A-Za-z_][A-Za-z0-9_]*`, and not a boolean word),
+/// quoted otherwise — the canonical display of a record.
+fn is_bare_key(k: &str) -> bool {
+    let mut cs = k.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !crate::parser::is_bool_word(k)
+}
+
+/// The record convention's argument list (ruling #50): a literal
+/// string is a key and prints as `key = value` — bare when it is an
+/// identifier, quoted otherwise — with `sep` between the items; an
+/// auto-named value prints alone. The kaiv form, which the record
+/// is emitted as.
+fn record_args(call: &crate::ast::FnCall, sep: &str) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < call.args.len() {
+        match &call.args[i] {
+            Arg::Lit(Value::Str(k)) if i + 1 < call.args.len() => {
+                let key = if is_bare_key(k) {
+                    k.clone()
+                } else {
+                    literal(&Value::Str(k.clone()))
+                };
+                out.push(format!("{key} = {}", arg_text(&call.args[i + 1])));
+                i += 2;
+            }
+            a => {
+                out.push(arg_text(a));
+                i += 1;
+            }
+        }
+    }
+    format!("({})", out.join(sep))
+}
+
+fn arg_text(a: &Arg) -> String {
+    match a {
+        Arg::Lit(v) => literal(v),
+        Arg::Expr(e) => operand(e),
+        Arg::Range(a, b) => format!(
+            "{}..{}",
+            a.map(|n| n.to_string()).unwrap_or_default(),
+            b.map(|n| n.to_string()).unwrap_or_default()
+        ),
+    }
+}
+
 fn fn_call(call: &crate::ast::FnCall) -> String {
     if call.args.is_empty() {
         return call.name.clone();
     }
-    let args: Vec<String> = call
-        .args
-        .iter()
-        .map(|a| match a {
-            Arg::Lit(v) => literal(v),
-            Arg::Expr(e) => operand(e),
-            Arg::Range(a, b) => format!(
-                "{}..{}",
-                a.map(|n| n.to_string()).unwrap_or_default(),
-                b.map(|n| n.to_string()).unwrap_or_default()
-            ),
-        })
-        .collect();
+    let args: Vec<String> = call.args.iter().map(arg_text).collect();
     format!("{}({})", call.name, args.join(", "))
 }
 

@@ -28,7 +28,7 @@ fn nav_stages_round_trip() {
         // anchors: root, mark; arrows; a quantified walk in
         // stage position
         "/a/b | ^/c",
-        "/a .m | /b | (m)/c",
+        "/a .m | /b | ((m))/c",
         "/x | ->ref",
         "/e | (->manager_id)+::name",
         // file-first: push reopens navigation
@@ -42,21 +42,24 @@ fn nav_stages_round_trip() {
 fn mark_anchors_round_trip() {
     for q in [
         // anonymous marks, positional and recency anchors
-        "/a . /b | (1)/c",
-        "/a . /b | (.)/c",
-        "/a .m /b | (2):::name",
+        // (double parentheses are canonical since ruling #43; the
+        // single-paren spellings parse as deprecated aliases)
+        "/a . /b | ((1))/c",
+        "/a . /b | ((.))/c",
+        "/a .m /b | ((2)):::name",
         // the plural: bare re-seed, with steps, named
-        "/a | . | ^/b | . | (@)",
-        "/a | . | (@)/kids/*",
-        "/a .s /b | (@s)::x",
+        "/a | . | ^/b | . | ((@))",
+        "/a | . | ((@))/kids/*",
+        "/a .s /b | ((@s))::x",
         // anchors in operand position
-        "/a . /*[(1)/x]",
-        "/e/*[(.)::depth > 2]",
+        "/a . /*[((1))/x]",
+        "/e/*[((.))::depth > 2]",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
-    // a bare parenthesized number stays the literal topic
-    assert_eq!(canon("/a | (2)"), "/a | (2)");
+    // `(2)` is the match capture `$2` (ruling #46); a number needs
+    // no parentheses to be the topic
+    assert_eq!(canon("/a | (2)"), "/a | $2");
 }
 
 #[test]

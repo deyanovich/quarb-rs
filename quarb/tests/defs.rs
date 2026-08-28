@@ -71,7 +71,7 @@ fn rec_refuses_call_operand_position() {
         "rec as macro argument must refuse"
     );
     // the honest spelling still parses and round-trips
-    assert_eq!(exp("/row | ('seen' | rec(::Fare))"), "/row | ('seen' | rec(::Fare))");
+    assert_eq!(exp("/row | ('seen' | %(::Fare))"), "/row | ('seen' | %(::Fare))");
 }
 
 /// Ruling #22: capture must be invited through an argument. A
@@ -109,12 +109,12 @@ fn invited_capture() {
     assert_eq!(
         exp("macro &m($r): //step[1] | \"| .${::matcher}(9)\"; \
              ^ | &m(/t) | rec(\"v\", $.t)"),
-        "^ | .t(9) | rec('v', $.t)"
+        "^ | .t(9) | %(v = $.t)"
     );
     // A def doing the same thing stays legal — bodies are literal.
     assert_eq!(
         exp("def &load: | .t(9); ^ | &load | rec(\"v\", $.t)"),
-        "^ | .t(9) | rec('v', $.t)"
+        "^ | .t(9) | %(v = $.t)"
     );
 }
 
@@ -225,7 +225,7 @@ fn predicate_splice() {
     // a guard refines the step before it
     assert_eq!(
         exp("def &vis: [not ::style =~ /none/]; //div&vis/h3::"),
-        "//div[!::style =~ 'none']/h3::"
+        "//div[!::style =~ (/none/)]/h3::"
     );
     // bracket predicates after a guard join the same predicate run
     assert_eq!(
@@ -240,7 +240,7 @@ fn predicate_splice() {
     // ... and rides the plain pipe as a per-capsa filter
     assert_eq!(
         exp("def &vis: [not ::style =~ /none/]; //div | &vis | ::id"),
-        "//div | [!::style =~ 'none'] | ::id"
+        "//div | [!::style =~ (/none/)] | ::id"
     );
     // as an operand it reads as a boolean
     assert_eq!(

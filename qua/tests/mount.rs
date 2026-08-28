@@ -112,7 +112,7 @@ fn archive_no_graft_holds_members_opaque() {
     let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
     let a = Dyn(a);
     assert!(run_q(&a, "/cfg.json/port::").is_empty(), "no_graft must not cross the boundary");
-    assert_eq!(run_q(&a, "/cfg.json;;;size").len(), 1, "the member stays listable and sizable");
+    assert_eq!(run_q(&a, "/cfg.json::::size").len(), 1, "the member stays listable and sizable");
 }
 
 #[test]

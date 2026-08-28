@@ -87,6 +87,8 @@ struct Capsa {
     /// The groups of the last successful `=~` match in a filter
     /// stage (`$1` … `$9`); empty until one matches.
     captures: Vec<String>,
+    /// The named groups of that match (`%+`), as `(name, text)`.
+    named: Vec<(String, String)>,
     /// The thread's marks — nodes labeled on the walk, for the
     /// `(name)` anchor.
     marks: Vec<Mark>,
@@ -131,6 +133,8 @@ struct Scope<'a> {
     ordinal: Option<usize>,
     /// Regex captures from the last matching filter (`$1` …).
     captures: &'a [String],
+    /// The named groups of the last matching filter (`%+`).
+    named: &'a [(String, String)],
     /// The marks in scope, for `(name)`-anchored paths.
     marks: &'a [Mark],
     /// The correlation witness that admitted this capsa (one node
@@ -159,6 +163,7 @@ const NO_SCOPE: Scope<'static> = Scope {
     topic: None,
     ordinal: None,
     captures: &[],
+    named: &[],
     marks: &[],
     bindings: &[],
     edge: None,
@@ -256,6 +261,7 @@ fn uses_shell_stage(stage: &Stage) -> bool {
     };
     match stage {
         Stage::Func(call) | Stage::Agg(call) => call.name == "sh" || args(call),
+        Stage::RecordPush { call, .. } => args(call),
         Stage::Subcontext { body, .. } => uses_shell_query(body),
         Stage::Map(inner) => uses_shell_stage(inner),
         Stage::Filter(e) => uses_shell_pred(e),
@@ -490,6 +496,7 @@ fn correlate_gate(
                     topic: c.topic.as_ref(),
                     ordinal: None,
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &[],
                     edge: None,
@@ -650,6 +657,7 @@ fn union_branches(
                     .map(|p| project(adapter, node, p)),
                 members: Vec::new(),
                 captures: Vec::new(),
+                named: Vec::new(),
                 bindings: trace
                     .witnesses
                     .borrow()
@@ -733,7 +741,7 @@ fn stage_reads_context(stage: &Stage) -> bool {
         Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => op(e),
         Stage::Filter(e) => pred(e),
         Stage::Select(Predicate::Expr(e)) => pred(e),
-        Stage::Func(call) | Stage::Agg(call) => call.args.iter().any(|a| match a {
+        Stage::Func(call) | Stage::Agg(call) | Stage::RecordPush { call, .. } => call.args.iter().any(|a| match a {
             Arg::Expr(e) => op(e),
             _ => false,
         }),
@@ -808,7 +816,7 @@ fn apply_stage(
                 })
                 .collect()
         }
-        Stage::Func(call) if call.name == "json" => caps
+        Stage::Func(call) if call.name == "json" || call.name == "jsonl" => caps
             .into_iter()
             .map(|mut c| {
                 let v = match &c.topic {
@@ -844,6 +852,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -889,6 +898,7 @@ fn apply_stage(
                                 topic: None,
                                 ordinal: None,
                                 captures: &c.captures,
+                    named: &c.named,
                                 marks: &c.marks,
                                 bindings: &c.bindings,
                                 edge: None,
@@ -919,6 +929,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -928,6 +939,39 @@ fn apply_stage(
                 };
                 let value = build_record(call, adapter, c.node, trace, scope);
                 c.topic = Some(value);
+                c
+            })
+            .collect(),
+        // `%%(...)` — the named register view enriched with the
+        // given fields: register fields first (the `%.` layout),
+        // the args after in written order, an arg overriding a
+        // register field that shares its name.
+        Stage::RecordWith(call) => caps
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut c)| {
+                let scope = Scope {
+                    node: Some(c.node),
+                    register: &c.register,
+                    topic: c.topic.as_ref(),
+                    ordinal: Some(i + 1),
+                    captures: &c.captures,
+                    named: &c.named,
+                    marks: &c.marks,
+                    bindings: &c.bindings,
+                    edge: None,
+                    arrived: &c.arrived,
+                    peers,
+                    outer,
+                };
+                let mut fields = named_register_fields(&c.register);
+                for (name, value) in record_fields(&call.args, adapter, c.node, trace, scope) {
+                    match fields.iter_mut().find(|(n, _)| n == &name) {
+                        Some((_, v)) => *v = value,
+                        None => fields.push((name, value)),
+                    }
+                }
+                c.topic = Some(Value::Record(fields));
                 c
             })
             .collect(),
@@ -999,6 +1043,7 @@ fn apply_stage(
                         topic: Some(v),
                         members: Vec::new(),
                         captures: c.captures.clone(),
+                        named: c.named.clone(),
                         marks: c.marks.clone(),
                         bindings: c.bindings.clone(),
                         arrived: c.arrived.clone(),
@@ -1029,6 +1074,7 @@ fn apply_stage(
                         topic: Some(v),
                         members: Vec::new(),
                         captures: c.captures.clone(),
+                        named: c.named.clone(),
                         marks: c.marks.clone(),
                         bindings: c.bindings.clone(),
                         arrived: c.arrived.clone(),
@@ -1072,6 +1118,7 @@ fn apply_stage(
                     topic: Some(v),
                     members: Vec::new(),
                     captures: c.captures.clone(),
+                        named: c.named.clone(),
                     marks: c.marks.clone(),
                     bindings: c.bindings.clone(),
                     arrived: c.arrived.clone(),
@@ -1120,6 +1167,7 @@ fn apply_stage(
                             .map(|p| project(adapter, node, p)),
                         members: Vec::new(),
                         captures: c.captures.clone(),
+                        named: c.named.clone(),
                         bindings: c.bindings.clone(),
                     });
                 }
@@ -1165,6 +1213,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -1195,6 +1244,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -1218,6 +1268,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -1235,6 +1286,52 @@ fn apply_stage(
                 // navigation mode: a following hop is legal and
                 // rebuilds the capsae, the filed value safe in
                 // the register (spec: Execution Modes).
+                c.topic = Some(value);
+                c
+            })
+            .collect(),
+        // `.%(...)` / `.name%(...)` — build the record and push it,
+        // the topic set to the record (`.%%(...)`: the enriched
+        // register view, as `%%(...)` renders it).
+        Stage::RecordPush {
+            name,
+            call,
+            enriched,
+        } => caps
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut c)| {
+                let scope = Scope {
+                    node: Some(c.node),
+                    register: &c.register,
+                    topic: c.topic.as_ref(),
+                    ordinal: Some(i + 1),
+                    captures: &c.captures,
+                    named: &c.named,
+                    marks: &c.marks,
+                    bindings: &c.bindings,
+                    edge: None,
+                    arrived: &c.arrived,
+                    peers,
+                    outer,
+                };
+                let fields = if *enriched {
+                    let mut fields = named_register_fields(&c.register);
+                    for (name, value) in record_fields(&call.args, adapter, c.node, trace, scope) {
+                        match fields.iter_mut().find(|(n, _)| n == &name) {
+                            Some((_, v)) => *v = value,
+                            None => fields.push((name, value)),
+                        }
+                    }
+                    fields
+                } else {
+                    record_fields(&call.args, adapter, c.node, trace, scope)
+                };
+                let value = Value::Record(fields);
+                c.register.push(Reg {
+                    name: name.clone(),
+                    value: value.clone(),
+                });
                 c.topic = Some(value);
                 c
             })
@@ -1362,6 +1459,7 @@ fn apply_stage(
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
+                    named: &c.named,
                     marks: &c.marks,
                     bindings: &c.bindings,
                     edge: None,
@@ -1386,10 +1484,20 @@ fn apply_stage(
                 }
                 // A successful `=~` in the filter binds its groups
                 // for later stages ($1 …); a filter without one
-                // leaves earlier captures intact.
+                // leaves earlier captures intact. A NAMED group is
+                // a named push (ruling #47): `(?<year>…)` files its
+                // text into the register under `year`, read back as
+                // `$.year` / `(.year)` and seen by `%.`.
                 let groups = extract_captures(cond, adapter, c.node, trace, scope);
-                if let Some(groups) = groups {
+                if let Some((groups, named)) = groups {
                     c.captures = groups;
+                    c.named = named.clone();
+                    for (name, text) in named {
+                        c.register.push(Reg {
+                            name: Some(name),
+                            value: Value::Str(text),
+                        });
+                    }
                 }
                 Some(c)
             })
@@ -1413,6 +1521,7 @@ fn apply_stage(
                     topic: Some(v),
                     members: Vec::new(),
                     captures: Vec::new(),
+                named: Vec::new(),
                     marks: Vec::new(),
                     bindings: Vec::new(),
                     arrived: Vec::new(),
@@ -1465,6 +1574,7 @@ fn keyed_agg(
                         topic: c.topic.as_ref(),
                         ordinal: Some(i + 1),
                         captures: &c.captures,
+                    named: &c.named,
                         marks: &c.marks,
                         bindings: &c.bindings,
                         edge: None,
@@ -1506,6 +1616,7 @@ fn keyed_agg(
                 topic: c.topic.as_ref(),
                 ordinal: Some(i + 1),
                 captures: &c.captures,
+                    named: &c.named,
                 marks: &c.marks,
                 bindings: &c.bindings,
                 edge: None,
@@ -1553,6 +1664,7 @@ fn keyed_agg(
                     topic: Some(Value::List(topics)),
                     members,
                     captures: Vec::new(),
+                named: Vec::new(),
                     marks: Vec::new(),
                     bindings: Vec::new(),
                     arrived: Vec::new(),
@@ -1655,6 +1767,7 @@ fn peer_lists(
             topic: c.topic.as_ref(),
             ordinal: Some(i + 1),
             captures: &c.captures,
+                    named: &c.named,
             marks: &c.marks,
             bindings: &c.bindings,
             edge: None,
@@ -2261,18 +2374,7 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
         // carrying the latest value pushed under that name — so a
         // repointed column keeps its place in the row. Unnamed
         // regulae are not part of the record.
-        RegRef::Record => {
-            let mut fields: Vec<(String, Value)> = Vec::new();
-            for reg in register {
-                if let Some(name) = &reg.name {
-                    match fields.iter_mut().find(|(n, _)| n == name) {
-                        Some((_, v)) => *v = reg.value.clone(),
-                        None => fields.push((name.clone(), reg.value.clone())),
-                    }
-                }
-            }
-            Value::Record(fields)
-        }
+        RegRef::Record => Value::Record(named_register_fields(register)),
         // The full view: the named regulae exactly as `%.` renders
         // them, plus each anonymous regula keyed `#N` by its
         // 1-based register position — the number `$.N` recalls it
@@ -2293,6 +2395,23 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
             Value::Record(fields)
         }
     }
+}
+
+/// The `%.` layout: one field per named regula, in first-push
+/// order, carrying the latest value pushed under that name — so a
+/// repointed column keeps its place in the row. Unnamed regulae
+/// are not part of the record.
+fn named_register_fields(register: &[Reg]) -> Vec<(String, Value)> {
+    let mut fields: Vec<(String, Value)> = Vec::new();
+    for reg in register {
+        if let Some(name) = &reg.name {
+            match fields.iter_mut().find(|(n, _)| n == name) {
+                Some((_, v)) => *v = reg.value.clone(),
+                None => fields.push((name.clone(), reg.value.clone())),
+            }
+        }
+    }
+    fields
 }
 
 /// A register rendered as a hashable dedup key: names plus value
@@ -3761,16 +3880,19 @@ fn traits_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
 }
 
 /// Walk a filter condition for `=~` comparisons and return the
-/// groups of the *last* successful match (Perl's rule), or `None`
-/// when no `=~` matched. Non-participating groups capture as empty
-/// text.
+/// groups of the *last* successful match (Perl's rule) — the
+/// numbered groups, and the named ones as `(name, text)` pairs — or
+/// `None` when no `=~` matched. Non-participating groups capture as
+/// empty text.
+type Captured = (Vec<String>, Vec<(String, String)>);
+
 fn extract_captures(
     e: &PredExpr,
     adapter: &impl AstAdapter,
     node: NodeId,
     trace: &Trace,
     scope: Scope<'_>,
-) -> Option<Vec<String>> {
+) -> Option<Captured> {
     match e {
         PredExpr::Or(a, b) | PredExpr::And(a, b) => {
             let first = extract_captures(a, adapter, node, trace, scope);
@@ -3788,10 +3910,24 @@ fn extract_captures(
                 .find_map(|v| {
                     let text = v.to_string();
                     re.captures(&text).map(|caps| {
-                        caps.iter()
+                        let numbered = caps
+                            .iter()
                             .skip(1)
                             .map(|g| g.map_or(String::new(), |m| m.as_str().to_string()))
-                            .collect()
+                            .collect();
+                        let named = re
+                            .capture_names()
+                            .enumerate()
+                            .filter_map(|(i, n)| {
+                                n.map(|n| {
+                                    let text = caps
+                                        .get(i)
+                                        .map_or(String::new(), |m| m.as_str().to_string());
+                                    (n.to_string(), text)
+                                })
+                            })
+                            .collect();
+                        (numbered, named)
                     })
                 })
         }
@@ -3905,6 +4041,33 @@ fn eval_operand(
         // Capsa-scope operands: a register recall and the topic.
         Operand::Recall(r) => vec![recall(scope.register, r)],
         Operand::Topic => vec![scope.topic.cloned().unwrap_or(Value::Null)],
+        // `base:name` — a record's field; null on a non-record.
+        Operand::Field { base, name } => eval_operand(adapter, node, base, trace, bound, scope)
+            .into_iter()
+            .map(|v| match v {
+                Value::Record(fields) => fields
+                    .into_iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v)
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            })
+            .collect(),
+        // `@(a; b)` — the list literal: every value of every item.
+        Operand::List(items) => vec![Value::List(
+            items
+                .iter()
+                .flat_map(|item| eval_operand(adapter, node, item, trace, bound, scope))
+                .collect(),
+        )],
+        // `%+` — the named groups of the last match, as a record.
+        Operand::NamedCaptures => vec![Value::Record(
+            scope
+                .named
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                .collect(),
+        )],
         Operand::Ordinal => vec![
             scope
                 .ordinal
@@ -3977,6 +4140,7 @@ fn eval_operand(
                         topic: Some(v),
                         members: Vec::new(),
                         captures: scope.captures.to_vec(),
+                        named: scope.named.to_vec(),
                         marks: scope.marks.to_vec(),
                         bindings: bound.to_vec(),
                         arrived: scope.arrived.to_vec(),
@@ -5379,11 +5543,11 @@ mod tests {
         // differ — one final crossing each; identical breadcrumbs
         // merge, and their crossings aggregate
         assert_eq!(
-            vals("//a(->e.($-::qty))->e | .(@-) @| count", &t),
+            vals("//a(->e .($-::qty))->e | .(@-) @| count", &t),
             vec![Value::Int(2)]
         );
         assert_eq!(
-            vals("//a(->e.(1))->e | .(@-::qty)", &t),
+            vals("//a(->e .(1))->e | .(@-::qty)", &t),
             vec![Value::List(vec![Value::Int(12), Value::Int(5)])]
         );
         // stage form: `| @-::prop` sets the topic directly, and
@@ -5571,16 +5735,16 @@ mod tests {
         // Push the walked edge's property; read it back per path.
         // a -4-> x.rs -12-> deep: one path, register [4, 12].
         assert_eq!(
-            vals("//a(->e.($-::qty))+ | [:::name = deep] | @. | product", &t),
+            vals("//a(->e .($-::qty))+ | [:::name = deep] | @. | product", &t),
             vec![Value::Int(48)]
         );
         // Bare $- pushes the label; tree hops push [child].
         assert_eq!(
-            vals("(/a.($-)){1} | $.", &t),
+            vals("(/a .($-)){1} | $.", &t),
             vec![Value::Str("[child]".into())]
         );
         // Depth as a value: count the breadcrumbs.
-        assert_eq!(vals("//a(->e.(1))+! | @. | count", &t), vec![Value::Int(2)]);
+        assert_eq!(vals("//a(->e .(1))+! | @. | count", &t), vec![Value::Int(2)]);
         // A named push lands as a named regula. (Spaced: glued
         // `.q(` would lex into the matcher name, exactly as
         // `/x.rs(...)` keeps its filename.)
@@ -5597,7 +5761,7 @@ mod tests {
         let t = MockTree::diamond();
         assert_eq!(
             vals(
-                "//a(->e.(:::name))+ | [:::name = deep] | @. | join(\"-\")",
+                "//a(->e .(:::name))+ | [:::name = deep] | @. | join(\"-\")",
                 &t
             ),
             vec![
@@ -6436,19 +6600,115 @@ mod tests {
     }
 
     #[test]
+    fn named_groups_push_into_the_register() {
+        // Ruling #47: a named group is a named push — read back as
+        // a register, and seen by the record view.
+        let t = MockTree::sample();
+        let q = "/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %.";
+        let rows = vals(q, &t);
+        assert!(!rows.is_empty());
+        for r in &rows {
+            let Value::Record(fields) = r else {
+                panic!("expected a record, got {r:?}");
+            };
+            let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(keys, vec!["stem", "ext"], "{r:?}");
+        }
+        let exts = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | $.ext", &t);
+        assert!(exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
+        // the numbered captures still bind alongside
+        let stems = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(\\w+)$/)] | $1", &t);
+        assert_eq!(stems.len(), exts.len());
+    }
+
+    #[test]
+    fn record_fields_and_named_captures() {
+        // Ruling #48: `:name` reads a record's field; `%+` is the
+        // named-captures record.
+        let t = MockTree::sample();
+        let q = "/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:ext";
+        let exts = vals(q, &t);
+        assert!(!exts.is_empty() && exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
+        let recs = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)/)] | %+", &t);
+        assert!(recs.iter().all(|r| matches!(r, Value::Record(f) if f.len() == 1 && f[0].0 == "stem")), "{recs:?}");
+        // a constructed record's field, from the topic and from a register
+        let ones = vals("/a/* | rec(:::name, 'n', 1) | :n", &t);
+        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        let ones = vals("/a/* | rec(:::name, 'n', 1) | .r | $.r:n", &t);
+        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        // a missing field, and a non-record, read as null
+        let nulls = vals("/a/* | rec(:::name, 'n', 1) | :zzz", &t);
+        assert!(nulls.iter().all(|v| matches!(v, Value::Null)), "{nulls:?}");
+        // outside any match, `%+` is the empty record
+        let empty = vals("/a/* | %+", &t);
+        assert!(empty.iter().all(|v| matches!(v, Value::Record(f) if f.is_empty())), "{empty:?}");
+    }
+
+    #[test]
+    fn list_literal_gathers_every_value() {
+        // Ruling #52: `@(a; b)` — each item contributes all its
+        // values; the rounded `*(…)` spells the same.
+        let t = MockTree::sample();
+        assert_eq!(
+            vals("/a | @(1; 'x'; 2 + 1)", &t),
+            vec![Value::List(vec![Value::Int(1), Value::Str("x".into()), Value::Int(3)])]
+        );
+        let gathered = vals("/a | @(/*:::name)", &t);
+        assert!(matches!(&gathered[0], Value::List(items) if items.len() > 1), "{gathered:?}");
+        assert_eq!(vals("/a | @()", &t), vec![Value::List(Vec::new())]);
+        assert_eq!(vals("/a | *(1; 2)", &t), vals("/a | @(1; 2)", &t));
+        // display: the Quarb form, bare scalars, quoted strings
+        assert_eq!(vals("/a | @(1; 'x')", &t)[0].display_form(), "@(1; 'x')");
+    }
+
+    #[test]
+    fn json_and_jsonl_over_the_stream() {
+        // Ruling #51: `| json` serializes each value; `@| json` the
+        // whole stream as one array; `@| jsonl` one document per line.
+        let t = MockTree::sample();
+        let each = vals("/a/* | :::name | json", &t);
+        assert!(each.len() > 1 && each.iter().all(|v| matches!(v, Value::Str(s) if s.starts_with('"'))), "{each:?}");
+        let whole = vals("/a/* | :::name @| json", &t);
+        assert!(matches!(&whole[..], [Value::Str(s)] if s.starts_with("[\"") && s.ends_with(']')), "{whole:?}");
+        let lines = vals("/a/* | :::name @| jsonl", &t);
+        assert!(matches!(&lines[..], [Value::Str(s)] if s.lines().count() == each.len()), "{lines:?}");
+        // a record's JSON is unchanged by the display ruling
+        let rec = vals("/a/* | %(n = :::name) | json", &t);
+        assert!(rec.iter().all(|v| matches!(v, Value::Str(s) if s.starts_with("{\"n\": "))), "{rec:?}");
+    }
+
+    #[test]
+    fn record_push_in_one_step() {
+        // Ruling #49: `.%(...)` builds and pushes; `.name%(...)` names it.
+        let t = MockTree::sample();
+        let ones = vals("/a/* | .r%(:::name, 'n', 1) | $.r:n", &t);
+        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        let views = vals("/a/* | .r%(:::name) | %.", &t);
+        assert!(views.iter().all(|v| matches!(v, Value::Record(f) if f.len() == 1 && f[0].0 == "r")), "{views:?}");
+        let anon = vals("/a/* | .%(:::name, 'n', 2) | $.:n", &t);
+        assert!(!anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))), "{anon:?}");
+        // the enriched form carries the register's named regulae
+        let rich = vals("/a/* | .k(:::name) | .%%('n', 3) | :k", &t);
+        assert!(!rich.is_empty() && rich.iter().all(|v| matches!(v, Value::Str(_))), "{rich:?}");
+    }
+
+    #[test]
     fn mark_array_symmetry() {
+        // Anchors in double parentheses — canonical since ruling #43
+        // (the single-paren spellings still parse, except `(.)`,
+        // which is now the register file).
         let t = MockTree::sample();
         // Bare `.` pockets the node anonymously — mid-path and as
         // a pipe stage — and `(N)` / `(.)` recall positionally.
-        assert_eq!(run("/a . /x.rs | (1)/y.txt", &t), vec![3]);
-        assert_eq!(run("/a . /x.rs | (.)/y.txt", &t), vec![3]);
-        assert_eq!(run("/a | . | /x.rs | (1)/y.txt", &t), vec![3]);
+        assert_eq!(run("/a . /x.rs | ((1))/y.txt", &t), vec![3]);
+        assert_eq!(run("/a . /x.rs | ((.))/y.txt", &t), vec![3]);
+        assert_eq!(run("/a | . | /x.rs | ((1))/y.txt", &t), vec![3]);
         // Names are references over the same slots: the named mark
         // is also position 2. (Bare `| (2)` stays the literal 2 —
         // digit anchors need a continuation; the bare re-seed
         // spellings are `(.)`, `(@)`, `(@name)`.)
         assert_eq!(
-            vals("/a . /x.rs .m | (2):::name", &t),
+            vals("/a . /x.rs .m | ((2)):::name", &t),
             vec![Value::Str("x.rs".into())]
         );
         // The null wart is gone: a bare push in node context marks
@@ -6458,7 +6718,7 @@ mod tests {
             vec![Value::Str("[]".into())]
         );
         // Positional recall of marks lives in operand space too.
-        assert_eq!(run("/a . /*[(1)/x.rs]", &t), vec![2, 3]);
+        assert_eq!(run("/a . /*[((1))/x.rs]", &t), vec![2, 3]);
     }
 
     #[test]

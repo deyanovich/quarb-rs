@@ -1,0 +1,16 @@
+[package]
+name = "quarb-text-koine"
+description = "Koine/litogramma producer for the Quarb text level — the reader's model from an atrep document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quarb-text = { path = "../quarb-text", version = "0.26.0" }
+atrep = { version = "0.3.0", default-features = false }
+thiserror = "2"
+quick-xml = "0.37"
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.26.0" }

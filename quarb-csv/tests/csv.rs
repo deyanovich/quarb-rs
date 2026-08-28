@@ -119,8 +119,8 @@ fn records_and_json() {
     assert_eq!(
         values(r#"/row[::dept = "eng"] | record(::name, "monthly", ::salary div 12)"#),
         vec![
-            r#"{"name": "Ada", "monthly": 10000}"#,
-            r#"{"name": "Cy", "monthly": 7916.666666666667}"#
+            "%(name = 'Ada'; monthly = 10000)",
+            "%(name = 'Cy'; monthly = 7916.666666666667)"
         ]
     );
     // | json serializes any topic: strings quote, null is literal
@@ -129,7 +129,7 @@ fn records_and_json() {
     // composes with keyed aggregates: top earner as a record
     assert_eq!(
         values("/row @| max_by(::salary) | record(::name, ::salary)"),
-        vec![r#"{"name": "Ada", "salary": "120000"}"#]
+        vec!["%(name = 'Ada'; salary = '120000')"]
     );
 }
 
@@ -141,9 +141,9 @@ fn grouping() {
     assert_eq!(
         values("/row @| group(::dept) | count | rec($.dept, \"n\", $_)"),
         vec![
-            r#"{"dept": "eng", "n": 2}"#,
-            r#"{"dept": "sales", "n": 1}"#,
-            r#"{"dept": "ops, misc", "n": 1}"#
+            "%(dept = 'eng'; n = 2)",
+            "%(dept = 'sales'; n = 1)",
+            "%(dept = 'ops, misc'; n = 1)"
         ]
     );
     // groupby().mean() — and groups sort by their aggregate (the
@@ -154,15 +154,15 @@ fn grouping() {
              @| sort_by($.m)"
         ),
         vec![
-            r#"{"dept": "sales", "mean": 45000}"#,
-            r#"{"dept": "eng", "mean": 107500}"#,
-            r#"{"dept": "ops, misc", "mean": null}"#
+            "%(dept = 'sales'; mean = 45000)",
+            "%(dept = 'eng'; mean = 107500)",
+            "%(dept = 'ops, misc'; mean = null)"
         ]
     );
     // computed group keys, record-convention named
     assert_eq!(
         values("/row @| group(\"senior\", ::age idiv 40) | count | rec($.senior, \"n\", $_)"),
-        vec![r#"{"senior": 0, "n": 2}"#, r#"{"senior": 1, "n": 2}"#]
+        vec!["%(senior = 0; n = 2)", "%(senior = 1; n = 2)"]
     );
     // null keys form no group (pandas dropna): Dee's empty salary
     assert_eq!(
@@ -183,9 +183,9 @@ fn group_members() {
              | rec($.dept, ::name, ::salary)"
         ),
         vec![
-            r#"{"dept": "eng", "name": "Ada", "salary": "120000"}"#,
-            r#"{"dept": "sales", "name": "Bo", "salary": "45000"}"#,
-            r#"{"dept": "ops, misc", "name": "Dee", "salary": null}"#
+            "%(dept = 'eng'; name = 'Ada'; salary = '120000')",
+            "%(dept = 'sales'; name = 'Bo'; salary = '45000')",
+            "%(dept = 'ops, misc'; name = 'Dee'; salary = null)"
         ]
     );
     // a keyed stage on `|` rebuilds the list topic from the
@@ -193,9 +193,9 @@ fn group_members() {
     assert_eq!(
         values("/row::salary @| group(::dept) | top(1, $_) | sum | rec($.dept, \"max\", $_)"),
         vec![
-            r#"{"dept": "eng", "max": 120000}"#,
-            r#"{"dept": "sales", "max": 45000}"#,
-            r#"{"dept": "ops, misc", "max": null}"#
+            "%(dept = 'eng'; max = 120000)",
+            "%(dept = 'sales'; max = 45000)",
+            "%(dept = 'ops, misc'; max = null)"
         ]
     );
     // ungroup restores the pre-group typing: an unprojected
@@ -209,11 +209,13 @@ fn group_members() {
         values("/row::name @| group(::dept) | top(1, ::age) @| ungroup"),
         vec!["Cy", "Bo", "Dee"]
     );
-    // memberless capsae pass through keyed `|` stages and ungroup
-    assert_eq!(
-        values("/row | top(1, ::age) @| ungroup @| count"),
-        vec!["4"]
-    );
+    // a keyed stage on the plain pipe with no group before it is
+    // refused with a pointer (2026-08-27): it would rank each
+    // capsa's single value against itself and pass everything
+    // through, silently.
+    let adapter = CsvAdapter::parse(DOC).unwrap();
+    let e = quarb::run("/row | top(1, ::age) @| ungroup @| count", &adapter).unwrap_err();
+    assert!(e.to_string().contains("ranks a context"), "{e}");
 }
 
 /// `$ordinal` / `$ord` — the capsa's 1-based position in the
@@ -225,10 +227,10 @@ fn ordinal() {
     assert_eq!(
         values("/row @| sort_by(::age) | rec($ord, ::name)"),
         vec![
-            r#"{"ordinal": 1, "name": "Bo"}"#,
-            r#"{"ordinal": 2, "name": "Ada"}"#,
-            r#"{"ordinal": 3, "name": "Dee"}"#,
-            r#"{"ordinal": 4, "name": "Cy"}"#
+            "%(ordinal = 1; name = 'Bo')",
+            "%(ordinal = 2; name = 'Ada')",
+            "%(ordinal = 3; name = 'Dee')",
+            "%(ordinal = 4; name = 'Cy')"
         ]
     );
     // positional sampling in a per-capsa filter
@@ -346,7 +348,7 @@ fn interpolation() {
     // interpolations work as function arguments
     assert_eq!(
         values(r#"/row[1] | rec("who", "${::name}/${::dept}")"#),
-        vec![r#"{"who": "Ada/eng"}"#]
+        vec!["%(who = 'Ada/eng')"]
     );
 }
 
@@ -377,7 +379,7 @@ fn macros_end_to_end() {
                          | "| .${$.k}-mean(/row${::form} @| mean)";
                ^ | &describe(::age, ::salary) | %."#
         ),
-        vec![r#"{"age-mean": 39.5, "salary-mean": 86666.66666666667}"#]
+        vec!["%('age-mean' = 39.5; 'salary-mean' = 86666.66666666667)"]
     );
     // a computed splice parameterizes a filter at expansion time
     assert_eq!(
@@ -401,7 +403,7 @@ fn data_aware_macros() {
                    | "| .n-${$_}(/row[${$col} = '${$_}'] @| count)";
                ^ | &pivot!(::dept) | %."#
         ),
-        vec![r#"{"n-eng": 2, "n-sales": 1}"#]
+        vec!["%('n-eng' = 2; 'n-sales' = 1)"]
     );
     // the form binding also filters the data at expansion time
     assert_eq!(
@@ -442,9 +444,9 @@ fn register_record_view() {
     assert_eq!(
         values("/row[::age > 35] | .name(::name) | .age(::age) | %."),
         vec![
-            r#"{"name": "Ada", "age": "36"}"#,
-            r#"{"name": "Cy", "age": "64"}"#,
-            r#"{"name": "Dee", "age": "41"}"#
+            "%(name = 'Ada'; age = '36')",
+            "%(name = 'Cy'; age = '64')",
+            "%(name = 'Dee'; age = '41')"
         ]
     );
     // a group's key regs are already named: %. after a reduction
@@ -452,19 +454,19 @@ fn register_record_view() {
     assert_eq!(
         values("/row @| group(::dept) | count | .n | %."),
         vec![
-            r#"{"dept": "eng", "n": 2}"#,
-            r#"{"dept": "sales", "n": 1}"#,
-            r#"{"dept": "ops, misc", "n": 1}"#
+            "%(dept = 'eng'; n = 2)",
+            "%(dept = 'sales'; n = 1)",
+            "%(dept = 'ops, misc'; n = 1)"
         ]
     );
     // unnamed regs are skipped; a repointed name keeps its place
     // and carries the latest value
     assert_eq!(
         values("/row[1] | .a(::name) | ::dept | . | .b(::age) | .a(::salary) | %."),
-        vec![r#"{"a": "120000", "b": "36"}"#]
+        vec!["%(a = '120000'; b = '36')"]
     );
     // an empty register is an empty record
-    assert_eq!(values("/row[1] | %."), vec!["{}"]);
+    assert_eq!(values("/row[1] | %."), vec!["%()"]);
 }
 
 /// Fragment definitions expand at parse time: query fragments,
@@ -484,7 +486,7 @@ fn fragments() {
             "def &cols: | .name(::name) | .dept(::dept) | %.; \
              /row @| top(1, ::salary) | &cols"
         ),
-        vec![r#"{"name": "Ada", "dept": "eng"}"#]
+        vec!["%(name = 'Ada'; dept = 'eng')"]
     );
     // a def building on an earlier def
     assert_eq!(
@@ -516,23 +518,23 @@ fn captures() {
     // extract, then use as fields (Perl's match-then-harvest)
     assert_eq!(
         values(r#"/row | [::dept =~ /^(\w+)s$/] | rec("stem", $1, ::name)"#),
-        vec![r#"{"stem": "sale", "name": "Bo"}"#]
+        vec!["%(stem = 'sale'; name = 'Bo')"]
     );
     // captures reach pushes, %., and later filters
     assert_eq!(
         values(r#"/row | [::name =~ /^(\w)/] | .initial($1) | .age(::age) | %. @| [1..2]"#),
         vec![
-            r#"{"initial": "A", "age": "36"}"#,
-            r#"{"initial": "B", "age": "17"}"#
+            "%(initial = 'A'; age = '36')",
+            "%(initial = 'B'; age = '17')"
         ]
     );
     // ... and group keys
     assert_eq!(
         values(r#"/row | [::dept =~ /^(\w)/] @| group("initial", $1) | count | .n | %."#),
         vec![
-            r#"{"initial": "e", "n": 2}"#,
-            r#"{"initial": "s", "n": 1}"#,
-            r#"{"initial": "o", "n": 1}"#
+            "%(initial = 'e'; n = 2)",
+            "%(initial = 's'; n = 1)",
+            "%(initial = 'o'; n = 1)"
         ]
     );
     // a later filter without =~ keeps earlier captures; an
@@ -540,13 +542,13 @@ fn captures() {
     assert_eq!(
         values(r#"/row | [::name =~ /^(\w+)$/] | [::age > 30] | rec("who", $1, "g2", $2)"#),
         vec![
-            r#"{"who": "Ada", "g2": null}"#,
-            r#"{"who": "Cy", "g2": null}"#,
-            r#"{"who": "Dee", "g2": null}"#
+            "%(who = 'Ada'; g2 = null)",
+            "%(who = 'Cy'; g2 = null)",
+            "%(who = 'Dee'; g2 = null)"
         ]
     );
     // outside any match, captures are null (and falsy)
-    assert_eq!(values("/row[1] | rec(\"c\", $1)"), vec![r#"{"c": null}"#]);
+    assert_eq!(values("/row[1] | rec(\"c\", $1)"), vec!["%(c = null)"]);
 }
 
 /// Regression: a property projection evaluated at the arbor root
@@ -587,9 +589,9 @@ fn correlated_subqueries() {
              | .adults(^/row[::dept = $$.dept][::age >= 18] @| count) | %."
         ),
         vec![
-            r#"{"dept": "eng", "adults": 2}"#,
-            r#"{"dept": "sales", "adults": 0}"#,
-            r#"{"dept": "ops, misc", "adults": 1}"#
+            "%(dept = 'eng'; adults = 2)",
+            "%(dept = 'sales'; adults = 0)",
+            "%(dept = 'ops, misc'; adults = 1)"
         ]
     );
     // groupwise transform: each row paired with its group's mean

@@ -113,6 +113,24 @@ pub enum Stage {
     /// `| $.`, `| $.name`, `| @.` — recall a register value as the
     /// topic.
     Recall(RegRef),
+    /// `| %%(...)` — the named register view (`%.`) enriched with
+    /// the given fields: register fields first in the `%.` layout,
+    /// the args after in written order, an arg overriding a
+    /// register field that shares its name. The call carries the
+    /// record convention, normalized to `rec`.
+    RecordWith(FnCall),
+    /// `| .%(...)` / `| .name%(...)` — build the record and push it
+    /// in one step, anonymous or named, the topic set to the record
+    /// (ruling #49); `.%%(...)` builds the enriched register view
+    /// instead. The operand spelling `.name(%(...))` cannot exist: a
+    /// record constructor in operand position would ride its first
+    /// field as the topic (ruling #38), so the push carries the
+    /// constructor itself.
+    RecordPush {
+        name: Option<String>,
+        call: FnCall,
+        enriched: bool,
+    },
     /// `| ...` — the spread: fork a list topic into one thread per
     /// element (Cypher's UNWIND). Core syntax, not a function — it
     /// computes nothing, it changes how many threads exist. Null
@@ -198,6 +216,11 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     }
     if let Operand::Recall(RegRef::Named(n)) = op {
         return Some(n);
+    }
+    // `:title` — a record's field derives its name as a projection
+    // does (ruling #48): `group(:title)`, `%(:title, 'n', 1)`.
+    if let Operand::Field { name, .. } = op {
+        return Some(name);
     }
     if matches!(op, Operand::Ordinal) {
         return Some("ordinal");
@@ -366,8 +389,9 @@ pub enum Operand {
     /// refuses it anywhere else). The stars are syntax, not data: a
     /// value containing `*` never globs.
     Pattern(Vec<PatSeg>),
-    /// A descending path from the current node, with an optional
-    /// projection. Empty `steps` + a projection is a projection of the
+    /// A path from the current node — descending, ascending, sideways,
+    /// or across a crosslink — with an optional projection. Empty
+    /// `steps` + a projection is a projection of the
     /// current node (`::size`); non-empty `steps` navigate first
     /// (`/address::city`). The anchor mirrors the branch anchor:
     /// `[;;;short = ^/tags/*;;;short]` compares against a set
@@ -400,6 +424,17 @@ pub enum Operand {
     Recall(RegRef),
     /// `$_` — the topic: the current pipeline value.
     Topic,
+    /// `base:name` — a field of a record value (ruling #48): the
+    /// bottom rung of the colon ladder, a value's field below a
+    /// node's property. A leading `:name` reads the topic's field.
+    Field { base: Box<Operand>, name: String },
+    /// `%+` — the record of the last match's named groups (Perl's
+    /// `%+`); the empty record outside any match.
+    NamedCaptures,
+    /// `@(a; b; c)` — the list literal (ruling #52): each item
+    /// contributes every value it yields, so `@(/tags/*::)` gathers
+    /// a path's values into one list. `@()` is the empty list.
+    List(Vec<Operand>),
     /// `$ordinal` / `$ord` — the capsa's 1-based position in the
     /// current context. Ephemeral order (it changes with every
     /// sort, filter, and group), unlike the stable tree fact

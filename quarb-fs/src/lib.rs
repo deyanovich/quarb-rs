@@ -281,6 +281,24 @@ impl AstAdapter for FsAdapter {
     /// source, its mtime as the instant (the same derivation as
     /// `::::modified`, so the two always agree). No dpid — the
     /// filesystem assigns none.
+    /// Ruling #29: a file cannot grow properties — the surface is
+    /// closed — so the filesystem annotations answer at `::` too:
+    /// `::size`, `::modified`, `::extension` read as `::::size`,
+    /// `::::modified`, `::::extension` (and `::::is-dir`,
+    /// `::::is-file`, `::::mode`, `::::permissions`). Data would win
+    /// if a file had such a property; none does.
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        &[
+            "size",
+            "modified",
+            "extension",
+            "is-dir",
+            "is-file",
+            "mode",
+            "permissions",
+        ]
+    }
+
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         let path = &self.paths[node.0 as usize];
         quarb::Provenance {

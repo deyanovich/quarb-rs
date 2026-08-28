@@ -237,9 +237,9 @@ fn join_projection() {
     assert_eq!(
         got,
         vec![
-            r#"{"who": "Ada", "amt": 30}"#,
-            r#"{"who": "Bo", "amt": 45}"#,
-            r#"{"who": "Ada", "amt": 99}"#
+            "%(who = 'Ada'; amt = 30)",
+            "%(who = 'Bo'; amt = 45)",
+            "%(who = 'Ada'; amt = 99)"
         ]
     );
 }

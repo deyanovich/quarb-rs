@@ -118,10 +118,10 @@ fn sql_shapes() {
     assert_eq!(
         values("/tracks/*[::price < 1] @| sort_by(::title) | rec(::title, ::price)"),
         vec![
-            r#"{"title": "Bourree", "price": 0.99}"#,
-            r#"{"title": "Gymnopedie No.1", "price": 0.99}"#,
-            r#"{"title": "Unfiled Sketch", "price": 0.5}"#,
-            r#"{"title": "Venus", "price": 0.99}"#
+            "%(title = 'Bourree'; price = 0.99)",
+            "%(title = 'Gymnopedie No.1'; price = 0.99)",
+            "%(title = 'Unfiled Sketch'; price = 0.5)",
+            "%(title = 'Venus'; price = 0.99)"
         ]
     );
     // GROUP BY album HAVING count > 1 — via the FK chain in the key
@@ -131,8 +131,8 @@ fn sql_shapes() {
              | count | .n | [$_ > 1] | %."
         ),
         vec![
-            r#"{"album": "The Planets", "n": 3}"#,
-            r#"{"album": "Mikrokosmos", "n": 2}"#
+            "%(album = 'The Planets'; n = 3)",
+            "%(album = 'Mikrokosmos'; n = 2)"
         ]
     );
     // JOIN with projection of both sides (the witness)
@@ -142,10 +142,10 @@ fn sql_shapes() {
              | rec(\"album\", $*1::title, ::title)"
         ),
         vec![
-            r#"{"album": "The Planets", "title": "Mars"}"#,
-            r#"{"album": "The Planets", "title": "Venus"}"#,
-            r#"{"album": "The Planets", "title": "Jupiter"}"#,
-            r#"{"album": "Quartets", "title": "Quartet No.4"}"#
+            "%(album = 'The Planets'; title = 'Mars')",
+            "%(album = 'The Planets'; title = 'Venus')",
+            "%(album = 'The Planets'; title = 'Jupiter')",
+            "%(album = 'Quartets'; title = 'Quartet No.4')"
         ]
     );
     // correlated subquery: albums with revenue over 2 (SUM per row)
@@ -156,8 +156,8 @@ fn sql_shapes() {
              | [$.rev > 2] | rec(::title, \"revenue\", $.rev)"
         ),
         vec![
-            r#"{"title": "The Planets", "revenue": 3.5700000000000003}"#,
-            r#"{"title": "Mikrokosmos", "revenue": 2.2800000000000002}"#
+            "%(title = 'The Planets'; revenue = 3.5700000000000003)",
+            "%(title = 'Mikrokosmos'; revenue = 2.2800000000000002)"
         ]
     );
 }

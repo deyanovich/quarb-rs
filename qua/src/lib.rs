@@ -116,6 +116,16 @@ struct Cli {
     #[arg(long, alias = "daiv")]
     kaiv: bool,
 
+    /// Print the results as one JSON document — an array of the
+    /// values, records as objects. (The default prints the Quarb
+    /// form: `%(k = v; …)` for a record, `@(a; b)` for a list.)
+    #[arg(long, conflicts_with_all = ["jsonl", "kaiv"])]
+    json: bool,
+
+    /// Print the results as JSON Lines: one JSON document per line.
+    #[arg(long, conflicts_with_all = ["json", "kaiv"])]
+    jsonl: bool,
+
     /// Load fragment definitions (`def &name(params): body;`) from a
     /// file before parsing the query; inline defs extend them.
     #[arg(long, value_name = "FILE")]
@@ -181,11 +191,11 @@ struct Cli {
 
     /// A declared-references document: '{"refs": {"field":
     /// "container", ...}}' — the edges the substrate's own catalog
-    /// does not hold. On a SQLite database each declared field gains
+    /// does not hold. On a SQLite database each declared property gains
     /// the full crosslink fabric ('-->', '->', '<-', '<--') into the
     /// target container (a table, or a view — e.g. a SELECT DISTINCT
-    /// dimension view); a field may be scoped as 'table.column'. On
-    /// Firebase, bare '-->' and '->' work for the declared fields.
+    /// dimension view); a property may be scoped as 'table.column'. On
+    /// Firebase, bare '-->' and '->' work for the declared properties.
     #[arg(long, value_name = "FILE")]
     refs: Option<PathBuf>,
 
@@ -268,7 +278,18 @@ struct Cli {
     cache_dir: Option<PathBuf>,
 }
 
+/// How a result line is written (ruling #51): the Quarb form by
+/// default, JSON on request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Quarb,
+    Json,
+    Jsonl,
+}
+
 thread_local! {
+    /// The --json / --jsonl choice. Set once in `main`.
+    static OUTPUT: std::cell::Cell<Output> = const { std::cell::Cell::new(Output::Quarb) };
     /// Whether this invocation is `--expand` (print the expanded
     /// query instead of running it). Set once in `main`.
     static EXPAND_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -351,6 +372,15 @@ pub fn cli_main() -> anyhow::Result<()> {
     }
 
     let mut cli = Cli::parse();
+    OUTPUT.with(|o| {
+        o.set(if cli.json {
+            Output::Json
+        } else if cli.jsonl {
+            Output::Jsonl
+        } else {
+            Output::Quarb
+        })
+    });
 
     // The highlight filter: no query, no target — a pure lexer
     // pass, line in, HTML line out.
@@ -997,11 +1027,76 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     // (html, md); the producer is chosen by the remaining
     // extension, with `<` sniffing markup for the rest and plain
     // paragraphs as the fallback.
+    // A `koine:` prefix takes the koine route to the same
+    // reader's model: native atrep formats plus everything
+    // atrep's endomorphosis imports; `?format=` forces one.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("koine:"))
+        && !rest.is_empty()
+    {
+        let adapter = koine_level(rest)?;
+        let src = rest.to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
     if let Some(p) = &path
         && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("text:"))
         && !rest.is_empty()
     {
         let target = Path::new(rest);
+        // A native atrep file is already koine: the two prefixes
+        // converge, and text: aliases to the koine route.
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("atd") || e.eq_ignore_ascii_case("atk"))
+        {
+            let adapter = koine_level(rest)?;
+            let src = target.display().to_string();
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
+        // The binary producers dispatch before the text read: a
+        // .docx is a zip, not UTF-8. (Plain `report.docx` keeps
+        // its archive reading — three readings, one file.)
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            let bytes = std::fs::read(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let adapter = quarb_text_pdf::parse(&bytes)
+                .with_context(|| format!("reading {} as PDF", target.display()))?;
+            let src = target.display().to_string();
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
+        if let Some(kind) = binary_text_kind(target) {
+            let bytes = std::fs::read(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let adapter = binary_text_level(kind, &bytes)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let src = target.display().to_string();
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
         let text = std::fs::read_to_string(target)
             .with_context(|| format!("reading {}", target.display()))?;
         let text = match text.strip_prefix('\u{feff}') {
@@ -1908,6 +2003,26 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
     }
 
+    // A PDF is its own object graph (quarb-pdf): plain file.pdf
+    // opens the internals reading, text:file.pdf the reader's
+    // model — the two-level split, as html/DOM vs text-html.
+    if let Some(p) = &path
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    {
+        let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let adapter = quarb_pdf::PdfAdapter::load(&bytes)
+            .with_context(|| format!("reading {} as PDF", p.display()))?;
+        let src = p.display().to_string();
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
+    }
+
     // Archives are binary: dispatch before the text read (zip/PK
     // or gzip magic, or a .tar extension). Composition is on by
     // default — the point of opening a .docx is the XML inside.
@@ -2386,6 +2501,120 @@ fn is_html(path: Option<&Path>, text: &str) -> bool {
 /// The text-level reading of a document (`text:` targets and
 /// `.txt` files): the producer is chosen by extension, `<` sniffs
 /// markup for the rest, plain paragraphs are the fallback.
+/// The binary text-level producers, by extension: formats whose
+/// bytes are a container, not UTF-8. Plain (unprefixed) paths
+/// keep their archive reading — `text:` opts into the reader's
+/// model.
+fn binary_text_kind(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "docx" => Some("docx"),
+        "epub" => Some("epub"),
+        _ => None,
+    }
+}
+
+fn binary_text_level(kind: &str, bytes: &[u8]) -> anyhow::Result<quarb_text::TextModel> {
+    match kind {
+        "docx" => quarb_text_docx::parse(bytes).map_err(|e| anyhow::anyhow!("as Word: {e}")),
+        _ => quarb_text_epub::parse(bytes).map_err(|e| anyhow::anyhow!("as EPUB: {e}")),
+    }
+}
+
+/// The koine reading (`koine:` — and `text:` on native atrep
+/// files): native atrep documents lower directly; Markdown, HTML,
+/// reStructuredText, Org, and djot arrive through atrep's
+/// endomorphosis importers into their mirror dialects. Anything
+/// else refuses by design — no atrep import exists for it yet,
+/// and a PDF never will (the print reading is `text:`).
+fn koine_level(spec: &str) -> anyhow::Result<quarb_text::TextModel> {
+    // The house ?param syntax: `koine:records.xml?format=jats`
+    // forces a format — the third dispatch tier, for stdin-ish,
+    // extensionless, or undeclared inputs.
+    let (path_part, format) = match spec.split_once('?') {
+        Some((p, q)) => {
+            let mut fmt = None;
+            for pair in q.split('&') {
+                match pair.split_once('=') {
+                    Some(("format", v)) => fmt = Some(v.to_string()),
+                    _ => anyhow::bail!("unknown koine option {pair:?} — supported: format="),
+                }
+            }
+            (p, fmt)
+        }
+        None => (spec, None),
+    };
+    let target = Path::new(path_part);
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    let read = || -> anyhow::Result<String> {
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading {}", target.display()))?;
+        Ok(match text.strip_prefix('\u{feff}') {
+            Some(rest) => rest.to_owned(),
+            None => text,
+        })
+    };
+    if let Some(fmt) = format {
+        let imported = match fmt.as_str() {
+            "atd" | "atk" => {
+                return quarb_text_koine::parse_file(target).with_context(|| {
+                    format!("reading {} as an atrep document", target.display())
+                });
+            }
+            "md" | "markdown" => quarb_text_koine::parse_markdown(&read()?),
+            "html" => quarb_text_koine::parse_html(&read()?),
+            "rst" => quarb_text_koine::parse_rst(&read()?),
+            "org" => quarb_text_koine::parse_org(&read()?),
+            "dj" | "djot" => quarb_text_koine::parse_djot(&read()?),
+            "tei" | "docbook" | "jats" | "usx" | "osis" => {
+                quarb_text_koine::parse_xml_as(&read()?, &fmt)
+            }
+            other => anyhow::bail!(
+                "unknown koine format {other:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, atd"
+            ),
+        };
+        return imported
+            .with_context(|| format!("importing {} through atrep as {fmt}", target.display()));
+    }
+    let imported = match ext.as_deref() {
+        Some("atd" | "atk") => {
+            return quarb_text_koine::parse_file(target)
+                .with_context(|| format!("reading {} as an atrep document", target.display()));
+        }
+        Some("md" | "markdown") => quarb_text_koine::parse_markdown(&read()?),
+        Some("html" | "htm") => quarb_text_koine::parse_html(&read()?),
+        Some("rst") => quarb_text_koine::parse_rst(&read()?),
+        Some("org") => quarb_text_koine::parse_org(&read()?),
+        Some("dj" | "djot") => quarb_text_koine::parse_djot(&read()?),
+        Some("xml") => {
+            // The XML vocabularies dispatch by DECLARED identity:
+            // root namespace, DOCTYPE public id, or unambiguous
+            // root element — never a statistical guess.
+            let text = read()?;
+            match quarb_text_koine::detect_xml_kind(&text) {
+                Some(kind) => quarb_text_koine::parse_xml_as(&text, kind),
+                None => anyhow::bail!(
+                    "{} declares no XML identity this route knows (no namespace, DOCTYPE, or unambiguous root) — force one with koine:{}?format=tei|docbook|jats|usx|osis",
+                    target.display(),
+                    target.display()
+                ),
+            }
+        }
+        Some("pdf") => anyhow::bail!(
+            "atrep cannot import a PDF — the print reading is text:{}",
+            target.display()
+        ),
+        _ => anyhow::bail!(
+            "no atrep import for this format yet — the native reading is text:{}",
+            target.display()
+        ),
+    };
+    imported.with_context(|| format!("importing {} through atrep", target.display()))
+}
+
 fn text_level(text: &str, path: Option<&Path>) -> quarb_text::TextModel {
     let ext = path
         .and_then(|p| p.extension())
@@ -2394,6 +2623,7 @@ fn text_level(text: &str, path: Option<&Path>) -> quarb_text::TextModel {
     match ext.as_deref() {
         Some("html" | "htm") => quarb_text_html::parse(text),
         Some("md" | "markdown") => quarb_text_markdown::parse(text),
+        Some("tex" | "latex") => quarb_text_latex::parse(text),
         Some("txt") => quarb_text::TextModel::parse_plain(text),
         _ if text.trim_start().starts_with('<') => quarb_text_html::parse(text),
         _ => quarb_text::TextModel::parse_plain(text),
@@ -2545,6 +2775,16 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
+    // A `koine:` prefix takes the koine route, matching the
+    // single-input flow.
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("koine:")
+        && !rest.is_empty()
+    {
+        let a = Rc::new(koine_level(rest)?);
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
     // A `text:` prefix forces the text-level reading, matching the
     // single-input flow.
     if let Some(s) = p.to_str()
@@ -2552,6 +2792,40 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         && !rest.is_empty()
     {
         let target = Path::new(rest);
+        // Native atrep files converge on the koine route.
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("atd") || e.eq_ignore_ascii_case("atk"))
+        {
+            let a = Rc::new(koine_level(rest)?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            let bytes = std::fs::read(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let a = Rc::new(
+                quarb_text_pdf::parse(&bytes)
+                    .with_context(|| format!("reading {} as PDF", target.display()))?,
+            );
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
+        if let Some(kind) = binary_text_kind(target) {
+            let bytes = std::fs::read(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let a = Rc::new(
+                binary_text_level(kind, &bytes)
+                    .with_context(|| format!("reading {}", target.display()))?,
+            );
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
         let text = std::fs::read_to_string(target)
             .with_context(|| format!("reading {}", target.display()))?;
         let text = match text.strip_prefix('\u{feff}') {
@@ -2937,6 +3211,18 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             |a, n| a.locator(n),
         ));
     }
+    if p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    {
+        let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let a = Rc::new(
+            quarb_pdf::PdfAdapter::load(&bytes)
+                .with_context(|| format!("reading {} as PDF", p.display()))?,
+        );
+        let r = a.clone();
+        return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+    }
     if is_archive(p) {
         if cli.no_graft {
             let a = Rc::new(ArchiveAdapter::open(p).context("opening archive")?);
@@ -3230,15 +3516,37 @@ fn run_inner<A: AstAdapter>(
     use std::io::Write as _;
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    match quarb::run(query, adapter)? {
+    let mode = OUTPUT.with(|o| o.get());
+    let values = match quarb::run(query, adapter)? {
         QueryResult::Nodes(nodes) => {
-            for node in nodes {
-                writeln!(out, "{}", render(node))?;
+            if mode == Output::Quarb {
+                for node in nodes {
+                    writeln!(out, "{}", render(node))?;
+                }
+                out.flush()?;
+                return Ok(());
+            }
+            nodes.into_iter().map(|n| Value::Str(render(n))).collect()
+        }
+        QueryResult::Values(values) => values,
+    };
+    match mode {
+        // The Quarb form: a scalar bare, a record `%(k = v; …)`, a
+        // list `@(a; b)` — text that reads back as a query.
+        Output::Quarb => {
+            for value in values {
+                writeln!(out, "{}", value.display_form())?;
             }
         }
-        QueryResult::Values(values) => {
+        // One JSON document: the values as an array.
+        Output::Json => {
+            let items: Vec<String> = values.iter().map(Value::to_json).collect();
+            writeln!(out, "[{}]", items.join(", "))?;
+        }
+        // JSON Lines: one document per line.
+        Output::Jsonl => {
             for value in values {
-                writeln!(out, "{value}")?;
+                writeln!(out, "{}", value.to_json())?;
             }
         }
     }
@@ -3375,13 +3683,18 @@ fn sqlite_value(v: &Value) -> rusqlite::types::Value {
 /// Render traced results as canonical kaiv. Each result becomes one
 /// leaf (or one leaf per record field) under `/@results/N`, typed by
 /// the value's kind. Provenance is per value, from the origin node's
-/// own `:::provenance`: its source is declared (`.?`) and referenced
-/// per distinct source string (`?q`, the run's joined inputs, is the
-/// fallback for nodes recording none), its instant emits as kaiv's
-/// compact `@ts`, and its dpid passes through — the origin node's
-/// locator, identifier-sanitized, stands in where the source
-/// assigned none. A value canonical kaiv cannot hold on a flat line
-/// falls back to its JSON text (quoted, single-line) as `str`.
+/// own `:::provenance`: its source is declared (`.?`) once per
+/// distinct source string as `src1`, `src2`, … (`?q`, the run's
+/// joined inputs, is the fallback for nodes recording none), its
+/// instant emits as kaiv's compact `@ts`, and its dpid passes
+/// through — where the source assigned none, the origin node's
+/// locator stands in, identifier-sanitized, unless it only repeats
+/// the source (a filesystem node's source is its own path). A record
+/// value is a kaiv namespace (`/@results/N/r::name=…`), a list a kaiv
+/// array (`/@results/N/@tags::0=…`, records as `/@tags/0::k=…`);
+/// quantities keep their unit (`!float:B`). What canonical kaiv
+/// cannot hold on a flat line falls back to its JSON text (quoted,
+/// single-line) as `str`.
 fn emit_kaiv(
     rows: &[(NodeId, Option<Value>)],
     source: &str,
@@ -3389,16 +3702,14 @@ fn emit_kaiv(
     prov_of: impl Fn(NodeId) -> quarb::Provenance,
 ) -> anyhow::Result<String> {
     use kaiv::{KaivBuilder, Provenance};
-    let err = |e: kaiv::PipelineError| anyhow::anyhow!("emitting kaiv: {e}");
     let mut b = KaivBuilder::new();
-    b.declare_source("q", source).map_err(err)?;
+    b.declare_source("q", source).map_err(kaiv_err)?;
     // Declare each distinct row source once, in first-appearance
-    // order, under a sanitized id (`q` is reserved; collisions
-    // suffix). A source the builder refuses maps to the fallback.
+    // order, under a short id — the point of the declaration is
+    // that the URI travels once, up top. A source the builder
+    // refuses maps to the fallback.
     let mut source_ids: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    let mut used_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::from(["q".to_string()]);
     for (node, _) in rows {
         let Some(src) = prov_of(*node).source else {
             continue;
@@ -3406,18 +3717,7 @@ fn emit_kaiv(
         if source_ids.contains_key(&src) {
             continue;
         }
-        let mut id = ident_of(&src);
-        if !used_ids.insert(id.clone()) {
-            let mut k = 2;
-            loop {
-                let candidate = format!("{id}-{k}");
-                if used_ids.insert(candidate.clone()) {
-                    id = candidate;
-                    break;
-                }
-                k += 1;
-            }
-        }
+        let id = format!("src{}", source_ids.len() + 1);
         let id = match b.declare_source(&id, &src) {
             Ok(()) => id,
             Err(_) => "q".to_string(),
@@ -3440,106 +3740,162 @@ fn emit_kaiv(
                 .instant
                 .map(|(secs, _, _)| quarb::temporal::format_instant_compact(secs))
                 .filter(|t| t.len() == 16),
-            dpid: Some(
-                rp.dpid
-                    .as_deref()
-                    .map(ident_of)
-                    .unwrap_or_else(|| ident_of(&render(*node))),
-            ),
+            dpid: rp.dpid.as_deref().map(ident_of).or_else(|| {
+                let loc = ident_of(&render(*node));
+                match &rp.source {
+                    Some(s) if ident_of(s) == loc => None,
+                    _ => Some(loc),
+                }
+            }),
         };
-        // Sanitization can collide distinct field names ("a b" and
-        // "a-b" both become "a-b"); suffix rather than abort.
+        let base = format!("/@results/{i}");
         let mut used = std::collections::HashSet::new();
-        let mut put = |field: &str, value: &Value| -> anyhow::Result<()> {
-            let mut id = ident_of(field);
-            if !used.insert(id.clone()) {
-                let mut k = 2;
-                loop {
-                    let candidate = format!("{id}-{k}");
-                    if used.insert(candidate.clone()) {
-                        id = candidate;
-                        break;
-                    }
-                    k += 1;
-                }
-            }
-            let namepath = format!("/@results/{i}::{id}");
-            // Quantities emit unit-annotated (`!float:km`), in
-            // their written unit so the authored form survives the
-            // loop; instants emit as their std/time type, so a
-            // re-mount re-mints them.
-            match value {
-                Value::Quantity {
-                    value: bv,
-                    base,
-                    written,
-                } => {
-                    let (v, u) = written.clone().unwrap_or((*bv, base.clone()));
-                    if b.leaf_with_unit(&namepath, "float", Some(&u), &v.to_string(), Some(&prov))
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                // Durations emit on the seconds unit: a time-unit
-                // annotation mints a duration at the re-mount (one
-                // ontology per dimension of time), so the loop is
-                // lossless.
-                Value::Duration { secs, nanos } => {
-                    let v = *secs as f64 + *nanos as f64 / 1e9;
-                    if b.leaf_with_unit(&namepath, "float", Some("s"), &v.to_string(), Some(&prov))
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                Value::Instant {
-                    secs,
-                    nanos,
-                    offset_min,
-                } => {
-                    let ty = if offset_min.is_some() {
-                        "std/time/datetime"
-                    } else if *nanos == 0 && secs.rem_euclid(86400) == 0 {
-                        "std/time/date"
-                    } else {
-                        "std/time/localdatetime"
-                    };
-                    b.declare_types("std/time").map_err(err)?;
-                    if b.leaf(&namepath, ty, &value.to_string(), Some(&prov))
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                _ => {}
-            }
-            let (t, payload) = kaiv_scalar(value);
-            if b.leaf(&namepath, t, &payload, Some(&prov)).is_err() {
-                // Not flat-line representable: carry the JSON text.
-                b.leaf(&namepath, "str", &value.to_json(), Some(&prov))
-                    .map_err(err)?;
-            }
-            Ok(())
-        };
         match topic {
             None => {
                 let loc = render(*node);
-                put("node", &Value::Str(loc))?;
+                kaiv_put(&mut b, &base, "node", &Value::Str(loc), &prov, &mut used)?;
             }
             Some(Value::Record(fields)) => {
                 for (k, v) in fields {
-                    put(k, v)?;
+                    kaiv_put(&mut b, &base, k, v, &prov, &mut used)?;
                 }
             }
-            Some(v) => put("value", v)?,
+            Some(v) => kaiv_put(&mut b, &base, "value", v, &prov, &mut used)?,
         }
     }
-    b.finish().map_err(err)
+    b.finish().map_err(kaiv_err)
 }
 
-/// The kaiv type annotation and payload for one value. Lists and
-/// records ride as JSON text.
+fn kaiv_err(e: kaiv::PipelineError) -> anyhow::Error {
+    anyhow::anyhow!("emitting kaiv: {e}")
+}
+
+/// A field id unique within its namespace: sanitization can collide
+/// distinct field names ("a b" and "a-b" both become "a-b"); suffix
+/// rather than abort.
+fn unique_ident(field: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let mut id = ident_of(field);
+    if !used.insert(id.clone()) {
+        let mut k = 2;
+        loop {
+            let candidate = format!("{id}-{k}");
+            if used.insert(candidate.clone()) {
+                id = candidate;
+                break;
+            }
+            k += 1;
+        }
+    }
+    id
+}
+
+/// Place one field under `base`: a record opens the namespace
+/// `base/id` and places its fields there; a list opens the array
+/// `base/@id`, its scalar elements as `::n` leaves and its record
+/// elements as `/n` namespaces; anything else is a leaf `base::id`.
+/// An empty record or list, and a list nested in a list, ride as
+/// JSON text — kaiv has no line for them.
+fn kaiv_put(
+    b: &mut kaiv::KaivBuilder,
+    base: &str,
+    field: &str,
+    value: &Value,
+    prov: &kaiv::Provenance,
+    used: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let id = unique_ident(field, used);
+    match value {
+        Value::Record(fields) if !fields.is_empty() => {
+            let sub = format!("{base}/{id}");
+            let mut used = std::collections::HashSet::new();
+            for (k, v) in fields {
+                kaiv_put(b, &sub, k, v, prov, &mut used)?;
+            }
+            Ok(())
+        }
+        Value::List(items) if !items.is_empty() => {
+            let sub = format!("{base}/@{id}");
+            for (n, item) in items.iter().enumerate() {
+                match item {
+                    Value::Record(fields) if !fields.is_empty() => {
+                        let elem = format!("{sub}/{n}");
+                        let mut used = std::collections::HashSet::new();
+                        for (k, v) in fields {
+                            kaiv_put(b, &elem, k, v, prov, &mut used)?;
+                        }
+                    }
+                    _ => kaiv_leaf(b, &format!("{sub}::{n}"), item, prov)?,
+                }
+            }
+            Ok(())
+        }
+        _ => kaiv_leaf(b, &format!("{base}::{id}"), value, prov),
+    }
+}
+
+/// One typed leaf. Quantities emit unit-annotated (`!float:km`), in
+/// their written unit so the authored form survives the loop;
+/// durations on the seconds unit (a time-unit annotation mints a
+/// duration at the re-mount, one ontology per dimension of time);
+/// instants as their std/time type, so a re-mount re-mints them.
+fn kaiv_leaf(
+    b: &mut kaiv::KaivBuilder,
+    namepath: &str,
+    value: &Value,
+    prov: &kaiv::Provenance,
+) -> anyhow::Result<()> {
+    match value {
+        Value::Quantity {
+            value: bv,
+            base,
+            written,
+        } => {
+            let (v, u) = written.clone().unwrap_or((*bv, base.clone()));
+            if b.leaf_with_unit(namepath, "float", Some(&u), &v.to_string(), Some(prov))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Value::Duration { secs, nanos } => {
+            let v = *secs as f64 + *nanos as f64 / 1e9;
+            if b.leaf_with_unit(namepath, "float", Some("s"), &v.to_string(), Some(prov))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+        } => {
+            let ty = if offset_min.is_some() {
+                "std/time/datetime"
+            } else if *nanos == 0 && secs.rem_euclid(86400) == 0 {
+                "std/time/date"
+            } else {
+                "std/time/localdatetime"
+            };
+            b.declare_types("std/time").map_err(kaiv_err)?;
+            if b.leaf(namepath, ty, &value.to_string(), Some(prov)).is_ok() {
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+    let (t, payload) = kaiv_scalar(value);
+    if b.leaf(namepath, t, &payload, Some(prov)).is_err() {
+        // Not flat-line representable: carry the JSON text.
+        b.leaf(namepath, "str", &value.to_json(), Some(prov))
+            .map_err(kaiv_err)?;
+    }
+    Ok(())
+}
+
+/// The kaiv type annotation and payload for one scalar. Lists and
+/// records reach here only when they could not open a namespace
+/// (empty, or nested in a list) and ride as JSON text.
 fn kaiv_scalar(v: &Value) -> (&'static str, String) {
     match v {
         Value::Null => ("null", String::new()),
@@ -3549,8 +3905,8 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         Value::Str(s) => ("str", s.clone()),
         Value::List(_) | Value::Record(_) => ("str", v.to_json()),
         // The fallback route: instants normally emit typed
-        // (std/time, in `put`); durations have no kaiv type yet
-        // and quantities normally emit unit-annotated. All ride
+        // (std/time, in `kaiv_leaf`); durations have no kaiv type
+        // yet and quantities normally emit unit-annotated. All ride
         // as text here.
         Value::Instant { .. } | Value::Duration { .. } | Value::Quantity { .. } => {
             ("str", v.to_string())
@@ -3655,14 +4011,66 @@ mod tests {
         // One declaration per distinct source, after the fallback.
         assert!(out.contains(".?q a.daiv, b.csv\n"));
         assert_eq!(out.matches("sensors.example.com").count(), 1);
-        // The declared id carries the compact instant and the
-        // pass-through dpid on row 0 (authored block form); row 1
-        // shares the source but falls back to its locator dpid; row
-        // 2 rides `q`.
-        let id = "https-sensors-example-com-1";
-        assert!(out.contains(&format!("!int?{id}@20260717T120000Z#req-42\nvalue=7")));
-        assert!(out.contains(&format!("!int?{id}#row-2\nvalue=9")));
+        // The declared id is short (`src1`, first appearance); it
+        // carries the compact instant and the pass-through dpid on
+        // row 0 (authored block form); row 1 shares the source but
+        // falls back to its locator dpid; row 2 rides `q`.
+        assert!(out.contains(".?src1 https://sensors.example.com/1\n"));
+        assert!(out.contains("!int?src1@20260717T120000Z#req-42\nvalue=7"));
+        assert!(out.contains("!int?src1#row-2\nvalue=9"));
         assert!(out.contains("!int?q#row-3\nvalue=11"));
+
+        // A locator that only repeats the source (a filesystem node's
+        // source is its own path) adds no dpid.
+        let fs = super::emit_kaiv(
+            &[(NodeId(1), Some(Value::Int(1)))],
+            ".",
+            |_| "/a/b.txt".to_string(),
+            |_| Provenance {
+                source: Some("/a/b.txt".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(fs.contains("!int?src1\nvalue=1"), "{fs}");
+        assert!(!fs.contains('#'), "{fs}");
+
+        // A record field opens a namespace; a list an array; a
+        // quantity keeps its unit.
+        let nested = super::emit_kaiv(
+            &[(
+                NodeId(1),
+                Some(Value::Record(vec![
+                    (
+                        "r".to_string(),
+                        Value::Record(vec![
+                            ("n".to_string(), Value::Str("grc.atd".into())),
+                            (
+                                "size".to_string(),
+                                Value::Quantity {
+                                    value: 4025440.0,
+                                    base: "B".into(),
+                                    written: None,
+                                },
+                            ),
+                        ]),
+                    ),
+                    (
+                        "tags".to_string(),
+                        Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]),
+                    ),
+                ])),
+            )],
+            "u.json",
+            |_| "/0".to_string(),
+            |_| Provenance::default(),
+        )
+        .unwrap();
+        assert!(nested.contains("(/r)"), "{nested}");
+        assert!(nested.contains("\nn=grc.atd\n"), "{nested}");
+        assert!(nested.contains("!float:B?q#0\nsize=4025440\n"), "{nested}");
+        assert!(nested.contains("@tags"), "{nested}");
+        assert!(!nested.contains("{\"n\""), "{nested}");
 
         // Provenance-less rows emit exactly the pre-upgrade shape.
         let plain = super::emit_kaiv(&rows, "data.json", |n: NodeId| format!("/r/{}", n.0), |_| {

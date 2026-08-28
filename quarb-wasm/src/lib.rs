@@ -98,7 +98,7 @@ fn go<A: AstAdapter>(
     match quarb::run(query, &nowed) {
         Ok(QueryResult::Nodes(nodes)) => Ok(nodes.into_iter().map(render).collect()),
         Ok(QueryResult::Values(values)) => {
-            Ok(values.into_iter().map(|v| v.to_string()).collect())
+            Ok(values.into_iter().map(|v| v.display_form()).collect())
         }
         Err(e) => Err(e.to_string()),
     }

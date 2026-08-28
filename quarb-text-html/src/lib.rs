@@ -1,4 +1,4 @@
-//! HTML producer for the Quarb text level: reduces a page to what
+//! HTML adapter for the Quarb text level: reduces a page to what
 //! it *says* — headings, paragraphs, quotes, lists, verbatim
 //! blocks, tables — and drops the markup soup. The DOM-faithful
 //! view is `quarb-html`; this crate lowers the same substrate into
@@ -6,7 +6,7 @@
 //! and `//paragraph` read the same over a page as over any other
 //! text substrate.
 //!
-//! Producer rules (the HTML-specific knowledge lives here):
+//! Adapter rules (the HTML-specific knowledge lives here):
 //!
 //! - `h1`–`h6` become flat [`Block::Heading`]s; `quarb-text`
 //!   derives the enclosing section tree.
@@ -27,7 +27,7 @@
 //! - Inline markup flattens to its text.
 
 use ego_tree::NodeRef;
-use quarb_text::{Block, Cell, Container, TextModel};
+use quarb_text::{Block, Cell, Container, NoteFamily, TextModel};
 use scraper::{ElementRef, Html, Node as DomNode};
 
 /// Parse `html` and lower it to a text-level document.
@@ -41,6 +41,8 @@ pub fn blocks(html: &str) -> Vec<Block> {
     let document = Html::parse_document(html);
     let mut out = Vec::new();
     let mut run = String::new();
+    // Synthetic pairing onyms for id-less marginalia asides.
+    let mut aside_seq = 0usize;
 
     // Explicit work stack (children pushed reversed, popped in
     // document order) so pathologically deep markup cannot
@@ -58,7 +60,7 @@ pub fn blocks(html: &str) -> Vec<Block> {
                 flush(&mut run, &mut out);
                 out.push(Block::Close { hypograph });
             }
-            Work::El(el) => element(el, &mut run, &mut out, &mut stack),
+            Work::El(el) => element(el, &mut run, &mut out, &mut stack, &mut aside_seq),
         }
     }
     flush(&mut run, &mut out);
@@ -95,6 +97,60 @@ const CHROME_ROLES: &[&str] = &[
     "none",
 ];
 
+/// Ruling #35 — the declared note vocabularies: EPUB's
+/// `epub:type` (noteref / footnote / endnote / rearnote, plus
+/// marginalia for the aside family) and W3C DPUB-ARIA's `role`
+/// (doc-noteref / doc-footnote / doc-endnote). All are cited,
+/// standards-declared vocabularies — never a guess from markup
+/// shape (Tufte-style sidenote CLASSES are exactly the
+/// guessing this rules out).
+enum NoteKind {
+    /// An in-text callout; the onym is the target fragment. The
+    /// vocabulary declares no family on the callout — the model
+    /// settles it from the body the reference reaches.
+    Ref(String),
+    /// A note body; the onym is the element's own id, the family
+    /// the one its vocabulary word names.
+    Body(String, NoteFamily),
+}
+
+fn note_kind(el: ElementRef) -> Option<NoteKind> {
+    let has = |attr: &str, words: &[&str]| {
+        el.value()
+            .attr(attr)
+            .is_some_and(|v| v.split_whitespace().any(|w| words.contains(&w)))
+    };
+    if has("epub:type", &["noteref"]) || has("role", &["doc-noteref"]) {
+        let onym = el
+            .value()
+            .attr("href")
+            .and_then(|h| h.split('#').nth(1))
+            .map(str::to_string)
+            .unwrap_or_default();
+        return Some(NoteKind::Ref(onym));
+    }
+    if has("epub:type", &["footnote", "endnote", "rearnote", "marginalia"])
+        || has("role", &["doc-footnote", "doc-endnote"])
+    {
+        let onym = el.value().attr("id").unwrap_or_default().to_string();
+        // endnote and rearnote (EPUB) / doc-endnote (DPUB-ARIA)
+        // name the endnote family; marginalia the aside family
+        // (anchored content, not apparatus); footnote words the
+        // rest.
+        let family = if has("epub:type", &["marginalia"]) {
+            NoteFamily::Aside
+        } else if has("epub:type", &["endnote", "rearnote"])
+            || has("role", &["doc-endnote"])
+        {
+            NoteFamily::Endnote
+        } else {
+            NoteFamily::Footnote
+        };
+        return Some(NoteKind::Body(onym, family));
+    }
+    None
+}
+
 /// Whether an element is chrome by its ARIA surface: a chrome
 /// landmark role, or hidden from assistive readers outright.
 fn aria_chrome(el: ElementRef) -> bool {
@@ -122,20 +178,68 @@ fn element<'a>(
     run: &mut String,
     out: &mut Vec<Block>,
     stack: &mut Vec<Work<'a>>,
+    aside_seq: &mut usize,
 ) {
     let tag = el.value().name();
+    if let Some(kind) = note_kind(el) {
+        flush(run, out);
+        match kind {
+            NoteKind::Ref(onym) => out.push(Block::NoteRef {
+                onym,
+                family: None,
+                margin: false,
+            }),
+            NoteKind::Body(mut onym, family) => {
+                // An aside's flow position IS its anchor: emit
+                // the insertion-point deixis here, the body goes
+                // to the document end like every family's
+                // (litogramma's construction). An id-less body
+                // gets a synthetic pairing onym.
+                if family == NoteFamily::Aside {
+                    if onym.is_empty() {
+                        *aside_seq += 1;
+                        onym = format!("m{aside_seq}");
+                    }
+                    out.push(Block::NoteRef {
+                        onym: onym.clone(),
+                        family: Some(NoteFamily::Aside),
+                        margin: false,
+                    });
+                }
+                out.push(Block::Open {
+                    kind: Container::Note {
+                        onym,
+                        family,
+                        margin: false,
+                    },
+                    lemma: None,
+                });
+                stack.push(Work::Close { hypograph: None });
+                push_children(el.children().rev().collect(), stack);
+            }
+        }
+        return;
+    }
     match tag {
         _ if SKIP.contains(&tag) || aria_chrome(el) => {}
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             flush(run, out);
+            let mut notes = Vec::new();
+            let lemma =
+                quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
             out.push(Block::Heading {
                 level: tag[1..].parse().unwrap(),
-                lemma: text_of(el),
+                lemma,
             });
+            emit_notes(notes, out, aside_seq);
         }
         _ if P_LIKE.contains(&tag) => {
             flush(run, out);
-            out.push(Block::Paragraph { text: text_of(el) });
+            let mut notes = Vec::new();
+            let text =
+                quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
+            out.push(Block::Paragraph { text });
+            emit_notes(notes, out, aside_seq);
         }
         "blockquote" => {
             flush(run, out);
@@ -491,10 +595,30 @@ fn text_of(el: ElementRef) -> String {
 /// wrapper, an `aria-hidden` tooltip — so flattened prose carries
 /// only what the reader sees.
 fn text_of_raw(el: ElementRef) -> String {
+    text_and_notes_raw(el, &mut Vec::new())
+}
+
+/// Like [`text_of_raw`], collecting the declared notes met in the
+/// flow (ruling #35): a noteref contributes its onym and NO marker
+/// text; an inline note body contributes (onym, its text) and is
+/// excluded from the flow it interrupts.
+fn text_and_notes_raw(el: ElementRef, notes: &mut Vec<Note>) -> String {
     let mut out = String::new();
     let mut stack: Vec<NodeRef<DomNode>> = el.children().rev().collect();
     while let Some(node) = stack.pop() {
         if let Some(child) = ElementRef::wrap(node) {
+            match note_kind(child) {
+                Some(NoteKind::Ref(onym)) => {
+                    notes.push(Note::Ref(onym));
+                    continue;
+                }
+                Some(NoteKind::Body(onym, family)) => {
+                    let text = text_of_raw(child);
+                    notes.push(Note::Body(onym, family, text));
+                    continue;
+                }
+                None => {}
+            }
             if SKIP.contains(&child.value().name()) || aria_chrome(child) {
                 continue;
             }
@@ -506,6 +630,53 @@ fn text_of_raw(el: ElementRef) -> String {
         }
     }
     out
+}
+
+/// A note met inside flow text, for the caller to emit after its
+/// block: a callout's onym, or an inline body's (onym, text).
+enum Note {
+    Ref(String),
+    Body(String, NoteFamily, String),
+}
+
+fn emit_notes(notes: Vec<Note>, out: &mut Vec<Block>, aside_seq: &mut usize) {
+    for note in notes {
+        match note {
+            Note::Ref(onym) => out.push(Block::NoteRef {
+                onym,
+                family: None,
+                margin: false,
+            }),
+            Note::Body(mut onym, family, text) => {
+                // Inline aside bodies anchor where they stood —
+                // same synthesis as the element path.
+                if family == NoteFamily::Aside {
+                    if onym.is_empty() {
+                        *aside_seq += 1;
+                        onym = format!("m{aside_seq}");
+                    }
+                    out.push(Block::NoteRef {
+                        onym: onym.clone(),
+                        family: Some(NoteFamily::Aside),
+                        margin: false,
+                    });
+                }
+                out.push(Block::Open {
+                    kind: Container::Note {
+                        onym,
+                        family,
+                        margin: false,
+                    },
+                    lemma: None,
+                });
+                let text = quarb_text::normalize_ws(&text);
+                if !text.is_empty() {
+                    out.push(Block::Text { text });
+                }
+                out.push(Block::Close { hypograph: None });
+            }
+        }
+    }
 }
 
 fn flush(run: &mut String, out: &mut Vec<Block>) {

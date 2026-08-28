@@ -18,12 +18,12 @@ name = "quai"
 path = "src/main.rs"
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.25.0" }
-quarb-session = { path = "../quarb-session", version = "0.25.0" }
-quarb-model = { path = "../quarb-model", version = "0.25.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.25.0" }
+quarb = { path = "../quarb", version = "0.26.0" }
+quarb-session = { path = "../quarb-session", version = "0.26.0" }
+quarb-model = { path = "../quarb-model", version = "0.26.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.26.0" }
 # The full mounting dispatch — quai opens every target qua opens.
-qua = { path = "../qua", version = "0.25.0" }
+qua = { path = "../qua", version = "0.26.0" }
 clap.workspace = true
 anyhow.workspace = true
 rustyline = "14"

@@ -1,0 +1,20 @@
+[package]
+name = "quarb-text-pdf"
+description = "PDF reader's-model adapter for Quarb: declared outline sections over lines with geometry — no heuristics, no minted paragraphs"
+keywords = ["quarb", "pdf", "text", "outline"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.26.0" }
+lopdf = "0.38"
+thiserror.workspace = true
+
+[dev-dependencies]
+lopdf = "0.38"
+quarb = { path = "../quarb", version = "0.26.0" }

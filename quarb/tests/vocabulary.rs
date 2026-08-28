@@ -73,7 +73,7 @@ const CORPUS: &[&str] = &[
     "/a->e[$-::qty > 1][$- = e]",
     // pattern pushes (breadcrumbs): expression and sub-query bodies,
     // bare and named — reflecting with the pipeline push kinds
-    "/a(->e.($-::qty) .w(//x @| count))+ | @. | product",
+    "/a(->e .($-::qty) .w(//x @| count))+ | @. | product",
     // group predicates: filtered before reach (targeted proximal)
     "/a(->e)+[::q > 1][$- = e]?",
     // the arrived-edges plural: bare and projected
@@ -107,12 +107,19 @@ const CORPUS: &[&str] = &[
     // projected, root- and mark-anchored, quantified — a branch in
     // stage position, wrapped in the nav kind
     "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
-    "/a .m | /b | ^/c:::name | . | (m)/d(->e)+::x",
+    "/a .m | /b | ^/c:::name | . | ((m))/d(->e)+::x",
     // the mark array (2026-07-24, marks symmetry): anonymous
     // marks, positional/recency/plural anchors — in branch and
     // in operand position
-    "/a . /b .m | (1)/c | (.)/d | (@)/e | (@m)/f",
-    "/a . /*[(2)::x > 1][(.)::y = (@)::z][(@m)::w]",
+    "/a . /b .m | ((1))/c | ((.))/d | ((@))/e | ((@m))/f",
+    "/a . /*[((2))::x > 1][((.))::y = ((@))::z][((@m))::w]",
+    // the record-field colon and the named-captures record
+    // (rulings #47/#48): a field of the topic, of a register, of %+
+    "/row | [::name =~ (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",
+    // the record push, plain and enriched (ruling #49)
+    "/row | .r%(::x, 'n', 1) | .%%('k', 2) | $.r:n",
+    // the list literal (ruling #52)
+    "/row | %(tags = @(::a; ::b); n = 1) | @(1; 2)",
 ];
 
 /// kind → sorted property keys, as locked. `param` is reserved
@@ -134,6 +141,8 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // pipes).
     ("capsae", &[]),
     ("capture", &["group"]),
+    // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
+    ("captures", &[]),
     ("compare", &["op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     ("cond", &[]),
@@ -144,12 +153,14 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("edges", &[]),
     ("expr", &[]),
     ("expr-push", &["name"]),
+    ("field", &["name"]),
     ("filter", &[]),
     ("func", &["name"]),
     // v1 additive growth: group (2026-07-08, path patterns).
     ("group", &["max", "min", "reach"]),
     // v1 additive growth: interp (2026-07-07, interpolation).
     ("interp", &[]),
+    ("list", &[]),
     ("literal", &["type", "value"]),
     // v1 additive growth: map (2026-07-11, the $| pipe).
     ("map", &[]),
@@ -186,6 +197,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("push", &["name"]),
     ("query", &["outer", "role"]),
     ("recall", &["ref"]),
+    ("record-push", &["enriched", "name"]),
     ("select", &[]),
     ("span", &["from", "kind", "to"]),
     // v1 additive growth: spread (2026-07-11, | ... core syntax);

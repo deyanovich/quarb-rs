@@ -151,3 +151,29 @@ fn markdown_round_trips() {
         assert_eq!(show(a), show(b), "round trip diverged on {q}");
     }
 }
+
+/// The markdown footnote extension ([^name] callouts, [^name]:
+/// bodies) lands in the shared apparatus: footnote-family nodes
+/// both ends, clean prose, ->footnote edges (ruling #35's
+/// recorded markdown amendment).
+#[test]
+fn footnotes_join_the_apparatus() {
+    let m = quarb_text_markdown::parse(
+        "# The war\n\nThe emus advanced.[^count] They kept coming.\n\n\
+         [^count]: Twenty thousand of them.\n",
+    );
+    let q = |q: &str| -> Vec<String> {
+        match quarb::run(q, &m).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            quarb::QueryResult::Nodes(ns) => ns.iter().map(|n| m.locator(*n)).collect(),
+        }
+    };
+    assert_eq!(q("//footnote @| count"), ["2"]);
+    assert_eq!(q("//*<deixis>->footnote::"), ["Twenty thousand of them."]);
+    assert_eq!(
+        q("//section/paragraph::"),
+        ["The emus advanced. They kept coming."]
+    );
+    assert_eq!(q(r"//*<note><-footnote\*::"), ["The emus advanced. They kept coming."]);
+    assert_eq!(q("//*<dangling> @| count"), ["0"]);
+}

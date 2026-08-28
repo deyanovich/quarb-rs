@@ -886,7 +886,7 @@ mod tests {
         };
         assert_eq!(
             got,
-            vec![r#"{"failed": "payment failed", "upstream": "handling /pay for o-77"}"#]
+            vec!["%(failed = 'payment failed'; upstream = 'handling /pay for o-77')"]
         );
     }
 }

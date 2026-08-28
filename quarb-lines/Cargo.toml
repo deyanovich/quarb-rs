@@ -1,10 +1,10 @@
 [package]
 name = "quarb-lines"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 description = "Line-atom adapter for the Quarb query engine — every line of a file as a node"
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/quarb/engine"
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.25.0" }
+quarb = { path = "../quarb", version = "0.26.0" }

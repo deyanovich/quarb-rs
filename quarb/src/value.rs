@@ -141,11 +141,45 @@ impl Value {
         }
     }
 
+    /// The Quarb form (ruling #51): the value spelled as Quarb
+    /// query text, so a printed result reads back as an expression.
+    /// Strings quoted as literals, numbers and booleans bare,
+    /// `null`, lists as `@(a; b)`, records as `%(k = v; k2 = v2)`
+    /// with bare identifier keys; instants, durations, and
+    /// quantities in their written form. This is what `qua` prints
+    /// for a record or list result — JSON is `| json` / `--json`.
+    pub fn to_quarb(&self) -> String {
+        match self {
+            Value::Null => "null".to_string(),
+            Value::Str(s) => quarb_string(s),
+            Value::List(l) => {
+                let inner: Vec<String> = l.iter().map(Value::to_quarb).collect();
+                format!("@({})", inner.join("; "))
+            }
+            Value::Record(o) => {
+                let inner: Vec<String> = o
+                    .iter()
+                    .map(|(k, v)| format!("{} = {}", quarb_key(k), v.to_quarb()))
+                    .collect();
+                format!("%({})", inner.join("; "))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    /// What a result line shows: a scalar bare (text unquoted), a
+    /// record or list in its Quarb form.
+    pub fn display_form(&self) -> String {
+        match self {
+            Value::List(_) | Value::Record(_) => self.to_quarb(),
+            other => other.to_string(),
+        }
+    }
+
     /// Strict-JSON rendering: strings quoted and escaped, numbers and
     /// booleans bare, null literal, lists as arrays, records as
-    /// key-ordered JSON objects. This is the `| json` serialization
-    /// and the display form of records, making a record stream
-    /// JSONL.
+    /// key-ordered JSON objects. This is the `| json` / `| jsonl`
+    /// serialization and the `--json` / `--jsonl` output.
     pub fn to_json(&self) -> String {
         match self {
             Value::Null => "null".to_string(),
@@ -333,9 +367,8 @@ impl fmt::Display for Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "{}", parts.join(", "))
             }
-            // Records display as strict JSON, so a stream of record
-            // topics prints as JSONL.
-            Value::Record(_) => write!(f, "{}", self.to_json()),
+            // A record's text is its Quarb form (ruling #51).
+            Value::Record(_) => write!(f, "{}", self.to_quarb()),
             Value::Instant {
                 secs,
                 nanos,
@@ -463,13 +496,57 @@ mod tests {
             obj.to_json(),
             r#"{"name": "A\"da\n", "age": 36, "score": 2.5, "ok": true, "gone": null, "tags": ["x", 1]}"#
         );
-        // Display of a record is its JSON; an empty record is falsy
-        assert_eq!(obj.to_string(), obj.to_json());
+        // Display of a record is its Quarb form (ruling #51); an
+        // empty record is falsy
+        assert_eq!(
+            obj.to_quarb(),
+            "%(name = 'A\"da\n'; age = 36; score = 2.5; ok = true; gone = null; tags = @('x'; 1))"
+        );
+        assert_eq!(obj.to_string(), obj.to_quarb());
         assert!(!Value::Record(Vec::new()).is_truthy());
-        // top-level list display is unchanged (join, not JSON)
+        assert_eq!(Value::List(Vec::new()).to_quarb(), "@()");
+        assert_eq!(Value::Record(Vec::new()).to_quarb(), "%()");
+        // a key that is not an identifier quotes
+        assert_eq!(
+            Value::Record(vec![("my-key".into(), Value::Int(1))]).to_quarb(),
+            "%('my-key' = 1)"
+        );
+        // top-level list display (string coercion) is unchanged
+        // (join, not the Quarb form — that is display_form's job)
         assert_eq!(
             Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]).to_string(),
             "a, b"
         );
     }
 }
+
+/// A string as a Quarb literal: single quotes are verbatim; when
+/// the text itself holds one, double quotes with `"`, `\`, and `$`
+/// escaped (a double-quoted string interpolates), so the result
+/// reparses exactly.
+pub fn quarb_string(s: &str) -> String {
+    if s.contains('\'') {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            if matches!(c, '"' | '\\' | '$') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+        out
+    } else {
+        format!("'{s}'")
+    }
+}
+
+/// A record key as written in `%(k = v)`: bare when it is an
+/// identifier that is not a reserved word, quoted otherwise.
+pub fn quarb_key(k: &str) -> String {
+    let bare = !k.is_empty()
+        && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !crate::parser::is_bool_word(k);
+    if bare { k.to_string() } else { quarb_string(k) }
+}
+

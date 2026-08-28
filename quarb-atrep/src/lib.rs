@@ -19,7 +19,7 @@
 //!   to — callout and body share the name by construction (the
 //!   litogramma F5 ruling), so `//footnote` gathers the whole
 //!   apparatus; the `<deixis>` trait isolates the callouts and
-//!   `<noted>` the bodies.
+//!   `<note>` the bodies (`<noted>` is the deprecated alias).
 //! - A `lemma` (and `hypograph`) is both a flattened property and
 //!   a child node exposing its inline structure, in document
 //!   order: lemma, content, hypograph.
@@ -31,7 +31,7 @@
 //!   embedded bibliogramma englossis when one is present;
 //!   otherwise its `::param` stays available for cross-mount
 //!   joins. A reference whose target is missing keeps its node,
-//!   carries `<dangling>` and `;;;resolved = false`, and emits no
+//!   carries `<dangling>` and `::::resolved = false`, and emits no
 //!   edge — `//*<dangling>` is a broken-cross-reference linter.
 //! - The default projection of a resolved reference is its
 //!   rendered form — the target's lemma (falling back to the
@@ -40,7 +40,7 @@
 //!   mount pass) and as `::genoses`; structural traits (`<block>`,
 //!   `<inline>`, `<mono>`, plus the per-kind trait) and semantic
 //!   traits (`<ref>`, `<target>`, `<autonym>`, `<deixis>`,
-//!   `<noted>`, `<dangling>`) come from the model.
+//!   `<note>`, `<dangling>`) come from the model.
 //! - Mounting parses as authored and runs `kanonizo::tasso` — the
 //!   ordering subset of kanonizo — so `::taxis` is always settled
 //!   and autonyms are pinned, while onyms stay as written and
@@ -1023,6 +1023,9 @@ impl AstAdapter for AtrepAdapter {
             out.push("target".to_string());
         }
         if self.noted.contains(&node) {
+            // The canonical body trait is `note`; `noted` is the
+            // 0.25-shipped spelling, kept as an alias until 1.0.
+            out.push("note".to_string());
             out.push("noted".to_string());
         }
         if n.sim.as_ref().is_some_and(|s| s.autonym) {
@@ -1108,11 +1111,11 @@ impl AstAdapter for AtrepAdapter {
         Some(Value::Str(n.text.clone()))
     }
 
-    /// Root: `;;;dialect`, `;;;dialect-version`. Sim nodes:
-    /// `;;;short-desc`, `;;;long-desc`, `;;;form`, `;;;keyword`,
-    /// `;;;bracket-matching`. References: `;;;resolved`. Verbatim:
-    /// `;;;lang`. Enmedia: `;;;media`, `;;;sha256`. Englossis:
-    /// `;;;dialect`.
+    /// Root: `::::dialect`, `::::dialect-version`. Sim nodes:
+    /// `::::short-desc`, `::::long-desc`, `::::form`, `::::keyword`,
+    /// `::::bracket-matching`. References: `::::resolved`. Verbatim:
+    /// `::::lang`. Enmedia: `::::media`, `::::sha256`. Englossis:
+    /// `::::dialect`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = self.node(node);
         match key {
@@ -1236,7 +1239,7 @@ The onym query language.
         assert_eq!(values(&a, "//emphasis::text"), ["OQL"]);
         assert_eq!(values(&a, "//strong::text"), ["text"]);
         // Root metadata carries the declaration.
-        assert_eq!(values(&a, ";;;dialect"), ["koine"]);
+        assert_eq!(values(&a, "::::dialect"), ["koine"]);
     }
 
     #[test]
@@ -1297,8 +1300,8 @@ The onym query language.
         let a = mount();
         assert_eq!(values(&a, "//*<dangling>::target"), ["ghost"]);
         assert_eq!(values(&a, "//*<dangling>->* @| count"), ["0"]);
-        assert_eq!(values(&a, "//*<dangling>;;;resolved"), ["false"]);
-        assert_eq!(values(&a, "//ref[1];;;resolved"), ["true"]);
+        assert_eq!(values(&a, "//*<dangling>::::resolved"), ["false"]);
+        assert_eq!(values(&a, "//ref[1]::::resolved"), ["true"]);
     }
 
     #[test]

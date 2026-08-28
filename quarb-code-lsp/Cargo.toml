@@ -11,12 +11,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.25.0" }
-quarb-code = { path = "../quarb-code", version = "0.25.0" }
-quarb-tree-sitter = { path = "../quarb-tree-sitter", version = "0.25.0" }
-quarb-compose = { path = "../quarb-compose", version = "0.25.0" }
-quarb-fs = { path = "../quarb-fs", version = "0.25.0" }
-quarb-lsp = { path = "../quarb-lsp", version = "0.25.0" }
+quarb = { path = "../quarb", version = "0.26.0" }
+quarb-code = { path = "../quarb-code", version = "0.26.0" }
+quarb-tree-sitter = { path = "../quarb-tree-sitter", version = "0.26.0" }
+quarb-compose = { path = "../quarb-compose", version = "0.26.0" }
+quarb-fs = { path = "../quarb-fs", version = "0.26.0" }
+quarb-lsp = { path = "../quarb-lsp", version = "0.26.0" }
 kaivrpc = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

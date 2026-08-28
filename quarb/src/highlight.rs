@@ -25,7 +25,11 @@ const REGISTER: &str = "\x1b[36m"; // cyan — $. $* @. %. register refs
 /// never wins over the sigil it opens (`:::` before `::`, `<=>?`
 /// before `<=>`).
 const OPERATORS: &[&str] = &[
-    "::::", ";;;", ":::", "::;", "::", ":--", ":-", "<=>?", "<=>", "-->", "<--", "~>", "<~", "->", "<-", "--", "@|", "&&", "||", "=~", "?=",
+    ".τουλάχιστον.", ".τουλαχιστον.", ".μεγαλύτερο.", ".μεγαλυτερο.", ".μικρότερο.", ".μικροτερο.", ".τοπολύ.", ".τοπολυ.",
+    ".неболее.", ".неменее.", ".менее.", ".более.", ".nonmaior.", ".nonminor.", ".minor.", ".maior.",
+    ".nonsup.", ".noninf.", ".inf.", ".sup.", "(())", "((_))", "(_)", "(.)", "(*.)", "(*-)", "(*)", "(-)",
+    ",__", "*__", "__", ":=:?", ":=:", "%+", ":",
+    "::::", ";;;", ";;-", ":::", "::;", "::", ":--", ":-", "--:", "-:", "-;;", "-;", ";-", "(?", "(:", "(;", "<=>?", "<=>", "-->", "<--", "~>", "<~", "->", "<-", "--", "@|", "&&", "||", "=~", "?=",
     ">=", "<=", "!=", "*=", "|", "!", "=", "<", ">", "+", "{", "}", "?", "(", ")", "[", "]", ",",
 ];
 
@@ -174,16 +178,29 @@ fn scan(src: &str) -> Vec<(Option<Class>, &str)> {
             // a glued `x-->y` colors the arrow, not `x--` as a name.
             while i < b.len()
                 && is_name_char(b[i] as char)
-                && !(b[i] == b'-' && matches!(b.get(i + 1), Some(b'>') | Some(b'-')))
+                && !(b[i] == b'-'
+                    && (matches!(b.get(i + 1), Some(b'>') | Some(b'-') | Some(b';'))
+                        || (b.get(i + 1) == Some(&b':') && b.get(i + 2) != Some(&b':'))))
             {
                 i += 1;
             }
             let word = &src[start..i];
-            spans.push((is_keyword(word).then_some(Class::Keyword), word));
+            let class = if word == "__" {
+                Some(Class::Operator)
+            } else {
+                is_keyword(word).then_some(Class::Keyword)
+            };
+            spans.push((class, word));
             continue;
         }
 
-        // Path axes: // then /.
+        // Path axes: the rounded ascent ..// and ../, then // and /.
+        if src[i..].starts_with("../") {
+            let n = if src[i..].starts_with("..//") { 4 } else { 3 };
+            spans.push((Some(Class::Path), &src[i..i + n]));
+            i += n;
+            continue;
+        }
         if c == '/' {
             if i + 1 < b.len() && b[i + 1] as char == '/' {
                 spans.push((Some(Class::Path), &src[i..i + 2]));
@@ -271,7 +288,10 @@ fn is_keyword(word: &str) -> bool {
     crate::stdlib::known_scalar(word)
         || crate::stdlib::known_agg(word)
         || crate::stdlib::known_keyed(word)
-        || matches!(word, "def" | "macro" | "not" | "and" | "or")
+        || matches!(
+            word,
+            "def" | "macro" | "not" | "and" | "or" | "et" | "vel" | "ou" | "non"
+        )
 }
 
 #[cfg(test)]

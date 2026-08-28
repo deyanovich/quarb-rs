@@ -362,12 +362,16 @@ fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
                 PipeMode::Nav
             }
         }
-        Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } => PipeMode::Nav,
+        Stage::Push(_)
+        | Stage::ExprPush { .. }
+        | Stage::RecordPush { .. }
+        | Stage::Subcontext { .. } => PipeMode::Nav,
         Stage::Filter(_) | Stage::Select(_) => cur,
         Stage::Func(_)
         | Stage::Expr(_)
         | Stage::Agg(_)
         | Stage::Recall(_)
+        | Stage::RecordWith(_)
         | Stage::Spread { .. }
         | Stage::Map(_) => PipeMode::Scalar,
     }
@@ -413,11 +417,21 @@ impl Parser<'_> {
         }
         let query = self.parse_chain()?;
         if let Some(tok) = self.peek() {
+            // `:name` after a path: a node has properties, not
+            // fields (ruling #48).
+            if matches!(tok, Token::Field)
+                && let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 1)
+            {
+                return Err(QuarbError::Parse(format!(
+                    "':{text}' reads a record's field; a node's property is '::{text}'"
+                )));
+            }
             return Err(QuarbError::Parse(format!(
                 "unexpected trailing input at token {tok:?}"
             )));
         }
         validate_correlation_refs(&query)?;
+        validate_keyed_stages(&query)?;
         self.sweep_captures(&query)?;
         Ok(query)
     }
@@ -659,7 +673,9 @@ impl Parser<'_> {
                 | Token::ColonColonColon
                 | Token::SemiSemiSemi
                 | Token::Lt
-                | Token::Gt,
+                | Token::Gt
+                | Token::NextSibling
+                | Token::PrevSibling,
             ) => true,
             Some(Token::Name {
                 text,
@@ -821,6 +837,13 @@ impl Parser<'_> {
             // them are value expressions; a plain recall is just the
             // single-operand case.
             Some(Token::Dollar) => Ok(Stage::Expr(self.additive()?)),
+            // `| :name` — the topic record's field; `| %+` — the
+            // named-captures record (ruling #48).
+            Some(Token::Field | Token::PercentPlus) => Ok(Stage::Expr(self.additive()?)),
+            // `| @(a; b)` — a list literal as the stage's expression.
+            Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
+                Ok(Stage::Expr(self.additive()?))
+            }
             Some(Token::At) => {
                 // `| @-::prop` (and arithmetic over it) is a value
                 // expression; `| @.` stays the whole-register recall.
@@ -831,7 +854,7 @@ impl Parser<'_> {
                     return Ok(Stage::Expr(self.additive()?));
                 }
                 self.pos += 1;
-                self.expect_dot()?;
+                self.expect_dot("@")?;
                 Ok(Stage::Recall(RegRef::Whole))
             }
             // A backtick literal is the sh(...) stage, sugared
@@ -859,17 +882,36 @@ impl Parser<'_> {
                     args: vec![arg],
                 }))
             }
+            // The record sigil. `| %(...)` — the record
+            // constructor, canonical spelling of `rec(...)`;
             // `| %.` — the named register view, as a record;
-            // `| %%.` — the full view, anonymous regulae included
-            // under their positions.
+            // `| %%(...)` — the named view enriched with the given
+            // fields (args after registers, args win on a shared
+            // name); `| %%.` — the full view, anonymous regulae
+            // included under their positions.
             Some(Token::Percent) => {
                 self.pos += 1;
                 if matches!(self.peek(), Some(Token::Percent)) {
                     self.pos += 1;
-                    self.expect_dot()?;
+                    if matches!(self.peek(), Some(Token::LParen)) {
+                        let call = self.record_args()?;
+                        if call.args.is_empty() {
+                            return Err(QuarbError::Parse(
+                                "an empty %%() adds nothing — the register view is %.".into(),
+                            ));
+                        }
+                        validate_record(&call)?;
+                        return Ok(Stage::RecordWith(call));
+                    }
+                    self.expect_dot("%%")?;
                     return Ok(Stage::Recall(RegRef::FullRecord));
                 }
-                self.expect_dot()?;
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    let call = self.record_args()?;
+                    validate_record(&call)?;
+                    return Ok(Stage::Func(call));
+                }
+                self.expect_dot("%")?;
                 Ok(Stage::Recall(RegRef::Record))
             }
             // `| ...` — the spread. Dots are name characters, so
@@ -904,6 +946,30 @@ impl Parser<'_> {
                 } else {
                     Some(text[1..].to_string())
                 };
+                // `.%(...)` / `.name%(...)` — the record push
+                // (ruling #49): the constructor's fields, built and
+                // filed in one step; `.%%(...)` the enriched view.
+                if matches!(self.peek(), Some(Token::Percent)) {
+                    self.pos += 1;
+                    let enriched = if matches!(self.peek(), Some(Token::Percent)) {
+                        self.pos += 1;
+                        true
+                    } else {
+                        false
+                    };
+                    if !matches!(self.peek(), Some(Token::LParen)) {
+                        return Err(QuarbError::Parse(
+                            "a record push takes its fields: `.%(…)` or `.name%(…)`".into(),
+                        ));
+                    }
+                    let call = self.record_args()?;
+                    validate_record(&call)?;
+                    return Ok(Stage::RecordPush {
+                        name,
+                        call,
+                        enriched,
+                    });
+                }
                 if matches!(self.peek(), Some(Token::LParen)) {
                     self.pos += 1;
                     // A subcontext body is a navigating sub-query; a
@@ -1048,6 +1114,8 @@ impl Parser<'_> {
                     | Token::BackslashBackslash
                     | Token::Gt
                     | Token::Lt
+                    | Token::NextSibling
+                    | Token::PrevSibling
                     | Token::FollowingSiblings(_)
                     | Token::PrecedingSiblings(_)
                     | Token::ArrowOut
@@ -1080,13 +1148,15 @@ impl Parser<'_> {
     }
 
     /// Consume a `Name` that is exactly `.` (for `@.`).
-    fn expect_dot(&mut self) -> Result<()> {
+    /// The dot that completes a register accessor (`@.`, `%.`,
+    /// `%%.`); `sigil` names the one being read, for the message.
+    fn expect_dot(&mut self, sigil: &str) -> Result<()> {
         match self.peek() {
             Some(Token::Name { text, .. }) if text == "." => {
                 self.pos += 1;
                 Ok(())
             }
-            _ => Err(QuarbError::Parse("expected '.' after '@'".into())),
+            _ => Err(QuarbError::Parse(format!("expected '.' after '{sigil}'"))),
         }
     }
 
@@ -1156,7 +1226,7 @@ impl Parser<'_> {
             }
             self.expect(Token::RParen, "')' to close the parameter list")?;
         }
-        self.expect(Token::Colon, "':' between the fragment name and its body")?;
+        self.expect_separator("':' between the fragment name and its body")?;
 
         self.def_params = params.clone();
         // A body starting with a pipe is a pipeline fragment; one
@@ -1314,7 +1384,7 @@ impl Parser<'_> {
             }
             self.expect(Token::RParen, "')' to close the parameter list")?;
         }
-        self.expect(Token::Colon, "':' between the macro name and its body")?;
+        self.expect_separator("':' between the macro name and its body")?;
         if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
             return Err(QuarbError::Parse(format!(
                 "a macro body is a query over its expansion arbor; anchor a \
@@ -2285,6 +2355,29 @@ impl Parser<'_> {
         Some(anchor)
     }
 
+    /// The argument list of a `%(...)` / `%%(...)` record form —
+    /// the record convention, normalized to the `rec` call the
+    /// sigil is canonical for.
+    fn record_args(&mut self) -> Result<FnCall> {
+        self.expect(Token::LParen, "'(' after '%'")?;
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Some(Token::RParen)) {
+            loop {
+                self.record_item(&mut args)?;
+                if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::RParen, "')' to close the record")?;
+        Ok(FnCall {
+            name: "rec".to_string(),
+            args,
+        })
+    }
+
     fn func_call(&mut self) -> Result<FnCall> {
         let name = match self.bump() {
             Some(Token::Name {
@@ -2301,10 +2394,20 @@ impl Parser<'_> {
         let mut args = Vec::new();
         if matches!(self.peek(), Some(Token::LParen)) {
             self.pos += 1;
+            // The record-convention calls (`rec`, `record`, `group`)
+            // take `key = value` items and `;` between them as the
+            // sigil forms do (ruling #50).
+            let convention = is_record_convention(&name);
             if !matches!(self.peek(), Some(Token::RParen)) {
                 loop {
-                    args.push(self.func_arg()?);
-                    if matches!(self.peek(), Some(Token::Comma)) {
+                    if convention {
+                        self.record_item(&mut args)?;
+                    } else {
+                        args.push(self.func_arg()?);
+                    }
+                    if matches!(self.peek(), Some(Token::Comma))
+                        || (convention && matches!(self.peek(), Some(Token::Semi)))
+                    {
                         self.pos += 1;
                     } else {
                         break;
@@ -2329,6 +2432,22 @@ impl Parser<'_> {
     /// either end optional) lexes as a single name token — digits,
     /// `-`, and `.` are all name characters — like the positional
     /// range predicate.
+    /// One item of the record convention (ruling #50): `key = value`
+    /// — a bare or quoted name followed by `=` names the value after
+    /// it — or a value alone (auto-named, or named by a preceding
+    /// literal in the flat `k, v` list form, the Perl-list heritage).
+    fn record_item(&mut self, args: &mut Vec<Arg>) -> Result<()> {
+        if let Some(Token::Name { text, .. }) = self.peek()
+            && matches!(self.toks.get(self.pos + 1), Some(Token::Eq))
+        {
+            let key = text.clone();
+            self.pos += 2;
+            args.push(Arg::Lit(Value::Str(key)));
+        }
+        args.push(self.func_arg()?);
+        Ok(())
+    }
+
     fn func_arg(&mut self) -> Result<Arg> {
         if let Some(Token::Name {
             text,
@@ -2391,7 +2510,7 @@ impl Parser<'_> {
             // not property names, so a bare `::` before one is the
             // default projection (e.g. `$*1/id:: and …`). A field with
             // one of these names must be quoted (`::'and'`).
-            if !quoted && matches!(text.as_str(), "and" | "or" | "not") {
+            if !quoted && is_bool_word(text) {
                 return None;
             }
             let name = text.clone();
@@ -2861,13 +2980,16 @@ impl Parser<'_> {
             }
         }
         let expr = self.pred_or()?;
-        self.expect(Token::RBracket, "']' to close a predicate")?;
+        self.expect(
+            Token::RBracket,
+            "']' to close a predicate (')' for the '(?' spelling)",
+        )?;
         Ok(Predicate::Expr(expr))
     }
 
     fn pred_or(&mut self) -> Result<PredExpr> {
         let mut left = self.pred_and()?;
-        while self.eat_keyword("or")
+        while self.eat_word(OR_WORDS)
             || matches!(self.peek(), Some(Token::PipePipe)) && {
                 self.pos += 1;
                 true
@@ -2881,7 +3003,7 @@ impl Parser<'_> {
 
     fn pred_and(&mut self) -> Result<PredExpr> {
         let mut left = self.pred_not()?;
-        while self.eat_keyword("and")
+        while self.eat_word(AND_WORDS)
             || matches!(self.peek(), Some(Token::AmpAmp)) && {
                 self.pos += 1;
                 true
@@ -2905,7 +3027,7 @@ impl Parser<'_> {
             self.pos += 1;
             return Ok(PredExpr::Not(Box::new(self.pred_not()?)));
         }
-        if self.eat_keyword("not") {
+        if self.eat_word(NOT_WORDS) {
             return Ok(PredExpr::Not(Box::new(self.pred_not()?)));
         }
         self.pred_primary()
@@ -2914,6 +3036,14 @@ impl Parser<'_> {
     fn pred_primary(&mut self) -> Result<PredExpr> {
         let left = self.additive()?;
         if let Some(op) = self.cmp_op() {
+            // Ruling #44: a regex literal on the right of `=` / `!=`
+            // is a pattern match — `= (/x/)` reads as `=~ (/x/)`, the
+            // pattern doctrine of ruling #33.
+            let op = match (op, self.peek()) {
+                (CmpOp::Eq, Some(Token::Regex(_))) => CmpOp::Match,
+                (CmpOp::Ne, Some(Token::Regex(_))) => CmpOp::NotMatch,
+                (op, _) => op,
+            };
             if matches!(op, CmpOp::Eq | CmpOp::Ne)
                 && let Some(right) = self.pattern_operand()?
             {
@@ -3090,6 +3220,36 @@ impl Parser<'_> {
     }
 
     fn unary_inner(&mut self) -> Result<Operand> {
+        // `base:name` — a record's field (ruling #48), chained for
+        // nested records; a leading `:name` reads the topic's field.
+        let mut o = if matches!(self.peek(), Some(Token::Field)) {
+            Operand::Topic
+        } else {
+            self.unary_primary()?
+        };
+        while matches!(self.peek(), Some(Token::Field)) {
+            self.pos += 1;
+            let name = match self.bump() {
+                Some(Token::Name { text, .. }) => text.clone(),
+                _ => return Err(QuarbError::Parse("expected a field name after ':'".into())),
+            };
+            if let Operand::Rel {
+                projection: None, ..
+            } = &o
+            {
+                return Err(QuarbError::Parse(format!(
+                    "':{name}' reads a record's field; a node's property is '::{name}'"
+                )));
+            }
+            o = Operand::Field {
+                base: Box::new(o),
+                name,
+            };
+        }
+        Ok(o)
+    }
+
+    fn unary_primary(&mut self) -> Result<Operand> {
         if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "-") {
             self.pos += 1;
             return Ok(Operand::Neg(Box::new(self.unary()?)));
@@ -3245,7 +3405,11 @@ impl Parser<'_> {
         for stage in &stages[before..] {
             if matches!(
                 stage,
-                Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } | Stage::Nav(_)
+                Stage::Push(_)
+                    | Stage::ExprPush { .. }
+                    | Stage::RecordPush { .. }
+                    | Stage::Subcontext { .. }
+                    | Stage::Nav(_)
             ) {
                 return Err(QuarbError::Parse(
                     "a fragment spliced inside an expression pipe may \
@@ -3267,7 +3431,10 @@ impl Parser<'_> {
         // become navigation.
         let stage = self.pipe_item(PipeMode::Scalar)?;
         match &stage {
-            Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } => {
+            Stage::Push(_)
+            | Stage::ExprPush { .. }
+            | Stage::RecordPush { .. }
+            | Stage::Subcontext { .. } => {
                 Err(QuarbError::Parse(
                     "a pipe inside an expression transforms a value; \
                      pushes belong to real capsae (use a stage)"
@@ -3350,6 +3517,12 @@ impl Parser<'_> {
                 Some(
                     Token::Slash
                         | Token::SlashSlash
+                        | Token::Backslash
+                        | Token::BackslashBackslash
+                        | Token::FollowingSiblings(_)
+                        | Token::PrecedingSiblings(_)
+                        | Token::NextSibling
+                        | Token::PrevSibling
                         | Token::ArrowOut
                         | Token::ArrowIn
                         | Token::DashDash
@@ -3587,6 +3760,12 @@ impl Parser<'_> {
                         Some(
                             Token::Slash
                                 | Token::SlashSlash
+                                | Token::Backslash
+                                | Token::BackslashBackslash
+                                | Token::FollowingSiblings(_)
+                                | Token::PrecedingSiblings(_)
+                                | Token::NextSibling
+                                | Token::PrevSibling
                                 | Token::ArrowOut
                                 | Token::ArrowIn
                                 | Token::DashDash
@@ -3622,6 +3801,12 @@ impl Parser<'_> {
                         Some(
                             Token::Slash
                                 | Token::SlashSlash
+                                | Token::Backslash
+                                | Token::BackslashBackslash
+                                | Token::FollowingSiblings(_)
+                                | Token::PrecedingSiblings(_)
+                                | Token::NextSibling
+                                | Token::PrevSibling
                                 | Token::ArrowOut
                                 | Token::ArrowIn
                                 | Token::DashDash
@@ -3646,11 +3831,26 @@ impl Parser<'_> {
                     anchor: Anchor::Root,
                 })
             }
-            // A relative path operand. It may descend (`/`, `//`) or
-            // follow a crosslink (`->`, `<-`), so a structural
-            // predicate can ask "has any outgoing link?" with `[->*]`.
+            // A relative path operand. It may descend (`/`, `//`),
+            // ascend (`\`, `\\`), step sideways (`>>`, `<<`, the
+            // rounded `;-` / `-;`), or follow a crosslink (`->`,
+            // `<-`, `--`), so a structural predicate can ask "has any
+            // outgoing link?" with `[->*]` and a record can carry the
+            // parent's name with `rec(dir, \*:::name)`. (The bare
+            // `>` / `<` sibling hops are the comparison operators in
+            // operand position; their rounded spellings serve.)
             Some(
-                Token::Slash | Token::SlashSlash | Token::ArrowOut | Token::ArrowIn | Token::DashDash,
+                Token::Slash
+                | Token::SlashSlash
+                | Token::Backslash
+                | Token::BackslashBackslash
+                | Token::FollowingSiblings(_)
+                | Token::PrecedingSiblings(_)
+                | Token::NextSibling
+                | Token::PrevSibling
+                | Token::ArrowOut
+                | Token::ArrowIn
+                | Token::DashDash,
             ) => {
                 let mut steps = Vec::new();
                 loop {
@@ -3663,6 +3863,12 @@ impl Parser<'_> {
                         Some(
                             Token::Slash
                                 | Token::SlashSlash
+                                | Token::Backslash
+                                | Token::BackslashBackslash
+                                | Token::FollowingSiblings(_)
+                                | Token::PrecedingSiblings(_)
+                                | Token::NextSibling
+                                | Token::PrevSibling
                                 | Token::ArrowOut
                                 | Token::ArrowIn
                                 | Token::DashDash
@@ -3696,6 +3902,12 @@ impl Parser<'_> {
                         Some(
                             Token::Slash
                                 | Token::SlashSlash
+                                | Token::Backslash
+                                | Token::BackslashBackslash
+                                | Token::FollowingSiblings(_)
+                                | Token::PrecedingSiblings(_)
+                                | Token::NextSibling
+                                | Token::PrevSibling
                                 | Token::ArrowOut
                                 | Token::ArrowIn
                                 | Token::DashDash
@@ -3839,10 +4051,37 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(Operand::Lit(value))
             }
+            // `%+` — the named-captures record (ruling #48).
+            Some(Token::PercentPlus) => {
+                self.pos += 1;
+                Ok(Operand::NamedCaptures)
+            }
             // `@-` — all arrived-by edges (bare: labels; projected:
-            // each edge's property); `@.` — the whole register.
+            // each edge's property); `@.` — the whole register;
+            // `@(…)` — the list literal (ruling #52).
             Some(Token::At) => {
                 self.pos += 1;
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    loop {
+                        if matches!(self.peek(), Some(Token::RParen)) {
+                            self.pos += 1;
+                            break;
+                        }
+                        items.push(self.additive()?);
+                        match self.peek() {
+                            Some(Token::Comma | Token::Semi) => self.pos += 1,
+                            Some(Token::RParen) => {}
+                            _ => {
+                                return Err(QuarbError::Parse(
+                                    "a list literal separates its items with ';': @(a; b)".into(),
+                                ));
+                            }
+                        }
+                    }
+                    return Ok(Operand::List(items));
+                }
                 match self.peek() {
                     Some(Token::Name {
                         text,
@@ -4010,7 +4249,17 @@ impl Parser<'_> {
                 let mut steps = Vec::new();
                 while matches!(
                     self.peek(),
-                    Some(Token::Slash | Token::SlashSlash | Token::LParen)
+                    Some(
+                        Token::Slash
+                            | Token::SlashSlash
+                            | Token::Backslash
+                            | Token::BackslashBackslash
+                            | Token::FollowingSiblings(_)
+                            | Token::PrecedingSiblings(_)
+                            | Token::NextSibling
+                            | Token::PrevSibling
+                            | Token::LParen
+                    )
                 ) {
                     steps.push(self.path_elem()?);
                 }
@@ -4187,7 +4436,11 @@ impl Parser<'_> {
         for stage in &q.pipeline {
             if matches!(
                 stage,
-                Stage::Push(_) | Stage::ExprPush { .. } | Stage::Subcontext { .. } | Stage::Nav(_)
+                Stage::Push(_)
+                    | Stage::ExprPush { .. }
+                    | Stage::RecordPush { .. }
+                    | Stage::Subcontext { .. }
+                    | Stage::Nav(_)
             ) {
                 return Err(QuarbError::Parse(format!(
                     "fragment '&{name}' carries a pipeline that pushes or \
@@ -4213,10 +4466,54 @@ impl Parser<'_> {
             Token::Match => CmpOp::Match,
             Token::NotMatch => CmpOp::NotMatch,
             Token::Contains => CmpOp::Contains,
+            // The spelled ordering comparisons — a bare word in
+            // operator position, like `and` / `or` / `not`.
+            Token::Name {
+                text,
+                quoted: false,
+                ..
+            } => cmp_word(text)?,
             _ => return None,
         };
         self.pos += 1;
         Some(op)
+    }
+
+    /// A definition's head separator: the colon, spaced or glued
+    /// (`def &f: body`, `def &f:body` — a glued colon lexes as the
+    /// field colon, which reads the same here).
+    fn expect_separator(&mut self, what: &str) -> Result<()> {
+        if matches!(self.peek(), Some(Token::Field)) {
+            self.pos += 1;
+            return Ok(());
+        }
+        self.expect(Token::Colon, what)
+    }
+
+    /// Consume a bare word from `words` when an operand follows it
+    /// — a name or an opening paren — so that a lone word closing a
+    /// trait (`<and>`) stays a trait name.
+    fn eat_word_if_followed(&mut self, words: &[&str]) -> bool {
+        let followed = matches!(
+            self.toks.get(self.pos + 1),
+            Some(Token::Name { .. } | Token::LParen | Token::Bang)
+        );
+        followed && self.eat_word(words)
+    }
+
+    /// Consume the next token if it is a bare word from `words`.
+    fn eat_word(&mut self, words: &[&str]) -> bool {
+        if let Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) = self.peek()
+            && words.contains(&text.as_str())
+        {
+            self.pos += 1;
+            return true;
+        }
+        false
     }
 
     /// Consume the bare keyword `kw` if it is next.
@@ -4269,10 +4566,16 @@ impl Parser<'_> {
         trait_cnf(expr).map(Some)
     }
 
+    // The trait algebra takes the boolean words too (`<admin and
+    // not banned>`, and their spellings in the family's languages —
+    // ruling #42, completed): a word in operator position is the
+    // operator; a lone word is still a trait name.
     fn trait_or(&mut self) -> Option<TExpr> {
         let mut left = self.trait_and()?;
-        while matches!(self.peek(), Some(Token::PipePipe)) {
-            self.pos += 1;
+        while matches!(self.peek(), Some(Token::PipePipe)) || self.eat_word_if_followed(OR_WORDS) {
+            if matches!(self.peek(), Some(Token::PipePipe)) {
+                self.pos += 1;
+            }
             let right = self.trait_and()?;
             left = TExpr::Or(Box::new(left), Box::new(right));
         }
@@ -4281,8 +4584,10 @@ impl Parser<'_> {
 
     fn trait_and(&mut self) -> Option<TExpr> {
         let mut left = self.trait_not()?;
-        while matches!(self.peek(), Some(Token::AmpAmp)) {
-            self.pos += 1;
+        while matches!(self.peek(), Some(Token::AmpAmp)) || self.eat_word_if_followed(AND_WORDS) {
+            if matches!(self.peek(), Some(Token::AmpAmp)) {
+                self.pos += 1;
+            }
             let right = self.trait_not()?;
             left = TExpr::And(Box::new(left), Box::new(right));
         }
@@ -4292,6 +4597,9 @@ impl Parser<'_> {
     fn trait_not(&mut self) -> Option<TExpr> {
         if matches!(self.peek(), Some(Token::Bang)) {
             self.pos += 1;
+            return Some(TExpr::Not(Box::new(self.trait_not()?)));
+        }
+        if self.eat_word_if_followed(NOT_WORDS) {
             return Some(TExpr::Not(Box::new(self.trait_not()?)));
         }
         match self.peek() {
@@ -4319,8 +4627,8 @@ impl Parser<'_> {
             Some(Token::SlashSlash) => Axis::Descendant(self.reach()),
             Some(Token::Backslash) => Axis::Parent,
             Some(Token::BackslashBackslash) => Axis::Ancestor(self.reach()),
-            Some(Token::Gt) => Axis::NextSibling,
-            Some(Token::Lt) => Axis::PrevSibling,
+            Some(Token::Gt) | Some(Token::NextSibling) => Axis::NextSibling,
+            Some(Token::Lt) | Some(Token::PrevSibling) => Axis::PrevSibling,
             Some(Token::FollowingSiblings(mark)) => Axis::FollowingSiblings(mark_reach(*mark)),
             Some(Token::PrecedingSiblings(mark)) => Axis::PrecedingSiblings(mark_reach(*mark)),
             Some(Token::ArrowOut) => Axis::OutLink,
@@ -4331,6 +4639,17 @@ impl Parser<'_> {
                     "expected a navigation operator before '{text}' \
                      (queries are root-anchored; start with '/', or open \
                      with an expression head: '= expr')"
+                )));
+            }
+            // `:name` after a step: a node has properties, not
+            // fields (ruling #48).
+            Some(Token::Field) => {
+                let name = match self.peek() {
+                    Some(Token::Name { text, .. }) => text.clone(),
+                    _ => "name".to_string(),
+                };
+                return Err(QuarbError::Parse(format!(
+                    "':{name}' reads a record's field; a node's property is '::{name}'"
                 )));
             }
             _ => {
@@ -4511,10 +4830,18 @@ fn validate_record(call: &FnCall) -> Result<()> {
 
 /// The shared record-convention argument check, for `record(...)`
 /// and `group(...)` keys.
+/// The calls that follow the record convention — `key = value`
+/// items, the flat `k, v` list, `;` separators.
+fn is_record_convention(name: &str) -> bool {
+    matches!(name, "rec" | "record" | "group")
+}
+
 fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
     if call.args.is_empty() {
+        // a record has fields; a grouping has keys
+        let noun = if what == "group" { "key" } else { "field" };
         return Err(QuarbError::Parse(format!(
-            "{what} needs at least one field, e.g. {what}(::name)"
+            "{what} needs at least one {noun}, e.g. {what}(::name)"
         )));
     }
     // Field names are fully static — literals or auto-named
@@ -4547,8 +4874,8 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             Arg::Expr(e) => {
                 let Some(name) = crate::ast::auto_field_name(e) else {
                     return Err(QuarbError::Parse(format!(
-                        "a {what} field needs a name: precede a computed value with a \
-                         literal, e.g. {what}(\"total\", ::price * ::qty)"
+                        "a {what} field needs a name: give a computed value a key, \
+                         e.g. %(total = ::price * ::qty)"
                     )));
                 };
                 let name = name.to_string();
@@ -4557,8 +4884,8 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             }
             _ => {
                 return Err(QuarbError::Parse(format!(
-                    "a {what} field needs a name: precede a computed value with a \
-                     literal, e.g. {what}(\"total\", ::price * ::qty)"
+                    "a {what} field needs a name: give a computed value a key, \
+                     e.g. %(total = ::price * ::qty)"
                 )));
             }
         }
@@ -4802,7 +5129,7 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
 
 fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
     match stage {
-        Stage::Func(call) | Stage::Agg(call) => {
+        Stage::Func(call) | Stage::Agg(call) | Stage::RecordWith(call) | Stage::RecordPush { call, .. } => {
             for arg in &mut call.args {
                 if let Arg::Expr(e) = arg {
                     subst_operand(e, map);
@@ -4869,6 +5196,13 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
             subst_operand(right, map);
         }
         Operand::Neg(inner) => subst_operand(inner, map),
+        Operand::Field { base, .. } => subst_operand(base, map),
+        Operand::List(items) => {
+            for item in items {
+                subst_operand(item, map);
+            }
+        }
+        Operand::NamedCaptures => {}
         Operand::Group(e) => subst_pred_expr(e, map),
         Operand::Outer(inner) => subst_operand(inner, map),
         Operand::Interp(segs) => {
@@ -4959,7 +5293,7 @@ pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
 
 fn max_ctx_stage(st: &Stage) -> usize {
     match st {
-        Stage::Func(call) | Stage::Agg(call) => call
+        Stage::Func(call) | Stage::Agg(call) | Stage::RecordWith(call) | Stage::RecordPush { call, .. } => call
             .args
             .iter()
             .map(|a| match a {
@@ -5022,6 +5356,33 @@ fn max_ctx_operand(o: &Operand) -> usize {
 /// joined expression's ON clause (its final step's brackets) may
 /// reference strictly earlier entries (and the driver as `$$…`);
 /// the driver's pipeline reads any witness back.
+/// A keyed aggregate — `top`, `bottom`, `sort_by`, `unique_by`,
+/// `min_by`, `max_by` — ranks a context, so it rides `@|`; on the
+/// plain pipe it works per group, after `@| group`. Without a group
+/// stage before it, it would rank each capsa's single value against
+/// itself and pass everything through — refuse with the pointer.
+fn validate_keyed_stages(q: &Query) -> Result<()> {
+    let mut grouped = false;
+    for stage in &q.pipeline {
+        match stage {
+            // `@| group` and `@| window` partition the stream; a
+            // keyed stage on the plain pipe then works per part.
+            Stage::Agg(call) if matches!(call.name.as_str(), "group" | "window") => grouped = true,
+            Stage::Func(call) if crate::stdlib::known_keyed(&call.name) && !grouped => {
+                return Err(QuarbError::Parse(format!(
+                    "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per group, after '@| group')",
+                    n = call.name
+                )));
+            }
+            _ => {}
+        }
+    }
+    for c in &q.correlations {
+        validate_keyed_stages(c)?;
+    }
+    Ok(())
+}
+
 fn validate_correlation_refs(q: &Query) -> Result<()> {
     let n = q.correlations.len();
     for b in &q.branches {
@@ -5520,4 +5881,39 @@ fn top_level_bash_op(src: &str) -> Option<(usize, &'static str)> {
         i += 1;
     }
     None
+}
+
+/// The spelled ordering comparisons — the rounded aliases of `<`,
+/// `<=`, `>`, `>=` for keyboards where the angle brackets are
+/// costly, and for typing in the user's own language. Latin takes
+/// the comparatives (`minor quam`, `maior quam`) and their
+/// negations for the bounds (`non maior` = at most); French the
+/// `inférieur` / `supérieur` reading; Russian the quantity idioms
+/// (`не более`, `не менее`); Greek the comparatives and the
+/// `το πολύ` / `τουλάχιστον` idioms, with or without the tonos.
+/// Each is a bare word spaced on both sides; the symbol is
+/// canonical.
+fn cmp_word(word: &str) -> Option<CmpOp> {
+    Some(match word {
+        ".minor." | ".inf." | ".менее." | ".μικρότερο." | ".μικροτερο." => CmpOp::Lt,
+        ".nonmaior." | ".nonsup." | ".неболее." | ".τοπολύ." | ".τοπολυ." => CmpOp::Le,
+        ".maior." | ".sup." | ".более." | ".μεγαλύτερο." | ".μεγαλυτερο." => CmpOp::Gt,
+        ".nonminor." | ".noninf." | ".неменее." | ".τουλάχιστον." | ".τουλαχιστον." => CmpOp::Ge,
+        _ => return None,
+    })
+}
+
+/// The boolean words — `and` / `or` / `not`, the parsed aliases of
+/// `&&` / `||` / `!` — in each language of the rounded family
+/// (ruling #42): Latin (`vel`, the inclusive or), French, Russian,
+/// Greek with or without the tonos. On layouts without `&` and `|`
+/// the words are the only spelling of conjunction and disjunction.
+const AND_WORDS: &[&str] = &["and", "et", "и", "και"];
+const OR_WORDS: &[&str] = &["or", "vel", "ou", "или", "ή", "η"];
+const NOT_WORDS: &[&str] = &["not", "non", "не", "όχι", "οχι"];
+
+/// Whether a bare word is one of the boolean words — which, unquoted,
+/// is never a property name.
+pub(crate) fn is_bool_word(word: &str) -> bool {
+    AND_WORDS.contains(&word) || OR_WORDS.contains(&word) || NOT_WORDS.contains(&word)
 }

@@ -538,5 +538,88 @@ fn closed_surface_adapters_alias_their_metadata() {
     assert_eq!(values(&m, "//section::nonesuch"), vec![""]);
     // Core metadata is never aliased: `::name` is not `:::name`.
     let names = values(&m, "//section | rec(\"data\", ::name, \"core\", :::name)");
-    assert!(names[0].contains("\"data\": null"), "{names:?}");
+    assert!(names[0].contains("data = null"), "{names:?}");
+}
+
+/// Ruling #35 as amended: resolution pairs (family, onym); a
+/// callout whose source declares no family (an HTML noteref)
+/// takes its resolved body's family, and dangles as a footnote.
+#[test]
+fn open_family_callouts_take_their_bodys_family() {
+    use quarb_text::NoteFamily;
+    let m = TextModel::build(vec![
+        Block::Paragraph { text: "Prose.".into() },
+        Block::NoteRef { onym: "a".into(), family: None, margin: false },
+        Block::NoteRef { onym: "b".into(), family: None, margin: false },
+        Block::NoteRef { onym: "c".into(), family: None, margin: false },
+        Block::Open {
+            kind: Container::Note { onym: "a".into(), family: NoteFamily::Footnote, margin: false },
+            lemma: None,
+        },
+        Block::Text { text: "The footnote.".into() },
+        Block::Close { hypograph: None },
+        Block::Open {
+            kind: Container::Note { onym: "b".into(), family: NoteFamily::Endnote, margin: false },
+            lemma: None,
+        },
+        Block::Text { text: "The endnote.".into() },
+        Block::Close { hypograph: None },
+    ]);
+    assert_eq!(values(&m, "//*<deixis>->footnote::"), ["The footnote."]);
+    assert_eq!(values(&m, "//*<deixis>->endnote::"), ["The endnote."]);
+    assert_eq!(values(&m, "//*<dangling>::onym"), ["c"]);
+    // the body IS the note: <note> marks the two bodies,
+    // whichever family; callouts answer <deixis> alone
+    assert_eq!(values(&m, "//*<note> @| count"), ["2"]);
+    assert_eq!(values(&m, "//*<deixis> @| count"), ["3"]);
+}
+
+/// Ruling #36: marks are invisible anchors — no `<block>` trait,
+/// no contribution to the surrounding prose — carrying `::term`
+/// as written with `|...` directives stripped.
+#[test]
+fn index_marks_are_invisible_anchors() {
+    let m = TextModel::build(vec![
+        Block::Paragraph { text: "Emus advanced.".into() },
+        Block::IndexMark { term: "emu".into() },
+        Block::IndexMark { term: "wheat districts|textbf".into() },
+    ]);
+    assert_eq!(values(&m, "//index-mark::term"), ["emu", "wheat districts"]);
+    assert_eq!(values(&m, "/paragraph::"), ["Emus advanced."]);
+    assert_eq!(values(&m, "//*<block> @| count"), ["1"]);
+}
+
+/// Ruling #37: verse holds strophes holding stichos lines; the
+/// stichos taxis numbers lines continuously across strophes (the
+/// citation coordinate), and the flattened prose separates
+/// strophes with a blank line.
+#[test]
+fn verse_lines_carry_the_citation_coordinate() {
+    let m = TextModel::build(vec![Block::Verse {
+        lemma: Some("Ode".into()),
+        strophes: vec![
+            vec!["Happy the man, whose wish and care".into(),
+                 "A few paternal acres bound,".into()],
+            vec!["Content to breathe his native air,".into(),
+                 "In his own ground.".into()],
+        ],
+        hypograph: None,
+    }]);
+    assert_eq!(values(&m, "//verse::lemma"), ["Ode"]);
+    assert_eq!(values(&m, "//strophe @| count"), ["2"]);
+    assert_eq!(values(&m, "//stichos @| count"), ["4"]);
+    // continuous numbering across strophes
+    assert_eq!(
+        values(&m, r#"//stichos[::taxis = 3]::"#),
+        ["Content to breathe his native air,"]
+    );
+    assert_eq!(values(&m, "//strophe[2]/stichos[1]::taxis"), ["3"]);
+    // strophes separate with a blank line in the flattened prose
+    assert_eq!(
+        values(&m, "//verse::"),
+        ["Ode\nHappy the man, whose wish and care\nA few paternal acres bound,\n\nContent to breathe his native air,\nIn his own ground."]
+    );
+    // sub-block structure: only the verse block carries <block>
+    assert_eq!(values(&m, "//verse<block> @| count"), ["1"]);
+    assert_eq!(values(&m, "//stichos<block> @| count"), ["0"]);
 }

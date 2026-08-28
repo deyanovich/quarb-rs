@@ -1,0 +1,19 @@
+[package]
+name = "quarb-pdf"
+description = "PDF object-graph adapter for Quarb: the document's own structure — objects, references as edges"
+keywords = ["quarb", "pdf", "forensics"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.26.0" }
+lopdf = "0.38"
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.26.0" }

@@ -101,10 +101,20 @@ fn context(text: &str, word_start: usize) -> Cx {
     if head.ends_with('$') {
         return Cx::Register;
     }
-    if head.ends_with('<') && !head.ends_with("<=") {
+    if (head.ends_with('<') && !head.ends_with("<=")) || head.ends_with("(:") {
         return Cx::Trait;
     }
-    if head.ends_with('/') || head.ends_with("->") || head.ends_with("<-") || head.ends_with("--")
+    // The pointy hops and their rounded spellings (`:-`, `-:`, the
+    // sibling `;-` / `-;`; `../` and `:--` / `--:` end in `/` and
+    // `--` / `-:` already).
+    if head.ends_with('/')
+        || head.ends_with("->")
+        || head.ends_with("<-")
+        || head.ends_with("--")
+        || head.ends_with(":-")
+        || head.ends_with("-:")
+        || head.ends_with(";-")
+        || head.ends_with("-;")
     {
         return Cx::Hop;
     }

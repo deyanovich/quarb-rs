@@ -1,0 +1,22 @@
+[package]
+name = "quarb-text-epub"
+description = "EPUB producer for the Quarb text level: the declared spine, each chapter through the HTML reading"
+keywords = ["quarb", "epub", "ebook", "text"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb-text = { path = "../quarb-text", version = "0.26.0" }
+quarb-text-html = { path = "../quarb-text-html", version = "0.26.0" }
+quick-xml.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.26.0" }
+zip.workspace = true
