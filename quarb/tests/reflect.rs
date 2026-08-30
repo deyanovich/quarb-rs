@@ -4,7 +4,7 @@
 use quarb::reflect::QueryArbor;
 use quarb::{QueryResult, Value};
 
-const QUERY: &str = "/row[::Age > 30 or /orders] @| group(::Pclass) \
+const QUERY: &str = "/row[::Age > 30 || /orders] @| group(::Pclass) \
                      | mean | .mean-age | %. @| sort_by($.mean-age)";
 
 fn arbor() -> QueryArbor {
@@ -88,7 +88,7 @@ fn predicates_reflect() {
 
 #[test]
 fn source_metadata_and_introspection_aggregates() {
-    assert_eq!(values("^;;;source"), vec![Value::Str(QUERY.to_string())]);
+    assert_eq!(values("^::::source"), vec![Value::Str(QUERY.to_string())]);
     // "how many stages does this query run?"
     assert_eq!(values("/query/pipeline/* @| count"), vec![Value::Int(5)]);
     // "does it use any descendant hops?" — no
@@ -116,35 +116,36 @@ fn recall_resolution_is_scope_aware() {
     // A site buried in a subcontext body binds the *inner* scope:
     // the outer `$.2` numbers past it to `.b`, while the body's own
     // `$.tmp` still resolves inside.
-    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | .b(::w * 1) | rec("n", $.2)"#;
+    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | .b(::w * 1) | %("n"; $.2)"#;
     assert_eq!(
-        vals(src, "//recall[::ref = '$.2']::ref~>::name"),
+        vals(src, "//recall[::ref = \"$.2\"]::ref-->::name"),
         vec![Value::Str("b".to_string())]
     );
     assert_eq!(
-        vals(src, "//recall[::ref = '$.tmp']::ref~>::name"),
+        vals(src, "//recall[::ref = \"$.tmp\"]::ref-->::name"),
         vec![Value::Str("tmp".to_string())]
     );
     // `$.` means the latest preceding site *in scope* — the
     // subcontext itself, not the last site inside its body.
-    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | rec("z", $.)"#;
+    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | %("z"; $.)"#;
     assert_eq!(
-        vals(src, "//recall[::ref = '$.']::ref~>::name @| last"),
+        vals(src, "//recall[::ref = \"$.\"]::ref-->::name @| last"),
         vec![Value::Str("s".to_string())]
     );
-    // `$$.d` climbs one register scope out of the body.
-    let src = r#"/row | .d(::dept * 1) | .m(^/row[::dept = $$.d] @| count) | $.m"#;
+    // The capsa is shared: `$.d` inside the body is the push the
+    // enclosing pipeline made, and resolves to it.
+    let src = r#"/row | .d(::dept * 1) | .m(^/row[::dept = $.d] @| count) | $.m"#;
     assert_eq!(
-        vals(src, "//outer/recall::ref~>::name"),
+        vals(src, "//recall[::ref = \"$.d\"]::ref-->::name"),
         vec![Value::Str("d".to_string())]
     );
-    // `$*1` inside a subcontext body of a correlated query means
+    // `$$1` inside a subcontext body of a correlated query means
     // the join's first entry (/b/*), not the body's own branches:
     // the context ref resolves to the /b/* branch (one deduped
     // node — before the fix the inner one resolved to /c/*).
-    let src = r#"/a/* <=> /b/*[::x = $$::x] | .s(/c/*[::y = $*1::y] @| count) | $.s"#;
+    let src = r#"/a/* <=> /b/*[::x = _::x] | .s(/c/*[::y = $$1::y] @| count) | $.s"#;
     assert_eq!(
-        vals(src, "//context::index~>/step[1]::matcher"),
+        vals(src, "//context::index-->/step[1]::matcher"),
         vec![Value::Str("b".to_string())]
     );
 }
@@ -154,15 +155,15 @@ fn recalls_resolve_to_expr_push_sites() {
     // Expression pushes bind a regula at runtime exactly as plain
     // pushes and named subcontexts do, so they must count as
     // definition sites — both for name lookup and `$.N` numbering.
-    let a = QueryArbor::parse(r#"/row | .total(::price * ::qty) | rec("t", $.total)"#).unwrap();
-    let resolved = match quarb::run("//recall::ref~>::name", &a).unwrap() {
+    let a = QueryArbor::parse(r#"/row | .total(::price * ::qty) | %("t"; $.total)"#).unwrap();
+    let resolved = match quarb::run("//recall::ref-->::name", &a).unwrap() {
         QueryResult::Values(vs) => vs,
         QueryResult::Nodes(_) => panic!("expected values"),
     };
     assert_eq!(resolved, vec![Value::Str("total".to_string())]);
 
-    let a = QueryArbor::parse(r#"/row | .a(::x * 1) | .b(::y) | rec("n", $.1)"#).unwrap();
-    let resolved = match quarb::run("//recall::ref~>::name", &a).unwrap() {
+    let a = QueryArbor::parse(r#"/row | .a(::x * 1) | .b(::y) | %("n"; $.1)"#).unwrap();
+    let resolved = match quarb::run("//recall::ref-->::name", &a).unwrap() {
         QueryResult::Values(vs) => vs,
         QueryResult::Nodes(_) => panic!("expected values"),
     };

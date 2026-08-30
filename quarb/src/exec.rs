@@ -149,11 +149,11 @@ struct Scope<'a> {
     /// snapshot rule: a stage is the transition, so "the context"
     /// during its evaluation is what it received.
     peers: Option<&'a [Capsa]>,
-    /// The invoking capsa's scope, one subcontext out (`$$.name`,
+    /// The invoking capsa's scope, one subcontext out (`$.name`,
     /// `$$_`, `$$ord`); `None` at the top level.
     outer: Option<&'a Scope<'a>>,
     /// The capsa's own node, where the scope belongs to a capsa —
-    /// what a `$$`-wrapped node operand (`$$::prop`, `$$/child::x`)
+    /// what a `$$`-wrapped node operand (`_::prop`, `_/child::x`)
     /// reads one scope out. `None` for navigation scopes.
     node: Option<NodeId>,
 }
@@ -379,7 +379,7 @@ fn eval_query(
 }
 
 /// [`eval_query`] with the invoking capsa's scope, when evaluating
-/// a subcontext body — what `$$.name` / `$$_` / `$$ord` reach.
+/// a subcontext body — what `$.name` / `$$_` / `$$ord` reach.
 fn eval_query_outer(
     query: &Query,
     adapter: &impl AstAdapter,
@@ -439,10 +439,18 @@ fn eval_query_caps_outer(
         witnesses: Default::default(),
     };
     let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
+    // The join binds where it was written: the driver's stages
+    // before the first `<=>` run first, the gate binds against the
+    // capsae as they then stand, and the rest of the pipeline
+    // follows.
+    let at = query.join_at.min(query.pipeline.len());
+    for stage in &query.pipeline[..at] {
+        caps = apply_stage(stage, caps, adapter, &trace, outer);
+    }
     if !query.correlations.is_empty() {
         caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
     }
-    for stage in &query.pipeline {
+    for stage in &query.pipeline[at..] {
         caps = apply_stage(stage, caps, adapter, &trace, outer);
     }
     (caps, pipeline_projected(query))
@@ -546,7 +554,15 @@ fn bind_entries(
     let candidates: Vec<NodeId> = trace.contexts[ctx_idx].clone();
     for cand in candidates {
         bound.push(Some(cand));
+        // One capsa, two nodes: the condition reads the driver's
+        // register, marks and captures with the candidate as the
+        // current node; `_` is the driver.
         let scope = Scope {
+            register: driver.register,
+            topic: driver.topic,
+            captures: driver.captures,
+            named: driver.named,
+            marks: driver.marks,
             outer: Some(driver),
             ..NO_SCOPE
         };
@@ -638,10 +654,13 @@ fn union_branches(
         // forms fork one navigation per pocket; the invoker's
         // marks also seed the navigation, so nested predicates and
         // deeper anchors keep seeing them.
+        // A body forks the capsa it serves, as a hop does: the same
+        // register, marks and captures ride in; the node is new.
         let seed: &[Mark] = outer.map(|s| s.marks).unwrap_or(&[]);
+        let seed_register: &[Reg] = outer.map(|s| s.register).unwrap_or(&[]);
         for from in anchor_nodes(&branch.anchor, start, adapter.root(), seed) {
         for (node, register, marks, arrived) in
-            navigate_paths(&branch.steps, adapter, from, trace, outer, &[], seed, &[])
+            navigate_paths(&branch.steps, adapter, from, trace, outer, &[], seed, seed_register)
         {
             caps.push(Capsa {
                 node,
@@ -656,8 +675,8 @@ fn union_branches(
                     .as_ref()
                     .map(|p| project(adapter, node, p)),
                 members: Vec::new(),
-                captures: Vec::new(),
-                named: Vec::new(),
+                captures: outer.map(|s| s.captures.to_vec()).unwrap_or_default(),
+                named: outer.map(|s| s.named.to_vec()).unwrap_or_default(),
                 bindings: trace
                     .witnesses
                     .borrow()
@@ -876,7 +895,7 @@ fn apply_stage(
             .collect(),
         // `default(fallback)`: the topic when non-null, else the
         // fallback — which may be an expression evaluated against
-        // the capsa's own node, making `(a) | default((b))` the
+        // the capsa's own node, making `(a) | default$$.b` the
         // coalesce idiom (chainable; ruling #21). Literal
         // fallbacks keep working through stdlib for adapter-free
         // callers.
@@ -1205,7 +1224,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 // The body sees this capsa as its enclosing scope:
-                // `$$.name` / `$$_` / `$$ord` reach it (correlated
+                // `$.name` / `$$_` / `$$ord` reach it (correlated
                 // subqueries).
                 let scope = Scope {
                     node: Some(c.node),
@@ -1287,6 +1306,22 @@ fn apply_stage(
                 // rebuilds the capsae, the filed value safe in
                 // the register (spec: Execution Modes).
                 c.topic = Some(value);
+                c
+            })
+            .collect(),
+        // `| .%` — the fields push: each field of the topic record
+        // becomes a named regula; the topic stays the record.
+        Stage::FieldsPush => caps
+            .into_iter()
+            .map(|mut c| {
+                if let Some(Value::Record(fields)) = &c.topic {
+                    for (k, v) in fields.clone() {
+                        c.register.push(Reg {
+                            name: Some(k),
+                            value: v,
+                        });
+                    }
+                }
                 c
             })
             .collect(),
@@ -1488,16 +1523,13 @@ fn apply_stage(
                 // a named push (ruling #47): `(?<year>…)` files its
                 // text into the register under `year`, read back as
                 // `$.year` / `(.year)` and seen by `%.`.
+                // A named group is a capture, not a push: `%+:year`
+                // is the match's, `$.year` the capsa's — filing is
+                // explicit (`| .year(%+:year)`, or `| %+ | .%`).
                 let groups = extract_captures(cond, adapter, c.node, trace, scope);
                 if let Some((groups, named)) = groups {
                     c.captures = groups;
-                    c.named = named.clone();
-                    for (name, text) in named {
-                        c.register.push(Reg {
-                            name: Some(name),
-                            value: Value::Str(text),
-                        });
-                    }
+                    c.named = named;
                 }
                 Some(c)
             })
@@ -2389,7 +2421,7 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
                         Some((_, v)) => *v = reg.value.clone(),
                         None => fields.push((name.clone(), reg.value.clone())),
                     },
-                    None => fields.push((format!("#{}", i + 1), reg.value.clone())),
+                    None => fields.push((format!(".{}", i + 1), reg.value.clone())),
                 }
             }
             Value::Record(fields)
@@ -2461,7 +2493,7 @@ fn navigate_paths(
                 PathElem::Step(step) => {
                     let mut succs = Vec::new();
                     apply_step(
-                        adapter, *node, step, trace, outer, witness, marks, &mut succs,
+                        adapter, *node, step, trace, outer, witness, marks, register, &mut succs,
                     );
                     next.extend(succs.into_iter().map(|s| {
                         let arrived = arrived_edge(adapter, *node, step, s).into_iter().collect();
@@ -2943,6 +2975,7 @@ fn expand_elems(
                         outer,
                         witness,
                         &path.marks,
+                        &path.register,
                         &mut succs,
                     );
                     next.extend(succs.into_iter().filter(|&s| !path.blocks(s)).map(|s| {
@@ -3168,6 +3201,7 @@ fn apply_step(
     outer: Option<&Scope<'_>>,
     witness: &[Option<NodeId>],
     marks: &[Mark],
+    register: &[Reg],
     out: &mut Vec<NodeId>,
 ) {
     match &step.axis {
@@ -3196,7 +3230,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 |&n| {
                     Some(EdgeCtx {
@@ -3217,7 +3251,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&(n, _)| n,
                 // The arrived-by edge of a descendant match is its
                 // own incoming tree edge.
@@ -3244,7 +3278,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 // Walked direction: from the child up.
                 |&p| {
@@ -3281,7 +3315,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&(n, _)| n,
                 |&(n, _)| {
                     Some(EdgeCtx {
@@ -3305,7 +3339,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 |&sib| {
                     Some(EdgeCtx {
@@ -3328,7 +3362,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 |&sib| {
                     Some(EdgeCtx {
@@ -3371,7 +3405,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&(n, _)| n,
                 |&(sib, _)| {
                     Some(EdgeCtx {
@@ -3398,7 +3432,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |(_, n)| *n,
                 |(label, target)| {
                     Some(EdgeCtx {
@@ -3425,7 +3459,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |(_, n)| *n,
                 // The walked edge points INTO the current node.
                 |(label, source)| {
@@ -3464,7 +3498,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |(_, n, _)| *n,
                 |(label, other, outgoing)| {
                     Some(if *outgoing {
@@ -3497,7 +3531,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 // A resolution edge is labeled by its property.
                 |&t| {
@@ -3530,7 +3564,7 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks,
+                marks, register,
                 |&n| n,
                 // Stored direction: the found node's property points
                 // at the current one.
@@ -3615,6 +3649,7 @@ fn apply_predicates<T>(
     outer: Option<&Scope<'_>>,
     witness: &[Option<NodeId>],
     marks: &[Mark],
+    register: &[Reg],
     node_of: impl Fn(&T) -> NodeId,
     edge_of: impl Fn(&T) -> Option<EdgeCtx>,
 ) -> Vec<T> {
@@ -3637,10 +3672,15 @@ fn apply_predicates<T>(
                     // their own; `$$…` still reaches the
                     // invoking subcontext's capsa. Edge hops
                     // define `$-` for their own predicates.
+                    // The path's own capsa: its breadcrumb register
+                    // (seeded from the invoking capsa inside a body —
+                    // the shared capsa) and its marks; `_` is the
+                    // served node.
                     let scope = Scope {
                         outer,
                         edge: edge.as_ref(),
                         marks,
+                        register,
                         bindings: witness,
                         ..NO_SCOPE
                     };
@@ -4114,7 +4154,7 @@ fn eval_operand(
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
                 // the stage — seed the null it exists to replace,
-                // so `(a) | default((b))` coalesces missing paths
+                // so `(a) | default$$.b` coalesces missing paths
                 // too (ruling #21).
                 if state.is_empty()
                     && matches!(stage, Stage::Func(c) if c.name == "default")
@@ -4189,7 +4229,7 @@ fn eval_operand(
         Operand::Param(_) => vec![Value::Null],
         // `$$…` — the same operand, one scope out: the invoking
         // capsa of the enclosing subcontext body (or, in an ON
-        // clause, the driving capsa). Node operands (`$$::prop`)
+        // clause, the driving capsa). Node operands (`_::prop`)
         // re-anchor on the invoking capsa's node. Null at the top
         // level, where no enclosing scope exists.
         Operand::Outer(inner) => match scope.outer {
@@ -5204,7 +5244,7 @@ mod tests {
     #[test]
     fn regex_name() {
         let t = MockTree::sample();
-        assert_eq!(run("//~(.*\\.rs)", &t), vec![2, 5, 7]);
+        assert_eq!(run("//(/.*\\.rs/)", &t), vec![2, 5, 7]);
     }
 
     #[test]
@@ -5213,16 +5253,16 @@ mod tests {
         // Driver-first: the first expression drives; the joined
         // expression's ON clause references the driver as `$$…`.
         // Nodes at the same depth as `a` (depth 1): a and b.
-        assert_eq!(run("//* <=> //a[:::depth = $$:::depth]", &t), vec![1, 4]);
+        assert_eq!(run("//* <=> //a[:::depth = _:::depth]", &t), vec![1, 4]);
         // All .rs files except the one `x.rs` names (join by name).
         assert_eq!(
-            run("//*.rs <=> //x.rs[:::name != $$:::name]", &t),
+            run("//*.rs <=> //x.rs[:::name != _:::name]", &t),
             vec![5, 7]
         );
         // Chained: an unconstrained second entry binds its first
         // candidate; the depth condition still filters the driver.
         assert_eq!(
-            run("//* <=> //a[:::depth = $$:::depth] <=> //x.rs", &t),
+            run("//* <=> //a[:::depth = _:::depth] <=> //x.rs", &t),
             vec![1, 4]
         );
         // A later entry may reference an earlier one's witness
@@ -5230,7 +5270,7 @@ mod tests {
         // so no driver survives the second ON.
         assert!(
             run(
-                "//* <=> //a[:::depth = $$:::depth] <=> //x.rs[:::depth = $*1:::depth]",
+                "//* <=> //a[:::depth = _:::depth] <=> //x.rs[:::depth = $$1:::depth]",
                 &t
             )
             .is_empty()
@@ -5248,16 +5288,16 @@ mod tests {
         // w.rs's witness sits at depth 3; x.rs's and z.rs's at 2.
         assert_eq!(
             run(
-                "//*.rs <=> //*[:::name = $$:::name] \
-                 | [(^//*[:::name = $*1:::name && :::depth = 3])]",
+                "//*.rs <=> //*[:::name = _:::name] \
+                 | [(^//*[:::name = $$1:::name && :::depth = 3])]",
                 &t
             ),
             vec![7]
         );
         assert_eq!(
             run(
-                "//*.rs <=> //*[:::name = $$:::name] \
-                 | [(^//*[:::name = $*1:::name && :::depth = 2])]",
+                "//*.rs <=> //*[:::name = _:::name] \
+                 | [(^//*[:::name = $$1:::name && :::depth = 2])]",
                 &t
             ),
             vec![2, 5]
@@ -5271,8 +5311,8 @@ mod tests {
         // x.rs and z.rs too.
         assert_eq!(
             run(
-                "//*.rs <=> //*[:::name = $$:::name] \
-                 | \\\\*/*.rs[:::name != $*1:::name && :::depth = 2]",
+                "//*.rs <=> //*[:::name = _:::name] \
+                 | \\\\*/*.rs[:::name != $$1:::name && :::depth = 2]",
                 &t
             ),
             vec![5]
@@ -5301,10 +5341,10 @@ mod tests {
         assert_eq!(run("/div(/ul/li)+?", &t), vec![3]); // shallowest
         assert_eq!(run("/div(/ul/li)+!", &t), vec![7]); // deepest
         assert_eq!(run("/div(/ul/li){2}", &t), vec![5]);
-        assert_eq!(run("/div(/ul/li){1,2}", &t), vec![3, 5]);
-        assert_eq!(run("/div(/ul/li){1,2}!", &t), vec![5]);
+        assert_eq!(run("/div(/ul/li){1;2}", &t), vec![3, 5]);
+        assert_eq!(run("/div(/ul/li){1;2}!", &t), vec![5]);
         // min above the tree's depth: nothing
-        assert!(run("/div(/ul/li){4,}", &t).is_empty());
+        assert!(run("/div(/ul/li){4;}", &t).is_empty());
     }
 
     #[test]
@@ -5365,7 +5405,7 @@ mod tests {
         // b itself (0 reps) plus deep (1 rep).
         assert_eq!(run("/b(/deep)*", &t), vec![4, 6]);
         // {0,1} spells the same reach explicitly.
-        assert_eq!(run("/b(/deep){0,1}", &t), vec![4, 6]);
+        assert_eq!(run("/b(/deep){0;1}", &t), vec![4, 6]);
     }
 
     #[test]
@@ -5406,16 +5446,16 @@ mod tests {
         assert!(msg.unwrap().contains("quantifier bound reached"));
         // An explicit ceiling beyond the bound refuses up front —
         // never a silent clamp, never a silent empty.
-        let (out, msg) = refusal("/div(/ul/li){1,3}");
+        let (out, msg) = refusal("/div(/ul/li){1;3}");
         assert!(out.is_empty());
         assert!(msg.unwrap().contains("explicit ceiling"));
         // A minimum beyond the bound can never be satisfied.
-        let (out, msg) = refusal("/div(/ul/li){3,}");
+        let (out, msg) = refusal("/div(/ul/li){3;}");
         assert!(out.is_empty());
         assert!(msg.unwrap().contains("minimum"));
         // An explicit ceiling INSIDE the bound is the user asking
         // for exactly that depth: complete at n, silent.
-        let (out, msg) = refusal("/div(/ul/li){1,2}");
+        let (out, msg) = refusal("/div(/ul/li){1;2}");
         assert_eq!(out, vec![3, 5]);
         assert!(msg.is_none());
     }
@@ -5501,7 +5541,7 @@ mod tests {
         assert_eq!(run("//x.rs(->mgr)+[:::name = w.rs]?", &t), vec![7]);
         assert_eq!(run("//x.rs(->mgr)+?", &t), vec![5]);
         // farthest satisfying
-        assert_eq!(run("//x.rs(->mgr)+[:::name =~ ~(rs)]!", &t), vec![7]);
+        assert_eq!(run("//x.rs(->mgr)+[:::name == (/rs/)]!", &t), vec![7]);
         // no survivor anywhere: empty, not an error
         assert!(run("//x.rs(->mgr)+[:::name = nope]?", &t).is_empty());
         // an unquantified group takes predicates too — endpoints of
@@ -5563,7 +5603,7 @@ mod tests {
         let t = MockTree::sample();
         // Bare @* reads the peers' topics; projected, their nodes.
         assert_eq!(
-            vals("//*.rs:::name | .all((@* @| join(', ')))", &t),
+            vals("//*.rs:::name | .all((@* @| join(\", \")))", &t),
             vec![
                 Value::Str("x.rs, z.rs, w.rs".into()),
                 Value::Str("x.rs, z.rs, w.rs".into()),
@@ -5585,7 +5625,7 @@ mod tests {
         // Capsa-preserving aggregates ride the inline pipe too.
         assert_eq!(
             vals(
-                "//*.rs | .top((@*:::name @| sort @| [1..2] @| join('-')))",
+                "//*.rs | .top((@*:::name @| sort @| [1..2] @| join(\"-\")))",
                 &t
             )[0],
             Value::Str("w.rs-x.rs".into())
@@ -5603,7 +5643,7 @@ mod tests {
         // basic selection by truthiness
         assert_eq!(
             vals(
-                "/a/* | rec(:::name, 'kind', (:::name =~ ~(rs) ? 'code' : 'text'))",
+                "/a/* | %(:::name; kind = (:::name == (/rs/) ? \"code\" : \"text\"))",
                 &t
             ),
             vec![
@@ -5620,7 +5660,7 @@ mod tests {
         // chained else — the multi-branch form, no inner parens
         assert_eq!(
             vals(
-                "//w.rs | ((:::depth = 1 ? 'top' : :::depth = 2 ? 'mid' : 'deep'))",
+                "//w.rs | ((:::depth = 1 ? \"top\" : :::depth = 2 ? \"mid\" : \"deep\"))",
                 &t
             ),
             vec![Value::Str("deep".into())]
@@ -5629,17 +5669,17 @@ mod tests {
         // be null-valued, not an error, and structural conditions
         // work in the condition
         assert_eq!(
-            vals("/b | ((/deep ? 'has-deep' : 'flat'))", &t),
+            vals("/b | ((/deep ? \"has-deep\" : \"flat\"))", &t),
             vec![Value::Str("has-deep".into())]
         );
         // composes with pipe tails
         assert_eq!(
-            vals("/a | (((1 = 1 ? 'yes' : 'no') | upper))", &t),
+            vals("/a | (((1 = 1 ? \"yes\" : \"no\") | upper))", &t),
             vec![Value::Str("YES".into())]
         );
         // null condition is falsy
         assert_eq!(
-            vals("/a | (($_ ? 'topic' : 'none'))", &t),
+            vals("/a | (($_ ? \"topic\" : \"none\"))", &t),
             vec![Value::Str("none".into())]
         );
     }
@@ -5749,7 +5789,7 @@ mod tests {
         // `.q(` would lex into the matcher name, exactly as
         // `/x.rs(...)` keeps its filename.)
         assert_eq!(
-            vals("//a(->e .q($-::qty)){1,2}! | $.q", &t),
+            vals("//a(->e .q($-::qty)){1;2}! | $.q", &t),
             vec![Value::Int(12)]
         );
     }
@@ -5777,12 +5817,12 @@ mod tests {
     fn structural_edge_labels() {
         let t = MockTree::sample();
         // Every hop defines $-: tree, sibling, and reach walks.
-        assert_eq!(run("/a[$- = '[child]']", &t), vec![1]);
-        assert_eq!(run("//w.rs\\deep[$- = '[parent]']", &t), vec![6]);
-        assert_eq!(run("/a/x.rs>y.txt[$- = '[next]']", &t), vec![3]);
-        assert_eq!(run("/a/y.txt<x.rs[$- = '[prev]']", &t), vec![2]);
+        assert_eq!(run("/a[$- = \"[child]\"]", &t), vec![1]);
+        assert_eq!(run("//w.rs\\deep[$- = \"[parent]\"]", &t), vec![6]);
+        assert_eq!(run("/a/x.rs>y.txt[$- = \"[next]\"]", &t), vec![3]);
+        assert_eq!(run("/a/y.txt<x.rs[$- = \"[prev]\"]", &t), vec![2]);
         // Before any hop, $- is null (nothing walked).
-        assert!(run("/a[$- = '[parent]']", &t).is_empty());
+        assert!(run("/a[$- = \"[parent]\"]", &t).is_empty());
     }
 
     #[test]
@@ -5836,10 +5876,10 @@ mod tests {
         // index predicate: first child of a -> x.rs
         assert_eq!(run("/a/*[1]", &t), vec![2]);
         // negation: non-leaf children of root -> a, b
-        assert_eq!(run("/*[not :::is-leaf]", &t), vec![1, 4]);
+        assert_eq!(run("/*[!:::is-leaf]", &t), vec![1, 4]);
         // and + regex match on the name
         assert_eq!(
-            run("//*[:::is-leaf and :::name =~ ~(rs)]", &t),
+            run("//*[:::is-leaf && :::name == (/rs/)]", &t),
             vec![2, 5, 7]
         );
         // comparison against a literal, via core depth
@@ -5976,7 +6016,7 @@ mod tests {
         assert_eq!(run("/*[::a-b = 1]", &t), Vec::<u64>::new());
         // boolean groups in operand position keep their old meaning
         assert_eq!(
-            run("/*[(:::index = 1 or :::index = 2) and :::is-leaf]", &t),
+            run("/*[(:::index = 1 || :::index = 2) && :::is-leaf]", &t),
             Vec::<u64>::new()
         );
     }
@@ -6084,7 +6124,7 @@ mod tests {
     fn context_snapshot_in_cond_and_agg_keys() {
         let t = MockTree::sample();
         assert_eq!(
-            vals("//*.rs | ((@* @| count) > 2 ? 'many' : 'few')", &t),
+            vals("//*.rs | ((@* @| count) > 2 ? \"many\" : \"few\")", &t),
             vec![
                 Value::Str("many".into()),
                 Value::Str("many".into()),
@@ -6219,6 +6259,13 @@ mod tests {
         assert_eq!(run("//w.rs\\\\*", &t), vec![6, 4, 0]);
         assert_eq!(run("//w.rs\\\\?*", &t), vec![6]); // nearest
         assert_eq!(run("//w.rs\\\\!*", &t), vec![0]); // farthest (root)
+        // the bare ascent, and the two tautologies: the nearest
+        // ancestor is the parent, the farthest is the root
+        assert_eq!(run("//w.rs\\\\", &t), run("//w.rs\\\\*", &t));
+        assert_eq!(run("//w.rs\\\\?", &t), run("//w.rs\\", &t));
+        assert_eq!(run("//w.rs\\\\!", &t), run("^", &t));
+        assert_eq!(run("//w.rs/..", &t), run("//w.rs\\", &t));
+        assert_eq!(run("//w.rs/...", &t), run("//w.rs\\\\", &t));
     }
 
     #[test]
@@ -6226,17 +6273,17 @@ mod tests {
         let t = MockTree::sample();
         // Mark mid-path; recall in a later step predicate — the
         // intra-path back-reference (Cypher's node variables).
-        assert_eq!(run("/a .a /*[:::name = (a):::name]", &t), Vec::<u64>::new());
-        assert_eq!(run("//deep .d /w.rs[(d):::name = \"deep\"]", &t), vec![7]);
+        assert_eq!(run("/a .a /*[:::name = $$.a:::name]", &t), Vec::<u64>::new());
+        assert_eq!(run("//deep .d /w.rs[$$.d:::name = \"deep\"]", &t), vec![7]);
         // Recall in a pipeline stage operand.
         assert_eq!(
-            vals("//w.rs .w \\\\!* | (w):::name", &t),
+            vals("//w.rs .w \\\\!* | $$.w:::name", &t),
             vec![Value::Str("w.rs".into())]
         );
         // Marks inside patterns: recall in a group predicate sees
         // the walk's own marks.
         assert_eq!(
-            run("/a/x.rs .x (->ref)[(x):::name = \"x.rs\"]", &t),
+            run("/a/x.rs .x (->ref)[$$.x:::name = \"x.rs\"]", &t),
             vec![7]
         );
         // The context-typed push: bare .name in a SCALAR context
@@ -6244,16 +6291,16 @@ mod tests {
         assert_eq!(vals("//*.rs @| count | .n | $.n", &t), vec![Value::Int(3)]);
         // An unset mark yields nothing (predicate false), not an
         // error.
-        assert_eq!(run("/a/*[(nope):::name = \"a\"]", &t), Vec::<u64>::new());
+        assert_eq!(run("/a/*[$$.nope:::name = \"a\"]", &t), Vec::<u64>::new());
         // Marks seed sub-navigation: an anchored operand's NESTED
         // predicate still sees the thread's marks...
         assert_eq!(
-            run("/a/x.rs .x | [^//w.rs[(x):::name = \"x.rs\"]]", &t),
+            run("/a/x.rs .x | [^//w.rs[$$.x:::name = \"x.rs\"]]", &t),
             vec![2]
         );
         // ...and a subcontext body's branch can anchor on them.
         assert_eq!(
-            vals("/a/x.rs .x | .n((x):::name) | $.n", &t),
+            vals("/a/x.rs .x | .n($$.x:::name) | $.n", &t),
             vec![Value::Str("x.rs".into())]
         );
     }
@@ -6343,10 +6390,10 @@ mod tests {
             vals("/a/* | (:::name ?= \"x.rs\" ? 1 : \"y.txt\" ? 2 : 0)", &t),
             vec![Value::Int(1), Value::Int(2)]
         );
-        // A regex arm tests =~ instead of equality.
+        // A regex arm tests == instead of equality.
         assert_eq!(
             vals(
-                "//*.rs @| [..1] | (:::name ?= ~(^x) ? \"ex\" : \"other\")",
+                "//*.rs @| [..1] | (:::name ?= (/^x/) ? \"ex\" : \"other\")",
                 &t
             ),
             vec![Value::Str("ex".into())]
@@ -6397,22 +6444,22 @@ mod tests {
         // Rows: every .rs file (the driver). Joined: /a's children
         // with a matching name. Only x.rs finds a partner; the
         // outer marker keeps the other rows with a null witness.
-        let q = "//*.rs <=> /a/*[:::name = $$:::name]";
+        let q = "//*.rs <=> /a/*[:::name = _:::name]";
         assert_eq!(run(q, &t), vec![2]);
-        let q = "//*.rs <=>? /a/*[:::name = $$:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = _:::name]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
         // The witness reads back: the partner's name, or null.
         assert_eq!(
-            vals("//*.rs <=>? /a/*[:::name = $$:::name] | $*1:::name", &t),
+            vals("//*.rs <=>? /a/*[:::name = _:::name] | $$1:::name", &t),
             vec![Value::Str("x.rs".into()), Value::Null, Value::Null]
         );
         // The anti-join: a pipeline filter is the WHERE clause,
         // evaluated under the capsa's witness (null-propagating),
         // so testing the null slot keeps only the unmatched rows.
-        let q = "//*.rs <=>? /a/*[:::name = $$:::name] | [not $*1:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = _:::name] | [!$$1:::name]";
         assert_eq!(run(q, &t), vec![5, 7]);
         // And the matched-only filter is its complement.
-        let q = "//*.rs <=>? /a/*[:::name = $$:::name] | [$*1:::name]";
+        let q = "//*.rs <=>? /a/*[:::name = _:::name] | [$$1:::name]";
         assert_eq!(run(q, &t), vec![2]);
     }
 
@@ -6425,13 +6472,13 @@ mod tests {
         // join's null binding exactly as a bare one is. Otherwise
         // the unmatched rows (z.rs, w.rs) are wrongly dropped, and
         // semantically equivalent spellings diverge.
-        let q = "//*.rs <=>? /a/*[(:::name ?= $$:::name ? 1 : 0) = 1]";
+        let q = "//*.rs <=>? /a/*[(:::name ?= _:::name ? 1 : 0) = 1]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
         // The same reference, buried in a nested step predicate
         // (`$$` inside the `/*` step's `[...]`). /a's children are
         // leaves, so no real binding admits any driver; only the
         // null binding keeps them.
-        let q = "//*.rs <=>? /a/*[/*[$$:::name = :::name]]";
+        let q = "//*.rs <=>? /a/*[/*[_:::name = :::name]]";
         assert_eq!(run(q, &t), vec![2, 5, 7]);
     }
 
@@ -6575,8 +6622,8 @@ mod tests {
         assert_eq!(run("/a/x.rs | ^/b", &t), vec![4]);
         // `(m)` — anchor on the thread's own pebble; both the
         // path-side and the pipe-side mark spellings feed it.
-        assert_eq!(run("/a .m /x.rs | (m)/y.txt", &t), vec![3]);
-        assert_eq!(run("/a | .m | /x.rs | (m)/y.txt", &t), vec![3]);
+        assert_eq!(run("/a .m /x.rs | $$.m/y.txt", &t), vec![3]);
+        assert_eq!(run("/a | .m | /x.rs | $$.m/y.txt", &t), vec![3]);
         // Arrows hop crosslinks as stages too.
         assert_eq!(run("/a/x.rs | ->ref", &t), vec![7]);
         // File-first: a projection enters scalar mode, the push
@@ -6601,10 +6648,15 @@ mod tests {
 
     #[test]
     fn named_groups_push_into_the_register() {
-        // Ruling #47: a named group is a named push — read back as
-        // a register, and seen by the record view.
+        // A named group is a capture, read from `%+`; filing it is
+        // explicit — `| %+ | .%` pushes every group under its name,
+        // seen by the record view and recalled as a register.
         let t = MockTree::sample();
-        let q = "/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %.";
+        let bare = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %.", &t);
+        assert!(bare.iter().all(|r| matches!(r, Value::Record(f) if f.is_empty())), "{bare:?}");
+        let stems = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:stem", &t);
+        assert!(stems.iter().all(|v| matches!(v, Value::Str(_))), "{stems:?}");
+        let q = "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+ | .% | %.";
         let rows = vals(q, &t);
         assert!(!rows.is_empty());
         for r in &rows {
@@ -6614,10 +6666,10 @@ mod tests {
             let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
             assert_eq!(keys, vec!["stem", "ext"], "{r:?}");
         }
-        let exts = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | $.ext", &t);
+        let exts = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+ | .% | $.ext", &t);
         assert!(exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
         // the numbered captures still bind alongside
-        let stems = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(\\w+)$/)] | $1", &t);
+        let stems = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(\\w+)$/)] | $1", &t);
         assert_eq!(stems.len(), exts.len());
     }
 
@@ -6626,18 +6678,18 @@ mod tests {
         // Ruling #48: `:name` reads a record's field; `%+` is the
         // named-captures record.
         let t = MockTree::sample();
-        let q = "/a/* | [:::name =~ (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:ext";
+        let q = "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:ext";
         let exts = vals(q, &t);
         assert!(!exts.is_empty() && exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
-        let recs = vals("/a/* | [:::name =~ (/^(?<stem>\\w+)/)] | %+", &t);
+        let recs = vals("/a/* | [:::name == (/^(?<stem>\\w+)/)] | %+", &t);
         assert!(recs.iter().all(|r| matches!(r, Value::Record(f) if f.len() == 1 && f[0].0 == "stem")), "{recs:?}");
         // a constructed record's field, from the topic and from a register
-        let ones = vals("/a/* | rec(:::name, 'n', 1) | :n", &t);
+        let ones = vals("/a/* | %(:::name; n = 1) | :n", &t);
         assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
-        let ones = vals("/a/* | rec(:::name, 'n', 1) | .r | $.r:n", &t);
+        let ones = vals("/a/* | %(:::name; n = 1) | .r | $.r:n", &t);
         assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
         // a missing field, and a non-record, read as null
-        let nulls = vals("/a/* | rec(:::name, 'n', 1) | :zzz", &t);
+        let nulls = vals("/a/* | %(:::name; n = 1) | :zzz", &t);
         assert!(nulls.iter().all(|v| matches!(v, Value::Null)), "{nulls:?}");
         // outside any match, `%+` is the empty record
         let empty = vals("/a/* | %+", &t);
@@ -6650,7 +6702,7 @@ mod tests {
         // values; the rounded `*(…)` spells the same.
         let t = MockTree::sample();
         assert_eq!(
-            vals("/a | @(1; 'x'; 2 + 1)", &t),
+            vals("/a | @(1; \"x\"; 2 + 1)", &t),
             vec![Value::List(vec![Value::Int(1), Value::Str("x".into()), Value::Int(3)])]
         );
         let gathered = vals("/a | @(/*:::name)", &t);
@@ -6658,7 +6710,7 @@ mod tests {
         assert_eq!(vals("/a | @()", &t), vec![Value::List(Vec::new())]);
         assert_eq!(vals("/a | *(1; 2)", &t), vals("/a | @(1; 2)", &t));
         // display: the Quarb form, bare scalars, quoted strings
-        assert_eq!(vals("/a | @(1; 'x')", &t)[0].display_form(), "@(1; 'x')");
+        assert_eq!(vals("/a | @(1; \"x\")", &t)[0].display_form(), "@(1; \"x\")");
     }
 
     #[test]
@@ -6681,14 +6733,14 @@ mod tests {
     fn record_push_in_one_step() {
         // Ruling #49: `.%(...)` builds and pushes; `.name%(...)` names it.
         let t = MockTree::sample();
-        let ones = vals("/a/* | .r%(:::name, 'n', 1) | $.r:n", &t);
+        let ones = vals("/a/* | .r%(:::name, \"n\", 1) | $.r:n", &t);
         assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
         let views = vals("/a/* | .r%(:::name) | %.", &t);
         assert!(views.iter().all(|v| matches!(v, Value::Record(f) if f.len() == 1 && f[0].0 == "r")), "{views:?}");
-        let anon = vals("/a/* | .%(:::name, 'n', 2) | $.:n", &t);
+        let anon = vals("/a/* | .%(:::name, \"n\", 2) | $.:n", &t);
         assert!(!anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))), "{anon:?}");
         // the enriched form carries the register's named regulae
-        let rich = vals("/a/* | .k(:::name) | .%%('n', 3) | :k", &t);
+        let rich = vals("/a/* | .k(:::name) | .%%(\"n\", 3) | :k", &t);
         assert!(!rich.is_empty() && rich.iter().all(|v| matches!(v, Value::Str(_))), "{rich:?}");
     }
 
@@ -6700,15 +6752,15 @@ mod tests {
         let t = MockTree::sample();
         // Bare `.` pockets the node anonymously — mid-path and as
         // a pipe stage — and `(N)` / `(.)` recall positionally.
-        assert_eq!(run("/a . /x.rs | ((1))/y.txt", &t), vec![3]);
-        assert_eq!(run("/a . /x.rs | ((.))/y.txt", &t), vec![3]);
-        assert_eq!(run("/a | . | /x.rs | ((1))/y.txt", &t), vec![3]);
+        assert_eq!(run("/a . /x.rs | ((.1))/y.txt", &t), vec![3]);
+        assert_eq!(run("/a . /x.rs | $$./y.txt", &t), vec![3]);
+        assert_eq!(run("/a | . | /x.rs | ((.1))/y.txt", &t), vec![3]);
         // Names are references over the same slots: the named mark
         // is also position 2. (Bare `| (2)` stays the literal 2 —
         // digit anchors need a continuation; the bare re-seed
         // spellings are `(.)`, `(@)`, `(@name)`.)
         assert_eq!(
-            vals("/a . /x.rs .m | ((2)):::name", &t),
+            vals("/a . /x.rs .m | ((.2)):::name", &t),
             vec![Value::Str("x.rs".into())]
         );
         // The null wart is gone: a bare push in node context marks
@@ -6718,7 +6770,7 @@ mod tests {
             vec![Value::Str("[]".into())]
         );
         // Positional recall of marks lives in operand space too.
-        assert_eq!(run("/a . /*[((1))/x.rs]", &t), vec![2, 3]);
+        assert_eq!(run("/a . /*[((.1))/x.rs]", &t), vec![2, 3]);
     }
 
     #[test]
@@ -6726,14 +6778,14 @@ mod tests {
         let t = MockTree::sample();
         // `(@)` re-seeds the thread from every pocket, in push
         // order — one fork per marked node.
-        assert_eq!(run("/a/x.rs | . | ^/b/z.rs | . | (@)", &t), vec![2, 5]);
+        assert_eq!(run("/a/x.rs | . | ^/b/z.rs | . | ((@))", &t), vec![2, 5]);
         // ... and navigation continues from each in parallel.
-        assert_eq!(run("/a | . | ^/b | . | (@)/*.rs", &t), vec![2, 5]);
+        assert_eq!(run("/a | . | ^/b | . | ((@))/*.rs", &t), vec![2, 5]);
         // `(@name)` fans over every mark under one name, shadowed
         // ones included.
-        assert_eq!(run("/a .s /x.rs | ^/b .s /z.rs | (@s)", &t), vec![1, 4]);
+        assert_eq!(run("/a .s /x.rs | ^/b .s /z.rs | ((@s))", &t), vec![1, 4]);
         // An empty pocket yields nothing, never an error.
-        assert_eq!(run("/a | (@)/x.rs", &t), Vec::<u64>::new());
+        assert_eq!(run("/a | ((@))/x.rs", &t), Vec::<u64>::new());
     }
 
     #[test]
@@ -6743,8 +6795,8 @@ mod tests {
                 .expect_err("should refuse")
                 .to_string()
         };
-        assert!(refuse("/a .1 /b").contains("positions number themselves"));
-        assert!(refuse("/a | .1").contains("positions number themselves"));
+        assert!(refuse("/a .1 /b").contains("starts with a letter"));
+        assert!(refuse("/a | .1").contains("starts with a letter"));
     }
 
     #[test]

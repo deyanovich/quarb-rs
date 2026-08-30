@@ -697,7 +697,7 @@ mod tests {
         // and an ordered rank.
         assert_eq!(run("/entry::"), vec!["POST /pay 500", "processor timeout"]);
         assert_eq!(run("/entry<error>::service"), vec!["checkout"]);
-        assert_eq!(run("/entry[;;;severity >= 400] @| count"), vec!["1"]);
+        assert_eq!(run("/entry[::::severity >= 400] @| count"), vec!["1"]);
         // Fallthrough: custom attributes, then tags.
         assert_eq!(run("/entry[::order]::order"), vec!["o-1402"]);
         assert_eq!(run("/entry[::team]::team"), vec!["payments"]);
@@ -705,9 +705,9 @@ mod tests {
         assert_eq!(run("/entry[/http/status_code:: = 500]::service"), vec!["gateway"]);
         // The minted trace joins the two services.
         let joined = run(
-            "/entry<error> <=> /entry[::service = 'gateway'][::trace = $$::trace] \
-             | rec(::order, \"edge\", $*1::)",
+            "/entry<error> <=> /entry[::service = 'gateway'][::trace = _::trace] \
+             | %(::order; edge = $$1::)",
         );
-        assert_eq!(joined, vec!["%(order = 'o-1402'; edge = 'POST /pay 500')"]);
+        assert_eq!(joined, vec!["%(order = \"o-1402\"; edge = \"POST /pay 500\")"]);
     }
 }

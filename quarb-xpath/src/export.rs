@@ -285,7 +285,7 @@ impl Exporter {
                     "=" | "<" | "<=" | ">" | ">=" => format!("{l} {op} {r}"),
                     "!=" => format!("{l} != {r}"),
                     "*=" => format!("contains({l}, {r})"),
-                    "=~" => {
+                    "==" | "!==" | "=~" | "!~" => {
                         return Err(XPathError::Unsupported(
                             "regex matching (XPath 1.0 has contains/starts-with)".into(),
                         ));

@@ -56,22 +56,22 @@ fn expansion_errors() {
 /// The record convention breaks the call-operand duality — a
 /// leading field name would ride as the topic and silently re-key
 /// the record — so `rec`/`record` refuse operand position (found
-/// porting `aif`: `&f(rec("seen", ::Fare))` reflected and ran as
-/// `('seen' | rec(::Fare))`, keying the record `Fare`).
+/// porting `aif`: `&f(%("seen"; ::Fare))` reflected && ran as
+/// `('seen' | %(::Fare))`, keying the record `Fare`).
 #[test]
 fn rec_refuses_call_operand_position() {
     let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
     assert!(
-        err("/row[rec('seen', ::Fare) = 1]").contains("re-keying"),
-        "rec as predicate operand must refuse"
+        err("/row[rec('seen', ::Fare) = 1]").contains("retired"),
+        "rec is retired: the record is %(…)"
     );
     assert!(
         err("macro &f($t): /t | \"| ${::form}\"; /row | &f(rec('seen', ::Fare))")
-            .contains("re-keying"),
+            .contains("retired"),
         "rec as macro argument must refuse"
     );
     // the honest spelling still parses and round-trips
-    assert_eq!(exp("/row | ('seen' | %(::Fare))"), "/row | ('seen' | %(::Fare))");
+    assert_eq!(exp("/row | (\"seen\" | %(::Fare))"), "/row | (\"seen\" | %(::Fare))");
 }
 
 /// Ruling #22: capture must be invited through an argument. A
@@ -87,7 +87,7 @@ fn invited_capture() {
     // The v=9 accident: uninvited push, outside recall — refused.
     assert!(
         err("macro &m($n): //step[1] | \"| .t(9)\"; \
-             ^ | .t(1) | &m(/x) | rec(\"v\", $.t)")
+             ^ | .t(1) | &m(/x) | %(v = $.t)")
             .contains("invited through an argument"),
         "uninvited capture must refuse"
     );
@@ -108,12 +108,12 @@ fn invited_capture() {
     // argument hands the register name through the parentheses.
     assert_eq!(
         exp("macro &m($r): //step[1] | \"| .${::matcher}(9)\"; \
-             ^ | &m(/t) | rec(\"v\", $.t)"),
+             ^ | &m(/t) | %(v = $.t)"),
         "^ | .t(9) | %(v = $.t)"
     );
     // A def doing the same thing stays legal — bodies are literal.
     assert_eq!(
-        exp("def &load: | .t(9); ^ | &load | rec(\"v\", $.t)"),
+        exp("def &load: | .t(9); ^ | &load | %(v = $.t)"),
         "^ | .t(9) | %(v = $.t)"
     );
 }
@@ -139,7 +139,7 @@ fn expand_first_steps() {
     // Diagnostics still fire in the -1 lens: the full parse runs.
     assert!(
         expand_first("macro &m($n): //step[1] | \"| .t(9)\"; \
-                      ^ | .t(1) | &m(/x) | rec(\"v\", $.t)", &Defs::default())
+                      ^ | .t(1) | &m(/x) | %(v = $.t)", &Defs::default())
             .unwrap_err()
             .to_string()
             .contains("invited through an argument")
@@ -153,8 +153,8 @@ fn expand_first_steps() {
 fn path_splice() {
     // mid-path: the walk continues through the fragment
     assert_eq!(
-        exp("def &card: //div[::kind = 'card']; //section&card/h3::"),
-        "//section//div[::kind = 'card']/h3::"
+        exp("def &card: //div[::kind = \"card\"]; //section&card/h3::"),
+        "//section//div[::kind = \"card\"]/h3::"
     );
     // the article-17 guard: a group body under a written quantifier
     assert_eq!(
@@ -170,13 +170,13 @@ fn path_splice() {
     assert_eq!(exp("def &a: /row; &a::name"), "/row::name");
     // a projected body ends the branch where it stands
     assert_eq!(
-        exp("def &price: /span[::kind = 'p']::; //div&price @| max"),
-        "//div/span[::kind = 'p']:: @| max"
+        exp("def &price: /span[::kind = \"p\"]::; //div&price @| max"),
+        "//div/span[::kind = \"p\"]:: @| max"
     );
     // quantifier + reach on a plain body wrap it as a group
     assert_eq!(
-        exp("def &down: /wrap; /root&down{2,3}?/leaf::"),
-        "/root(/wrap){2,3}?/leaf::"
+        exp("def &down: /wrap; /root&down{2;3}?/leaf::"),
+        "/root(/wrap){2;3}?/leaf::"
     );
     // two fragments splice in sequence
     assert_eq!(
@@ -214,8 +214,8 @@ fn group_splice() {
     );
     // a group-bodied fragment nests
     assert_eq!(
-        exp("def &pair: (/a/b); /x(&pair|/c){1,2}"),
-        "/x((/a/b)|/c){1,2}"
+        exp("def &pair: (/a/b); /x(&pair|/c){1;2}"),
+        "/x((/a/b)|/c){1;2}"
     );
 }
 
@@ -224,13 +224,13 @@ fn group_splice() {
 fn predicate_splice() {
     // a guard refines the step before it
     assert_eq!(
-        exp("def &vis: [not ::style =~ /none/]; //div&vis/h3::"),
-        "//div[!::style =~ (/none/)]/h3::"
+        exp("def &vis: [!::style == (/none/)]; //div&vis/h3::"),
+        "//div[!(::style == (/none/))]/h3::"
     );
     // bracket predicates after a guard join the same predicate run
     assert_eq!(
-        exp("def &vis: [::s]; //span&vis[::k = 'p']::"),
-        "//span[::s][::k = 'p']::"
+        exp("def &vis: [::s]; //span&vis[::k = \"p\"]::"),
+        "//span[::s][::k = \"p\"]::"
     );
     // ... and a group's match set
     assert_eq!(
@@ -239,8 +239,8 @@ fn predicate_splice() {
     );
     // ... and rides the plain pipe as a per-capsa filter
     assert_eq!(
-        exp("def &vis: [not ::style =~ /none/]; //div | &vis | ::id"),
-        "//div | [!::style =~ (/none/)] | ::id"
+        exp("def &vis: [!::style == (/none/)]; //div | &vis | ::id"),
+        "//div | [!(::style == (/none/))] | ::id"
     );
     // as an operand it reads as a boolean
     assert_eq!(
@@ -276,7 +276,7 @@ fn path_splice_errors() {
     assert!(err("def &s: /row | upper; /x&s").contains("carries a pipeline"));
     // ... nor a correlation
     assert!(
-        err("def &j: /a <=> /b[::x = $$::x]; /x&j").contains("carries a correlation")
+        err("def &j: /a <=> /b[::x = _::x]; /x&j").contains("carries a correlation")
     );
     // ... nor a re-anchoring body
     assert!(err("def &t: ^/a; /x&t").contains("re-anchors"));
@@ -471,7 +471,7 @@ fn defs_file_comments() {
     );
     assert_eq!(
         expand("/x | &gregorian", &defs).unwrap(),
-        "/x | tp('%Y-%m-%d') | $_ + '12d'"
+        "/x | tp(\"%Y-%m-%d\") | $_ + \"12d\""
     );
     // only a line-leading `#` comments; `#` has no meaning inside a
     // definition body, so a mid-line `#` still errors as query text
@@ -484,35 +484,35 @@ fn defs_file_comments() {
 fn unparse_fixpoint() {
     let queries = [
         "/row[::Age >= 18] @| count",
-        "//book[::pages > 200];;;id",
+        "//book[::pages > 200]::::id",
         "//*<block>[:::index = 2][1..3]$",
         "/items/*[/price:: * /qty:: > 15]/name::",
-        "/a || /b::x | upper @| join(', ')",
-        "/row @| group(::Pclass) | top(2, ::Fare) @| ungroup | rec($.Pclass, ::Name)",
+        "/a || /b::x | upper @| join(\", \")",
+        "/row @| group(::Pclass) | top(2, ::Fare) @| ungroup | %($.Pclass; ::Name)",
         "/row | .who | [$ord mod 2 = 1] | $.who",
         "/row | .a(::x) | %. @| [2..-1]",
         "/row | .(::x) | .b(::y) | %%.",
         "/users/* | .total(/orders/*/amt:: @| sum) | $.total",
-        "//user <=> //order[::uid = $$::id and ::amt > $$::limit]",
-        "//p[not (::a = 1 or ::b = 2)]",
+        "//user <=> //order[::uid = _::id && ::amt > _::limit]",
+        "//p[!(::a = 1 || ::b = 2)]",
         "/x | s/foo/bar/g | trim",
         "/x | (:::index + 1) * 3",
         "/x[- :::index = -2]",
-        ";;;n-rows",
-        "//~(^ch[0-9]+$)/*.rs",
-        "/row | [::name =~ /^(\\w+), (\\w+)/] | rec('surname', $1, 'title', $2)",
+        "::::n-rows",
+        "//(/^ch[0-9]+$/)/*.rs",
+        "/row | [::name == (/^(\\w+), (\\w+)/)] | %(surname = $1; title = $2)",
         "/row | ::fare @| window(-2..0) | mean",
         "/row | ::fare @| window(..0, ::class) | sum",
         "/row | ::fare | .now @| shift(1, ::class) | $.now - $_",
         "/row | ::fare @| window(3) | mean",
-        "/row | \"${::name} (${::age})\" @| join(', ')",
+        "/row | \"${::name} (${::age})\" @| join(\", \")",
         "/row | ::fare | .f | \"fare \\$${$.f}, doubled ${$_ * 2}\"",
-        "//h2>>p:: @| join(' ')",
-        "//aside<<?*;;;tag || //a[1]>>!p",
-        "/row | .d(::dept) | .m(^/row[::dept = $$.d]::pay @| mean) | $.m - $$_",
-        "/users/* <=> /orders/*[/uid:: = $$/id::] | rec(::name, 'amt', $*1/amt::)",
-        "/tracks/* | rec(::title, 'artist', ::album_id~>::artist_id~>::name)",
-        "/invoices/* | ::qty * ::track_id~>::price @| group(::customer) | sum",
+        "//h2>>p:: @| join(\" \")",
+        "//aside<<?*::::tag || //a[1]>>!p",
+        "/row | .d(::dept) | .m(^/row[::dept = $.d]::pay @| mean) | $.m - _",
+        "/users/* <=> /orders/*[/uid:: = _/id::] | %(::name; amt = $$1/amt::)",
+        "/tracks/* | %(::title; artist = ::album_id-->::artist_id-->::name)",
+        "/invoices/* | ::qty * ::track_id-->::price @| group(::customer) | sum",
         // Round-trip regressions (2026-07-21 review): constant and
         // operand stages keep their parens; a quoted dot-leading
         // string stays a constant topic; quoted trait names reprint
@@ -523,8 +523,8 @@ fn unparse_fixpoint() {
         "/a | (now())",
         "/a | (- 3)",
         "/a | (@*)",
-        "/files | '.gitignore'",
-        "//x<'my trait'>",
+        "/files | \".gitignore\"",
+        "//x<\"my trait\">",
         "//a <- 3",
         "//a < -x",
         "def &f: /a$; &f | upper",
@@ -533,7 +533,7 @@ fn unparse_fixpoint() {
         "def &clean: (<-a->b); /x&clean+ @| count",
         "def &g: /a || /b; /x&g{2}",
         "def &p: /price::; //row[&p > 10]::name",
-        "def &vis: [not ::style =~ /none/]; //div&vis/h3::",
+        "def &vis: [!::style == (/none/)]; //div&vis/h3::",
     ];
     for q in queries {
         let once = exp(q);
@@ -541,3 +541,20 @@ fn unparse_fixpoint() {
         assert_eq!(once, twice, "not a fixpoint for {q}");
     }
 }
+
+#[test]
+fn rounded_fragment_and_parameter_spellings() {
+    // `(=name)` calls a fragment, `(=name!)` a macro, `(,col)` reads a
+    // definition's parameter — each canonicalizing to the sigil.
+    assert_eq!(exp("def &load: | ::a; /* | (=load)"), "/* | ::a");
+    assert_eq!(exp("def &f($c): | (,c); /* | (=f)(::a)"), "/* | ::a");
+    assert_eq!(exp("def &f((,c)): | $c; /* | &f(::a)"), "/* | ::a");
+}
+
+#[test]
+fn rounded_hole_with_a_parameter() {
+    // `"(,(,c))"` is `"${$c}"` — the hole's dollar and the parameter's,
+    // both in their value-side digraph.
+    assert_eq!(exp(r#"def &f($c): | "x=${$c}"; /* | &f(::a)"#), exp(r#"def (=f)((,c)): | "x=(,(,c))"; /* | (=f)(::a)"#));
+}
+

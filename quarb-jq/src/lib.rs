@@ -522,7 +522,7 @@ impl Parser {
                 self.pos += 1;
                 match state {
                     State::Nodes => {
-                        out.push_str(";;;length");
+                        out.push_str("::::length");
                         Ok(State::Values)
                     }
                     // A slice's length is its element count.
@@ -759,7 +759,7 @@ impl Parser {
         while self.peek() == Some(&Tok::And) {
             self.pos += 1;
             let right = self.cond_cmp()?;
-            left = format!("{left} and {right}");
+            left = format!("{left} && {right}");
         }
         Ok(left)
     }
@@ -973,7 +973,7 @@ mod tests {
         );
         assert_eq!(
             t(".users[] | select(.age >= 18 and .age < 65)"),
-            "/users/*[/age:: >= 18 and /age:: < 65]::"
+            "/users/*[/age:: >= 18 && /age:: < 65]::"
         );
         assert_eq!(
             t(r#".users[] | select(has("email"))"#),
@@ -988,7 +988,7 @@ mod tests {
 
     #[test]
     fn functions() {
-        assert_eq!(t(".users | length"), "/users;;;length");
+        assert_eq!(t(".users | length"), "/users::::length");
         assert_eq!(t(".users[0] | keys"), "/users/0/*:::name @| sort");
         assert_eq!(t(".nums | add"), "/nums/*:: @| sum");
         assert_eq!(t(".nums | min"), "/nums/*:: @| min");

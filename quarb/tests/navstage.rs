@@ -28,7 +28,7 @@ fn nav_stages_round_trip() {
         // anchors: root, mark; arrows; a quantified walk in
         // stage position
         "/a/b | ^/c",
-        "/a .m | /b | ((m))/c",
+        "/a .m | /b | $$.m/c",
         "/x | ->ref",
         "/e | (->manager_id)+::name",
         // file-first: push reopens navigation
@@ -44,16 +44,16 @@ fn mark_anchors_round_trip() {
         // anonymous marks, positional and recency anchors
         // (double parentheses are canonical since ruling #43; the
         // single-paren spellings parse as deprecated aliases)
-        "/a . /b | ((1))/c",
-        "/a . /b | ((.))/c",
-        "/a .m /b | ((2)):::name",
+        "/a . /b | $$.1/c",
+        "/a . /b | $$./c",
+        "/a .m /b | $$.2:::name",
         // the plural: bare re-seed, with steps, named
         "/a | . | ^/b | . | ((@))",
         "/a | . | ((@))/kids/*",
         "/a .s /b | ((@s))::x",
         // anchors in operand position
-        "/a . /*[((1))/x]",
-        "/e/*[((.))::depth > 2]",
+        "/a . /*[$$.1/x]",
+        "/e/*[$$.::depth > 2]",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }

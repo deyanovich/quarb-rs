@@ -483,9 +483,9 @@ mod tests {
     #[test]
     fn a_semicolon_projection_is_not_a_terminator() {
         // legacy ;;; in a body survives the statement splitter
-        let m = parse_model("node /sizes/size: /files/*;;;size;").unwrap();
+        let m = parse_model("node /sizes/size: /files/*::::size;").unwrap();
         assert_eq!(m.nodes.len(), 1);
-        assert_eq!(m.nodes[0].query, "/files/*;;;size");
+        assert_eq!(m.nodes[0].query, "/files/*::::size");
     }
 
     #[test]
@@ -521,11 +521,11 @@ mod tests {
 
     #[test]
     fn parses_a_relation() {
-        let m = parse_model("rel /errors/error -> /deploys/deploy [::at > $$::at];").unwrap();
+        let m = parse_model("rel /errors/error -> /deploys/deploy [::at > _::at];").unwrap();
         assert_eq!(m.rels.len(), 1);
         assert_eq!(m.rels[0].source, "/errors/error");
         assert_eq!(m.rels[0].target, "/deploys/deploy");
-        assert_eq!(m.rels[0].cond, "[::at > $$::at]");
+        assert_eq!(m.rels[0].cond, "[::at > _::at]");
     }
 
     #[test]

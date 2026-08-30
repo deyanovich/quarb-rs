@@ -51,7 +51,7 @@ fn cross_document_join() {
     // ON clause reaching the driver as `$$`), and the witness's
     // country projects in the pipeline.
     assert_eq!(
-        values(r#"//people/row <=> //cities/cities/*[/city:: = $$::city] | $*1/country::"#),
+        values(r#"//people/row <=> //cities/cities/*[/city:: = _::city] | $$1/country::"#),
         vec!["FR", "UK"]
     );
 }

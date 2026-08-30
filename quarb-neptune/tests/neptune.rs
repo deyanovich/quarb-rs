@@ -186,7 +186,7 @@ fn bottled_neptune() {
 
     // Catalog via the summary API.
     assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person;;;n-rows"), ["2"]);
+    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
 
     // ?key= names nodes; properties project.
     assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
@@ -202,7 +202,7 @@ fn bottled_neptune() {
     );
 
     // Hinted resolution against the ?key= property.
-    assert_eq!(values(&a, "/Person/Ada::city~>City::country"), ["NO"]);
+    assert_eq!(values(&a, "/Person/Ada::city-->City::country"), ["NO"]);
 
     drop(a);
     drop(handle);

@@ -32,7 +32,7 @@ fn live_arangodb() {
     // Document collections at the root; edge collections are
     // link fabric, not tables.
     assert_eq!(values(&a, "/*:::name"), ["cities", "people"]);
-    assert_eq!(values(&a, "/people;;;n-rows"), ["2"]);
+    assert_eq!(values(&a, "/people::::n-rows"), ["2"]);
 
     // _key names documents; bodies are JSON subtrees with dual
     // exposure.
@@ -51,5 +51,5 @@ fn live_arangodb() {
     );
 
     // _id-convention resolution: bare key with a collection hint.
-    assert_eq!(values(&a, "/people/ada::city~>cities::country"), ["NO"]);
+    assert_eq!(values(&a, "/people/ada::city-->cities::country"), ["NO"]);
 }

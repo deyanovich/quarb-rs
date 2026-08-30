@@ -43,8 +43,7 @@ struct Cli {
 
     /// Opt directory mounts into grafting: a directory's
     /// .json/.xml/.csv/… leaves graft their parsed tree as children.
-    /// (--descend is the pre-0.24 spelling, kept as an alias.)
-    #[arg(long, alias = "descend")]
+    #[arg(long)]
     graft: bool,
 
     /// Disable grafting entirely: archive members and text columns

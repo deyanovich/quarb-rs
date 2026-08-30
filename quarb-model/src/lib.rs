@@ -457,8 +457,8 @@ impl<A: AstAdapter> ModelAdapter<A> {
     }
 
     /// Substitute the driver operand in a relation's condition:
-    /// `$$::field` becomes that property of the source node, bare
-    /// `$$` its default projection. Text inside string literals is
+    /// `_::field` becomes that property of the source node, bare
+    /// `$$_` its default projection (`$$` is the heritage spelling). Text inside string literals is
     /// left alone.
     fn bind_driver(&self, cond: &str, source: NodeId) -> String {
         let view = PriorView {
@@ -486,8 +486,28 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         i += 1;
                     }
                 }
-                '$' if b.get(i + 1) == Some(&'$') => {
-                    i += 2;
+                // `_` — the served node (the relation's source); `$$_`
+                // and the bare `$$` are its heritage spellings.
+                c @ ('$' | '_')
+                    if (c == '$' && b.get(i + 1) == Some(&'$'))
+                        || (c == '_'
+                            && !(i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_' || b[i - 1] == '-'))
+                            && !b
+                                .get(i + 1)
+                                .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')) =>
+                {
+                    if c == '$' {
+                        i += 2;
+                        if b.get(i) == Some(&'_')
+                            && !b
+                                .get(i + 1)
+                                .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                        {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
                     let value = if b.get(i) == Some(&':') && b.get(i + 1) == Some(&':') {
                         i += 2;
                         let start = i;

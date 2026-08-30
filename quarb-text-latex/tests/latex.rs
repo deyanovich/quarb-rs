@@ -221,7 +221,7 @@ fn escaped_dollar_inside_math_does_not_close_it() {
     // heading was eaten).
     let m = parse(
         r#"\section{A}
-Trace references $\$*1, \$*2$ name expressions.
+Trace references $\$$1, \$$2$ name expressions.
 
 \section{B}
 
@@ -286,7 +286,7 @@ fn verse_environment_lowers_to_the_verse_vocabulary() {
     let m = parse(
         r#"\section{Ode on Solitude}
 \begin{verse}
-Happy the man, whose wish and care \\
+Happy the man, whose wish && care \\
 A few \emph{paternal} acres bound,
 
 Content to breathe his native air, \\

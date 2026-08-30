@@ -602,6 +602,9 @@ impl QueryArbor {
                 let id = self.intern(Some("expr"), Vec::new(), Some(parent));
                 self.walk_operand(e, id);
             }
+            Stage::FieldsPush => {
+                self.intern(Some("fields-push"), Vec::new(), Some(parent));
+            }
             Stage::ExprPush { name, expr } => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
@@ -1117,8 +1120,8 @@ fn cmp_spelling(op: crate::ast::CmpOp) -> &'static str {
         CmpOp::Le => "<=",
         CmpOp::Gt => ">",
         CmpOp::Ge => ">=",
-        CmpOp::Match => "=~",
-        CmpOp::NotMatch => "!~",
+        CmpOp::Match => "==",
+        CmpOp::NotMatch => "!==",
         CmpOp::Contains => "*=",
     }
 }
@@ -1310,32 +1313,39 @@ impl AstAdapter for QueryArbor {
                     _ => return None,
                 };
                 let rest = spelling.strip_prefix("$.")?;
-                // The recall's register scope: its nearest enclosing
-                // query node — every reflected query (the top query,
-                // a subcontext body, a correlation operand) opens a
-                // register scope of its own. Each `$$` outer wrapper
-                // above the recall climbs one scope out.
-                let mut scope = self.scope_query_of(idx)?;
-                let mut probe = idx;
-                while let Some(p) = self.nodes[probe].parent {
-                    if self.nodes[p].name.as_deref() != Some("outer") {
+                // The capsa is shared: a body forks the register of
+                // the capsa it serves, so a recall sees the sites of
+                // its own query AND those of every enclosing query
+                // that precede the body. Collect the scope chain
+                // innermost-first, then the sites outermost-first —
+                // slots number over the inherited register before
+                // the body's own pushes.
+                let mut chain = vec![self.scope_query_of(idx)?];
+                while let Some(up) = self.scope_query_of(*chain.last().unwrap()) {
+                    if chain.contains(&up) {
                         break;
                     }
-                    scope = self.scope_query_of(scope)?;
-                    probe = p;
+                    chain.push(up);
                 }
-                // Definition sites, in source order, *within that
-                // scope*: push stages, expression pushes, and named
-                // subcontexts (all three bind a regula at runtime).
-                // A site buried in a nested body belongs to the
-                // inner scope and must not skew `$.N` numbering or
-                // name lookup out here.
-                let sites: Vec<usize> = (0..self.nodes.len())
-                    .filter(|&i| {
-                        matches!(
-                            self.nodes[i].name.as_deref(),
-                            Some("push") | Some("expr-push") | Some("subcontext")
-                        ) && self.in_scope(i, scope)
+                chain.reverse();
+                // Definition sites, in source order: push stages,
+                // expression pushes, and named subcontexts (all three
+                // bind a regula at runtime). A site buried in a nested
+                // body belongs to the inner scope; a site in an
+                // enclosing scope counts only when it precedes the
+                // recall (the body inherits what was pushed before it
+                // ran).
+                let inner = *chain.last().unwrap();
+                let sites: Vec<usize> = chain
+                    .iter()
+                    .flat_map(|&sc| {
+                        (0..self.nodes.len()).filter(move |&i| {
+                            matches!(
+                                self.nodes[i].name.as_deref(),
+                                Some("push") | Some("expr-push") | Some("subcontext")
+                            ) && self.in_scope(i, sc)
+                                && (sc == inner || i < idx)
+                        })
                     })
                     .collect();
                 let found = if rest.is_empty() {
@@ -1569,7 +1579,7 @@ mod tests {
     #[test]
     fn resolve_context_index_to_correlation_operand() {
         let a = QueryArbor::parse(
-            "/a/* <=> /b/*[::x = $$::x] <=> /c/*[::y = $*1::y] | rec($*1::n, $*2::m)",
+            "/a/* <=> /b/*[::x = _::x] <=> /c/*[::y = $$1::y] | %($$1::n; $$2::m)",
         )
         .unwrap();
         // Operands in $*k order are the joined expressions'
@@ -1601,7 +1611,7 @@ mod tests {
     fn resolve_recall_ref_to_definition_site() {
         let a = QueryArbor::parse(
             "/row | .adult(::age) | .fare(::fare) \
-             | rec(\"a\", $.adult, \"f\", $.fare, \"one\", $.1, \"top\", $.)",
+             | %(a = $.adult; f = $.fare; one = $.1; top = $.)",
         )
         .unwrap();
         let name_of = |n: NodeId| match a.property(n, "name") {
@@ -1624,7 +1634,7 @@ mod tests {
         );
         assert_eq!(name_of(a.resolve(recalls[3], "ref", None).unwrap()), "fare");
         // The whole-register views have no single site.
-        let b = QueryArbor::parse("/row | .x(::n) | rec(\"all\", @.)").unwrap();
+        let b = QueryArbor::parse("/row | .x(::n) | %(all = @.)").unwrap();
         let r = find_all(&b, "recall")[0];
         assert!(b.resolve(r, "ref", None).is_none());
     }

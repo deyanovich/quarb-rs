@@ -62,7 +62,7 @@ doc.values('/books/*[/price:: > 20]/title::')
 doc.value('/books/*/price:: @| mean')
 # 21.5
 
-doc.records('/books/* | rec("t", /title::, "p", /price::)')
+doc.records('/books/* | %(t = /title::; p = /price::)')
 # [{'t': 'Sapiens', 'p': 25}, {'t': 'Cosmos', 'p': 18}]
 ```
 

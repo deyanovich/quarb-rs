@@ -17,7 +17,7 @@ fn values(adapter: &BigqueryAdapter, q: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "needs QUARB_BQ and network"]
+#[ignore = "needs QUARB_BQ && network"]
 fn catalog_rows_and_fk_chain() {
     let Some(t) = target() else { return };
     let a = BigqueryAdapter::connect(&t).unwrap();
@@ -27,21 +27,21 @@ fn catalog_rows_and_fk_chain() {
     assert_eq!(
         values(
             &a,
-            "/tracks/*[::secs > 1000]::album_id~>::artist_id~>::name"
+            "/tracks/*[::secs > 1000]::album_id-->::artist_id-->::name"
         ),
         ["Bartok"]
     );
     // Reverse resolution.
-    assert_eq!(values(&a, "/artists/1::id<~[::secs > 400] @| count"), ["0"]);
+    assert_eq!(values(&a, "/artists/1::id<--[::secs > 400] @| count"), ["0"]);
 }
 
 #[test]
-#[ignore = "needs QUARB_BQ and network"]
+#[ignore = "needs QUARB_BQ && network"]
 fn pushdown_matches_scan() {
     let Some(t) = target() else { return };
     let cases = [
         "/tracks/* @| count",
-        "/tracks/*[::price < 1] | rec(::title, ::secs)",
+        "/tracks/*[::price < 1] | %(::title; ::secs)",
         "/invoices/* | ::qty @| sum",
     ];
     for q in cases {

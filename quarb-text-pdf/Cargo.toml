@@ -11,10 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.26.0" }
+quarb = { path = "../quarb", version = "0.27.0" }
 lopdf = "0.38"
 thiserror.workspace = true
 
 [dev-dependencies]
 lopdf = "0.38"
-quarb = { path = "../quarb", version = "0.26.0" }
+quarb = { path = "../quarb", version = "0.27.0" }

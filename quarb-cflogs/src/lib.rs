@@ -481,7 +481,7 @@ mod tests {
         // Fields are properties; ::ray is the join key; the cache
         // status rides metadata.
         assert_eq!(run("/entry[::EdgeResponseStatus = 500]::ray"), vec!["8a1b2c3d4e5f0001"]);
-        assert_eq!(run("/entry[;;;cache = 'hit'] @| count"), vec!["1"]);
+        assert_eq!(run("/entry[::::cache = 'hit'] @| count"), vec!["1"]);
         // The typed instant.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
     }

@@ -209,7 +209,7 @@ fn tei_imports_by_namespace() {
 #[test]
 fn stichoi_lower_to_the_verse_vocabulary() {
     let m = parse_str(
-        "@@@!koine\n\n@@@=\nHappy the man, whose wish and care\nA few paternal acres bound\n=@@@\n",
+        "@@@!koine\n\n@@@=\nHappy the man, whose wish && care\nA few paternal acres bound\n=@@@\n",
         Path::new("."),
     )
     .unwrap();

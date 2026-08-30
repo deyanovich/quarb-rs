@@ -16,23 +16,23 @@ use std::collections::BTreeSet;
 const CORPUS: &[&str] = &[
     // descendant axis, traits, expr/index/range predicates, leaf
     // anchor, adapter-metadata projection
-    "//book<block||inline>[::pages > 200][2][1..3]$;;;id",
+    "//book<block||inline>[::pages > 200][2][1..3]$::::id",
     // the trait boolean algebra: &&, tight !, parens (CNF inside)
     "//sec<(a||b) && !deprecated>",
     // union branches, scalar + aggregate stages, literal args
-    "/a || /b::x | upper @| join(', ')",
+    "/a || /b::x | upper @| join(\", \")",
     // the axis zoo (child, both reaches each way, siblings — one
     // step and the reach family — links)
     "/a//b//?c//!d\\e\\\\f\\\\?g\\\\!h>i<j->k<-l--m/*",
     "/a>>b>>?c>>!d<<e<<?f<<!g",
     // glob and regex matchers
-    "/src/*.rs//~(^ch[0-9]+$)",
+    "/src/*.rs//(/^ch[0-9]+$/)",
     // resolution axes: with a hint, and reverse without
-    "/loan::book~>shelf/page::id<~",
+    "/loan::book-->shelf/page::id<--",
     // core metadata, and/or/not, a bare truthy operand
-    "/x[:::index = 2 and not (::a = 1 or ::b)]",
+    "/x[:::index = 2 && !(::a = 1 || ::b)]",
     // comparison zoo
-    "/x[::a != 1][::b < 2][::c <= 3][::d >= 4][::e *= 'q'][::f !~ /z/]",
+    "/x[::a != 1][::b < 2][::c <= 3][::d >= 4][::e *= \"q\"][::f !== (/z/)]",
     // literal types
     "/x[::a = true][::b = null][::c = 1.5]",
     // arithmetic zoo, parenthesized value group, unary minus
@@ -43,14 +43,15 @@ const CORPUS: &[&str] = &[
     "/x | .n(::a * ::b) | $.n | .named | . | .(::a + 1) \
      | [$ord mod 2 = 1] @| [2..-1] @| [3]",
     "/x | $_ | @. | %. | %%. | $. | $.2",
+    "/row | [::n == (/(?<y>\\d+)/)] | %+ | .% | $.y",
     // subcontexts, named and bare
     "/users/* | .total(/orders/*/amt:: @| sum) | .(//y @| count)",
     // correlation (driver-first): the ON clause references the
-    // driver as `$$::…`, earlier entries as `$*k`, the candidate
+    // driver as `_::…`, earlier entries as `$*k`, the candidate
     // itself as `$*`; a second entry exercises the indexed ref
-    "//user <=> //order[::uid = $$::id and ::amt > $*::limit] <=> //note[::oid = $*1::id]",
+    "//user <=> //order[::uid = _::id && ::amt > $*::limit] <=> //note[::oid = $$1::id]",
     // match captures
-    "/row | [::name =~ /^(\\w+), (\\w+)/] | rec('k', $1, 'j', $2)",
+    "/row | [::name == (/^(\\w+), (\\w+)/)] | %(k = $1; j = $2)",
     // window spans: closed, open-start, open-end; keyed; shift
     "/row | ::fare @| window(-2..0, ::class) | mean @| shift(1)",
     "/row | ::fare @| window(..0) | sum @| window(0..) | max",
@@ -61,14 +62,14 @@ const CORPUS: &[&str] = &[
     // the root anchor, semantic in subcontext bodies
     "/row | .t(^/row @| count) | $.t",
     // outer-scope operands (correlated subqueries)
-    "/row | .d(::dept) | .m(^/row[::dept = $$.d][:::index = $$ord] | $$_)",
+    "/row | .d(::dept) | .m(^/row[::dept = $.d][:::index = $ord] | _::x | _/kid::y)",
     // path patterns: grouping, alternation, nesting, + quantifier
     "//div(/ul/li|/ol/li|/dl(/dt|/dd))+",
     // dot wildcard, {m,n}, proximal suffix; a group in a predicate
     // path; bare-operator sugar (reflects as a dot group)
-    "/a(/.){2,3}?/b[(->ref)+]/{2}",
+    "/a(/.){2;3}?/b[(->ref)+]/{2}",
     // quantified crosslink, open max, distal suffix; tolerated form
-    "//user(->manager_id){2,}! || //body/(p|div)",
+    "//user(->manager_id){2;}! || //body/(p|div)",
     // the arrived-by edge: bare and projected, in edge-hop predicates
     "/a->e[$-::qty > 1][$- = e]",
     // pattern pushes (breadcrumbs): expression and sub-query bodies,
@@ -77,47 +78,47 @@ const CORPUS: &[&str] = &[
     // group predicates: filtered before reach (targeted proximal)
     "/a(->e)+[::q > 1][$- = e]?",
     // the arrived-edges plural: bare and projected
-    "/a->e | rec(@-, @-::qty)",
+    "/a->e | %(@-; @-::qty)",
     // the context operand and an inline pipe tail
     "/a | .p((::x div (@*::x @| sum) | round))",
     // the conditional, chained
-    "/a | rec(::n, 'bin', (::x < 2 ? 'lo' : ::x < 9 ? 'mid' : 'hi'))",
+    "/a | %(::n; bin = (::x < 2 ? \"lo\" : ::x < 9 ? \"mid\" : \"hi\"))",
     // the spread
     "/a->e | @-::roles | ... | ...",
     // the outer spread and the outer correlation (2026-07-11;
     // driver-first since 2026-07-25)
-    "//order::amt <=>? //user[::id = $$::uid] | ...?",
+    "//order::amt <=>? //user[::id = _::uid] | ...?",
     // the anchored operand (2026-07-11)
-    "//commit[;;;short = ^/tags/*;;;short]",
+    "//commit[::::short = ^/tags/*::::short]",
     // marks and the (name) anchor (2026-07-11)
-    "/movie .m <-ACTED_IN[::born > (m)::released] | rec(::name, (m)::title)",
+    "/movie .m <-ACTED_IN[::born > $$.m::released] | %(::name; $$.m::title)",
     // the branch-position mark anchor, inside a subcontext body
-    "/movie .m /cast | .n((m)/tags @| count) | %.",
+    "/movie .m /cast | .n($$.m/tags @| count) | %.",
     // the value match, equality and regex arms (2026-07-11)
-    "/c/* | (::kind ?= 'a' ? 1 : ~(^b) ? 2 : 0)",
+    "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
     // the shell stage, backtick-sugared (2026-07-11; reflects as
     // an ordinary func named sh)
     "/files/* | `wc -l`",
     // the map pipe: transform, filter, slice within the topic
-    "/a | @-::roles $| upper $| [$_ != 'x'] $| [1..2]",
+    "/a | @-::roles $| upper $| [$_ != \"x\"] $| [1..2]",
     // now() and call operands (2026-07-12, the duration-parsing
     // round; f(x, args) reflects as its (x | f(args)) desugaring)
-    "/log/*[/at:: > now() - 12h] | (td(5d3h5min)) | (tp('02/15/2024', '%m/%d/%Y'))",
+    "/log/*[/at:: > now() - 12h] | (td(5d3h5min)) | (tp(\"02/15/2024\", \"%m/%d/%Y\"))",
     // navigation stages (2026-07-23, pipeline navigation): plain,
     // projected, root- and mark-anchored, quantified — a branch in
     // stage position, wrapped in the nav kind
     "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
-    "/a .m | /b | ^/c:::name | . | ((m))/d(->e)+::x",
+    "/a .m | /b | ^/c:::name | . | $$.m/d(->e)+::x",
     // the mark array (2026-07-24, marks symmetry): anonymous
     // marks, positional/recency/plural anchors — in branch and
     // in operand position
-    "/a . /b .m | ((1))/c | ((.))/d | ((@))/e | ((@m))/f",
-    "/a . /*[((2))::x > 1][((.))::y = ((@))::z][((@m))::w]",
+    "/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f",
+    "/a . /*[$$.2::x > 1][$$.::y = ((@))::z][((@m))::w]",
     // the record-field colon and the named-captures record
     // (rulings #47/#48): a field of the topic, of a register, of %+
-    "/row | [::name =~ (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",
+    "/row | [::name == (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",
     // the record push, plain and enriched (ruling #49)
-    "/row | .r%(::x, 'n', 1) | .%%('k', 2) | $.r:n",
+    "/row | .r%(::x, \"n\", 1) | .%%(\"k\", 2) | $.r:n",
     // the list literal (ruling #52)
     "/row | %(tags = @(::a; ::b); n = 1) | @(1; 2)",
 ];
@@ -154,6 +155,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("expr", &[]),
     ("expr-push", &["name"]),
     ("field", &["name"]),
+    ("fields-push", &[]),
     ("filter", &[]),
     ("func", &["name"]),
     // v1 additive growth: group (2026-07-08, path patterns).
@@ -257,7 +259,7 @@ fn vocabulary_is_locked() {
         corpus_inventory(),
         locked,
         "the reflection vocabulary drifted from the v1 lock: \
-         extend the corpus/lock table and the spec's normative \
+         extend the corpus/lock table && the spec's normative \
          table together, additively"
     );
 }
@@ -293,7 +295,7 @@ fn spellings_are_locked() {
     );
     assert_eq!(
         collect("compare", "op"),
-        set(&["=", "!=", "<", "<=", ">", ">=", "=~", "!~", "*="])
+        set(&["=", "!=", "<", "<=", ">", ">=", "==", "!==", "*="])
     );
     assert_eq!(
         collect("arith", "op"),

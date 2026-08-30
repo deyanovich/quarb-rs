@@ -53,9 +53,9 @@ fn attributes_as_properties() {
     assert_eq!(values("//p::class"), vec!["intro"]);
     assert_eq!(values("//html::lang"), vec!["en"]);
     // via metadata too
-    assert_eq!(values("//p;;;classes"), vec!["intro"]);
+    assert_eq!(values("//p::::classes"), vec!["intro"]);
     assert_eq!(values("//h1::id"), vec!["top"]);
-    assert_eq!(values("//h1;;;tag"), vec!["h1"]);
+    assert_eq!(values("//h1::::tag"), vec!["h1"]);
     // core-meta `:::traits` is the node's trait list
     assert_eq!(values("//strong:::traits"), vec!["inline"]);
     assert_eq!(values("//h1:::traits"), vec!["block, heading"]);
@@ -67,15 +67,15 @@ fn attributes_as_properties() {
 /// probeable by its value's shape).
 #[test]
 fn attribute_names_as_metadata() {
-    assert_eq!(values("//html;;;attrs"), vec!["lang"]);
-    assert_eq!(values("//p;;;attrs"), vec!["class"]);
+    assert_eq!(values("//html::::attrs"), vec!["lang"]);
+    assert_eq!(values("//p::::attrs"), vec!["class"]);
     // token test, like `::::classes`: which elements carry an href?
     assert_eq!(
         nodes("//*[::::attrs *= 'href']"),
         vec!["/html/body/main/a[1]", "/html/body/main/a[2]"]
     );
     // no attributes → an empty list, not a miss
-    assert_eq!(values("//ul;;;attrs"), vec![""]);
+    assert_eq!(values("//ul::::attrs"), vec![""]);
 }
 
 #[test]
@@ -103,11 +103,11 @@ fn predicates_and_pipelines() {
     // count of anchors
     assert_eq!(values("//a @| count"), vec!["2"]);
     // external links (href not starting with #)
-    assert_eq!(values("//a[::href !~ ~(^#)]::"), vec!["external"]);
+    assert_eq!(values("//a[::href !== (/^#/)]::"), vec!["external"]);
     // substring containment: the external link's href holds "example"
     assert_eq!(values("//a[::href *= \"example\"]::"), vec!["external"]);
     // regex match with a /.../ literal (equivalent to ~(...))
-    assert_eq!(values("//a[::href =~ /example/]::"), vec!["external"]);
+    assert_eq!(values("//a[::href == (/example/)]::"), vec!["external"]);
     // ... and no anchor's href contains "missing"
     assert_eq!(
         values("//a[::href *= \"missing\"]::"),
@@ -118,12 +118,12 @@ fn predicates_and_pipelines() {
 #[test]
 fn resolve_fragment_href() {
     // the "back to top" anchor's href="#top" resolves to <h1 id="top">
-    assert_eq!(nodes("//a::href~>"), vec!["/html/body/header/h1"]);
+    assert_eq!(nodes("//a::href-->"), vec!["/html/body/header/h1"]);
     // follow the fragment and read the target's text
-    assert_eq!(values("//a::href~>::"), vec!["Welcome"]);
+    assert_eq!(values("//a::href-->::"), vec!["Welcome"]);
     // reverse resolution: which nodes' href resolves to the <h1>?
-    assert_eq!(nodes("//h1::href<~"), vec!["/html/body/main/a[1]"]);
-    assert_eq!(values("//h1::href<~::"), vec!["back to top"]);
+    assert_eq!(nodes("//h1::href<--"), vec!["/html/body/main/a[1]"]);
+    assert_eq!(values("//h1::href<--::"), vec!["back to top"]);
 }
 
 /// Numeric aggregation over HTML, whose attribute values are all
@@ -206,16 +206,16 @@ fn correlated_join_shares_one_binding() {
     // conditions must hold under the same binding.
     let join = concat!(
         r#"//li[::class="order"]:: <=> "#,
-        r#"//li[::class="user"][::data-id = $$::data-uid "#,
-        r#"and ::data-limit < $$::data-amount]"#,
+        r#"//li[::class="user"][::data-id = _::data-uid "#,
+        r#"&& ::data-limit < _::data-amount]"#,
     );
     assert_eq!(run(join), vec!["order-A"]);
     // Stacked brackets are a conjunction, so they share the binding
     // and must give the identical result.
     let stacked = concat!(
         r#"//li[::class="order"]:: <=> "#,
-        r#"//li[::class="user"][::data-id = $$::data-uid]"#,
-        r#"[::data-limit < $$::data-amount]"#,
+        r#"//li[::class="user"][::data-id = _::data-uid]"#,
+        r#"[::data-limit < _::data-amount]"#,
     );
     assert_eq!(run(stacked), vec!["order-A"]);
 }

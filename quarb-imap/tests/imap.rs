@@ -12,7 +12,7 @@ fn folders_messages_and_headers() {
         .stdout(std::process::Stdio::piped())
         .spawn();
     let Ok(mut server) = server else {
-        eprintln!("skipping: python3 not available");
+        eprintln!("skipping: python3 !available");
         return;
     };
     // Wait for the ready line.
@@ -40,6 +40,6 @@ fn folders_messages_and_headers() {
         ["Re: Release plan"]
     );
     assert_eq!(v("/INBOX/2::"), ["Friday works. Docs are ready.\n"]);
-    assert_eq!(v("/INBOX/*[;;;epoch > 1783410000] @| count"), ["2"]);
+    assert_eq!(v("/INBOX/*[::::epoch > 1783410000] @| count"), ["2"]);
     let _ = server.kill();
 }

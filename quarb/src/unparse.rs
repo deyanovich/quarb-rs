@@ -20,12 +20,18 @@ use crate::value::Value;
 /// `<=>` (the outer marker glued to the operator), and the driving
 /// pipeline closes the text.
 pub fn unparse(query: &Query) -> String {
-    let main_pipes = query
-        .pipeline
-        .first()
-        .is_some_and(|s| stage(s).starts_with('|'));
     let n = query.correlations.len();
-    let mut out = branches_join(query, n == 0 && main_pipes);
+    // The join prints where it binds: the driver's stages before
+    // `join_at` precede the `<=>` entries, the rest follow them.
+    let at = if n == 0 { 0 } else { query.join_at.min(query.pipeline.len()) };
+    let (pre, post) = query.pipeline.split_at(at);
+    let main_pipes = post.first().is_some_and(|s| stage(s).starts_with('|'));
+    let pre_pipes = pre.first().is_some_and(|s| stage(s).starts_with('|'));
+    let mut out = branches_join(query, if at > 0 { pre_pipes } else { n == 0 && main_pipes });
+    for stage_ast in pre {
+        out.push(' ');
+        out.push_str(&stage(stage_ast));
+    }
     for (i, corr) in query.correlations.iter().enumerate() {
         out.push_str(if corr.outer { " <=>? " } else { " <=> " });
         let followed_by_main_pipe = (i + 1 == n) && main_pipes;
@@ -40,7 +46,7 @@ pub fn unparse(query: &Query) -> String {
             out.push_str(&stage(stage_ast));
         }
     }
-    for stage_ast in &query.pipeline {
+    for stage_ast in post {
         out.push(' ');
         out.push_str(&stage(stage_ast));
     }
@@ -94,11 +100,12 @@ fn anchor(a: &crate::ast::Anchor) -> String {
     match a {
         Anchor::Current => String::new(),
         Anchor::Root => "^".to_string(),
-        // Double parentheses are the node side (ruling #43); the
-        // single-paren spellings parse as deprecated aliases.
-        Anchor::Mark(m) => format!("(({m}))"),
-        Anchor::MarkIndex(n) => format!("(({n}))"),
-        Anchor::MarkTop => "((.))".to_string(),
+        // Double parentheses are the node side (ruling #43).
+        // `$$.name` / `$$.N` / `$$.` — the marks, node-side; the
+        // rounded spellings are the double-paren anchors.
+        Anchor::Mark(m) => format!("$$.{m}"),
+        Anchor::MarkIndex(n) => format!("$$.{n}"),
+        Anchor::MarkTop => "$$.".to_string(),
         Anchor::MarksAll => "((@))".to_string(),
         Anchor::MarksNamed(m) => format!("((@{m}))"),
     }
@@ -108,7 +115,7 @@ fn elem(e: &PathElem) -> String {
     match e {
         // A mark prints spaced for the same lexing reason as the
         // named push below; the anonymous mark is a lone dot.
-        PathElem::Mark(Some(name)) => format!(" .{name} "),
+        PathElem::Mark(Some(name)) => format!(" .{} ", push_name(name)),
         PathElem::Mark(None) => " . ".to_string(),
         PathElem::Step(s) => step(s),
         PathElem::Group(g) => group(g),
@@ -140,8 +147,9 @@ fn group(g: &Group) -> String {
         (1, None) => "+".to_string(),
         (0, None) => "*".to_string(),
         (m, Some(n)) if m == n => format!("{{{m}}}"),
-        (m, Some(n)) => format!("{{{m},{n}}}"),
-        (m, None) => format!("{{{m},}}"),
+        // the semicolon separates the bounds; the regex comma is sugar
+        (m, Some(n)) => format!("{{{m};{n}}}"),
+        (m, None) => format!("{{{m};}}"),
     };
     let preds: String = g.predicates.iter().map(predicate).collect();
     format!(
@@ -191,7 +199,13 @@ fn step(s: &Step) -> String {
             return out + &step_suffix(s);
         }
     }
-    let m = matcher(&s.matcher);
+    // The parent and the ancestors take no name: the wildcard is
+    // implied, and the bare axis is the canonical spelling.
+    let m = if matches!(s.axis, Axis::Parent | Axis::Ancestor(_)) && matches!(s.matcher, Matcher::Any) {
+        String::new()
+    } else {
+        matcher(&s.matcher)
+    };
     // The lexer reads `<-3` as less-than-minus-three and `<-x` as
     // an incoming crosslink, so a digit-leading matcher after `<-`
     // (and a dash-leading one after `<`) needs a separating space
@@ -306,7 +320,7 @@ fn trait_lit(lit: &str) -> String {
         if bare {
             n.to_string()
         } else {
-            format!("'{n}'")
+            crate::value::quarb_string(n)
         }
     };
     match lit.strip_prefix('!') {
@@ -324,7 +338,7 @@ fn name_text(n: &str) -> String {
     if bare {
         n.to_string()
     } else {
-        format!("'{n}'")
+        crate::value::quarb_string(n)
     }
 }
 
@@ -335,7 +349,7 @@ fn name_text(n: &str) -> String {
 /// reprint quoted (`::'and'`) to round-trip.
 fn proj_name(k: &str) -> String {
     if matches!(k, "and" | "or" | "not") {
-        format!("'{k}'")
+        crate::value::quarb_string(k)
     } else {
         name_text(k)
     }
@@ -366,11 +380,17 @@ fn pred_expr(e: &PredExpr) -> String {
     match e {
         PredExpr::Or(a, b) => format!("{} || {}", pred_term(a), pred_term(b)),
         PredExpr::And(a, b) => format!("{} && {}", pred_term(a), pred_term(b)),
-        PredExpr::Not(a) => format!("!{}", pred_term(a)),
+        // `!` binds tightest: a negated comparison or connective
+        // prints with its parentheses so the text re-parses as
+        // written (`.not. ::x > 1` is `!(::x > 1)`).
+        PredExpr::Not(a) => match a.as_ref() {
+            PredExpr::Truthy(_) | PredExpr::Not(_) => format!("!{}", pred_expr(a)),
+            _ => format!("!({})", pred_expr(a)),
+        },
         PredExpr::Compare(l, op, r) => {
             // Ruling #33: the canonical spelling of a literal
             // substring test is the pattern form — `*= "x"` prints
-            // as `= *'x'*`. A dynamic right operand keeps `*=`
+            // as `== *"x"*`. A dynamic right operand keeps `*=`
             // (patterns are literal syntax only).
             if matches!(op, CmpOp::Contains)
                 && let Operand::Lit(Value::Str(t)) = r
@@ -380,11 +400,19 @@ fn pred_expr(e: &PredExpr) -> String {
                     PatSeg::Lit(t.clone()),
                     PatSeg::Star,
                 ]);
-                return format!("{} = {}", operand(l), operand(&pat));
+                return format!("{} == {}", operand(l), operand(&pat));
             }
-            // Ruling #44: a match's literal pattern prints as the
-            // regex literal — `=~ (/x/i)` — whichever way it was
-            // spelled (`/x/i`, `(/x/i)`, `'x'`, `~(x)`).
+            // A pattern literal is a pattern comparison however it
+            // was spelled (`= *"x"*` is heritage): `==` / `!==`.
+            if let Operand::Pattern(_) = r
+                && matches!(op, CmpOp::Eq | CmpOp::Ne)
+            {
+                let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
+                return format!("{} {} {}", operand(l), eq, operand(r));
+            }
+            // A match's literal pattern prints as `== (/x/i)` /
+            // `!== (/x/i)`; a dynamic pattern (a non-literal right
+            // operand) prints its operand.
             if matches!(op, CmpOp::Match | CmpOp::NotMatch)
                 && let Operand::Lit(Value::Str(t)) = r
             {
@@ -416,8 +444,9 @@ fn cmp(op: CmpOp) -> &'static str {
         CmpOp::Le => "<=",
         CmpOp::Gt => ">",
         CmpOp::Ge => ">=",
-        CmpOp::Match => "=~",
-        CmpOp::NotMatch => "!~",
+        // the pattern comparisons; `=~` / `!~` parse as heritage sugar
+        CmpOp::Match => "==",
+        CmpOp::NotMatch => "!==",
         CmpOp::Contains => "*=",
     }
 }
@@ -535,14 +564,10 @@ fn operand(o: &Operand) -> String {
         // Each `Outer` wrap adds one `$`. Capsa-scope inners
         // (`$.name`, `$_`) already start with a dollar; the node
         // form (`::prop`, `/child::x`) needs the full `$$` spelled.
-        Operand::Outer(inner) => {
-            let s = operand(inner);
-            if s.starts_with('$') {
-                format!("${s}")
-            } else {
-                format!("$${s}")
-            }
-        }
+        // `$$_` is the driver; its register `$$_.name`, its node
+        // form `$$_::prop` / `$$_/kid`; one `$` more per scope out.
+        // `_` — the served node, projected or navigated.
+        Operand::Outer(inner) => format!("_{}", operand(inner)),
         // An interpolated string reprints double-quoted, with its
         // escapes restored and each hole's expression unparsed.
         Operand::Interp(segs) => {
@@ -589,7 +614,7 @@ fn operand(o: &Operand) -> String {
             projection: p,
         } => {
             let mut out = match index {
-                Some(k) => format!("$*{k}"),
+                Some(k) => format!("$${k}"),
                 None => "$*".to_string(),
             };
             for e in steps {
@@ -726,11 +751,11 @@ fn stage(st: &Stage) -> String {
             enriched,
         } => {
             let sigil = if *enriched { "%%" } else { "%" };
-            format!("| .{}{sigil}{}", name.as_deref().unwrap_or(""), record_args(call, "; "))
+            format!("| .{}{sigil}{}", name.as_deref().map(push_name).unwrap_or_default(), record_args(call, "; "))
         }
         // `group(...)` follows the record convention: its keys print
         // as a record's do.
-        Stage::Agg(call) if call.name == "group" => format!("@| group{}", record_args(call, ", ")),
+        Stage::Agg(call) if call.name == "group" => format!("@| group{}", record_args(call, "; ")),
         Stage::Agg(call) => format!("@| {}", fn_call(call)),
         Stage::Spread { outer: false } => "| ...".to_string(),
         Stage::Spread { outer: true } => "| ...?".to_string(),
@@ -745,9 +770,10 @@ fn stage(st: &Stage) -> String {
         }
         Stage::Nav(b) => format!("| {}", branch(b)),
         Stage::Push(None) => "| .".to_string(),
-        Stage::Push(Some(n)) => format!("| .{n}"),
+        Stage::Push(Some(n)) => format!("| .{}", push_name(n)),
+        Stage::FieldsPush => "| .%".to_string(),
         Stage::Subcontext { name, body } => match name {
-            Some(n) => format!("| .{n}({})", unparse(body)),
+            Some(n) => format!("| .{}({})", push_name(n), unparse(body)),
             None => format!("| .({})", unparse(body)),
         },
         // Only some operand spellings are self-delimiting after `|`
@@ -759,7 +785,7 @@ fn stage(st: &Stage) -> String {
         // it would reparse as a navigation stage.
         Stage::Expr(e) => {
             let text = operand(e);
-            let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%'])
+            let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
                 || text.starts_with("@-")
                 || text.starts_with("@(");
             if delimited {
@@ -769,7 +795,7 @@ fn stage(st: &Stage) -> String {
             }
         }
         Stage::ExprPush { name, expr } => match name {
-            Some(n) => format!("| .{n}({})", operand(expr)),
+            Some(n) => format!("| .{}({})", push_name(n), operand(expr)),
             None => format!("| .({})", operand(expr)),
         },
         Stage::Select(p) => format!("@| {}", predicate(p)),
@@ -785,10 +811,28 @@ fn is_record_call(name: &str) -> bool {
 /// A key of the record convention prints bare when it is an
 /// identifier (`[A-Za-z_][A-Za-z0-9_]*`, and not a boolean word),
 /// quoted otherwise — the canonical display of a record.
+/// A push name prints bare when it is an identifier, quoted
+/// otherwise (`."3"`, a pivot's data-driven column).
+fn push_name(n: &str) -> String {
+    if n.chars().next().is_some_and(|c| c.is_alphabetic())
+        && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        n.to_string()
+    } else {
+        crate::value::quarb_string(n)
+    }
+}
+
 fn is_bare_key(k: &str) -> bool {
+    // An identifier in any script (names are Unicode alphanumerics
+    // and `_`), never a boolean word; and `.N`, the key of an
+    // anonymous regula in `%%.`.
+    if k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
     let mut cs = k.chars();
-    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && cs.all(|c| c.is_alphanumeric() || c == '_')
         && !crate::parser::is_bool_word(k)
 }
 
@@ -837,7 +881,7 @@ fn fn_call(call: &crate::ast::FnCall) -> String {
         return call.name.clone();
     }
     let args: Vec<String> = call.args.iter().map(arg_text).collect();
-    format!("{}({})", call.name, args.join(", "))
+    format!("{}({})", call.name, args.join("; "))
 }
 
 fn reg(r: &RegRef) -> String {
@@ -867,7 +911,7 @@ mod tests {
     /// returning the canonical text for further assertions.
     fn assert_fixpoint(q: &str) -> String {
         let once = rt(q);
-        assert_eq!(rt(&once), once, "unparse is not a fixpoint for {q:?}");
+        assert_eq!(rt(&once), once, "unparse is !a fixpoint for {q:?}");
         once
     }
 
@@ -876,15 +920,15 @@ mod tests {
     // as `::::`.
     #[test]
     fn adapter_meta_alias_canonicalizes() {
-        assert_eq!(rt("//*.txt::;size"), "//*.txt::::size");
-        assert_eq!(rt("//*.txt;;;size"), "//*.txt::::size");
+        assert_eq!(rt("//*.txt::::size"), "//*.txt::::size");
+        assert_eq!(rt("//*.txt::::size"), "//*.txt::::size");
         assert_eq!(rt("//*.txt::::size"), "//*.txt::::size");
         assert_eq!(
-            rt("/commits/*[::;short = ^/tags/*::;short]"),
+            rt("/commits/*[::::short = ^/tags/*::::short]"),
             "/commits/*[::::short = ^/tags/*::::short]"
         );
         // The def statement terminator still lexes as a single `;`.
-        assert_eq!(rt("def &f: //x;;;size; &f"), rt("def &f: //x::;size; &f"));
+        assert_eq!(rt("def &f: //x::::size; &f"), rt("def &f: //x::::size; &f"));
     }
 
     // Finding: a projection key named `and`/`or`/`not` must reprint
@@ -892,10 +936,10 @@ mod tests {
     // followed by the connective keyword.
     #[test]
     fn projection_keyword_key_is_quoted() {
-        assert_eq!(assert_fixpoint("/x::'and'"), "/x::'and'");
-        assert_eq!(assert_fixpoint("/x::'or'"), "/x::'or'");
-        assert_eq!(assert_fixpoint("/x:::'not'"), "/x:::'not'");
-        assert_eq!(assert_fixpoint("/x::::'and'"), "/x::::'and'");
+        assert_eq!(assert_fixpoint("/x::\"and\""), "/x::\"and\"");
+        assert_eq!(assert_fixpoint("/x::\"or\""), "/x::\"or\"");
+        assert_eq!(assert_fixpoint("/x:::\"not\""), "/x:::\"not\"");
+        assert_eq!(assert_fixpoint("/x::::\"and\""), "/x::::\"and\"");
         // A near-miss name is not a keyword and stays bare.
         assert_eq!(assert_fixpoint("/x::android"), "/x::android");
     }

@@ -680,7 +680,7 @@ impl Parser {
         while matches!(self.peek(), Some(Tok::Name(n, false)) if n == "or") {
             self.pos += 1;
             let right = self.pred_and()?;
-            left = format!("{left} or {right}");
+            left = format!("{left} || {right}");
         }
         Ok(left)
     }
@@ -690,7 +690,7 @@ impl Parser {
         while matches!(self.peek(), Some(Tok::Name(n, false)) if n == "and") {
             self.pos += 1;
             let right = self.pred_cmp()?;
-            left = format!("{left} and {right}");
+            left = format!("{left} && {right}");
         }
         Ok(left)
     }
@@ -730,7 +730,7 @@ impl Parser {
                 self.expect(Tok::LParen, "'(' after not")?;
                 let inner = self.pred_or()?;
                 self.expect(Tok::RParen, "')' to close not")?;
-                Ok((format!("not ({inner})"), false))
+                Ok((format!("!({inner})"), false))
             }
             Some(Tok::Name(f, true)) if f == "contains" => {
                 self.pos += 1;
@@ -769,7 +769,7 @@ impl Parser {
                     ));
                 }
                 self.expect_nothing_weird(&prefix)?;
-                Ok((format!("{subject} =~ ~(^{})", regex_escape(&prefix)), false))
+                Ok((format!("{subject} == (/^{}/)", regex_escape(&prefix)), false))
             }
             Some(Tok::Name(f, true)) if f == "text" => self.pred_path(),
             Some(Tok::Name(f, true)) => Err(XPathError::Unsupported(format!(
@@ -990,11 +990,11 @@ mod tests {
         assert_eq!(t("//chapter[text()='x']"), "//chapter[:: = \"x\"]");
         assert_eq!(
             t("//chapter[@id='a' or @id='b']"),
-            "//chapter[::id = \"a\" or ::id = \"b\"]"
+            "//chapter[::id = \"a\" || ::id = \"b\"]"
         );
         assert_eq!(
             t("//chapter[not(image) and title]"),
-            "//chapter[not (/image) and /title]"
+            "//chapter[!(/image) && /title]"
         );
         assert_eq!(
             t("//chapter[contains(@id, 'apt')]"),
@@ -1002,7 +1002,7 @@ mod tests {
         );
         assert_eq!(
             t("//chapter[starts-with(@id, 'chap')]"),
-            "//chapter[::id =~ ~(^chap)]"
+            "//chapter[::id == (/^chap/)]"
         );
         assert_eq!(
             t("//city[population > 100000]"),

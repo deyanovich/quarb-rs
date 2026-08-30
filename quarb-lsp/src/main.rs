@@ -67,7 +67,7 @@ method=quarb-lsp/complete
         let req = "\
 .!kaiv
 method=quarb-lsp/diagnostics
-/params::text=/tags/* | rec(:::)
+/params::text=/tags/* | %(:::)
 ";
         let out = answer(req.as_bytes());
         assert!(out.contains("::status=ok"), "{out}");

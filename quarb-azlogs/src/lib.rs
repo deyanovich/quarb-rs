@@ -784,6 +784,6 @@ mod tests {
         // TimeGenerated is a typed instant behind ::timestamp.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
         // Metadata names the table.
-        assert_eq!(run("/entry[1];;;table"), vec!["AppRequests"]);
+        assert_eq!(run("/entry[1]::::table"), vec!["AppRequests"]);
     }
 }

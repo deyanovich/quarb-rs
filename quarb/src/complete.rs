@@ -122,7 +122,7 @@ fn context(text: &str, word_start: usize) -> Cx {
 }
 
 /// Register spellings offered after a bare `$`.
-const REGISTERS: &[&str] = &["$_", "$.", "$$", "$-", "$ordinal"];
+const REGISTERS: &[&str] = &["$_", "$.", "$$", "$-", "$ord"];
 
 /// Syntax-tier completion: candidates from the text alone.
 pub fn complete(text: &str, cursor: usize) -> Vec<Candidate> {
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn dollar_offers_registers() {
         let c = complete("/x[::a = $", 10);
-        assert!(texts(&c).contains(&"$ordinal"));
+        assert!(texts(&c).contains(&"$ord"));
     }
 
     #[test]

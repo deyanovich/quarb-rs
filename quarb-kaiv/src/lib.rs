@@ -646,12 +646,12 @@ mod tests {
         .unwrap();
         assert_eq!(values(&a, "/readings::temp"), ["100"]);
         assert_eq!(values(&a, "/readings/temp::"), ["100"]);
-        assert_eq!(values(&a, "/readings/temp;;;source"), ["sensor1"]);
+        assert_eq!(values(&a, "/readings/temp::::source"), ["sensor1"]);
         assert_eq!(
-            values(&a, "/readings/temp;;;source-uri"),
+            values(&a, "/readings/temp::::source-uri"),
             ["https://sensors.example.com/1"]
         );
-        assert_eq!(values(&a, "/readings/temp;;;dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/readings/temp::::dpid"), ["req-42"]);
         // The resolved core tier: URI-resolved source, the compact
         // timestamp bridged to a typed Instant (displays dashed),
         // dpid passed through, and the composite. The raw string
@@ -679,7 +679,7 @@ mod tests {
         // (null displays as the empty string).
         assert_eq!(values(&a, "/readings:::provenance"), [""]);
         assert_eq!(values(&a, "/trip/length:::source"), [""]);
-        assert_eq!(values(&a, "/trip/length;;;unit"), ["km"]);
+        assert_eq!(values(&a, "/trip/length::::unit"), ["km"]);
         // Unit-annotated: a quantity, filterable in ANY compatible
         // unit — the criterion converts through the same table.
         assert_eq!(values(&a, "/trip[::length > 26mi]/length::"), ["42 km"]);
@@ -694,7 +694,7 @@ mod tests {
             values(&a, "/rig[::power > 5km]::power"),
             Vec::<String>::new()
         );
-        assert_eq!(values(&a, "/net/host;;;type"), ["acme/net/label"]);
+        assert_eq!(values(&a, "/net/host::::type"), ["acme/net/label"]);
         assert_eq!(values(&a, "/net::host"), ["web-01"]);
     }
 
@@ -776,7 +776,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(values(&b, "/bridge::length"), ["364.4"]);
-        assert_eq!(values(&b, "/bridge/length;;;unit"), ["smoot"]);
+        assert_eq!(values(&b, "/bridge/length::::unit"), ["smoot"]);
     }
 
     #[test]

@@ -63,17 +63,17 @@ fn mock_cluster() {
     // Owner chain: Pod ~> ReplicaSet ~> Deployment, the targets
     // arriving by single GET.
     assert_eq!(
-        v("/namespaces/default/pods/web-1::owner~>::owner~>::name"),
+        v("/namespaces/default/pods/web-1::owner-->::owner-->::name"),
         ["web"]
     );
 
     // Placement and namespace references.
     assert_eq!(v("/pods/web-1->node::name"), ["worker-1"]);
-    assert_eq!(v("/pods/sys-1::namespace~>::phase"), ["Active"]);
+    assert_eq!(v("/pods/sys-1::namespace-->::phase"), ["Active"]);
 
     // Kind traits; the namespace hybrid answers fields and holds
     // listings.
     assert_eq!(v("/pods/*<pod> @| count"), ["3"]);
     assert_eq!(v("/namespaces/default::phase"), ["Active"]);
-    assert_eq!(v("/namespaces/default;;;n-fields"), ["3"]);
+    assert_eq!(v("/namespaces/default::::n-fields"), ["3"]);
 }

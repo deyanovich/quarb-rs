@@ -27,11 +27,11 @@ fn scan_filter_resolve() {
     assert_eq!(values(&a, "/artists/Holst/labels/* @| count"), ["2"]);
     // hinted resolution is a GetItem, hint-less tries the _id stem
     assert_eq!(
-        values(&a, "/tracks/*[::song = 'Jupiter']::artist_id~>artists::country"),
+        values(&a, "/tracks/*[::song = 'Jupiter']::artist_id-->artists::country"),
         ["England"]
     );
     assert_eq!(
-        values(&a, "/tracks/*[::song = 'Bourree']::artist_id~>::country"),
+        values(&a, "/tracks/*[::song = 'Bourree']::artist_id-->::country"),
         ["Hungary"]
     );
 }

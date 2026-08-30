@@ -79,7 +79,7 @@ fn sections_derive_from_flat_headings() {
 fn prose_flattens_with_lemma() {
     let m = outline();
     assert_eq!(
-        values(&m, "/section[::lemma = 'Two']::"),
+        values(&m, "/section[::lemma = \"Two\"]::"),
         vec!["Two\nIn two."]
     );
 }
@@ -345,7 +345,7 @@ fn serialization_stages_render_subtrees() {
         },
     ]);
     assert_eq!(
-        values(&m, r#"//section[::lemma =~ /war/] | markdown"#),
+        values(&m, r#"//section[::lemma == (/war/)] | markdown"#),
         vec![
             "## The \"war\"\n\nMachine guns were requested.\n\n### First attempt\n\nThe birds split into small groups."
         ]
@@ -419,7 +419,7 @@ fn atrep_output_parses() {
         std::env::var("ATREP_BIN"),
         std::env::var("LITOGRAMMA_DIA"),
     ) else {
-        eprintln!("skip: set ATREP_BIN and LITOGRAMMA_DIA to run the parse gate");
+        eprintln!("skip: set ATREP_BIN && LITOGRAMMA_DIA to run the parse gate");
         return;
     };
     let m = TextModel::build(vec![
@@ -496,7 +496,7 @@ fn grammata_and_the_friendly_aliases() {
     ]);
     // A section's grammata is its body without the title.
     assert_eq!(
-        values(&m, "//section[::lemma = \"Aftermath\"]::grammata @| [1] | [$_ =~ /^The emus/] @| count"),
+        values(&m, "//section[::lemma = \"Aftermath\"]::grammata @| [1] | [$_ == (/^The emus/)] @| count"),
         vec!["1"]
     );
     // A cell's body is the value without the label fold.
@@ -537,7 +537,7 @@ fn closed_surface_adapters_alias_their_metadata() {
     // An undeclared metadata key stays four-colon only.
     assert_eq!(values(&m, "//section::nonesuch"), vec![""]);
     // Core metadata is never aliased: `::name` is not `:::name`.
-    let names = values(&m, "//section | rec(\"data\", ::name, \"core\", :::name)");
+    let names = values(&m, "//section | %(data = ::name; core = :::name)");
     assert!(names[0].contains("data = null"), "{names:?}");
 }
 
@@ -598,7 +598,7 @@ fn verse_lines_carry_the_citation_coordinate() {
     let m = TextModel::build(vec![Block::Verse {
         lemma: Some("Ode".into()),
         strophes: vec![
-            vec!["Happy the man, whose wish and care".into(),
+            vec!["Happy the man, whose wish && care".into(),
                  "A few paternal acres bound,".into()],
             vec!["Content to breathe his native air,".into(),
                  "In his own ground.".into()],
@@ -617,7 +617,7 @@ fn verse_lines_carry_the_citation_coordinate() {
     // strophes separate with a blank line in the flattened prose
     assert_eq!(
         values(&m, "//verse::"),
-        ["Ode\nHappy the man, whose wish and care\nA few paternal acres bound,\n\nContent to breathe his native air,\nIn his own ground."]
+        ["Ode\nHappy the man, whose wish && care\nA few paternal acres bound,\n\nContent to breathe his native air,\nIn his own ground."]
     );
     // sub-block structure: only the verse block carries <block>
     assert_eq!(values(&m, "//verse<block> @| count"), ["1"]);

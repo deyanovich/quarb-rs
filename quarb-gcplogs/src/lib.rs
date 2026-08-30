@@ -824,9 +824,9 @@ mod tests {
             vec!["cache miss", "handling /pay for o-77", "payment failed"]
         );
         // Severity as text, trait, and ordered metadata rank.
-        assert_eq!(run("/entry[::severity = 'ERROR']::insertId"), vec!["e2"]);
+        assert_eq!(run("/entry[::severity = \"ERROR\"]::insertId"), vec!["e2"]);
         assert_eq!(run("/entry<error>::insertId"), vec!["e2"]);
-        assert_eq!(run("/entry[;;;severity >= 400] @| count"), vec!["2"]);
+        assert_eq!(run("/entry[::::severity >= 400] @| count"), vec!["2"]);
         // The instant is typed: calendar comparison works.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
         // Short log ids, URL-decoded.
@@ -875,8 +875,8 @@ mod tests {
     fn trace_join_reconstructs_a_request() {
         let a = GclAdapter::from_json("demo", &fixture(), true);
         let got = match quarb::run(
-            "/entry<error> <=> /entry<info>[::trace = $$::trace] \
-             | rec(\"failed\", ::, \"upstream\", $*1::)",
+            "/entry<error> <=> /entry<info>[::trace = _::trace] \
+             | %(failed = ::; upstream = $$1::)",
             &a,
         )
         .unwrap()
@@ -886,7 +886,7 @@ mod tests {
         };
         assert_eq!(
             got,
-            vec!["%(failed = 'payment failed'; upstream = 'handling /pay for o-77')"]
+            vec!["%(failed = \"payment failed\"; upstream = \"handling /pay for o-77\")"]
         );
     }
 }

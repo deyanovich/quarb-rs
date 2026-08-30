@@ -20,7 +20,7 @@ fn head_desugars_to_root_anchor() {
     // The head and its spelled-out form canonicalize identically.
     assert_eq!(canon("= 2 + 2"), canon("^ | (2 + 2)"));
     // Pipe from the head — stages compose.
-    canon("= 2 + 2 | rec(\"answer\", $_)");
+    canon("= 2 + 2 | %(answer = $_)");
     // Parenthesized sub-expressions stay ordinary operands.
     canon("= (2 + 2) * 3");
     // An aggregate over the one-row stream.
@@ -47,7 +47,7 @@ fn parens_keep_their_navigational_meanings() {
     canon("(/a|/b)");
     canon("(/a/(x.rs|y.txt)|/b/z.rs)");
     // (mark anchors print in double parentheses since ruling #43)
-    assert_eq!(canon("/a.m | (m)/address"), "/a.m | ((m))/address");
+    assert_eq!(canon("/a.m | $$.m/address"), "/a.m | $$.m/address");
     assert!(refuse("(|/a)").contains("at least one hop"));
 }
 
@@ -55,7 +55,7 @@ fn parens_keep_their_navigational_meanings() {
 fn calculator_detection() {
     // Expression heads and the lone root anchor qualify.
     assert!(is_calculator("= 2 + 2"));
-    assert!(is_calculator("= 2 + 2 | rec(\"x\", $_)"));
+    assert!(is_calculator("= 2 + 2 | %(x = $_)"));
     assert!(is_calculator("^ | count"));
     assert!(is_calculator("def &four: = 2 + 2; &four"));
     // Anything that navigates does not.

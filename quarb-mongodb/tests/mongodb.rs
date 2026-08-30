@@ -5,7 +5,7 @@
 use quarb_mongodb::MongodbAdapter;
 
 #[test]
-#[ignore = "needs QUARB_MONGODB and a live server"]
+#[ignore = "needs QUARB_MONGODB && a live server"]
 fn native_references() {
     let Ok(t) = std::env::var("QUARB_MONGODB") else {
         return;
@@ -16,7 +16,7 @@ fn native_references() {
         quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| a.locator(n)).collect(),
     };
     assert_eq!(v("/tracks/* @| count"), ["3"]);
-    assert_eq!(v("/tracks/mars::album~>::artist~>::name"), ["Holst"]);
+    assert_eq!(v("/tracks/mars::album-->::artist-->::name"), ["Holst"]);
     assert_eq!(v("/tracks/venus->album::title"), ["The Planets"]);
     assert_eq!(v("/tracks/*[::price < 1] @| count"), ["2"]);
 }

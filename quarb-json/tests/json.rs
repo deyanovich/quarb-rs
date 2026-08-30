@@ -156,18 +156,18 @@ fn resolve_json_ref() {
     };
 
     // follow the $ref, then read a field of the target
-    assert_eq!(vals("//home::'$ref'~>/city::"), vec!["London"]);
-    assert_eq!(vals("//home::'$ref'~>/zip::"), vec!["SW1"]);
+    assert_eq!(vals("//home::\"$ref\"-->/city::"), vec!["London"]);
+    assert_eq!(vals("//home::\"$ref\"-->/zip::"), vec!["SW1"]);
     // the resolution lands on the definitions/address node
-    assert_eq!(vals("//home::'$ref'~>"), vec!["/definitions/address"]);
+    assert_eq!(vals("//home::\"$ref\"-->"), vec!["/definitions/address"]);
 }
 
 #[test]
 fn metadata_and_aggregation() {
-    assert_eq!(values("/users;;;length"), vec!["2"]);
-    assert_eq!(values("/users/0/name;;;type"), vec!["string"]);
+    assert_eq!(values("/users::::length"), vec!["2"]);
+    assert_eq!(values("/users/0/name::::type"), vec!["string"]);
     // total age across users
-    assert_eq!(values("/users/*/age;;;type"), vec!["number", "number"]);
+    assert_eq!(values("/users/*/age::::type"), vec!["number", "number"]);
     assert_eq!(values("/users/*/age:: @| sum"), vec!["47"]);
 }
 
@@ -194,11 +194,11 @@ fn correlated_join_navigates_from_context() {
         quarb::QueryResult::Nodes(_) => panic!("expected values"),
     };
     let join = "/orders/* <=> /users/*\
-        [/id:: = $$/uid:: and $$/amount:: > /limit::] | /amount::";
+        [/id:: = _/uid:: && _/amount:: > /limit::] | /amount::";
     assert_eq!(vals(join), vec!["200"]);
     // stacked brackets share the binding, so identical result
     let stacked = "/orders/* <=> /users/*\
-        [/id:: = $$/uid::][$$/amount:: > /limit::] | /amount::";
+        [/id:: = _/uid::][_/amount:: > /limit::] | /amount::";
     assert_eq!(vals(stacked), vec!["200"]);
 }
 
@@ -226,7 +226,7 @@ fn join_projection() {
                   "orders": [{"uid": 1, "amt": 30}, {"uid": 2, "amt": 45}, {"uid": 1, "amt": 99}]}"#;
     let adapter = JsonAdapter::parse(doc).unwrap();
     let got = match quarb::run(
-        "/orders/* <=> /users/*[/id:: = $$/uid::] | rec(\"who\", $*1/name::, \"amt\", /amt::)",
+        "/orders/* <=> /users/*[/id:: = _/uid::] | %(who = $$1/name::; amt = /amt::)",
         &adapter,
     )
     .unwrap()
@@ -237,9 +237,9 @@ fn join_projection() {
     assert_eq!(
         got,
         vec![
-            "%(who = 'Ada'; amt = 30)",
-            "%(who = 'Bo'; amt = 45)",
-            "%(who = 'Ada'; amt = 99)"
+            "%(who = \"Ada\"; amt = 30)",
+            "%(who = \"Bo\"; amt = 45)",
+            "%(who = \"Ada\"; amt = 99)"
         ]
     );
 }

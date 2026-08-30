@@ -1200,7 +1200,7 @@ impl Exporter {
                             .replace('\'', "''");
                         format!("{l} LIKE '%{pat}%' ESCAPE '\\'")
                     }
-                    "=~" | "!~" => {
+                    "==" | "!==" | "=~" | "!~" => {
                         return Err(SqlError::Semantics(
                             "regex matching means a different REGEXP engine per \
                              backend; regexes run engine-side"
@@ -1904,7 +1904,7 @@ mod null_and_literal_tests {
         // metacharacters escaped. Strict push only where LIKE is
         // provably case-sensitive (PostgreSQL); everywhere else the
         // pattern rides the scan.
-        let q = "/users/*[::name = 'app-'*]::id";
+        let q = "/users/*[::name == 'app-'*]::id";
         let p = pushdown(q, Some(Dialect::Postgres)).unwrap();
         assert_eq!(
             p.sql,
@@ -1913,16 +1913,16 @@ mod null_and_literal_tests {
         assert!(pushdown(q, Some(Dialect::Sqlite)).is_none());
         assert!(pushdown(q, Some(Dialect::MySql)).is_none());
         // contains and multi-segment shapes
-        let p = pushdown("/users/*[::name = *'web'*]::id", Some(Dialect::Postgres)).unwrap();
+        let p = pushdown("/users/*[::name == *'web'*]::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
-        let p = pushdown("/users/*[::name = *'a'*'.gz']::id", Some(Dialect::Postgres)).unwrap();
+        let p = pushdown("/users/*[::name == *'a'*'.gz']::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%a%.gz'"), "{}", p.sql);
         // LIKE metacharacters in a segment are escaped
-        let p = pushdown("/users/*[::name = *'50%_x'*]::id", Some(Dialect::Postgres)).unwrap();
+        let p = pushdown("/users/*[::name == *'50%_x'*]::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%50\\%\\_x%'"), "{}", p.sql);
         // `!=` with a pattern rides the scan
         assert!(
-            pushdown("/users/*[::name != *'web'*]::id", Some(Dialect::Postgres)).is_none()
+            pushdown("/users/*[::name !== *'web'*]::id", Some(Dialect::Postgres)).is_none()
         );
         // the `*=` alias gains the same PostgreSQL rung
         let p = pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Postgres)).unwrap();

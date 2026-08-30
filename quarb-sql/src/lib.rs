@@ -20,7 +20,7 @@
 //! - `JOIN t2 ON t2.b = t1.a` → correlation (driver-first): `/t1/*
 //!   <=> /t2/*[::b = $$::a]` — the FROM table drives, the ON rides
 //!   the joined expression — with the joined side's select columns
-//!   projected through the witness (`$*1::col`).
+//!   projected through the witness (`$$1::col`).
 //! - `ORDER BY` → `@| sort_by(…)` (`DESC` via `@| reverse`, or a
 //!   numeric `-` key when mixed); `LIMIT n` → `@| [..n]`.
 //!
@@ -484,14 +484,14 @@ impl Parser {
 
 /// The tables in scope: (name, alias). The first is the FROM table
 /// — the driver under driver-first correlation; the second the
-/// JOIN table, whose witness the pipeline reads as `$*1`.
+/// JOIN table, whose witness the pipeline reads as `$$1`.
 struct Scope {
     from: (String, Option<String>),
     join: Option<(String, Option<String>)>,
     /// Whether operands are being emitted inside the joined
     /// expression's ON bracket (driver = `$$::col`, joined side
     /// bare) rather than in pipeline position (driver bare,
-    /// joined side = `$*1::col`).
+    /// joined side = `$$1::col`).
     on_clause: bool,
 }
 
@@ -523,15 +523,15 @@ impl Scope {
 
     /// The operand for `col`. In pipeline position the driver's
     /// columns are bare and the joined table's ride its witness
-    /// (`$*1::col`); inside the ON bracket the joined table's are
+    /// (`$$1::col`); inside the ON bracket the joined table's are
     /// bare and the driver is reached as `$$::col`.
     fn operand(&self, col: &ColRef) -> Result<String, SqlError> {
         let key = quarb_key(&col.column)?;
         Ok(match (self.join.is_some(), self.on_clause) {
             (false, _) => format!("::{key}"),
             (true, false) if self.is_left(col)? => format!("::{key}"),
-            (true, false) => format!("$*1::{key}"),
-            (true, true) if self.is_left(col)? => format!("$$::{key}"),
+            (true, false) => format!("$$1::{key}"),
+            (true, true) if self.is_left(col)? => format!("_::{key}"),
             (true, true) => format!("::{key}"),
         })
     }
@@ -621,10 +621,10 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
             );
             let esc = regex_escape(inner);
             match (pat.starts_with('%'), pat.ends_with('%')) {
-                (true, true) => format!("{lhs} =~ /(?i){esc}/"),
-                (false, true) => format!("{lhs} =~ /(?i)^{esc}/"),
-                (true, false) => format!("{lhs} =~ /(?i){esc}$/"),
-                (false, false) => format!("{lhs} =~ /(?i)^{esc}$/"),
+                (true, true) => format!("{lhs} == (/(?i){esc}/)"),
+                (false, true) => format!("{lhs} == (/(?i)^{esc}/)"),
+                (true, false) => format!("{lhs} == (/(?i){esc}$/)"),
+                (false, false) => format!("{lhs} == (/(?i)^{esc}$/)"),
             }
         }
         Cond::IsNull(col, is_null) => {
@@ -645,10 +645,10 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
                 .iter()
                 .map(|s| Ok(format!("{lhs} = {}", scalar_text(s, scope)?)))
                 .collect::<Result<_, SqlError>>()?;
-            format!("({})", parts.join(" or "))
+            format!("({})", parts.join(" || "))
         }
         Cond::And(a, b) => format!(
-            "{} and {}",
+            "{} && {}",
             emit_cond(a, scope, notes)?,
             emit_cond(b, scope, notes)?
         ),
@@ -657,7 +657,7 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
             emit_cond(a, scope, notes)?,
             emit_cond(b, scope, notes)?
         ),
-        Cond::Not(a) => format!("not ({})", emit_cond(a, scope, notes)?),
+        Cond::Not(a) => format!("!({})", emit_cond(a, scope, notes)?),
     })
 }
 
@@ -837,7 +837,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let (left_col, right_col) = if scope.is_left(l)? { (l, r) } else { (r, l) };
         write!(
             q,
-            "/{}/* <=> /{}/*[::{} = $$::{}",
+            "/{}/* <=> /{}/*[::{} = _::{}",
             quarb_key(&from_table)?,
             quarb_key(jt)?,
             quarb_key(&right_col.column)?,
@@ -845,7 +845,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         )
         .unwrap();
         if let Some(w) = &where_cond {
-            write!(q, " and {}", emit_cond(w, &scope.on(), &mut notes)?).unwrap();
+            write!(q, " && {}", emit_cond(w, &scope.on(), &mut notes)?).unwrap();
         }
         q.push(']');
         notes.push(
@@ -1006,16 +1006,16 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                     SelectItem::Col(c, alias) => {
                         let op = scope.operand(c)?;
                         match alias {
-                            Some(a) => fields.push(format!("{}, {op}", quarb_str(a))),
+                            Some(a) => fields.push(format!("{} = {op}", quarb_str(a))),
                             // The witness side names its field with
                             // the SQL qualifier, so two-sided select
                             // lists keep distinct keys.
-                            None if op.starts_with("$*") => {
+                            None if op.starts_with("$$") && op[2..].starts_with(|c: char| c.is_ascii_digit()) => {
                                 let name = match &c.table {
                                     Some(t) => format!("{t}.{}", c.column),
                                     None => c.column.clone(),
                                 };
-                                fields.push(format!("{}, {op}", quarb_str(&name)));
+                                fields.push(format!("{} = {op}", quarb_str(&name)));
                             }
                             None => fields.push(op),
                         }
@@ -1023,7 +1023,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                     SelectItem::Agg(..) => unreachable!("handled above"),
                 }
             }
-            write!(q, " | rec({})", fields.join(", ")).unwrap();
+            write!(q, " | %({})", fields.join("; ")).unwrap();
             notes.push("the result streams as records (JSONL), not a table".to_string());
         }
         return Ok(Translation { query: q, notes });

@@ -32,8 +32,8 @@ fn live_sparql() {
 
     // rdf:type plays the tables; the listing is complete.
     assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person;;;complete"), ["true"]);
-    assert_eq!(values(&a, "/Person;;;n-rows"), ["2"]);
+    assert_eq!(values(&a, "/Person::::complete"), ["true"]);
+    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
 
     // ?key=rdfs:label names resources; typed literals answer as
     // properties.
@@ -58,7 +58,7 @@ fn live_sparql() {
 
     // The full IRI rides the metadata channel.
     assert_eq!(
-        values(&a, "/Person/Ada;;;iri"),
+        values(&a, "/Person/Ada::::iri"),
         ["http://example.org/ada"]
     );
 }

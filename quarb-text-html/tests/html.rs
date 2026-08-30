@@ -224,7 +224,7 @@ fn definition_lists_mount_as_lemma_items() {
     // Two dds fold into the one item, space-joined like li text;
     // the lemma joins inline.
     assert_eq!(
-        vals(&m, "//unordered-item[::lemma =~ /Lewis/]::"),
+        vals(&m, "//unordered-item[::lemma == (/Lewis/)]::"),
         vec!["Lewis gun, Machine gun: The army's contribution. Mounted on a truck."]
     );
 }

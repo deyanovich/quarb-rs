@@ -29,7 +29,7 @@ const OPERATORS: &[&str] = &[
     ".неболее.", ".неменее.", ".менее.", ".более.", ".nonmaior.", ".nonminor.", ".minor.", ".maior.",
     ".nonsup.", ".noninf.", ".inf.", ".sup.", "(())", "((_))", "(_)", "(.)", "(*.)", "(*-)", "(*)", "(-)",
     ",__", "*__", "__", ":=:?", ":=:", "%+", ":",
-    "::::", ";;;", ";;-", ":::", "::;", "::", ":--", ":-", "--:", "-:", "-;;", "-;", ";-", "(?", "(:", "(;", "<=>?", "<=>", "-->", "<--", "~>", "<~", "->", "<-", "--", "@|", "&&", "||", "=~", "?=",
+    "::::", ";;;", ";;-", ":::", "::;", "::", ":--", ":-", "--:", "-:", "-;;", "-;", ";-", "(?", "(:", "(;", "(+", "<=>?", "<=>", "-->", "<--", "~>", "<~", "->", "<-", "--", "@|", "&&", "||", "!==", "==", "=~", "!~", "?=",
     ">=", "<=", "!=", "*=", "|", "!", "=", "<", ">", "+", "{", "}", "?", "(", ")", "[", "]", ",",
 ];
 
@@ -322,7 +322,7 @@ mod tests {
         for q in [
             "/books/*[/price:: > 20]/title::",
             "/@hosts/*[::draw > 0.2kW]::name",
-            "/a/* <=> /b/*[::k = $*1::k] | rec(\"x\", ::v)",
+            "/a/* <=> /b/*[::k = $$1::k] | %(x = ::v)",
             "//function_item @| count | .n | %.",
         ] {
             assert_eq!(strip(&highlight_ansi(q)), q, "round-trip: {q}");
@@ -331,10 +331,9 @@ mod tests {
 
     #[test]
     fn colors_the_right_tokens() {
-        let h = highlight_ansi("/x/* | rec(\"a\", ::v) @| count");
-        assert!(h.contains(&format!("{KEYWORD}rec{RESET}")));
+        let h = highlight_ansi("/x/* | %(a = \"s\") @| count");
         assert!(h.contains(&format!("{KEYWORD}count{RESET}")));
-        assert!(h.contains(&format!("{STRING}\"a\"{RESET}")));
+        assert!(h.contains(&format!("{STRING}\"s\"{RESET}")));
         assert!(h.contains(&format!("{PATH}/{RESET}")));
         // A unit literal colors whole.
         let u = highlight_ansi("[::draw > 0.2kW]");
@@ -345,9 +344,8 @@ mod tests {
 
     #[test]
     fn html_escapes_and_wraps() {
-        let h = highlight_html("/a/*[::v > 1] | rec(\"x\", ::v)");
+        let h = highlight_html("/a/*[::v > 1] | %(x = \"x\")");
         assert!(h.contains("<span class=\"qh-path\">/</span>"));
-        assert!(h.contains("<span class=\"qh-keyword\">rec</span>"));
         assert!(h.contains("<span class=\"qh-operator\">&gt;</span>"));
         // Strip tags and unescape → the original source.
         assert!(h.contains("<span class=\"qh-string\">&quot;x&quot;</span>"));

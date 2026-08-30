@@ -7,10 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-quarb-text = { path = "../quarb-text", version = "0.26.0" }
+quarb-text = { path = "../quarb-text", version = "0.27.0" }
 atrep = { version = "0.3.0", default-features = false }
 thiserror = "2"
 quick-xml = "0.37"
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.26.0" }
+quarb = { path = "../quarb", version = "0.27.0" }

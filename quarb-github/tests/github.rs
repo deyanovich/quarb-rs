@@ -82,7 +82,7 @@ fn mock_github() {
     // `parent`; the adapter refetches the full repo) — as a
     // property and as a reference.
     assert_eq!(v("/ada/*<fork>::parent"), ["tesslab/kettle"]);
-    assert_eq!(v("/ada/fork-of-kettle::parent~>::owner"), ["tesslab"]);
+    assert_eq!(v("/ada/fork-of-kettle::parent-->::owner"), ["tesslab"]);
 
     // The contributor edge carries data.
     assert_eq!(
@@ -93,7 +93,7 @@ fn mock_github() {
     // Issue references: author and assignee edges.
     assert_eq!(v("/ada/boiler/issues/1->author::login"), ["grace"]);
     assert_eq!(v("/ada/boiler/issues/1->assignee::login"), ["ada"]);
-    assert_eq!(v("/ada/boiler/issues/1::author~>::bio"), ["compiler pioneer"]);
+    assert_eq!(v("/ada/boiler/issues/1::author-->::bio"), ["compiler pioneer"]);
 
     // Instants and bodies.
     assert_eq!(v("/ada/*[::created > 2015-01-01] @| count"), ["2"]);

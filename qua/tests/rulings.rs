@@ -27,18 +27,18 @@ fn values(q: &str) -> Vec<String> {
 
 #[test]
 fn pattern_literals_match() {
-    assert_eq!(values(r#"/items/*[::name = *"web"*]::name"#), ["app-web"]);
-    assert_eq!(values(r#"/items/*[::name = "app"*]::name"#), ["app-web"]);
-    assert_eq!(values(r#"/items/*[::name = *".gz"]::name"#), ["data.gz"]);
+    assert_eq!(values(r#"/items/*[::name == *"web"*]::name"#), ["app-web"]);
+    assert_eq!(values(r#"/items/*[::name == "app"*]::name"#), ["app-web"]);
+    assert_eq!(values(r#"/items/*[::name == *".gz"]::name"#), ["data.gz"]);
     assert_eq!(
-        values(r#"/items/*[::name = "app"*"web"]::name"#),
+        values(r#"/items/*[::name == "app"*"web"]::name"#),
         ["app-web"]
     );
     // the quoted text is literal — a data star needs no escape
-    assert_eq!(values(r#"/items/*[::name = *"a*b"*]::name"#), ["a*b!"]);
+    assert_eq!(values(r#"/items/*[::name == *"a*b"*]::name"#), ["a*b!"]);
     // `!=` keeps the holes, shape-identical to the plain `!=`
     assert_eq!(
-        values(r#"/items/*[::name != *"zzz"*] @| count"#),
+        values(r#"/items/*[::name !== *"zzz"*] @| count"#),
         values(r#"/items/*[::name != "zzz"] @| count"#),
     );
 }
@@ -58,7 +58,7 @@ fn strict_hole_refuses() {
 #[test]
 fn default_hole_coalesces() {
     assert_eq!(
-        values(r#"= "got ${/items/0::missing:-'n/a'}""#),
+        values(r#"= "got ${/items/0::missing:-"n/a"}""#),
         ["got n/a"]
     );
     // the fallback is a full value expression
@@ -66,7 +66,7 @@ fn default_hole_coalesces() {
         values(r#"= "got ${/items/0::missing:-/items/1::name}""#),
         ["got data.gz"]
     );
-    assert_eq!(values(r#"= "got ${/items/0::name:-'n/a'}""#), ["got app-web"]);
+    assert_eq!(values(r#"= "got ${/items/0::name:-"n/a"}""#), ["got app-web"]);
 }
 
 #[test]
@@ -88,21 +88,21 @@ fn record_sigil_builds_and_enriches() {
     // constructor == rec, explicit and auto-named fields
     assert_eq!(
         values(r#"/items/0 | %("n", ::name, ::name)"#),
-        ["%(n = 'app-web'; name = 'app-web')"]
+        ["%(n = \"app-web\"; name = \"app-web\")"]
     );
     assert_eq!(
-        values(r#"/items/0 | rec("n", ::name)"#),
+        values(r#"/items/0 | %("n"; ::name)"#),
         values(r#"/items/0 | %("n", ::name)"#)
     );
     // enrichment: register fields first, args after
     assert_eq!(
         values(r#"/items/0 | .n(::name) | %%("upper", (::name | upper))"#),
-        ["%(n = 'app-web'; upper = 'APP-WEB')"]
+        ["%(n = \"app-web\"; upper = \"APP-WEB\")"]
     );
     // an arg overrides the register field sharing its name
     assert_eq!(
-        values(r#"/items/0 | .n(::name) | %%("n", 'won')"#),
-        ["%(n = 'won')"]
+        values(r#"/items/0 | .n(::name) | %%("n", "won")"#),
+        ["%(n = \"won\")"]
     );
 }
 

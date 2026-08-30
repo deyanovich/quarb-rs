@@ -123,13 +123,13 @@ fn bottled_cosmos() {
     assert_eq!(values(&a, "/orders/o-1/lines/*::sku"), ["tea", "cup"]);
     assert_eq!(values(&a, "/customers/ada/* @| count"), ["3"]);
     // …but surface as metadata
-    assert_eq!(values(&a, "/customers/ada;;;ts"), ["1753380000"]);
+    assert_eq!(values(&a, "/customers/ada::::ts"), ["1753380000"]);
     // hinted and hint-less resolution, via the id query
     assert_eq!(
-        values(&a, "/orders/o-1::customer_id~>customers::tier"),
+        values(&a, "/orders/o-1::customer_id-->customers::tier"),
         ["gold"]
     );
-    assert_eq!(values(&a, "/orders/o-1::customer_id~>::name"), ["Ada"]);
+    assert_eq!(values(&a, "/orders/o-1::customer_id-->::name"), ["Ada"]);
     drop(a);
     drop(handle);
 }

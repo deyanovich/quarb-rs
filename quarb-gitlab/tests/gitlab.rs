@@ -78,7 +78,7 @@ fn mock_gitlab() {
     assert_eq!(v("/tesslab/kettle/pipelines/902::ref"), ["valve"]);
 
     // The file tree; content is the value.
-    assert_eq!(v("/tesslab/kettle/files/src/main.rs;;;path"), [
+    assert_eq!(v("/tesslab/kettle/files/src/main.rs::::path"), [
         "/tesslab/kettle/files/src/main.rs"
     ]);
     assert_eq!(v("/tesslab/kettle/files/README.md::"), [
@@ -97,7 +97,7 @@ fn mock_gitlab() {
 
     // Forks: parent property, reference, and backlinks.
     assert_eq!(v("/ada/*<fork>::parent"), ["tesslab/kettle"]);
-    assert_eq!(v("/ada/kettle::parent~>::stars"), ["128"]);
+    assert_eq!(v("/ada/kettle::parent-->::stars"), ["128"]);
     assert_eq!(v("/tesslab/kettle<-parent"), ["/ada/kettle"]);
 
     // Instants.

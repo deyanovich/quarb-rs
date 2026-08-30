@@ -35,11 +35,11 @@ fn live_kafka() {
 
     // Topics list, internal ones hidden.
     assert_eq!(values(&a, "/*:::name"), ["events", "logs", "users"]);
-    assert_eq!(values(&a, "/events;;;partitions"), ["2"]);
+    assert_eq!(values(&a, "/events::::partitions"), ["2"]);
 
     // The bounded window sees every message, across partitions.
     assert_eq!(values(&a, "/events/* @| count"), ["5"]);
-    let mut keys = values(&a, "/events/*;;;key");
+    let mut keys = values(&a, "/events/*::::key");
     keys.sort();
     assert_eq!(keys, ["e1", "e2", "e3", "e4", "e5"]);
 
@@ -56,7 +56,7 @@ fn live_kafka() {
 
     // Record timestamps are typed instants.
     assert_eq!(
-        values(&a, "/events/*[;;;ts > 2020-01-01] @| count"),
+        values(&a, "/events/*[::::ts > 2020-01-01] @| count"),
         ["5"]
     );
 
@@ -68,12 +68,12 @@ fn live_kafka() {
     // The stream-table join: resolve lands on the LATEST message
     // with the key — the compacted topic's current row.
     assert_eq!(
-        values(&a, "/events/'e3'::user_id~>users::name"),
+        values(&a, "/events/'e3'::user_id-->users::name"),
         ["Bo"]
     );
-    assert_eq!(values(&a, "/events/'e2'::user_id~>users::tier"), ["gold"]);
+    assert_eq!(values(&a, "/events/'e2'::user_id-->users::tier"), ["gold"]);
     // Hint-less: user_id → the `users` topic by convention.
-    assert_eq!(values(&a, "/events/'e2'::user_id~>::name"), ["Ada"]);
+    assert_eq!(values(&a, "/events/'e2'::user_id-->::name"), ["Ada"]);
 
     // Plain-text payloads stay leaf values.
     assert_eq!(values(&a, "/logs/* @| count"), ["3"]);

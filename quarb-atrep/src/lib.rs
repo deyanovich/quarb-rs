@@ -1209,7 +1209,7 @@ Beta @*text*@ and a dangling @>(ghost).
 @\"\"strange loops\"\"@.said
 
 @@@=
-Happy the man, whose wish and care
+Happy the man, whose wish && care
 A few paternal acres bound
 =@@@
 

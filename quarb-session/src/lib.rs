@@ -149,7 +149,7 @@ mod mount_spec_tests {
             "name=",
         ] {
             let spec = MountSpec::parse(arg);
-            assert!(spec.name.is_none(), "{arg} should not split");
+            assert!(spec.name.is_none(), "{arg} should !split");
             assert_eq!(spec.path.to_str(), Some(arg));
         }
     }

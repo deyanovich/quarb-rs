@@ -365,6 +365,7 @@ fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
         Stage::Push(_)
         | Stage::ExprPush { .. }
         | Stage::RecordPush { .. }
+        | Stage::FieldsPush
         | Stage::Subcontext { .. } => PipeMode::Nav,
         Stage::Filter(_) | Stage::Select(_) => cur,
         Stage::Func(_)
@@ -444,6 +445,12 @@ impl Parser<'_> {
     /// fragment may name a whole join).
     fn parse_chain(&mut self) -> Result<Query> {
         let mut query = self.parse_query()?;
+        // The join binds where it is written: after the driver's
+        // stages parsed so far (a spliced chain-carrying fragment
+        // brought its own position along).
+        if matches!(self.peek(), Some(Token::Correlate)) && query.correlations.is_empty() {
+            query.join_at = query.pipeline.len();
+        }
         while matches!(self.peek(), Some(Token::Correlate)) {
             self.pos += 1;
             // `<=>?` — the outer marker flags the expression it
@@ -486,8 +493,11 @@ impl Parser<'_> {
         let mut branches = Vec::new();
         let mut pipeline = Vec::new();
         let mut correlations = Vec::new();
-        self.union_element(&mut branches, &mut pipeline, &mut correlations)?;
-        while matches!(self.peek(), Some(Token::PipePipe)) {
+        let mut join_at = 0usize;
+        self.union_element(&mut branches, &mut pipeline, &mut correlations, &mut join_at)?;
+        // `||` or its word (`.or.`, the family's spellings): the
+        // rounding follows the glyph, not the position.
+        while matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
             if !pipeline.is_empty() || !correlations.is_empty() {
                 return Err(QuarbError::Parse(
                     "a fragment carrying a pipeline or a correlation must \
@@ -496,7 +506,7 @@ impl Parser<'_> {
                 ));
             }
             self.pos += 1;
-            self.union_element(&mut branches, &mut pipeline, &mut correlations)?;
+            self.union_element(&mut branches, &mut pipeline, &mut correlations, &mut join_at)?;
         }
 
         // Pipeline over the whole union. The entering mode is
@@ -517,6 +527,7 @@ impl Parser<'_> {
             outer: false,
             branches,
             pipeline,
+            join_at,
         })
     }
 
@@ -527,6 +538,7 @@ impl Parser<'_> {
         branches: &mut Vec<Branch>,
         pipeline: &mut Vec<Stage>,
         correlations: &mut Vec<Query>,
+        join_at: &mut usize,
     ) -> Result<()> {
         // The expression head: a query may open with `= expr`
         // instead of navigation — `= 2 + 2`, `= 1900-01-01 |
@@ -551,7 +563,7 @@ impl Parser<'_> {
                 anchor: Anchor::Root,
             });
             pipeline.push(Stage::Expr(expr));
-            if matches!(self.peek(), Some(Token::PipePipe)) {
+            if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
                 return Err(QuarbError::Parse(
                     "an expression head stands alone; it cannot join a \
                      union — pipe from it instead: '= expr | …'"
@@ -602,6 +614,9 @@ impl Parser<'_> {
                 ));
             }
             branches.extend(q.branches);
+            if !q.correlations.is_empty() {
+                *join_at = pipeline.len() + q.join_at;
+            }
             pipeline.extend(q.pipeline);
             correlations.extend(q.correlations);
             if matches!(self.peek(), Some(Token::LBracket)) {
@@ -837,6 +852,9 @@ impl Parser<'_> {
             // them are value expressions; a plain recall is just the
             // single-operand case.
             Some(Token::Dollar) => Ok(Stage::Expr(self.additive()?)),
+            // `| _::prop` / `| _/kid::x` — the served node as the
+            // stage's expression.
+            Some(Token::Driver) => Ok(Stage::Expr(self.additive()?)),
             // `| :name` — the topic record's field; `| %+` — the
             // named-captures record (ruling #48).
             Some(Token::Field | Token::PercentPlus) => Ok(Stage::Expr(self.additive()?)),
@@ -941,11 +959,33 @@ impl Parser<'_> {
             }) if text.starts_with('.') => {
                 let text = text.clone();
                 self.pos += 1;
-                let name = if text == "." {
+                let mut name = if text == "." {
                     None
                 } else {
                     Some(text[1..].to_string())
                 };
+                // A push name is an identifier — it starts with a
+                // letter — or a quoted string glued to the dot
+                // (`."3"(…)`, the data-driven names a pivot writes).
+                if name.is_none()
+                    && let Some(Token::Name {
+                        text: q,
+                        quoted: true,
+                        glued: true,
+                    }) = self.peek()
+                {
+                    name = Some(q.clone());
+                    self.pos += 1;
+                }
+                if let Some(n) = &name
+                    && text.len() > 1
+                    && !n.chars().next().is_some_and(|c| c.is_alphabetic())
+                {
+                    return Err(QuarbError::Parse(format!(
+                        "a push name starts with a letter ('| .name'); quote any other \
+                         ('| .\"{n}\"'), and recall a position with $.N or ((.N))"
+                    )));
+                }
                 // `.%(...)` / `.name%(...)` — the record push
                 // (ruling #49): the constructor's fields, built and
                 // filed in one step; `.%%(...)` the enriched view.
@@ -958,8 +998,15 @@ impl Parser<'_> {
                         false
                     };
                     if !matches!(self.peek(), Some(Token::LParen)) {
+                        // The bare `.%` is the fields push: the topic
+                        // record's fields, each filed under its name.
+                        if !enriched && name.is_none() {
+                            return Ok(Stage::FieldsPush);
+                        }
                         return Err(QuarbError::Parse(
-                            "a record push takes its fields: `.%(…)` or `.name%(…)`".into(),
+                            "a record push takes its fields: `.%(…)` or `.name%(…)`; \
+                             the bare `.%` (no name, no parens) spreads the topic record"
+                                .into(),
                         ));
                     }
                     let call = self.record_args()?;
@@ -1000,16 +1047,13 @@ impl Parser<'_> {
                     // In navigation mode a bare push marks; marks
                     // may not take numeric names (positions number
                     // themselves).
-                    if mode == PipeMode::Nav
-                        && name
-                            .as_deref()
-                            .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
-                    {
+                    // A mark named `_N` is reserved: `((_N))` is the
+                    // join's N-th node in the rounded spelling.
+                    if name.as_deref().is_some_and(|n| {
+                        n.len() > 1 && n.starts_with('_') && n[1..].chars().all(|c| c.is_ascii_digit())
+                    }) {
                         return Err(QuarbError::Parse(
-                            "positions number themselves — a mark takes a \
-                             word name ('| .name') or none at all ('| .'); \
-                             recall a position with '(N)'"
-                                .into(),
+                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)".into(),
                         ));
                     }
                     Ok(Stage::Push(name))
@@ -1084,6 +1128,9 @@ impl Parser<'_> {
                 let reducible = crate::stdlib::known_agg(&call.name)
                     && !crate::stdlib::context_only(&call.name);
                 if !crate::stdlib::known_scalar(&call.name) && !reducible {
+                    if let Some(pointer) = retired_function(&call.name) {
+                        return Err(QuarbError::Parse(pointer));
+                    }
                     let hint = if crate::stdlib::context_only(&call.name) {
                         format!(" ('{}' uses '@|')", call.name)
                     } else {
@@ -1126,10 +1173,8 @@ impl Parser<'_> {
         match self.peek() {
             Some(t) if axis(t) => true,
             Some(Token::Caret) => true,
-            Some(Token::LParen) => {
-                self.mark_anchor_ahead()
-                    || self.toks.get(self.pos + 1).is_some_and(axis)
-            }
+            Some(Token::MarkOpen) => self.mark_anchor_ahead(),
+            Some(Token::LParen) => self.toks.get(self.pos + 1).is_some_and(axis),
             _ => false,
         }
     }
@@ -1212,13 +1257,14 @@ impl Parser<'_> {
                     || param == "ordinal"
                     || param.starts_with('.')
                     || param.starts_with('*')
+                    || !param.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
                     return Err(QuarbError::Parse(format!(
                         "parameter name '${param}' collides with a capsa-scope operand"
                     )));
                 }
                 params.push(param);
-                if matches!(self.peek(), Some(Token::Comma)) {
+                if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                     self.pos += 1;
                 } else {
                     break;
@@ -1359,6 +1405,7 @@ impl Parser<'_> {
                     || param == "ordinal"
                     || param.starts_with('.')
                     || param.starts_with('*')
+                    || !param.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
                     return Err(QuarbError::Parse(format!(
                         "parameter name '{param}' collides with a capsa-scope operand"
@@ -1376,7 +1423,7 @@ impl Parser<'_> {
                     break;
                 }
                 params.push(param);
-                if matches!(self.peek(), Some(Token::Comma)) {
+                if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                     self.pos += 1;
                 } else {
                     break;
@@ -1664,7 +1711,7 @@ impl Parser<'_> {
                     // Same relaxation as function arguments: a
                     // conditional argument stands bare.
                     args.push(self.cond_expr()?);
-                    if matches!(self.peek(), Some(Token::Comma)) {
+                    if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                         self.pos += 1;
                     } else {
                         break;
@@ -1938,6 +1985,12 @@ impl Parser<'_> {
             if matches!(tok, Token::Amp) {
                 projection = self.splice_path_fragment(&mut steps, SplicePos::MidPath)?;
                 continue;
+            }
+            // The union word (`.or.` and the family's spellings)
+            // ends the branch as `||` does — a hop named so is
+            // written with its axis or quoted.
+            if self.peek_word(OR_WORDS) {
+                break;
             }
             // `$|` at pipeline level is the map pipe — a stage, not a
             // path step; end the branch so `pipeline_items` sees it.
@@ -2267,6 +2320,27 @@ impl Parser<'_> {
         self.peek_anchor().is_some()
     }
 
+    /// The pointer for the retired single-paren anchor: `(name)`,
+    /// `(N)` followed by a path, or `(@)` / `(@name)` — the value
+    /// side's parentheses on a node. `Err` when the shape is seen.
+    fn refuse_single_paren_anchor(&self) -> Result<()> {
+        if matches!(self.toks.get(self.pos), Some(Token::LParen))
+            && let Some((anchor, _)) = self.anchor_shape()
+        {
+            let spelled = match anchor {
+                Anchor::MarksAll => "((@))".to_string(),
+                Anchor::MarksNamed(n) => format!("((@{n}))"),
+                Anchor::Mark(n) => format!("$$.{n}"),
+                Anchor::MarkIndex(n) => format!("$$.{n}"),
+                _ => "$$.".to_string(),
+            };
+            return Err(QuarbError::Parse(format!(
+                "a mark anchor is a node: write '{spelled}' (single parentheses are the value side)"
+            )));
+        }
+        Ok(())
+    }
+
     /// The mark-anchor lookahead: `(name)` / `(N)` / `(.)` one
     /// mark, `(@)` / `(@name)` the plural. The name and number
     /// interiors require a path continuation after the closing
@@ -2276,9 +2350,15 @@ impl Parser<'_> {
     /// re-seeds a thread from its marks). Returns the anchor and
     /// its token span without consuming.
     fn peek_anchor(&self) -> Option<(Anchor, usize)> {
-        if !matches!(self.toks.get(self.pos), Some(Token::LParen)) {
+        if !matches!(self.toks.get(self.pos), Some(Token::MarkOpen)) {
             return None;
         }
+        self.anchor_shape()
+    }
+
+    /// The anchor interior after an opener at `pos` — shared by the
+    /// live `((…))` lookahead and the retired `(…)` pointer.
+    fn anchor_shape(&self) -> Option<(Anchor, usize)> {
         let continues = |i: usize| {
             matches!(
                 self.toks.get(i),
@@ -2391,6 +2471,9 @@ impl Parser<'_> {
                 ));
             }
         };
+        if let Some(pointer) = retired_function(&name) {
+            return Err(QuarbError::Parse(pointer));
+        }
         let mut args = Vec::new();
         if matches!(self.peek(), Some(Token::LParen)) {
             self.pos += 1;
@@ -2405,9 +2488,9 @@ impl Parser<'_> {
                     } else {
                         args.push(self.func_arg()?);
                     }
-                    if matches!(self.peek(), Some(Token::Comma))
-                        || (convention && matches!(self.peek(), Some(Token::Semi)))
-                    {
+                    // `;` is the argument separator; `,` is sugar
+                    // (spaced, so the decimal comma stays a number).
+                    if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                         self.pos += 1;
                     } else {
                         break;
@@ -2556,18 +2639,29 @@ impl Parser<'_> {
                 || !matches!(self.toks.get(self.pos + 1), Some(Token::LParen)))
         {
             // Bare `.` marks anonymously — the slot is still
-            // `(N)`-addressable, and `(.)`/`(@)` see it.
+            // `((.N))`-addressable, and `$$.`/`((@))` see it. A
+            // mark name is an identifier or a quoted string glued
+            // to the dot, like every push name.
             let name = if text == "." {
-                None
+                match self.toks.get(self.pos + 1) {
+                    Some(Token::Name {
+                        text: q,
+                        quoted: true,
+                        glued: true,
+                    }) => {
+                        let q = q.clone();
+                        self.pos += 1;
+                        Some(q)
+                    }
+                    _ => None,
+                }
             } else {
                 let n = &text[1..];
-                if n.chars().all(|c| c.is_ascii_digit()) {
-                    return Err(QuarbError::Parse(
-                        "positions number themselves — a mark takes a word \
-                         name ('.name') or none at all ('.'); recall a \
-                         position with '(N)'"
-                            .into(),
-                    ));
+                if !n.chars().next().is_some_and(|c| c.is_alphabetic()) {
+                    return Err(QuarbError::Parse(format!(
+                        "a mark name starts with a letter ('.name'); quote any other \
+                         ('.\"{n}\"'), and recall a position with ((.N))"
+                    )));
                 }
                 Some(n.to_string())
             };
@@ -2619,7 +2713,7 @@ impl Parser<'_> {
                 reach: self.reach(),
             }));
         }
-        let matcher = self.matcher()?;
+        let matcher = self.matcher_after(&axis)?;
         let step = self.finish_step(axis, matcher)?;
         // A brace quantifier after a named hop wraps it
         // (`/div{2}` ≡ `(/div){2}`); `+`/`*` are name characters, so
@@ -2711,7 +2805,7 @@ impl Parser<'_> {
             // leading bare name (`/(p|div)` ≡ `(/p|/div)`).
             match self.peek() {
                 Some(Token::Name { .. } | Token::Regex(_)) => {
-                    let matcher = self.matcher()?;
+                    let matcher = self.matcher_after(&axis)?;
                     elems.push(PathElem::Step(self.finish_step(axis.clone(), matcher)?));
                 }
                 _ => {
@@ -2987,8 +3081,22 @@ impl Parser<'_> {
         Ok(Predicate::Expr(expr))
     }
 
+    /// A bare `and` / `or` / `not` where a connective may stand is
+    /// refused with the pointer to the symbol and the dotted word.
+    fn refuse_bare_bool_word(&self) -> Result<()> {
+        if let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+            && let Some((w, sym)) = BARE_BOOL_WORDS.iter().find(|(w, _)| w == text)
+        {
+            return Err(QuarbError::Parse(format!(
+                "the bare word '{w}' is retired: write '{sym}' (or the dotted '.{w}.')"
+            )));
+        }
+        Ok(())
+    }
+
     fn pred_or(&mut self) -> Result<PredExpr> {
         let mut left = self.pred_and()?;
+        self.refuse_bare_bool_word()?;
         while self.eat_word(OR_WORDS)
             || matches!(self.peek(), Some(Token::PipePipe)) && {
                 self.pos += 1;
@@ -2996,6 +3104,7 @@ impl Parser<'_> {
             }
         {
             let right = self.pred_and()?;
+            self.refuse_bare_bool_word()?;
             left = PredExpr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -3016,6 +3125,7 @@ impl Parser<'_> {
     }
 
     fn pred_not(&mut self) -> Result<PredExpr> {
+        self.refuse_bare_bool_word()?;
         self.descend()?;
         let r = self.pred_not_inner();
         self.nest_depth -= 1;
@@ -3036,17 +3146,38 @@ impl Parser<'_> {
     fn pred_primary(&mut self) -> Result<PredExpr> {
         let left = self.additive()?;
         if let Some(op) = self.cmp_op() {
-            // Ruling #44: a regex literal on the right of `=` / `!=`
-            // is a pattern match — `= (/x/)` reads as `=~ (/x/)`, the
-            // pattern doctrine of ruling #33.
-            let op = match (op, self.peek()) {
-                (CmpOp::Eq, Some(Token::Regex(_))) => CmpOp::Match,
-                (CmpOp::Ne, Some(Token::Regex(_))) => CmpOp::NotMatch,
-                (op, _) => op,
-            };
-            if matches!(op, CmpOp::Eq | CmpOp::Ne)
+            // `==` / `!==` are the pattern comparisons: a regex or
+            // pattern literal rides them only. `=` / `!=` are
+            // equality; a literal pattern after them is refused with
+            // the pointer.
+            match (op, self.peek()) {
+                (CmpOp::Eq, Some(Token::Regex(_))) => {
+                    return Err(QuarbError::Parse(
+                        "'= (/…/)' is retired: the pattern comparison is '== (/…/)'".into(),
+                    ));
+                }
+                (CmpOp::Ne, Some(Token::Regex(_))) => {
+                    return Err(QuarbError::Parse(
+                        "'!= (/…/)' is retired: the pattern comparison is '!== (/…/)'".into(),
+                    ));
+                }
+                _ => {}
+            }
+            if matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Match | CmpOp::NotMatch)
                 && let Some(right) = self.pattern_operand()?
             {
+                if matches!(op, CmpOp::Eq | CmpOp::Ne) {
+                    let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
+                    return Err(QuarbError::Parse(format!(
+                        "a pattern literal after '{}' is retired: the pattern comparison is '{eq}' ('{eq} {}')",
+                        cmp_text(op), crate::unparse::operand_text(&right)
+                    )));
+                }
+                let op = match op {
+                    CmpOp::Match => CmpOp::Eq,
+                    CmpOp::NotMatch => CmpOp::Ne,
+                    op => op,
+                };
                 return Ok(PredExpr::Compare(left, op, right));
             }
             let right = self.additive()?;
@@ -3082,7 +3213,7 @@ impl Parser<'_> {
                 return Err(QuarbError::Parse(
                     "a pattern segment must be a literal string — \
                      an interpolated \"${...}\" hole cannot glob; \
-                     use =~ for a dynamic pattern"
+                     use == with a path for a dynamic pattern"
                         .into(),
                 ));
             }
@@ -3254,13 +3385,13 @@ impl Parser<'_> {
             self.pos += 1;
             return Ok(Operand::Neg(Box::new(self.unary()?)));
         }
+        if matches!(self.peek(), Some(Token::MarkOpen)) {
+            // `$$.name` followed by a path continuation is the mark
+            // anchor — dispatch before the group readings claim it.
+            return self.operand();
+        }
         if matches!(self.peek(), Some(Token::LParen)) {
-            // `(name)` followed by a path continuation is the mark
-            // anchor — dispatch before the group readings claim the
-            // paren.
-            if self.mark_anchor_ahead() {
-                return self.operand();
-            }
+            self.refuse_single_paren_anchor()?;
             // A `(` here may open a path-pattern group (`[(->ref)+]`)
             // or a boolean/value group (`(::a or ::b)`). Try the path
             // reading first and back off on failure — a bare `(path)`
@@ -3408,6 +3539,7 @@ impl Parser<'_> {
                 Stage::Push(_)
                     | Stage::ExprPush { .. }
                     | Stage::RecordPush { .. }
+                    | Stage::FieldsPush
                     | Stage::Subcontext { .. }
                     | Stage::Nav(_)
             ) {
@@ -3434,6 +3566,7 @@ impl Parser<'_> {
             Stage::Push(_)
             | Stage::ExprPush { .. }
             | Stage::RecordPush { .. }
+            | Stage::FieldsPush
             | Stage::Subcontext { .. } => {
                 Err(QuarbError::Parse(
                     "a pipe inside an expression transforms a value; \
@@ -3671,73 +3804,6 @@ impl Parser<'_> {
         Ok(expr)
     }
 
-    /// Parse a `$$…` outer-scope operand: consume the extra `$`s,
-    /// parse the plain `$`-form, and wrap one `Outer` per extra
-    /// sigil. Only capsa-scope operands step out; the reserved
-    /// context-history accessor `$$*` is refused by name.
-    fn outer_operand(&mut self) -> Result<Operand> {
-        let mut depth = 0usize;
-        while matches!(self.peek(), Some(Token::Dollar))
-            && matches!(self.toks.get(self.pos + 1), Some(Token::Dollar))
-        {
-            self.pos += 1;
-            depth += 1;
-        }
-        // `$$::prop`, `$$:::name`, `$$/child::x` — the node form:
-        // the final `$` is the spelling's last dollar, and what
-        // follows is a relative path/projection read from the
-        // invoking capsa's node.
-        let inner = if matches!(self.peek(), Some(Token::Dollar))
-            && matches!(
-                self.toks.get(self.pos + 1),
-                Some(
-                    Token::ColonColon
-                        | Token::ColonColonColon
-                        | Token::SemiSemiSemi
-                        | Token::Slash
-                        | Token::SlashSlash
-                )
-            ) {
-            self.pos += 1;
-            let mut steps = Vec::new();
-            while matches!(self.peek(), Some(Token::Slash | Token::SlashSlash)) {
-                steps.push(self.path_elem()?);
-            }
-            let projection = self.projection()?;
-            Operand::Rel {
-                steps,
-                projection,
-                anchor: Anchor::Current,
-            }
-        } else {
-            self.operand()?
-        };
-        match inner {
-            Operand::Recall(_) | Operand::Topic | Operand::Ordinal | Operand::Capture(_) => {}
-            // `$$::prop`, `$$/child::x` — the invoking capsa's NODE,
-            // navigated and projected like any relative path. This is
-            // how a joined expression's ON clause reaches the driver
-            // (`A <=> B[::uid = $$::id]`), and how a subcontext body
-            // reaches the capsa it serves.
-            Operand::Rel { .. } => {}
-            Operand::Ctx { .. } => {
-                return Err(QuarbError::Parse(
-                    "the context-history accessor '$$*' is reserved (unbuilt);                      '$$' steps a capsa-scope operand out one level                      ($$.name, $$_, $$ord, $$::prop)"
-                        .into(),
-                ));
-            }
-            _ => {
-                return Err(QuarbError::Parse(
-                    "'$$' takes a capsa-scope operand ($$.name, $$_, $$ord, $$1, $$::prop)".into(),
-                ));
-            }
-        }
-        let mut out = inner;
-        for _ in 0..depth {
-            out = Operand::Outer(Box::new(out));
-        }
-        Ok(out)
-    }
 
     fn operand(&mut self) -> Result<Operand> {
         match self.peek() {
@@ -3747,7 +3813,7 @@ impl Parser<'_> {
             // parenthesized expressions keep `(` otherwise. The
             // plural forms gather values from every matching mark
             // (existential, like any multi-valued operand).
-            Some(Token::LParen) if self.mark_anchor_ahead() => {
+            Some(Token::MarkOpen) if self.mark_anchor_ahead() => {
                 let anchor = self.mark_anchor().expect("lookahead hit");
                 let mut steps = Vec::new();
                 loop {
@@ -3965,6 +4031,9 @@ impl Parser<'_> {
                 // topic — the field name becomes data and the record
                 // silently re-keys. Refuse rather than re-key; the
                 // pipe form spells the topic-riding meaning honestly.
+                if let Some(pointer) = retired_function(&call.name) {
+                    return Err(QuarbError::Parse(pointer));
+                }
                 if matches!(call.name.as_str(), "rec" | "record") {
                     return Err(QuarbError::Parse(format!(
                         "'{n}(...)' as an operand would ride its first \
@@ -4007,6 +4076,9 @@ impl Parser<'_> {
                     let reducible = crate::stdlib::known_agg(&stage_call.name)
                         && !crate::stdlib::context_only(&stage_call.name);
                     if !crate::stdlib::known_scalar(&stage_call.name) && !reducible {
+                        if let Some(pointer) = retired_function(&stage_call.name) {
+                            return Err(QuarbError::Parse(pointer));
+                        }
                         let hint = if crate::stdlib::context_only(&stage_call.name) {
                             format!(" ('{}' uses '@|')", stage_call.name)
                         } else {
@@ -4124,18 +4196,57 @@ impl Parser<'_> {
                     )),
                 }
             }
+            // `_` — the served node, projected or navigated like any
+            // node (`_::prop`, `_/child::x`); bare, the node itself.
+            Some(Token::Driver) => {
+                self.pos += 1;
+                return self.served_node();
+            }
             Some(Token::Dollar) => {
                 // Correlation context reference: $* or $*N, optionally
                 // projected.
                 self.pos += 1;
-                // `$$…` — the same capsa-scope operand one scope out
-                // (the invoking capsa of the enclosing subcontext);
-                // each extra `$` steps out one more level.
+                // `$$N` — the join's N-th bound node: the driver's
+                // doubled sigil with the position (`$*N` is the
+                // heritage spelling). Any other `$$…` is the same
+                // capsa-scope operand one scope out (the invoking
+                // capsa of the enclosing subcontext); each extra `$`
+                // steps out one more level.
+                let mut joined: Option<usize> = None;
                 if matches!(self.peek(), Some(Token::Dollar)) {
-                    self.pos -= 1;
-                    return self.outer_operand();
+                    let digits = match self.toks.get(self.pos + 1) {
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    };
+                    match digits {
+                        Some(d) => {
+                            let k = d.parse::<usize>().map_err(|_| {
+                                QuarbError::Parse(format!("bad join position '$${d}'"))
+                            })?;
+                            self.pos += 2;
+                            if k == 0 {
+                                // `$$0` — the served node, spelled `_`.
+                                return self.served_node();
+                            }
+                            joined = Some(k);
+                        }
+                        None => {
+                            return Err(QuarbError::Parse(
+                                "the capsa is shared: '$.name', '$_' and '$ord' read the same register \
+                                 inside a body or a join condition; '_' is the served node, '$$N' a \
+                                 bound node, '$$.name' a mark"
+                                    .into(),
+                            ));
+                        }
+                    }
                 }
-                let index = match self.peek() {
+                let index = if joined.is_some() { joined } else { match self.peek() {
                     Some(Token::Name {
                         text,
                         quoted: false,
@@ -4146,9 +4257,9 @@ impl Parser<'_> {
                         if digits.is_empty() {
                             None
                         } else {
-                            Some(digits.parse::<usize>().map_err(|_| {
-                                QuarbError::Parse(format!("bad context index '$*{digits}'"))
-                            })?)
+                            return Err(QuarbError::Parse(format!(
+                                "'$*{digits}' is retired: the join's N-th node is '$${digits}'"
+                            )));
                         }
                     }
                     // `$.name` / `$.` — a register recall as an
@@ -4184,9 +4295,18 @@ impl Parser<'_> {
                         text,
                         quoted: false,
                         ..
-                    }) if text == "ordinal" || text == "ord" => {
+                    }) if text == "ord" => {
                         self.pos += 1;
                         return Ok(Operand::Ordinal);
+                    }
+                    Some(Token::Name {
+                        text,
+                        quoted: false,
+                        ..
+                    }) if text == "ordinal" => {
+                        return Err(QuarbError::Parse(
+                            "'$ordinal' is retired: write '$ord'".into(),
+                        ));
                     }
                     // `$1` … `$9` — a regex capture from the last
                     // successful `=~` match in a filter stage.
@@ -4242,7 +4362,7 @@ impl Parser<'_> {
                                 .into(),
                         ));
                     }
-                };
+                } };
                 // Optional descending navigation from the bound context
                 // node, then a projection — the same shape as a `Rel`
                 // operand from the current node.
@@ -4439,6 +4559,7 @@ impl Parser<'_> {
                 Stage::Push(_)
                     | Stage::ExprPush { .. }
                     | Stage::RecordPush { .. }
+                    | Stage::FieldsPush
                     | Stage::Subcontext { .. }
                     | Stage::Nav(_)
             ) {
@@ -4463,8 +4584,8 @@ impl Parser<'_> {
             Token::Le => CmpOp::Le,
             Token::Gt => CmpOp::Gt,
             Token::Ge => CmpOp::Ge,
-            Token::Match => CmpOp::Match,
-            Token::NotMatch => CmpOp::NotMatch,
+            Token::MatchEq => CmpOp::Match,
+            Token::NotMatchEq => CmpOp::NotMatch,
             Token::Contains => CmpOp::Contains,
             // The spelled ordering comparisons — a bare word in
             // operator position, like `and` / `or` / `not`.
@@ -4501,6 +4622,26 @@ impl Parser<'_> {
         followed && self.eat_word(words)
     }
 
+    /// The served node after its token: an optional relative path
+    /// and projection (`_::prop`, `_/child::x`), else the node.
+    fn served_node(&mut self) -> Result<Operand> {
+        let mut steps = Vec::new();
+        while matches!(self.peek(), Some(Token::Slash | Token::SlashSlash)) {
+            steps.push(self.path_elem()?);
+        }
+        let projection = self.projection()?;
+        Ok(Operand::Outer(Box::new(Operand::Rel {
+            steps,
+            projection,
+            anchor: Anchor::Current,
+        })))
+    }
+
+    /// Is the next token a bare word from `words`?
+    fn peek_word(&self, words: &[&str]) -> bool {
+        matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if words.contains(&text.as_str()))
+    }
+
     /// Consume the next token if it is a bare word from `words`.
     fn eat_word(&mut self, words: &[&str]) -> bool {
         if let Some(Token::Name {
@@ -4516,20 +4657,6 @@ impl Parser<'_> {
         false
     }
 
-    /// Consume the bare keyword `kw` if it is next.
-    fn eat_keyword(&mut self, kw: &str) -> bool {
-        if let Some(Token::Name {
-            text,
-            quoted: false,
-            ..
-        }) = self.peek()
-            && text == kw
-        {
-            self.pos += 1;
-            return true;
-        }
-        false
-    }
 
     fn expect(&mut self, tok: Token, what: &str) -> Result<()> {
         if self.peek() == Some(&tok) {
@@ -4674,6 +4801,21 @@ impl Parser<'_> {
             }
             _ => Reach::All,
         }
+    }
+
+    /// The matcher after an axis. The parent and ancestor axes take
+    /// no name: the parent is one node and the ancestors are all of
+    /// them, so a bare `\` / `\\` (or `\\?` / `\\!`) implies the
+    /// wildcard — the one exception to "a hop names or patterns".
+    /// A name after them is still the check it always was (`\x`).
+    fn matcher_after(&mut self, axis: &Axis) -> Result<Matcher> {
+        if matches!(axis, Axis::Parent | Axis::Ancestor(_))
+            && (!matches!(self.peek(), Some(Token::Name { .. } | Token::Regex(_) | Token::Lt))
+                || self.peek_word(OR_WORDS))
+        {
+            return Ok(Matcher::Any);
+        }
+        self.matcher()
     }
 
     fn matcher(&mut self) -> Result<Matcher> {
@@ -4826,6 +4968,32 @@ fn validate_record(call: &FnCall) -> Result<()> {
         return Ok(());
     }
     validate_record_convention(call, "record")
+}
+
+/// The spelled comparison operator, for pointers.
+fn cmp_text(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "=",
+        CmpOp::Ne => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+        CmpOp::Match => "==",
+        CmpOp::NotMatch => "!==",
+        CmpOp::Contains => "*=",
+    }
+}
+
+/// The retired function names, each with its pointer: `rec` /
+/// `record` (the record sigil `%(…)` since ruling #38) and `chars`
+/// (the pre-0.25 spelling of `cc`).
+pub(crate) fn retired_function(name: &str) -> Option<String> {
+    match name {
+        "rec" | "record" => Some(format!("'{name}(…)' is retired: the record is '%(…)'")),
+        "chars" => Some("'chars' is retired: write 'cc'".into()),
+        _ => None,
+    }
 }
 
 /// The shared record-convention argument check, for `record(...)`
@@ -5029,6 +5197,16 @@ fn literal_value(text: &str, quoted: bool) -> Value {
         "null" => return Value::Null,
         _ => {}
     }
+    if let Some(norm) = numeric_text(text) {
+        if let Ok(n) = norm.parse::<i64>() {
+            return Value::Int(n);
+        }
+        if let Ok(f) = norm.parse::<f64>()
+            && f.is_finite()
+        {
+            return Value::Float(f);
+        }
+    }
     if let Ok(n) = text.parse::<i64>() {
         return Value::Int(n);
     }
@@ -5042,6 +5220,45 @@ fn literal_value(text: &str, quoted: bool) -> Value {
         return Value::Float(f);
     }
     Value::Str(text.to_string())
+}
+
+/// A number's text in the parser's form: `_` group separators
+/// stripped (they stand only between digits) and the decimal comma
+/// read as the decimal point — `1_000,5` is `1000.5`. `None` when
+/// the text is not shaped as a number this way.
+fn numeric_text(text: &str) -> Option<String> {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    if text.starts_with('-') {
+        out.push('-');
+    }
+    let mut seen_point = false;
+    let chars: Vec<char> = body.chars().collect();
+    if chars.first().is_none_or(|c| !c.is_ascii_digit()) {
+        return None;
+    }
+    for (k, &c) in chars.iter().enumerate() {
+        match c {
+            d if d.is_ascii_digit() => out.push(d),
+            '_' => {
+                let between = k > 0
+                    && chars[k - 1].is_ascii_digit()
+                    && chars.get(k + 1).is_some_and(|n| n.is_ascii_digit());
+                if !between {
+                    return None;
+                }
+            }
+            '.' | ',' => {
+                if seen_point || !chars.get(k + 1).is_some_and(|n| n.is_ascii_digit()) {
+                    return None;
+                }
+                seen_point = true;
+                out.push('.');
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Whether `tok` begins a projection (ending the navigation part).
@@ -5146,7 +5363,7 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
         Stage::Filter(e) => subst_pred_expr(e, map),
         Stage::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
         Stage::Map(inner) => subst_stage(inner, map),
-        Stage::Select(_) | Stage::Push(_) | Stage::Recall(_) | Stage::Spread { .. } => {}
+        Stage::Select(_) | Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => {}
     }
 }
 
@@ -5308,7 +5525,7 @@ fn max_ctx_stage(st: &Stage) -> usize {
         Stage::Filter(e) => max_ctx_pred_expr(e),
         Stage::Select(p) => max_ctx_pred(p),
         Stage::Map(inner) => max_ctx_stage(inner),
-        Stage::Push(_) | Stage::Recall(_) | Stage::Spread { .. } => 0,
+        Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => 0,
     }
 }
 
@@ -5391,7 +5608,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
                 return Err(QuarbError::Parse(
                     "the first expression drives the join and cannot \
                      reference '$*k'; join conditions belong on the \
-                     joined expression: 'A <=> B[::x = $$::x]'"
+                     joined expression: 'A <=> B[::x = _::x]'"
                         .into(),
                 ));
             }
@@ -5485,6 +5702,26 @@ pub(crate) fn pred_mentions_outer(e: &PredExpr) -> bool {
 fn op_mentions_outer(o: &Operand) -> bool {
     match o {
         Operand::Outer(_) => true,
+        // The capsa is shared: a joined expression's predicate that
+        // reads the register, the marks, the captures, the topic or
+        // the ordinal reads the DRIVER's, so it is an ON condition,
+        // evaluated per driving capsa — not once at materialization.
+        Operand::Recall(_)
+        | Operand::Topic
+        | Operand::Ordinal
+        | Operand::Capture(_)
+        | Operand::NamedCaptures => true,
+        Operand::Rel {
+            anchor:
+                Anchor::Mark(_)
+                | Anchor::MarkIndex(_)
+                | Anchor::MarkTop
+                | Anchor::MarksAll
+                | Anchor::MarksNamed(_),
+            ..
+        } => true,
+        Operand::Field { base, .. } => op_mentions_outer(base),
+        Operand::List(items) => items.iter().any(op_mentions_outer),
         Operand::Ctx { steps, .. } | Operand::Rel { steps, .. } => {
             steps.iter().any(elem_mentions_outer)
         }
@@ -5602,9 +5839,9 @@ mod tests {
     #[test]
     fn record_field_names_must_be_unique() {
         for q in [
-            "/r/* | rec(::name, ::name)",
-            "/r/* | rec(\"a\", ::x, \"a\", ::y)",
-            "/r/* | rec(\"name\", ::x, ::name)",
+            "/r/* | %(::name; ::name)",
+            "/r/* | %(a = ::x; a = ::y)",
+            "/r/* | %(name = ::x; ::name)",
             "/r/* @| group(::k, ::k) | count",
         ] {
             let toks = lexer::lex(q).unwrap();
@@ -5612,7 +5849,7 @@ mod tests {
             assert!(err.contains("twice"), "{q}: {err}");
         }
         // Distinct names stay fine, literal or auto-named.
-        let toks = lexer::lex("/r/* | rec(::name, \"other\", ::name)").unwrap();
+        let toks = lexer::lex("/r/* | %(::name; other = ::name)").unwrap();
         assert!(parse(&toks).is_ok());
     }
 
@@ -5622,9 +5859,9 @@ mod tests {
         // alone, takes a pipe tail, and extends with further
         // entries.
         for q in [
-            "def &j: /a/* <=> /b/*[::x = $$::x]; &j @| count",
-            "def &j: /a/* <=> /b/*[::x = $$::x]; &j | [not $*1::x]",
-            "def &j: /a/* <=> /b/*[::x = $$::x]; &j <=> /c/*[::y = $*1::y]",
+            "def &j: /a/* <=> /b/*[::x = _::x]; &j @| count",
+            "def &j: /a/* <=> /b/*[::x = _::x]; &j | [!$$1::x]",
+            "def &j: /a/* <=> /b/*[::x = _::x]; &j <=> /c/*[::y = $$1::y]",
             // pipeline fragments splice inside inline pipes
             "def &g: | trim | upper; /r/* | .u((::name | &g))",
             "def &g2: | tp(\"%Y-%m-%d\") | ($_ + 12d); /r/* | .d((::when | &g2))",
@@ -5635,12 +5872,12 @@ mod tests {
         for (q, needle) in [
             // an entry cannot itself carry a correlation
             (
-                "def &j: /a/* <=> /b/*[::x = $$::x]; /d/* <=> &j",
+                "def &j: /a/* <=> /b/*[::x = _::x]; /d/* <=> &j",
                 "chains are flat",
             ),
             // a chain fragment cannot join a union
             (
-                "def &j: /a/* <=> /b/*[::x = $$::x]; /d/* || &j",
+                "def &j: /a/* <=> /b/*[::x = _::x]; /d/* || &j",
                 "stand alone",
             ),
             // a stage-shaped def body points at the leading pipe
@@ -5659,18 +5896,24 @@ mod tests {
 
     #[test]
     fn full_register_view_and_numeric_push_names() {
-        // `%%.` parses as its own recall; `%.` stays itself — and
-        // numeric push names stay legal (the pivot macro writes
-        // data-valued column names like `.1(...)`); `%%.` keys
-        // anonymous slots `#N`, which no push name can spell.
+        // `%%.` parses as its own recall; `%.` stays itself. A push
+        // name is an identifier or a quoted string glued to the dot
+        // (the pivot macro writes data-valued column names,
+        // `."1"(...)`); `%%.` keys anonymous slots `.N`, which no
+        // push name can spell.
         for q in [
             "/r/* | .(::a) | %%.",
             "/r/* | .x(::a) | %. | %%.",
-            "/r/* | .1(::a) | %.",
+            "/r/* | .\"1\"(::a) | %.",
+            "/r/* | %(a = 1; b = 2) | .%",
         ] {
             let toks = lexer::lex(q).unwrap();
             assert!(parse(&toks).is_ok(), "should parse: {q}");
         }
+        let e = parse(&lexer::lex("/r/* | .1(::a) | %.").unwrap()).unwrap_err().to_string();
+        assert!(e.contains("starts with a letter"), "{e}");
+        let e = parse(&lexer::lex("/r/* | ._id(::a)").unwrap()).unwrap_err().to_string();
+        assert!(e.contains("starts with a letter"), "{e}");
     }
 
     #[test]
@@ -5678,28 +5921,28 @@ mod tests {
         // Legal: ON on the joined expression ($$ = driver, $*k =
         // earlier entries), witnesses read back in the pipeline.
         for q in [
-            "/a/* <=> /b/*[::x = $$::x]",
-            "/a/* <=>? /b/*[::x = $$::x] | [not $*1::x]",
-            "/a/* <=> /b/*[::x = $$::x] <=> /c/*[::y = $*1::y] | rec($*1::n, $*2::m)",
-            "/a/* <=> /b/*[$$/kid::x = ::x]",
+            "/a/* <=> /b/*[::x = _::x]",
+            "/a/* <=>? /b/*[::x = _::x] | [!$$1::x]",
+            "/a/* <=> /b/*[::x = _::x] <=> /c/*[::y = $$1::y] | %($$1::n; $$2::m)",
+            "/a/* <=> /b/*[_/kid::x = ::x]",
         ] {
             let toks = lexer::lex(q).unwrap();
             assert!(parse(&toks).is_ok(), "should parse: {q}");
         }
         // The driver cannot reference the join from its own steps.
         for (q, needle) in [
-            ("/a/*[::x = $*1::x] <=> /b/*", "first expression drives"),
+            ("/a/*[::x = $$1::x] <=> /b/*", "first expression drives"),
             // A joined expression cannot reference itself or later
             // entries.
-            ("/a/* <=> /b/*[::x = $*1::x]", "joined expression #1"),
-            ("/a/* <=> /b/*[::x = $*2::x] <=> /c/*", "joined expression #1"),
+            ("/a/* <=> /b/*[::x = $$1::x]", "joined expression #1"),
+            ("/a/* <=> /b/*[::x = $$2::x] <=> /c/*", "joined expression #1"),
             // The pipeline cannot outrun the join count.
-            ("/a/* <=> /b/* | rec($*2::n)", "only 1 expression"),
+            ("/a/* <=> /b/* | %($$2::n)", "only 1 expression"),
             // Join conditions sit on the final step.
-            ("/a/* <=> /b[$$::x]/c/*", "final step"),
+            ("/a/* <=> /b[_::x]/c/*", "final step"),
             // Positional selection after an ON clause is ambiguous.
             (
-                "/a/* <=> /b/*[::x = $$::x][1]",
+                "/a/* <=> /b/*[::x = _::x][1]",
                 "positional selection after a join condition",
             ),
         ] {
@@ -5724,13 +5967,13 @@ mod tests {
             // a pipe-tail branch inside the bare conditional
             "/r/* | .y(::quarter ? (::quarter | s/ Q.*$//) * 1 : 0)",
             // function arguments: rec named field, group key
-            "/r/* | rec(\"age\", ::Age ? ::Age * 1 : 0)",
+            "/r/* | %(age = ::Age ? ::Age * 1 : 0)",
             "/r/* @| group(\"src\", ::Age ? \"manifest\" : \"records\") | count",
             // fragment argument
             "def &f($x): /r/*[::a = $x]; &f(::b ? 1 : 2)",
             // the old double-parens spelling must keep parsing
             "/r/* | .born((::quarter ? 1890 : 0))",
-            "/r/* | rec(\"age\", (( ::Age ? 1 : 0 )))",
+            "/r/* | %(age = (( ::Age ? 1 : 0 )))",
         ] {
             let toks = lexer::lex(q).unwrap();
             assert!(parse(&toks).is_ok(), "should parse: {q}");
@@ -5774,7 +6017,7 @@ mod tests {
         );
         assert!(
             !last_step(&q).leaf,
-            "the step preceding `$|` must not be leaf-anchored"
+            "the step preceding `$|` must !be leaf-anchored"
         );
     }
 
@@ -5820,8 +6063,8 @@ mod tests {
         // `<--` walks the whole arbor per node, so it is refused inside a
         // predicate — but stays legal in top-level navigation, and the
         // bounded incoming edge `<-` is allowed in predicates.
-        assert!(parse(&lexer::lex("//a[::r<~]").unwrap()).is_err());
-        assert!(parse(&lexer::lex("//a::r<~").unwrap()).is_ok());
+        assert!(parse(&lexer::lex("//a[::r<--]").unwrap()).is_err());
+        assert!(parse(&lexer::lex("//a::r<--").unwrap()).is_ok());
         assert!(parse(&lexer::lex("//a[<-b]").unwrap()).is_ok());
     }
 }
@@ -5895,22 +6138,34 @@ fn top_level_bash_op(src: &str) -> Option<(usize, &'static str)> {
 /// canonical.
 fn cmp_word(word: &str) -> Option<CmpOp> {
     Some(match word {
-        ".minor." | ".inf." | ".менее." | ".μικρότερο." | ".μικροτερο." => CmpOp::Lt,
-        ".nonmaior." | ".nonsup." | ".неболее." | ".τοπολύ." | ".τοπολυ." => CmpOp::Le,
-        ".maior." | ".sup." | ".более." | ".μεγαλύτερο." | ".μεγαλυτερο." => CmpOp::Gt,
-        ".nonminor." | ".noninf." | ".неменее." | ".τουλάχιστον." | ".τουλαχιστον." => CmpOp::Ge,
+        // English (the Fortran heritage), French, Greek (tonos
+        // optional), Latin, Russian, Spanish.
+        ".lt." | ".inf." | ".μικρότερο." | ".μικροτερο." | ".minor." | ".менее." | ".menor." => CmpOp::Lt,
+        ".le." | ".nonsup." | ".τοπολύ." | ".τοπολυ." | ".nonmaior." | ".неболее." | ".nomayor." => CmpOp::Le,
+        ".gt." | ".sup." | ".μεγαλύτερο." | ".μεγαλυτερο." | ".maior." | ".более." | ".mayor." => CmpOp::Gt,
+        ".ge." | ".noninf." | ".τουλάχιστον." | ".τουλαχιστον." | ".nonminor." | ".неменее." | ".nomenor." => CmpOp::Ge,
         _ => return None,
     })
 }
 
-/// The boolean words — `and` / `or` / `not`, the parsed aliases of
-/// `&&` / `||` / `!` — in each language of the rounded family
-/// (ruling #42): Latin (`vel`, the inclusive or), French, Russian,
-/// Greek with or without the tonos. On layouts without `&` and `|`
-/// the words are the only spelling of conjunction and disjunction.
-const AND_WORDS: &[&str] = &["and", "et", "и", "και"];
-const OR_WORDS: &[&str] = &["or", "vel", "ou", "или", "ή", "η"];
-const NOT_WORDS: &[&str] = &["not", "non", "не", "όχι", "οχι"];
+/// The boolean words — the parsed aliases of `&&` / `||` / `!`,
+/// which stay canonical — in each language of the rounded family,
+/// dotted like the comparison words so that no bare word of any
+/// language is a keyword: English `.and.` `.or.` `.not.`, French
+/// `.et.` `.ou.` `.non.`, Greek `.και.` `.ή.` `.όχι.` (tonos
+/// optional), Latin `.et.` `.vel.` `.non.`, Russian `.и.` `.или.`
+/// `.не.`, Spanish `.y.` `.o.` `.no.`. The bare English words stay
+/// as sugar (the programmer's habit). On layouts without `&` and
+/// `|` the words are the only spelling of conjunction and
+/// disjunction.
+const AND_WORDS: &[&str] = &[".and.", ".et.", ".και.", ".и.", ".y."];
+const OR_WORDS: &[&str] = &[".or.", ".ou.", ".ή.", ".η.", ".vel.", ".или.", ".o."];
+const NOT_WORDS: &[&str] = &[".not.", ".non.", ".όχι.", ".οχι.", ".не.", ".no."];
+
+/// The bare English words `and` / `or` / `not` were the last undotted
+/// keywords; they are retired, and a bare one in operator position
+/// is refused with the pointer.
+const BARE_BOOL_WORDS: &[(&str, &str)] = &[("and", "&&"), ("or", "||"), ("not", "!")];
 
 /// Whether a bare word is one of the boolean words — which, unquoted,
 /// is never a property name.

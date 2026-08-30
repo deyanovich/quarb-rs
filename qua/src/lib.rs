@@ -111,9 +111,8 @@ struct Cli {
 
     /// Emit results as canonical kaiv: one typed leaf per value
     /// under /@results/N, with provenance recording the source
-    /// document and each value's origin node. (--daiv remains a
-    /// hidden alias from the 0.2.0 era.)
-    #[arg(long, alias = "daiv")]
+    /// document and each value's origin node.
+    #[arg(long)]
     kaiv: bool,
 
     /// Print the results as one JSON document — an array of the
@@ -172,9 +171,8 @@ struct Cli {
     /// Opt a directory mount into grafting (composition): a
     /// parseable leaf's — .json/.xml/.html/.csv/source — parsed
     /// tree becomes its children. Archives, buckets, and text
-    /// columns graft by default. (--descend is the pre-0.24
-    /// spelling, kept as an alias.)
-    #[arg(long, alias = "descend")]
+    /// columns graft by default.
+    #[arg(long)]
     graft: bool,
 
     /// Disable grafting entirely: no boundary is crossed —

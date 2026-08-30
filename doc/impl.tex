@@ -123,7 +123,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-fs} & The filesystem adapter. Depends on \texttt{quarb}. \\
 \texttt{quarb-imap} & Remote IMAP mailboxes, queried in place:
   the maildir mapping over the wire (folders, messages by UID,
-  headers as properties, \texttt{;;;epoch}), transported by
+  headers as properties, \texttt{::::epoch}), transported by
   \texttt{curl} over subprocess (it speaks IMAP natively) — zero
   new dependencies. Lazy per message: one LIST, one UID SEARCH
   per folder, two fetches per touched message. The thread fabric
@@ -258,7 +258,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   table-naming hint for undeclared references. Loading is catalog-
   eager, rows-lazy: a table materializes on first touch through
   the driver-supplied fetcher, once, and untouched tables are
-  never read (\texttt{;;;loaded} reports the state). Engine
+  never read (\texttt{::::loaded} reports the state). Engine
   adapters are thin catalog drivers over it. Depends on
   \texttt{quarb}. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
@@ -317,14 +317,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{ldap[s]://[USER:PASS@]HOST[:PORT]/BASE\_DN}. \\
 \texttt{quarb-cbor} & The CBOR (RFC~8949) adapter, the JSON
   mapping extended: non-text map keys name nodes by canonical
-  rendering, byte strings are hex scalars (\texttt{;;;length}
+  rendering, byte strings are hex scalars (\texttt{::::length}
   is the raw byte count), the standard time tags (0, 1) decode
   to instants, other tags are transparent with the number at
-  \texttt{;;;tag}. Traits carry the CBOR type. Binary, by the
+  \texttt{::::tag}. Traits carry the CBOR type. Binary, by the
   \texttt{.cbor} extension. Depends on \texttt{ciborium}. \\
 \texttt{quarb-csv} & The CSV/TSV adapter (one \texttt{row} node per
   record, columns as properties, empty cells as missing values that
-  numeric aggregates skip; \texttt{;;;columns} / \texttt{;;;n-rows}
+  numeric aggregates skip; \texttt{::::columns} / \texttt{::::n-rows}
   metadata). Depends on \texttt{quarb} and \texttt{csv}. \\
 \texttt{quarb-xpath} & The XPath~1.0 bridge, both directions:
   \texttt{translate} imports an XPath expression to Quarb, and
@@ -392,8 +392,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   tree — the syntax level (né \texttt{quarb-code}): node kinds
   as edge names (\texttt{//function\_item}), tree-sitter
   \emph{fields} as properties (\texttt{::name} on a function is
-  its name), source text as the value, \texttt{;;;start-line} /
-  \texttt{;;;kind} / \texttt{;;;field} metadata; named nodes
+  its name), source text as the value, \texttt{::::start-line} /
+  \texttt{::::kind} / \texttt{::::field} metadata; named nodes
   only. Rust / Python / JavaScript / C by extension,
   compile-time grammar set. Grafts under composition —
   \texttt{--graft} queries every function in a directory tree
@@ -422,13 +422,13 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   archives, \texttt{--graft} for directories. \\
 \texttt{quarb-archive} & Zip and tar (\texttt{.tar[.gz]})
   archives as path trees: entry content as the node value,
-  \texttt{;;;size} / \texttt{;;;compressed}; zip contents lazy
+  \texttt{::::size} / \texttt{::::compressed}; zip contents lazy
   per entry, tar in one pass. With composition, \texttt{.docx} /
   \texttt{.epub} / \texttt{.jar} internals are directly
   queryable. \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
   and mbox mailboxes: headers as properties (lowercased), the
-  body as the value, \texttt{;;;epoch} parsing the Date header
+  body as the value, \texttt{::::epoch} parsing the Date header
   for range predicates. The thread graph is reference fabric:
   \texttt{::in-reply-to\textasciitilde>} walks to the parent
   message, \texttt{<-in-reply-to} finds the replies, via a
@@ -489,7 +489,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   children (the \texttt{/row} convention); severity as text
   property, lowercased trait
   (\texttt{/entry<error>}), and ordered numeric rank
-  (\texttt{;;;severity}, GCP's enum values); timestamps as
+  (\texttt{::::severity}, GCP's enum values); timestamps as
   typed instants; \texttt{::trace} the bare trace id — the
   \texttt{<=>} join key across services. Unknown property
   names fall through payload top level → labels → resource
@@ -511,8 +511,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   names it), JSON messages decoded with property fallthrough
   (\texttt{::level}, \texttt{::requestId} — the cross-group
   join key), \texttt{filter=} as a server-side CloudWatch
-  filter pattern, \texttt{;;;group}/\texttt{;;;stream}/
-  \texttt{;;;received}/\texttt{;;;id} metadata.
+  filter pattern, \texttt{::::group}/\texttt{::::stream}/
+  \texttt{::::received}/\texttt{::::id} metadata.
   \texttt{endpoint=} overrides the URL (LocalStack; the
   bottled \texttt{cwlogs-server.py} fixture). Read-only.
   Target: \texttt{cwl:[GROUP]?since=1h\&filter=…\&limit=N}
@@ -537,7 +537,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{GET zones/\{zone\}/logs/received} NDJSON, one flat
   record per request, fields as properties under their own
   names plus minted \texttt{::ray} and \texttt{::timestamp};
-  the default value is the request line; \texttt{;;;cache} the
+  the default value is the request line; \texttt{::::cache} the
   cache status. \texttt{since=} is mandatory (Logpull demands a
   range; \texttt{until} clamps a minute behind now). The Ray ID
   is what the origin sees as \texttt{cf-ray}, so mounting the
@@ -553,7 +553,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   bounded snapshots (\texttt{since=}/\texttt{limit=} mandatory),
   \texttt{query=} as Datadog's own search syntax run
   server-side. Severity is Datadog's \texttt{::status} plus the
-  family trait and ordered \texttt{;;;severity} rank;
+  family trait and ordered \texttt{::::severity} rank;
   \texttt{::trace} is minted from \texttt{dd.trace\_id}; tags
   split into fallthrough properties (\texttt{env:prod} answers
   \texttt{::env}); custom attributes navigate as children. Auth
@@ -624,7 +624,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{git log -- path} is
   \texttt{/commits/*[/path<changed>]}; commits answer
   \texttt{::changed} (the touched paths, deletions included)
-  and \texttt{;;;n-changed}. Plumbing over subprocess —
+  and \texttt{::::n-changed}. Plumbing over subprocess —
   no libgit2, zero new dependencies. Target: \texttt{git:PATH}.
   Read-only. \\
 \texttt{quarb-atrep} & The atrep semantic-document adapter —
@@ -745,7 +745,7 @@ hold this), so the rungs trade only latency and transfer:
     leading run only (a positional predicate before an expression
     one sees unfiltered rows), a single \texttt{/table/*} branch
     with no correlations, the table reached exactly once, no
-    crosslink/resolution axes, no \texttt{:::}/\texttt{;;;}
+    crosslink/resolution axes, no \texttt{:::}/\texttt{::::}
     metadata (each would observe the filtering). Since the
     JSON-column round (2026-07-31), refused predicates in the
     leading run degrade to \emph{superset prefilters} instead
@@ -805,9 +805,9 @@ root-anchored sequence of hops, each an axis followed by a name:
   & \live wildcard, glob, and regex name matching \\
 \texttt{<code>}, \texttt{<a|b>}, \texttt{<a><b>}
   & \live trait filters (alternation, conjunction) \\
-\texttt{::}, \texttt{:::key}, \texttt{;;;key}
+\texttt{::}, \texttt{:::key}, \texttt{::::key}
   & \live property, core-metadata, and adapter-metadata projection \\
-\texttt{[;;;size > 1K]}, \texttt{[/child]}, \texttt{[n]},
+\texttt{[::::size > 1K]}, \texttt{[/child]}, \texttt{[n]},
 \texttt{[-1]}, \texttt{[2..5]}
   & \live predicates: comparisons (\texttt{=} \texttt{!=} \texttt{<}
     \texttt{<=} \texttt{>} \texttt{>=}), substring \texttt{*=}, regex
@@ -853,7 +853,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     reflection: \texttt{.quarb} files open as the query's own arbor
     (\texttt{quarb::reflect}; vocabulary locked v1, enforced by the
     conformance corpus in \texttt{tests/vocabulary.rs}, version on
-    the root as \texttt{;;;vocabulary}) \\
+    the root as \texttt{::::vocabulary}) \\
 \texttt{def \&f(\$x): ...;}, \texttt{\&f(::age)},
 \texttt{--defs}, \texttt{--expand}
   & \live fragments: parse-time expansion with call-by-name
@@ -907,7 +907,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     branch navigates from the arbor root, so a subcontext can
     consult the whole table (share-of-total columns) \\
 \texttt{.c(\^{}/row[::k = \$\$.k] @| count)},
-\texttt{| \%(\$*1/name::; /amt::)}
+\texttt{| \%(\$\$1/name::; /amt::)}
   & \live correlated subqueries: \texttt{\$\$} steps a capsa-scope
     operand out to the invoking capsa (\texttt{\$\$.name},
     \texttt{\$\$\_}, \texttt{\$\$ord}; the node form
@@ -918,7 +918,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     projects the joined side into output (\texttt{SELECT a.x, b.y});
     the witness travels into every path a stage's operand or pipe
     hop navigates, so a nested step predicate
-    (\texttt{(\^{}/c/*[::b\_id = \$*1::id])}) reads the same
+    (\texttt{(\^{}/c/*[::b\_id = \$\$1::id])}) reads the same
     thread's binding rather than re-searching the trace
     (2026-08-18) \\
 \texttt{A <=> B[/k:: = \$\$/k:: and …]}
@@ -930,7 +930,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     nullable (\texttt{LEFT JOIN}); one tuple binds the whole
     predicate set, searched depth-first with per-entry pruning,
     and \texttt{\$*N} may navigate from its context node
-    (\texttt{\$*1/field::}), so joins work where keys are
+    (\texttt{\$\$1/field::}), so joins work where keys are
     children, e.g. JSON. Misplaced correlated references are
     parse errors, never silent nulls \\
 \texttt{::ref\textasciitilde>}, \texttt{::'\$ref'\textasciitilde>/city}
@@ -1004,7 +1004,7 @@ pub trait AstAdapter {
     /// The default projection, bare `::` (filesystem: file content).
     fn default_value(&self, _node: NodeId) -> Option<Value> { None }
 
-    /// Adapter metadata `;;;key` (filesystem: size, modified, …).
+    /// Adapter metadata `::::key` (filesystem: size, modified, …).
     fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> { None }
 
     /// Outgoing / incoming crosslinks as (label, node) pairs, for
@@ -1108,7 +1108,7 @@ cargo run -p qua -- '/README.md'      # a single top-level file
 
 # query a document
 cargo run -p qua -- '/users/0/name::' data.json
-cargo run -p qua -- '//book[::pages > 200];;;id' catalog.xml
+cargo run -p qua -- '//book[::pages > 200]::::id' catalog.xml
 cargo run -p qua -- '//a::href' page.html
 \end{lstlisting}
 

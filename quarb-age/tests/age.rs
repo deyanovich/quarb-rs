@@ -34,7 +34,7 @@ fn live_age() {
 
     // Vertex labels at the root (internal `_…` labels hidden).
     assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person;;;n-rows"), ["2"]);
+    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
 
     // ?key= names vertices; properties project.
     assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);

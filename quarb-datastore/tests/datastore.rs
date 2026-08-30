@@ -3,7 +3,7 @@
 use quarb_datastore::DatastoreAdapter;
 
 #[test]
-#[ignore = "needs QUARB_DATASTORE and network"]
+#[ignore = "needs QUARB_DATASTORE && network"]
 fn native_key_references() {
     let Ok(t) = std::env::var("QUARB_DATASTORE") else {
         return;
@@ -14,6 +14,6 @@ fn native_key_references() {
         quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| a.locator(n)).collect(),
     };
     assert_eq!(v("/tracks/* @| count"), ["3"]);
-    assert_eq!(v("/tracks/mars::album~>::artist~>::name"), ["Holst"]);
+    assert_eq!(v("/tracks/mars::album-->::artist-->::name"), ["Holst"]);
     assert_eq!(v("/albums/mikrokosmos->artist::name"), ["Bartok"]);
 }

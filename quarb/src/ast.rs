@@ -17,6 +17,12 @@ pub struct Query {
     pub correlations: Vec<Query>,
     pub branches: Vec<Branch>,
     pub pipeline: Vec<Stage>,
+    /// Where the correlations bind: the number of the driver's
+    /// pipeline stages written before the first `<=>`. Those stages
+    /// run first, the join binds against the capsae as they then
+    /// stand (register, marks, node), and the rest of the pipeline
+    /// follows — a join forks the capsa it leaves, as a hop does.
+    pub join_at: usize,
     /// Meaningful on a correlation entry: `true` when the marker
     /// following it was `<=>?` — the outer join. The entry's
     /// context may then bind null: a current-side row that no
@@ -140,6 +146,11 @@ pub enum Stage {
     /// an empty list), it emits ONE thread with a null topic — the
     /// row-multiplying half of OPTIONAL MATCH / LEFT JOIN.
     Spread { outer: bool },
+    /// `| .%` — the fields push: the topic is a record, and each of
+    /// its fields is pushed as a named regula — the mirror image of
+    /// `%.`, which reads the named regulae as a record. (`| .`
+    /// files the record as ONE regula; the bare `.%` spreads it.)
+    FieldsPush,
     /// `| /path…` — a navigation stage: resume navigation from each
     /// capsa's node (or from `^` / a `(name)` mark), fanning out
     /// into one capsa per result with registers and marks carried
@@ -152,7 +163,7 @@ pub enum Stage {
     /// mode exactly like a branch projection. Refused under `@|`
     /// and `$|`: hops are per-thread.
     Nav(Branch),
-    /// `$| stage` — the map pipe, the scope-dual of `@|`: where
+    /// `$| stage` — the iteration pipe, the scope-dual of `@|`: where
     /// `@|` hands its stage ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per
     /// capsa, capsae unchanged. `$| f` maps, `$| [cond]` filters
@@ -266,10 +277,10 @@ pub enum Projection {
 pub enum PathElem {
     /// `.name` (bare, node context) — mark the current node in the
     /// thread's mark array, under `name` when one is given; a bare
-    /// `.` marks anonymously (the slot is still `(N)`-addressable,
-    /// and `(.)`/`(@)` see it). Names may not be purely numeric —
-    /// positions number themselves. Not a hop: navigation
-    /// continues from the same node.
+    /// `.` marks anonymously (the slot is still `((.N))`-addressable,
+    /// and `((.))`/`((@))` see it). A name is an identifier or a
+    /// quoted string — positions number themselves. Not a hop:
+    /// navigation continues from the same node.
     Mark(Option<String>),
     Step(Step),
     Group(Group),
@@ -449,7 +460,7 @@ pub enum Operand {
     /// a filter has matched (and in navigation predicates, where no
     /// capsa exists).
     Capture(usize),
-    /// `$$.name`, `$$_`, `$$ord`, `$$1` — the same capsa-scope
+    /// `$$.name`, `$$_`, `$$ord` — the same capsa-scope
     /// operand, one scope *out*: the invoking capsa of the enclosing
     /// subcontext body. Each extra `$` steps out one more level;
     /// null where no enclosing scope exists.

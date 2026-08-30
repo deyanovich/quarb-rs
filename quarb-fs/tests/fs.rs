@@ -158,7 +158,7 @@ fn pipelines_and_union() {
     // count of code files (aggregation via @|)
     assert_eq!(values("//*<code> @| count", &dir), vec!["2"]);
     // total size of code files
-    assert_eq!(values("//*<code>;;;size @| sum", &dir), vec!["6 B"]);
+    assert_eq!(values("//*<code>::::size @| sum", &dir), vec!["6 B"]);
     // sorted joined names
     assert_eq!(
         values("//*<code>:::name @| sort @| join(\", \")", &dir),
@@ -178,22 +178,22 @@ fn predicates() {
     fs::write(p.join("README.md"), "hello").unwrap();
 
     // size comparison
-    assert_eq!(names("//*[;;;size > 1000]", &dir), vec!["src/big.rs"]);
+    assert_eq!(names("//*[::::size > 1000]", &dir), vec!["src/big.rs"]);
     // extension equality (bare-name literal)
     assert_eq!(
-        names("//*[;;;extension = rs]", &dir),
+        names("//*[::::extension = rs]", &dir),
         vec!["src/big.rs", "src/small.rs"]
     );
     // regex match on the name
     assert_eq!(
-        names("//*[:::name =~ ~(^small)]", &dir),
+        names("//*[:::name == (/^small/)]", &dir),
         vec!["src/small.rs"]
     );
     // structural condition: dirs that contain a big.rs
     assert_eq!(names("/*[/big.rs]", &dir), vec!["src"]);
     // boolean combination
     assert_eq!(
-        names("//*[;;;is-file and ;;;size < 10]", &dir),
+        names("//*[::::is-file && ::::size < 10]", &dir),
         vec!["README.md", "src/small.rs"]
     );
 }
@@ -226,9 +226,9 @@ fn projections_return_scalars() {
     fs::write(dir.path().join("hello.txt"), "hi there").unwrap();
     assert_eq!(values("//hello.txt:::name", &dir), vec!["hello.txt"]);
     assert_eq!(values("//hello.txt:::is-leaf", &dir), vec!["true"]);
-    assert_eq!(values("//hello.txt;;;size", &dir), vec!["8 B"]);
-    assert_eq!(values("//hello.txt;;;extension", &dir), vec!["txt"]);
-    assert_eq!(values("//hello.txt;;;is-file", &dir), vec!["true"]);
+    assert_eq!(values("//hello.txt::::size", &dir), vec!["8 B"]);
+    assert_eq!(values("//hello.txt::::extension", &dir), vec!["txt"]);
+    assert_eq!(values("//hello.txt::::is-file", &dir), vec!["true"]);
     // bare :: is the default projection — file content
     assert_eq!(values("//hello.txt::", &dir), vec!["hi there"]);
 }
@@ -268,7 +268,7 @@ fn provenance_is_path_and_mtime() {
     // adapter-metadata spelling.
     assert_eq!(
         values("//guide.txt:::instant", &dir),
-        values("//guide.txt;;;modified", &dir)
+        values("//guide.txt::::modified", &dir)
     );
     // No dpid: the filesystem assigns none (null displays empty).
     assert_eq!(values("//guide.txt:::dpid", &dir), vec![""]);

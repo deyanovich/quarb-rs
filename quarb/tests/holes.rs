@@ -27,7 +27,7 @@ fn strict_hole_round_trips() {
 
 #[test]
 fn default_hole_round_trips() {
-    assert_eq!(canon(r#"= "${::x:-'n/a'}""#), r#"^ | "${::x:-'n/a'}""#);
+    assert_eq!(canon(r#"= "${::x:-"n/a"}""#), r#"^ | "${::x:-"n/a"}""#);
     // the fallback is a full value expression — a path works
     assert_eq!(canon(r#"= "${::x:-::y}""#), r#"^ | "${::x:-::y}""#);
     // a projection run before the operator is not the operator
@@ -54,11 +54,11 @@ fn glue_is_the_syntax() {
 
 #[test]
 fn bash_op_and_bare_pipe_tail_exclude() {
-    let e = refuse(r#"= "${::n | upper:-'x'}""#);
+    let e = refuse(r#"= "${::n | upper:-"x"}""#);
     assert!(e.contains("one or the other"), "{e}");
     // parenthesized, they compose
-    let c = canon(r#"= "${(::n | upper):-'x'}""#);
-    assert!(c.contains(":-'x'"), "{c}");
+    let c = canon(r#"= "${(::n | upper):-"x"}""#);
+    assert!(c.contains(":-\"x\""), "{c}");
 }
 
 #[test]

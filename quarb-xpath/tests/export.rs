@@ -30,7 +30,7 @@ fn translations() {
     assert_eq!(x("//book[-1]::id"), "//book[last()]/@id");
     assert_eq!(x("//h2>>p::"), "//h2/following-sibling::p/text()");
     assert_eq!(
-        x("//book[not (::pages > 400)]::id"),
+        x("//book[!(::pages > 400)]::id"),
         "//book[not((@pages > 400))]/@id"
     );
     assert_eq!(
@@ -47,10 +47,10 @@ fn translations() {
 #[test]
 fn refusals() {
     let err = |q: &str| export(q).unwrap_err().to_string();
-    assert!(err("//book[::t =~ /x/]").contains("regex"));
+    assert!(err("//book[::t == (/x/)]").contains("regex"));
     assert!(err("//*.rs").contains("glob"));
     assert!(err("//book<block>").contains("trait"));
-    assert!(err("/a <=> /b[::x = $$::x]").contains("correlation"));
+    assert!(err("/a <=> /b[::x = _::x]").contains("correlation"));
     assert!(err("//book | upper").contains("pipeline"));
     assert!(err("//book @| mean").contains("count() and sum()"));
 }
@@ -58,7 +58,7 @@ fn refusals() {
 #[test]
 fn differential_against_xmllint() {
     if Command::new("xmllint").arg("--version").output().is_err() {
-        eprintln!("skipping: xmllint not installed");
+        eprintln!("skipping: xmllint !installed");
         return;
     }
     let dir = std::env::temp_dir().join("quarb-xpath-export-test");
@@ -73,7 +73,7 @@ fn differential_against_xmllint() {
         "//book::pages @| sum",
         "//book[::pages > 500] @| count",
         "//shelf[::label = \"scifi\"]/book @| count",
-        "//book[not (::pages > 500)] @| count",
+        "//book[!(::pages > 500)] @| count",
     ];
     for quarb in cases {
         let xpath = export(quarb).unwrap().query;

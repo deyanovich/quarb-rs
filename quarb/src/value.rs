@@ -500,7 +500,7 @@ mod tests {
         // empty record is falsy
         assert_eq!(
             obj.to_quarb(),
-            "%(name = 'A\"da\n'; age = 36; score = 2.5; ok = true; gone = null; tags = @('x'; 1))"
+            "%(name = \"A\\\"da\n\"; age = 36; score = 2.5; ok = true; gone = null; tags = @(\"x\"; 1))"
         );
         assert_eq!(obj.to_string(), obj.to_quarb());
         assert!(!Value::Record(Vec::new()).is_truthy());
@@ -509,7 +509,7 @@ mod tests {
         // a key that is not an identifier quotes
         assert_eq!(
             Value::Record(vec![("my-key".into(), Value::Int(1))]).to_quarb(),
-            "%('my-key' = 1)"
+            "%(\"my-key\" = 1)"
         );
         // top-level list display (string coercion) is unchanged
         // (join, not the Quarb form — that is display_form's job)
@@ -520,32 +520,42 @@ mod tests {
     }
 }
 
-/// A string as a Quarb literal: single quotes are verbatim; when
-/// the text itself holds one, double quotes with `"`, `\`, and `$`
-/// escaped (a double-quoted string interpolates), so the result
-/// reparses exactly.
+/// A string as a Quarb literal: double-quoted — the quote every
+/// keyboard layout has — with `"`, `\`, and a `${` hole opener
+/// escaped, so the result reparses exactly (a lone `$` is literal
+/// in a double-quoted string). The single-quoted verbatim form
+/// stays as input.
 pub fn quarb_string(s: &str) -> String {
-    if s.contains('\'') {
-        let mut out = String::from("\"");
-        for c in s.chars() {
-            if matches!(c, '"' | '\\' | '$') {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\\' => {
                 out.push('\\');
+                out.push(c);
             }
-            out.push(c);
+            '$' if chars.peek() == Some(&'{') => {
+                out.push('\\');
+                out.push('$');
+            }
+            _ => out.push(c),
         }
-        out.push('"');
-        out
-    } else {
-        format!("'{s}'")
     }
+    out.push('"');
+    out
 }
 
 /// A record key as written in `%(k = v)`: bare when it is an
 /// identifier that is not a reserved word, quoted otherwise.
 pub fn quarb_key(k: &str) -> String {
-    let bare = !k.is_empty()
-        && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    // An identifier in any script (a name is Unicode alphanumerics
+    // and `_`), never a boolean word.
+    let position = k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit());
+    let bare = position
+        || !k.is_empty()
+        && k.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && k.chars().all(|c| c.is_alphanumeric() || c == '_')
         && !crate::parser::is_bool_word(k);
     if bare { k.to_string() } else { quarb_string(k) }
 }

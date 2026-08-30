@@ -68,29 +68,29 @@ fn nodes(query: &str) -> Vec<String> {
 fn tables_and_rows() {
     // tables are the root's children; rows are named by primary key
     assert_eq!(nodes("/*"), vec!["/albums", "/artists", "/tracks"]);
-    assert_eq!(values("/tracks;;;n-rows"), vec!["8"]);
+    assert_eq!(values("/tracks::::n-rows"), vec!["8"]);
     assert_eq!(nodes("/tracks/7"), vec!["/tracks/7"]);
     assert_eq!(values("/artists/2::name"), vec!["Bartok"]);
     // columns are properties; SQL NULL is null (dropna filters)
     assert_eq!(values("/tracks/*[::price > 1]::title @| count"), vec!["4"]);
     assert_eq!(values("/tracks/*[::album_id] @| count"), vec!["7"]);
-    assert_eq!(values("/tracks/8;;;table"), vec!["tracks"]);
+    assert_eq!(values("/tracks/8::::table"), vec!["tracks"]);
 }
 
 #[test]
 fn fk_resolution() {
     // ~> follows a declared foreign key: no join spelled
-    assert_eq!(values("/tracks/1::album_id~>::title"), vec!["The Planets"]);
+    assert_eq!(values("/tracks/1::album_id-->::title"), vec!["The Planets"]);
     // ... and chains: track -> album -> artist
     assert_eq!(
-        values("/tracks/*[::title = \"Bourree\"]::album_id~>::artist_id~>::name"),
+        values("/tracks/*[::title = \"Bourree\"]::album_id-->::artist_id-->::name"),
         vec!["Bartok"]
     );
     // a NULL FK resolves to nothing, not an error
-    assert_eq!(values("/tracks/8::album_id~>::title @| count"), vec!["0"]);
+    assert_eq!(values("/tracks/8::album_id-->::title @| count"), vec!["0"]);
     // the hint names a table for undeclared references
     assert_eq!(
-        values("/tracks/1::album_id~>albums::title"),
+        values("/tracks/1::album_id-->albums::title"),
         vec!["The Planets"]
     );
 }
@@ -107,7 +107,7 @@ fn fk_links() {
     );
     // reverse resolution: rows whose artist_id points here
     assert_eq!(
-        values("/artists/2::artist_id<~::title"),
+        values("/artists/2::artist_id<--::title"),
         vec!["Mikrokosmos", "Quartets"]
     );
 }
@@ -116,48 +116,48 @@ fn fk_links() {
 fn sql_shapes() {
     // SELECT title, price FROM tracks WHERE price < 1 ORDER BY title
     assert_eq!(
-        values("/tracks/*[::price < 1] @| sort_by(::title) | rec(::title, ::price)"),
+        values("/tracks/*[::price < 1] @| sort_by(::title) | %(::title; ::price)"),
         vec![
-            "%(title = 'Bourree'; price = 0.99)",
-            "%(title = 'Gymnopedie No.1'; price = 0.99)",
-            "%(title = 'Unfiled Sketch'; price = 0.5)",
-            "%(title = 'Venus'; price = 0.99)"
+            "%(title = \"Bourree\"; price = 0.99)",
+            "%(title = \"Gymnopedie No.1\"; price = 0.99)",
+            "%(title = \"Unfiled Sketch\"; price = 0.5)",
+            "%(title = \"Venus\"; price = 0.99)"
         ]
     );
     // GROUP BY album HAVING count > 1 — via the FK chain in the key
     assert_eq!(
         values(
-            "/tracks/*[::album_id] @| group(\"album\", ::album_id~>::title) \
+            "/tracks/*[::album_id] @| group(\"album\", ::album_id-->::title) \
              | count | .n | [$_ > 1] | %."
         ),
         vec![
-            "%(album = 'The Planets'; n = 3)",
-            "%(album = 'Mikrokosmos'; n = 2)"
+            "%(album = \"The Planets\"; n = 3)",
+            "%(album = \"Mikrokosmos\"; n = 2)"
         ]
     );
     // JOIN with projection of both sides (the witness)
     assert_eq!(
         values(
-            "/tracks/*[::secs > 400] <=> /albums/*[::id = $$::album_id] \
-             | rec(\"album\", $*1::title, ::title)"
+            "/tracks/*[::secs > 400] <=> /albums/*[::id = _::album_id] \
+             | %(album = $$1::title; ::title)"
         ),
         vec![
-            "%(album = 'The Planets'; title = 'Mars')",
-            "%(album = 'The Planets'; title = 'Venus')",
-            "%(album = 'The Planets'; title = 'Jupiter')",
-            "%(album = 'Quartets'; title = 'Quartet No.4')"
+            "%(album = \"The Planets\"; title = \"Mars\")",
+            "%(album = \"The Planets\"; title = \"Venus\")",
+            "%(album = \"The Planets\"; title = \"Jupiter\")",
+            "%(album = \"Quartets\"; title = \"Quartet No.4\")"
         ]
     );
     // correlated subquery: albums with revenue over 2 (SUM per row)
     assert_eq!(
         values(
             "/albums/* | .id(::id) \
-             | .rev(^/tracks/*[::album_id = $$.id]::price @| sum) \
-             | [$.rev > 2] | rec(::title, \"revenue\", $.rev)"
+             | .rev(^/tracks/*[::album_id = $.id]::price @| sum) \
+             | [$.rev > 2] | %(::title; revenue = $.rev)"
         ),
         vec![
-            "%(title = 'The Planets'; revenue = 3.5700000000000003)",
-            "%(title = 'Mikrokosmos'; revenue = 2.2800000000000002)"
+            "%(title = \"The Planets\"; revenue = 3.5700000000000003)",
+            "%(title = \"Mikrokosmos\"; revenue = 2.2800000000000002)"
         ]
     );
 }
@@ -225,8 +225,8 @@ fn pushdown_matches_scan() {
     let cases = [
         "/tracks/* @| count",
         "/tracks/* | ::price @| sum",
-        "/tracks/*[::price < 1] | rec(::title, ::secs)",
-        "/tracks/*[::secs > 100 and ::price >= 1] | ::title",
+        "/tracks/*[::price < 1] | %(::title; ::secs)",
+        "/tracks/*[::secs > 100 && ::price >= 1] | ::title",
     ];
     for q in cases {
         let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite))
@@ -348,7 +348,7 @@ fn from_bytes_roundtrip() {
     let bytes: Vec<u8> = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
     drop(conn);
     let a = SqliteAdapter::from_bytes(&bytes).unwrap();
-    let got = match quarb::run("/tracks/*[::artist_id~>::name = 'Holst']::title", &a).unwrap() {
+    let got = match quarb::run("/tracks/*[::artist_id-->::name = \"Holst\"]::title", &a).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };
@@ -417,7 +417,7 @@ fn declared_refs_are_crosslinks() {
     // the refs document supplies what the schema never declared:
     // forward, reverse, and resolution — the full fabric
     assert_eq!(forum_nodes("/posts/1->cookie"), vec!["/cookies/ck-1"]);
-    assert_eq!(forum_values("/posts/1::ip~>::id"), vec!["ip-a"]);
+    assert_eq!(forum_values("/posts/1::ip-->::id"), vec!["ip-a"]);
     assert_eq!(
         forum_nodes("/cookies/ck-2<-cookie"),
         vec!["/posts/2", "/posts/3"]
@@ -566,10 +566,10 @@ fn json_prefilter_matches_scan_on_adversarial_rows() {
         }
     };
     for q in [
-        "/t/*[/j/x:: = '150']::id",
+        "/t/*[/j/x:: = \"150\"]::id",
         "/t/*[/j/x:: > 100]::id",
-        "/t/*[/j/x:: != '150']::id",
-        "/t/*[/j/x:: > 'a']::id",
+        "/t/*[/j/x:: != \"150\"]::id",
+        "/t/*[/j/x:: > \"a\"]::id",
         "/t/*[/j/x]::id",
     ] {
         let plan = quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite))
@@ -599,6 +599,6 @@ fn prefetch_surfaces_bad_filter() {
     }
     let bad = SqliteAdapter::open_filtered(&path, "t", "no_such_function(x)").unwrap();
     assert!(bad.prefetch("t").is_err());
-    let good = SqliteAdapter::open_filtered(&path, "t", "x = 'a'").unwrap();
+    let good = SqliteAdapter::open_filtered(&path, "t", "x = \"a\"").unwrap();
     assert!(good.prefetch("t").is_ok());
 }

@@ -25,7 +25,7 @@ fn opaque_navigation_and_properties() {
     let a = FirebaseAdapter::connect(&target()).unwrap();
     // /v0 and /v0/item refuse enumeration; named hops pass through.
     assert_eq!(
-        values(&a, "/item/1 | rec(::title, ::by)"),
+        values(&a, "/item/1 | %(::title; ::by)"),
         [r#"{"title": "Y Combinator", "by": "pg"}"#]
     );
     // Item 1's kids enumerate (bounded container).
@@ -41,10 +41,10 @@ fn hint_resolution() {
     let a = FirebaseAdapter::connect(&target()).unwrap();
     // A comment's parent field resolves into /item by hint.
     assert_eq!(
-        values(&a, "/item/15::parent~>item::title"),
+        values(&a, "/item/15::parent-->item::title"),
         ["Y Combinator"]
     );
-    assert_eq!(values(&a, "/item/15;;;path"), ["/item/15"]);
+    assert_eq!(values(&a, "/item/15::::path"), ["/item/15"]);
 }
 
 #[test]
@@ -56,9 +56,9 @@ fn declared_refs() {
     .unwrap();
     let a = FirebaseAdapter::connect_with_refs(&target(), refs).unwrap();
     // Bare ~> uses the declared target; a hint still overrides.
-    assert_eq!(values(&a, "/item/15::parent~>::title"), ["Y Combinator"]);
+    assert_eq!(values(&a, "/item/15::parent-->::title"), ["Y Combinator"]);
     assert_eq!(
-        values(&a, "/item/15::parent~>item::title"),
+        values(&a, "/item/15::parent-->item::title"),
         ["Y Combinator"]
     );
     // -> crosslinks: the declared fields become labeled edges,

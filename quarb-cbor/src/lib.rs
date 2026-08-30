@@ -344,22 +344,22 @@ mod tests {
         let a = CborAdapter::parse(&music()).unwrap();
         assert_eq!(v(&a, "/tracks/0/title::"), ["Mars"]);
         assert_eq!(v(&a, "/tracks/0::price"), ["1.29"]);
-        assert_eq!(v(&a, "/tracks;;;length"), ["1"]);
+        assert_eq!(v(&a, "/tracks::::length"), ["1"]);
     }
 
     #[test]
     fn time_tags_become_instants() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/added;;;type"), ["instant"]);
+        assert_eq!(v(&a, "/tracks/0/added::::type"), ["instant"]);
         assert_eq!(v(&a, "/tracks/*[::added > 2023-01-01] @| count"), ["1"]);
-        assert_eq!(v(&a, "/tracks/0/added;;;tag"), ["1"]);
+        assert_eq!(v(&a, "/tracks/0/added::::tag"), ["1"]);
     }
 
     #[test]
     fn bytes_render_hex_with_raw_length() {
         let a = CborAdapter::parse(&music()).unwrap();
         assert_eq!(v(&a, "/tracks/0/art::"), ["c0ffee"]);
-        assert_eq!(v(&a, "/tracks/0/art;;;length"), ["3"]);
+        assert_eq!(v(&a, "/tracks/0/art::::length"), ["3"]);
         assert_eq!(v(&a, "/tracks/0/*<bytes> @| count"), ["1"]);
     }
 
@@ -376,6 +376,6 @@ mod tests {
             Cbor::Tag(0, Box::new(Cbor::Text("2026-07-20T12:00:00Z".into()))),
         )]));
         let a = CborAdapter::parse(&doc).unwrap();
-        assert_eq!(v(&a, "/when;;;type"), ["instant"]);
+        assert_eq!(v(&a, "/when::::type"), ["instant"]);
     }
 }

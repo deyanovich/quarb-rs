@@ -45,8 +45,8 @@ fn embedded_kuzu() {
 
     // Catalog: node tables at the root; rows named by primary key.
     assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person;;;primary-key"), ["name"]);
-    assert_eq!(values(&a, "/Person;;;n-rows"), ["3"]);
+    assert_eq!(values(&a, "/Person::::primary-key"), ["name"]);
+    assert_eq!(values(&a, "/Person::::n-rows"), ["3"]);
     assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo", "Cy"]);
 
     // Typed properties; DATE mints an instant.
@@ -69,7 +69,7 @@ fn embedded_kuzu() {
     );
 
     // By-convention pointer resolution against a primary key.
-    assert_eq!(values(&a, "/Person/Bo::city~>City::country"), ["RS"]);
+    assert_eq!(values(&a, "/Person/Bo::city-->City::country"), ["RS"]);
 
     // Aggregate over an edge walk: everyone Ada mentors.
     assert_eq!(values(&a, "/Person/Ada->MENTORS @| count"), ["2"]);

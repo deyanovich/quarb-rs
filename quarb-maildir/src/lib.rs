@@ -362,7 +362,7 @@ mod tests {
     fn crlf_message_splits_headers_from_body() {
         // A CRLF-delimited message: the header/body boundary is
         // `\r\n\r\n`, not `\n\n`.
-        let raw = "Subject: hi\r\nFrom: a@b\r\n\r\nPS: see below\r\nin-reply-to: not a header\r\n";
+        let raw = "Subject: hi\r\nFrom: a@b\r\n\r\nPS: see below\r\nin-reply-to: !a header\r\n";
         let m = parse_message(raw, "n".to_string(), None);
         // Exactly the two real headers, not the body lines misread
         // as headers.

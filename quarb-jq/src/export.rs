@@ -281,8 +281,8 @@ impl Exporter {
                     "=" => format!("{l} == {r}"),
                     "!=" => format!("{l} != {r}"),
                     "<" | "<=" | ">" | ">=" => format!("{l} {op} {r}"),
-                    "=~" => format!("({l} | test({r}))"),
-                    "!~" => format!("({l} | test({r}) | not)"),
+                    "==" | "=~" => format!("({l} | test({r}))"),
+                    "!==" | "!~" => format!("({l} | test({r}) | not)"),
                     "*=" => format!("({l} | contains({r}))"),
                     other => {
                         return Err(JqError::Unsupported(format!("the '{other}' comparison")));

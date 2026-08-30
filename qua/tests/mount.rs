@@ -62,7 +62,7 @@ fn mounted_sqlite_grafts_json_columns() {
     // Navigation into the column, a filter over it, and dual
     // exposure at the graft root — all through the mount door.
     assert_eq!(run("/s/1/meta/geo/city::"), ["London"]);
-    assert_eq!(run("/s/*[/meta/geo/city:: = 'Berlin']::id"), ["2"]);
+    assert_eq!(run("/s/*[/meta/geo/city:: = \"Berlin\"]::id"), ["2"]);
     assert_eq!(run("/s/2/meta::device"), ["laptop"]);
 }
 
@@ -83,7 +83,7 @@ fn dir_mount_grafts_only_with_graft() {
     std::fs::write(dir.join("cfg.json"), r#"{"port": 8080}"#).unwrap();
 
     let (a, _) = open_target(dir.to_str().unwrap(), &OpenOpts::default()).expect("mount");
-    assert!(run_q(&Dyn(a), "/cfg.json/port::").is_empty(), "bare dir must not graft");
+    assert!(run_q(&Dyn(a), "/cfg.json/port::").is_empty(), "bare dir must !graft");
 
     let opts = OpenOpts { graft: true, ..OpenOpts::default() };
     let (a, _) = open_target(dir.to_str().unwrap(), &opts).expect("mount");
@@ -111,8 +111,8 @@ fn archive_no_graft_holds_members_opaque() {
     let opts = OpenOpts { no_graft: true, ..OpenOpts::default() };
     let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
     let a = Dyn(a);
-    assert!(run_q(&a, "/cfg.json/port::").is_empty(), "no_graft must not cross the boundary");
-    assert_eq!(run_q(&a, "/cfg.json::::size").len(), 1, "the member stays listable and sizable");
+    assert!(run_q(&a, "/cfg.json/port::").is_empty(), "no_graft must !cross the boundary");
+    assert_eq!(run_q(&a, "/cfg.json::::size").len(), 1, "the member stays listable && sizable");
 }
 
 #[test]

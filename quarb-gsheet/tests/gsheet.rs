@@ -4,7 +4,7 @@
 use quarb_gsheet::GsheetAdapter;
 
 #[test]
-#[ignore = "needs QUARB_GSHEET_KEY and network"]
+#[ignore = "needs QUARB_GSHEET_KEY && network"]
 fn sample_sheet() {
     if std::env::var("QUARB_GSHEET_KEY").is_err() {
         return;

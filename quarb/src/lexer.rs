@@ -84,6 +84,14 @@ pub enum Token {
     // opener lexes as `<`, the `)` that balances it as `>`.
     /// `(`
     LParen,
+    /// `((` — the node-anchor opener (`$$.name`, `((N))`, `$$.`,
+    /// `((@))`, `((@name))`): the paren unit closes both parens as
+    /// one `RParen`. Single parentheses are the value side, so a
+    /// `(name)` group is never an anchor.
+    MarkOpen,
+    /// `_` — the served node: the driver inside a join condition,
+    /// the invoking node inside a body; the join's node zero.
+    Driver,
     /// `)`
     RParen,
     /// `,`
@@ -96,10 +104,11 @@ pub enum Token {
     Le,
     /// `>=`
     Ge,
-    /// `=~` — regex match.
-    Match,
-    /// `!~` — regex non-match.
-    NotMatch,
+    /// `==` — the pattern comparison: a regex literal, a pattern
+    /// literal, or a path evaluated as a dynamic pattern.
+    MatchEq,
+    /// `!==` — the negated pattern comparison.
+    NotMatchEq,
     /// `*=` — substring containment.
     Contains,
     /// `->` — outgoing crosslink.
@@ -233,9 +242,22 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
     let double = chars.get(i + 1) == Some(&'(');
     let start = if double { i + 2 } else { i + 1 };
     let mut j = start;
+    // `(=name)` / `(=name!)` / `(,name)` — the fragment sigil and a
+    // definition's parameter, rounded: a leading `=` or `,`, and a
+    // trailing `!` for the macro marker.
+    if !double && matches!(chars.get(j), Some('=') | Some(',')) {
+        j += 1;
+    }
     while chars
         .get(j)
         .is_some_and(|&c| is_name_char(c) || c == '@')
+    {
+        j += 1;
+    }
+    if !double
+        && chars.get(start) == Some(&'=')
+        && chars.get(j) == Some(&'!')
+        && chars.get(j + 1) == Some(&')')
     {
         j += 1;
     }
@@ -246,12 +268,22 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
         }
         let toks = match body.as_str() {
             "" => vec![Token::Caret],
-            "_" => vec![Token::Dollar, Token::Dollar],
-            "*" | "@" => vec![Token::LParen, Token::At, Token::RParen],
-            b if b.starts_with('*') || b.starts_with('@') => {
-                vec![Token::LParen, Token::At, name(&b[1..]), Token::RParen]
+            // `((0))` — the served node, `_`.
+            "0" => vec![Token::Driver],
+            // `((N))` — the join's N-th bound node, `$$N`.
+            b if !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit()) => {
+                vec![Token::Dollar, Token::Dollar, name(b)]
             }
-            b => vec![Token::LParen, name(b), Token::RParen],
+            // `((.N))` — the mark at position N (the push dot, as in
+            // `$.N`); `((N))` is its heritage spelling.
+            b if b.starts_with('.') && b.len() > 1 && b[1..].bytes().all(|c| c.is_ascii_digit()) => {
+                vec![Token::MarkOpen, name(&b[1..]), Token::RParen]
+            }
+            "*" | "@" => vec![Token::MarkOpen, Token::At, Token::RParen],
+            b if b.starts_with('*') || b.starts_with('@') => {
+                vec![Token::MarkOpen, Token::At, name(&b[1..]), Token::RParen]
+            }
+            b => vec![Token::MarkOpen, name(b), Token::RParen],
         };
         return Some((toks, j + 2));
     }
@@ -266,17 +298,33 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
         // `(.name)` — the register pushed by `.name`; `(.N)` the
         // N-th register (a float is written `0.5`, never `(.5)`).
         b if b.starts_with('.') => vec![Token::Dollar, name(b)],
-        // `(*N)` — the N-th witness.
-        b if b.starts_with('*') && b[1..].bytes().all(|c| c.is_ascii_digit()) => {
-            vec![Token::Dollar, name(b)]
-        }
         // `(N)` — the N-th match capture `$N` (a value; the mark at
         // position N is `((N))`).
         b if !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit()) => {
             vec![Token::Dollar, name(b)]
         }
-        // A bare name is a mark anchor's deprecated single-paren
-        // spelling, or a group — the parser's call.
+        // `(=name)` — the fragment `&name` (`(=3)` the history line
+        // `&3`); `(=name!)` the macro marker `&name!`.
+        b if b.starts_with('=') && b.len() > 1 => {
+            let stem = b[1..].trim_end_matches('!');
+            if stem.is_empty() || !stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return None;
+            }
+            let mut t = vec![Token::Amp, name(stem)];
+            if b.ends_with('!') {
+                t.push(Token::Bang);
+            }
+            t
+        }
+        // `(,name)` — a definition's parameter `$name`.
+        b if b.starts_with(',') && b.len() > 1 => {
+            let stem = &b[1..];
+            if !stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return None;
+            }
+            vec![Token::Dollar, name(stem)]
+        }
+        // A bare name is a group — the parser's call.
         _ => return None,
     };
     Some((toks, j + 1))
@@ -302,6 +350,15 @@ fn after_push_dot(chars: &[char], i: usize) -> bool {
         k -= 1;
     }
     k > 0 && chars[k - 1] == '.' && !(k > 1 && chars[k - 2] == '.')
+}
+
+/// Whether `text` so far is a number's digit run — digits with `_`
+/// group separators and at most one decimal point (`.` or `,`) —
+/// the context in which a following `,digit` is the decimal comma.
+fn is_digit_run(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_digit())
+        && text.chars().all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | ','))
+        && !text.ends_with(['_', '.', ','])
 }
 
 fn after_axis(tokens: &[Token]) -> bool {
@@ -389,10 +446,13 @@ fn regex_paren(chars: &[char], i: usize, mods: bool) -> Option<(String, usize)> 
 /// `&f()`) — rather than opening something of its own.
 fn after_call_head(tokens: &[Token], glued: bool) -> bool {
     glued
-        && matches!(
+        && (matches!(
             tokens.last(),
             Some(Token::Name { .. } | Token::Percent | Token::Amp | Token::Dollar | Token::At)
         )
+            // a macro's marker: `&tok!(…)`, `(=tok!)(…)`
+            || (matches!(tokens.last(), Some(Token::Bang))
+                && matches!(tokens.get(tokens.len().wrapping_sub(2)), Some(Token::Name { .. }))))
 }
 
 /// Tokenize `input` into the subset's token stream.
@@ -464,47 +524,30 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     mods,
                 });
             }
-            '/' if matches!(tokens.last(), Some(Token::Match | Token::NotMatch)) => {
-                let mut body = String::new();
-                i += 1;
-                loop {
-                    match at(i) {
-                        Some('\\') if at(i + 1) == Some('/') => {
-                            body.push('/');
-                            i += 2;
-                        }
-                        Some('/') => {
-                            i += 1;
-                            break;
-                        }
-                        Some(ch) => {
-                            body.push(ch);
-                            i += 1;
-                        }
-                        None => {
-                            return Err(QuarbError::Lex("unterminated regex '/…'".into()));
-                        }
-                    }
-                }
-                // Trailing modifier letters (`/pat/imsx`): case-insensitive
-                // (i), multi-line (m), dot-matches-newline (s), extended (x).
-                // Folded into the pattern as an inline flag group so every
-                // regex flavor (base `regex`, opt-in fancy-regex/PCRE2)
-                // honors them without a separate build path.
-                let mut flags = String::new();
-                while let Some(m @ ('i' | 'm' | 's' | 'x')) = at(i) {
-                    flags.push(m);
-                    i += 1;
-                }
-                if flags.is_empty() {
-                    tokens.push(Token::Regex(body));
-                } else {
-                    tokens.push(Token::Regex(format!("(?{flags}){body}")));
-                }
-            }
             '/' if at(i + 1) == Some('/') => {
                 tokens.push(Token::SlashSlash);
                 i += 2;
+            }
+            // `/..` — the parent, `/...` — the ancestors (`/...?` the
+            // nearest, `/...!` the farthest): the rounded ascent, a
+            // hop in name position like the filesystem's `..`. A
+            // longer dotted run (`/..x`, `/.git`) is a name.
+            '/' if at(i + 1) == Some('.')
+                && at(i + 2) == Some('.')
+                && at(i + 3) == Some('.')
+                && !(at(i + 4).is_some_and(is_name_char)
+                    && !matches!((at(i + 4), at(i + 5)), (Some('-'), Some('>' | '-')))) =>
+            {
+                tokens.push(Token::BackslashBackslash);
+                i += 4;
+            }
+            '/' if at(i + 1) == Some('.')
+                && at(i + 2) == Some('.')
+                && !(at(i + 3).is_some_and(is_name_char)
+                    && !matches!((at(i + 3), at(i + 4)), (Some('-'), Some('>' | '-')))) =>
+            {
+                tokens.push(Token::Backslash);
+                i += 3;
             }
             '/' => {
                 tokens.push(Token::Slash);
@@ -533,7 +576,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // `__` — the pipe, lying down (ruling #43): a standalone
             // double underscore is `|`; glued to name characters it
             // stays a name (`x__y`, `__init__`). `*__` and `,__` are
-            // the aggregation and map pipes — all, then; each, then
+            // the aggregation and iteration pipes
             // — whole spellings, since `@` and `$` are not on the
             // layouts that lack `|`.
             '_' if at(i + 1) == Some('_') && !at(i + 2).is_some_and(is_name_char) => {
@@ -681,8 +724,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '<' if at(i + 1) == Some('~') => {
-                tokens.push(Token::ReverseResolve);
-                i += 2;
+                return Err(QuarbError::Lex("'<~' is retired: write '<--'".into()));
             }
             '<' if at(i + 1) == Some('=') && at(i + 2) == Some('>') => {
                 tokens.push(Token::Correlate);
@@ -729,13 +771,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     i += 1;
                 }
             }
+            '!' if at(i + 1) == Some('=') && at(i + 2) == Some('=') => {
+                tokens.push(Token::NotMatchEq);
+                i += 3;
+            }
             '!' if at(i + 1) == Some('=') => {
                 tokens.push(Token::Ne);
                 i += 2;
             }
             '!' if at(i + 1) == Some('~') => {
-                tokens.push(Token::NotMatch);
-                i += 2;
+                return Err(QuarbError::Lex(
+                    "'!~' is retired: the pattern comparison is '!==' ('!== (/…/)')".into(),
+                ));
             }
             '!' => {
                 tokens.push(Token::Bang);
@@ -744,6 +791,59 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             '^' => {
                 tokens.push(Token::Caret);
                 i += 1;
+            }
+            // `$$` is the node-side sigil: `$$_` the driver (the
+            // invoking node — the node topic, as `$_` is the value
+            // topic), `$.name` / `$.N` / `$$.` the marks by name,
+            // position, and latest, `$$N` the join's N-th node. The
+            // marks lex as their anchors; `$$_` as the bare `$$` the
+            // parser steps out with (`_::id` stays as heritage).
+            // Heritage spellings of the served node `_`: `$$_`, and
+            // the bare `$$` before a projection or a path.
+            '$' if at(i + 1) == Some('$')
+                && at(i + 2) == Some('_')
+                && !at(i + 3).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') =>
+            {
+                return Err(QuarbError::Lex(
+                    "'$$_' is retired: the served node is '_' ('_::prop', '_/child')".into(),
+                ));
+            }
+            '$' if at(i + 1) == Some('$') && matches!(at(i + 2), Some(':' | '/')) => {
+                return Err(QuarbError::Lex(
+                    "a bare '$$' is retired: the served node is '_' ('_::prop', '_/child')".into(),
+                ));
+            }
+            '$' if at(i + 1) == Some('$')
+                && at(i + 2) == Some('_')
+                && at(i + 3).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                return Err(QuarbError::Lex(
+                    "'$$_N' is retired: the join's N-th node is '$$N'".into(),
+                ));
+            }
+            // `_` — the served node (the driver): a token of its own
+            // wherever it is not part of a name.
+            '_' if !at(i + 1).is_some_and(|c| is_name_char(c) || c == '(')
+                && !(glued && matches!(tokens.last(), Some(Token::Dollar | Token::At))) =>
+            {
+                tokens.push(Token::Driver);
+                i += 1;
+            }
+            '$' if at(i + 1) == Some('$') && at(i + 2) == Some('.') => {
+                let mut k = i + 3;
+                while at(k).is_some_and(is_name_char) {
+                    k += 1;
+                }
+                let spec: String = chars[i + 3..k].iter().collect();
+                let body = if spec.is_empty() { ".".to_string() } else { spec };
+                tokens.push(Token::MarkOpen);
+                tokens.push(Token::Name {
+                    text: body,
+                    quoted: false,
+                    glued: true,
+                });
+                tokens.push(Token::RParen);
+                i = k;
             }
             '$' => {
                 tokens.push(Token::Dollar);
@@ -807,8 +907,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                             c.is_alphanumeric() || c == '_' || c == '\'' || c == '"'
                         }) =>
                     {
-                        tokens.push(Token::SemiSemiSemi);
-                        i += 3;
+                        return Err(QuarbError::Lex(
+                            "'::;' is retired: adapter metadata is '::::'".into(),
+                        ));
                     }
                     _ => {
                         tokens.push(Token::ColonColon);
@@ -831,9 +932,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Contains);
                 i += 2;
             }
-            '=' if at(i + 1) == Some('~') => {
-                tokens.push(Token::Match);
+            // `==` / `!==` — the pattern comparisons. A bare `/…/`
+            // after them is a path (the dynamic-pattern operand),
+            // never a regex literal: `(/…/)` is the one regex
+            // spelling there.
+            '=' if at(i + 1) == Some('=') => {
+                tokens.push(Token::MatchEq);
                 i += 2;
+            }
+            '=' if at(i + 1) == Some('~') => {
+                return Err(QuarbError::Lex(
+                    "'=~' is retired: the pattern comparison is '==' ('== (/…/)')".into(),
+                ));
             }
             // `=>` — the scalar pattern-search hop (spec: Search
             // Operators). Not implemented yet; recognized here so it
@@ -889,13 +999,27 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // reach this arm — `read_balanced` takes them raw.
             // The rounded register and anchor families (ruling
             // #43): a parenthesized symbol is the value side —
-            // `(_)` `(.)` `(.name)` `(*)` `(*.)` `(*-)` `(*N)` `(-)`
+            // `(_)` `(.)` `(.name)` `(*)` `(*.)` `(*-)` `(-)`
             // for `$_` `$.` `$.name` `@*` `@.` `@-` `$*N` `$-` —
             // and double parentheses the node side — `(())` the
-            // root, `((_))` the driver `$$`, `((name))` `((N))`
-            // `((.))` `((@))` `((@name))` the mark anchors (also
+            // root, `_` the driver `$$`, `$$.name` `((N))`
+            // `$$.` `((@))` `((@name))` the mark anchors (also
             // `((*))` `((*name))`). Glued to a call head the outer
             // paren is the call's (`f((_))` passes the topic).
+            '(' if at(i + 1) == Some('(')
+                && at(i + 2) == Some('_')
+                && (at(i + 3) == Some(')')
+                    || (at(i + 3).is_some_and(|c| c.is_ascii_digit())
+                        && chars[i + 3..].iter().take_while(|c| c.is_ascii_digit()).count() > 0
+                        && {
+                            let k = i + 3 + chars[i + 3..].iter().take_while(|c| c.is_ascii_digit()).count();
+                            at(k) == Some(')') && at(k + 1) == Some(')')
+                        })) =>
+            {
+                return Err(QuarbError::Lex(
+                    "'((_))' and '((_N))' are retired: the served node is '((0))', the joined '((N))'".into(),
+                ));
+            }
             '(' if !after_call_head(&tokens, glued)
                 && let Some((unit, next)) = paren_unit(&chars, i) =>
             {
@@ -940,11 +1064,33 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Lt);
                 i += 2;
             }
-            // `(;m,n)` — the rounded quantifier, `{m,n}`'s alias:
-            // read whole, like the braces.
-            '(' if at(i + 1) == Some(';') => {
+            // `(+m;n)` — the rounded quantifier, `{m;n}`'s alias:
+            // the plus is the pattern algebra's own repetition
+            // mark, and the semicolon is always written (`{2}` is
+            // `(+2;2)`), which is what tells the form from unary
+            // plus in a value group (`(+2)`) in any position.
+            '(' if at(i + 1) == Some('+') && quantifier_body(&chars, i + 2, ')') => {
                 let (min, max, next) = read_quantifier(&chars, i + 2, ')')?;
                 tokens.push(Token::Quant { min, max });
+                i = next;
+            }
+            // `(;cmd)` — the rounded shell literal, the backtick's
+            // alias: the body runs to the balancing `)` (shell
+            // quotes protect a paren, `\)` is a literal one) and
+            // interpolates exactly like the backtick.
+            '(' if at(i + 1) == Some(';') && !after_call_head(&tokens, glued) => {
+                let (body, next) = read_shell_paren(&chars, i + 2)?;
+                if body.iter().any(|c| c.is_ascii_digit())
+                    && body.iter().all(|c| c.is_ascii_digit() || *c == ';')
+                {
+                    return Err(QuarbError::Parse(
+                        "the rounded quantifier is (+m;n) — (;…) is the shell literal".into(),
+                    ));
+                }
+                let mut tmp = body;
+                tmp.push('\0');
+                let (parts, _) = read_interpolated_until(&tmp, 0, '\0')?;
+                tokens.push(Token::Shell(parts));
                 i = next;
             }
             '(' => {
@@ -974,7 +1120,17 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 }
                 i += 1;
             }
+            // The comma is separator sugar for `;` and stands
+            // before whitespace: `f(a, b)` — a glued `a,b` is not a
+            // separator (in a digit run it is the decimal comma).
             ',' => {
+                if at(i + 1).is_some_and(|c| !c.is_whitespace()) {
+                    return Err(QuarbError::Parse(
+                        "a comma separator is followed by a space — 'f(a, b)' — \
+                         or write the separator ';' ('f(a; b)')"
+                            .into(),
+                    ));
+                }
                 tokens.push(Token::Comma);
                 i += 1;
             }
@@ -1030,8 +1186,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             ';' if at(i + 1) == Some(';') && at(i + 2) == Some(';') => {
-                tokens.push(Token::SemiSemiSemi);
-                i += 3;
+                return Err(QuarbError::Lex(
+                    "';;;' is retired: adapter metadata is '::::'".into(),
+                ));
             }
             // `;;-` / `;-` — the following-siblings reach and the
             // next-sibling hop, rounded (`>>` / `>`).
@@ -1055,18 +1212,17 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             '~' if at(i + 1) == Some('>') => {
-                tokens.push(Token::Resolve);
-                i += 2;
+                return Err(QuarbError::Lex("'~>' is retired: write '-->'".into()));
+            }
+            '~' if at(i + 1) == Some('(') => {
+                return Err(QuarbError::Lex(
+                    "'~(…)' is retired: the regex literal is '(/…/)'".into(),
+                ));
             }
             '~' => {
-                if at(i + 1) != Some('(') {
-                    return Err(QuarbError::Lex(
-                        "'~' must introduce a regex '~(...)' or a resolution '-->'".into(),
-                    ));
-                }
-                let (body, next) = read_balanced(&chars, i + 2)?;
-                tokens.push(Token::Regex(body));
-                i = next;
+                return Err(QuarbError::Lex(
+                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'".into(),
+                ));
             }
             '\'' => {
                 let (text, next) = read_quoted(&chars, i + 1, c)?;
@@ -1108,15 +1264,6 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // is otherwise a name (`..3` in a range, `...` the
             // spread), so only `..` directly before `/` is the hop;
             // the name lexer breaks on the same shape.
-            '.' if at(i + 1) == Some('.') && at(i + 2) == Some('/') => {
-                if at(i + 3) == Some('/') {
-                    tokens.push(Token::BackslashBackslash);
-                    i += 4;
-                } else {
-                    tokens.push(Token::Backslash);
-                    i += 3;
-                }
-            }
             c if is_name_char(c) => {
                 let mut text = String::new();
                 while let Some(ch) = at(i) {
@@ -1170,6 +1317,23 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         && is_iso_datetime_prefix(&text)
                         && at(i + 1).is_some_and(|c| c.is_ascii_digit())
                     {
+                        text.push(ch);
+                        i += 1;
+                        continue;
+                    }
+                    // The decimal comma: in a digit run, `,` followed
+                    // by a digit is the decimal point (`1,5` is 1.5),
+                    // taking precedence over the argument separator —
+                    // which is therefore written with a space after
+                    // it. A second one is a thousands separator, and
+                    // those are spelled `_` (`1_000_000`).
+                    if ch == ',' && is_digit_run(&text) && at(i + 1).is_some_and(|c| c.is_ascii_digit())
+                    {
+                        if text.contains(['.', ',']) {
+                            return Err(QuarbError::Parse(format!(
+                                "'{text},…': a thousands separator is written '_' (1_000_000); '.' and ',' are the decimal point"
+                            )));
+                        }
                         text.push(ch);
                         i += 1;
                         continue;
@@ -1229,9 +1393,9 @@ fn read_quantifier(
 ) -> Result<(usize, Option<usize>, usize)> {
     let malformed = || {
         QuarbError::Lex(if close == ')' {
-            "malformed quantifier '(;…)': write (;n), (;m,n), or (;m,)".into()
+            "malformed quantifier '(;…)': write (;n), (;m;n), or (;m;)".into()
         } else {
-            "malformed quantifier '{…}': write {n}, {m,n}, or {m,}".into()
+            "malformed quantifier '{…}': write {n}, {m;n}, or {m;}".into()
         })
     };
     let mut i = start;
@@ -1254,7 +1418,11 @@ fn read_quantifier(
     let min = number(&mut i).ok_or_else(malformed)?;
     match chars.get(i) {
         Some(&c) if c == close => Ok((min, Some(min), i + 1)),
-        Some(',') => {
+        Some(',') => Err(QuarbError::Lex(
+            "the comma is retired in a quantifier: write {m;n} (rounded (+m;n))".into(),
+        )),
+        // `;` separates the bounds.
+        Some(';') => {
             i += 1;
             let max = number(&mut i);
             match chars.get(i) {
@@ -1276,6 +1444,77 @@ fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, u
     read_interpolated_until(chars, start, '"')
 }
 
+/// Digits around one `;` up to `close`, with at least one digit —
+/// the shape of a rounded quantifier body (`m;n`, `m;`, `;n`).
+fn quantifier_body(chars: &[char], start: usize, close: char) -> bool {
+    let mut k = start;
+    let mut digit = false;
+    let mut semis = 0;
+    while let Some(&c) = chars.get(k) {
+        if c == close {
+            return digit && semis == 1;
+        }
+        if c.is_ascii_digit() {
+            digit = true;
+        } else if c == ';' {
+            semis += 1;
+        } else {
+            return false;
+        }
+        k += 1;
+    }
+    false
+}
+
+/// The body of a `(;…)` shell literal up to its balancing `)`:
+/// bare parens nest, shell quotes protect a paren, `\)` is a
+/// literal one. Returns the body and the index past the closer.
+fn read_shell_paren(chars: &[char], start: usize) -> Result<(Vec<char>, usize)> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut k = start;
+    while let Some(&c) = chars.get(k) {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == q {
+                quote = None;
+            }
+            k += 1;
+            continue;
+        }
+        match c {
+            '\\' if chars.get(k + 1) == Some(&')') => {
+                out.push(')');
+                k += 2;
+            }
+            '\'' | '"' => {
+                quote = Some(c);
+                out.push(c);
+                k += 1;
+            }
+            '(' => {
+                depth += 1;
+                out.push(c);
+                k += 1;
+            }
+            ')' if depth == 0 => return Ok((out, k + 1)),
+            ')' => {
+                depth -= 1;
+                out.push(c);
+                k += 1;
+            }
+            _ => {
+                out.push(c);
+                k += 1;
+            }
+        }
+    }
+    Err(QuarbError::Parse(
+        "unterminated shell literal '(;…)': no balancing ')'".into(),
+    ))
+}
+
 fn read_interpolated_until(
     chars: &[char],
     start: usize,
@@ -1292,9 +1531,68 @@ fn read_interpolated_until(
                 }
                 return Ok((parts, i + 1));
             }
-            '\\' if matches!(chars.get(i + 1), Some('$' | '"' | '`' | '\\')) => {
+            '\\' if matches!(chars.get(i + 1), Some('$' | '"' | '`' | '\\' | '(')) => {
                 text.push(chars[i + 1]);
                 i += 2;
+            }
+            // `(,expr)` — the rounded hole: the dollar's value-side
+            // digraph, closed by the balancing `)` (nested parens and
+            // single-quoted strings honored); `\(` escapes a literal.
+            '(' if chars.get(i + 1) == Some(&',') => {
+                if !text.is_empty() {
+                    parts.push(InterpPart::Text(std::mem::take(&mut text)));
+                }
+                let mut hole = String::new();
+                i += 2;
+                let mut depth = 0usize;
+                loop {
+                    match chars.get(i) {
+                        Some(')') if depth == 0 => break,
+                        Some(')') => {
+                            depth -= 1;
+                            hole.push(')');
+                            i += 1;
+                        }
+                        Some('(') => {
+                            depth += 1;
+                            hole.push('(');
+                            i += 1;
+                        }
+                        Some('\'') => {
+                            hole.push('\'');
+                            i += 1;
+                            loop {
+                                match chars.get(i) {
+                                    Some('\'') => {
+                                        hole.push('\'');
+                                        i += 1;
+                                        break;
+                                    }
+                                    Some(&c) => {
+                                        hole.push(c);
+                                        i += 1;
+                                    }
+                                    None => {
+                                        return Err(QuarbError::Lex(
+                                            "unterminated interpolation '(,…' (missing ')')".into(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Some(&c) => {
+                            hole.push(c);
+                            i += 1;
+                        }
+                        None => {
+                            return Err(QuarbError::Lex(
+                                "unterminated interpolation '(,…' (missing ')')".into(),
+                            ));
+                        }
+                    }
+                }
+                parts.push(InterpPart::Hole(hole));
+                i += 1;
             }
             '$' if chars.get(i + 1) == Some(&'{') => {
                 if !text.is_empty() {
@@ -1386,54 +1684,6 @@ fn read_quoted(chars: &[char], start: usize, quote: char) -> Result<(String, usi
     )))
 }
 
-/// Read a regex body after `~(` starting at `start`, up to the
-/// matching `)`, honoring nested parentheses, backslash escapes, and
-/// `[...]` character classes (where parens are literal). Returns the
-/// body and the index past the closing `)`.
-fn read_balanced(chars: &[char], start: usize) -> Result<(String, usize)> {
-    let mut body = String::new();
-    let mut depth = 1usize;
-    let mut in_class = false;
-    let mut i = start;
-    while let Some(&ch) = chars.get(i) {
-        i += 1;
-        match ch {
-            // A backslash escapes the next character verbatim, so an
-            // escaped paren or bracket (`\)`, `\(`, `\]`) neither
-            // closes the group nor toggles a character class.
-            '\\' => {
-                body.push('\\');
-                if let Some(&next) = chars.get(i) {
-                    body.push(next);
-                    i += 1;
-                }
-            }
-            // Inside a `[...]` character class, parens are literal;
-            // only an unescaped `]` closes the class.
-            '[' if !in_class => {
-                in_class = true;
-                body.push('[');
-            }
-            ']' if in_class => {
-                in_class = false;
-                body.push(']');
-            }
-            '(' if !in_class => {
-                depth += 1;
-                body.push('(');
-            }
-            ')' if !in_class => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok((body, i));
-                }
-                body.push(')');
-            }
-            _ => body.push(ch),
-        }
-    }
-    Err(QuarbError::Lex("unterminated regex '~(…'".into()))
-}
 
 #[cfg(test)]
 mod quant_tests {
@@ -1446,10 +1696,11 @@ mod quant_tests {
             other => panic!("expected a single Quant, got {other:?}"),
         };
         assert_eq!(quant("{2}"), (2, Some(2)));
-        assert_eq!(quant("{1,3}"), (1, Some(3)));
-        assert_eq!(quant("{2,}"), (2, None));
-        assert_eq!(quant("{ 1 , 3 }"), (1, Some(3)));
-        assert_eq!(quant("{0,4}"), (0, Some(4)));
+        assert_eq!(quant("{1;3}"), (1, Some(3)));
+        assert!(lex("{1,3}").unwrap_err().to_string().contains("retired"));
+        assert_eq!(quant("{2;}"), (2, None));
+        assert_eq!(quant("{ 1 ; 3 }"), (1, Some(3)));
+        assert_eq!(quant("{0;4}"), (0, Some(4)));
     }
 
     #[test]
@@ -1484,8 +1735,8 @@ mod quant_tests {
 
     #[test]
     fn malformed_quantifiers() {
-        for src in ["{}", "{,3}", "{a}", "{1,2", "{1;2}"] {
-            assert!(lex(src).is_err(), "{src} should not lex");
+        for src in ["{}", "{;3}", "{a}", "{1,2", "{1;2", "{1:2}"] {
+            assert!(lex(src).is_err(), "{src} should !lex");
         }
         // A stray closing brace stays unsupported.
         assert!(lex("}").is_err());
@@ -1619,7 +1870,7 @@ mod glued_operator_tests {
         // A regex body is raw: `(?i)` is an inline flag, not a
         // predicate.
         assert!(matches!(
-            lex("~(?i)bob").unwrap().first(),
+            lex("(/?i/)bob").unwrap().first(),
             Some(Token::Regex(r)) if r == "?i"
         ));
         // A spaced `( ?` is still two tokens.
@@ -1653,9 +1904,13 @@ mod glued_operator_tests {
         assert!(lex("/a;;-?b").unwrap().contains(&Token::FollowingSiblings('?')));
         assert!(lex("/a-;;!b").unwrap().contains(&Token::PrecedingSiblings('!')));
         // ascent
-        assert_eq!(lex("../x").unwrap(), vec![Token::Backslash, name("x")]);
+        assert_eq!(lex("/../x").unwrap(), vec![Token::Backslash, Token::Slash, name("x")]);
+        assert_eq!(lex("/..").unwrap(), vec![Token::Backslash]);
+        assert_eq!(lex("/...").unwrap(), vec![Token::BackslashBackslash]);
+        assert_eq!(lex("/..->lbl").unwrap(), vec![Token::Backslash, Token::ArrowOut, name("lbl")]);
+        assert_eq!(lex("/..x").unwrap(), vec![Token::Slash, name("..x")]);
         assert_eq!(
-            lex("/a/b..//?c").unwrap(),
+            lex("/a/b/...?c").unwrap(),
             vec![
                 Token::Slash,
                 name("a"),
@@ -1704,10 +1959,19 @@ mod glued_operator_tests {
         );
         assert_eq!(lex("%()").unwrap(), vec![Token::Percent, Token::LParen, Token::RParen]);
         // quantifier
-        assert_eq!(lex("(;2,3)").unwrap(), vec![Token::Quant { min: 2, max: Some(3) }]);
-        assert_eq!(lex("(;2)").unwrap(), vec![Token::Quant { min: 2, max: Some(2) }]);
-        assert_eq!(lex("(;2,)").unwrap(), vec![Token::Quant { min: 2, max: None }]);
-        assert!(lex("(;2,3}").is_err());
+        assert_eq!(lex("(+2;3)").unwrap(), vec![Token::Quant { min: 2, max: Some(3) }]);
+        assert_eq!(lex("(+2;2)").unwrap(), vec![Token::Quant { min: 2, max: Some(2) }]);
+        assert_eq!(lex("(+2;)").unwrap(), vec![Token::Quant { min: 2, max: None }]);
+        assert!(lex("(+2;3}").is_err());
+        // the old `(;…)` quantifier is the shell literal now
+        let e = lex("(;2;3)").unwrap_err().to_string();
+        assert!(e.contains("(+m;n)"), "{e}");
+        // `(+2)` is unary plus — not a quantifier in any position
+        assert!(matches!(lex("(+2)").unwrap().as_slice(), [Token::LParen, ..]));
+        // the shell literal: to the balancing paren, quotes protect
+        assert!(matches!(lex("| (;wc -l)").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
+        assert!(matches!(lex("| (;echo \"(\" $(date))").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
+        assert!(matches!(lex("| (;echo \\))").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
     }
 
     #[test]
@@ -1726,7 +1990,8 @@ mod glued_operator_tests {
             ("(*)", "@*"),
             ("(*.)", "@."),
             ("(*-)", "@-"),
-            ("(*2)", "$*2"),
+            ("((2))", "$$2"),
+            ("((2))::x", "$$2::x"),
             ("(1)", "$1"),
             ("(12)", "$12"),
             ("(-)", "$-"),
@@ -1736,13 +2001,13 @@ mod glued_operator_tests {
         }
         // the node side, double parens: the mark anchors and the driver
         for (rounded, pointy) in [
-            ("((m))/x", "(m)/x"),
+            ("$$.m/x", "$$.m/x"),
             ("((2))::x", "((2))::x"),
-            ("((@))/e", "(@)/e"),
-            ("((*))/e", "(@)/e"),
-            ("((@m))/f", "(@m)/f"),
-            ("((*m))/f", "(@m)/f"),
-            ("((_))::id", "$$::id"),
+            ("((@))/e", "((@))/e"),
+            ("((*))/e", "((@))/e"),
+            ("((@m))/f", "((@m))/f"),
+            ("((*m))/f", "((@m))/f"),
+            ("_::id", "_::id"),
             ("(())//x", "^//x"),
         ] {
             assert_eq!(
@@ -1751,16 +2016,16 @@ mod glued_operator_tests {
                 "{rounded} vs {pointy}"
             );
         }
-        // `((.))` is the most recent mark — `(.)` itself is now `$.`
+        // `$$.` is the most recent mark — `(.)` itself is now `$.`
         assert_eq!(
-            lex("((.))/d").unwrap(),
-            vec![Token::LParen, name("."), Token::RParen, Token::Slash, name("d")]
+            lex("$$./d").unwrap(),
+            vec![Token::MarkOpen, name("."), Token::RParen, Token::Slash, name("d")]
         );
         // ordinary parens are untouched
         assert!(matches!(lex("((::a = 1 || ::b = 2) && ::c)").unwrap().as_slice(), [Token::LParen, Token::LParen, Token::ColonColon, ..]));
         assert!(matches!(lex("(-3)").unwrap().as_slice(), [Token::LParen, Token::Name { .. }, Token::RParen]));
         assert_eq!(lex("(.5)").unwrap(), lex("$.5").unwrap());
-        assert_eq!(lex("f((_))").unwrap()[1..], lex("f($_)").unwrap()[1..]);
+        assert!(lex("f(_)").unwrap().contains(&Token::Driver));
         // pipes: standalone `__`, `*__`, `,__`
         assert_eq!(lex("/a __ count").unwrap(), lex("/a | count").unwrap());
         assert_eq!(lex("/a *__ max").unwrap(), lex("/a @| max").unwrap());
@@ -1776,8 +2041,8 @@ mod glued_operator_tests {
     #[test]
     fn regex_literal_in_parens_lexes() {
         // name position: strict `/)` closer, flags inline
-        assert_eq!(lex("//(/^foo/)").unwrap(), lex("//~(^foo)").unwrap());
-        assert_eq!(lex("//(/(?i)^foo/)").unwrap(), lex("//~((?i)^foo)").unwrap());
+        assert_eq!(lex("//(/^foo/)").unwrap(), lex("//(/^foo/)").unwrap());
+        assert!(lex("//~((?i)^foo)").unwrap_err().to_string().contains("retired"));
         // a group ending in a hop named x stays a group
         assert!(matches!(
             lex("/a(/src/x)+").unwrap().as_slice(),
@@ -1785,11 +2050,11 @@ mod glued_operator_tests {
         ));
         assert!(matches!(lex("/(/a|/b)").unwrap().as_slice(), [Token::Slash, Token::LParen, ..]));
         // operand position: Perl modifiers, same token as the sugar
-        assert_eq!(lex("[::a =~ (/^bob/i)]").unwrap(), lex("[::a =~ /^bob/i]").unwrap());
-        assert!(matches!(lex("[::a = (/x/)]").unwrap().as_slice(), [Token::LBracket, Token::ColonColon, Token::Name { .. }, Token::Eq, Token::Regex(r), Token::RBracket] if r == "x"));
+        assert_eq!(lex("[::a == (/^bob/i)]").unwrap(), lex("[::a == (/^bob/i)]").unwrap());
+        assert!(matches!(lex("[::a == (/x/)]").unwrap().as_slice(), [Token::LBracket, Token::ColonColon, Token::Name { .. }, Token::MatchEq, Token::Regex(r), Token::RBracket] if r == "x"));
         // an escaped slash is literal; an unescaped one before non-closer text too
         assert!(matches!(lex("//(/a\\/b/)").unwrap().as_slice(), [Token::SlashSlash, Token::Regex(r)] if r == "a/b"));
-        assert!(matches!(lex("[::p =~ (/a/b/)]").unwrap().as_slice(), [.., Token::Regex(r), Token::RBracket] if r == "a/b"));
+        assert!(matches!(lex("[::p == (/a/b/)]").unwrap().as_slice(), [.., Token::Regex(r), Token::RBracket] if r == "a/b"));
         // glued to a call head the paren is the call's
         assert!(matches!(lex("f(/x/)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Slash, ..]));
     }
@@ -1840,11 +2105,56 @@ mod glued_operator_tests {
         assert!(lex("/a | *(1; 2)").unwrap().contains(&Token::At));
         // char-indexed: a non-ASCII character earlier in the text
         // must not shift the whitespace check (article 18's `·`)
-        assert!(lex("/a[:: =~ /x · y/] | %(::n)").is_ok());
+        assert!(lex("/a[:: == (/x · y/)] | %(::n)").is_ok());
         assert!(lex("/a[:: = 'é'] | @(1)").is_ok());
         // glued after an axis: the wildcard, then a rounded predicate
         let toks = lex("/*(?::x = 1)").unwrap();
         assert!(!toks.contains(&Token::At) && toks.contains(&Token::LBracket), "{toks:?}");
+    }
+
+    #[test]
+    fn rounded_hole_in_a_string() {
+        // `(,expr)` is `${expr}` inside a double-quoted string; nested
+        // parens and quotes ride along; `\(` escapes a literal.
+        assert_eq!(lex(r#""a (,::n) b""#).unwrap(), lex(r#""a ${::n} b""#).unwrap());
+        assert_eq!(lex(r#""(,(::n | upper)) x""#).unwrap(), lex(r#""${(::n | upper)} x""#).unwrap());
+        // the hole's text is kept verbatim and re-lexed at parse time
+        assert!(matches!(lex(r#""(,(.n))""#).unwrap().as_slice(), [Token::Interp(parts)] if matches!(parts.as_slice(), [InterpPart::Hole(h)] if h == "(.n)")));
+        // escaped, no hole opens: an ordinary (hole-less) literal
+        let t = lex(r#""\(,see""#).unwrap();
+        assert!(t.len() == 1 && !matches!(t[0], Token::Interp(_)), "{t:?}");
+        assert!(lex(r#""(,::n""#).is_err());
+    }
+
+    #[test]
+    fn decimal_comma_and_group_underscores() {
+        // `1,5` is one number; `1, 5` two; `1,000,000` refuses at the
+        // second comma with the `_` pointer.
+        assert!(matches!(lex("1,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1,5"));
+        assert!(matches!(lex("f(1, 5)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Name { text, .. }, Token::Comma, Token::Name { .. }, Token::RParen] if text == "1"));
+        assert!(matches!(lex("1_000,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1_000,5"));
+        let e = lex("1,000,000").unwrap_err().to_string();
+        assert!(e.contains("1_000_000"), "{e}");
+        // a comma after a name or a decimal-less non-number stays a comma
+        // a glued comma is never a separator (`f(a, b)` or `f(a; b)`)
+        assert!(lex("x,1").is_err());
+        assert!(lex("x, 1").unwrap().contains(&Token::Comma));
+        assert!(matches!(lex("f(a; b)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Name { .. }, Token::Semi, Token::Name { .. }, Token::RParen]));
+        assert!(lex("(+2;5)").is_ok());
+    }
+
+    #[test]
+    fn fragment_and_parameter_units() {
+        // `(=name)` is `&name`, `(=name!)` the macro marker, `(=3)` a
+        // history line, `(,col)` a definition's parameter.
+        assert!(matches!(lex("| (=load)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "load"));
+        assert!(matches!(lex("| (=tok!)(1)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { .. }, Token::Bang, Token::LParen, ..]));
+        assert!(matches!(lex("| (=3)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "3"));
+        assert!(matches!(lex("| (,col)").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == "col"));
+        // the node anchors open with their own token; a single-paren
+        // name is a plain group
+        assert!(lex("$$.m/x").unwrap().starts_with(&[Token::MarkOpen]));
+        assert!(lex("(m)/x").unwrap().starts_with(&[Token::LParen]));
     }
 
     #[test]
@@ -1885,11 +2195,11 @@ mod glued_operator_tests {
             other => panic!("expected a regex, got {other:?}"),
         };
         // An escaped `)` does not close the group early.
-        assert_eq!(body("~(.*\\))"), ".*\\)");
+        assert_eq!(body("(/.*\\)/)"), ".*\\)");
         // A `)` inside a character class is literal.
-        assert_eq!(body("~([)])"), "[)]");
+        assert_eq!(body("(/[)]/)"), "[)]");
         // A plain nested group still balances as before.
-        assert_eq!(body("~((ab)+)"), "(ab)+");
+        assert_eq!(body("(/(ab)+/)"), "(ab)+");
     }
 }
 
@@ -1902,18 +2212,18 @@ mod regex_and_search_tests {
         // `/pat/imsx` after `=~` folds the trailing modifier letters
         // into an inline flag group, so every regex flavor honors them
         // without a separate build path.
-        let toks = lex("[::x =~ /admin/i]").unwrap();
+        let toks = lex("[::x == (/admin/i)]").unwrap();
         assert!(
             toks.contains(&Token::Regex("(?i)admin".into())),
             "got {toks:?}"
         );
-        let toks = lex("[::x =~ /a.b/ms]").unwrap();
+        let toks = lex("[::x == (/a.b/ms)]").unwrap();
         assert!(
             toks.contains(&Token::Regex("(?ms)a.b".into())),
             "got {toks:?}"
         );
         // No modifiers: the body is left bare.
-        let toks = lex("[::x =~ /plain/]").unwrap();
+        let toks = lex("[::x == (/plain/)]").unwrap();
         assert!(toks.contains(&Token::Regex("plain".into())), "got {toks:?}");
     }
 

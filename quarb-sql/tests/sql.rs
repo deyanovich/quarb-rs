@@ -13,7 +13,7 @@ fn t(sql: &str) -> String {
 fn translations() {
     assert_eq!(
         t("SELECT title, price FROM tracks WHERE price < 1 ORDER BY title"),
-        "/tracks/*[::price < 1] @| sort_by(::title) | rec(::title, ::price)"
+        "/tracks/*[::price < 1] @| sort_by(::title) | %(::title; ::price)"
     );
     assert_eq!(t("SELECT COUNT(*) FROM tracks"), "/tracks/* @| count");
     assert_eq!(
@@ -25,8 +25,8 @@ fn translations() {
             "SELECT al.title, t.title FROM albums al JOIN tracks t ON t.album_id = al.id \
            WHERE t.secs > 400"
         ),
-        "/albums/* <=> /tracks/*[::album_id = $$::id and ::secs > 400] \
-         | rec(::title, \"t.title\", $*1::title)"
+        "/albums/* <=> /tracks/*[::album_id = _::id && ::secs > 400] \
+         | %(::title; \"t.title\" = $$1::title)"
     );
     assert_eq!(
         t("SELECT DISTINCT country FROM artists"),
@@ -34,17 +34,17 @@ fn translations() {
     );
     assert_eq!(
         t("SELECT title FROM tracks WHERE title LIKE '%o%' AND secs >= 200"),
-        "/tracks/*[::title =~ /(?i)o/ and ::secs >= 200] | rec(::title)"
+        "/tracks/*[::title == (/(?i)o/) && ::secs >= 200] | %(::title)"
     );
     // `IS [NOT] NULL` → `= null` / `!= null`: exact under Quarb's
     // value_eq (truthiness would also drop 0 and '').
     assert_eq!(
         t("SELECT name FROM artists WHERE country IS NOT NULL"),
-        "/artists/*[::country != null] | rec(::name)"
+        "/artists/*[::country != null] | %(::name)"
     );
     assert_eq!(
         t("SELECT name FROM artists WHERE country IS NULL"),
-        "/artists/*[::country = null] | rec(::name)"
+        "/artists/*[::country = null] | %(::name)"
     );
     // DISTINCT dedups before LIMIT (SQL's order of operations).
     assert_eq!(
@@ -54,7 +54,7 @@ fn translations() {
     // `AS` table aliases.
     assert_eq!(
         t("SELECT t.title FROM tracks AS t WHERE t.secs > -10"),
-        "/tracks/*[::secs > -10] | rec(::title)"
+        "/tracks/*[::secs > -10] | %(::title)"
     );
     // HAVING may name the aggregate by call, alias, or function.
     assert_eq!(
@@ -70,7 +70,7 @@ fn translations() {
     // SQL strings escape into Quarb string syntax.
     assert_eq!(
         t("SELECT a FROM t WHERE a = 'say \"hi\" for $5'"),
-        "/t/*[::a = \"say \\\"hi\\\" for \\$5\"] | rec(::a)"
+        "/t/*[::a = \"say \\\"hi\\\" for \\$5\"] | %(::a)"
     );
 }
 
@@ -205,7 +205,7 @@ fn x(quarb: &str) -> String {
 #[test]
 fn export_translations() {
     assert_eq!(
-        x("/tracks/*[::price < 1] | rec(::title, ::secs) @| sort_by(::title)"),
+        x("/tracks/*[::price < 1] | %(::title; ::secs) @| sort_by(::title)"),
         "SELECT title, secs FROM tracks WHERE price < 1 ORDER BY title"
     );
     assert_eq!(x("/tracks/* @| count"), "SELECT COUNT(*) FROM tracks");
@@ -216,8 +216,8 @@ fn export_translations() {
     );
     assert_eq!(
         x(
-            "/albums/* <=> /tracks/*[::album_id = $$::id and ::secs > 400] \
-           | rec(\"album\", ::title, $*1::title)"
+            "/albums/* <=> /tracks/*[::album_id = _::id && ::secs > 400] \
+           | %(album = ::title; $$1::title)"
         ),
         "SELECT albums.title AS album, tracks.title FROM albums \
          JOIN tracks ON tracks.album_id = albums.id WHERE tracks.secs > 400"
@@ -227,7 +227,7 @@ fn export_translations() {
         "SELECT DISTINCT price FROM tracks"
     );
     assert_eq!(
-        x("/tracks/* @| top(2, ::price) | rec(::title, ::price)"),
+        x("/tracks/* @| top(2, ::price) | %(::title; ::price)"),
         "SELECT title, price FROM tracks ORDER BY price DESC LIMIT 2"
     );
 }
@@ -235,9 +235,9 @@ fn export_translations() {
 #[test]
 fn export_refusals() {
     let err = |q: &str| export(q).unwrap_err().to_string();
-    assert!(err("/tracks/* | rec(::album_id~>::title)").contains("schema"));
+    assert!(err("/tracks/* | %(::album_id-->::title)").contains("schema"));
     assert!(err("/tracks/* | ::price @| window(3) | mean").contains("aggregate"));
-    assert!(err("/a/*[::x =~ /y/]").contains("regex"));
+    assert!(err("/a/*[::x == (/y/)]").contains("regex"));
     assert!(err("//tracks/*::title").contains("/table/*"));
     // SUM(*) is not SQL: bare-row aggregates beyond count refuse.
     assert!(err("/t/* @| sum").contains("project a column"));
@@ -252,7 +252,7 @@ fn export_refusals() {
     assert!(err("/t/*[::a *= ::b] | ::a").contains("non-literal"));
     // `$*k` belongs on a joined expression; the driver cannot
     // reference the join (a parse-level placement error).
-    assert!(err("/t/*[$*1::x = 5] | ::a").contains("drives"));
+    assert!(err("/t/*[$$1::x = 5] | ::a").contains("drives"));
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn export_details() {
     // A terminal projection on the joined branch selects from the
     // result context's table (it used to be silently dropped).
     assert_eq!(
-        x("/albums/* <=> /tracks/*[::album_id = $$::id] | rec($*1::title)"),
+        x("/albums/* <=> /tracks/*[::album_id = _::id] | %($$1::title)"),
         "SELECT tracks.title FROM albums JOIN tracks ON tracks.album_id = albums.id"
     );
     // Grouped '| count' counts every member like Quarb does —
@@ -292,7 +292,7 @@ fn identifiers_are_gated() {
     assert!(pushdown("/t/*[::\"a OR b\" = 5] | ::x").is_none());
     assert!(pushdown("/\"t; DROP TABLE u\"/*[::a = 5] | ::x").is_none());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::aid = $$::\"album-id\"] | rec(\"t\", $*1::title)")
+        pushdown("/albums/* <=> /tracks/*[::aid = _::\"album-id\"] | %(t = $$1::title)")
             .is_none()
     );
     // The display translation double-quotes (ANSI) with a note.
@@ -329,9 +329,9 @@ fn export_differential_against_sqlite() {
     let cases = [
         "/tracks/*[::price < 1] | ::title @| sort_by(::title)",
         "/tracks/* @| count",
-        "/tracks/*[::secs > 100 and ::price >= 1] | ::title @| sort_by(::title)",
+        "/tracks/*[::secs > 100 && ::price >= 1] | ::title @| sort_by(::title)",
         "/tracks/* | ::price @| sum",
-        "/tracks/* @| top(2, ::secs) | rec(::title)",
+        "/tracks/* @| top(2, ::secs) | %(::title)",
     ];
     for quarb in cases {
         let sql = export(quarb).unwrap().query;
@@ -386,9 +386,9 @@ fn pushdown_gate() {
     let pushdown = |q: &str| quarb_sql::pushdown(q, None);
     // In: aggregates, filtered selections, witness joins.
     assert!(pushdown("/tracks/* @| count").is_some());
-    assert!(pushdown("/tracks/*[::price < 1] | rec(::title)").is_some());
+    assert!(pushdown("/tracks/*[::price < 1] | %(::title)").is_some());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::album_id = $$::id] | rec(::title, \"track\", $*1::title)")
+        pushdown("/albums/* <=> /tracks/*[::album_id = _::id] | %(::title; track = $$1::title)")
             .is_some()
     );
     // Aggregates carry no order table; row selections order by the
@@ -400,7 +400,7 @@ fn pushdown_gate() {
             .is_none()
     );
     assert_eq!(
-        pushdown("/tracks/*[::price < 1] | rec(::title)")
+        pushdown("/tracks/*[::price < 1] | %(::title)")
             .unwrap()
             .order_table
             .as_deref(),
@@ -431,9 +431,9 @@ fn partial_pushdown_gate() {
     // Reaching the table twice (a ^-anchored subcontext) = out.
     assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n", None).is_none());
     // Crosslink/resolution axes = out.
-    assert!(partial_pushdown("/t/*[::a = 1]::b~>::c", None).is_none());
+    assert!(partial_pushdown("/t/*[::a = 1]::b-->::c", None).is_none());
     // Metadata = out (a filtered ;;;n-rows would lie).
-    assert!(partial_pushdown("/t/*[::a = 1] | ;;;table", None).is_none());
+    assert!(partial_pushdown("/t/*[::a = 1] | ::::table", None).is_none());
     // Non-strict predicates (LIKE folding) = out.
     assert!(
         partial_pushdown("/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.", None)
@@ -448,7 +448,7 @@ fn pushdown_join_soundness_metadata() {
     // so the driver can verify uniqueness (SQL JOIN multiplies
     // rows when several joined rows match one FROM row; Quarb's
     // existential binding never does).
-    let p = pushdown("/albums/* <=> /tracks/*[::album_id = $$::id] | rec(\"a\", ::title)")
+    let p = pushdown("/albums/* <=> /tracks/*[::album_id = _::id] | %(a = ::title)")
         .expect("canonical witness join pushes down");
     let (table, cols) = p.join_left.expect("join carries its obligation");
     assert_eq!(table, "tracks");
@@ -468,7 +468,7 @@ fn pushdown_refuses_keyword_aliases() {
     // `AS order` is an SQL syntax error; quoting portably differs
     // by dialect, so strict pushdown refuses outright.
     let Err(err) = pushdown_explained(
-        "/albums/* <=> /tracks/*[::album_id = $$::id] | rec(\"order\", $*1::title)",
+        "/albums/* <=> /tracks/*[::album_id = _::id] | %(order = $$1::title)",
     ) else {
         panic!("keyword alias must refuse")
     };
@@ -484,7 +484,7 @@ fn refuses_the_internal_left_marker() {
     // join's left table: query text containing it would be
     // rewritten inside its own literals and could spoof the join
     // obligation, so it stays on the scan path.
-    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id' and ::album_id = $$::id] | rec($*1::title)";
+    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id' && ::album_id = _::id] | %($$1::title)";
     assert!(pushdown(q).is_none());
     let Err(err) = pushdown_explained(q) else {
         panic!("marker in a literal must refuse")
@@ -497,13 +497,13 @@ fn refuses_the_internal_left_marker() {
 fn join_projections_qualify_by_operand_index() {
     let pushdown = |q: &str| quarb_sql::pushdown(q, None);
     let pushdown_explained = |q: &str| quarb_sql::pushdown_explained(q, None);
-    // Bare columns project the driver/FROM table, `$*1` the
+    // Bare columns project the driver/FROM table, `$$1` the
     // joined one — found by the seams article: every context used
     // to render as one table, compiling invalid SQL that only the
     // driver's runtime refusal caught.
     let p = pushdown(
-        "/albums/* <=> /tracks/*[::album_id = $$::id] \
-         | rec(\"a\", ::title, \"t\", $*1::title)",
+        "/albums/* <=> /tracks/*[::album_id = _::id] \
+         | %(a = ::title; t = $$1::title)",
     )
     .expect("two-sided projection pushes down");
     assert!(p.sql.contains("albums.title AS a"), "{}", p.sql);
@@ -511,7 +511,7 @@ fn join_projections_qualify_by_operand_index() {
     // Beyond the joined operand there is no verified mapping.
     assert!(
         pushdown_explained(
-            "/albums/* <=> /tracks/*[::album_id = $$::id] | rec(\"x\", $*2::title)"
+            "/albums/* <=> /tracks/*[::album_id = _::id] | %(x = $$2::title)"
         )
         .is_err()
     );

@@ -22,10 +22,8 @@ const SCALAR: &[&str] = &[
     "trim",
     "ltrim",
     "rtrim",
-    // `cc` counts codepoints, `bc` UTF-8 bytes, `wc` words;
-    // `chars` is the pre-0.25 spelling of `cc`, kept as an alias.
+    // `cc` counts codepoints, `bc` UTF-8 bytes, `wc` words.
     "cc",
-    "chars",
     "bc",
     "wc",
     "lc",
@@ -223,7 +221,7 @@ pub fn apply_scalar(
         "rtrim" => vec![Value::Str(text.trim_end().to_string())],
         // `cc` counts codepoints (né `chars`, the pre-0.25 alias);
         // `bc` counts UTF-8 bytes; `wc` counts words.
-        "cc" | "chars" => vec![Value::Int(text.chars().count() as i64)],
+        "cc" => vec![Value::Int(text.chars().count() as i64)],
         "bc" => vec![Value::Int(text.len() as i64)],
         "wc" => vec![Value::Int(text.split_whitespace().count() as i64)],
         "lc" => vec![Value::Int(text.lines().count() as i64)],
@@ -1211,7 +1209,7 @@ mod tests {
         assert_eq!(sc("rtrim", s("  x  ")), vec![s("  x")]);
         // counts: codepoints vs bytes vs words vs lines
         assert_eq!(sc("cc", s("льюис")), vec![Value::Int(5)]);
-        assert_eq!(sc("chars", s("льюис")), vec![Value::Int(5)]);
+        assert_eq!(sc("cc", s("льюис")), vec![Value::Int(5)]);
         assert_eq!(sc("bc", s("льюис")), vec![Value::Int(10)]);
         assert_eq!(sc("wc", s("a b c")), vec![Value::Int(3)]);
         assert_eq!(sc("lc", s("a\nb\nc")), vec![Value::Int(3)]);

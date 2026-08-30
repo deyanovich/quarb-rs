@@ -45,7 +45,7 @@ fn catalog_and_rows() {
 fn fk_machinery() {
     // the two-hop join as a path, over sys.foreign_key_columns
     assert_eq!(
-        values("/tracks/1::album_id~>::artist_id~>::name"),
+        values("/tracks/1::album_id-->::artist_id-->::name"),
         ["Holst"]
     );
 }

@@ -67,7 +67,7 @@ const session = await mount([
   { name: 'orders', format: 'json', text: ordersJson },
 ]);
 const r = JSON.parse(session.run(
-  '/page//a <=> /orders/rows/*[::url = $$::href] | rec("url", ::href, "total", $*1::total)'
+  '/page//a <=> /orders/rows/*[::url = _::href] | %(url = ::href; total = $$1::total)'
 ));
 // r = {label: "&1", lines: [...], note, error}
 ```

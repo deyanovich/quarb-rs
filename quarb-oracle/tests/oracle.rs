@@ -44,7 +44,7 @@ fn catalog_and_rows() {
 fn fk_machinery() {
     // the two-hop join as a path, over USER_CONSTRAINTS FKs
     assert_eq!(
-        values("/TRACKS/1::ALBUM_ID~>::ARTIST_ID~>::NAME"),
+        values("/TRACKS/1::ALBUM_ID-->::ARTIST_ID-->::NAME"),
         ["Holst"]
     );
 }

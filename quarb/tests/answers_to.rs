@@ -75,8 +75,8 @@ fn quoted_alias_spelling_answers() {
 fn patterns_stay_canonical() {
     // ~(...) ranges over canonical vocabulary: the alias spelling
     // is not in pattern space.
-    assert_eq!(values("/~(^al)::"), vec!["hello"]);
-    assert!(values("/~(^@)::").is_empty());
+    assert_eq!(values("/(/^al/)::"), vec!["hello"]);
+    assert!(values("/(/^@/)::").is_empty());
 }
 
 #[test]

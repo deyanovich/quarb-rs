@@ -151,7 +151,7 @@ pip install quarb-full   # the complete CLI, prebuilt (or:
 qua '/books/*[/price:: > 20]/title::' store.json
 
 # A filesystem, like find — but with graph navigation:
-qua '//*[;;;size > 1e6]' ~/logs
+qua '//*[::::size > 1e6]' ~/logs
 
 # A SQLite database, no SQL:
 qua '/albums/*::title' music.db

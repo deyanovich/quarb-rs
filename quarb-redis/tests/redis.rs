@@ -42,7 +42,7 @@ fn live_redis() {
     assert_eq!(values(&a, "/user/1::name"), ["Ada"]);
     assert_eq!(values(&a, "/user/*[::plan = \"pro\"]::city"), ["Oslo"]);
     assert_eq!(values(&a, "/user/1/visits/* @| count"), ["3"]);
-    assert_eq!(values(&a, "/user/1;;;type"), ["hash"]);
+    assert_eq!(values(&a, "/user/1::::type"), ["hash"]);
 
     // JSON strings graft; plain strings stay leaves.
     assert_eq!(values(&a, "/session/abc::ip"), ["10.0.0.7"]);
@@ -50,7 +50,7 @@ fn live_redis() {
 
     // zset members ride in score order, the score as metadata.
     assert_eq!(values(&a, "/leaderboard/*:::name"), ["Bo", "Ada"]);
-    assert_eq!(values(&a, "/leaderboard/Ada;;;score"), ["120"]);
+    assert_eq!(values(&a, "/leaderboard/Ada::::score"), ["120"]);
 
     // Streams are bounded snapshots: id-named entries, typed
     // ;;;ts instants, fields as properties.
@@ -60,19 +60,19 @@ fn live_redis() {
         ["45"]
     );
     assert_eq!(
-        values(&a, "/events/*[;;;ts > 2020-01-01] @| count"),
+        values(&a, "/events/*[::::ts > 2020-01-01] @| count"),
         ["2"]
     );
 
     // TTL is a typed duration.
-    assert_eq!(values(&a, "/ttl/token[;;;ttl > 1h] @| count"), ["1"]);
+    assert_eq!(values(&a, "/ttl/token[::::ttl > 1h] @| count"), ["1"]);
 
     // Key-convention references resolve: the stream's user field
     // holds a full key.
     assert_eq!(
-        values(&a, "/events/*[::kind = \"view\"]::user~>::name"),
+        values(&a, "/events/*[::kind = \"view\"]::user-->::name"),
         ["Ada"]
     );
     // …and the session's user pointer too.
-    assert_eq!(values(&a, "/session/abc::user~>::plan"), ["pro"]);
+    assert_eq!(values(&a, "/session/abc::user-->::plan"), ["pro"]);
 }

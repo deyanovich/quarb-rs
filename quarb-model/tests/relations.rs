@@ -32,7 +32,7 @@ fn values(a: &ModelAdapter<SqliteAdapter>, q: &str) -> Vec<String> {
 const MODEL: &str = r#"
     node /deploys/deploy: /deploys/*;
     node /errors/error:   /errors/*;
-    rel /errors/error -> /deploys/deploy [::at < $$::at];
+    rel /errors/error -> /deploys/deploy [::at < _::at];
 "#;
 
 #[test]
@@ -98,8 +98,8 @@ fn a_second_relation_between_the_same_sets_mints_a_second_role() {
         node /deploys/deploy: /deploys/*;
         node /errors/error:   /errors/*;
         node /culprits/culprit: /deploys/*;
-        rel /errors/error -> /deploys/deploy   [::at < $$::at];
-        rel /errors/error -> /culprits/culprit [::at < $$::at and ::rev = 'b2'];
+        rel /errors/error -> /deploys/deploy   [::at < _::at];
+        rel /errors/error -> /culprits/culprit [::at < _::at && ::rev = 'b2'];
     "#);
     // both relations from the same error, each under its own label
     let mut got = values(&a, "/errors/error[::msg = 'timeout']->deploy::rev");

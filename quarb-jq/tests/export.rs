@@ -30,11 +30,11 @@ fn translations() {
     assert_eq!(x("/books/*/price:: @| sum"), "[.books[].price] | add");
     assert_eq!(x("/books/*[2..3]/title::"), ".books[1:3][].title");
     assert_eq!(
-        x(r#"/books/* | rec("t", /title::, "p", /price::)"#),
+        x(r#"/books/* | %("t"; /title::; "p"; /price::)"#),
         ".books[] | {t: .title, p: .price}"
     );
     assert_eq!(
-        x("/books/*[/title:: =~ /^S/]/title::"),
+        x("/books/*[/title:: == (/^S/)]/title::"),
         ".books[] | select((.title | test(\"^S\"))).title"
     );
 }
@@ -44,7 +44,7 @@ fn refusals() {
     let err = |q: &str| export(q).unwrap_err().to_string();
     assert!(err("//book/title::").contains("'//' axis"));
     assert!(err("/books/*<block>/title::").contains("trait"));
-    assert!(err("/a <=> /b[::x = $$::x]").contains("correlation"));
+    assert!(err("/a <=> /b[::x = _::x]").contains("correlation"));
     assert!(err("/books/* | .t(/title::) | $.t").contains("stage"));
     assert!(err("/books/*.rs/x::").contains("glob"));
 }
@@ -52,7 +52,7 @@ fn refusals() {
 #[test]
 fn differential_against_jq() {
     if Command::new("jq").arg("--version").output().is_err() {
-        eprintln!("skipping: jq binary not installed");
+        eprintln!("skipping: jq binary !installed");
         return;
     }
     let dir = std::env::temp_dir().join("quarb-jq-export-test");
@@ -68,7 +68,7 @@ fn differential_against_jq() {
         "/books/*[/genre:: = \"history\"]/title::",
         "/books/*[2..3]/title::",
         "/books/*/author:: @| join(\", \")",
-        "/books/*[/title:: =~ /^S/]/title::",
+        "/books/*[/title:: == (/^S/)]/title::",
         "/clerk/name::",
     ];
     for quarb in cases {

@@ -17,7 +17,7 @@ fn values(query: &str) -> Vec<String> {
 #[test]
 #[ignore = "needs QUARB_MYSQL pointing at a music-store database"]
 fn catalog_rows_and_lazy() {
-    assert_eq!(values("/tracks;;;n-rows"), vec!["7"]);
+    assert_eq!(values("/tracks::::n-rows"), vec!["7"]);
     assert_eq!(values("/artists/2::name"), vec!["Bartok"]);
     assert_eq!(values("/tracks/*[::price < 1]::title @| count"), vec!["3"]);
 }
@@ -26,11 +26,11 @@ fn catalog_rows_and_lazy() {
 #[ignore = "needs QUARB_MYSQL pointing at a music-store database"]
 fn fk_machinery() {
     assert_eq!(
-        values("/invoices/1::track_id~>::album_id~>::artist_id~>::name"),
+        values("/invoices/1::track_id-->::album_id-->::artist_id-->::name"),
         vec!["Holst"]
     );
     assert_eq!(
-        values("/artists/2::artist_id<~::title"),
+        values("/artists/2::artist_id<--::title"),
         vec!["Mikrokosmos", "Quartets"]
     );
 }
@@ -40,8 +40,8 @@ fn fk_machinery() {
 fn sql_shapes() {
     assert_eq!(
         values(
-            "/tracks/* | ::price @| group(\"artist\", ::album_id~>::artist_id~>::name) \
-             | sum | .rev | rec($.artist, \"rev\", $.rev)"
+            "/tracks/* | ::price @| group(\"artist\", ::album_id-->::artist_id-->::name) \
+             | sum | .rev | %($.artist; rev = $.rev)"
         ),
         vec![
             r#"{"artist": "Holst", "rev": 3.5700000000000003}"#,
@@ -51,8 +51,8 @@ fn sql_shapes() {
     );
     assert_eq!(
         values(
-            "/albums/* <=> /tracks/*[::album_id = $*1::id and ::secs > 400] \
-             | rec(\"album\", $*1::title, ::title)"
+            "/albums/* <=> /tracks/*[::album_id = $$1::id && ::secs > 400] \
+             | %(album = $$1::title; ::title)"
         ),
         vec![
             r#"{"album": "The Planets", "title": "Mars"}"#,
