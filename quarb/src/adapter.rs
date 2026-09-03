@@ -200,6 +200,43 @@ pub trait AstAdapter {
         None
     }
 
+    /// The external reference `node`'s `property` holds, if any: an
+    /// adapter-defined identifier of a document *outside this
+    /// arbor* — for html, the anchor's absolute URL, a relative
+    /// `href` joined against the document's own URL. A `#fragment`
+    /// part is the crossref *within* the target document and rides
+    /// along (URI semantics). Consulted by `::property-->` when
+    /// in-document resolution misses: a mounted document with that
+    /// identifier answers (the fragment's element, else its root),
+    /// an unmounted one lands among the run's unresolved external
+    /// references for the host's acquisition loop. The engine
+    /// itself never fetches.
+    fn external_ref(&self, _node: NodeId, _property: &str, _hint: Option<&str>) -> Option<String> {
+        None
+    }
+
+    /// The element `fragment` names inside the document `node`
+    /// belongs to — html's `id` lookup. The landing rung of a
+    /// fragment-carrying external reference, once its document is
+    /// mounted.
+    fn resolve_fragment(&self, _node: NodeId, _fragment: &str) -> Option<NodeId> {
+        None
+    }
+
+    /// The property carrying `node`'s own reference, for the bare
+    /// arrow (`//a-->`): an html anchor's `href`, an iframe's
+    /// `src`. `None` for a node that references nothing.
+    fn ref_property(&self, _node: NodeId) -> Option<String> {
+        None
+    }
+
+    /// The relation name a resolution edge from `node` via
+    /// `property` carries — html's `rel` attribute. `None` falls
+    /// back to the property name as the edge label.
+    fn ref_label(&self, _node: NodeId, _property: &str) -> Option<String> {
+        None
+    }
+
     /// A property of the crosslink `source --label--> target` — the
     /// `$-::prop` read. Adapters whose edges carry data (a property
     /// graph's relationship properties) override this; `None` if the
@@ -316,6 +353,18 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.inner.resolve(node, property, hint)
     }
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        self.inner.external_ref(node, property, hint)
+    }
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.inner.resolve_fragment(node, fragment)
+    }
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.inner.ref_property(node)
+    }
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        self.inner.ref_label(node, property)
+    }
     fn link_property(
         &self,
         source: NodeId,
@@ -388,6 +437,18 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
     }
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.inner.resolve(node, property, hint)
+    }
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        self.inner.external_ref(node, property, hint)
+    }
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.inner.resolve_fragment(node, fragment)
+    }
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.inner.ref_property(node)
+    }
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        self.inner.ref_label(node, property)
     }
     fn link_property(
         &self,
@@ -463,6 +524,18 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
     }
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.inner.resolve(node, property, hint)
+    }
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        self.inner.external_ref(node, property, hint)
+    }
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.inner.resolve_fragment(node, fragment)
+    }
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.inner.ref_property(node)
+    }
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        self.inner.ref_label(node, property)
     }
     fn link_property(
         &self,

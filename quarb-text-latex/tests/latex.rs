@@ -315,3 +315,35 @@ fn multibyte_prose_survives() {
         ["Of χραισμεῖν, Buttmann observes “it helps thee not”."]
     );
 }
+
+#[test]
+fn citations_and_the_bibliography() {
+    let m = quarb_text_latex::parse(
+        r"\section{Intro}
+Knuth said so \cite{knuth84}, twice \citep{knuth84,lamport94}.
+
+\begin{thebibliography}{99}
+\bibitem{knuth84} Donald E. Knuth. \emph{The TeXbook}. 1984.
+\bibitem{lamport94} Leslie Lamport. LaTeX. 1994.
+\bibitem{unused00} Nobody. Never cited. 2000.
+\end{thebibliography}
+",
+    );
+    // The mark projects its raw key; \citep{a,b} is two marks.
+    assert_eq!(values(&m, "//cit::"), ["knuth84", "knuth84", "lamport94"]);
+    // The arrow lands on the entry; its projection is the full
+    // reference text, plain.
+    assert_eq!(
+        values(&m, r#"//cit[::target = "lamport94"]--> ::"#),
+        ["Leslie Lamport. LaTeX. 1994."]
+    );
+    // The two linters: uncited entries, dangling citations.
+    assert_eq!(values(&m, "//bib[!<-cit]::onym"), ["unused00"]);
+    assert_eq!(values(&m, "//cit[!::::resolved] @| count"), ["0"]);
+    // Citation keys are their own namespace: a \ref to a bib key
+    // does not resolve (LaTeX's \newlabel vs \bibcite).
+    let m2 = quarb_text_latex::parse(
+        "\\section{A}\\label{knuth84}\nSee \\cite{knuth84}.\n",
+    );
+    assert_eq!(values(&m2, "//cit[!::::resolved] @| count"), ["1"]);
+}

@@ -43,6 +43,7 @@ const SCALAR: &[&str] = &[
     "abs",
     "json",
     "jsonl",
+    "kaiv",
     "xml",
     "markdown",
     "html",
@@ -89,7 +90,7 @@ const SCALAR: &[&str] = &[
 ];
 
 const AGGREGATE: &[&str] = &[
-    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "json", "jsonl", "sort",
+    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "json", "jsonl", "kaiv", "sort",
     "unique", "reverse", "first", "last", "join", "ungroup", "window", "shift",
 ];
 
@@ -684,6 +685,12 @@ pub fn apply_scalar(
         // named here but constructed in the executor, which has the
         // adapter at hand for its expression arguments.)
         "json" | "jsonl" => vec![Value::Str(topic.to_json())],
+        // The one-value kaiv document; `@| kaiv` renders the whole
+        // stream as one (ruling #51's family, the kaiv member).
+        "kaiv" => vec![Value::Str(
+            crate::kaiv_out::document(std::slice::from_ref(&topic))
+                .unwrap_or_else(|e| e),
+        )],
         _ => vec![topic],
     }
 }
@@ -745,6 +752,13 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             let items: Vec<String> = input.iter().map(Value::to_json).collect();
             vec![Value::Str(items.join("\n"))]
         }
+        // The stream as one kaiv document: results under
+        // `/@results`, records as namespaces, lists as arrays,
+        // units kept. Provenance rides qua's `--kaiv`, not the
+        // stage (the stage sees values, not nodes).
+        "kaiv" => vec![Value::Str(
+            crate::kaiv_out::document(&input).unwrap_or_else(|e| e),
+        )],
         // The order/selection family over an explicit value list —
         // reached from the per-capsa list reductions (`| last` on a
         // group's list topic); the `@|` forms are capsa-preserving

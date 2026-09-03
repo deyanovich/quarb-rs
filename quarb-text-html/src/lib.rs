@@ -231,6 +231,9 @@ fn element<'a>(
                 level: tag[1..].parse().unwrap(),
                 lemma,
             });
+            // A heading's id labels the section it opens — the
+            // block-style bearer.
+            emit_label(el, out);
             emit_notes(notes, out, aside_seq);
         }
         _ if P_LIKE.contains(&tag) => {
@@ -239,6 +242,9 @@ fn element<'a>(
             let text =
                 quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
             out.push(Block::Paragraph { text });
+            // A block element's own id names the block — the
+            // html-id / attached-\label parity rule.
+            emit_label(el, out);
             emit_notes(notes, out, aside_seq);
         }
         "blockquote" => {
@@ -247,6 +253,7 @@ fn element<'a>(
                 kind: Container::Blockquote,
                 lemma: None,
             });
+            emit_label(el, out);
             let (children, hypograph) = quote_content(el);
             stack.push(Work::Close { hypograph });
             push_children(children, stack);
@@ -318,6 +325,7 @@ fn element<'a>(
                 lang: verbatim_lang(el),
                 text: text_of_raw(el),
             });
+            emit_label(el, out);
         }
         "table" => {
             flush(run, out);
@@ -622,6 +630,21 @@ fn text_and_notes_raw(el: ElementRef, notes: &mut Vec<Note>) -> String {
             if SKIP.contains(&child.value().name()) || aria_chrome(child) {
                 continue;
             }
+            // The reference vocabulary, met in flow: an inline id
+            // bears a point anchor at this position; an anchor's
+            // href is a mention (its text stays in the prose — a
+            // link is prose that also points).
+            if let Some(id) = child.value().attr("id")
+                && !id.trim().is_empty()
+            {
+                notes.push(Note::Point(id.trim().to_string()));
+            }
+            if child.value().name() == "a"
+                && let Some(href) = child.value().attr("href")
+                && !href.trim().is_empty()
+            {
+                notes.push(Note::Link(href.trim().to_string(), text_of_raw(child)));
+            }
             for c in child.children().rev() {
                 stack.push(c);
             }
@@ -633,10 +656,26 @@ fn text_and_notes_raw(el: ElementRef, notes: &mut Vec<Note>) -> String {
 }
 
 /// A note met inside flow text, for the caller to emit after its
-/// block: a callout's onym, or an inline body's (onym, text).
+/// block: a callout's onym, or an inline body's (onym, text) —
+/// plus the reference vocabulary met the same way: an in-prose
+/// link's (href, text) and an inline id's point anchor.
 enum Note {
     Ref(String),
     Body(String, NoteFamily, String),
+    Link(String, String),
+    Point(String),
+}
+
+/// A block element's own `id` labels the block just emitted —
+/// the html-id / attached-\label parity rule.
+fn emit_label(el: ElementRef, out: &mut Vec<Block>) {
+    if let Some(id) = el.value().attr("id")
+        && !id.trim().is_empty()
+    {
+        out.push(Block::Label {
+            onym: id.trim().to_string(),
+        });
+    }
 }
 
 fn emit_notes(notes: Vec<Note>, out: &mut Vec<Block>, aside_seq: &mut usize) {
@@ -647,6 +686,15 @@ fn emit_notes(notes: Vec<Note>, out: &mut Vec<Block>, aside_seq: &mut usize) {
                 family: None,
                 margin: false,
             }),
+            Note::Link(target, text) => {
+                let internal = target.starts_with('#');
+                out.push(Block::Ref {
+                    target,
+                    text: Some(quarb_text::normalize_ws(&text)).filter(|t| !t.is_empty()),
+                    internal,
+                });
+            }
+            Note::Point(onym) => out.push(Block::Anchor { onym }),
             Note::Body(mut onym, family, text) => {
                 // Inline aside bodies anchor where they stood —
                 // same synthesis as the element path.

@@ -177,3 +177,29 @@ fn footnotes_join_the_apparatus() {
     assert_eq!(q(r"//*<note><-footnote\*::"), ["The emus advanced. They kept coming."]);
     assert_eq!(q("//*<dangling> @| count"), ["0"]);
 }
+
+#[test]
+fn pandoc_bracketed_citations() {
+    let model = quarb_text_markdown::parse(
+        "The classic treatment [@knuth84] holds; compare\n\
+         [see @lamport94, pp. 3-5; -@knuth84].\n\n\
+         Mail [x@y.com] or ping @someone about it.\n",
+    );
+    let vals = |q: &str| -> Vec<String> {
+        match quarb::run(q, &model).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            quarb::QueryResult::Nodes(ns) => ns.iter().map(|n| format!("{n:?}")).collect(),
+        }
+    };
+    // Every bracketed @key is a cit mark — the locator, prefix,
+    // and author-suppressed forms included; keys repeat as cited.
+    assert_eq!(vals("//cit::target"), ["knuth84", "lamport94", "knuth84"]);
+    // The bare narrative @key is deliberately not read: an email
+    // in brackets and an @mention stay prose.
+    assert_eq!(vals("//cit @| count"), ["3"]);
+    // The bracket text stays in the prose as authored.
+    assert_eq!(
+        vals("//paragraph[2]::"),
+        ["Mail [x@y.com] or ping @someone about it."]
+    );
+}

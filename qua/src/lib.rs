@@ -1095,6 +1095,26 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 cli.kaiv.then_some(src.as_str()),
             );
         }
+        // BibTeX / BibLaTeX: atrep's importer parses it into
+        // bibliogramma, and the entries land as bib blocks.
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("bib"))
+        {
+            let text = std::fs::read_to_string(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let adapter = quarb_text_koine::parse_bibtex(&text).with_context(|| {
+                format!("reading {} as BibTeX through bibliogramma", target.display())
+            })?;
+            let src = target.display().to_string();
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
         let text = std::fs::read_to_string(target)
             .with_context(|| format!("reading {}", target.display()))?;
         let text = match text.strip_prefix('\u{feff}') {
@@ -2824,6 +2844,21 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
         }
+        // BibTeX / BibLaTeX: atrep's importer parses it into
+        // bibliogramma, and the entries land as bib blocks.
+        if target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("bib"))
+        {
+            let text = std::fs::read_to_string(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let a = Rc::new(quarb_text_koine::parse_bibtex(&text).with_context(|| {
+                format!("reading {} as BibTeX through bibliogramma", target.display())
+            })?);
+            let r = a.clone();
+            return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+        }
         let text = std::fs::read_to_string(target)
             .with_context(|| format!("reading {}", target.display()))?;
         let text = match text.strip_prefix('\u{feff}') {
@@ -3700,6 +3735,7 @@ fn emit_kaiv(
     prov_of: impl Fn(NodeId) -> quarb::Provenance,
 ) -> anyhow::Result<String> {
     use kaiv::{KaivBuilder, Provenance};
+    use quarb::kaiv_out::{ident_of, kaiv_put};
     let mut b = KaivBuilder::new();
     b.declare_source("q", source).map_err(kaiv_err)?;
     // Declare each distinct row source once, in first-appearance
@@ -3751,14 +3787,17 @@ fn emit_kaiv(
         match topic {
             None => {
                 let loc = render(*node);
-                kaiv_put(&mut b, &base, "node", &Value::Str(loc), &prov, &mut used)?;
+                kaiv_put(&mut b, &base, "node", &Value::Str(loc), &prov, &mut used)
+                    .map_err(anyhow::Error::msg)?;
             }
             Some(Value::Record(fields)) => {
                 for (k, v) in fields {
-                    kaiv_put(&mut b, &base, k, v, &prov, &mut used)?;
+                    kaiv_put(&mut b, &base, k, v, &prov, &mut used)
+                        .map_err(anyhow::Error::msg)?;
                 }
             }
-            Some(v) => kaiv_put(&mut b, &base, "value", v, &prov, &mut used)?,
+            Some(v) => kaiv_put(&mut b, &base, "value", v, &prov, &mut used)
+                .map_err(anyhow::Error::msg)?,
         }
     }
     b.finish().map_err(kaiv_err)
@@ -3768,172 +3807,10 @@ fn kaiv_err(e: kaiv::PipelineError) -> anyhow::Error {
     anyhow::anyhow!("emitting kaiv: {e}")
 }
 
-/// A field id unique within its namespace: sanitization can collide
-/// distinct field names ("a b" and "a-b" both become "a-b"); suffix
-/// rather than abort.
-fn unique_ident(field: &str, used: &mut std::collections::HashSet<String>) -> String {
-    let mut id = ident_of(field);
-    if !used.insert(id.clone()) {
-        let mut k = 2;
-        loop {
-            let candidate = format!("{id}-{k}");
-            if used.insert(candidate.clone()) {
-                id = candidate;
-                break;
-            }
-            k += 1;
-        }
-    }
-    id
-}
 
-/// Place one field under `base`: a record opens the namespace
-/// `base/id` and places its fields there; a list opens the array
-/// `base/@id`, its scalar elements as `::n` leaves and its record
-/// elements as `/n` namespaces; anything else is a leaf `base::id`.
-/// An empty record or list, and a list nested in a list, ride as
-/// JSON text — kaiv has no line for them.
-fn kaiv_put(
-    b: &mut kaiv::KaivBuilder,
-    base: &str,
-    field: &str,
-    value: &Value,
-    prov: &kaiv::Provenance,
-    used: &mut std::collections::HashSet<String>,
-) -> anyhow::Result<()> {
-    let id = unique_ident(field, used);
-    match value {
-        Value::Record(fields) if !fields.is_empty() => {
-            let sub = format!("{base}/{id}");
-            let mut used = std::collections::HashSet::new();
-            for (k, v) in fields {
-                kaiv_put(b, &sub, k, v, prov, &mut used)?;
-            }
-            Ok(())
-        }
-        Value::List(items) if !items.is_empty() => {
-            let sub = format!("{base}/@{id}");
-            for (n, item) in items.iter().enumerate() {
-                match item {
-                    Value::Record(fields) if !fields.is_empty() => {
-                        let elem = format!("{sub}/{n}");
-                        let mut used = std::collections::HashSet::new();
-                        for (k, v) in fields {
-                            kaiv_put(b, &elem, k, v, prov, &mut used)?;
-                        }
-                    }
-                    _ => kaiv_leaf(b, &format!("{sub}::{n}"), item, prov)?,
-                }
-            }
-            Ok(())
-        }
-        _ => kaiv_leaf(b, &format!("{base}::{id}"), value, prov),
-    }
-}
 
-/// One typed leaf. Quantities emit unit-annotated (`!float:km`), in
-/// their written unit so the authored form survives the loop;
-/// durations on the seconds unit (a time-unit annotation mints a
-/// duration at the re-mount, one ontology per dimension of time);
-/// instants as their std/time type, so a re-mount re-mints them.
-fn kaiv_leaf(
-    b: &mut kaiv::KaivBuilder,
-    namepath: &str,
-    value: &Value,
-    prov: &kaiv::Provenance,
-) -> anyhow::Result<()> {
-    match value {
-        Value::Quantity {
-            value: bv,
-            base,
-            written,
-        } => {
-            let (v, u) = written.clone().unwrap_or((*bv, base.clone()));
-            if b.leaf_with_unit(namepath, "float", Some(&u), &v.to_string(), Some(prov))
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-        Value::Duration { secs, nanos } => {
-            let v = *secs as f64 + *nanos as f64 / 1e9;
-            if b.leaf_with_unit(namepath, "float", Some("s"), &v.to_string(), Some(prov))
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-        Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        } => {
-            let ty = if offset_min.is_some() {
-                "std/time/datetime"
-            } else if *nanos == 0 && secs.rem_euclid(86400) == 0 {
-                "std/time/date"
-            } else {
-                "std/time/localdatetime"
-            };
-            b.declare_types("std/time").map_err(kaiv_err)?;
-            if b.leaf(namepath, ty, &value.to_string(), Some(prov)).is_ok() {
-                return Ok(());
-            }
-        }
-        _ => {}
-    }
-    let (t, payload) = kaiv_scalar(value);
-    if b.leaf(namepath, t, &payload, Some(prov)).is_err() {
-        // Not flat-line representable: carry the JSON text.
-        b.leaf(namepath, "str", &value.to_json(), Some(prov))
-            .map_err(kaiv_err)?;
-    }
-    Ok(())
-}
 
-/// The kaiv type annotation and payload for one scalar. Lists and
-/// records reach here only when they could not open a namespace
-/// (empty, or nested in a list) and ride as JSON text.
-fn kaiv_scalar(v: &Value) -> (&'static str, String) {
-    match v {
-        Value::Null => ("null", String::new()),
-        Value::Bool(b) => ("bool", b.to_string()),
-        Value::Int(n) => ("int", n.to_string()),
-        Value::Float(f) => ("float", f.to_string()),
-        Value::Str(s) => ("str", s.clone()),
-        Value::List(_) | Value::Record(_) => ("str", v.to_json()),
-        // The fallback route: instants normally emit typed
-        // (std/time, in `kaiv_leaf`); durations have no kaiv type
-        // yet and quantities normally emit unit-annotated. All ride
-        // as text here.
-        Value::Instant { .. } | Value::Duration { .. } | Value::Quantity { .. } => {
-            ("str", v.to_string())
-        }
-    }
-}
 
-/// Sanitize a locator or field name into kaiv's identifier charset:
-/// ASCII alphanumerics and `_` pass through; each run of any other
-/// characters (including `.` and `-`) collapses to one `-`.
-fn ident_of(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            out.push(c);
-            dash = false;
-        } else if !dash && !out.is_empty() {
-            out.push('-');
-            dash = true;
-        }
-    }
-    let trimmed = out.trim_end_matches('-').to_string();
-    if trimmed.is_empty() {
-        "value".to_string()
-    } else {
-        trimmed
-    }
-}
 
 #[cfg(test)]
 mod tests {

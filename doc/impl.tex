@@ -1011,6 +1011,37 @@ pub trait AstAdapter {
     /// `->` / `<-` (filesystem: symlinks).
     fn links(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
     fn backlinks(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
+
+    // --- the reference surface (defaulted) ---
+
+    /// Resolve a cross-reference: `::prop-->hint` maps a property
+    /// value to its in-document target (html: a `#fragment` href
+    /// to the element with that id).
+    fn resolve(&self, _n: NodeId, _prop: &str, _hint: Option<&str>)
+        -> Option<NodeId> { None }
+
+    /// The external reference a property holds -- an
+    /// adapter-defined identifier of a document outside the arbor
+    /// (html: the absolute URL, relative hrefs joined against the
+    /// document's declared URL). On an in-document miss the engine
+    /// consults the mount layer's reference targets (identifier ->
+    /// mounted root) and lands, or records the identifier among
+    /// the run's unresolved external references for the host's
+    /// acquisition loop. The engine performs no IO, ever.
+    fn external_ref(&self, _n: NodeId, _prop: &str, _hint: Option<&str>)
+        -> Option<String> { None }
+
+    /// The element `fragment` names inside `node`'s document --
+    /// the landing rung of a fragment-carrying external reference.
+    fn resolve_fragment(&self, _n: NodeId, _frag: &str)
+        -> Option<NodeId> { None }
+
+    /// The property carrying the node's own reference, for the
+    /// bare arrow `//a-->` (html: an anchor's href); and the
+    /// relation an edge carries (html: `rel`), the label falling
+    /// back to the property name.
+    fn ref_property(&self, _n: NodeId) -> Option<String> { None }
+    fn ref_label(&self, _n: NodeId, _prop: &str) -> Option<String> { None }
 }
 \end{lstlisting}
 
@@ -1033,6 +1064,14 @@ Three observations that the filesystem work has already forced:
   engine never inspects the \texttt{u64}; it only passes ids back to
   the adapter. Each adapter chooses its own identity scheme (the
   filesystem adapter uses an interning arena index).
+
+\item \textbf{New trait methods need their forwarders.} The run
+  path wraps every adapter in decorators (\texttt{WithNow},
+  \texttt{AllowShell}), the session in \texttt{Dyn}, mounts in
+  \texttt{MountAdapter}/\texttt{Shared}, models in
+  \texttt{ModelAdapter} -- a defaulted method silently answers
+  \texttt{None} through any wrapper that does not forward it.
+  When adding to the trait, sweep every delegating impl.
 
 \item \textbf{The root may be unnamed.} \texttt{name} returns
   \texttt{Option} precisely so an adapter can leave the root without a

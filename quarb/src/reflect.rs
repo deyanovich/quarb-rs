@@ -219,7 +219,9 @@ impl QueryArbor {
         ];
         if let Axis::Resolve { property, hint } | Axis::ReverseResolve { property, hint } = &s.axis
         {
-            props.push(("property".to_string(), Value::Str(property.clone())));
+            if let Some(p) = property {
+                props.push(("property".to_string(), Value::Str(p.clone())));
+            }
             if let Some(h) = hint {
                 props.push(("hint".to_string(), Value::Str(h.clone())));
             }

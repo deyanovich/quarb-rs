@@ -115,6 +115,18 @@ impl quarb::AstAdapter for Dyn {
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.0.resolve(node, property, hint)
     }
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        self.0.external_ref(node, property, hint)
+    }
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.0.resolve_fragment(node, fragment)
+    }
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.0.ref_property(node)
+    }
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        self.0.ref_label(node, property)
+    }
     fn link_property(
         &self,
         source: NodeId,
@@ -195,6 +207,12 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" | "text-md" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
+            // BibTeX / BibLaTeX, imported through atrep's
+            // bibliogramma: a document of bib entries.
+            #[cfg(feature = "koine")]
+            "text-bibtex" | "bibtex" => quarb_text_koine::parse_bibtex(input)
+                .map(Doc::Text)
+                .map_err(|e| anyhow::anyhow!("{e}")),
             // The code level: identifiers as names; the format
             // name carries the language.
             #[cfg(feature = "native")]
@@ -436,6 +454,47 @@ impl Doc {
         Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
     }
 
+    /// Declare a source's own URL on its adapter — today the html
+    /// DOM reading, whose relative hrefs join against it for the
+    /// acquisition arrow (`::href-->` across documents). Other
+    /// formats ignore it (their cross-references carry no URL yet).
+    pub fn attach_url(&mut self, url: &str) {
+        match self {
+            Doc::Html(a) => a.set_document_url(url),
+            Doc::Text(a) => a.set_document_url(url),
+            _ => {}
+        }
+    }
+
+    /// The reference targets for this doc: external-reference
+    /// identifier (its declared URL) → the root the arrow lands
+    /// on, for every mounted source that declared one. `urls` is
+    /// `(mount name, url)`; on a single-source (path-bare) doc the
+    /// one root answers.
+    pub fn url_roots(
+        &self,
+        urls: &[(String, String)],
+    ) -> std::collections::HashMap<String, quarb::NodeId> {
+        use quarb::AstAdapter;
+        let a = self.base_dyn();
+        let root = a.root();
+        match self {
+            Doc::Mount(_) => urls
+                .iter()
+                .filter_map(|(name, url)| {
+                    a.children_named(root, name)
+                        .first()
+                        .map(|&n| (url.clone(), n))
+                })
+                .collect(),
+            _ => urls
+                .iter()
+                .take(1)
+                .map(|(_, url)| (url.clone(), root))
+                .collect(),
+        }
+    }
+
     /// Mount several already-parsed text documents as named children
     /// of one root — [`Doc::mount_docs`] over [`Doc::parse`], for
     /// callers that hold text (the browser playground's paste
@@ -590,6 +649,7 @@ impl Doc {
                     })?;
                     return Ok(Doc::Text(model));
                 }
+                Some("bib") => quarb_text_koine::parse_bibtex(&read()?),
                 Some("md" | "markdown") => quarb_text_koine::parse_markdown(&read()?),
                 Some("html" | "htm") => quarb_text_koine::parse_html(&read()?),
                 Some("rst") => quarb_text_koine::parse_rst(&read()?),
@@ -685,6 +745,8 @@ impl Doc {
                 Some("md" | "markdown") => "text-markdown",
                 Some("tex" | "latex") => "tex",
                 Some("txt") => "text",
+                #[cfg(feature = "koine")]
+                Some("bib") => "text-bibtex",
                 _ if text.trim_start().starts_with('<') => "text-html",
                 _ => "text",
             };

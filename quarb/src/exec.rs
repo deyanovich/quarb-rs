@@ -210,6 +210,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// The unresolved external references of the eval in progress:
+    /// identifiers (a URL, for html) of documents queries
+    /// referenced but could not reach because they are not
+    /// mounted. The engine performs no IO — the host may acquire
+    /// these, remount, and re-run (the loop lives above, in
+    /// quarb-session's embedders). Cleared with the refusal cell.
+    static REFS: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// Mounted-document roots by external-reference identifier
+    /// (fragment-stripped), set by the mount layer before a run;
+    /// `Axis::Resolve` consults it when a property references
+    /// another document.
+    static REF_TARGETS: std::cell::RefCell<std::collections::HashMap<String, NodeId>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn record_ref(id: String) {
+    REFS.with(|n| { n.borrow_mut().insert(id); });
+}
+
+fn ref_target(id: &str) -> Option<NodeId> {
+    REF_TARGETS.with(|a| a.borrow().get(id).copied())
+}
+
+/// Register the mounted-document roots the arrow may land on, by
+/// external-reference identifier (a URL, fragment-stripped, for
+/// html). Called by the mount layer, before running; replaces the
+/// previous registration.
+pub fn set_ref_targets(map: std::collections::HashMap<String, NodeId>) {
+    REF_TARGETS.with(|a| *a.borrow_mut() = map);
+}
+
+/// Drain the unresolved external references recorded since the
+/// last clear: the identifiers of documents queries referenced
+/// but could not reach.
+pub fn take_refs() -> Vec<String> {
+    REFS.with(|n| std::mem::take(&mut *n.borrow_mut()).into_iter().collect())
+}
+
+pub(crate) fn clear_refs() {
+    REFS.with(|n| n.borrow_mut().clear());
+}
+
 pub(crate) fn record_refusal(msg: String) {
     REFUSAL.with(|r| {
         let mut r = r.borrow_mut();
@@ -221,6 +265,7 @@ pub(crate) fn record_refusal(msg: String) {
 
 fn clear_refusal() {
     REFUSAL.with(|r| *r.borrow_mut() = None);
+    clear_refs();
 }
 
 /// Take the refusal recorded during the last [`eval`] /
@@ -843,6 +888,23 @@ fn apply_stage(
                     None => Value::Str(node_to_json(adapter, c.node).to_json()),
                 };
                 c.topic = Some(v);
+                c
+            })
+            .collect(),
+        // `| kaiv` mirrors `| json`: a topic value renders as a
+        // one-value kaiv document; a node context renders its
+        // subtree's value form. `@| kaiv` (stdlib) renders the
+        // whole stream as one document.
+        Stage::Func(call) if call.name == "kaiv" => caps
+            .into_iter()
+            .map(|mut c| {
+                let doc = match &c.topic {
+                    Some(t) => crate::kaiv_out::document(std::slice::from_ref(t)),
+                    None => crate::kaiv_out::document(std::slice::from_ref(
+                        &node_to_json(adapter, c.node),
+                    )),
+                };
+                c.topic = Some(Value::Str(doc.unwrap_or_else(|e| e)));
                 c
             })
             .collect(),
@@ -2740,12 +2802,12 @@ fn arrived_edge(
         }
         Axis::Resolve { property, .. } => EdgeCtx {
             source: from,
-            label: property.clone(),
+            label: property.clone().unwrap_or_else(|| "ref".to_string()),
             target: succ,
         },
         Axis::ReverseResolve { property, .. } => EdgeCtx {
             source: succ,
-            label: property.clone(),
+            label: property.clone().unwrap_or_else(|| "ref".to_string()),
             target: from,
         },
     };
@@ -3519,8 +3581,43 @@ fn apply_step(
             out.extend(kept.into_iter().map(|(_, other, _)| other));
         }
         Axis::Resolve { property, hint } => {
-            let matched: Vec<NodeId> = adapter
-                .resolve(node, property, hint.as_deref())
+            // The bare arrow (`//a-->`) asks the adapter which
+            // property carries this node's reference; a named
+            // property spells it. No property at all resolves
+            // nothing — an unreferencing node simply yields empty.
+            let prop = property.clone().or_else(|| adapter.ref_property(node));
+            let Some(prop) = prop else { return };
+            let property = &prop;
+            let mut resolved: Vec<NodeId> =
+                adapter.resolve(node, property, hint.as_deref()).into_iter().collect();
+            if resolved.is_empty() {
+                // The property may hold an external reference — a
+                // document outside the arbor. Its fragment part is
+                // the crossref *within* that document (URI
+                // semantics; html's #id, JSON's #/pointer), so the
+                // document identity is the fragment-stripped part:
+                // a mounted target answers with the fragment's
+                // element (else its root); an unmounted one is
+                // recorded among the run's unresolved external
+                // references, for the host's acquisition loop. No
+                // IO here, ever.
+                if let Some(ext) = adapter.external_ref(node, property, hint.as_deref()) {
+                    let (doc, frag) = match ext.split_once('#') {
+                        Some((d, f)) if !f.is_empty() => (d.to_string(), Some(f.to_string())),
+                        _ => (ext.trim_end_matches('#').to_string(), None),
+                    };
+                    match ref_target(&doc) {
+                        Some(root) => {
+                            let landed = frag
+                                .and_then(|f| adapter.resolve_fragment(root, &f))
+                                .unwrap_or(root);
+                            resolved.push(landed);
+                        }
+                        None => record_ref(doc),
+                    }
+                }
+            }
+            let matched: Vec<NodeId> = resolved
                 .into_iter()
                 .filter(|&t| tests_ok(adapter, t, step))
                 .collect();
@@ -3533,11 +3630,14 @@ fn apply_step(
                 witness,
                 marks, register,
                 |&n| n,
-                // A resolution edge is labeled by its property.
+                // A resolution edge is labeled by its relation —
+                // html's rel — falling back to the property name.
                 |&t| {
                     Some(EdgeCtx {
                         source: node,
-                        label: property.clone(),
+                        label: adapter
+                            .ref_label(node, property)
+                            .unwrap_or_else(|| property.clone()),
                         target: t,
                     })
                 },
@@ -3550,11 +3650,17 @@ fn apply_step(
             // shortcut this later.
             let mut all = Vec::new();
             collect_subtree(adapter, adapter.root(), &mut all);
+            let prop_of = |source: NodeId| {
+                property
+                    .clone()
+                    .or_else(|| adapter.ref_property(source))
+            };
             let matched: Vec<NodeId> = all
                 .into_iter()
                 .filter(|&source| {
-                    adapter.resolve(source, property, hint.as_deref()) == Some(node)
-                        && tests_ok(adapter, source, step)
+                    prop_of(source).is_some_and(|p| {
+                        adapter.resolve(source, &p, hint.as_deref()) == Some(node)
+                    }) && tests_ok(adapter, source, step)
                 })
                 .collect();
             out.extend(apply_predicates(
@@ -3569,9 +3675,10 @@ fn apply_step(
                 // Stored direction: the found node's property points
                 // at the current one.
                 |&source| {
+                    let p = prop_of(source)?;
                     Some(EdgeCtx {
                         source,
-                        label: property.clone(),
+                        label: adapter.ref_label(source, &p).unwrap_or(p),
                         target: node,
                     })
                 },

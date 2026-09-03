@@ -102,6 +102,23 @@ struct Remount {
     opts: Options,
     now: (i64, u32),
     allow_shell: bool,
+    /// The `--model` view, reapplied on every rebuild.
+    model: Option<quarb_model::Model>,
+    /// `:follow` rounds per line: 0 = off (the default — refs are
+    /// only reported), `on` = 1, N = up to N rounds.
+    follow_depth: usize,
+    /// Documents fetched by `:follow`, mounted beside the local
+    /// sources and keyed by URL so the arrow lands on them. They
+    /// persist for the rest of the session.
+    web: Vec<WebDoc>,
+}
+
+/// One `:follow`-fetched document.
+struct WebDoc {
+    name: String,
+    url: String,
+    format: String,
+    text: String,
 }
 
 /// Whether a target names an adapter scheme (qua's dispatch) rather
@@ -125,28 +142,28 @@ fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
     Ok((Doc::open(&spec.path, opts)?, false))
 }
 
-/// Build the in-process executor over the current mount specs.
+/// Build the in-process executor over the current mount specs plus
+/// any `:follow`-fetched documents, the `--model` view reapplied.
 fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
     // No source at all: the calculator session — a bare root for
     // expression-headed lines (`= expr`; spec: The Expression
     // Head). `:mount` grafts real sources in later; until then &N!
     // reads the same bare root as &N.
-    if remount.specs.is_empty() {
+    if remount.specs.is_empty() && remount.web.is_empty() {
         let doc = Doc::parse("{}", "json").map_err(|e| anyhow::anyhow!("{e}"))?;
-        return Ok(Box::new(LocalExecutor::new(
-            doc,
-            remount.now,
-            remount.allow_shell,
-        )));
+        return Ok(Box::new(
+            LocalExecutor::new(doc, remount.now, remount.allow_shell)
+                .with_model(remount.model.clone()),
+        ));
     }
     let mut schemed = false;
-    let doc = match remount.specs.as_slice() {
-        [one] if one.name.is_none() => {
+    let doc = match (remount.specs.as_slice(), remount.web.is_empty()) {
+        ([one], true) if one.name.is_none() => {
             let (doc, sch) = build_doc(one, &remount.opts)?;
             schemed |= sch;
             doc
         }
-        many => {
+        (many, _) => {
             let mut parts: Vec<(String, Doc)> = Vec::new();
             for spec in many {
                 let (doc, sch) = build_doc(spec, &remount.opts)?;
@@ -173,26 +190,45 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
                 }
                 parts.push((name, doc));
             }
+            // The fetched documents mount beside the locals, each
+            // declaring its URL so the arrow lands on it and its
+            // relative hrefs join correctly.
+            for w in &remount.web {
+                let mut doc = Doc::parse(&w.text, &w.format)
+                    .with_context(|| format!("parsing '{}' ({})", w.name, w.url))?;
+                doc.attach_url(&w.url);
+                parts.push((w.name.clone(), doc));
+            }
             Doc::mount_docs(parts)?
         }
     };
+    let urls: Vec<(String, String)> = remount
+        .web
+        .iter()
+        .map(|w| (w.name.clone(), w.url.clone()))
+        .collect();
+    let roots = doc.url_roots(&urls);
     // Live re-reads (&N!) re-open through the file path machinery,
-    // which scheme targets bypass; their sessions read the standing
-    // snapshot for both &N and &N!.
-    if schemed {
-        return Ok(Box::new(LocalExecutor::new(
+    // which scheme targets bypass — and fetched documents are not
+    // re-fetched: those sessions read the standing snapshot for
+    // both &N and &N!.
+    if schemed || !remount.web.is_empty() {
+        return Ok(Box::new(
+            LocalExecutor::new(doc, remount.now, remount.allow_shell)
+                .with_model(remount.model.clone())
+                .with_url_roots(roots),
+        ));
+    }
+    Ok(Box::new(
+        LocalExecutor::with_respec(
             doc,
             remount.now,
             remount.allow_shell,
-        )));
-    }
-    Ok(Box::new(LocalExecutor::with_respec(
-        doc,
-        remount.now,
-        remount.allow_shell,
-        remount.specs.clone(),
-        remount.opts.clone(),
-    )))
+            remount.specs.clone(),
+            remount.opts.clone(),
+        )
+        .with_model(remount.model.clone()),
+    ))
 }
 
 fn main() -> Result<()> {
@@ -274,10 +310,18 @@ fn main() -> Result<()> {
             opts,
             now,
             allow_shell: cli.allow_shell,
+            model: model.clone(),
+            // Batteries included: the arrow in a hand-typed line is
+            // the consent, so an interactive session follows refs
+            // by default (one round). A piped session stays off —
+            // nobody is watching a script fetch (:follow on opts
+            // in; the refs note says so).
+            follow_depth: usize::from(std::io::stdin().is_terminal()),
+            web: Vec::new(),
         };
-        let executor = (*local_executor(&ctx)?).with_model(model.clone());
+        let executor = local_executor(&ctx)?;
         remount = Some(ctx);
-        Session::new(Box::new(executor), Box::new(MemStore))
+        Session::new(executor, Box::new(MemStore))
     };
     let session = std::rc::Rc::new(std::cell::RefCell::new(session));
     if let Some(p) = &cli.defs {
@@ -387,8 +431,8 @@ fn repl(
                 }
                 None => eprintln!("error: &{n}# has no captured result (line {n} hasn't run)"),
             },
-            Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), &q, true),
-            Ok(Prepared::Eval(q)) => run_and_commit(&mut session.borrow_mut(), &q, false),
+            Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, true),
+            Ok(Prepared::Eval(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, false),
         }
     }
     Ok(())
@@ -446,21 +490,183 @@ impl rustyline::highlight::Highlighter for QuaiHelper {}
 impl rustyline::validate::Validator for QuaiHelper {}
 impl rustyline::Helper for QuaiHelper {}
 
+/// Fetch one external reference: a plain GET, the format from the
+/// content type, else a shape sniff. The raw bytes as served — the
+/// curl view, not a rendered DOM (that is the browser extension's
+/// grab).
+fn fetch_web(url: &str) -> Result<(String, String)> {
+    const CAP: u64 = 10_000_000;
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ct = resp.content_type().to_ascii_lowercase();
+    let mut text = String::new();
+    use std::io::Read;
+    resp.into_reader()
+        .take(CAP + 1)
+        .read_to_string(&mut text)
+        .context("reading the body")?;
+    if text.len() as u64 > CAP {
+        anyhow::bail!("too large (the cap is {CAP} bytes)");
+    }
+    let t = text.trim_start();
+    let format = if ct.contains("html") {
+        "html"
+    } else if ct.contains("json") {
+        "json"
+    } else if ct.contains("xml") {
+        "xml"
+    } else if t.starts_with('{') || t.starts_with('[') {
+        "json"
+    } else if t.to_ascii_lowercase().starts_with("<!doctype html") || t.starts_with("<html") {
+        "html"
+    } else if t.starts_with('<') {
+        "xml"
+    } else {
+        "text"
+    };
+    Ok((format.to_string(), text))
+}
+
+/// Prefix the query's leading path opener with `prefix` — needed
+/// when a follow turns a single path-bare source into named
+/// children. Only the leading opener moves: a path after the
+/// arrow or inside a stage is relative to its context, not the
+/// root (a multi-branch join may need a hand adjustment — the
+/// note prints exactly what re-ran).
+fn rebase(q: &str, prefix: &str) -> String {
+    let t = q.trim_start();
+    if t.starts_with('/') {
+        format!("{prefix}{t}")
+    } else {
+        q.to_string()
+    }
+}
+
+/// Acquire the run's unresolved external references and re-run the
+/// line — up to `follow_depth` rounds. Returns the (possibly
+/// rebased) query text the final result belongs to.
+fn follow_refs(
+    session: &mut Session,
+    remount: &mut Option<Remount>,
+    q: &str,
+) -> (String, Option<anyhow::Result<Vec<quarb_session::Cell>>>) {
+    let mut q = q.to_string();
+    let mut result = None;
+    let mut rounds = 0;
+    loop {
+        let refs = session.refs();
+        if refs.is_empty() {
+            break;
+        }
+        let Some(ctx) = remount.as_mut() else {
+            eprintln!(
+                "note: {} external reference(s) not mounted — under --daemon the \
+                 arbor is pinned at start",
+                refs.len()
+            );
+            break;
+        };
+        if rounds >= ctx.follow_depth {
+            let shown: Vec<&str> = refs.iter().take(3).map(String::as_str).collect();
+            let more = refs.len().saturating_sub(3);
+            eprintln!(
+                "note: {} external reference(s) not mounted: {}{} — {}",
+                refs.len(),
+                shown.join(", "),
+                if more > 0 { format!(" (+{more})") } else { String::new() },
+                if ctx.follow_depth == 0 {
+                    ":follow on acquires and re-runs"
+                } else {
+                    ":follow N raises the rounds"
+                },
+            );
+            break;
+        }
+        rounds += 1;
+        let was_single_bare = ctx.web.is_empty()
+            && matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
+        let single_stem = ctx.specs.first().and_then(|s| {
+            s.name
+                .clone()
+                .or_else(|| s.path.file_stem().map(|x| x.to_string_lossy().into_owned()))
+        });
+        let mut fetched = 0;
+        for url in &refs {
+            let taken: std::collections::HashSet<&str> =
+                ctx.web.iter().map(|w| w.name.as_str()).collect();
+            let mut n = 1;
+            while taken.contains(format!("page{n}").as_str()) {
+                n += 1;
+            }
+            match fetch_web(url) {
+                Ok((format, text)) => {
+                    eprintln!("followed: /page{n} <- {url} ({format})");
+                    ctx.web.push(WebDoc {
+                        name: format!("page{n}"),
+                        url: url.clone(),
+                        format,
+                        text,
+                    });
+                    fetched += 1;
+                }
+                Err(e) => eprintln!("follow: {url}: {e:#}"),
+            }
+        }
+        if fetched == 0 {
+            break;
+        }
+        match local_executor(ctx) {
+            Ok(executor) => session.set_executor(executor),
+            Err(e) => {
+                eprintln!("error rebuilding the mount: {e:#}");
+                break;
+            }
+        }
+        if was_single_bare {
+            // The lone source now mounts as a named child; the
+            // line's root-relative paths move with it.
+            if let Some(stem) = single_stem {
+                let rebased = rebase(&q, &format!("/{stem}"));
+                if rebased != q {
+                    eprintln!("note: sources now mount as named children — re-running as: {rebased}");
+                    q = rebased;
+                }
+            }
+        }
+        result = Some(session.eval(&q));
+        if result.as_ref().is_some_and(|r| r.is_err()) {
+            break;
+        }
+    }
+    (q, result)
+}
+
 /// Evaluate a query line (against the standing arbor, or `fresh` for a
-/// live re-read), print the result, and register it as `&N`.
-fn run_and_commit(session: &mut Session, q: &str, fresh: bool) {
-    let result = if fresh {
+/// live re-read), follow any external references the run surfaced,
+/// print the result, and register it as `&N`.
+fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str, fresh: bool) {
+    let mut result = if fresh {
         session.eval_fresh(q)
     } else {
         session.eval(q)
     };
+    let mut q = q.to_string();
+    if result.is_ok() {
+        let (q2, followed) = follow_refs(session, remount, &q);
+        q = q2;
+        if let Some(r) = followed {
+            result = r;
+        }
+    }
     match result {
         Ok(cells) => {
             for c in &cells {
                 println!("{}", c.display());
             }
             let n = session.line_no();
-            if !session.commit(q, cells) {
+            if !session.commit(&q, cells) {
                 eprintln!("note: &{n} is not referenceable (its shape can't be a macro body)");
             }
         }
@@ -550,6 +756,43 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
         }
         return false;
     }
+    if line == ":follow" || line.starts_with(":follow ") {
+        let arg = line.strip_prefix(":follow").unwrap_or_default().trim();
+        match remount {
+            None => println!(
+                "note: :follow is in-process only — under --daemon the arbor is \
+                 pinned at start"
+            ),
+            Some(ctx) => {
+                match arg {
+                    "" => {}
+                    "off" => ctx.follow_depth = 0,
+                    "on" => ctx.follow_depth = 1,
+                    n => match n.parse::<usize>() {
+                        Ok(v) => ctx.follow_depth = v,
+                        Err(_) => {
+                            println!("usage: :follow [on|off|N] — rounds of acquisition per line");
+                            return false;
+                        }
+                    },
+                }
+                println!(
+                    "follow: {} — a line's unresolved external references (::href-->) {}",
+                    match ctx.follow_depth {
+                        0 => "off".to_string(),
+                        1 => "on (1 round)".to_string(),
+                        n => format!("on ({n} rounds)"),
+                    },
+                    if ctx.follow_depth == 0 {
+                        "are reported, not fetched"
+                    } else {
+                        "are fetched, mounted, and the line re-runs"
+                    },
+                );
+            }
+        }
+        return false;
+    }
     match line {
         ":q" | ":quit" => return true,
         ":help" | ":?" => {
@@ -560,6 +803,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  &N!           re-run line N live — re-reads the source; diverges from &N# under drift\n  \
                  def &x: …;    add a named fragment to the session\n  \
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
+                 :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
                  :history      show the macro table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"

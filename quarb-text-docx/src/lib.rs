@@ -82,10 +82,13 @@ pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, DocxError> {
         .unwrap_or_default();
     let footnotes = member(&mut zip, "word/footnotes.xml");
     let endnotes = member(&mut zip, "word/endnotes.xml");
+    let rels = member(&mut zip, "word/_rels/document.xml.rels")
+        .map(|xml| parse_rels(&xml))
+        .unwrap_or_default();
     let Some(document) = member(&mut zip, "word/document.xml") else {
         return Err(DocxError::NoDocument);
     };
-    let mut out = lower(&document, &styles, &numbering)?;
+    let mut out = lower(&document, &styles, &numbering, &rels)?;
     if let Some(xml) = footnotes {
         append_notes(
             &xml,
@@ -151,7 +154,7 @@ fn append_notes(
                 }
             }
             Event::Start(e) if e.name().as_ref() == b"w:p" && current.is_some() => {
-                let para = read_para(&mut reader)?;
+                let para = read_para(&mut reader, &std::collections::HashMap::new())?;
                 let text = quarb_text::normalize_ws(&para.text);
                 if !text.is_empty() {
                     out.push(Block::Paragraph { text });
@@ -310,6 +313,55 @@ fn parse_numbering(xml: &str) -> Numbering {
 // document.xml — the body walk
 // ---------------------------------------------------------------
 
+/// `word/_rels/document.xml.rels`: relationship id → target,
+/// resolving a `w:hyperlink r:id` to its URL.
+fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    while let Ok(ev) = reader.read_event_into(&mut buf) {
+        match &ev {
+            Event::Start(e) | Event::Empty(e)
+                if e.name().as_ref() == b"Relationship" =>
+            {
+                if let (Some(id), Some(target)) = (attr(e, b"Id"), attr(e, b"Target")) {
+                    out.insert(id, target);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// A field instruction that references: `REF bm` / `PAGEREF bm`
+/// (internal), `HYPERLINK "url"` (external), `HYPERLINK \l "bm"`
+/// (internal) — as (target, internal).
+fn field_ref(instr: &str) -> Option<(String, bool)> {
+    let t = instr.trim();
+    let word = t.split_whitespace().next()?;
+    match word {
+        "REF" | "PAGEREF" => {
+            let bm = t[word.len()..].trim().split_whitespace().next()?;
+            let bm = bm.trim_matches('"');
+            (!bm.is_empty()).then(|| (bm.to_string(), true))
+        }
+        "HYPERLINK" => {
+            let rest = t["HYPERLINK".len()..].trim();
+            if let Some(rest) = rest.strip_prefix("\\l") {
+                let bm = rest.trim().split_whitespace().next()?.trim_matches('"');
+                (!bm.is_empty()).then(|| (bm.to_string(), true))
+            } else {
+                let url = rest.split('"').nth(1).or_else(|| rest.split_whitespace().next())?;
+                (!url.is_empty()).then(|| (url.to_string(), false))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// One body paragraph, fully read.
 #[derive(Default)]
 struct Para {
@@ -318,18 +370,33 @@ struct Para {
     num: Option<(String, u8)>,
     text: String,
     /// Inline apparatus in run order — note callouts
-    /// (`w:footnoteReference` / `w:endnoteReference` ids) and XE
-    /// index marks — emitted after the paragraph's block.
+    /// (`w:footnoteReference` / `w:endnoteReference` ids), XE
+    /// index marks, mentions, and mid-paragraph bookmarks —
+    /// emitted after the paragraph's block.
     apparatus: Vec<Apparatus>,
+    /// A bookmark opened before any run text: the block's own
+    /// label (Word's heading cross-reference bookmarks), the
+    /// attachment rule.
+    label: Option<String>,
 }
 
 /// One piece of inline apparatus met in a paragraph's runs.
 enum Apparatus {
     Note(String, NoteFamily),
     Mark(String),
+    /// A mention met in the runs: (target, text, internal) — a
+    /// w:hyperlink, or a REF / PAGEREF / HYPERLINK field.
+    Ref(String, String, bool),
+    /// A mid-paragraph bookmark: a point anchor at this position.
+    Point(String),
 }
 
-fn lower(xml: &str, styles: &Styles, numbering: &Numbering) -> Result<Vec<Block>, DocxError> {
+fn lower(
+    xml: &str,
+    styles: &Styles,
+    numbering: &Numbering,
+    rels: &std::collections::HashMap<String, String>,
+) -> Result<Vec<Block>, DocxError> {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut out = Vec::new();
@@ -345,7 +412,7 @@ fn lower(xml: &str, styles: &Styles, numbering: &Numbering) -> Result<Vec<Block>
             .map_err(|e| DocxError::Xml("word/document.xml", e))?;
         match &ev {
             Event::Start(e) if e.name().as_ref() == b"w:p" => {
-                let para = read_para(&mut reader)?;
+                let para = read_para(&mut reader, rels)?;
                 emit_para(para, styles, numbering, &mut frames, &mut quote_open, &mut out);
             }
             Event::Start(e) if e.name().as_ref() == b"w:tbl" => {
@@ -450,6 +517,12 @@ fn emit_para(
 }
 
 fn emit_callouts(para: &Para, out: &mut Vec<Block>) {
+    // A bookmark opened before the runs names the block just
+    // emitted — Word's heading cross-reference bookmarks, the
+    // attachment rule.
+    if let Some(onym) = &para.label {
+        out.push(Block::Label { onym: onym.clone() });
+    }
     for a in &para.apparatus {
         match a {
             Apparatus::Note(onym, family) => out.push(Block::NoteRef {
@@ -458,6 +531,12 @@ fn emit_callouts(para: &Para, out: &mut Vec<Block>) {
                 margin: false,
             }),
             Apparatus::Mark(term) => out.push(Block::IndexMark { term: term.clone() }),
+            Apparatus::Ref(target, text, internal) => out.push(Block::Ref {
+                target: target.clone(),
+                text: Some(text.clone()).filter(|t| !t.is_empty()),
+                internal: *internal,
+            }),
+            Apparatus::Point(onym) => out.push(Block::Anchor { onym: onym.clone() }),
         }
     }
 }
@@ -488,13 +567,24 @@ fn close_quote(quote_open: &mut bool, out: &mut Vec<Block>) {
 /// instructions (`w:instrText`) are captured out of the flow and
 /// scanned for `XE` index marks; the cached result text of any
 /// field stays, as before.
-fn read_para(reader: &mut Reader<&[u8]>) -> Result<Para, DocxError> {
+fn read_para(
+    reader: &mut Reader<&[u8]>,
+    rels: &std::collections::HashMap<String, String>,
+) -> Result<Para, DocxError> {
     let mut para = Para::default();
     let mut buf = Vec::new();
     let mut depth = 1usize;
     let mut skip: usize = 0; // inside w:del subtrees
     let mut in_text = false;
     let mut in_instr = false;
+    // An open w:hyperlink: (target, internal, where its text
+    // began in the paragraph).
+    let mut hl: Option<(String, bool, usize)> = None;
+    // A referencing field past its `separate` (its visible result
+    // text follows until `end`), same shape.
+    let mut pending_field: Option<(String, bool, usize)> = None;
+    // An open w:fldSimple that references, same shape.
+    let mut fs: Option<(String, bool, usize)> = None;
     // The accumulated field instruction, XE-parsed at the field's
     // end or separate fldChar (instructions span several runs).
     let mut instr = String::new();
@@ -515,9 +605,34 @@ fn read_para(reader: &mut Reader<&[u8]>) -> Result<Para, DocxError> {
                 match name {
                     b"w:t" => in_text = true,
                     b"w:instrText" => in_instr = true,
+                    b"w:hyperlink" => {
+                        // Internal (w:anchor names a bookmark) or
+                        // external (r:id resolves in the rels).
+                        hl = attr(e, b"w:anchor")
+                            .filter(|a| !a.is_empty())
+                            .map(|a| (a, true, para.text.len()))
+                            .or_else(|| {
+                                attr(e, b"r:id")
+                                    .and_then(|id| rels.get(&id).cloned())
+                                    .map(|url| (url, false, para.text.len()))
+                            });
+                    }
+                    b"w:bookmarkStart" => {
+                        if let Some(nm) = attr(e, b"w:name").filter(|n| n != "_GoBack") {
+                            if para.text.trim().is_empty() && para.label.is_none() {
+                                para.label = Some(nm);
+                            } else {
+                                para.apparatus.push(Apparatus::Point(nm));
+                            }
+                        }
+                    }
                     b"w:fldSimple" => {
-                        if let Some(term) = attr(e, b"w:instr").as_deref().and_then(xe_term) {
+                        let instr = attr(e, b"w:instr").unwrap_or_default();
+                        if let Some(term) = xe_term(&instr) {
                             para.apparatus.push(Apparatus::Mark(term));
+                        }
+                        if let Some((t, internal)) = field_ref(&instr) {
+                            fs = Some((t, internal, para.text.len()));
                         }
                     }
                     b"w:pStyle" => para.style = attr(e, b"w:val"),
@@ -554,9 +669,24 @@ fn read_para(reader: &mut Reader<&[u8]>) -> Result<Para, DocxError> {
                             para.apparatus.push(Apparatus::Note(id, NoteFamily::Endnote));
                         }
                     }
+                    b"w:bookmarkStart" => {
+                        if let Some(nm) = attr(e, b"w:name").filter(|n| n != "_GoBack") {
+                            if para.text.trim().is_empty() && para.label.is_none() {
+                                para.label = Some(nm);
+                            } else {
+                                para.apparatus.push(Apparatus::Point(nm));
+                            }
+                        }
+                    }
                     b"w:fldSimple" => {
-                        if let Some(term) = attr(e, b"w:instr").as_deref().and_then(xe_term) {
+                        let si = attr(e, b"w:instr").unwrap_or_default();
+                        if let Some(term) = xe_term(&si) {
                             para.apparatus.push(Apparatus::Mark(term));
+                        }
+                        if let Some((t, internal)) = field_ref(&si) {
+                            // No result runs: a mention without
+                            // visible text.
+                            para.apparatus.push(Apparatus::Ref(t, String::new(), internal));
                         }
                     }
                     b"w:fldChar" => {
@@ -567,7 +697,21 @@ fn read_para(reader: &mut Reader<&[u8]>) -> Result<Para, DocxError> {
                             if let Some(term) = xe_term(&instr) {
                                 para.apparatus.push(Apparatus::Mark(term));
                             }
+                            if let Some((t, internal)) = field_ref(&instr) {
+                                if ty == "separate" {
+                                    // The visible result follows.
+                                    pending_field = Some((t, internal, para.text.len()));
+                                } else {
+                                    para.apparatus.push(Apparatus::Ref(t, String::new(), internal));
+                                }
+                            }
                             instr.clear();
+                        }
+                        if ty == "end"
+                            && let Some((t, internal, at)) = pending_field.take()
+                        {
+                            let text = para.text.get(at..).unwrap_or_default().trim().to_string();
+                            para.apparatus.push(Apparatus::Ref(t, text, internal));
                         }
                     }
                     _ => {}
@@ -592,6 +736,20 @@ fn read_para(reader: &mut Reader<&[u8]>) -> Result<Para, DocxError> {
                     match e.name().as_ref() {
                         b"w:t" => in_text = false,
                         b"w:instrText" => in_instr = false,
+                        b"w:hyperlink" => {
+                            if let Some((t, internal, at)) = hl.take() {
+                                let text =
+                                    para.text.get(at..).unwrap_or_default().trim().to_string();
+                                para.apparatus.push(Apparatus::Ref(t, text, internal));
+                            }
+                        }
+                        b"w:fldSimple" => {
+                            if let Some((t, internal, at)) = fs.take() {
+                                let text =
+                                    para.text.get(at..).unwrap_or_default().trim().to_string();
+                                para.apparatus.push(Apparatus::Ref(t, text, internal));
+                            }
+                        }
                         _ => {}
                     }
                 }

@@ -37,6 +37,7 @@
 //! assert!(matches!(hits, QueryResult::Nodes(ns) if ns.is_empty()));
 //! ```
 
+pub mod kaiv_out;
 pub mod adapter;
 mod ast;
 mod encoding;
@@ -96,7 +97,7 @@ pub fn now_secs() -> i64 {
             .unwrap_or(0),
     }
 }
-pub use exec::QueryResult;
+pub use exec::{set_ref_targets, take_refs, QueryResult};
 pub use parser::Defs;
 pub use value::Value;
 

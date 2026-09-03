@@ -227,6 +227,32 @@ impl AstAdapter for MountAdapter {
             .map(|t| self.encode(m, t))
     }
 
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        // The identifier is document-external by definition — no
+        // id translation, plain delegation to the node's mount.
+        let (m, inner) = self.decode(node)?;
+        self.mounts[m].adapter.external_ref(inner, property, hint)
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let (m, inner) = self.decode(node)?;
+        self.mounts[m].adapter.ref_property(inner)
+    }
+
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        let (m, inner) = self.decode(node)?;
+        self.mounts[m].adapter.ref_label(inner, property)
+    }
+
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        // The fragment lands within the node's own mount.
+        let (m, inner) = self.decode(node)?;
+        self.mounts[m]
+            .adapter
+            .resolve_fragment(inner, fragment)
+            .map(|t| self.encode(m, t))
+    }
+
     fn quantifier_bound(&self) -> usize {
         // A query spans every mount: the most permissive inner bound
         // must not be silently cut.
@@ -309,6 +335,18 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.0.resolve(node, property, hint)
+    }
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        self.0.external_ref(node, property, hint)
+    }
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.0.resolve_fragment(node, fragment)
+    }
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.0.ref_property(node)
+    }
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        self.0.ref_label(node, property)
     }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.0.children_named(node, name)

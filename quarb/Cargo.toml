@@ -22,6 +22,7 @@ default = ["colligo"]
 colligo = ["dep:colligo"]
 
 [dependencies]
+kaiv = { version = "0.9.0", default-features = false }
 thiserror.workspace = true
 globset.workspace = true
 regex = "1"

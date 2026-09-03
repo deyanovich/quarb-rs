@@ -674,3 +674,13 @@ fn tail_colon_aliases_canonicalize() {
         canon("/x | (::a ?= 1 ? 2 : -3)")
     );
 }
+
+#[test]
+fn bare_arrow_canonicalizes() {
+    // The bare arrow: no property named, the node's own reference
+    // resolves; hint and reverse forms ride along.
+    assert_eq!(canon("//a--> //title::"), "//a-->//title::");
+    assert_eq!(canon("//a-->nofollow"), "//a-->nofollow");
+    assert_eq!(canon("//style<--"), "//style<--");
+    assert_eq!(canon("//a::href-->next"), "//a::href-->next");
+}

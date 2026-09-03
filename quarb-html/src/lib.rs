@@ -48,9 +48,35 @@ pub struct HtmlAdapter {
     /// `id` attribute value → the element carrying it.
     ids: HashMap<String, NodeId>,
     root: NodeId,
+    /// The document's own URL, when the mount knows it — the base
+    /// a relative `href` joins against for `::href-->` across
+    /// documents. `None` for pasted or fileless html: only
+    /// absolute hrefs reference out then.
+    document_url: Option<url::Url>,
 }
 
 impl HtmlAdapter {
+    /// Does `node`'s `rel` admit the relation `hint`? No hint and
+    /// the `*` wildcard admit everything; a named hint needs the
+    /// space-separated `rel` list to contain it (`rel="nofollow
+    /// noopener"` answers to either word). An element without a
+    /// `rel` answers only the wildcard forms — the spec's
+    /// `-->stylesheet` reads "only the stylesheet relation".
+    fn rel_ok(&self, node: NodeId, hint: Option<&str>) -> bool {
+        match hint {
+            None | Some("*") => true,
+            Some(h) => self.nodes[node.0 as usize]
+                .attr("rel")
+                .is_some_and(|rel| rel.split_whitespace().any(|w| w.eq_ignore_ascii_case(h))),
+        }
+    }
+
+    /// Declare the document's own URL — the base a relative `href`
+    /// joins against when `::href-->` reaches across documents.
+    pub fn set_document_url(&mut self, url: &str) {
+        self.document_url = url::Url::parse(url).ok();
+    }
+
     /// Parse `html` and build the adapter.
     pub fn parse(html: &str) -> Self {
         let document = Html::parse_document(html);
@@ -68,7 +94,7 @@ impl HtmlAdapter {
         nodes[0].text = nodes[html_node.0 as usize].text.clone();
         nodes[0].children = vec![html_node];
 
-        HtmlAdapter { nodes, ids, root }
+        HtmlAdapter { nodes, ids, root, document_url: None }
     }
 
     /// A locator path to `node`, like `/html/body/div[2]/p`, for
@@ -297,10 +323,76 @@ impl AstAdapter for HtmlAdapter {
     }
 
     /// Follow an attribute that is a fragment reference (`#section`) to
-    /// the element with that `id`. Used by an anchor's `::href~>`.
-    fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
+    /// the element with that `id`. Used by an anchor's `::href-->`.
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        if property == "href" && !self.rel_ok(node, hint) {
+            return None;
+        }
         let value = self.nodes[node.0 as usize].attr(property)?;
         let fragment = value.strip_prefix('#')?;
         self.ids.get(fragment).copied()
+    }
+
+    /// The external reference an `href`-like attribute holds: the
+    /// absolute URL, relative values joined against the document's
+    /// own URL (when the mount declared one). A bare `#fragment`
+    /// stays in-document (that is `resolve`'s job); a fragment on
+    /// a cross-document URL rides along — it is the crossref
+    /// within the target, landed by `resolve_fragment` once that
+    /// document is mounted. Non-web schemes reference nothing
+    /// followable. Feeds `::href-->` across documents — the
+    /// acquisition arrow.
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        if property == "href" && !self.rel_ok(node, hint) {
+            return None;
+        }
+        let value = self.nodes[node.0 as usize].attr(property)?;
+        let t = value.trim();
+        if t.is_empty() || t.starts_with('#') {
+            return None;
+        }
+        let u = match url::Url::parse(t) {
+            Ok(u) => u,
+            Err(url::ParseError::RelativeUrlWithoutBase) => {
+                self.document_url.as_ref()?.join(t).ok()?
+            }
+            Err(_) => return None,
+        };
+        if u.scheme() != "http" && u.scheme() != "https" {
+            return None;
+        }
+        Some(u.into())
+    }
+
+    /// html's fragment landing: the element whose `id` is
+    /// `fragment`, anywhere in this document.
+    fn resolve_fragment(&self, _node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.ids.get(fragment).copied()
+    }
+
+    /// The bare arrow's property: an anchor-family element's
+    /// `href`, a frame's `src`.
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let n = &self.nodes[node.0 as usize];
+        let (prop, tags): (&str, &[&str]) = match n.tag.as_deref() {
+            Some(t) if ["a", "link", "area"].contains(&t) => ("href", &["a", "link", "area"]),
+            Some(t) if ["iframe", "frame"].contains(&t) => ("src", &["iframe", "frame"]),
+            _ => return None,
+        };
+        let _ = tags;
+        n.attr(prop).map(|_| prop.to_string())
+    }
+
+    /// The relation an href edge carries: the `rel` attribute —
+    /// `<link rel="stylesheet">`, `<a rel="nofollow">`. The spec's
+    /// `-->stylesheet` hint filters on it; absent, the edge label
+    /// falls back to the property name.
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        if property != "href" {
+            return None;
+        }
+        let rel = self.nodes[node.0 as usize].attr("rel")?;
+        let rel = rel.trim();
+        (!rel.is_empty()).then(|| rel.to_string())
     }
 }

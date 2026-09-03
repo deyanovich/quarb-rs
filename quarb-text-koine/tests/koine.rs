@@ -90,6 +90,7 @@ fn the_apparatus_is_shared() {
     assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
 }
 
+
 #[test]
 fn quotes_and_lists_map() {
     let m = mount();
@@ -156,6 +157,20 @@ fn rst_footnotes_join_the_apparatus() {
     assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
 }
 
+#[test]
+fn refs_resolve_against_section_onyms() {
+    let m = mount();
+    // `@>(second)` mentions; `#@(second)` names its section —
+    // the mention lands and projects as the target's lemma.
+    assert_eq!(values(&m, "//ref::target"), ["second"]);
+    assert_eq!(values(&m, "//ref--> ::lemma"), ["Second attempt"]);
+    assert_eq!(values(&m, "//ref::"), ["Second attempt"]);
+    assert_eq!(
+        values(&m, r#"//section[::onym = "second"]<-- ::target"#),
+        ["second"]
+    );
+}
+
 /// XML identity is declared, not guessed: namespace first, then
 /// DOCTYPE public id, then an unambiguous root; bare <article>
 /// (JATS or DocBook 4) refuses.
@@ -218,4 +233,91 @@ fn stichoi_lower_to_the_verse_vocabulary() {
         values(&m, "//stichos[::taxis = 2]::"),
         ["A few paternal acres bound"]
     );
+}
+
+#[test]
+fn bibtex_mounts_as_bib_entries() {
+    // atrep's importer parses BibTeX/BibLaTeX into bibliogramma;
+    // the entries land as bib blocks with the campi and genera
+    // canonicalized to the Latin vocabulary — BibLaTeX's
+    // journaltitle answers as ::ephemeris, @book as <liber>.
+    let m = quarb_text_koine::parse_bibtex(
+        "@book{knuth84,\n  author = {Donald E. Knuth},\n  title = {The {TeX}book},\n  year = 1984,\n}\n\
+         @article{lamport94,\n  author = \"Leslie Lamport\",\n  title = {How to Write a Long Formula},\n  journaltitle = {Formal Aspects},\n  year = {1994},\n}\n",
+    )
+    .unwrap();
+    assert_eq!(values(&m, "//bib::onym"), ["knuth84", "lamport94"]);
+    assert_eq!(values(&m, "//bib::auctor"), ["Donald E. Knuth", "Leslie Lamport"]);
+    assert_eq!(values(&m, "//bib<liber>::onym"), ["knuth84"]);
+    assert_eq!(values(&m, "//bib[::ephemeris]::onym"), ["lamport94"]);
+    assert_eq!(
+        values(&m, "//bib::::genus"),
+        ["liber", "commentarius"]
+    );
+    // The plain form: the full data, values in source order.
+    assert_eq!(
+        values(&m, r#"//bib[::onym = "knuth84"]::"#),
+        ["Donald E. Knuth. The {TeX}book. 1984"]
+    );
+    // The alias census removes the friction: BibLaTeX's own
+    // field names — and any covered language, case-insensitively
+    // — answer beside the Latin canon. On a bib node the fields
+    // outrank the general vocabulary, so ::title is titulus.
+    assert_eq!(values(&m, "//bib::author"), ["Donald E. Knuth", "Leslie Lamport"]);
+    assert_eq!(
+        values(&m, "//bib::title"),
+        ["The {TeX}book", "How to Write a Long Formula"]
+    );
+    assert_eq!(values(&m, "//bib[::journaltitle]::onym"), ["lamport94"]);
+    assert_eq!(values(&m, "//bib[::journal]::onym"), ["lamport94"]);
+    assert_eq!(values(&m, "//bib::год"), ["1984", "1994"]);
+    assert_eq!(
+        values(&m, "//bib::Titel"),
+        ["The {TeX}book", "How to Write a Long Formula"]
+    );
+}
+
+#[test]
+fn endo_links_become_refs() {
+    // The org route: [[target][desc]] arrives as the `><` link
+    // endo whose grammata is the target — the mention lands as a
+    // ref, external by URL, internal by fragment.
+    let m = quarb_text_koine::parse_org(
+        "* Guide\n\nSee [[https://quarb.org/spec][the spec]] and [[#usage]].\n",
+    )
+    .unwrap();
+    assert_eq!(
+        values(&m, "//ref | %(t = ::target; i = ::::resolved)"),
+        [
+            "%(t = \"https://quarb.org/spec\"; i = null)",
+            "%(t = \"#usage\"; i = false)"
+        ]
+    );
+    // The importers' own normalization keeps the target visible.
+    assert_eq!(
+        values(&m, "//paragraph::"),
+        ["See the spec (https://quarb.org/spec) and #usage."]
+    );
+}
+
+#[test]
+fn markdown_route_links_and_footnotes() {
+    // atrep 0.3.1: the visible-URL link sim and the markdown
+    // footnote extension both reach the koine route — links as
+    // ref nodes (the autolink IS the sim; [text](url) projects
+    // as "text (url)"), footnotes as the shared apparatus.
+    let m = quarb_text_koine::parse_markdown(
+        "See [the spec](https://quarb.org/spec) and <https://quarb.org>.\n\n\
+         A note[^1].\n\n[^1]: The footnote body.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        values(&m, "//ref::target"),
+        ["https://quarb.org/spec", "https://quarb.org"]
+    );
+    assert_eq!(
+        values(&m, "//paragraph[1]::"),
+        ["See the spec (https://quarb.org/spec) and https://quarb.org."]
+    );
+    assert_eq!(values(&m, "//*<deixis>->footnote::"), ["The footnote body."]);
 }

@@ -85,6 +85,13 @@ impl Session {
         self.executor.run(&self.combined(line))
     }
 
+    /// The unresolved external references the last evaluation
+    /// recorded — see [`crate::Executor::refs`]. The host closes
+    /// the loop: acquire, remount, re-run.
+    pub fn refs(&self) -> Vec<String> {
+        self.executor.refs()
+    }
+
     /// Evaluate a line against a freshly re-materialized source — the
     /// `&N!` live reading, which sees current data.
     pub fn eval_fresh(&self, line: &str) -> Result<Vec<Cell>> {

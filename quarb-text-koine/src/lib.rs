@@ -96,7 +96,7 @@ pub fn parse_file(path: &Path) -> Result<TextModel, KoineError> {
             let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
             let dial = dialektos::resolve(&base, &doc.dialect_id)?;
             kanonizo::tasso(&mut doc, &dial, &base)?;
-            Ok(TextModel::build(blocks(&doc, &dial)))
+            Ok(finish_model(blocks(&doc, &dial)))
         }
     }
 }
@@ -109,7 +109,7 @@ pub fn parse_str(source: &str, dir: &Path) -> Result<TextModel, KoineError> {
         Checked::Document(mut doc) => {
             let dial = dialektos::resolve(dir, &doc.dialect_id)?;
             kanonizo::tasso(&mut doc, &dial, dir)?;
-            Ok(TextModel::build(blocks(&doc, &dial)))
+            Ok(finish_model(blocks(&doc, &dial)))
         }
     }
 }
@@ -227,7 +227,7 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
 fn import(mut doc: atrep::Document) -> Result<TextModel, KoineError> {
     let dial = dialektos::resolve(Path::new("."), &doc.dialect_id)?;
     kanonizo::tasso(&mut doc, &dial, Path::new("."))?;
-    Ok(TextModel::build(blocks(&doc, &dial)))
+    Ok(finish_model(blocks(&doc, &dial)))
 }
 
 /// Lower a settled document into the block event stream —
@@ -268,9 +268,114 @@ const SKIP: &[&str] = &["toc", "section-break", "ordinal", "manuscript-note", "i
 
 /// Inline apparatus collected while flattening a paragraph,
 /// emitted after its block in source order.
+/// One bibliogramma entry block, lowered: the sim's lemma is the
+/// citation key, its genos the genus, its `field` children the
+/// campi — every term canonicalized through the bibliogramma
+/// dialektos, so a bibliography authored in any covered language
+/// (or imported from BibTeX/BibLaTeX, whose names are aliases)
+/// lands on the same Latin canon.
+fn bib_entry(block: &ABlock, bg: &Dialektos) -> Option<Block> {
+    let ABlock::Para {
+        lemma,
+        children,
+        ann,
+        ..
+    } = block
+    else {
+        return None;
+    };
+    let key = flat(lemma);
+    if key.trim().is_empty() {
+        return None;
+    }
+    let canon = |vocab: &str, term: &str| -> String {
+        bg.vocabularies
+            .get(vocab)
+            .map(|v| v.canonicalize(term).to_string())
+            .unwrap_or_else(|| term.to_string())
+    };
+    let genus = ann.genoses.first().map(|g| canon("genera", g));
+    let mut fields = Vec::new();
+    for f in children {
+        if let ABlock::Para {
+            lemma: fname,
+            children: fval,
+            ..
+        } = f
+        {
+            let campus = canon("campi", &flat(fname));
+            let value = fval.iter().map(block_text).collect::<Vec<_>>().join(" ");
+            fields.push((campus, value));
+        }
+    }
+    Some(Block::Bib {
+        key,
+        text: String::new(),
+        fields,
+        genus,
+    })
+}
+
+/// Build the model and, when the document carried a
+/// bibliography (an embedded bibliogramma englossis), attach
+/// the field alias census so any covered name answers.
+fn finish_model(blocks: Vec<Block>) -> TextModel {
+    let has_bib = blocks.iter().any(|b| matches!(b, Block::Bib { .. }));
+    let mut model = TextModel::build(blocks);
+    if has_bib
+        && let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma")
+    {
+        model.set_bib_aliases(bib_alias_census(&bg));
+    }
+    model
+}
+
+/// The bib-field alias census: every campus alias (lowercased)
+/// → its canonical Latin campus, from the bibliogramma
+/// vocabulary — BibLaTeX's field names are its English rows, so
+/// `::author` / `::journaltitle` answer beside `::auctor` /
+/// `::ephemeris`, in any covered language.
+fn bib_alias_census(bg: &Dialektos) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for vocab in ["campi", "genera"] {
+        if let Some(v) = bg.vocabularies.get(vocab) {
+            for (canon, aliases) in &v.terms {
+                for a in aliases {
+                    map.insert(a.to_lowercase(), canon.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Read a standalone BibTeX / BibLaTeX file as a text-level
+/// document of `bib` entries — atrep's own importer parses it
+/// into bibliogramma, and the same lowering serves both the
+/// embedded englossis and the mounted file.
+pub fn parse_bibtex(source: &str) -> Result<TextModel, KoineError> {
+    let doc = atrep::endo::bibtex_to_document(source).map_err(KoineError::Atrep)?;
+    let bg = dialektos::resolve(Path::new("."), "bibliogramma")?;
+    let mut blocks = Vec::new();
+    for b in &doc.blocks {
+        if let Some(entry) = bib_entry(b, &bg) {
+            blocks.push(entry);
+        }
+    }
+    let mut model = TextModel::build(blocks);
+    model.set_bib_aliases(bib_alias_census(&bg));
+    Ok(model)
+}
+
 enum Pending {
     Note(String, NoteFamily),
     Mark(String),
+    /// A mention met in flow: (target, internal).
+    Ref(String, bool),
+    /// A standalone onym anchor: a point bearer at this position.
+    Point(String),
+    /// A citation mark: the authored key, the bib namespace.
+    Cite(String),
 }
 
 struct Lower {
@@ -288,12 +393,18 @@ impl Lower {
                 // in the name; the shared derivation builds the
                 // outline as it does for h1/h2.
                 if let [Inline::Endo {
-                    symbol, content, ..
+                    symbol,
+                    content,
+                    ann,
+                    ..
                 }] = inlines.as_slice()
                     && let Some(level) = flat_heading_level(&sim_name(dial, symbol))
                 {
                     let lemma = self.flatten(content, dial);
                     self.out.push(Block::Heading { level, lemma });
+                    if let Some(onym) = &ann.onym {
+                        self.out.push(Block::Label { onym: onym.clone() });
+                    }
                     self.drain_pending();
                     return;
                 }
@@ -322,6 +433,11 @@ impl Lower {
                             level: self.heading_depth,
                             lemma,
                         });
+                        // The section's own onym (`#@(name)`)
+                        // names it — the block-style bearer.
+                        if let Some(onym) = &ann.onym {
+                            self.out.push(Block::Label { onym: onym.clone() });
+                        }
                         self.drain_pending();
                         self.seq(children, dial);
                         self.heading_depth -= 1;
@@ -454,8 +570,21 @@ impl Lower {
             ABlock::MonadEnglossis {
                 dialect, children, ..
             } => {
-                // An embedded foreign-dialect subtree reads as
-                // verbatim in that dialect's name.
+                // An embedded bibliogramma is the bibliography:
+                // its entries become bib blocks, campi and genera
+                // canonicalized to the Latin vocabulary. Any other
+                // foreign-dialect subtree reads as verbatim in
+                // that dialect's name.
+                if dialect == "bibliogramma"
+                    && let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma")
+                {
+                    for child in children {
+                        if let Some(b) = bib_entry(child, &bg) {
+                            self.out.push(b);
+                        }
+                    }
+                    return;
+                }
                 let text = children.iter().map(block_text).collect::<Vec<_>>().join("\n\n");
                 self.out.push(Block::Verbatim {
                     lang: Some(dialect.clone()),
@@ -544,11 +673,50 @@ impl Lower {
                         }
                         self.pending.push(Pending::Mark(term));
                     }
+                    // The link endo: the grammata IS the target
+                    // (at-org's own definition), and the endo
+                    // importers emit the bare `><` symbol across
+                    // dialects — so both spellings answer. The
+                    // target stays in the prose (the importers'
+                    // "desc (url)" normalization already put the
+                    // authored text beside it) and the mention
+                    // becomes a ref node; a `#fragment` target is
+                    // internal.
+                    name if name == "link" || symbol == "><" => {
+                        let target = flat(content);
+                        self.flatten_into(content, dial, out);
+                        let t = target.trim().to_string();
+                        if !t.is_empty() {
+                            let internal = t.starts_with('#');
+                            self.pending.push(Pending::Ref(t, internal));
+                        }
+                    }
                     _ => self.flatten_into(content, dial, out),
                 },
                 Inline::EndoDiaphane { content, .. } => self.flatten_into(content, dial, out),
                 Inline::VerbatimInline { content, .. } => out.push_str(content),
-                Inline::Monosim { param, .. } => out.push_str(param),
+                Inline::Monosim { symbol, param, .. } => {
+                    // The ref family: the key stays in the prose
+                    // (as before) and the mention becomes a ref
+                    // node, internal by construction. `cite` keys
+                    // are a namespace of their own (the
+                    // bibliogramma) and stay prose until that
+                    // story lands.
+                    out.push_str(param);
+                    match sim_name(dial, symbol).as_str() {
+                        "ref" | "heading-ref" | "page-ref" | "line-ref" => {
+                            self.pending.push(Pending::Ref(param.clone(), true));
+                        }
+                        // The citation namespace is its own: cite
+                        // marks resolve against bib entries (an
+                        // embedded bibliogramma's entries are the
+                        // recorded follow-up).
+                        "cite" => {
+                            self.pending.push(Pending::Cite(param.clone()));
+                        }
+                        _ => {}
+                    }
+                }
                 Inline::Deixis { symbol, onym, .. } => {
                     let family = match sim_name(dial, symbol).as_str() {
                         "footnote" => Some(NoteFamily::Footnote),
@@ -560,8 +728,12 @@ impl Lower {
                         self.pending.push(Pending::Note(onym.clone(), family));
                     }
                 }
-                Inline::OnymAnchor(_)
-                | Inline::Milestone { .. }
+                Inline::OnymAnchor(o) => {
+                    // A standalone anchor bears its onym at this
+                    // position — the point style.
+                    self.pending.push(Pending::Point(o.clone()));
+                }
+                Inline::Milestone { .. }
                 | Inline::EndoAxioma { .. }
                 | Inline::AxiomaRef { .. } => {}
             }
@@ -611,6 +783,13 @@ impl Lower {
                     margin: false,
                 }),
                 Pending::Mark(term) => self.out.push(Block::IndexMark { term }),
+                Pending::Ref(target, internal) => self.out.push(Block::Ref {
+                    target,
+                    text: None,
+                    internal,
+                }),
+                Pending::Point(onym) => self.out.push(Block::Anchor { onym }),
+                Pending::Cite(target) => self.out.push(Block::Cite { target }),
             }
         }
     }

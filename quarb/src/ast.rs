@@ -648,16 +648,19 @@ pub enum Axis {
     /// only one direction usually exists, so the spelling drops
     /// the direction claim the data never needed.
     BothLink,
-    /// `::prop~>hint` — resolve a cross-reference: the adapter maps
-    /// `(node, property, hint)` to a target node.
+    /// `::prop-->hint` — resolve a cross-reference: the adapter maps
+    /// `(node, property, hint)` to a target node. With no property
+    /// (`//a-->`, the bare arrow) the adapter names the node's own
+    /// reference property — an html anchor's `href`.
     Resolve {
-        property: String,
+        property: Option<String>,
         hint: Option<String>,
     },
-    /// `::prop<~hint` — reverse resolution: find every node whose
+    /// `::prop<--hint` — reverse resolution: find every node whose
     /// `prop` resolves to the current node ("what points here?").
+    /// With no property, each candidate's own reference property.
     ReverseResolve {
-        property: String,
+        property: Option<String>,
         hint: Option<String>,
     },
 }

@@ -28,6 +28,91 @@ pub fn parse(text: &str) -> TextModel {
     TextModel::build(blocks(text))
 }
 
+/// Pandoc-style bracketed citations: every `@key` inside a
+/// `[...]` group whose `@` sits at a citation boundary (the
+/// group start, or after whitespace, `-`, `;`, or `(`) yields a
+/// cit mark — `[@knuth84]`, `[see @a, p. 3; -@b]`. The bare
+/// narrative `@key` is deliberately not read: outside pandoc's
+/// own parser it is indistinguishable from emails and
+/// @mentions, so the bracket is the unambiguous spelling. The
+/// bracket text stays in the prose as authored.
+fn scan_citations(text: &str, cites: &mut Vec<String>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '[' {
+            i += 1;
+            continue;
+        }
+        let Some(close) = chars[i + 1..].iter().position(|&c| c == ']') else {
+            break;
+        };
+        let group = &chars[i + 1..i + 1 + close];
+        let mut j = 0;
+        while j < group.len() {
+            if group[j] == '@'
+                && (j == 0
+                    || group[j - 1].is_whitespace()
+                    || matches!(group[j - 1], '-' | ';' | '('))
+                && let Some(key) = citation_key(&group[j + 1..])
+            {
+                cites.push(key);
+            }
+            j += 1;
+        }
+        i += 1 + close + 1;
+    }
+}
+
+/// A pandoc citation key: a letter, digit, or `_` first, then
+/// alphanumerics with internal punctuation from the pandoc set —
+/// each punctuation character must be followed by an
+/// alphanumeric, so a trailing comma or period stays prose.
+fn citation_key(rest: &[char]) -> Option<String> {
+    let first = *rest.first()?;
+    if !(first.is_alphanumeric() || first == '_') {
+        return None;
+    }
+    let mut key = String::new();
+    key.push(first);
+    let mut i = 1;
+    while i < rest.len() {
+        let c = rest[i];
+        if c.is_alphanumeric() || c == '_' {
+            key.push(c);
+            i += 1;
+        } else if matches!(c, ':' | '.' | '#' | '$' | '%' | '&' | '-' | '+' | '?' | '<' | '>' | '~' | '/')
+            && rest
+                .get(i + 1)
+                .is_some_and(|n| n.is_alphanumeric() || *n == '_')
+        {
+            key.push(c);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    Some(key)
+}
+
+/// Emit the block's citation marks after it, in source order.
+fn drain_cites(cites: &mut Vec<String>, out: &mut Vec<Block>) {
+    for target in cites.drain(..) {
+        out.push(Block::Cite { target });
+    }
+}
+
+/// Emit the block's mentions after it, in source order.
+fn drain_refs(refs: &mut Vec<(String, String, bool)>, out: &mut Vec<Block>) {
+    for (target, text, internal) in refs.drain(..) {
+        out.push(Block::Ref {
+            target,
+            text: Some(text).filter(|t| !t.is_empty()),
+            internal,
+        });
+    }
+}
+
 /// The event stream `parse` builds from — exposed for testing and
 /// composition.
 pub fn blocks(text: &str) -> Vec<Block> {
@@ -36,6 +121,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
 
     let mut out = Vec::new();
     // Inline capture for the block being read (heading, paragraph,
@@ -53,13 +139,33 @@ pub fn blocks(text: &str) -> Vec<Block> {
     // markdown footnote extension declares the footnote family),
     // emitted after the block in source order.
     let mut callouts: Vec<String> = Vec::new();
+    // In-prose links met in the open block: (target, text,
+    // internal) — mentions, emitted after the block like the
+    // callouts. `link_open` remembers where the link's text began
+    // in the running capture.
+    let mut refs: Vec<(String, String, bool)> = Vec::new();
+    // Pandoc-style bracketed citations met in the open block,
+    // emitted after it like the callouts.
+    let mut cites: Vec<String> = Vec::new();
+    let mut link_open: Option<(String, usize)> = None;
+    // The heading's `{#id}` attribute — the section's label.
+    let mut heading_id: Option<String> = None;
 
     for event in Parser::new_ext(text, opts) {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Heading { .. } | Tag::Paragraph => {
+                Tag::Heading { id, .. } => {
+                    flush(&mut run, &mut out);
+                    heading_id = id.map(|i| i.to_string());
+                    cap = Some(String::new());
+                }
+                Tag::Paragraph => {
                     flush(&mut run, &mut out);
                     cap = Some(String::new());
+                }
+                Tag::Link { dest_url, .. } => {
+                    let at = cap.as_ref().map_or(run.len(), String::len);
+                    link_open = Some((dest_url.to_string(), at));
                 }
                 Tag::CodeBlock(kind) => {
                     flush(&mut run, &mut out);
@@ -130,17 +236,34 @@ pub fn blocks(text: &str) -> Vec<Block> {
             },
             Event::End(tag) => match tag {
                 TagEnd::Heading(level) => {
+                    let lemma = cap.take().unwrap_or_default();
+                    scan_citations(&lemma, &mut cites);
                     out.push(Block::Heading {
                         level: heading_level(level),
-                        lemma: cap.take().unwrap_or_default(),
+                        lemma,
                     });
+                    if let Some(id) = heading_id.take() {
+                        out.push(Block::Label { onym: id });
+                    }
                     drain_callouts(&mut callouts, &mut out);
+                    drain_refs(&mut refs, &mut out);
+                    drain_cites(&mut cites, &mut out);
                 }
                 TagEnd::Paragraph => {
-                    out.push(Block::Paragraph {
-                        text: cap.take().unwrap_or_default(),
-                    });
+                    let text = cap.take().unwrap_or_default();
+                    scan_citations(&text, &mut cites);
+                    out.push(Block::Paragraph { text });
                     drain_callouts(&mut callouts, &mut out);
+                    drain_refs(&mut refs, &mut out);
+                    drain_cites(&mut cites, &mut out);
+                }
+                TagEnd::Link => {
+                    if let Some((dest, at)) = link_open.take() {
+                        let buf = cap.as_deref().unwrap_or(&run);
+                        let text = buf.get(at..).unwrap_or_default().trim().to_string();
+                        let internal = dest.starts_with('#');
+                        refs.push((dest, text, internal));
+                    }
                 }
                 TagEnd::CodeBlock => {
                     // Language recorded at Start; recover it from

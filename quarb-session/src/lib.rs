@@ -93,6 +93,15 @@ impl Cell {
 pub trait Executor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>>;
 
+    /// The unresolved external references the last `run` recorded:
+    /// identifiers (URLs, for html) of documents queries referenced
+    /// (`::href-->`) but could not reach. The engine performs no IO
+    /// — the host may acquire these, remount, and re-run the line.
+    /// Empty by default.
+    fn refs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Run against a *freshly re-materialized* source — the `&N!`
     /// live reading. The default re-runs against the standing arbor
     /// (an immutable source never drifts); executors that can re-open

@@ -180,8 +180,10 @@ fn step(s: &Step) -> String {
         Axis::InLink => out.push_str("<-"),
         Axis::BothLink => out.push_str("--"),
         Axis::Resolve { property, hint } => {
-            out.push_str("::");
-            out.push_str(&name_text(property));
+            if let Some(p) = property {
+                out.push_str("::");
+                out.push_str(&name_text(p));
+            }
             out.push_str("-->");
             if let Some(h) = hint {
                 out.push_str(&name_text(h));
@@ -190,8 +192,10 @@ fn step(s: &Step) -> String {
             return out + &step_suffix(s);
         }
         Axis::ReverseResolve { property, hint } => {
-            out.push_str("::");
-            out.push_str(&name_text(property));
+            if let Some(p) = property {
+                out.push_str("::");
+                out.push_str(&name_text(p));
+            }
             out.push_str("<--");
             if let Some(h) = hint {
                 out.push_str(&name_text(h));

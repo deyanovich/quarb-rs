@@ -76,10 +76,13 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 /// single source mounts path-bare at the root; several mount as
 /// named children. Shared by [`QuaiSession::mount`] and
 /// [`QuaiSession::mount_with_model`].
-fn build_doc(sources_json: &str) -> Result<Doc, JsError> {
+fn build_doc(
+    sources_json: &str,
+) -> Result<(Doc, std::collections::HashMap<String, quarb::NodeId>), JsError> {
     let sources: serde_json::Value = serde_json::from_str(sources_json)
         .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
     let mut parts: Vec<(String, Doc)> = Vec::new();
+    let mut urls: Vec<(String, String)> = Vec::new();
     for s in sources.as_array().into_iter().flatten() {
         let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
         let (Some(name), Some(format)) = (field("name"), field("format")) else {
@@ -98,7 +101,16 @@ fn build_doc(sources_json: &str) -> Result<Doc, JsError> {
                 }
             }
         } else if let Some(text) = field("text") {
-            Doc::parse(&text, &format).map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?
+            let mut doc = Doc::parse(&text, &format)
+                .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?;
+            // A source that knows its URL joins the acquisition
+            // story: relative hrefs resolve against it, and the
+            // arrow can land on it from a sibling source.
+            if let Some(url) = field("url") {
+                doc.attach_url(&url);
+                urls.push((name.clone(), url));
+            }
+            doc
         } else {
             return Err(JsError::new(&format!(
                 "'{name}': a source needs text or bytes_b64"
@@ -106,12 +118,14 @@ fn build_doc(sources_json: &str) -> Result<Doc, JsError> {
         };
         parts.push((name, doc));
     }
-    match parts.len() {
-        0 => Err(JsError::new("no sources to mount")),
+    let doc = match parts.len() {
+        0 => return Err(JsError::new("no sources to mount")),
         // A single source stays path-bare at the root.
-        1 => Ok(parts.remove(0).1),
-        _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}"))),
-    }
+        1 => parts.remove(0).1,
+        _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}")))?,
+    };
+    let roots = doc.url_roots(&urls);
+    Ok((doc, roots))
 }
 
 /// Match a bare capture ref `&<digits><suffix>` (the whole line).
@@ -125,11 +139,26 @@ fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
 /// A result envelope for JS: the `&N` label, the output lines, and an
 /// optional note or error (exactly one of note/error, or neither).
 fn envelope(label: &str, lines: Vec<String>, note: Option<String>, error: Option<String>) -> String {
+    envelope_refs(label, lines, note, error, Vec::new())
+}
+
+/// [`envelope`], carrying the run's unresolved external
+/// references — the identifiers (URLs) the query referenced
+/// (`::href-->`) but could not reach. The host may acquire them,
+/// remount, and re-run.
+fn envelope_refs(
+    label: &str,
+    lines: Vec<String>,
+    note: Option<String>,
+    error: Option<String>,
+    refs: Vec<String>,
+) -> String {
     json!({
         "label": label,
         "lines": lines,
         "note": note,
         "error": error,
+        "refs": refs,
     })
     .to_string()
 }
@@ -162,8 +191,10 @@ impl QuaiSession {
     /// source mounts at the root, path-bare, exactly as the
     /// one-document constructor does.
     pub fn mount(sources_json: &str, now_millis: f64) -> Result<QuaiSession, JsError> {
-        let doc = build_doc(sources_json)?;
-        let executor = Box::new(LocalExecutor::new(doc, now_parts(now_millis), false));
+        let (doc, roots) = build_doc(sources_json)?;
+        let executor = Box::new(
+            LocalExecutor::new(doc, now_parts(now_millis), false).with_url_roots(roots),
+        );
         Ok(QuaiSession {
             session: Session::new(executor, Box::new(MemStore)),
         })
@@ -182,11 +213,13 @@ impl QuaiSession {
         model_text: &str,
         now_millis: f64,
     ) -> Result<QuaiSession, JsError> {
-        let doc = build_doc(sources_json)?;
+        let (doc, roots) = build_doc(sources_json)?;
         let model = quarb_model::parse_model(model_text)
             .map_err(|e| JsError::new(&format!("parsing model: {e}")))?;
         let executor = Box::new(
-            LocalExecutor::new(doc, now_parts(now_millis), false).with_model(Some(model)),
+            LocalExecutor::new(doc, now_parts(now_millis), false)
+                .with_model(Some(model))
+                .with_url_roots(roots),
         );
         Ok(QuaiSession {
             session: Session::new(executor, Box::new(MemStore)),
@@ -264,13 +297,14 @@ impl QuaiSession {
         let label = format!("&{}", self.session.line_no());
         match self.session.eval(t) {
             Ok(cells) => {
+                let refs = self.session.refs();
                 let lines = cells.iter().map(|c| c.display()).collect();
                 let note = if self.session.commit(t, cells) {
                     None
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope(&label, lines, note, None)
+                envelope_refs(&label, lines, note, None, refs)
             }
             Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
         }
@@ -338,13 +372,14 @@ impl QuaiSession {
         };
         match result {
             Ok(cells) => {
+                let refs = self.session.refs();
                 let lines = cells.iter().map(|c| c.display()).collect();
                 let note = if self.session.commit(&query, cells) {
                     None
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope(&label, lines, note, None)
+                envelope_refs(&label, lines, note, None, refs)
             }
             Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
         }

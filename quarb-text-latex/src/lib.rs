@@ -69,7 +69,6 @@ const SECTIONING: &[(&str, u8)] = &[
 /// Commands whose argument is metadata, not prose: the command and
 /// its braced argument both vanish.
 const DROP: &[&str] = &[
-    "label",
     "documentclass",
     "usepackage",
     "input",
@@ -113,6 +112,9 @@ struct Lower<'a> {
     /// Note bodies collected for the document end:
     /// (onym, family, margin-form, text).
     notes: Vec<(String, NoteFamily, bool, String)>,
+    /// The open \bibitem key: flush_para closes the entry as a
+    /// bib block instead of a paragraph.
+    bib_key: Option<String>,
     /// The auto-number for \footnote and bare \footnotemark, and
     /// the endnote family's own.
     counter: usize,
@@ -134,6 +136,13 @@ struct Lower<'a> {
 enum Inline {
     Note(String, NoteFamily, bool),
     Mark(String),
+    /// A mention met in flow: (target, authored text, internal).
+    Ref(String, Option<String>, bool),
+    /// A mid-flow \label: a point anchor at this position.
+    Point(String),
+    /// A citation mark: the authored key, resolved against the
+    /// bib namespace.
+    Cite(String),
 }
 
 impl<'a> Lower<'a> {
@@ -145,6 +154,7 @@ impl<'a> Lower<'a> {
             para: String::new(),
             inline: Vec::new(),
             notes: Vec::new(),
+            bib_key: None,
             counter: 0,
             e_counter: 0,
             text_counter: 0,
@@ -382,11 +392,67 @@ impl<'a> Lower<'a> {
                     });
                 }
             }
-            "ref" | "cref" | "Cref" | "eqref" | "pageref" | "cite" | "citep" | "citet" => {
+            "ref" | "cref" | "Cref" | "eqref" | "pageref" => {
                 // The reader sees a mark; the key is what is
-                // declared. Kept as written.
+                // declared, kept as written in the prose — and the
+                // mention becomes a ref node, internal by
+                // construction (\ref points at a \label).
                 if let Some(key) = self.braced() {
                     self.para.push_str(&key);
+                    self.inline.push(Inline::Ref(key, None, true));
+                }
+            }
+            "cite" | "citep" | "citet" => {
+                // The keys stay in the prose (as before), and each
+                // becomes a citation mark — \cite{a,b} is two.
+                if let Some(keys) = self.braced() {
+                    self.para.push_str(&keys);
+                    for key in keys.split(',') {
+                        let key = key.trim();
+                        if !key.is_empty() {
+                            self.inline.push(Inline::Cite(key.to_string()));
+                        }
+                    }
+                }
+            }
+            "bibitem" => {
+                // Close the previous entry (flush_para sees the
+                // open key), then open this one.
+                self.flush_para();
+                if let Some(key) = self.braced() {
+                    self.bib_key = Some(key);
+                }
+            }
+            "label" => {
+                // The promotion rule: a \label attached to a
+                // sectioning command — nothing of the following
+                // paragraph written yet — names the section as a
+                // whole; mid-flow it is a point anchor at this
+                // position.
+                if let Some(key) = self.braced() {
+                    if self.para.trim().is_empty()
+                        && matches!(self.out.last(), Some(Block::Heading { .. } | Block::Label { .. }))
+                    {
+                        self.out.push(Block::Label { onym: key });
+                    } else {
+                        self.inline.push(Inline::Point(key));
+                    }
+                }
+            }
+            "href" => {
+                // \href{url}{text}: the text is prose that also
+                // points — an external mention.
+                let url = self.braced();
+                let text = self.braced();
+                if let (Some(url), Some(text)) = (url, text) {
+                    self.para.push_str(&text);
+                    self.inline.push(Inline::Ref(url, Some(text), false));
+                }
+            }
+            "url" => {
+                if let Some(u) = self.braced() {
+                    self.para.push_str(&u);
+                    self.inline.push(Inline::Ref(u.clone(), Some(u), false));
                 }
             }
             "par" => self.flush_para(),
@@ -444,6 +510,12 @@ impl<'a> Lower<'a> {
 
     fn environment(&mut self, env: &str) {
         match env {
+            "thebibliography" => {
+                self.flush_para();
+                // The widest-label argument is presentation.
+                let _ = self.braced();
+                self.envs.push(("thebibliography", false));
+            }
             "quote" | "quotation" => {
                 self.flush_para();
                 self.out.push(Block::Open {
@@ -538,6 +610,11 @@ impl<'a> Lower<'a> {
                             margin,
                         }),
                         Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
+                Inline::Ref(target, text, internal) => {
+                    self.out.push(Block::Ref { target, text, internal });
+                }
+                Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
+                Inline::Cite(target) => self.out.push(Block::Cite { target }),
                     }
                 }
             }
@@ -577,6 +654,12 @@ impl<'a> Lower<'a> {
 
     fn end_environment(&mut self, env: &str) {
         match env {
+            "thebibliography" => {
+                self.flush_para();
+                if self.envs.last().is_some_and(|f| f.0 == "thebibliography") {
+                    self.envs.pop();
+                }
+            }
             "quote" | "quotation" => {
                 self.flush_para();
                 if self.envs.last().is_some_and(|f| f.0 == "quote") {
@@ -632,7 +715,18 @@ impl<'a> Lower<'a> {
     fn flush_para(&mut self) {
         let text = quarb_text::normalize_ws(&self.para);
         self.para.clear();
-        if !text.is_empty() {
+        if let Some(key) = self.bib_key.take() {
+            // The open bibliography entry closes here — its full
+            // reference text, however styled, is the block.
+            if !text.is_empty() {
+                self.out.push(Block::Bib {
+                    key,
+                    text,
+                    fields: Vec::new(),
+                    genus: None,
+                });
+            }
+        } else if !text.is_empty() {
             if self.envs.is_empty() {
                 self.out.push(Block::Paragraph { text });
             } else {
@@ -647,6 +741,11 @@ impl<'a> Lower<'a> {
                     margin,
                 }),
                 Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
+                Inline::Ref(target, text, internal) => {
+                    self.out.push(Block::Ref { target, text, internal });
+                }
+                Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
+                Inline::Cite(target) => self.out.push(Block::Cite { target }),
             }
         }
     }

@@ -2671,6 +2671,9 @@ impl Parser<'_> {
         if self.is_resolution_ahead() {
             return Ok(PathElem::Step(self.resolution_step()?));
         }
+        if matches!(self.peek(), Some(Token::Resolve | Token::ReverseResolve)) {
+            return Ok(PathElem::Step(self.bare_resolution_step()?));
+        }
         if matches!(self.peek(), Some(Token::LParen)) {
             return Ok(PathElem::Group(self.group(None)?));
         }
@@ -2975,8 +2978,8 @@ impl Parser<'_> {
             )
     }
 
-    /// Parse a resolution step `::property~>hint` (forward) or
-    /// `::property<~hint` (reverse).
+    /// Parse a resolution step `::property-->hint` (forward) or
+    /// `::property<--hint` (reverse).
     fn resolution_step(&mut self) -> Result<Step> {
         self.pos += 1; // consume '::'
         let property = match self.bump() {
@@ -2987,6 +2990,17 @@ impl Parser<'_> {
                 ));
             }
         };
+        self.resolution_tail(Some(property))
+    }
+
+    /// The bare arrow — `//a-->` / `<--` with no property named:
+    /// each node's own reference property (an html anchor's
+    /// `href`) resolves, as the adapter declares it.
+    fn bare_resolution_step(&mut self) -> Result<Step> {
+        self.resolution_tail(None)
+    }
+
+    fn resolution_tail(&mut self, property: Option<String>) -> Result<Step> {
         let reverse = matches!(self.bump(), Some(Token::ReverseResolve));
         if reverse && self.predicate_depth > 0 {
             // Reverse resolution scans the whole arbor per candidate

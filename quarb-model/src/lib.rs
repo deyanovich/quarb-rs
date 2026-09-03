@@ -846,6 +846,41 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         None
     }
 
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        // An aliased node references as the node it stands for; a
+        // base id passes straight through, and a purely derived
+        // node (tagged id) references nothing external.
+        let under = self.aliased(node).unwrap_or(node);
+        if self.decode(under).is_none() {
+            return self.base.external_ref(under, property, hint);
+        }
+        None
+    }
+
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        let under = self.aliased(node).unwrap_or(node);
+        if self.decode(under).is_none() {
+            return self.base.resolve_fragment(under, fragment);
+        }
+        None
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let under = self.aliased(node).unwrap_or(node);
+        if self.decode(under).is_none() {
+            return self.base.ref_property(under);
+        }
+        None
+    }
+
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        let under = self.aliased(node).unwrap_or(node);
+        if self.decode(under).is_none() {
+            return self.base.ref_label(under, property);
+        }
+        None
+    }
+
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let f = self.fabric();
         match self.decode(node) {
@@ -986,6 +1021,18 @@ impl AstAdapter for Borrowed<'_> {
     }
     fn resolve(&self, n: NodeId, p: &str, h: Option<&str>) -> Option<NodeId> {
         self.0.resolve(n, p, h)
+    }
+    fn external_ref(&self, n: NodeId, p: &str, h: Option<&str>) -> Option<String> {
+        self.0.external_ref(n, p, h)
+    }
+    fn resolve_fragment(&self, n: NodeId, f: &str) -> Option<NodeId> {
+        self.0.resolve_fragment(n, f)
+    }
+    fn ref_property(&self, n: NodeId) -> Option<String> {
+        self.0.ref_property(n)
+    }
+    fn ref_label(&self, n: NodeId, p: &str) -> Option<String> {
+        self.0.ref_label(n, p)
     }
     fn link_property(&self, s: NodeId, l: &str, t: NodeId, name: &str) -> Option<Value> {
         self.0.link_property(s, l, t, name)

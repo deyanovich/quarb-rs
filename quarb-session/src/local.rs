@@ -11,6 +11,15 @@ use quarb::QueryResult;
 
 pub struct LocalExecutor {
     doc: Doc,
+    /// The reference targets: external-reference identifier
+    /// (fragment-stripped URL, for html) → mounted root, fed to
+    /// the engine before each run so `::href-->` can land on a
+    /// sibling source. See [`Doc::url_roots`].
+    url_roots: std::collections::HashMap<String, quarb::NodeId>,
+    /// The unresolved external references of the last run —
+    /// documents queried but not mounted. The host may acquire
+    /// them, remount, and re-run; the executor only reports.
+    refs: std::cell::RefCell<Vec<String>>,
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
@@ -29,12 +38,24 @@ impl LocalExecutor {
     pub fn new(doc: Doc, now: (i64, u32), allow_shell: bool) -> Self {
         Self {
             doc,
+            url_roots: Default::default(),
+            refs: Default::default(),
             now,
             allow_shell,
             #[cfg(feature = "native")]
             respec: None,
             model: None,
         }
+    }
+
+    /// Register the reference targets (identifier → mounted root)
+    /// the arrow may land on. See [`Doc::url_roots`].
+    pub fn with_url_roots(
+        mut self,
+        map: std::collections::HashMap<String, quarb::NodeId>,
+    ) -> Self {
+        self.url_roots = map;
+        self
     }
 
     /// Attach a `--model` file: the session runs every query against
@@ -56,6 +77,8 @@ impl LocalExecutor {
     ) -> Self {
         Self {
             doc,
+            url_roots: Default::default(),
+            refs: Default::default(),
             now,
             allow_shell,
             respec: Some((specs, opts)),
@@ -97,10 +120,18 @@ fn run_doc_modeled(
 
 impl Executor for LocalExecutor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
-        if let Some(model) = &self.model {
-            return run_doc_modeled(&self.doc, query, self.now, self.allow_shell, model);
-        }
-        run_doc(&self.doc, query, self.now, self.allow_shell)
+        quarb::set_ref_targets(self.url_roots.clone());
+        let out = if let Some(model) = &self.model {
+            run_doc_modeled(&self.doc, query, self.now, self.allow_shell, model)
+        } else {
+            run_doc(&self.doc, query, self.now, self.allow_shell)
+        };
+        *self.refs.borrow_mut() = quarb::take_refs();
+        out
+    }
+
+    fn refs(&self) -> Vec<String> {
+        self.refs.borrow().clone()
     }
 
     fn run_fresh(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
