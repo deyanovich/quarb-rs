@@ -1,13 +1,60 @@
 //! kaiv emission of result values — the `| kaiv` / `@| kaiv`
 //! output stages, and the shared machinery behind qua's `--kaiv`
 //! emitter. The stages see values only, so the documents they
-//! build carry no provenance; qua's emitter, which sees the
-//! result nodes, layers per-row provenance over the same
+//! build carry no provenance; qua's emitter, which sees each
+//! value's origins, layers per-field provenance over the same
 //! placement rules (records open namespaces, lists open arrays,
 //! typed leaves keep their units).
 
+use crate::exec::{Origins, Prov};
 use crate::Value;
 use std::collections::HashSet;
+
+/// Where a value's provenance comes from while it is placed: the
+/// value's provenance tree (a record's fields and a list's items
+/// each keep their own part, so each leaf line gets its own
+/// prefix), and how a leaf's origin set becomes a kaiv provenance.
+/// [`document`] places without either.
+pub struct ProvCtx<'a> {
+    pub prov: Option<&'a Prov>,
+    pub resolve: &'a dyn Fn(&Origins) -> Option<kaiv::Provenance>,
+}
+
+fn no_provenance(_: &Origins) -> Option<kaiv::Provenance> {
+    None
+}
+
+impl<'a> ProvCtx<'a> {
+    /// No provenance at all.
+    pub fn none() -> ProvCtx<'static> {
+        ProvCtx {
+            prov: None,
+            resolve: &no_provenance,
+        }
+    }
+
+    /// The context for one field of a record.
+    fn part(&self, key: &str) -> Option<Prov> {
+        self.prov.map(|p| p.part(key))
+    }
+
+    /// The context for one item of a list.
+    fn item(&self, i: usize) -> Option<Prov> {
+        self.prov.map(|p| p.item(i))
+    }
+
+    fn with(&self, prov: Option<&'a Prov>) -> ProvCtx<'a> {
+        ProvCtx {
+            prov,
+            resolve: self.resolve,
+        }
+    }
+
+    /// The leaf's own provenance line prefix.
+    fn leaf(&self) -> Option<kaiv::Provenance> {
+        self.prov.and_then(|p| (self.resolve)(&p.origins))
+    }
+}
 
 /// Sanitize a locator or field name into kaiv's identifier charset:
 /// ASCII alphanumerics and `_` pass through; each run of any other
@@ -85,7 +132,7 @@ pub fn kaiv_leaf(
     b: &mut kaiv::KaivBuilder,
     namepath: &str,
     value: &Value,
-    prov: &kaiv::Provenance,
+    prov: Option<&kaiv::Provenance>,
 ) -> Result<(), String> {
     match value {
         Value::Quantity {
@@ -94,7 +141,7 @@ pub fn kaiv_leaf(
             written,
         } => {
             let (v, u) = written.clone().unwrap_or((*bv, base.clone()));
-            if b.leaf_with_unit(namepath, "float", Some(&u), &v.to_string(), Some(prov))
+            if b.leaf_with_unit(namepath, "float", Some(&u), &v.to_string(), prov)
                 .is_ok()
             {
                 return Ok(());
@@ -102,7 +149,7 @@ pub fn kaiv_leaf(
         }
         Value::Duration { secs, nanos } => {
             let v = *secs as f64 + *nanos as f64 / 1e9;
-            if b.leaf_with_unit(namepath, "float", Some("s"), &v.to_string(), Some(prov))
+            if b.leaf_with_unit(namepath, "float", Some("s"), &v.to_string(), prov)
                 .is_ok()
             {
                 return Ok(());
@@ -121,16 +168,16 @@ pub fn kaiv_leaf(
                 "std/time/localdatetime"
             };
             b.declare_types("std/time").map_err(estr)?;
-            if b.leaf(namepath, ty, &value.to_string(), Some(prov)).is_ok() {
+            if b.leaf(namepath, ty, &value.to_string(), prov).is_ok() {
                 return Ok(());
             }
         }
         _ => {}
     }
     let (t, payload) = kaiv_scalar(value);
-    if b.leaf(namepath, t, &payload, Some(prov)).is_err() {
+    if b.leaf(namepath, t, &payload, prov).is_err() {
         // Not flat-line representable: carry the JSON text.
-        b.leaf(namepath, "str", &value.to_json(), Some(prov))
+        b.leaf(namepath, "str", &value.to_json(), prov)
             .map_err(estr)?;
     }
     Ok(())
@@ -141,13 +188,14 @@ pub fn kaiv_leaf(
 /// `base/@id`, its scalar elements as `::n` leaves and its record
 /// elements as `/n` namespaces; anything else is a leaf `base::id`.
 /// An empty record or list, and a list nested in a list, ride as
-/// JSON text — kaiv has no line for them.
+/// JSON text — kaiv has no line for them. The provenance context
+/// descends in lockstep: a field's part, an item's part.
 pub fn kaiv_put(
     b: &mut kaiv::KaivBuilder,
     base: &str,
     field: &str,
     value: &Value,
-    prov: &kaiv::Provenance,
+    prov: &ProvCtx,
     used: &mut HashSet<String>,
 ) -> Result<(), String> {
     let id = unique_ident(field, used);
@@ -156,27 +204,31 @@ pub fn kaiv_put(
             let sub = format!("{base}/{id}");
             let mut used = HashSet::new();
             for (k, v) in fields {
-                kaiv_put(b, &sub, k, v, prov, &mut used)?;
+                let part = prov.part(k);
+                kaiv_put(b, &sub, k, v, &prov.with(part.as_ref()), &mut used)?;
             }
             Ok(())
         }
         Value::List(items) if !items.is_empty() => {
             let sub = format!("{base}/@{id}");
             for (n, item) in items.iter().enumerate() {
+                let part = prov.item(n);
+                let ctx = prov.with(part.as_ref());
                 match item {
                     Value::Record(fields) if !fields.is_empty() => {
                         let elem = format!("{sub}/{n}");
                         let mut used = HashSet::new();
                         for (k, v) in fields {
-                            kaiv_put(b, &elem, k, v, prov, &mut used)?;
+                            let fp = ctx.part(k);
+                            kaiv_put(b, &elem, k, v, &ctx.with(fp.as_ref()), &mut used)?;
                         }
                     }
-                    _ => kaiv_leaf(b, &format!("{sub}::{n}"), item, prov)?,
+                    _ => kaiv_leaf(b, &format!("{sub}::{n}"), item, ctx.leaf().as_ref())?,
                 }
             }
             Ok(())
         }
-        _ => kaiv_leaf(b, &format!("{base}::{id}"), value, prov),
+        _ => kaiv_leaf(b, &format!("{base}::{id}"), value, prov.leaf().as_ref()),
     }
 }
 
@@ -186,7 +238,7 @@ pub fn kaiv_put(
 /// `--kaiv` is the provenance-rich emitter.
 pub fn document(items: &[Value]) -> Result<String, String> {
     let mut b = kaiv::KaivBuilder::new();
-    let prov = kaiv::Provenance::default();
+    let prov = ProvCtx::none();
     for (i, v) in items.iter().enumerate() {
         let base = format!("/@results/{i}");
         let mut used = HashSet::new();

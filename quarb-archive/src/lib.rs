@@ -106,9 +106,20 @@ impl ArchiveAdapter {
         })
     }
 
+    /// A tar or gzipped tar held in memory — the form a browser
+    /// has after one fetch. Zip needs a seekable file and stays
+    /// with [`open`](Self::open).
+    pub fn from_tar_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
+        let gz = bytes.starts_with(&[0x1f, 0x8b]);
+        Self::read_tar(std::io::Cursor::new(bytes), gz)
+    }
+
     fn open_tar(path: &Path, gz: bool) -> Result<Self, ArchiveError> {
-        let f = std::fs::File::open(path)?;
-        let reader: Box<dyn Read> = if gz {
+        Self::read_tar(std::fs::File::open(path)?, gz)
+    }
+
+    fn read_tar<'a, R: Read + 'a>(f: R, gz: bool) -> Result<Self, ArchiveError> {
+        let reader: Box<dyn Read + 'a> = if gz {
             Box::new(flate2::read::GzDecoder::new(f))
         } else {
             Box::new(f)
@@ -154,6 +165,19 @@ impl ArchiveAdapter {
         }
         parts.reverse();
         format!("/{}", parts.join("/"))
+    }
+
+    /// Every file entry as `(path, text)`, in archive order —
+    /// the form a store over the archive builds from.
+    pub fn files(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            let Some(entry) = n.entry else { continue };
+            if let Some(text) = self.content(entry) {
+                out.push((self.locator(NodeId(i as u64)).trim_start_matches('/').to_string(), text));
+            }
+        }
+        out
     }
 
     /// An entry's text content, reading it on first touch (zip).

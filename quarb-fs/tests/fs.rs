@@ -272,12 +272,14 @@ fn provenance_is_path_and_mtime() {
     );
     // No dpid: the filesystem assigns none (null displays empty).
     assert_eq!(values("//guide.txt:::dpid", &dir), vec![""]);
-    // The composite carries source and instant only.
+    // The composite carries source and instant only; the kaiv
+    // spelling prints the instant to the whole second.
     let composite = values("//guide.txt:::provenance", &dir);
+    let instant = values("//guide.txt:::instant", &dir)[0].clone();
     let expected = format!(
         "?{}@{}",
         root.join("docs/guide.txt").display(),
-        values("//guide.txt:::instant", &dir)[0]
+        instant.split('.').next().unwrap()
     );
     assert_eq!(composite, vec![expected]);
 }

@@ -42,7 +42,9 @@ enum Inner {
     Html(quarb_html::HtmlAdapter),
     Text(quarb_text::TextModel),
     Csv(quarb_csv::CsvAdapter),
+    #[cfg(feature = "source")]
     Syntax(quarb_tree_sitter::TreeSitterAdapter),
+    #[cfg(feature = "source")]
     Code(quarb_code::CodeModel),
     /// A grafted archive, itself composed so its own parseable
     /// entries graft in turn.
@@ -57,7 +59,9 @@ impl Inner {
             Inner::Html(a) => a,
             Inner::Text(a) => a,
             Inner::Csv(a) => a,
+            #[cfg(feature = "source")]
             Inner::Syntax(a) => a,
+            #[cfg(feature = "source")]
             Inner::Code(a) => a,
             Inner::Archive(a) => &**a,
         }
@@ -70,7 +74,9 @@ impl Inner {
             Inner::Html(a) => a.locator(node),
             Inner::Text(a) => a.locator(node),
             Inner::Csv(a) => a.locator(node),
+            #[cfg(feature = "source")]
             Inner::Syntax(a) => a.locator(node),
+            #[cfg(feature = "source")]
             Inner::Code(a) => a.locator(node),
             Inner::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
         }
@@ -90,6 +96,18 @@ pub enum SourceGraft {
     Code,
 }
 
+/// The level marked-up documents (`.html`, `.htm`, `.md`) graft
+/// at: their DOM by default, or the text level — sections,
+/// paragraphs, lists, and what the page declares about itself
+/// in its head — when the mount asks for the reader's model
+/// (`text:` on an archive or directory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocumentGraft {
+    #[default]
+    Dom,
+    Text,
+}
+
 /// Names [`quarb_archive::ArchiveAdapter::open`] can take: the
 /// zip family, tar, and gzip (`.gz` alone included — the open
 /// checks magic bytes, and a failure leaves the leaf a leaf).
@@ -99,7 +117,9 @@ fn archive_name(name: &str) -> bool {
 }
 
 /// Parse `content` by `name`'s extension, else by sniffing.
-fn parse_inner(name: &str, content: &str, graft: SourceGraft) -> Option<Inner> {
+fn parse_inner(name: &str, content: &str, graft: SourceGraft, doc: DocumentGraft) -> Option<Inner> {
+    #[cfg(not(feature = "source"))]
+    let _ = graft;
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "json" => {
@@ -115,10 +135,20 @@ fn parse_inner(name: &str, content: &str, graft: SourceGraft) -> Option<Inner> {
         "xml" | "svg" | "xhtml" => {
             return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
         }
-        "html" | "htm" => return Some(Inner::Html(quarb_html::HtmlAdapter::parse(content))),
+        "html" | "htm" => {
+            return Some(match doc {
+                DocumentGraft::Dom => Inner::Html(quarb_html::HtmlAdapter::parse(content)),
+                DocumentGraft::Text => Inner::Text(quarb_text_html::parse(content)),
+            });
+        }
         "yaml" | "yml" => return quarb_yaml::parse(content).ok().map(Inner::Json),
         "toml" => return quarb_toml::parse(content).ok().map(Inner::Json),
-        "md" | "markdown" => return Some(Inner::Html(quarb_markdown::parse(content))),
+        "md" | "markdown" => {
+            return Some(match doc {
+                DocumentGraft::Dom => Inner::Html(quarb_markdown::parse(content)),
+                DocumentGraft::Text => Inner::Text(quarb_text_markdown::parse(content)),
+            });
+        }
         // Plain text grafts at the text level (blank-line
         // paragraphs); html/md keep their DOM-level graft.
         "txt" => return Some(Inner::Text(quarb_text::TextModel::parse_plain(content))),
@@ -128,14 +158,15 @@ fn parse_inner(name: &str, content: &str, graft: SourceGraft) -> Option<Inner> {
                 .ok()
                 .map(Inner::Csv);
         }
+        #[cfg(feature = "source")]
         ext if quarb_tree_sitter::supported(ext) => {
             return match graft {
                 SourceGraft::Syntax => quarb_tree_sitter::TreeSitterAdapter::parse(content, ext)
                     .ok()
                     .map(Inner::Syntax),
-                SourceGraft::Code => {
-                    quarb_code::CodeModel::parse(content, ext).ok().map(Inner::Code)
-                }
+                SourceGraft::Code => quarb_code::CodeModel::parse(content, ext)
+                    .ok()
+                    .map(Inner::Code),
             };
         }
         _ => {}
@@ -185,6 +216,14 @@ pub struct ComposeAdapter<A: AstAdapter> {
     source_path: Option<fn(&A, NodeId) -> Option<PathBuf>>,
     /// The level source-file leaves graft at.
     source_graft: SourceGraft,
+    /// The level marked-up documents graft at.
+    document_graft: DocumentGraft,
+    /// Maps an outer leaf to the URL its document is served
+    /// from, so a text-level graft joins relative references
+    /// against it and `-->` can land on a sibling document.
+    document_url: Option<fn(&A, NodeId) -> Option<String>>,
+    /// URL → outer leaf, built on first `document_by_ref`.
+    urls: RefCell<Option<HashMap<String, NodeId>>>,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -197,13 +236,55 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             reverse: RefCell::new(Vec::new()),
             source_path: None,
             source_graft: SourceGraft::default(),
+            document_graft: DocumentGraft::default(),
+            document_url: None,
+            urls: RefCell::new(None),
         }
+    }
+
+    /// Declare where each outer leaf's document is served from
+    /// (builder-style): a text-level graft joins its relative
+    /// references against that URL, and `-->` from any graft
+    /// lands on the leaf holding the referenced document (its
+    /// fragment's bearer when named) without a host registration.
+    pub fn with_document_urls(mut self, document_url: fn(&A, NodeId) -> Option<String>) -> Self {
+        self.document_url = Some(document_url);
+        self
+    }
+
+    /// The outer leaf serving `url` (fragment-stripped), from the
+    /// declared URLs; the whole outer tree is walked once.
+    fn leaf_by_url(&self, url: &str) -> Option<NodeId> {
+        let f = self.document_url?;
+        if self.urls.borrow().is_none() {
+            let mut map = HashMap::new();
+            let mut stack = vec![self.outer.root()];
+            while let Some(n) = stack.pop() {
+                let kids = self.outer.children(n);
+                if kids.is_empty() {
+                    if let Some(u) = f(&self.outer, n) {
+                        map.entry(u.split('#').next().unwrap_or(&u).to_string()).or_insert(n);
+                    }
+                } else {
+                    stack.extend(kids);
+                }
+            }
+            *self.urls.borrow_mut() = Some(map);
+        }
+        self.urls.borrow().as_ref()?.get(url).copied()
     }
 
     /// Choose the level source-file leaves graft at
     /// (builder-style; the default is the syntax level).
     pub fn with_source_graft(mut self, graft: SourceGraft) -> Self {
         self.source_graft = graft;
+        self
+    }
+
+    /// Choose the level marked-up documents graft at
+    /// (builder-style; the default is the DOM).
+    pub fn with_document_graft(mut self, graft: DocumentGraft) -> Self {
+        self.document_graft = graft;
         self
     }
 
@@ -242,6 +323,16 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     }
 
     /// Decode a composite id.
+    /// The graft's fill for a node inside a grafted document: the
+    /// outer leaf's provenance (the file's path and mtime) with the
+    /// mtime re-labelled as the source rung, and the node's path
+    /// inside the document.
+    fn graft_fill(&self, outer_leaf: NodeId, inner_path: String) -> quarb::Provenance {
+        let mut fill = self.outer.provenance(outer_leaf).as_source_rung();
+        fill.path = Some(inner_path);
+        fill
+    }
+
     fn split(&self, node: NodeId) -> Option<(usize, NodeId)> {
         if node.0 & GRAFT_BIT == 0 {
             return None;
@@ -281,7 +372,9 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 && let Ok(a) = quarb_archive::ArchiveAdapter::open(&path)
             {
                 let inner = Inner::Archive(Box::new(
-                    ComposeAdapter::new(a).with_source_graft(self.source_graft),
+                    ComposeAdapter::new(a)
+                        .with_source_graft(self.source_graft)
+                        .with_document_graft(self.document_graft),
                 ));
                 let mut grafts = self.grafts.borrow_mut();
                 grafts.push(Graft { outer: node, inner });
@@ -291,7 +384,12 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 Value::Str(s) => s,
                 _ => return None,
             };
-            let inner = parse_inner(&name, &content, self.source_graft)?;
+            let mut inner = parse_inner(&name, &content, self.source_graft, self.document_graft)?;
+            if let (Inner::Text(model), Some(f)) = (&mut inner, self.document_url)
+                && let Some(u) = f(&self.outer, node)
+            {
+                model.set_document_url(&u);
+            }
             let mut grafts = self.grafts.borrow_mut();
             grafts.push(Graft { outer: node, inner });
             Some(grafts.len() - 1)
@@ -364,10 +462,34 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    /// A written name reaches a node by the owning adapter's rule
+    /// (its aliases included).
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().answers_to(inner, name),
+            None => self.outer.answers_to(node, name),
+        }
+    }
+
+    /// The graft root IS the outer leaf, so the leaf wears the
+    /// grafted document's own traits too — a page's declared tags
+    /// on the file that holds it.
     fn traits(&self, node: NodeId) -> Vec<String> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().traits(inner),
-            None => self.outer.traits(node),
+            None => {
+                let mut out = self.outer.traits(node);
+                if let Some(g) = self.graft_at(node) {
+                    let grafts = self.grafts.borrow();
+                    let a = grafts[g].inner.adapter();
+                    for t in a.traits(a.root()) {
+                        if !out.contains(&t) {
+                            out.push(t);
+                        }
+                    }
+                }
+                out
+            }
         }
     }
 
@@ -400,7 +522,15 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().metadata(inner, key),
-            None => self.outer.metadata(node, key),
+            // Like properties: what the outer cannot answer, the
+            // grafted document's root may (`::::"og:type"` on the
+            // file that holds the page).
+            None => self.outer.metadata(node, key).or_else(|| {
+                let g = self.graft_at(node)?;
+                let grafts = self.grafts.borrow();
+                let a = grafts[g].inner.adapter();
+                a.metadata(a.root(), key)
+            }),
         }
     }
 
@@ -409,7 +539,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     /// consulted only after the owning adapter's `property` misses.
     fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
         match self.split(node) {
-            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().aliased_metadata(inner),
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .aliased_metadata(inner),
             None => self.outer.aliased_metadata(node),
         }
     }
@@ -426,16 +559,28 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 // Clone what we need out of the borrow before calling
                 // into `self.outer` (which may re-enter the graft
                 // tables).
-                let (inner_prov, outer_leaf) = {
+                let (inner_prov, outer_leaf, inner_path) = {
                     let grafts = self.grafts.borrow();
-                    (
-                        grafts[g].inner.adapter().provenance(inner),
-                        grafts[g].outer,
-                    )
+                    let a = grafts[g].inner.adapter();
+                    (a.provenance(inner), grafts[g].outer, quarb::name_path(a, inner))
                 };
-                inner_prov.or(self.outer.provenance(outer_leaf))
+                inner_prov.or(self.graft_fill(outer_leaf, inner_path))
             }
             None => self.outer.provenance(node),
+        }
+    }
+    /// The same layering, entry by entry.
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let (inner_list, outer_leaf, inner_path) = {
+                    let grafts = self.grafts.borrow();
+                    let a = grafts[g].inner.adapter();
+                    (a.provenance_list(inner), grafts[g].outer, quarb::name_path(a, inner))
+                };
+                inner_list.or(self.graft_fill(outer_leaf, inner_path))
+            }
+            None => self.outer.provenance_list(node),
         }
     }
 
@@ -449,6 +594,109 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 Some(self.wrap(g, t))
             }
             None => self.outer.resolve(node, property, hint),
+        }
+    }
+
+    /// A trait test reaches the graft — and, on the outer leaf,
+    /// the graft's root, as `traits` does.
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().has_trait(inner, name),
+            None => {
+                self.outer.has_trait(node, name)
+                    || self.graft_at(node).is_some_and(|g| {
+                        let grafts = self.grafts.borrow();
+                        let a = grafts[g].inner.adapter();
+                        a.has_trait(a.root(), name)
+                    })
+            }
+        }
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().ref_property(inner),
+            None => self.outer.ref_property(node),
+        }
+    }
+
+    /// A graft's external references (a text-level ref leaving
+    /// its document) come through; an outer leaf's own do too.
+    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .external_ref(inner, property, hint),
+            None => self.outer.external_ref(node, property, hint),
+        }
+    }
+
+    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().ref_label(inner, property),
+            None => self.outer.ref_label(node, property),
+        }
+    }
+
+    /// A fragment lands inside the document: on an outer leaf
+    /// that holds a graft, inside that graft.
+    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let t = self.grafts.borrow()[g].inner.adapter().resolve_fragment(inner, fragment)?;
+                Some(self.wrap(g, t))
+            }
+            None => match self.graft_at(node) {
+                Some(g) => {
+                    let t = {
+                        let grafts = self.grafts.borrow();
+                        let a = grafts[g].inner.adapter();
+                        a.resolve_fragment(a.root(), fragment)?
+                    };
+                    Some(self.wrap(g, t))
+                }
+                None => self.outer.resolve_fragment(node, fragment),
+            },
+        }
+    }
+
+    /// The leaf serving a URL, from the declared document URLs;
+    /// else whatever the outer answers.
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        if let Some(leaf) = self.leaf_by_url(id) {
+            // The graft is parsed here so a fragment can land.
+            let _ = self.graft_at(leaf);
+            return Some(leaf);
+        }
+        self.outer.document_by_ref(id)
+    }
+
+    /// A reverse index answers on one side of the boundary only:
+    /// inside a graft, or on the outer tree when no graft could
+    /// hold a referrer (the outer's answer cannot see grafts).
+    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let v = self.grafts.borrow()[g].inner.adapter().reverse_resolve(inner, property, hint)?;
+                Some(v.into_iter().map(|t| self.wrap(g, t)).collect())
+            }
+            None => None,
+        }
+    }
+
+    /// Inside a graft the graft's index answers; on the outer tree
+    /// a name may also live inside grafts, so the walk stays.
+    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        let (g, inner) = self.split(node)?;
+        let v = self.grafts.borrow()[g].inner.adapter().descendants_named(inner, name)?;
+        Some(v.into_iter().map(|(t, d)| (self.wrap(g, t), d)).collect())
+    }
+
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        let outer: Vec<NodeId> = nodes.iter().copied().filter(|n| self.split(*n).is_none()).collect();
+        if !outer.is_empty() {
+            self.outer.prefetch_links(&outer, dir);
         }
     }
 

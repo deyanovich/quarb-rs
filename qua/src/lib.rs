@@ -13,18 +13,27 @@
 use anyhow::Context;
 use clap::Parser;
 use quarb::{AllowShell, AstAdapter, NodeId, QuantifierBound, QueryResult, Value, WithNow};
+use quarb_age::AgeAdapter;
+use quarb_arangodb::ArangoAdapter;
 use quarb_archive::ArchiveAdapter;
-use quarb_atrep::AtrepAdapter;
 use quarb_athena::AthenaAdapter;
+use quarb_atrep::AtrepAdapter;
+use quarb_azlogs::AzlAdapter;
 use quarb_bigquery::BigqueryAdapter;
-use quarb_tree_sitter::TreeSitterAdapter;
-use quarb_compose::{ComposeAdapter, SourceGraft};
+use quarb_cflogs::CflAdapter;
+use quarb_compose::{ComposeAdapter, DocumentGraft, SourceGraft};
+use quarb_cosmos::CosmosAdapter;
 use quarb_csv::CsvAdapter;
+use quarb_cwlogs::CwlAdapter;
 use quarb_datastore::DatastoreAdapter;
+use quarb_ddlogs::DdlAdapter;
 use quarb_duckdb::DuckdbAdapter;
+use quarb_dynamodb::DynamodbAdapter;
+use quarb_falkordb::FalkorAdapter;
 use quarb_firebase::FirebaseAdapter;
 use quarb_firestore::FirestoreAdapter;
 use quarb_fs::{FsAdapter, FsOptions};
+use quarb_gcplogs::GclAdapter;
 use quarb_git::GitAdapter;
 use quarb_github::GithubAdapter;
 use quarb_gitlab::GitlabAdapter;
@@ -32,37 +41,28 @@ use quarb_gsheet::GsheetAdapter;
 use quarb_html::HtmlAdapter;
 use quarb_imap::ImapAdapter;
 use quarb_json::JsonAdapter;
-use quarb_azlogs::AzlAdapter;
-use quarb_cflogs::CflAdapter;
-use quarb_cwlogs::CwlAdapter;
-use quarb_ddlogs::DdlAdapter;
-use quarb_gcplogs::GclAdapter;
-use quarb_kubernetes::KubernetesAdapter;
-use quarb_maildir::MaildirAdapter;
-use quarb_metatheca::MetathecaAdapter;
-use quarb_ldap::LdapAdapter;
-use quarb_cosmos::CosmosAdapter;
-use quarb_dynamodb::DynamodbAdapter;
-use quarb_age::AgeAdapter;
-use quarb_arangodb::ArangoAdapter;
-use quarb_falkordb::FalkorAdapter;
-use quarb_memgraph::MemgraphAdapter;
-use quarb_neptune::NeptuneAdapter;
-use quarb_redis::RedisAdapter;
-use quarb_sparql::SparqlAdapter;
 use quarb_kafka::KafkaAdapter;
+use quarb_kubernetes::KubernetesAdapter;
 #[cfg(feature = "kuzu")]
 use quarb_kuzu::KuzuAdapter;
+use quarb_ldap::LdapAdapter;
+use quarb_maildir::MaildirAdapter;
+use quarb_memgraph::MemgraphAdapter;
+use quarb_metatheca::MetathecaAdapter;
 use quarb_mongodb::MongodbAdapter;
-use quarb_mssql::MssqlAdapter;
-use quarb_oracle::OracleAdapter;
 use quarb_mount::{Mount, MountAdapter, Shared};
+use quarb_mssql::MssqlAdapter;
 use quarb_mysql::MysqlAdapter;
 use quarb_neo4j::Neo4jAdapter;
+use quarb_neptune::NeptuneAdapter;
 use quarb_objstore::ObjstoreAdapter;
+use quarb_oracle::OracleAdapter;
 use quarb_postgres::PostgresAdapter;
+use quarb_redis::RedisAdapter;
 use quarb_serve::ServeAdapter;
+use quarb_sparql::SparqlAdapter;
 use quarb_sqlite::SqliteAdapter;
+use quarb_tree_sitter::TreeSitterAdapter;
 use quarb_xlsx::XlsxAdapter;
 use quarb_xml::XmlAdapter;
 use std::io::{IsTerminal, Read};
@@ -114,6 +114,19 @@ struct Cli {
     /// document and each value's origin node.
     #[arg(long)]
     kaiv: bool,
+
+    /// With --kaiv: how many origins a value's provenance lists by
+    /// name before the rest collapse into the elision marker
+    /// (`;+N`). A sum over a thousand rows names 8 and says +992.
+    #[arg(long, value_name = "N", default_value_t = 8, requires = "kaiv")]
+    kaiv_origins: usize,
+
+    /// Reproducible provenance: answer and export only the instants
+    /// the data itself recorded, holding back a source's
+    /// modification time and the moment of reading, so the same
+    /// source gives the same output run after run.
+    #[arg(long)]
+    reproducible: bool,
 
     /// Print the results as one JSON document — an array of the
     /// values, records as objects. (The default prints the Quarb
@@ -292,6 +305,8 @@ thread_local! {
     /// query instead of running it). Set once in `main`.
     static EXPAND_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static EXPAND1_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `--kaiv-origins`: the bound on named origins per kaiv leaf.
+    static KAIV_ORIGINS: std::cell::Cell<usize> = const { std::cell::Cell::new(quarb::ORIGIN_CAP) };
 }
 
 thread_local! {
@@ -465,6 +480,12 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
         EXPAND_FLAG.with(|f| f.set(true));
     }
+    if cli.reproducible {
+        quarb::set_reproducible(true);
+    }
+    if cli.kaiv {
+        KAIV_ORIGINS.with(|c| c.set(cli.kaiv_origins));
+    }
 
     // --expand-1: one ledger step, printed and stop (macroexpand-1).
     if cli.expand_1 {
@@ -525,7 +546,8 @@ pub fn cli_main() -> anyhow::Result<()> {
         let base_dir = model_path.parent();
         for m in &model.mounts {
             let target = quarb_model::resolve_mount_target(&m.target, base_dir);
-            cli.paths.insert(0, PathBuf::from(format!("{}={}", m.name, target)));
+            cli.paths
+                .insert(0, PathBuf::from(format!("{}={}", m.name, target)));
         }
         MODEL.with(|m| *m.borrow_mut() = Some(model));
     }
@@ -559,8 +581,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
         if cli.resident_serve {
             let sock = resident_socket(&cli)?;
-            RESIDENT
-                .with(|r| *r.borrow_mut() = Some((sock, cli.resident_ttl, cli.now.is_some())));
+            RESIDENT.with(|r| *r.borrow_mut() = Some((sock, cli.resident_ttl, cli.now.is_some())));
         }
     }
     execute(&cli, &cli.query)
@@ -830,10 +851,7 @@ fn resident_serve_loop<A: AstAdapter>(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default();
                     NOW_INSTANT.with(|c| c.set((since.as_secs() as i64, since.subsec_nanos())));
-                    quarb::set_invocation_instant(
-                        since.as_secs() as i64,
-                        since.subsec_nanos(),
-                    );
+                    quarb::set_invocation_instant(since.as_secs() as i64, since.subsec_nanos());
                 }
                 let (result, output) =
                     with_stdout_capture(|| run_wrapped(&query, adapter, &render, None));
@@ -919,8 +937,7 @@ fn relational_refs(refs: &Option<PathBuf>) -> anyhow::Result<Vec<(String, String
         Some(f) => {
             let text = std::fs::read_to_string(f)
                 .with_context(|| format!("reading refs file {}", f.display()))?;
-            quarb_relational::parse_refs(&text)
-                .map_err(|e| anyhow::anyhow!("parsing refs: {e}"))
+            quarb_relational::parse_refs(&text).map_err(|e| anyhow::anyhow!("parsing refs: {e}"))
         }
         None => Ok(Vec::new()),
     }
@@ -1041,11 +1058,42 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             cli.kaiv.then_some(src.as_str()),
         );
     }
+    // The web level: a site — a directory of built pages or an
+    // archive of them — as `/sites/<host>/pages/…`, each page
+    // grafted at the text level on entry.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("web:"))
+        && !rest.is_empty()
+    {
+        let src = rest.to_string();
+        return match web_level(rest)? {
+            WebSite::Memory(adapter) => run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src.as_str())),
+            WebSite::Sqlite(store) => run_web_store(cli, query, store, &src),
+            WebSite::Postgres(store) => run_web_store(cli, query, store, &src),
+        };
+    }
     if let Some(p) = &path
         && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("text:"))
         && !rest.is_empty()
     {
         let target = Path::new(rest);
+        // An archive at the text level: every marked-up member
+        // grafts as the reader's model — a site's pages as
+        // sections and paragraphs, each page wearing what its
+        // head declares. A container with a producer of its own
+        // (.docx, .epub) is not an archive here: it is a document.
+        if is_archive(target) && binary_text_kind(target).is_none() {
+            let adapter =
+                ComposeAdapter::new(ArchiveAdapter::open(target).context("opening archive")?)
+                    .with_document_graft(DocumentGraft::Text);
+            let src = target.display().to_string();
+            return run(
+                query,
+                &adapter,
+                |n| adapter.locator(n, |o| adapter.outer().locator(o)),
+                cli.kaiv.then_some(src.as_str()),
+            );
+        }
         // A native atrep file is already koine: the two prefixes
         // converge, and text: aliases to the koine route.
         if target
@@ -1070,8 +1118,8 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
         {
-            let bytes = std::fs::read(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let bytes =
+                std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
             let adapter = quarb_text_pdf::parse(&bytes)
                 .with_context(|| format!("reading {} as PDF", target.display()))?;
             let src = target.display().to_string();
@@ -1083,8 +1131,8 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             );
         }
         if let Some(kind) = binary_text_kind(target) {
-            let bytes = std::fs::read(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let bytes =
+                std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
             let adapter = binary_text_level(kind, &bytes)
                 .with_context(|| format!("reading {}", target.display()))?;
             let src = target.display().to_string();
@@ -1105,7 +1153,10 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             let text = std::fs::read_to_string(target)
                 .with_context(|| format!("reading {}", target.display()))?;
             let adapter = quarb_text_koine::parse_bibtex(&text).with_context(|| {
-                format!("reading {} as BibTeX through bibliogramma", target.display())
+                format!(
+                    "reading {} as BibTeX through bibliogramma",
+                    target.display()
+                )
             })?;
             let src = target.display().to_string();
             return run(
@@ -1121,7 +1172,10 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             Some(rest) => rest.to_owned(),
             None => text,
         };
-        let adapter = text_level(&text, Some(target));
+        let mut adapter = text_level(&text, Some(target));
+        // The base `::href` links against, when the page declares
+        // no canonical URL of its own.
+        adapter.set_document_path(&target.display().to_string());
         let src = target.display().to_string();
         return run(
             query,
@@ -1188,10 +1242,10 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         };
         let src = path.display().to_string();
         if cli.graft {
-            let adapter = ComposeAdapter::with_source_paths(
-                FsAdapter::with_options(path, opts)?,
-                |fs, n| Some(fs.path(n)),
-            );
+            let adapter =
+                ComposeAdapter::with_source_paths(FsAdapter::with_options(path, opts)?, |fs, n| {
+                    Some(fs.path(n))
+                });
             return run(
                 query,
                 &adapter,
@@ -1519,7 +1573,9 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 s,
                 &plan.sql,
                 plan.order_table.as_deref(),
-                plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
                     print_raw(&cols, rows)?;
@@ -1541,9 +1597,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         MssqlAdapter::connect(s).context("connecting to SQL Server")?
                     }
@@ -1551,7 +1605,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => MssqlAdapter::connect(s).context("connecting to SQL Server")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // An Oracle database: oracle://USER:PASS@HOST[:PORT]/SERVICE.
@@ -1563,7 +1623,9 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                 s,
                 &plan.sql,
                 plan.order_table.as_deref(),
-                plan.join_left.as_ref().map(|(t, c)| (t.as_str(), c.as_slice())),
+                plan.join_left
+                    .as_ref()
+                    .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
                     print_raw(&cols, rows)?;
@@ -1585,9 +1647,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         OracleAdapter::connect(s).context("connecting to Oracle")?
                     }
@@ -1595,7 +1655,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => OracleAdapter::connect(s).context("connecting to Oracle")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // An LDAP directory: ldap[s]://[USER:PASS@]HOST[:PORT]/BASE_DN.
@@ -1603,7 +1669,12 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         && (s.starts_with("ldap://") || s.starts_with("ldaps://"))
     {
         let adapter = LdapAdapter::connect(s).context("connecting to LDAP")?;
-        return run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(s));
+        return run(
+            query,
+            &adapter,
+            |n| adapter.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // A Neo4j property graph: neo4j://HOST[/DB][?key=PROP].
@@ -1711,9 +1782,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         BigqueryAdapter::connect(s).context("connecting to BigQuery")?
                     }
@@ -1721,7 +1790,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // Athena: the S3 datalake's query layer. Billed by bytes
@@ -1759,9 +1834,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         AthenaAdapter::connect(s).context("connecting to Athena")?
                     }
@@ -1769,7 +1842,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => AthenaAdapter::connect(s).context("connecting to Athena")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // A MySQL/MariaDB URL connects and introspects the database.
@@ -1808,9 +1887,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         MysqlAdapter::connect(s).context("connecting to MySQL")?
                     }
@@ -1818,7 +1895,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => MysqlAdapter::connect(s).context("connecting to MySQL")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // A PostgreSQL connection string connects and materializes the
@@ -1859,9 +1942,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         PostgresAdapter::connect(s).context("connecting to PostgreSQL")?
                     }
@@ -1869,7 +1950,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             }
             None => PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
         };
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(s));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(s),
+        );
     }
 
     // A served adapter: `serve:COMMAND` spawns the command and
@@ -2018,7 +2105,13 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         }
         let adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
         let src = p.display().to_string();
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
     }
 
     // A PDF is its own object graph (quarb-pdf): plain file.pdf
@@ -2124,20 +2217,23 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         if cli.explain {
-                            eprintln!(
-                                "partial pushdown: prefilter rejected ({e}); scanning"
-                            );
+                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
                         }
                         SqliteAdapter::open_with_refs(p, &refs)
                             .context("opening SQLite database")?
                     }
                 }
             }
-            None => SqliteAdapter::open_with_refs(p, &refs)
-                .context("opening SQLite database")?,
+            None => SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
         };
         let src = p.display().to_string();
-        return run_relational(adapter, cli.no_graft, query, |a, n| a.locator(n), cli.kaiv.then_some(src.as_str()));
+        return run_relational(
+            adapter,
+            cli.no_graft,
+            query,
+            |a, n| a.locator(n),
+            cli.kaiv.then_some(src.as_str()),
+        );
     }
 
     let (text, path) = match &path {
@@ -2152,8 +2248,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             if !quarb::is_calculator(&cli.query) {
                 // A query that fails to parse should say so — not
                 // masquerade as a missing target.
-                quarb::expand(&cli.query, &quarb::Defs::default())
-                    .context("parsing the query")?;
+                quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
                 anyhow::bail!(
                     "no input: give a directory, a file, or pipe a document to \
                      stdin — an expression head '= expr' runs without one"
@@ -2230,8 +2325,7 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
         // anchors dialektos resolution, std definitions embedded.
         if matches!(ext, "atd" | "atk") {
             let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
-            let adapter =
-                AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
+            let adapter = AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
             return run(query, &adapter, |n| adapter.locator(n), kaiv);
         }
     }
@@ -2539,6 +2633,116 @@ fn binary_text_level(kind: &str, bytes: &[u8]) -> anyhow::Result<quarb_text::Tex
     }
 }
 
+/// The web level (`web:`): a directory of built pages or an
+/// archive of them (`.tar`, `.tgz`, `.zip`) as one site. Pages
+/// join against `?base=<url>`, else the base read off a page's
+/// canonical URL.
+/// Run a query over an index-backed site store: the planner first
+/// — a count outright, a candidate set the engine re-verifies, or
+/// nothing (the scan) — with `--explain` commentary on stderr.
+fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
+    cli: &Cli,
+    query: &str,
+    store: S,
+    src: &str,
+) -> anyhow::Result<()> {
+    use quarb_web::plan::{Plan, Rung};
+    let model = MODEL.with(|m| m.borrow().is_some());
+    let plan = if pushdown_applies(cli) {
+        quarb_web::plan::plan(query, store.dialect(), model)
+    } else {
+        Plan { rung: Rung::Scan, where_sql: String::new(), params: Vec::new(), reason: "disabled".into(), unverified: Vec::new(), limit: None }
+    };
+    if cli.explain {
+        eprintln!("web: {} — {}", web_rung_name(&plan.rung), plan.reason);
+        if plan.rung != Rung::Scan {
+            eprintln!("web: WHERE {}", plan.where_sql);
+            if let Some(e) = store.estimate_where(&plan.where_sql, &plan.params) {
+                eprintln!("web: plan {e}");
+            }
+        }
+    }
+    match plan.rung {
+        Rung::Full => {
+            let n = store.count_where(&plan.where_sql, &plan.params);
+            println!("{n}");
+            Ok(())
+        }
+        Rung::Prefilter => {
+            let keys = match &plan.limit {
+                Some(l) => store.keys_where_top(&plan.where_sql, &plan.params, &l.column, l.descending, l.n),
+                None => store.keys_where(&plan.where_sql, &plan.params),
+            };
+            if cli.explain {
+                eprintln!("web: {} candidate(s)", keys.len());
+            }
+            let adapter = quarb_web::WebAdapter::new(store).with_scope(keys);
+            run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src))
+        }
+        Rung::Scan => {
+            let adapter = quarb_web::WebAdapter::new(store);
+            run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src))
+        }
+    }
+}
+
+enum WebSite {
+    Memory(quarb_web::WebAdapter<quarb_web::MemoryStore>),
+    /// The store itself: the caller plans before wrapping it.
+    Sqlite(quarb_web::db::sqlite::SqliteStore),
+    Postgres(quarb_web::db::postgres::PostgresStore),
+}
+
+fn web_rung_name(r: &quarb_web::plan::Rung) -> &'static str {
+    match r {
+        quarb_web::plan::Rung::Full => "full",
+        quarb_web::plan::Rung::Prefilter => "prefilter",
+        quarb_web::plan::Rung::Scan => "scan",
+    }
+}
+
+fn web_level(spec: &str) -> anyhow::Result<WebSite> {
+    let (path_part, base) = match spec.split_once('?') {
+        Some((p, q)) => {
+            let mut base = String::new();
+            for pair in q.split('&') {
+                match pair.split_once('=') {
+                    Some(("base", v)) => base = v.to_string(),
+                    _ => anyhow::bail!("unknown web option {pair:?} — supported: base="),
+                }
+            }
+            (p, base)
+        }
+        None => (spec, String::new()),
+    };
+    if path_part.starts_with("postgres://") || path_part.starts_with("postgresql://") {
+        return quarb_web::db::postgres::PostgresStore::open(path_part)
+            .map(WebSite::Postgres)
+            .map_err(|e| anyhow::anyhow!("opening the site store: {e}"));
+    }
+    let target = Path::new(path_part);
+    if target.is_dir() {
+        return quarb_web::fs::open_dir(target, &base)
+            .map(WebSite::Memory)
+            .with_context(|| format!("reading {} as a site", target.display()));
+    }
+    if is_archive(target) {
+        return quarb_web::archive::open_path(target, &base)
+            .map(WebSite::Memory)
+            .with_context(|| format!("reading {} as a site", target.display()));
+    }
+    // An index-backed store: a site.db built by quarb-web-ingest.
+    if target.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3")) {
+        return quarb_web::db::sqlite::SqliteStore::open(target)
+            .map(WebSite::Sqlite)
+            .map_err(|e| anyhow::anyhow!("opening {} as a site store: {e}", target.display()));
+    }
+    anyhow::bail!(
+        "web: takes a directory of pages, an archive of them, or a site.db store, not {}",
+        target.display()
+    )
+}
+
 /// The koine reading (`koine:` — and `text:` on native atrep
 /// files): native atrep documents lower directly; Markdown, HTML,
 /// reStructuredText, Org, and djot arrive through atrep's
@@ -2578,9 +2782,8 @@ fn koine_level(spec: &str) -> anyhow::Result<quarb_text::TextModel> {
     if let Some(fmt) = format {
         let imported = match fmt.as_str() {
             "atd" | "atk" => {
-                return quarb_text_koine::parse_file(target).with_context(|| {
-                    format!("reading {} as an atrep document", target.display())
-                });
+                return quarb_text_koine::parse_file(target)
+                    .with_context(|| format!("reading {} as an atrep document", target.display()));
             }
             "md" | "markdown" => quarb_text_koine::parse_markdown(&read()?),
             "html" => quarb_text_koine::parse_html(&read()?),
@@ -2660,7 +2863,10 @@ fn split_alias(p: &Path) -> Option<(String, PathBuf)> {
         return None;
     }
     let mut chars = name.chars();
-    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+    if !chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
         return None;
     }
     if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -2686,10 +2892,7 @@ fn mounted_relational<A: AstAdapter + 'static>(
     if no_graft {
         let a = Rc::new(inner);
         let r = a.clone();
-        return (
-            Box::new(Shared(a)),
-            Box::new(move |n| outer_loc(&r, n)),
-        );
+        return (Box::new(Shared(a)), Box::new(move |n| outer_loc(&r, n)));
     }
     let a = Rc::new(ComposeAdapter::new(inner));
     let r = a.clone();
@@ -2803,6 +3006,28 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("web:")
+        && !rest.is_empty()
+    {
+        match web_level(rest)? {
+            WebSite::Memory(a) => {
+                let a = Rc::new(a);
+                let r = a.clone();
+                return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+            }
+            WebSite::Sqlite(store) => {
+                let a = Rc::new(quarb_web::WebAdapter::new(store));
+                let r = a.clone();
+                return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+            }
+            WebSite::Postgres(store) => {
+                let a = Rc::new(quarb_web::WebAdapter::new(store));
+                let r = a.clone();
+                return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
+            }
+        }
+    }
     // A `text:` prefix forces the text-level reading, matching the
     // single-input flow.
     if let Some(s) = p.to_str()
@@ -2825,8 +3050,8 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
         {
-            let bytes = std::fs::read(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let bytes =
+                std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
             let a = Rc::new(
                 quarb_text_pdf::parse(&bytes)
                     .with_context(|| format!("reading {} as PDF", target.display()))?,
@@ -2835,8 +3060,8 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
         }
         if let Some(kind) = binary_text_kind(target) {
-            let bytes = std::fs::read(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let bytes =
+                std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
             let a = Rc::new(
                 binary_text_level(kind, &bytes)
                     .with_context(|| format!("reading {}", target.display()))?,
@@ -2854,7 +3079,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
             let text = std::fs::read_to_string(target)
                 .with_context(|| format!("reading {}", target.display()))?;
             let a = Rc::new(quarb_text_koine::parse_bibtex(&text).with_context(|| {
-                format!("reading {} as BibTeX through bibliogramma", target.display())
+                format!(
+                    "reading {} as BibTeX through bibliogramma",
+                    target.display()
+                )
             })?);
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
@@ -2890,9 +3118,10 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
                 respect_ignore: !cli.no_ignore,
             };
             let a = Rc::new(
-                ComposeAdapter::with_source_paths(FsAdapter::with_options(target, opts)?, |fs, n| {
-                    Some(fs.path(n))
-                })
+                ComposeAdapter::with_source_paths(
+                    FsAdapter::with_options(target, opts)?,
+                    |fs, n| Some(fs.path(n)),
+                )
                 .with_source_graft(SourceGraft::Code),
             );
             let r = a.clone();
@@ -3304,10 +3533,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str())
-        && matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "daiv" | "kaiv" | "raiv"
-        )
+        && matches!(ext.to_ascii_lowercase().as_str(), "daiv" | "kaiv" | "raiv")
     {
         let dir = path.and_then(|p| p.parent());
         let a = Rc::new(parse_kaiv_ext(&ext.to_ascii_lowercase(), &text, dir)?);
@@ -3348,8 +3574,7 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         }
         if matches!(ext, "atd" | "atk") {
             let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
-            let a =
-                Rc::new(AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?);
+            let a = Rc::new(AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?);
             let r = a.clone();
             return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
         }
@@ -3527,10 +3752,16 @@ fn run_inner<A: AstAdapter>(
         return Ok(());
     }
     if let Some(source) = kaiv_source {
-        let rows = quarb::run_traced(query, adapter)?;
+        let rows = quarb::run_traced_prov(query, adapter)?;
         print!(
             "{}",
-            emit_kaiv(&rows, source, &render, |n| adapter.provenance(n))?
+            emit_kaiv(
+                &rows,
+                source,
+                &render,
+                |n| quarb::resolved_provenance(adapter, n),
+                KAIV_ORIGINS.with(|c| c.get()),
+            )?
         );
         return Ok(());
     }
@@ -3713,91 +3944,156 @@ fn sqlite_value(v: &Value) -> rusqlite::types::Value {
     }
 }
 
-/// Render traced results as canonical kaiv. Each result becomes one
-/// leaf (or one leaf per record field) under `/@results/N`, typed by
-/// the value's kind. Provenance is per value, from the origin node's
-/// own `:::provenance`: its source is declared (`.?`) once per
-/// distinct source string as `src1`, `src2`, … (`?q`, the run's
-/// joined inputs, is the fallback for nodes recording none), its
-/// instant emits as kaiv's compact `@ts`, and its dpid passes
-/// through — where the source assigned none, the origin node's
-/// locator stands in, identifier-sanitized, unless it only repeats
-/// the source (a filesystem node's source is its own path). A record
-/// value is a kaiv namespace (`/@results/N/r::name=…`), a list a kaiv
-/// array (`/@results/N/@tags::0=…`, records as `/@tags/0::k=…`);
-/// quantities keep their unit (`!float:B`). What canonical kaiv
-/// cannot hold on a flat line falls back to its JSON text (quoted,
-/// single-line) as `str`.
+/// The `--kaiv` document: every result under `/@results/N` — a
+/// record spreading as its namespace's fields, a node as `::node`
+/// (its locator), anything else as `::value` — with each leaf line
+/// carrying the provenance of the value it holds: the value's
+/// origins (where it was read, per field for a record, per item for
+/// a list), resolved through the adapter's layers into kaiv
+/// entries, `;`-separated, deduplicated by (source, dpid) with the
+/// newest instant kept, at most `cap` named before the elision
+/// marker `;+N` counts the rest. A value with no recorded origin
+/// (a literal, a count) is attributed to its row's node. Sources
+/// are declared once each, `.?srcN uri`, in first-appearance
+/// order; `q` names the query's own source (the fallback). Lists of
+/// records place their fields under `/@results/N/@tags/M` (records
+/// open namespaces, lists open arrays); quantities keep their unit
+/// (`!float:B`). What canonical kaiv cannot hold on a flat line
+/// falls back to its JSON text (quoted, single-line) as `str`.
 fn emit_kaiv(
-    rows: &[(NodeId, Option<Value>)],
+    rows: &[quarb::Traced],
     source: &str,
     render: impl Fn(NodeId) -> String,
-    prov_of: impl Fn(NodeId) -> quarb::Provenance,
+    prov_of: impl Fn(NodeId) -> quarb::ProvenanceList,
+    cap: usize,
 ) -> anyhow::Result<String> {
-    use kaiv::{KaivBuilder, Provenance};
-    use quarb::kaiv_out::{ident_of, kaiv_put};
+    use kaiv::{KaivBuilder, ProvEntry, Provenance};
+    use quarb::kaiv_out::{ident_of, kaiv_put, ProvCtx};
+    use quarb::Prov;
     let mut b = KaivBuilder::new();
     b.declare_source("q", source).map_err(kaiv_err)?;
-    // Declare each distinct row source once, in first-appearance
-    // order, under a short id — the point of the declaration is
-    // that the URI travels once, up top. A source the builder
-    // refuses maps to the fallback.
+    // Every node a leaf may be attributed to, in first-appearance
+    // order: the row's own, then its value's origins, tree-walked.
+    fn origin_nodes(p: &Prov, out: &mut Vec<NodeId>) {
+        out.extend(p.origins.nodes());
+        for (_, q) in &p.parts {
+            origin_nodes(q, out);
+        }
+    }
+    let mut nodes: Vec<NodeId> = Vec::new();
+    for r in rows {
+        nodes.push(r.node);
+        origin_nodes(&r.prov, &mut nodes);
+    }
+    // Declare each distinct source once under a short id — the
+    // point of the declaration is that the URI travels once, up
+    // top. A source the builder refuses maps to the fallback.
     let mut source_ids: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for (node, _) in rows {
-        let Some(src) = prov_of(*node).source else {
-            continue;
-        };
-        if source_ids.contains_key(&src) {
-            continue;
+    for n in &nodes {
+        for p in prov_of(*n).entries {
+            let Some(src) = p.source else { continue };
+            if source_ids.contains_key(&src) {
+                continue;
+            }
+            let id = format!("src{}", source_ids.len() + 1);
+            let id = match b.declare_source(&id, &src) {
+                Ok(()) => id,
+                Err(_) => "q".to_string(),
+            };
+            source_ids.insert(src, id);
         }
-        let id = format!("src{}", source_ids.len() + 1);
-        let id = match b.declare_source(&id, &src) {
-            Ok(()) => id,
-            Err(_) => "q".to_string(),
-        };
-        source_ids.insert(src, id);
     }
-    for (i, (node, topic)) in rows.iter().enumerate() {
-        let rp = prov_of(*node);
-        let prov = Provenance {
-            source: Some(
-                rp.source
-                    .as_ref()
-                    .and_then(|s| source_ids.get(s).cloned())
-                    .unwrap_or_else(|| "q".to_string()),
-            ),
-            // kaiv's `@ts` is the 16-char compact form; an instant a
-            // compact stamp cannot hold (a year outside 0000–9999)
-            // is dropped rather than emitted invalid.
-            timestamp: rp
+    // One kaiv entry per (origin node, recorded entry): the declared
+    // source id (else `q`), the instant in the canonical dashed form
+    // (an instant the form cannot hold — a year outside 0000–9999 —
+    // is dropped rather than emitted invalid), and the dpid — the
+    // source's own, else the node's path within the source (the
+    // rule for a source without keys), else the sanitized locator;
+    // never one that only repeats the source (a filesystem node's
+    // source is its path, and a document's root is `/`).
+    let entry_of = |n: NodeId, p: &quarb::Provenance| -> ProvEntry {
+        ProvEntry {
+            source: p
+                .source
+                .as_ref()
+                .and_then(|s| source_ids.get(s).cloned())
+                .unwrap_or_else(|| "q".to_string()),
+            timestamp: p
                 .instant
-                .map(|(secs, _, _)| quarb::temporal::format_instant_compact(secs))
-                .filter(|t| t.len() == 16),
-            dpid: rp.dpid.as_deref().map(ident_of).or_else(|| {
-                let loc = ident_of(&render(*node));
-                match &rp.source {
+                .map(|(secs, _, _)| quarb::temporal::format_instant(secs, 0, Some(0)))
+                .filter(|t| t.len() == 20),
+            dpid: p.dpid.as_deref().map(ident_of).or_else(|| {
+                let loc = match p.path.as_deref() {
+                    Some(path) if path != "/" => ident_of(path),
+                    _ => ident_of(&render(n)),
+                };
+                match &p.source {
                     Some(s) if ident_of(s) == loc => None,
                     _ => Some(loc),
                 }
             }),
+        }
+    };
+    for (i, row) in rows.iter().enumerate() {
+        // A leaf's prefix from its origin set: the entries in
+        // first-read order, deduplicated by (source, dpid) keeping
+        // the newest instant, bounded by `cap`; what the bound and
+        // the origins' own records elide is counted. No origin at
+        // all attributes the value to the row's node.
+        let resolve = |o: &quarb::Origins| -> Option<Provenance> {
+            let mut entries: Vec<ProvEntry> = Vec::new();
+            let mut elided = o.more;
+            let ns: Vec<NodeId> = if o.is_empty() { vec![row.node] } else { o.nodes().collect() };
+            for n in ns {
+                let list = prov_of(n);
+                elided = elided.saturating_add(list.elided);
+                let ps = if list.entries.is_empty() {
+                    vec![quarb::Provenance::default()]
+                } else {
+                    list.entries
+                };
+                for p in ps {
+                    let e = entry_of(n, &p);
+                    match entries.iter().position(|q| q.source == e.source && q.dpid == e.dpid) {
+                        // The dashed form orders as it reads.
+                        Some(at) => {
+                            if e.timestamp > entries[at].timestamp {
+                                entries[at].timestamp = e.timestamp;
+                            }
+                        }
+                        None if entries.len() < cap => entries.push(e),
+                        None => elided = elided.saturating_add(1),
+                    }
+                }
+            }
+            Some(Provenance { entries, elided })
+        };
+        let ctx = ProvCtx {
+            prov: Some(&row.prov),
+            resolve: &resolve,
         };
         let base = format!("/@results/{i}");
         let mut used = std::collections::HashSet::new();
-        match topic {
+        match &row.topic {
             None => {
-                let loc = render(*node);
-                kaiv_put(&mut b, &base, "node", &Value::Str(loc), &prov, &mut used)
+                let loc = render(row.node);
+                kaiv_put(&mut b, &base, "node", &Value::Str(loc), &ctx, &mut used)
                     .map_err(anyhow::Error::msg)?;
             }
             Some(Value::Record(fields)) => {
                 for (k, v) in fields {
-                    kaiv_put(&mut b, &base, k, v, &prov, &mut used)
-                        .map_err(anyhow::Error::msg)?;
+                    let part = row.prov.part(k);
+                    let fc = ProvCtx {
+                        prov: Some(&part),
+                        resolve: &resolve,
+                    };
+                    kaiv_put(&mut b, &base, k, v, &fc, &mut used).map_err(anyhow::Error::msg)?;
                 }
             }
-            Some(v) => kaiv_put(&mut b, &base, "value", v, &prov, &mut used)
-                .map_err(anyhow::Error::msg)?,
+            Some(v) => {
+                kaiv_put(&mut b, &base, "value", v, &ctx, &mut used).map_err(anyhow::Error::msg)?
+            }
         }
     }
     b.finish().map_err(kaiv_err)
@@ -3806,11 +4102,6 @@ fn emit_kaiv(
 fn kaiv_err(e: kaiv::PipelineError) -> anyhow::Error {
     anyhow::anyhow!("emitting kaiv: {e}")
 }
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -3858,13 +4149,23 @@ mod tests {
         assert_eq!(split_scheme_query("/a/b::c"), None);
     }
 
+    fn row(n: u64, topic: Option<quarb::Value>) -> quarb::Traced {
+        quarb::Traced {
+            node: quarb::NodeId(n),
+            topic,
+            prov: quarb::Prov::default(),
+        }
+    }
+
     #[test]
     fn emit_kaiv_provenance_per_row() {
-        use quarb::{NodeId, Provenance, Value};
+        use quarb::{NodeId, Provenance, ProvenanceList, Value};
+        // Values with no recorded origin are attributed to their
+        // row's node.
         let rows = vec![
-            (NodeId(1), Some(Value::Int(7))),
-            (NodeId(2), Some(Value::Int(9))),
-            (NodeId(3), Some(Value::Int(11))),
+            row(1, Some(Value::Int(7))),
+            row(2, Some(Value::Int(9))),
+            row(3, Some(Value::Int(11))),
         ];
         let render = |n: NodeId| format!("/row/{}", n.0);
         // Node 1: a full triple. Node 2: same source, no ts/dpid.
@@ -3875,6 +4176,7 @@ mod tests {
                 source: Some("https://sensors.example.com/1".into()),
                 instant: Some((secs, 0, Some(0))),
                 dpid: Some("req-42".into()),
+                ..Default::default()
             },
             2 => Provenance {
                 source: Some("https://sensors.example.com/1".into()),
@@ -3882,29 +4184,39 @@ mod tests {
             },
             _ => Provenance::default(),
         };
-        let out = super::emit_kaiv(&rows, "a.daiv, b.csv", render, prov_of).unwrap();
+        let out = super::emit_kaiv(
+            &rows,
+            "a.daiv, b.csv",
+            render,
+            |n| ProvenanceList::single(prov_of(n)),
+            8,
+        )
+        .unwrap();
         // One declaration per distinct source, after the fallback.
         assert!(out.contains(".?q a.daiv, b.csv\n"));
         assert_eq!(out.matches("sensors.example.com").count(), 1);
         // The declared id is short (`src1`, first appearance); it
-        // carries the compact instant and the pass-through dpid on
+        // carries the dashed instant and the pass-through dpid on
         // row 0 (authored block form); row 1 shares the source but
         // falls back to its locator dpid; row 2 rides `q`.
         assert!(out.contains(".?src1 https://sensors.example.com/1\n"));
-        assert!(out.contains("!int?src1@20260717T120000Z#req-42\nvalue=7"));
+        assert!(out.contains("!int?src1@2026-07-17T12:00:00Z#req-42\nvalue=7"), "{out}");
         assert!(out.contains("!int?src1#row-2\nvalue=9"));
         assert!(out.contains("!int?q#row-3\nvalue=11"));
 
         // A locator that only repeats the source (a filesystem node's
         // source is its own path) adds no dpid.
         let fs = super::emit_kaiv(
-            &[(NodeId(1), Some(Value::Int(1)))],
+            &[row(1, Some(Value::Int(1)))],
             ".",
             |_| "/a/b.txt".to_string(),
-            |_| Provenance {
-                source: Some("/a/b.txt".into()),
-                ..Default::default()
+            |_| {
+                ProvenanceList::single(Provenance {
+                    source: Some("/a/b.txt".into()),
+                    ..Default::default()
+                })
             },
+            8,
         )
         .unwrap();
         assert!(fs.contains("!int?src1\nvalue=1"), "{fs}");
@@ -3913,8 +4225,8 @@ mod tests {
         // A record field opens a namespace; a list an array; a
         // quantity keeps its unit.
         let nested = super::emit_kaiv(
-            &[(
-                NodeId(1),
+            &[row(
+                1,
                 Some(Value::Record(vec![
                     (
                         "r".to_string(),
@@ -3938,7 +4250,8 @@ mod tests {
             )],
             "u.json",
             |_| "/0".to_string(),
-            |_| Provenance::default(),
+            |_| ProvenanceList::default(),
+            8,
         )
         .unwrap();
         assert!(nested.contains("(/r)"), "{nested}");
@@ -3948,12 +4261,128 @@ mod tests {
         assert!(!nested.contains("{\"n\""), "{nested}");
 
         // Provenance-less rows emit exactly the pre-upgrade shape.
-        let plain = super::emit_kaiv(&rows, "data.json", |n: NodeId| format!("/r/{}", n.0), |_| {
-            Provenance::default()
-        })
+        let plain = super::emit_kaiv(
+            &rows,
+            "data.json",
+            |n: NodeId| format!("/r/{}", n.0),
+            |_| ProvenanceList::default(),
+            8,
+        )
         .unwrap();
         assert!(plain.contains(".?q data.json\n"));
         assert!(plain.contains("!int?q#r-1\nvalue=7"));
         assert!(!plain.contains(".?q-"));
+    }
+
+    fn prov_back(back: &quarb_kaiv::KaivAdapter, q: &str) -> Vec<String> {
+        match quarb::run(q, back).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_kaiv_per_field_and_plural() {
+        use quarb::{NodeId, Origin, Origins, Prov, Provenance, ProvenanceList, Value};
+        let (t1, _, _) = quarb::temporal::parse_iso("2026-07-17T12:00:00Z").unwrap();
+        let (t2, _, _) = quarb::temporal::parse_iso("2026-07-18T12:00:00Z").unwrap();
+        let prov_of = move |n: NodeId| {
+            ProvenanceList::single(Provenance {
+                source: Some(format!("https://s.example.com/{}", n.0)),
+                instant: Some((if n.0 == 2 { t2 } else { t1 }, 0, Some(0))),
+                dpid: Some(format!("row-{}", n.0)),
+                ..Default::default()
+            })
+        };
+        let at = |ns: &[u64]| {
+            let mut o = Origins::default();
+            for &n in ns {
+                o.insert(Origin { node: NodeId(n), stage: 1 });
+            }
+            Prov::leaf(o)
+        };
+        // A record whose fields were read at different nodes: each
+        // leaf line carries its own prefix; a field read from two
+        // nodes lists both, `;`-separated, in first-read order.
+        let rec = Value::Record(vec![
+            ("v".into(), Value::Int(1)),
+            ("n".into(), Value::Int(2)),
+            ("k".into(), Value::Int(3)),
+        ]);
+        let mut prov = Prov::record(vec![("v".into(), at(&[1])), ("n".into(), at(&[1, 2]))]);
+        // A field with no origin of its own (a literal) rides the
+        // row's node.
+        prov.parts.push(("k".into(), Prov::default()));
+        let rows = vec![quarb::Traced {
+            node: NodeId(3),
+            topic: Some(rec),
+            prov,
+        }];
+        let out = super::emit_kaiv(&rows, "t", |n| format!("/r/{}", n.0), prov_of, 8).unwrap();
+        assert!(out.contains(".?src1 https://s.example.com/3\n"), "{out}");
+        assert!(out.contains(".?src2 https://s.example.com/1\n"), "{out}");
+        assert!(out.contains(".?src3 https://s.example.com/2\n"), "{out}");
+        assert!(out.contains("!int?src2@2026-07-17T12:00:00Z#row-1\nv=1\n"), "{out}");
+        assert!(
+            out.contains(
+                "!int?src2@2026-07-17T12:00:00Z#row-1;src3@2026-07-18T12:00:00Z#row-2\nn=2\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("!int?src1@2026-07-17T12:00:00Z#row-3\nk=3\n"), "{out}");
+        // The round trip: the emitted document re-mounts, and the
+        // list-carrying field answers the same two entries — the
+        // declared ids resolved back to their URIs.
+        let back = quarb_kaiv::KaivAdapter::parse_kaiv(&out).unwrap();
+        let prov = |q: &str| match quarb::run(q, &back).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            prov("/@results/0/n:::provenance"),
+            ["?https://s.example.com/1@2026-07-17T12:00:00Z#row-1;https://s.example.com/2@2026-07-18T12:00:00Z#row-2"]
+        );
+        assert_eq!(prov("/@results/0/n:::instant"), ["2026-07-18T12:00:00Z"]);
+        assert_eq!(prov("/@results/0/n:::@provenance | count"), ["2"]);
+        assert_eq!(prov("/@results/0/v:::elided"), ["0"]);
+
+        // The bound: a value read from twelve nodes names `cap` of
+        // them and counts the rest; the engine's own bound adds to
+        // the count.
+        let mut o = Origins::default();
+        for n in 1..=12 {
+            o.insert(Origin { node: NodeId(n), stage: 1 });
+        }
+        assert_eq!(o.more, 12 - quarb::ORIGIN_CAP as u32);
+        let rows = vec![quarb::Traced {
+            node: NodeId(1),
+            topic: Some(Value::Int(78)),
+            prov: Prov::leaf(o),
+        }];
+        let out = super::emit_kaiv(&rows, "t", |n| format!("/r/{}", n.0), prov_of, 3).unwrap();
+        let line = out.lines().find(|l| l.starts_with("!int?")).unwrap();
+        assert_eq!(line.matches("#row-").count(), 3, "{line}");
+        assert!(line.ends_with(";+9"), "{line}");
+        let back = quarb_kaiv::KaivAdapter::parse_kaiv(&out).unwrap();
+        assert_eq!(prov_back(&back, "/@results/0/value:::elided"), ["9"]);
+        assert_eq!(prov_back(&back, "/@results/0/value:::@provenance | count"), ["3"]);
+
+        // The same (source, dpid) read twice keeps one entry with
+        // the newest instant.
+        let same = move |_: NodeId| {
+            ProvenanceList::single(Provenance {
+                source: Some("https://s.example.com/x".into()),
+                instant: None,
+                dpid: Some("row-x".into()),
+                ..Default::default()
+            })
+        };
+        let rows = vec![quarb::Traced {
+            node: NodeId(1),
+            topic: Some(Value::Int(1)),
+            prov: at(&[1, 2]),
+        }];
+        let out = super::emit_kaiv(&rows, "t", |n| format!("/r/{}", n.0), same, 8).unwrap();
+        assert!(out.contains("!int?src1#row-x\nvalue=1\n"), "{out}");
     }
 }

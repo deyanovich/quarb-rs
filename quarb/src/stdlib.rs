@@ -44,6 +44,7 @@ const SCALAR: &[&str] = &[
     "json",
     "jsonl",
     "kaiv",
+    "link",
     "xml",
     "markdown",
     "html",
@@ -691,6 +692,10 @@ pub fn apply_scalar(
             crate::kaiv_out::document(std::slice::from_ref(&topic))
                 .unwrap_or_else(|e| e),
         )],
+        // `| link` reads the capsa's node (the executor, which has
+        // the adapter, handles it); a bare value has nothing to
+        // link and passes through.
+        "link" => vec![topic],
         _ => vec![topic],
     }
 }

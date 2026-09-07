@@ -42,12 +42,12 @@ pub enum Token {
     /// `-;` — the previous-sibling hop's rounded spelling (see
     /// [`Token::NextSibling`]).
     PrevSibling,
-    /// `>>`, `>>?`, `>>!` — all / nearest / farthest following
+    /// `>>`, `>>?`, `>>!` — all / proximal / distal following
     /// siblings.
     FollowingSiblings(char),
     /// `<`
     Lt,
-    /// `<<`, `<<?`, `<<!` — all / nearest / farthest preceding
+    /// `<<`, `<<?`, `<<!` — all / proximal / distal preceding
     /// siblings. The payload is the reach mark (' ', '?', '!').
     PrecedingSiblings(char),
     /// `?` — proximal suffix.
@@ -89,6 +89,9 @@ pub enum Token {
     /// one `RParen`. Single parentheses are the value side, so a
     /// `(name)` group is never an anchor.
     MarkOpen,
+    /// `((!` — the node-id anchor's opener (ruling #58): an
+    /// expression yielding a node id follows, then `))`.
+    IdAnchorOpen,
     /// `_` — the served node: the driver inside a join condition,
     /// the invoking node inside a body; the join's node zero.
     Driver,
@@ -131,6 +134,11 @@ pub enum Token {
     /// `:name` — a record's field (ruling #48): the single colon
     /// glued to the field name, the bottom rung of the colon ladder.
     Field,
+    /// `:.name` / `:.` / `:.N` / `:@.` / `:%.` / `:%%.` glued after
+    /// a node path — the cross-capsa read (ruling #57): the register
+    /// of the capsa standing at the node. The body is the register
+    /// accessor as written (`.name`, `@.`, …).
+    Capsa(String),
     /// `%+` — the named-captures record.
     PercentPlus,
     /// `;` — the statement terminator (after a `def` body).
@@ -401,6 +409,10 @@ fn regex_paren(chars: &[char], i: usize, mods: bool) -> Option<(String, usize)> 
     let mut j = i + 2;
     while let Some(&c) = chars.get(j) {
         match c {
+            // A regex literal sits on one line: the closer search
+            // never crosses into the next statement of a defs table
+            // or a multi-line session.
+            '\n' => return None,
             '\\' if chars.get(j + 1) == Some(&'/') => {
                 body.push('/');
                 j += 2;
@@ -529,7 +541,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             // `/..` — the parent, `/...` — the ancestors (`/...?` the
-            // nearest, `/...!` the farthest): the rounded ascent, a
+            // proximal, `/...!` the distal): the rounded ascent, a
             // hop in name position like the filesystem's `..`. A
             // longer dotted run (`/..x`, `/.git`) is a name.
             '/' if at(i + 1) == Some('.')
@@ -602,7 +614,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             // `@(a; b)` — the list literal — follows whitespace.
             '@' if at(i + 1) == Some('(') => {
-                if !after_whitespace(&chars, i) {
+                // The node-id anchor's opener glues to its list
+                // (`((!@(2; 3)))`), as whitespace would.
+                if !after_whitespace(&chars, i) && !matches!(tokens.last(), Some(Token::IdAnchorOpen)) {
                     return Err(QuarbError::Parse(
                         "a list literal follows whitespace: write ' @(…)'".into(),
                     ));
@@ -876,6 +890,43 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Field);
                 i += 1;
             }
+            // `X:(*.)` — the rounded twin of `X:@.`: the one
+            // accessor with a sigil to round (`(*.)` for `@.`); the
+            // others carry no `$` and are rounded already.
+            ':' if i > 0
+                && (is_name_char(chars[i - 1]) || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
+                && at(i + 1) == Some('(')
+                && at(i + 2) == Some('*')
+                && at(i + 3) == Some('.')
+                && at(i + 4) == Some(')') =>
+            {
+                tokens.push(Token::Capsa("@.".to_string()));
+                i += 5;
+            }
+            // `X:.r` — the cross-capsa read (ruling #57): a colon
+            // glued on the left to a node path and on the right to
+            // a register accessor (`.name`, `.`, `.N`, `@.`, `%.`,
+            // `%%.`). Spaced on the left it stays the conditional's
+            // else (`? 1 : .5`).
+            ':' if i > 0
+                && (is_name_char(chars[i - 1]) || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
+                && (at(i + 1) == Some('.')
+                    || (at(i + 1) == Some('@') && at(i + 2) == Some('.'))
+                    || (at(i + 1) == Some('%')
+                        && (at(i + 2) == Some('.') || (at(i + 2) == Some('%') && at(i + 3) == Some('.'))))) =>
+            {
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && matches!(chars[j], '@' | '%') {
+                    j += 1;
+                }
+                j += 1; // the dot
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                tokens.push(Token::Capsa(chars[start..j].iter().collect()));
+                i = j;
+            }
             ':' => {
                 // A single ':' is the definition separator
                 // (`def &name: body;`); '::'/':::'/'::::' are the
@@ -897,6 +948,23 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     Some(':') => {
                         tokens.push(Token::ColonColonColon);
                         i += 3;
+                        // `:::%provenance` / `:::@origin` — the
+                        // record and list shapes of a core key
+                        // (ruling #58): the sigil rides in the key.
+                        if matches!(at(i), Some('%' | '@'))
+                            && at(i + 1).is_some_and(|c| c.is_alphabetic())
+                        {
+                            let start = i;
+                            i += 1;
+                            while at(i).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                                i += 1;
+                            }
+                            tokens.push(Token::Name {
+                                text: chars[start..i].iter().collect(),
+                                quoted: false,
+                                glued: true,
+                            });
+                        }
                     }
                     // The deprecated alias claims '::;' only when a
                     // metadata key follows; otherwise the ';' is a
@@ -1020,6 +1088,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     "'((_))' and '((_N))' are retired: the served node is '((0))', the joined '((N))'".into(),
                 ));
             }
+            // `((!expr))` — the node-id anchor (ruling #58): the
+            // node whose id the expression yields (`((!7))`,
+            // `((!$.v:::origin))`), stood on; a list forks.
+            '(' if !after_call_head(&tokens, glued)
+                && at(i + 1) == Some('(')
+                && at(i + 2) == Some('!') =>
+            {
+                tokens.push(Token::IdAnchorOpen);
+                i += 3;
+            }
             '(' if !after_call_head(&tokens, glued)
                 && let Some((unit, next)) = paren_unit(&chars, i) =>
             {
@@ -1035,7 +1113,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // Glued to a call head the paren is the call's (`f(/x/)`
             // passes a path). The bare `/…/` after `=~` / `!~` and
             // the tilde wrapper `~(…)` remain as sugar and alias.
+            // `(//…` is a descendant path in a group, never an empty
+            // regex — without this the closer search below could
+            // run into a later line's `(/…/i)` and swallow both.
             '(' if at(i + 1) == Some('/')
+                && at(i + 2) != Some('/')
                 && !after_call_head(&tokens, glued)
                 && let Some((body, next)) = regex_paren(&chars, i, !after_axis(&tokens)) =>
             {
@@ -1975,6 +2057,31 @@ mod glued_operator_tests {
     }
 
     #[test]
+    fn cross_capsa_reads_lex() {
+        // The accessor glued to a path: every register reading, and
+        // the rounded twin of `@.`; spaced, the colon is the else.
+        for (q, body) in [
+            ("<-link:.v", ".v"),
+            ("/*:.", "."),
+            ("/*:.3", ".3"),
+            ("\\/*:@.", "@."),
+            ("\\/*:(*.)", "@."),
+            ("->ref:%.", "%."),
+            ("->ref:%%.", "%%."),
+            ("(->ref):.v", ".v"),
+            ("/a[1]:.v", ".v"),
+        ] {
+            let toks = lex(q).unwrap();
+            assert!(
+                toks.iter().any(|t| matches!(t, Token::Capsa(b) if b == body)),
+                "{q}: {toks:?}"
+            );
+        }
+        assert!(!lex("(::x ? 1 : .5)").unwrap().iter().any(|t| matches!(t, Token::Capsa(_))));
+        assert!(!lex("? 1 :.5").unwrap().iter().any(|t| matches!(t, Token::Capsa(_))));
+    }
+
+    #[test]
     fn rounded_registers_pipes_and_correlation_lex() {
         let name = |t: &str| Token::Name {
             text: t.into(),
@@ -2036,6 +2143,18 @@ mod glued_operator_tests {
         // correlation
         assert_eq!(lex("/a :=: /b").unwrap(), lex("/a <=> /b").unwrap());
         assert_eq!(lex("/a :=:? /b").unwrap(), lex("/a <=>? /b").unwrap());
+    }
+
+    #[test]
+    fn descendant_group_is_never_a_regex() {
+        // `(//page …)` opens a group; a regex literal two lines
+        // later must not become its closer (the session re-parses
+        // its defs table before every line).
+        let toks = lex("def &1: //dir | %(n = (//page @| count)) ;\n//p[:: == (/a.*b/i)]").unwrap();
+        let regexes: Vec<&Token> = toks.iter().filter(|t| matches!(t, Token::Regex(_))).collect();
+        assert!(matches!(regexes.as_slice(), [Token::Regex(r)] if r == "(?i)a.*b"), "{toks:?}");
+        // and a regex literal never spans a line break
+        assert!(matches!(lex("(/a\nb/)").unwrap().as_slice(), [Token::LParen, ..]));
     }
 
     #[test]

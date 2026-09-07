@@ -191,8 +191,15 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{quarb-text}, \texttt{quarb-text-html}, and
   \texttt{zip}. \\
 \texttt{quarb-text-html} & The HTML text-level adapter:
-  soup dropped (nav, chrome, scripts, forms, media), wrappers
-  transparent, headings flat into the shared derivation, trailing
+  soup dropped (nav, chrome, scripts, forms, media), the head
+  read for the page's declared identity (\texttt{title},
+  \texttt{lang}, canonical, every \texttt{meta}, \texttt{rel=tag}
+  links, a JSON-LD block — verbatim as \texttt{::::} metadata on
+  the document, and curated into tags-as-traits, \texttt{::category},
+  \texttt{::description}, \texttt{::author}, \texttt{::published};
+  every node answers \texttt{::href} / \texttt{::anchor} /
+  \texttt{::link}, and \texttt{| link} rides them),
+  wrappers transparent, headings flat into the shared derivation, trailing
   \texttt{cite}/\texttt{footer}/\texttt{figcaption} as quote
   attribution; notes only from the declared vocabularies
   (\texttt{epub:type} noteref/footnote/endnote/rearnote/%
@@ -415,7 +422,12 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   adapter and a leaf whose name or content parses (json / xml /
   html / csv, else a sniff) grafts its parsed arbor as children —
   \texttt{/data/store.json/books/*} crosses from filesystem into
-  JSON mid-path. Grafts are lazy (read + parse on first entry),
+  JSON mid-path. Marked-up members graft at the DOM by default or,
+  under \texttt{DocumentGraft::Text} (\texttt{text:} on an
+  archive), as the text level; the source-level grafts
+  (tree-sitter, the code model) sit behind the default
+  \texttt{source} feature so the wasm build can leave them out.
+  Grafts are lazy (read + parse on first entry),
   the inner root is identified with the outer leaf (no phantom
   node), and locators mark the boundary jar-style
   (\texttt{store.json!/books/1}). \texttt{qua}: default for
@@ -426,6 +438,39 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   per entry, tar in one pass. With composition, \texttt{.docx} /
   \texttt{.epub} / \texttt{.jar} internals are directly
   queryable. \\
+\texttt{quarb-web} & The \emph{web level}: a site as an arbor —
+  \texttt{/sites/<host>/pages/<path>} for every page (directories
+  from the URL paths, \texttt{<dir>} / \texttt{<page>} /
+  \texttt{<redirect>}), the declared categories and tags as rows
+  of their own containers, every hyperlink of the DOM resolved
+  into \texttt{->link} / \texttt{<-link} (\texttt{->category},
+  \texttt{->tag}, \texttt{<-page}, \texttt{<-category}), the
+  degrees, \texttt{::pagerank}, \texttt{::redlinks}, and
+  \texttt{<orphan>} as columns; each page grafts at the text
+  level on entry, and a prose \texttt{ref} that leaves its page
+  resolves to the page it names. Rows answer to their kind
+  (\texttt{//page}), their segment, its stem, their title. A
+  \texttt{WebStore} contract behind it; stores: in-memory from a
+  tarball (\texttt{archive}, the wasm \texttt{Site}) or a
+  directory (\texttt{fs}), SQLite (\texttt{sqlite}), PostgreSQL
+  (\texttt{postgres}; COPY export, deferred foreign keys), one
+  schema in two dialects. A planner over the reflected query
+  answers on three rungs — Full (a bare count, every conjunct
+  exact), Prefilter (a superset of the enumerating step's
+  matches; the engine re-runs the query over the level scoped to
+  the candidates), Scan — with the text prefilter resting on
+  \texttt{page\_text.plain} = the graft's own
+  \texttt{plain\_text()}. The four adapter hooks
+  (\texttt{document\_by\_ref}, \texttt{reverse\_resolve},
+  \texttt{descendants\_named}, \texttt{prefetch\_links}) let a
+  store answer where the engine would walk.
+  \texttt{quarb-web-ingest} (\texttt{cli}): \texttt{crawl} a
+  directory or archive into a store, \texttt{wikipedia} the
+  Wikimedia Enterprise HTML dumps (streamed; links by URL then
+  through redirects; \texttt{--tree=path|category}),
+  \texttt{analyze}, \texttt{index} (pg\_trgm). \texttt{qua}:
+  \texttt{web:<dir|archive|site.db|postgres://…>},
+  \texttt{--explain} / \texttt{--no-pushdown}. \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
   and mbox mailboxes: headers as properties (lowercased), the
   body as the value, \texttt{::::epoch} parsing the Date header
@@ -795,7 +840,7 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{>>name}, \texttt{<<name}, \texttt{>>?}, \texttt{>>!},
 \texttt{<<?}, \texttt{<<!}
   & \live sibling reach: all following / preceding siblings at any
-    distance, with nearest / farthest quantifiers (matcher before
+    distance, with proximal / distal quantifiers (matcher before
     reach, mirroring \texttt{//?}); covers CSS \texttt{\textasciitilde}
     and XPath following/preceding-sibling \\
 \texttt{//?}, \texttt{//!}, \texttt{\textbackslash\textbackslash?}, \texttt{\textbackslash\textbackslash!}
@@ -864,7 +909,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     chains and inline-pipe splices as bodies;
     \texttt{rec}/\texttt{group} field-name collisions are parse
     errors (\texttt{validate\_record\_convention}) \\
-\texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | %(k = \$1)},
+\texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | \%(k = \$1)},
 \texttt{quai}
   & \live match captures (filter-stage \texttt{=\textasciitilde}
     binds groups onto the capsa) and the interactive session
@@ -939,6 +984,53 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{::ref<\textasciitilde}
   & \live reverse resolution: every node whose \texttt{ref} resolves
     to this one (naive whole-arbor scan) \\
+\texttt{\$.r:::provenance}, \texttt{:::\%provenance},
+\texttt{:::@origin}, \texttt{--reproducible}
+  & \live value provenance (2026-09-06/07): every value carries
+    its \emph{origins} (node, stage; \texttt{Origins} bounded at
+    eight, the rest counted) and the provenance entries of the
+    nodes it was read from, kept in lockstep with record fields and
+    list items (\texttt{Prov} in \texttt{exec.rs}, thread-local
+    read frames). The value-side \texttt{:::} rung
+    (\texttt{Operand::ValueMeta}) answers \texttt{provenance}
+    (kaiv text), the shaped keys \texttt{\%provenance} /
+    \texttt{@provenance} (record / list: source, path, instant,
+    instant-from, dpid), \texttt{origin} / \texttt{\%origin} /
+    \texttt{@origin} (node ids with the stage), \texttt{path},
+    \texttt{elided}. \texttt{resolved\_provenance} fills the
+    name-path within the source and completes the instant ladder
+    node $\to$ source (mount target mtime) $\to$ access
+    (invocation instant); \texttt{--reproducible} holds the two
+    lower rungs back. \texttt{qua --kaiv} exports per field and
+    per plural on the semicolon with \texttt{;+N} elision
+    (\texttt{--kaiv-origins}) \\
+\texttt{X:.r}, \texttt{X:@.}, \texttt{X:\%.}, \texttt{X:(*.)}
+  & \live cross-capsa reads (2026-09-07): the register of the capsa
+    \emph{standing at} the node \texttt{X} reaches, read from the
+    stage's input snapshot (\texttt{Operand::PeerReg}, a lazy
+    \texttt{Peers} index by node); location, not lineage --- after
+    a fork nothing stands at the fork node, its children do; null
+    outside a pipeline context. What lets one push read its
+    neighbours: \texttt{<-link:\%.} inside an expression body is
+    the peer's whole register \\
+\texttt{((!7))}, \texttt{((!\$.v:::origin))}
+  & \live the node-id anchor (2026-09-07): \texttt{Anchor::Id} takes
+    an expression; a number, a \texttt{\%origin} record (by
+    \texttt{id}), a list forks. \texttt{AstAdapter::has\_node}
+    guards it (default: probe parent/name under
+    \texttt{catch\_unwind}, since most adapters index a Vec by
+    id). Ids must be deterministic across runs --- minted from the
+    node's identity in the source, never from walk order \\
+\texttt{| .v(body)\{20\}}, \texttt{\{1;\}}, \texttt{\{m;n\}}
+  & \live the quantified push (2026-09-07): \texttt{Stage::Repeat}
+    wraps a push-family stage (push, expression push, subcontext,
+    record and fields push); each round is one \texttt{apply\_stage}
+    over the whole context, so a round reads the previous round's
+    snapshot; \texttt{\{N\}} exact, \texttt{\{m;n\}} /
+    \texttt{\{m;\}} at least \texttt{m} then stop at a fixpoint (no
+    node, topic, or \texttt{\%.} view changed) or at \texttt{n} /
+    the quantifier bound. PageRank over quarb.org is one such push;
+    the stored column matches to $2\times10^{-17}$ \\
 \bottomrule
 \end{tabularx}
 
@@ -950,7 +1042,13 @@ A per-capsa \texttt{|} transforms each topic; \texttt{@|} reduces the
 whole context; \texttt{| .name} pushes the topic onto the register and
 \texttt{| \$.name} recalls it; a subcontext \texttt{| .(expr)}
 evaluates \texttt{expr} from each node, reduces it to a scalar, and
-pushes it\,---\,grouped aggregation without leaving the query.
+pushes it\,---\,grouped aggregation without leaving the query. A
+push quantified \texttt{\{N\}} repeats over the whole context, each
+round seeing the last (the iteration loop); \texttt{X:.r} reads the
+register of whichever capsa stands at the node \texttt{X} reaches,
+from the same snapshot; and every value remembers where it was
+read, so \texttt{:::} on a value answers its provenance the way
+\texttt{:::} on a node does.
 
 \medskip
 
@@ -1042,6 +1140,34 @@ pub trait AstAdapter {
     /// back to the property name.
     fn ref_property(&self, _n: NodeId) -> Option<String> { None }
     fn ref_label(&self, _n: NodeId, _prop: &str) -> Option<String> { None }
+
+    // --- the index hooks (defaulted; an indexed store answers) ---
+
+    /// The document an external identifier names (a URL -> its
+    /// page), the arrow's landing rung after the mount layer.
+    fn document_by_ref(&self, _id: &str) -> Option<NodeId> { None }
+    /// `<--` from an index instead of a whole-arbor scan.
+    fn reverse_resolve(&self, _n: NodeId, _prop: Option<&str>,
+        _hint: Option<&str>) -> Option<Vec<NodeId>> { None }
+    /// `//name` below `node` from an index, with each hit's depth;
+    /// `None` means walk. The answer must equal the walk's.
+    fn descendants_named(&self, _n: NodeId, _name: &str)
+        -> Option<Vec<(NodeId, usize)>> { None }
+    /// A batching hint before a link sweep over `nodes`.
+    fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+
+    // --- identity and provenance (defaulted) ---
+
+    /// Whether `node` is a node of this arbor -- the guard of the
+    /// node-id anchor `((!expr))`. Default: probe parent and name
+    /// under catch_unwind.
+    fn has_node(&self, node: NodeId) -> bool { ... }
+    /// What the source recorded about `node`: source, path within
+    /// it, instant (and which rung it came from), dpid; a list when
+    /// several sources stand behind one node (mounts, grafts,
+    /// models layer entry by entry).
+    fn provenance(&self, _n: NodeId) -> Provenance { ... }
+    fn provenance_list(&self, n: NodeId) -> ProvenanceList { ... }
 }
 \end{lstlisting}
 
@@ -1071,7 +1197,12 @@ Three observations that the filesystem work has already forced:
   \texttt{MountAdapter}/\texttt{Shared}, models in
   \texttt{ModelAdapter} -- a defaulted method silently answers
   \texttt{None} through any wrapper that does not forward it.
-  When adding to the trait, sweep every delegating impl.
+  When adding to the trait, sweep every delegating impl. The
+  case in point (2026-09-07): \texttt{Dyn} had never forwarded
+  \texttt{answers\_to}, so a web level behind the session's
+  boxed door answered \texttt{//page} with nothing -- its rows
+  answer to their kind through that method. It forwards the
+  whole surface now.
 
 \item \textbf{The root may be unnamed.} \texttt{name} returns
   \texttt{Option} precisely so an adapter can leave the root without a

@@ -253,6 +253,42 @@ impl AstAdapter for MountAdapter {
             .map(|t| self.encode(m, t))
     }
 
+    /// The first mount holding a document under `id` answers.
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.mounts
+            .iter()
+            .enumerate()
+            .find_map(|(m, mount)| mount.adapter.document_by_ref(id).map(|t| self.encode(m, t)))
+    }
+
+    /// A reverse index answers within the node's own mount; the
+    /// other mounts cannot reference into it.
+    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+        let (m, inner) = self.decode(node)?;
+        let v = self.mounts[m].adapter.reverse_resolve(inner, property, hint)?;
+        Some(v.into_iter().map(|t| self.encode(m, t)).collect())
+    }
+
+    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        let (m, inner) = self.decode(node)?;
+        let v = self.mounts[m].adapter.descendants_named(inner, name)?;
+        Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
+    }
+
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        let mut by_mount: Vec<Vec<NodeId>> = vec![Vec::new(); self.mounts.len()];
+        for &n in nodes {
+            if let Some((m, inner)) = self.decode(n) {
+                by_mount[m].push(inner);
+            }
+        }
+        for (m, inner) in by_mount.into_iter().enumerate() {
+            if !inner.is_empty() {
+                self.mounts[m].adapter.prefetch_links(&inner, dir);
+            }
+        }
+    }
+
     fn quantifier_bound(&self) -> usize {
         // A query spans every mount: the most permissive inner bound
         // must not be silently cut.
@@ -270,16 +306,45 @@ impl AstAdapter for MountAdapter {
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         match self.decode(node) {
             None => quarb::Provenance::default(),
+            Some((m, inner)) => self.mounts[m].adapter.provenance(inner).or(self.source_fill(m, inner)),
+        }
+    }
+    /// The same layering, entry by entry.
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        match self.decode(node) {
+            None => quarb::ProvenanceList::default(),
             Some((m, inner)) => {
-                let mount = &self.mounts[m];
-                mount.adapter.provenance(inner).or(quarb::Provenance {
-                    source: mount
-                        .target
-                        .clone()
-                        .or_else(|| Some(mount.name.clone())),
-                    ..Default::default()
-                })
+                self.mounts[m].adapter.provenance_list(inner).or(self.source_fill(m, inner))
             }
+        }
+    }
+}
+
+impl MountAdapter {
+    /// The mount's fill: `:::source` its target (the real-world
+    /// address; the query-local name as a fallback), `:::path` the
+    /// node's name-path inside the mounted adapter, and — for a
+    /// target that is a local file — the file's modification time
+    /// as the source rung of the instant ladder.
+    fn source_fill(&self, m: usize, inner: NodeId) -> quarb::Provenance {
+        let mount = &self.mounts[m];
+        let instant = mount
+            .target
+            .as_deref()
+            .and_then(|t| std::fs::metadata(t).ok())
+            .filter(|md| md.is_file())
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs() as i64, d.subsec_nanos(), Some(0)));
+        quarb::Provenance {
+            source: mount
+                .target
+                .clone()
+                .or_else(|| Some(mount.name.clone())),
+            path: Some(quarb::name_path(&*mount.adapter, inner)),
+            instant_from: instant.map(|_| quarb::InstantFrom::Source),
+            instant,
+            dpid: None,
         }
     }
 }
@@ -299,6 +364,16 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn name(&self, node: NodeId) -> Option<String> {
         self.0.name(node)
+    }
+
+    /// Aliases (ruling #30) and trait aliases pass through: the
+    /// wrapped adapter's word, not name equality on this layer.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.0.answers_to(node, name)
+    }
+
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.0.has_trait(node, name)
     }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.0.parent(node)
@@ -342,6 +417,18 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
         self.0.resolve_fragment(node, fragment)
     }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.0.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
+        self.0.reverse_resolve(n, p, h)
+    }
+    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.0.descendants_named(n, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.0.prefetch_links(nodes, dir)
+    }
     fn ref_property(&self, node: NodeId) -> Option<String> {
         self.0.ref_property(node)
     }
@@ -362,6 +449,9 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         self.0.provenance(node)
+    }
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        self.0.provenance_list(node)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.0.unit_scale(expr)

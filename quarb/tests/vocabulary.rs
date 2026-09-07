@@ -99,6 +99,18 @@ const CORPUS: &[&str] = &[
     // the shell stage, backtick-sugared (2026-07-11; reflects as
     // an ordinary func named sh)
     "/files/* | `wc -l`",
+    // the value-side provenance projection (2026-09-06): `:::key`
+    // after a recall
+    "/x | .v(::a) | $.v:::provenance",
+    // the cross-capsa read (2026-09-07): a register accessor glued
+    // to a node path reads the peer standing there
+    "//x | .v(::a) | <-link:.v",
+    // the quantified push (2026-09-07): the iteration loop
+    "/a | .v(1) | .v($.v * 2){3} | .w($.v + 1){1;5}",
+    // the node-id anchor and the shaped core keys (2026-09-07):
+    // `((!N))` stands on a coordinate, `:::%key` / `:::@key` read
+    // a key as a record / a list
+    "/a | ((!3))::name | . | ((!3))/*:::%provenance | . | $_:::@origin | .k(((!3)):::index + 1) | ((!$.k)):::name",
     // the map pipe: transform, filter, slice within the topic
     "/a | @-::roles $| upper $| [$_ != \"x\"] $| [1..2]",
     // now() and call operands (2026-07-12, the duration-parsing
@@ -136,7 +148,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // symmetry: (N), (.), (@), (@name)).
     (
         "branch",
-        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name"],
+        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name", "node-id"],
     ),
     // v1 additive growth: capsae, piped (2026-07-11, @* + inline
     // pipes).
@@ -190,8 +202,11 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // anchor keys (2026-07-24, marks symmetry).
     (
         "path",
-        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name"],
+        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name", "node-id"],
     ),
+    // v1 additive growth: peer-reg (2026-09-07, the cross-capsa read
+    // `X:.r`).
+    ("peer-reg", &["ref"]),
     ("piped", &[]),
     ("pipeline", &[]),
     ("predicate", &["from", "kind", "to", "value"]),
@@ -200,6 +215,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("query", &["outer", "role"]),
     ("recall", &["ref"]),
     ("record-push", &["enriched", "name"]),
+    // v1 additive growth: repeat (2026-09-07, the quantified push —
+    // the iteration loop).
+    ("repeat", &["max", "min"]),
     ("select", &[]),
     ("span", &["from", "kind", "to"]),
     // v1 additive growth: spread (2026-07-11, | ... core syntax);
@@ -219,6 +237,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("subcontext", &["name"]),
     ("topic", &[]),
     ("trait", &["alts"]),
+    // v1 additive growth: value-meta (2026-09-06, a value's `:::key`
+    // provenance projection).
+    ("value-meta", &["key"]),
     // v1 additive growth: when (2026-07-11, the value match's arm).
     ("when", &["regex"]),
 ];

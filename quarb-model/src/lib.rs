@@ -17,7 +17,8 @@
 mod parse;
 
 pub use parse::{
-    parse_model, resolve_mount_target, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl,
+    parse_model, resolve_mount_target, AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount,
+    NodeDecl, RefDecl, RelDecl,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -334,6 +335,16 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     if matches!(value, Value::Null) {
                         continue;
                     }
+                    // A list-valued property (a page's tags) refers
+                    // to one node per element: the first element is
+                    // what `-->` resolves to, every element gets its
+                    // hop and its backlink.
+                    let elements: Vec<Value> = match value {
+                        Value::List(items) => items,
+                        other => vec![other],
+                    };
+                    let mut first = true;
+                    for value in elements {
                     let target = match &by_key {
                         Some(idx) => idx.get(&value.to_string()).copied(),
                         None => self.find_value(container, &value),
@@ -356,9 +367,13 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         Some((alias, role)) => (*alias, role.clone()),
                         None => (node, scope_role(&decl.scope)),
                     };
-                    f.resolve.insert((node, decl.field.clone()), target);
+                    if first {
+                        f.resolve.insert((node, decl.field.clone()), target);
+                        first = false;
+                    }
                     f.ref_fwd.entry(node).or_default().push((fwd, target));
                     f.ref_back.entry(target).or_default().push((back, back_node));
+                    }
                 }
             }
             // Relations: a condition evaluated per pair, with `$$`
@@ -664,11 +679,32 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
     // Minimal on purpose: base nodes forward; prior-container nodes
     // answer default (constructor queries never project
     // `:::provenance` mid-derivation).
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.base.document_by_ref(id)
+    }
+    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        if node.0 & MODEL_TAG != 0 || node == self.base.root() {
+            return None;
+        }
+        self.base.descendants_named(node, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        let base: Vec<NodeId> = nodes.iter().copied().filter(|n| n.0 & MODEL_TAG == 0).collect();
+        if !base.is_empty() {
+            self.base.prefetch_links(&base, dir);
+        }
+    }
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         if node.0 & MODEL_TAG != 0 {
             return quarb::Provenance::default();
         }
         self.base.provenance(node)
+    }
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        if node.0 & MODEL_TAG != 0 {
+            return quarb::ProvenanceList::default();
+        }
+        self.base.provenance_list(node)
     }
 }
 
@@ -829,6 +865,60 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             None => self.base.provenance(node),
         }
     }
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        match self.decode(node) {
+            Some((_, _)) => match self.aliased(node) {
+                Some(base) => self.base.provenance_list(base),
+                None => quarb::ProvenanceList::single(self.provenance(node)),
+            },
+            None => self.base.provenance_list(node),
+        }
+    }
+
+    /// A written name reaches a node under its canonical name or
+    /// any `alias` the model declares for names.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        if self.decode(node).is_none() && self.base.answers_to(node, name) {
+            return true;
+        }
+        let Some(canonical) = self.name(node) else {
+            return canonical_none(name);
+        };
+        if canonical == name {
+            return true;
+        }
+        let aliases = self.model.aliases.iter().filter(|a| a.kind == AliasKind::Name);
+        for a in aliases {
+            if a.admits(name, &canonical) {
+                return true;
+            }
+            // An exact alias rewrites the written name; a base node
+            // then answers under its own rules (a kind name, a stem,
+            // a title), not only under its canonical spelling.
+            if self.decode(node).is_none()
+                && let AliasRule::Exact { alias, original } = &a.rule
+                && alias == name
+                && self.base.answers_to(node, original)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A written trait reaches a node under a canonical trait or any
+    /// `alias <...>` the model declares.
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        let traits = self.traits(node);
+        if traits.iter().any(|t| t == name) {
+            return true;
+        }
+        self.model
+            .aliases
+            .iter()
+            .filter(|a| a.kind == AliasKind::Trait)
+            .any(|a| traits.iter().any(|t| a.admits(name, t)))
+    }
 
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         // An aliased node resolves as the node it stands for.
@@ -942,6 +1032,46 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// The document the base holds under a URL — base ids pass
+    /// straight through this layer.
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.base.document_by_ref(id)
+    }
+
+    /// The base's reverse index answers only when the model adds
+    /// no reference fabric of its own; otherwise the walk sees
+    /// both.
+    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+        if self.decode(node).is_some()
+            || !self.model.refs.is_empty()
+            || !self.model.rels.is_empty()
+            || !self.model.edges.is_empty()
+        {
+            return None;
+        }
+        self.base.reverse_resolve(node, property, hint)
+    }
+
+    /// The base's name index answers below any base node but the
+    /// root (the model's containers hang there) and only when no
+    /// name alias could widen the match.
+    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        if self.decode(node).is_some()
+            || node == self.base.root()
+            || self.model.aliases.iter().any(|a| a.kind == AliasKind::Name)
+        {
+            return None;
+        }
+        self.base.descendants_named(node, name)
+    }
+
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        let base: Vec<NodeId> = nodes.iter().copied().filter(|n| self.decode(*n).is_none()).collect();
+        if !base.is_empty() {
+            self.base.prefetch_links(&base, dir);
+        }
+    }
+
     fn quantifier_bound(&self) -> usize {
         self.base.quantifier_bound()
     }
@@ -954,6 +1084,11 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.base.unit_scale(expr)
     }
+}
+
+/// An unnamed node answers to no written name.
+fn canonical_none(_name: &str) -> bool {
+    false
 }
 
 /// The role of the nodes a scope path selects: the last *named*
@@ -994,6 +1129,16 @@ impl AstAdapter for Borrowed<'_> {
     }
     fn name(&self, n: NodeId) -> Option<String> {
         self.0.name(n)
+    }
+
+    /// Aliases (ruling #30) and trait aliases pass through: the
+    /// wrapped adapter's word, not name equality on this layer.
+    fn answers_to(&self, n: NodeId, name: &str) -> bool {
+        self.0.answers_to(n, name)
+    }
+
+    fn has_trait(&self, n: NodeId, name: &str) -> bool {
+        self.0.has_trait(n, name)
     }
     fn parent(&self, n: NodeId) -> Option<NodeId> {
         self.0.parent(n)
@@ -1037,6 +1182,18 @@ impl AstAdapter for Borrowed<'_> {
     fn link_property(&self, s: NodeId, l: &str, t: NodeId, name: &str) -> Option<Value> {
         self.0.link_property(s, l, t, name)
     }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.0.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
+        self.0.reverse_resolve(n, p, h)
+    }
+    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.0.descendants_named(n, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.0.prefetch_links(nodes, dir)
+    }
     fn quantifier_bound(&self) -> usize {
         self.0.quantifier_bound()
     }
@@ -1048,6 +1205,9 @@ impl AstAdapter for Borrowed<'_> {
     }
     fn provenance(&self, n: NodeId) -> quarb::Provenance {
         self.0.provenance(n)
+    }
+    fn provenance_list(&self, n: NodeId) -> quarb::ProvenanceList {
+        self.0.provenance_list(n)
     }
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.0.unit_scale(expr)

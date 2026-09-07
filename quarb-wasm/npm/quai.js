@@ -15,10 +15,10 @@ export function initQuai(input) {
   if (!ready) {
     if (input === undefined && typeof process !== 'undefined' && process.versions?.node) {
       ready = import('node:fs/promises').then(async ({ readFile }) =>
-        init(await readFile(new URL('./quai_wasm_bg.wasm', import.meta.url)))
+        init({ module_or_path: await readFile(new URL('./quai_wasm_bg.wasm', import.meta.url)) })
       );
     } else {
-      ready = init(input);
+      ready = init(input === undefined ? undefined : { module_or_path: input });
     }
   }
   return ready;

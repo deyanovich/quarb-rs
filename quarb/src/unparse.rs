@@ -108,6 +108,7 @@ fn anchor(a: &crate::ast::Anchor) -> String {
         Anchor::MarkTop => "$$.".to_string(),
         Anchor::MarksAll => "((@))".to_string(),
         Anchor::MarksNamed(m) => format!("((@{m}))"),
+        Anchor::Id(op) => format!("((!{}))", operand(op)),
     }
 }
 
@@ -518,6 +519,10 @@ fn operand(o: &Operand) -> String {
             Operand::Topic => format!(":{name}"),
             _ => format!("{}:{name}", operand(base)),
         },
+        Operand::ValueMeta { base, key } => format!("{}:::{key}", operand(base)),
+        Operand::PeerReg { at, reg: r } => {
+            format!("{}:{}", operand(at), reg(r).trim_start_matches('$'))
+        }
         Operand::NamedCaptures => "%+".to_string(),
         Operand::List(items) => {
             let inner: Vec<String> = items.iter().map(operand).collect();
@@ -763,6 +768,14 @@ fn stage(st: &Stage) -> String {
         Stage::Agg(call) => format!("@| {}", fn_call(call)),
         Stage::Spread { outer: false } => "| ...".to_string(),
         Stage::Spread { outer: true } => "| ...?".to_string(),
+        Stage::Repeat { stage: inner, min, max } => {
+            let quant = match max {
+                Some(n) if n == min => format!("{{{min}}}"),
+                Some(n) => format!("{{{min};{n}}}"),
+                None => format!("{{{min};}}"),
+            };
+            format!("{}{quant}", stage(inner))
+        }
         Stage::Map(inner) => {
             let body = stage(inner);
             let body = body
@@ -922,6 +935,34 @@ mod tests {
     // Finding: `::::` is the canonical adapter-metadata spelling; the
     // deprecated `::;` alias must parse to the same AST and reprint
     // as `::::`.
+    #[test]
+    fn peer_reads_round_trip() {
+        for q in [
+            "//x | .v(::a) | <-link:.v",
+            "//x | .v(::a) | (<-link:.v @| sum)",
+            "/a | /*:.",
+            "/a | /*:.2",
+            "/a | \\/*:@.",
+            "/a | \\/*:%.",
+            "/a | \\/*:%%.",
+            "/a | \\/*:%.:v",
+            "/a | <-link:.v:::provenance",
+            "/a | ((!3))::name",
+            "/a | .v(1) | ((!$.v:::origin)):::name",
+            "/a | ((!@(2; 3)))/*::x",
+            "/a | $.v:::%provenance",
+            "/a | $.v:::@origin:::source",
+        ] {
+            // A path-headed expression stage prints parenthesized,
+            // as every such stage does; the spelling inside is the
+            // written one.
+            let canon = assert_fixpoint(q);
+            assert!(canon.contains(&q[q.rfind("| ").unwrap() + 2..]), "{q:?} -> {canon:?}");
+        }
+        // The rounded twin prints pointy.
+        assert_eq!(rt("/a | \\/*:(*.)"), rt("/a | \\/*:@."));
+    }
+
     #[test]
     fn adapter_meta_alias_canonicalizes() {
         assert_eq!(rt("//*.txt::::size"), "//*.txt::::size");

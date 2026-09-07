@@ -27,18 +27,219 @@
 //! - Inline markup flattens to its text.
 
 use ego_tree::NodeRef;
-use quarb_text::{Block, Cell, Container, NoteFamily, TextModel};
-use scraper::{ElementRef, Html, Node as DomNode};
+use quarb_text::{Block, Cell, Container, HeadMeta, NoteFamily, TextModel};
+use scraper::{ElementRef, Html, Node as DomNode, Selector};
 
-/// Parse `html` and lower it to a text-level document.
+/// Parse `html` and lower it to a text-level document, carrying
+/// what the page declares about itself (see [`head_meta`]).
 pub fn parse(html: &str) -> TextModel {
-    TextModel::build(blocks(html))
+    let document = Html::parse_document(html);
+    let mut model = TextModel::build(blocks_of(&document));
+    let head = head_meta(&document);
+    if let Some(url) = head.declared_value("canonical")
+        && let quarb::Value::Str(u) = url
+    {
+        model.set_document_url(&u);
+    }
+    // `<base href>`: the base relative targets join against, itself
+    // relative to the document's URL when written so (Parsoid
+    // writes `//host/wiki/`).
+    if let Some(b) = base_href(&document) {
+        let joined = match head.declared_value("canonical") {
+            Some(quarb::Value::Str(u)) => url::Url::parse(&u).ok().and_then(|u| u.join(&b).ok()).map(|u| u.to_string()),
+            _ => None,
+        };
+        model.set_link_base(joined.as_deref().unwrap_or(&b));
+    }
+    model.set_head_meta(head);
+    model
+}
+
+/// The document's `<base href>`, if it declares one.
+pub fn base_href(document: &Html) -> Option<String> {
+    let sel = Selector::parse("head base[href]").ok()?;
+    let b = document.select(&sel).next()?.value().attr("href")?.trim();
+    (!b.is_empty()).then(|| b.to_string())
+}
+
+/// The page's declared identity, from the standard vocabularies a
+/// head carries — read, never guessed:
+///
+/// - every `<meta name=… content=…>` / `<meta property=… content=…>`
+///   verbatim, plus `title`, the root's `lang`, and the canonical
+///   link (the lossless layer, `::::name`);
+/// - a schema.org JSON-LD block's top-level scalars and one level
+///   of nesting, as `schema:<key>` (`::::schema:@type`,
+///   `::::schema:author.name`);
+/// - the curated core: tags from `keywords` (comma-split),
+///   `article:tag`, `rel="tag"` links, and JSON-LD `keywords`;
+///   the category from `article:section` else JSON-LD
+///   `articleSection`; `description` (`description`, `og:description`,
+///   JSON-LD); `author` (`author`, `DC.creator`, `article:author`,
+///   JSON-LD `author.name`); `published` / `modified` as instants
+///   from `article:published_time` / `article:modified_time`,
+///   `DC.date`, and JSON-LD `datePublished` / `dateModified`.
+pub fn head_meta(document: &Html) -> HeadMeta {
+    use scraper::Selector;
+    let sel = |s: &str| Selector::parse(s).expect("static selector");
+    let mut h = HeadMeta::default();
+    if let Some(t) = document.select(&sel("head > title")).next() {
+        let t = quarb_text::normalize_ws(&t.text().collect::<String>());
+        if !t.is_empty() {
+            h.declare("title", &t);
+            h.title = Some(t);
+        }
+    }
+    if let Some(lang) = document.root_element().value().attr("lang") {
+        h.declare("lang", lang);
+    }
+    if let Some(c) = document
+        .select(&sel(r#"link[rel="canonical"]"#))
+        .find_map(|l| l.value().attr("href"))
+    {
+        h.declare("canonical", c);
+    }
+    // meta name= / property=, verbatim, in document order.
+    for m in document.select(&sel("meta[content]")) {
+        let v = m.value();
+        let Some(content) = v.attr("content") else {
+            continue;
+        };
+        let Some(name) = v.attr("name").or_else(|| v.attr("property")) else {
+            continue;
+        };
+        h.declare(name, content);
+    }
+    for a in document.select(&sel(r#"a[rel~="tag"]"#)) {
+        let t = quarb_text::normalize_ws(&a.text().collect::<String>());
+        if !t.is_empty() {
+            h.declare("rel:tag", &t);
+        }
+    }
+    // JSON-LD: the top level and one level down, as schema:<key>.
+    let mut ld: Vec<serde_json::Value> = Vec::new();
+    for script in document.select(&sel(r#"script[type="application/ld+json"]"#)) {
+        let text = script.text().collect::<String>();
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match v {
+            serde_json::Value::Array(items) => ld.extend(items),
+            other => ld.push(other),
+        }
+    }
+    for item in &ld {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        for (k, v) in obj {
+            if k == "@context" {
+                continue;
+            }
+            declare_ld(&mut h, &format!("schema:{k}"), v);
+        }
+    }
+    // The curated core.
+    let first = |h: &HeadMeta, names: &[&str]| -> Option<String> {
+        names.iter().find_map(|n| {
+            h.declared
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                .and_then(|(_, vs)| vs.first().cloned())
+        })
+    };
+    let all = |h: &HeadMeta, name: &str| -> Vec<String> {
+        h.declared
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .flat_map(|(_, vs)| vs.iter().cloned())
+            .collect()
+    };
+    let mut tags: Vec<String> = Vec::new();
+    for kw in all(&h, "keywords")
+        .iter()
+        .chain(all(&h, "schema:keywords").iter())
+    {
+        tags.extend(kw.split(',').map(str::to_string));
+    }
+    tags.extend(all(&h, "article:tag"));
+    tags.extend(all(&h, "rel:tag"));
+    for t in tags {
+        h.tag(&t);
+    }
+    h.category = first(&h, &["article:section", "schema:articleSection"]);
+    h.description = first(&h, &["description", "og:description", "schema:description"]);
+    h.author = first(
+        &h,
+        &[
+            "author",
+            "DC.creator",
+            "dc.creator",
+            "article:author",
+            "schema:author.name",
+            "schema:author",
+        ],
+    );
+    h.published = first(
+        &h,
+        &[
+            "article:published_time",
+            "DC.date",
+            "dc.date",
+            "schema:datePublished",
+        ],
+    )
+    .and_then(|s| instant(&s));
+    h.modified =
+        first(&h, &["article:modified_time", "schema:dateModified"]).and_then(|s| instant(&s));
+    if h.title.is_none() {
+        h.title = first(&h, &["og:title", "schema:headline", "schema:name"]);
+    }
+    h
+}
+
+/// Flatten a JSON-LD value one level: scalars and arrays of
+/// scalars declare under `name`, an object's scalar members under
+/// `name.member`.
+fn declare_ld(h: &mut HeadMeta, name: &str, v: &serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => h.declare(name, s),
+        serde_json::Value::Number(n) => h.declare(name, &n.to_string()),
+        serde_json::Value::Bool(b) => h.declare(name, if *b { "true" } else { "false" }),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                declare_ld(h, name, item);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (k, inner) in obj {
+                if !inner.is_object() && !inner.is_array() {
+                    declare_ld(h, &format!("{name}.{k}"), inner);
+                }
+            }
+        }
+        serde_json::Value::Null => {}
+    }
+}
+
+/// An ISO-8601 timestamp as an instant; a bare date counts too —
+/// a publication date is a moment on the timeline, not a name.
+pub fn instant(s: &str) -> Option<quarb::Value> {
+    let s = s.trim();
+    quarb::temporal::parse_iso(s).map(|(secs, nanos, offset_min)| quarb::Value::Instant {
+        secs,
+        nanos,
+        offset_min,
+    })
 }
 
 /// The event stream `parse` builds from — exposed for testing and
 /// composition.
 pub fn blocks(html: &str) -> Vec<Block> {
-    let document = Html::parse_document(html);
+    blocks_of(&Html::parse_document(html))
+}
+
+fn blocks_of(document: &Html) -> Vec<Block> {
     let mut out = Vec::new();
     let mut run = String::new();
     // Synthetic pairing onyms for id-less marginalia asides.
@@ -71,8 +272,13 @@ enum Work<'a> {
     El(ElementRef<'a>),
     Text(String),
     Flush,
-    Open { kind: Container, lemma: Option<String> },
-    Close { hypograph: Option<String> },
+    Open {
+        kind: Container,
+        lemma: Option<String>,
+    },
+    Close {
+        hypograph: Option<String>,
+    },
 }
 
 /// Elements whose entire subtree is soup at the text level.
@@ -129,8 +335,10 @@ fn note_kind(el: ElementRef) -> Option<NoteKind> {
             .unwrap_or_default();
         return Some(NoteKind::Ref(onym));
     }
-    if has("epub:type", &["footnote", "endnote", "rearnote", "marginalia"])
-        || has("role", &["doc-footnote", "doc-endnote"])
+    if has(
+        "epub:type",
+        &["footnote", "endnote", "rearnote", "marginalia"],
+    ) || has("role", &["doc-footnote", "doc-endnote"])
     {
         let onym = el.value().attr("id").unwrap_or_default().to_string();
         // endnote and rearnote (EPUB) / doc-endnote (DPUB-ARIA)
@@ -139,9 +347,7 @@ fn note_kind(el: ElementRef) -> Option<NoteKind> {
         // rest.
         let family = if has("epub:type", &["marginalia"]) {
             NoteFamily::Aside
-        } else if has("epub:type", &["endnote", "rearnote"])
-            || has("role", &["doc-endnote"])
-        {
+        } else if has("epub:type", &["endnote", "rearnote"]) || has("role", &["doc-endnote"]) {
             NoteFamily::Endnote
         } else {
             NoteFamily::Footnote
@@ -171,7 +377,15 @@ const TRANSPARENT: &[&str] = &[
 ];
 
 /// Block elements read as plain paragraphs.
-const P_LIKE: &[&str] = &["p", "figcaption", "dt", "dd", "summary", "legend", "caption"];
+const P_LIKE: &[&str] = &[
+    "p",
+    "figcaption",
+    "dt",
+    "dd",
+    "summary",
+    "legend",
+    "caption",
+];
 
 fn element<'a>(
     el: ElementRef<'a>,
@@ -225,8 +439,7 @@ fn element<'a>(
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             flush(run, out);
             let mut notes = Vec::new();
-            let lemma =
-                quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
+            let lemma = quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
             out.push(Block::Heading {
                 level: tag[1..].parse().unwrap(),
                 lemma,
@@ -239,8 +452,7 @@ fn element<'a>(
         _ if P_LIKE.contains(&tag) => {
             flush(run, out);
             let mut notes = Vec::new();
-            let text =
-                quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
+            let text = quarb_text::normalize_ws(&text_and_notes_raw(el, &mut notes));
             out.push(Block::Paragraph { text });
             // A block element's own id names the block — the
             // html-id / attached-\label parity rule.
@@ -428,10 +640,11 @@ fn quote_content<'a>(el: ElementRef<'a>) -> (Vec<NodeRef<'a, DomNode>>, Option<S
     let mut attribution_id = None;
     for child in el.children() {
         if let Some(c) = ElementRef::wrap(child)
-            && matches!(c.value().name(), "cite" | "footer") {
-                hypograph = Some(text_of(c));
-                attribution_id = Some(child.id());
-            }
+            && matches!(c.value().name(), "cite" | "footer")
+        {
+            hypograph = Some(text_of(c));
+            attribution_id = Some(child.id());
+        }
     }
     let children = el
         .children()
@@ -462,9 +675,10 @@ fn verbatim_lang(el: ElementRef) -> Option<String> {
         if let Some(class) = c.value().attr("class") {
             for word in class.split_whitespace() {
                 if let Some(lang) = word.strip_prefix("language-")
-                    && !lang.is_empty() {
-                        return Some(lang.to_string());
-                    }
+                    && !lang.is_empty()
+                {
+                    return Some(lang.to_string());
+                }
             }
         }
     }

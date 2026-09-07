@@ -42,7 +42,7 @@ pub struct Query {
 /// Every anchor resolves to a LIST of start nodes; the singular
 /// forms yield at most one, and a miss yields nothing (never an
 /// error).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Anchor {
     /// Navigate from the current node (the default).
     Current,
@@ -69,7 +69,35 @@ pub enum Anchor {
     /// `(@name)` — every mark pushed under `name`, shadowed ones
     /// included, in push order; forks like `(@)`.
     MarksNamed(String),
+    /// `((!expr))` — the node-id anchor (ruling #58): the node
+    /// whose id the expression yields — a literal (`((!7))`), a
+    /// value's origin (`((!$.v:::origin))`), a coordinate record
+    /// (`:::%origin`, its `id` field), or a list of them, which
+    /// forks like `((@))`. The coordinate stood on again — in this
+    /// run or the next, since adapters mint ids deterministically.
+    /// An id the adapter never minted yields no node.
+    Id(Box<Operand>),
 }
+
+impl PartialEq for Anchor {
+    fn eq(&self, other: &Anchor) -> bool {
+        match (self, other) {
+            (Anchor::Current, Anchor::Current)
+            | (Anchor::Root, Anchor::Root)
+            | (Anchor::MarkTop, Anchor::MarkTop)
+            | (Anchor::MarksAll, Anchor::MarksAll) => true,
+            (Anchor::Mark(a), Anchor::Mark(b)) | (Anchor::MarksNamed(a), Anchor::MarksNamed(b)) => a == b,
+            (Anchor::MarkIndex(a), Anchor::MarkIndex(b)) => a == b,
+            // Two id anchors are equal when they are spelled alike.
+            (Anchor::Id(a), Anchor::Id(b)) => {
+                crate::unparse::operand_text(a) == crate::unparse::operand_text(b)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Anchor {}
 
 /// One `||` branch: navigation and an optional projection.
 #[derive(Debug, Clone)]
@@ -171,6 +199,19 @@ pub enum Stage {
     /// `$| [a..b]` slices. Null maps to null; a non-list topic is
     /// a singleton; an expanding inner stage flattens.
     Map(Box<Stage>),
+    /// `.v(body){N}` — a quantified push (ruling #60): the push
+    /// applied to the context again and again, each round reading
+    /// the previous round's values (the snapshot rule) and filing
+    /// one more regula on the same capsa — the iteration loop.
+    /// `{N}` runs exactly N rounds; `{m;n}` at least m, then stops
+    /// at a fixpoint (a round that repointed no name and changed
+    /// no topic) or at n; `{m;}` likewise up to the quantifier
+    /// bound.
+    Repeat {
+        stage: Box<Stage>,
+        min: usize,
+        max: Option<usize>,
+    },
 }
 
 /// A reference into a capsa's register.
@@ -232,6 +273,14 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     // does (ruling #48): `group(:title)`, `%(:title, 'n', 1)`.
     if let Operand::Field { name, .. } = op {
         return Some(name);
+    }
+    if let Operand::ValueMeta { key, .. } = op {
+        return Some(key);
+    }
+    // `<-link:.v` — a peer's named regula derives its name as a
+    // recall does.
+    if let Operand::PeerReg { reg: RegRef::Named(n), .. } = op {
+        return Some(n);
     }
     if matches!(op, Operand::Ordinal) {
         return Some("ordinal");
@@ -315,7 +364,7 @@ pub struct Group {
     pub quant: Quant,
     /// `[...]` expression predicates on the group's matches,
     /// applied per repetition count BEFORE reach — so
-    /// `(...)+[P]?` is "the nearest satisfying P" (a shortest
+    /// `(...)+[P]?` is "the proximal satisfying P" (a shortest
     /// path search, stopping at the first tier with a survivor).
     /// Positional predicates are refused (no ordering across
     /// tiers). Mirrors the axis rule: matcher before reach.
@@ -439,6 +488,18 @@ pub enum Operand {
     /// bottom rung of the colon ladder, a value's field below a
     /// node's property. A leading `:name` reads the topic's field.
     Field { base: Box<Operand>, name: String },
+    /// `base:::key` — a value's provenance: the core-metadata rung
+    /// after a register value or the topic, defined over the
+    /// origins the value was read from (`source`, `instant`,
+    /// `dpid`, `provenance`, `origins`, `elided`).
+    ValueMeta { base: Box<Operand>, key: String },
+    /// `X:.r` — the cross-capsa read (ruling #57): `at` is a node
+    /// path (a `Rel`, a `Ctx`, or the served node); at each node it
+    /// reaches, the regula `reg` of every capsa of the stage's
+    /// *input* context standing there (the `@*` snapshot rule), one
+    /// value per (node, capsa), in context order. No values where
+    /// nobody stands; null outside a pipeline context.
+    PeerReg { at: Box<Operand>, reg: RegRef },
     /// `%+` — the record of the last match's named groups (Perl's
     /// `%+`); the empty record outside any match.
     NamedCaptures,
@@ -599,16 +660,19 @@ pub struct TraitClause {
 }
 
 impl TraitClause {
-    /// Whether a node carrying `node_traits` satisfies this clause.
-    /// A leading `!` negates a literal (impossible in a real trait
-    /// name, so the marker cannot collide); `*` matches any node
-    /// that has at least one trait, `!*` a traitless one.
-    pub fn matches(&self, node_traits: &[String]) -> bool {
+    /// Whether a node satisfies this clause. A leading `!` negates
+    /// a literal (impossible in a real trait name, so the marker
+    /// cannot collide); `*` matches any node that has at least one
+    /// trait, `!*` a traitless one.
+    /// The test runs through a predicate — the adapter's
+    /// `has_trait`, which may honour aliases — with `any` saying
+    /// whether the node bears any trait at all (for `*` / `!*`).
+    pub fn matches_with(&self, any: bool, has: impl Fn(&str) -> bool) -> bool {
         self.alts.iter().any(|alt| match alt.strip_prefix('!') {
-            Some("*") => node_traits.is_empty(),
-            Some(name) => !node_traits.iter().any(|t| t == name),
-            None if alt == "*" => !node_traits.is_empty(),
-            None => node_traits.iter().any(|t| t == alt),
+            Some("*") => !any,
+            Some(name) => !has(name),
+            None if alt == "*" => any,
+            None => has(alt),
         })
     }
 }
@@ -629,11 +693,11 @@ pub enum Axis {
     /// `<` — the previous sibling.
     PrevSibling,
     /// `>>`, `>>?`, `>>!` — following siblings at any distance
-    /// (all matches / nearest match / farthest match), in document
+    /// (all matches / proximal / distal match), in document
     /// order.
     FollowingSiblings(Reach),
     /// `<<`, `<<?`, `<<!` — preceding siblings at any distance,
-    /// in document order; the nearest (`?`) is the latest one
+    /// in document order; the proximal (`?`) is the latest one
     /// before the node.
     PrecedingSiblings(Reach),
     /// `->` — outgoing crosslink; the step's matcher matches the edge
@@ -670,9 +734,9 @@ pub enum Axis {
 pub enum Reach {
     /// All matches at any distance.
     All,
-    /// `?` — only the nearest match(es) (minimum distance).
+    /// `?` — only the proximal (nearest) match(es) (minimum distance).
     Proximal,
-    /// `!` — only the farthest match(es) (maximum distance).
+    /// `!` — only the distal (farthest) match(es) (maximum distance).
     Distal,
 }
 

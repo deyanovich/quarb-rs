@@ -58,3 +58,52 @@ export function run(
 
 /** The engine version, e.g. `"0.12.0"`. */
 export function version(): string;
+
+/**
+ * A website loaded once and queried many times at the web level:
+ * every page under `/sites/<host>/pages/<path>`, the tags and
+ * categories the pages declare as rows of their own, every
+ * hyperlink resolved (`->link`, `<-link`, `::in_degree`,
+ * `::pagerank`), each page readable at the text level
+ * (`//section`, `//paragraph`, `| link`). Construct with
+ * {@link openSite}.
+ */
+export class Site {
+  /**
+   * Run a Quarb query over the site. Returns the result lines
+   * (node results as locators such as
+   * `/sites/example.org/pages/about.html!/section[2]`); throws on
+   * a parse or execution error. `opts.now` pins `now()`.
+   */
+  query(q: string, opts?: { now?: number }): string[];
+  /** The raw JSON envelope of a query; never throws. */
+  run(q: string, now?: number): string;
+  /** Every page as a locator, sorted. */
+  entries(): string[];
+  /** Every page's locator with its declared `<title>`. */
+  titles(): Record<string, string>;
+  /** Release the wasm memory the site holds. */
+  free(): void;
+}
+
+/**
+ * Open a site: a tarball of its pages (`.tar` or `.tar.gz`, as
+ * bytes), or an object of site-relative path to HTML for a site
+ * small enough to hold in memory.
+ *
+ * `opts.base` is the site's root URL (`https://example.org/`)
+ * that page paths and relative links join against; by default it
+ * is read off a page's canonical URL, and is `https://localhost/`
+ * when no page declares one. `opts.model` is a Quarb model file
+ * over the site (aliases, derived nodes, edges). `opts.wasm`
+ * forwards to {@link initQuarb} when the engine is not yet
+ * initialized.
+ */
+export function openSite(
+  source: Uint8Array | ArrayBuffer | Record<string, string>,
+  opts?: {
+    base?: string;
+    model?: string;
+    wasm?: BufferSource | WebAssembly.Module | Response | Promise<Response>;
+  }
+): Promise<Site>;

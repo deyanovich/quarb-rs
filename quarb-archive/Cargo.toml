@@ -11,8 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.28.0" }
-zip.workspace = true
+quarb = { path = "../quarb", version = "0.29.0" }
+# deflate only: the pure-Rust subset, so the crate builds for
+# wasm32 (bzip2/zstd would pull in C).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tar.workspace = true
 flate2.workspace = true
 thiserror.workspace = true

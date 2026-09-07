@@ -64,6 +64,15 @@ fn anchor_props(anchor: &Anchor) -> Vec<(String, Value)> {
         Anchor::MarksNamed(m) => {
             vec![("marks-name".to_string(), Value::Str(m.clone()))]
         }
+        // The id as a value where it is a literal, its spelling
+        // otherwise.
+        Anchor::Id(op) => vec![(
+            "node-id".to_string(),
+            match op.as_ref() {
+                crate::ast::Operand::Lit(v @ Value::Int(_)) => v.clone(),
+                other => Value::Str(crate::unparse::operand_text(other)),
+            },
+        )],
     }
 }
 
@@ -422,6 +431,22 @@ impl QueryArbor {
                 );
                 self.walk_operand(base, id);
             }
+            Operand::ValueMeta { base, key } => {
+                let id = self.intern(
+                    Some("value-meta"),
+                    vec![("key".to_string(), Value::Str(key.clone()))],
+                    Some(parent),
+                );
+                self.walk_operand(base, id);
+            }
+            Operand::PeerReg { at, reg } => {
+                let id = self.intern(
+                    Some("peer-reg"),
+                    vec![("ref".to_string(), Value::Str(reg_spelling(reg)))],
+                    Some(parent),
+                );
+                self.walk_operand(at, id);
+            }
             Operand::NamedCaptures => {
                 self.intern(Some("captures"), Vec::new(), Some(parent));
             }
@@ -660,6 +685,14 @@ impl QueryArbor {
             Stage::Map(inner) => {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
                 self.walk_stage(inner, id);
+            }
+            Stage::Repeat { stage, min, max } => {
+                let mut props = vec![("min".to_string(), Value::Int(*min as i64))];
+                if let Some(n) = max {
+                    props.push(("max".to_string(), Value::Int(*n as i64)));
+                }
+                let id = self.intern(Some("repeat"), props, Some(parent));
+                self.walk_stage(stage, id);
             }
         }
     }
@@ -1107,7 +1140,7 @@ fn default_key(kind: &str) -> Option<&'static str> {
         "literal" | "predicate" => Some("value"),
         "step" => Some("matcher"),
         "compare" | "arith" => Some("op"),
-        "recall" => Some("ref"),
+        "recall" | "peer-reg" => Some("ref"),
         "projection" => Some("key"),
         _ => None,
     }

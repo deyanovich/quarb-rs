@@ -32,3 +32,21 @@ fn zip_tree_and_content() {
     assert_eq!(values(&a, "/data/*::::size @| sum"), ["9 B"]);
     assert_eq!(values(&a, "/top.txt::::size"), ["3 B"]);
 }
+
+/// A tarball held in memory reads like one on disk.
+#[test]
+fn tar_from_bytes() {
+    let bytes = {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut ar = tar::Builder::new(gz);
+        let mut h = tar::Header::new_gnu();
+        h.set_size(5);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, "d/a.txt", &b"alpha"[..]).unwrap();
+        ar.into_inner().unwrap().finish().unwrap()
+    };
+    let a = ArchiveAdapter::from_tar_bytes(&bytes).unwrap();
+    assert_eq!(values(&a, "/d/a.txt::"), vec!["alpha"]);
+    assert!(ArchiveAdapter::from_tar_bytes(b"PK\x03\x04 not a tar").is_err());
+}

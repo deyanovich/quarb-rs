@@ -21,6 +21,149 @@ pub struct Model {
     /// `def`/`macro` statements, verbatim, joined with `;` — seeded
     /// into every constructor query's fragment table.
     pub defs_text: String,
+    /// `alias` statements: other spellings a node's name or trait
+    /// answers to (ruling #30 — an alias is a way in, never a way
+    /// out; locators and reflection keep the canonical spelling).
+    pub aliases: Vec<AliasDecl>,
+}
+
+/// What an alias applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasKind {
+    /// A node's name: `alias page document;`, `alias s/\.html$//;`.
+    Name,
+    /// A node's traits: `alias <chunk> <block>;`,
+    /// `alias <s/^tag://i>;`.
+    Trait,
+}
+
+/// How a written spelling is matched against the canonical one.
+#[derive(Debug, Clone)]
+pub enum AliasRule {
+    /// The written `alias` stands for the canonical `original`.
+    Exact { alias: String, original: String },
+    /// A Perl-style substitution `s/pattern/replacement/flags` applied
+    /// to each canonical spelling: the node also answers to what it
+    /// produces. `i` compares case-insensitively; `g` replaces every
+    /// match rather than the first.
+    Subst {
+        pattern: regex::Regex,
+        replacement: String,
+        ignore_case: bool,
+        global: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AliasDecl {
+    pub kind: AliasKind,
+    pub rule: AliasRule,
+}
+
+impl AliasDecl {
+    /// Whether `written` reaches a node whose canonical spelling is
+    /// `canonical` under this alias.
+    pub fn admits(&self, written: &str, canonical: &str) -> bool {
+        match &self.rule {
+            AliasRule::Exact { alias, original } => written == alias && canonical == original,
+            AliasRule::Subst {
+                pattern,
+                replacement,
+                ignore_case,
+                global,
+            } => {
+                // Perl's rule: a substitution that matched nothing
+                // substituted nothing, and admits nothing.
+                if !pattern.is_match(canonical) {
+                    return false;
+                }
+                let produced = if *global {
+                    pattern.replace_all(canonical, replacement.as_str())
+                } else {
+                    pattern.replace(canonical, replacement.as_str())
+                };
+                if *ignore_case {
+                    produced.eq_ignore_ascii_case(written)
+                        || produced.to_lowercase() == written.to_lowercase()
+                } else {
+                    produced == written
+                }
+            }
+        }
+    }
+}
+
+/// Parse one alias body: `NEW ORIGINAL`, `s/pat/rep/flags`, or the
+/// same two forms inside angle brackets for traits.
+fn parse_alias(body: &str, stmt: &str) -> Result<AliasDecl, String> {
+    let body = body.trim();
+    let (kind, body) = match body.strip_prefix('<') {
+        Some(inner) => {
+            let inner = inner.trim_end();
+            let inner = inner.strip_suffix('>').ok_or_else(|| {
+                format!("a trait alias closes its angle bracket: '{stmt}'")
+            })?;
+            // `<chunk> <block>` — two bracketed spellings.
+            let inner = inner.trim();
+            let inner = match inner.split_once("> <") {
+                Some((a, b)) => format!("{} {}", a.trim(), b.trim()),
+                None => inner.to_string(),
+            };
+            (AliasKind::Trait, inner)
+        }
+        None => (AliasKind::Name, body.to_string()),
+    };
+    let body = body.trim();
+    if let Some(rest) = body.strip_prefix("s/") {
+        // s/pattern/replacement/flags, `\/` escaping a slash.
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' && chars.peek() == Some(&'/') {
+                cur.push('/');
+                chars.next();
+            } else if c == '/' {
+                parts.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(c);
+            }
+        }
+        parts.push(cur);
+        if parts.len() != 3 {
+            return Err(format!(
+                "a substitution alias is 's/pattern/replacement/flags': '{stmt}'"
+            ));
+        }
+        let flags = parts[2].trim();
+        for f in flags.chars() {
+            if !matches!(f, 'i' | 'g') {
+                return Err(format!("unknown substitution flag '{f}' (i, g): '{stmt}'"));
+            }
+        }
+        let pattern = regex::Regex::new(&parts[0])
+            .map_err(|e| format!("alias pattern does not parse: {e}: '{stmt}'"))?;
+        return Ok(AliasDecl {
+            kind,
+            rule: AliasRule::Subst {
+                pattern,
+                replacement: parts[1].clone(),
+                ignore_case: flags.contains('i'),
+                global: flags.contains('g'),
+            },
+        });
+    }
+    let (alias, original) = body.split_once(char::is_whitespace).ok_or_else(|| {
+        format!("alias needs 'NEW ORIGINAL' or 's/pattern/replacement/': '{stmt}'")
+    })?;
+    let strip = |t: &str| t.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+    Ok(AliasDecl {
+        kind,
+        rule: AliasRule::Exact {
+            alias: strip(alias),
+            original: strip(original),
+        },
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -390,10 +533,13 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
             "def" | "macro" => {
                 defs.push(format!("{stmt};"));
             }
+            "alias" => {
+                model.aliases.push(parse_alias(rest, stmt)?);
+            }
             other => {
                 return Err(format!(
                     "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/def/macro)"
+                     (expected node/ref/rel/edge/mount/alias/def/macro)"
                 ));
             }
         }

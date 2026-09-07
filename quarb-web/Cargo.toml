@@ -1,0 +1,53 @@
+[package]
+name = "quarb-web"
+description = "The web level for the Quarb query engine: sites, pages, the tree, the links"
+keywords = ["query", "web", "site", "quarb", "arbor"]
+categories = ["parser-implementations", "web-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+# The in-memory stores over a set of files: a tarball (the wasm
+# playground's form) and a directory of built pages.
+default = ["archive", "fs"]
+archive = ["dep:quarb-archive"]
+fs = []
+# The index-backed stores: a local SQLite file (every test runs
+# on it) and PostgreSQL (the corpus store).
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:tokio-postgres", "dep:tokio", "dep:futures-util", "dep:bytes"]
+# The Wikipedia ingest: streams the Enterprise HTML dumps.
+ingest = ["dep:tar", "dep:flate2"]
+# The ingest binary: fills a store from a directory or an archive.
+cli = ["sqlite", "postgres", "ingest", "dep:clap", "dep:anyhow"]
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.29.0" }
+quarb-text = { path = "../quarb-text", version = "0.29.0" }
+quarb-text-html = { path = "../quarb-text-html", version = "0.29.0" }
+quarb-archive = { path = "../quarb-archive", version = "0.29.0", optional = true }
+scraper.workspace = true
+url = "2"
+percent-encoding = "2"
+serde_json.workspace = true
+regex-syntax = "0.8"
+rusqlite = { workspace = true, optional = true }
+tokio-postgres = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "net", "time"], optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink"] }
+bytes = { version = "1", optional = true }
+tar = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[[bin]]
+name = "quarb-web-ingest"
+required-features = ["cli"]
+
+[dev-dependencies]
+quarb-model = { path = "../quarb-model" }

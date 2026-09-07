@@ -1,0 +1,86 @@
+name: "Publish @quarb/wasm to npm"
+
+# Triggers on `npm/v*` tag pushes to this GitHub mirror (the same
+# per-dist tag convention as py/, pyfull/, quai-py/). Builds both
+# wasm modules with wasm-pack, assembles the package via
+# quarb-wasm/npm/mk-npm.sh, and publishes to npm using OIDC
+# trusted publishing — no API token secret needed on the GitHub
+# side, and npm attaches provenance attestations automatically.
+#
+# One-time setup required before the first publish:
+#
+# 1. On npm (https://www.npmjs.com/package/@quarb/wasm/access):
+#    under "Trusted Publisher", select GitHub Actions and set:
+#      Organization or user: deyanovich
+#      Repository:           quarb-rs
+#      Workflow filename:    publish-npm.yml
+#      Environment name:     npm
+#
+# 2. On GitHub (Settings → Environments on this repo):
+#    Create an environment named `npm`. Optional protection rules
+#    (e.g. require approval for deployment) can be added there.
+#
+# Adapted from the kaivrpc-ts publish-npm workflow, plus the
+# wasm-pack build the pure-TS package didn't need. Trusted
+# publishing needs npm >= 11.5.1; Node 24 bundles a new enough one.
+
+on:
+  push:
+    tags:
+      - "npm/v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: npm-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Assemble the package
+        run: bash quarb-wasm/npm/mk-npm.sh
+
+      - name: Check the tag matches the package version
+        run: |
+          TAG_V="${GITHUB_REF_NAME#npm/v}"
+          PKG_V=$(node -p "require('./quarb-wasm/npm/dist/package.json').version")
+          echo "tag: $TAG_V  package: $PKG_V"
+          test "$TAG_V" = "$PKG_V"
+          for f in quarb_wasm.js quarb_wasm_bg.wasm quai_wasm.js \
+                   quai_wasm_bg.wasm index.js index.d.ts quai.js \
+                   README.md LICENSE-MIT LICENSE-APACHE; do
+            test -s "quarb-wasm/npm/dist/$f"
+          done
+
+      - name: Publish
+        run: npm publish
+        working-directory: quarb-wasm/npm/dist

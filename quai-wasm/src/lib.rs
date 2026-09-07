@@ -100,6 +100,18 @@ fn build_doc(
                     )));
                 }
             }
+        } else if format == "site" {
+            // A website as one source: `text` is a JSON object
+            // `{"base": "https://example.org/", "pages": {path: html}}`
+            // — the web level over the memory store, every page
+            // grafted at the text level on entry.
+            let text = field("text")
+                .ok_or_else(|| JsError::new(&format!("'{name}': a site source needs text")))?;
+            let doc = site_doc(&text).map_err(|e| JsError::new(&format!("'{name}': {e}")))?;
+            if let Some(url) = field("url") {
+                urls.push((name.clone(), url));
+            }
+            doc
         } else if let Some(text) = field("text") {
             let mut doc = Doc::parse(&text, &format)
                 .map_err(|e| JsError::new(&format!("'{name}': {e:#}")))?;
@@ -126,6 +138,31 @@ fn build_doc(
     };
     let roots = doc.url_roots(&urls);
     Ok((doc, roots))
+}
+
+/// The web level over pages in memory, riding the session's Boxed
+/// door the way kaiv does: the adapter is Rc-shared between the
+/// Doc and its locator renderer.
+fn site_doc(text: &str) -> Result<Doc, String> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("reading the site: {e}"))?;
+    let base = v.get("base").and_then(|b| b.as_str()).unwrap_or("").to_string();
+    let pages = v
+        .get("pages")
+        .and_then(|p| p.as_object())
+        .ok_or_else(|| "a site needs a \"pages\" object of path to html".to_string())?;
+    let files = pages
+        .iter()
+        .filter_map(|(path, html)| {
+            html.as_str().map(|h| quarb_web::PageFile { path: path.clone(), html: h.to_string() })
+        })
+        .collect();
+    let store = quarb_web::MemoryStore::build(quarb_web::SiteInput { base_url: base, snapshot: None }, files);
+    let a = std::rc::Rc::new(quarb_web::WebAdapter::new(store));
+    let r = a.clone();
+    Ok(Doc::Boxed(
+        quarb_session::doc::Dyn(Box::new(quarb_mount::Shared(a))),
+        Box::new(move |n| r.locator(n)),
+    ))
 }
 
 /// Match a bare capture ref `&<digits><suffix>` (the whole line).

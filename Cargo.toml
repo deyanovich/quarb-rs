@@ -24,6 +24,7 @@ members = [
     "quarb-xlsx",
     "quarb-xml",
     "quarb-archive",
+    "quarb-web",
     "quarb-bigquery",
     "quarb-tree-sitter",
     "quarb-code",
@@ -87,7 +88,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.28.0"
+version = "0.29.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

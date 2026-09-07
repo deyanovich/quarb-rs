@@ -375,6 +375,7 @@ fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
         | Stage::RecordWith(_)
         | Stage::Spread { .. }
         | Stage::Map(_) => PipeMode::Scalar,
+        Stage::Repeat { stage, .. } => stage_mode_out(stage, cur),
     }
 }
 
@@ -720,7 +721,32 @@ impl Parser<'_> {
                         }
                         continue;
                     }
-                    let stage = self.pipe_item(mode)?;
+                    let mut stage = self.pipe_item(mode)?;
+                    // `.v(body){N}` — a quantifier on a push repeats
+                    // it (ruling #60).
+                    if let Some(&Token::Quant { min, max }) = self.peek() {
+                        if !matches!(
+                            stage,
+                            Stage::Push(_)
+                                | Stage::ExprPush { .. }
+                                | Stage::Subcontext { .. }
+                                | Stage::RecordPush { .. }
+                                | Stage::FieldsPush
+                        ) {
+                            return Err(QuarbError::Parse(
+                                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')".into(),
+                            ));
+                        }
+                        if max.is_some_and(|n| n < min) {
+                            return Err(QuarbError::Parse(format!("a quantifier's bounds are ordered: {{{min};{}}}", max.unwrap())));
+                        }
+                        self.pos += 1;
+                        stage = Stage::Repeat {
+                            stage: Box::new(stage),
+                            min,
+                            max,
+                        };
+                    }
                     mode = stage_mode_out(&stage, mode);
                     pipeline.push(stage);
                 }
@@ -1174,6 +1200,7 @@ impl Parser<'_> {
             Some(t) if axis(t) => true,
             Some(Token::Caret) => true,
             Some(Token::MarkOpen) => self.mark_anchor_ahead(),
+            Some(Token::IdAnchorOpen) => true,
             Some(Token::LParen) => self.toks.get(self.pos + 1).is_some_and(axis),
             _ => false,
         }
@@ -1188,6 +1215,9 @@ impl Parser<'_> {
                 matches!(text.as_str(), "+" | "-" | "*" | "div" | "idiv" | "mod")
             }
             Some(Token::Question) => true,
+            // `| <-link:.v` — a path with a register accessor glued
+            // to it is the cross-capsa read, an expression.
+            Some(Token::Capsa(_)) => true,
             _ => false,
         }
     }
@@ -1978,6 +2008,9 @@ impl Parser<'_> {
                     | Token::RParen
                     | Token::Correlate
                     | Token::Semi
+                    // `X:.r` — a register accessor glued to the
+                    // path closes the walk: the cross-capsa read.
+                    | Token::Capsa(_)
             ) {
                 break;
             }
@@ -2317,7 +2350,7 @@ impl Parser<'_> {
 
     /// Peek-only form of [`Self::mark_anchor`], for match guards.
     fn mark_anchor_ahead(&self) -> bool {
-        self.peek_anchor().is_some()
+        self.peek_anchor().is_some() || matches!(self.peek(), Some(Token::IdAnchorOpen))
     }
 
     /// The pointer for the retired single-paren anchor: `(name)`,
@@ -2330,6 +2363,7 @@ impl Parser<'_> {
             let spelled = match anchor {
                 Anchor::MarksAll => "((@))".to_string(),
                 Anchor::MarksNamed(n) => format!("((@{n}))"),
+                Anchor::Id(op) => format!("((!{}))", crate::unparse::operand_text(&op)),
                 Anchor::Mark(n) => format!("$$.{n}"),
                 Anchor::MarkIndex(n) => format!("$$.{n}"),
                 _ => "$$.".to_string(),
@@ -2430,9 +2464,28 @@ impl Parser<'_> {
     /// Consume the rounded anchor [`Self::peek_anchor`] saw, if
     /// any; leaves the position untouched otherwise.
     fn mark_anchor(&mut self) -> Option<Anchor> {
+        if matches!(self.peek(), Some(Token::IdAnchorOpen)) {
+            return self.id_anchor().ok();
+        }
         let (anchor, len) = self.peek_anchor()?;
         self.pos += len;
         Some(anchor)
+    }
+
+    /// `((!expr))` — the node-id anchor: the opener, an expression
+    /// yielding the id, the two closing parens.
+    fn id_anchor(&mut self) -> Result<Anchor> {
+        self.pos += 1;
+        let op = self.additive()?;
+        for _ in 0..2 {
+            if !matches!(self.peek(), Some(Token::RParen)) {
+                return Err(QuarbError::Parse(
+                    "expected '))' to close the node-id anchor '((!…))'".into(),
+                ));
+            }
+            self.pos += 1;
+        }
+        Ok(Anchor::Id(Box::new(op)))
     }
 
     /// The argument list of a `%(...)` / `%%(...)` record form —
@@ -3372,6 +3425,47 @@ impl Parser<'_> {
         } else {
             self.unary_primary()?
         };
+        // `X:.r` — the cross-capsa read (ruling #57): a register
+        // accessor glued to a node path reads the register of the
+        // capsa standing at the node. The node side must be a bare
+        // node operand — a path, `_`, `$$N` — without a projection
+        // (a projected path is a value, and a value has no capsa).
+        if let Some(Token::Capsa(body)) = self.peek() {
+            let body = body.clone();
+            let reg = match body.as_str() {
+                "." => RegRef::Top,
+                "@." => RegRef::Whole,
+                "%." => RegRef::Record,
+                "%%." => RegRef::FullRecord,
+                b => {
+                    let rest = &b[1..];
+                    match rest.parse::<usize>() {
+                        Ok(n) => RegRef::Index(n),
+                        Err(_) => RegRef::Named(rest.to_string()),
+                    }
+                }
+            };
+            let bare = |o: &Operand| {
+                matches!(
+                    o,
+                    Operand::Rel { projection: None, .. } | Operand::Ctx { projection: None, .. }
+                )
+            };
+            let ok = match &o {
+                Operand::Outer(inner) => bare(inner),
+                other => bare(other),
+            };
+            if !ok {
+                return Err(QuarbError::Parse(format!(
+                    "':{body}' reads the register of the capsa standing at a node: write it after a node path (<-link:{body}, \\/*:{body})"
+                )));
+            }
+            self.pos += 1;
+            o = Operand::PeerReg {
+                at: Box::new(o),
+                reg,
+            };
+        }
         while matches!(self.peek(), Some(Token::Field)) {
             self.pos += 1;
             let name = match self.bump() {
@@ -3390,6 +3484,19 @@ impl Parser<'_> {
                 base: Box::new(o),
                 name,
             };
+        }
+        // `value:::key` — a value's provenance (the core-metadata
+        // rung after a register value or the topic). A node path
+        // parsed its own `:::` as a projection already.
+        while matches!(self.peek(), Some(Token::ColonColonColon)) {
+            if !matches!(o, Operand::Recall(_) | Operand::Topic | Operand::Field { .. } | Operand::ValueMeta { .. } | Operand::Piped { .. } | Operand::PeerReg { .. }) {
+                return Err(QuarbError::Parse(
+                    "':::key' after a value reads its provenance: write it after a register value ($.name), the topic ($_), or a record field".into(),
+                ));
+            }
+            self.pos += 1;
+            let key = self.require_projection_name("value provenance `:::`")?;
+            o = Operand::ValueMeta { base: Box::new(o), key };
         }
         Ok(o)
     }
@@ -3827,7 +3934,7 @@ impl Parser<'_> {
             // parenthesized expressions keep `(` otherwise. The
             // plural forms gather values from every matching mark
             // (existential, like any multi-valued operand).
-            Some(Token::MarkOpen) if self.mark_anchor_ahead() => {
+            Some(Token::MarkOpen | Token::IdAnchorOpen) if self.mark_anchor_ahead() => {
                 let anchor = self.mark_anchor().expect("lookahead hit");
                 let mut steps = Vec::new();
                 loop {
@@ -4745,8 +4852,21 @@ impl Parser<'_> {
         }
         match self.peek() {
             Some(Token::Name { text, .. }) => {
-                let name = text.clone();
+                let mut name = text.clone();
                 self.pos += 1;
+                // A namespaced trait — `<tag:pandas>`,
+                // `<category:Guides>`: inside the angle brackets no
+                // record is in scope, so a glued colon joins the
+                // name rather than reading a field.
+                while matches!(self.peek(), Some(Token::Field))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::Name { .. }))
+                {
+                    self.pos += 1;
+                    if let Some(Token::Name { text, .. }) = self.bump() {
+                        name.push(':');
+                        name.push_str(text);
+                    }
+                }
                 Some(TExpr::Has(name))
             }
             Some(Token::LParen) => {
@@ -5318,6 +5438,9 @@ fn subst_query(q: &mut Query, map: &Subst<'_>) {
         subst_query(corr, map);
     }
     for b in &mut q.branches {
+        if let Anchor::Id(op) = &mut b.anchor {
+            subst_operand(op, map);
+        }
         for elem in &mut b.steps {
             subst_elem(elem, map);
         }
@@ -5369,6 +5492,9 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
         }
         Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => subst_operand(e, map),
         Stage::Nav(b) => {
+            if let Anchor::Id(op) = &mut b.anchor {
+                subst_operand(op, map);
+            }
             for elem in &mut b.steps {
                 subst_elem(elem, map);
             }
@@ -5376,7 +5502,7 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
         Stage::Subcontext { body, .. } => subst_query(body, map),
         Stage::Filter(e) => subst_pred_expr(e, map),
         Stage::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
-        Stage::Map(inner) => subst_stage(inner, map),
+        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => subst_stage(inner, map),
         Stage::Select(_) | Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => {}
     }
 }
@@ -5417,7 +5543,15 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 *o = arg.clone();
             }
         }
-        Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => {
+        Operand::Rel { steps, anchor, .. } => {
+            if let Anchor::Id(op) = anchor {
+                subst_operand(op, map);
+            }
+            for elem in steps {
+                subst_elem(elem, map);
+            }
+        }
+        Operand::Ctx { steps, .. } => {
             for elem in steps {
                 subst_elem(elem, map);
             }
@@ -5427,7 +5561,8 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
             subst_operand(right, map);
         }
         Operand::Neg(inner) => subst_operand(inner, map),
-        Operand::Field { base, .. } => subst_operand(base, map),
+        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => subst_operand(base, map),
+        Operand::PeerReg { at, .. } => subst_operand(at, map),
         Operand::List(items) => {
             for item in items {
                 subst_operand(item, map);
@@ -5538,7 +5673,7 @@ fn max_ctx_stage(st: &Stage) -> usize {
         Stage::Subcontext { body, .. } => max_ctx_query(body),
         Stage::Filter(e) => max_ctx_pred_expr(e),
         Stage::Select(p) => max_ctx_pred(p),
-        Stage::Map(inner) => max_ctx_stage(inner),
+        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => max_ctx_stage(inner),
         Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => 0,
     }
 }
@@ -5734,7 +5869,11 @@ fn op_mentions_outer(o: &Operand) -> bool {
                 | Anchor::MarksNamed(_),
             ..
         } => true,
-        Operand::Field { base, .. } => op_mentions_outer(base),
+        Operand::Rel { anchor: Anchor::Id(op), steps, .. } => {
+            op_mentions_outer(op) || steps.iter().any(elem_mentions_outer)
+        }
+        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => op_mentions_outer(base),
+        Operand::PeerReg { at, .. } => op_mentions_outer(at),
         Operand::List(items) => items.iter().any(op_mentions_outer),
         Operand::Ctx { steps, .. } | Operand::Rel { steps, .. } => {
             steps.iter().any(elem_mentions_outer)
@@ -5804,7 +5943,7 @@ fn stage_mentions_outer(st: &Stage) -> bool {
         Stage::Subcontext { body, .. } => query_mentions_outer(body),
         Stage::Filter(e) => pred_mentions_outer(e),
         Stage::Select(Predicate::Expr(e)) => pred_mentions_outer(e),
-        Stage::Map(inner) => stage_mentions_outer(inner),
+        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => stage_mentions_outer(inner),
         _ => false,
     }
 }

@@ -29,28 +29,108 @@ pub struct NodeId(pub u64);
 /// wins per component).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Provenance {
-    /// Where the datum came from (a URI, a path, a repo).
+    /// Where the datum came from: the document, file, store or
+    /// page — the innermost source that holds the node (a grafted
+    /// node's source is the file the graft opened, not the
+    /// directory above it).
     pub source: Option<String>,
-    /// The datum's own instant — `(secs, nanos, offset_min)`, the
-    /// shape `Value::Instant` carries. Never the invocation clock.
+    /// The node's path within its source — its name-path from the
+    /// source's root — so a source and a path name the node
+    /// without the engine's id. Filled by the layer that knows
+    /// where the source begins (a mount, a graft), else by the
+    /// engine from the arbor root.
+    pub path: Option<String>,
+    /// When the datum was observed — `(secs, nanos, offset_min)`,
+    /// the shape `Value::Instant` carries — by the rung
+    /// [`instant_from`](Self::instant_from) names.
     pub instant: Option<(i64, u32, Option<i16>)>,
+    /// Which rung answered the instant: the datum's own
+    /// timestamp, its source's modification time, or the moment of
+    /// reading. `None` with no instant.
+    pub instant_from: Option<InstantFrom>,
     /// The source-assigned data-point identifier (kaiv `#dpid`).
     pub dpid: Option<String>,
 }
 
+/// The rung an instant came from — three facts that share one
+/// field: a row's own timestamp, a file's mtime, the clock at the
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstantFrom {
+    /// The datum's own timestamp (a kaiv `@ts`, a commit date, a
+    /// row's `modified`).
+    Node,
+    /// The source's modification time (a file's mtime).
+    Source,
+    /// The moment the query read it: the invocation instant.
+    Access,
+}
+
+impl InstantFrom {
+    pub fn name(self) -> &'static str {
+        match self {
+            InstantFrom::Node => "node",
+            InstantFrom::Source => "source",
+            InstantFrom::Access => "access",
+        }
+    }
+}
+
 impl Provenance {
     /// Component-wise layering: `self` (inner, more specific) wins;
-    /// missing components fill from `outer`.
+    /// missing components fill from `outer`. The instant and its
+    /// rung travel together.
     pub fn or(self, outer: Provenance) -> Provenance {
+        let (instant, instant_from) = if self.instant.is_some() {
+            (self.instant, self.instant_from)
+        } else {
+            (outer.instant, outer.instant_from)
+        };
         Provenance {
             source: self.source.or(outer.source),
-            instant: self.instant.or(outer.instant),
+            path: self.path.or(outer.path),
+            instant,
+            instant_from,
             dpid: self.dpid.or(outer.dpid),
         }
     }
 
+    /// Nothing recorded — the path does not count, it is derivable.
     pub fn is_empty(&self) -> bool {
         self.source.is_none() && self.instant.is_none() && self.dpid.is_none()
+    }
+
+    /// The instant re-labelled as the source's — what a graft does
+    /// to the file's own mtime when it fills a node inside the file.
+    pub fn as_source_rung(mut self) -> Provenance {
+        if self.instant.is_some() {
+            self.instant_from = Some(InstantFrom::Source);
+        }
+        self
+    }
+
+    /// The canonical text of a list: `?a@ts#x;b#y;+N` — one `?`,
+    /// the entries separated by `;` (kaiv's list separator), each
+    /// in its own optionality grammar, the elision marker `+N` last
+    /// when `elided > 0`. `None` when no entry has a component.
+    pub fn canonical_list(entries: &[Provenance], elided: u32) -> Option<String> {
+        // Entries that write alike are one in the text (the path is
+        // not part of it).
+        let mut parts: Vec<String> = Vec::new();
+        for c in entries.iter().filter_map(|e| e.canonical()) {
+            let c = c.trim_start_matches('?').to_string();
+            if !parts.contains(&c) {
+                parts.push(c);
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let mut out = format!("?{}", parts.join(";"));
+        if elided > 0 {
+            out.push_str(&format!(";+{elided}"));
+        }
+        Some(out)
     }
 
     /// The composite canonical text `?src@ts#dpid` — kaiv's
@@ -65,9 +145,11 @@ impl Provenance {
         if let Some(src) = &self.source {
             out.push_str(src);
         }
-        if let Some((secs, nanos, offset)) = self.instant {
+        if let Some((secs, _, offset)) = self.instant {
+            // kaiv's instant has no sub-second field: whole seconds,
+            // whatever the rung recorded.
             out.push('@');
-            out.push_str(&crate::temporal::format_instant(secs, nanos, offset));
+            out.push_str(&crate::temporal::format_instant(secs, 0, offset));
         }
         if let Some(dpid) = &self.dpid {
             out.push('#');
@@ -75,6 +157,68 @@ impl Provenance {
         }
         Some(out)
     }
+}
+
+/// A node's provenance as a list: several entries where the datum
+/// was recorded from several sources (a kaiv leaf's `?a;b`), and how
+/// many further sources the record elides (its `;+N`). The singular
+/// [`AstAdapter::provenance`] is the list's anchoring first entry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProvenanceList {
+    pub entries: Vec<Provenance>,
+    pub elided: u32,
+}
+
+impl ProvenanceList {
+    /// The one-entry list — empty when the entry is.
+    pub fn single(p: Provenance) -> ProvenanceList {
+        ProvenanceList {
+            entries: if p.is_empty() { Vec::new() } else { vec![p] },
+            elided: 0,
+        }
+    }
+
+    /// The anchoring entry (the first), empty when there is none.
+    pub fn first(&self) -> Provenance {
+        self.entries.first().cloned().unwrap_or_default()
+    }
+
+    /// The latest instant any entry carries: a datum with several
+    /// sources is as fresh as its newest.
+    pub fn instant_max(&self) -> Option<(i64, u32, Option<i16>)> {
+        self.entries
+            .iter()
+            .filter_map(|p| p.instant)
+            .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+    }
+
+    /// The canonical list text, `?a@ts#x;b#y;+N`.
+    pub fn canonical(&self) -> Option<String> {
+        Provenance::canonical_list(&self.entries, self.elided)
+    }
+
+    /// Component-wise layering of every entry over `outer` (see
+    /// [`Provenance::or`]); an empty list takes `outer` as its one
+    /// entry.
+    pub fn or(self, outer: Provenance) -> ProvenanceList {
+        if self.entries.is_empty() {
+            return ProvenanceList { entries: ProvenanceList::single(outer).entries, elided: self.elided };
+        }
+        ProvenanceList {
+            entries: self.entries.into_iter().map(|p| p.or(outer.clone())).collect(),
+            elided: self.elided,
+        }
+    }
+}
+
+/// The direction of a crosslink walk, for the batching hint
+/// [`AstAdapter::prefetch_links`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkDir {
+    /// `->`: the links a node carries.
+    Out,
+    /// `<-`: the links that reach a node.
+    In,
 }
 
 /// The interface a data source implements to be queried by Quarb.
@@ -150,6 +294,18 @@ pub trait AstAdapter {
         self.name(node).as_deref() == Some(name)
     }
 
+    /// Whether `node` bears `name` as a trait, as written in a
+    /// `<...>` clause. The default is membership in
+    /// [`traits`](Self::traits); an adapter may declare aliases the
+    /// way [`answers_to`](Self::answers_to) does for names — a
+    /// model file's `alias <chunk> <block>;` or
+    /// `alias <s/^tag://i>;` — and the engine consults this
+    /// wherever a written trait is matched. Reflection and
+    /// serialization print the canonical traits only.
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.traits(node).iter().any(|t| t == name)
+    }
+
     /// The default projection of `node` — bare `::`, adapter-specific
     /// (a filesystem adapter returns file content).
     fn default_value(&self, _node: NodeId) -> Option<Value> {
@@ -192,9 +348,10 @@ pub trait AstAdapter {
         Vec::new()
     }
 
-    /// Resolve a cross-reference: `::property~>hint` maps `node`'s
+    /// Resolve a cross-reference: `::property-->hint` maps `node`'s
     /// `property` (a value that references another node) to its target,
-    /// with an optional adapter-specific relation `hint`. A JSON
+    /// with an optional adapter-specific `hint` (a relation type such as
+    /// an html `rel`, or a target container such as a table). A JSON
     /// adapter resolves a `$ref` JSON Pointer; `None` if unresolvable.
     fn resolve(&self, _node: NodeId, _property: &str, _hint: Option<&str>) -> Option<NodeId> {
         None
@@ -253,6 +410,44 @@ pub trait AstAdapter {
         None
     }
 
+    /// The document this arbor holds under an external-reference
+    /// identifier (a URL, fragment-stripped), when it can answer
+    /// without the host's registration: the landing rung of `-->`
+    /// after the mounted-document table misses. An adapter over a
+    /// store of pages answers by URL lookup; the engine performs
+    /// no IO either way.
+    fn document_by_ref(&self, _id: &str) -> Option<NodeId> {
+        None
+    }
+
+    /// Every node whose `property` (or, when `None`, own reference
+    /// property) resolves to `node`, in document order — the
+    /// reverse index behind `<--`. `None` keeps the engine's walk
+    /// of the whole arbor; `Some` is the adapter's complete answer.
+    fn reverse_resolve(
+        &self,
+        _node: NodeId,
+        _property: Option<&str>,
+        _hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        None
+    }
+
+    /// The descendants of `node` that answer to `name`, each with
+    /// its depth (children are depth 1), in document order — the
+    /// fast path behind `//name` for an adapter whose substrate
+    /// indexes names. `None` keeps the engine's walk; `Some` must
+    /// be exactly what the walk would find.
+    fn descendants_named(&self, _node: NodeId, _name: &str) -> Option<Vec<(NodeId, usize)>> {
+        None
+    }
+
+    /// A batching hint: the engine is about to follow `dir`
+    /// crosslinks from every node in `nodes`. An adapter backed by
+    /// a store may fetch them in one statement; semantics are
+    /// unchanged either way.
+    fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+
     /// The quantifier bound N_max: the depth to which open-ended path
     /// quantifiers (`+`, `*`, `{m,}`) expand, and the ceiling of any
     /// explicit `{m,n}` (the effective upper bound is min(n, N_max)).
@@ -293,6 +488,36 @@ pub trait AstAdapter {
         Provenance::default()
     }
 
+    /// Whether `node` is an id this adapter minted — the guard
+    /// behind the node-id anchor `((!N))`, which may name an id
+    /// from an earlier run (ids are minted deterministically: the
+    /// same source, the same ids). The default probes the id
+    /// through `parent` and `name` and treats a panic as absence,
+    /// so an adapter that indexes by id needs no override; one that
+    /// can answer cheaply should.
+    fn has_node(&self, node: NodeId) -> bool {
+        if node == self.root() {
+            return true;
+        }
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.parent(node).is_some() || self.name(node).is_some()
+        }))
+        .unwrap_or(false);
+        std::panic::set_hook(hook);
+        ok
+    }
+
+    /// The data provenance of `node` as a list — every source the
+    /// substrate records for the datum, and how many it elides.
+    /// The default is the singular answer as a one-entry list; an
+    /// adapter whose substrate records several (kaiv's `?a;b;+N`)
+    /// overrides it, and a wrapper layers each entry.
+    fn provenance_list(&self, node: NodeId) -> ProvenanceList {
+        ProvenanceList::single(self.provenance(node))
+    }
+
     /// The scale of a unit expression — (factor, canonical SI-base
     /// expansion) — for the unital reading's criterion text (spec:
     /// The Quantital Fragment). The default answers from the
@@ -322,6 +547,16 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
     }
     fn name(&self, node: NodeId) -> Option<String> {
         self.inner.name(node)
+    }
+
+    /// Aliases (ruling #30) and trait aliases pass through: the
+    /// wrapped adapter's word, not name equality on this layer.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.inner.answers_to(node, name)
+    }
+
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.inner.has_trait(node, name)
     }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.inner.parent(node)
@@ -373,6 +608,18 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
         name: &str,
     ) -> Option<Value> {
         self.inner.link_property(source, label, target, name)
+    }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.inner.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
+        self.inner.reverse_resolve(n, p, h)
+    }
+    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.inner.descendants_named(n, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: LinkDir) {
+        self.inner.prefetch_links(nodes, dir)
     }
     fn quantifier_bound(&self) -> usize {
         self.bound
@@ -408,6 +655,16 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
     fn name(&self, node: NodeId) -> Option<String> {
         self.inner.name(node)
     }
+
+    /// Aliases (ruling #30) and trait aliases pass through: the
+    /// wrapped adapter's word, not name equality on this layer.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.inner.answers_to(node, name)
+    }
+
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.inner.has_trait(node, name)
+    }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.inner.parent(node)
     }
@@ -458,6 +715,18 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
         name: &str,
     ) -> Option<Value> {
         self.inner.link_property(source, label, target, name)
+    }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.inner.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
+        self.inner.reverse_resolve(n, p, h)
+    }
+    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.inner.descendants_named(n, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: LinkDir) {
+        self.inner.prefetch_links(nodes, dir)
     }
     fn quantifier_bound(&self) -> usize {
         self.inner.quantifier_bound()
@@ -495,6 +764,16 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
     fn name(&self, node: NodeId) -> Option<String> {
         self.inner.name(node)
     }
+
+    /// Aliases (ruling #30) and trait aliases pass through: the
+    /// wrapped adapter's word, not name equality on this layer.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.inner.answers_to(node, name)
+    }
+
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.inner.has_trait(node, name)
+    }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.inner.parent(node)
     }
@@ -545,6 +824,18 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
         name: &str,
     ) -> Option<Value> {
         self.inner.link_property(source, label, target, name)
+    }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.inner.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
+        self.inner.reverse_resolve(n, p, h)
+    }
+    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.inner.descendants_named(n, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: LinkDir) {
+        self.inner.prefetch_links(nodes, dir)
     }
     fn quantifier_bound(&self) -> usize {
         self.inner.quantifier_bound()

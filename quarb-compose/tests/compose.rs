@@ -53,7 +53,8 @@ fn archive_leaves_graft_by_path() {
     let tarball = {
         let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut ar = tar::Builder::new(gz);
-        let json = br#"{"services": [{"name": "web", "port": 8080}, {"name": "db", "port": 5432}]}"#;
+        let json =
+            br#"{"services": [{"name": "web", "port": 8080}, {"name": "db", "port": 5432}]}"#;
         let mut h = tar::Header::new_gnu();
         h.set_size(json.len() as u64);
         h.set_mode(0o644);
@@ -76,8 +77,7 @@ fn archive_leaves_graft_by_path() {
         ["web"]
     );
     // Without the path hook, the binary leaf stays a leaf.
-    let without =
-        ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
+    let without = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
     assert_eq!(values(&without, "/app.tar.gz/* @| count"), ["0"]);
 }
 
@@ -165,11 +165,7 @@ fn source_graft_level_is_per_mount() {
         "/// Scan.\npub fn lex(input: &str) -> usize {\n    fn is_name_char(c: char) -> bool {\n        c.is_alphanumeric()\n    }\n    input.chars().filter(|c| is_name_char(*c)).count()\n}\n",
     )
     .unwrap();
-    std::fs::write(
-        dir.join("util.py"),
-        "def helper(a, b):\n    return a + b\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("util.py"), "def helper(a, b):\n    return a + b\n").unwrap();
     std::fs::write(
         dir.join("main.c"),
         "static int helper(int a, int b) { return a + b; }\n",
@@ -178,7 +174,10 @@ fn source_graft_level_is_per_mount() {
 
     // Default: the syntax level, exactly as before.
     let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
-    assert_eq!(values(&a, "/lexer.rs//function_item::name"), ["lex", "is_name_char"]);
+    assert_eq!(
+        values(&a, "/lexer.rs//function_item::name"),
+        ["lex", "is_name_char"]
+    );
     assert_eq!(values(&a, "//lex @| count"), ["0"]);
 
     // Opted up: the code level, one namespace — dirs, files,
@@ -198,5 +197,103 @@ fn source_graft_level_is_per_mount() {
         _ => panic!("expected nodes"),
     };
     let fs_locator = |n| a.outer().path(n).display().to_string();
-    assert!(a.locator(node, fs_locator).ends_with("lexer.rs!/lex/is_name_char"));
+    assert!(
+        a.locator(node, fs_locator)
+            .ends_with("lexer.rs!/lex/is_name_char")
+    );
+}
+
+/// A site as a tarball of pages, read at the text level: every
+/// page grafts as sections and paragraphs, and the file that
+/// holds a page wears what the page's head declares — its tags
+/// as traits, its category, its Open Graph facts.
+#[test]
+fn a_tarball_of_pages_at_the_text_level() {
+    use quarb_archive::ArchiveAdapter;
+    use quarb_compose::DocumentGraft;
+    let page = |name: &str, title: &str, section: &str, tags: &str, body: &str| {
+        format!(
+            r##"<!doctype html><html lang="en"><head><title>{title}</title>
+<meta name="keywords" content="{tags}">
+<meta property="article:section" content="{section}">
+<meta property="og:type" content="article">
+<link rel="canonical" href="https://quarb.org/{name}">
+</head><body><nav>chrome</nav><main><h1>{title}</h1>{body}</main><footer>foot</footer></body></html>"##
+        )
+    };
+    let files = [
+        (
+            "capsa.html",
+            page(
+                "capsa.html",
+                "Capsa",
+                "Data Model",
+                "capsa, register",
+                "<h2>The register</h2><p>The register holds push-only scalars.</p>",
+            ),
+        ),
+        (
+            "guides/jq.html",
+            page(
+                "guides/jq.html",
+                "Quarb for jq Users",
+                "Guides",
+                "guide, jq",
+                "<h2>Filters</h2><p>select becomes a predicate.</p>",
+            ),
+        ),
+        (
+            "guides/sql.html",
+            page(
+                "guides/sql.html",
+                "Quarb for SQL Users",
+                "Guides",
+                "guide, sql",
+                "<h2 id=\"joins\">Joins</h2><p>The register keeps the witness.</p>",
+            ),
+        ),
+    ];
+    let bytes = {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut ar = tar::Builder::new(gz);
+        for (name, html) in &files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(html.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, name, html.as_bytes()).unwrap();
+        }
+        ar.into_inner().unwrap().finish().unwrap()
+    };
+    let site = ComposeAdapter::new(ArchiveAdapter::from_tar_bytes(&bytes).unwrap())
+        .with_document_graft(DocumentGraft::Text);
+    // The text level, not the DOM: sections and paragraphs, chrome gone.
+    assert_eq!(
+        values(&site, "/guides/jq.html//section::lemma"),
+        vec!["Quarb for jq Users", "Filters"]
+    );
+    assert_eq!(
+        values(&site, "//paragraph[:: *= \"register\"] | \\::lemma"),
+        vec!["The register", "Joins"]
+    );
+    // A page's declared tags are the traits of the file that holds it.
+    assert_eq!(
+        values(&site, "//*<tag:guide>::title"),
+        vec!["Quarb for jq Users", "Quarb for SQL Users"]
+    );
+    assert_eq!(values(&site, "//*<tag:capsa>::category"), vec!["Data Model"]);
+    assert_eq!(
+        values(&site, "//*[::category = \"Guides\"]::tags"),
+        vec!["guide, jq", "guide, sql"]
+    );
+    // ...and every declaration, verbatim, under the name it was made with.
+    assert_eq!(values(&site, "/capsa.html::::\"og:type\""), vec!["article"]);
+    // A hit links back to its page, narrowed to its section.
+    assert_eq!(
+        values(&site, "//paragraph[:: *= \"witness\"] | link | :href"),
+        vec!["https://quarb.org/guides/sql.html#joins:~:text=The%20register%20keeps%20the%20witness%2E"]
+    );
+    // The DOM level is still the default.
+    let dom = ComposeAdapter::new(ArchiveAdapter::from_tar_bytes(&bytes).unwrap());
+    assert_eq!(values(&dom, "/capsa.html//h2::"), vec!["The register"]);
 }

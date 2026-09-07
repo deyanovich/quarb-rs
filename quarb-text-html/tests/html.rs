@@ -149,9 +149,7 @@ fn html_round_trips() {
         let a = quarb::run(q, &m).unwrap();
         let b = quarb::run(q, &m2).unwrap();
         let show = |r: quarb::QueryResult| match r {
-            quarb::QueryResult::Values(vs) => {
-                vs.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-            }
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
             quarb::QueryResult::Nodes(_) => panic!("expected values"),
         };
         assert_eq!(show(a), show(b), "round trip diverged on {q}");
@@ -174,9 +172,7 @@ fn infobox_row_labels() {
         </tbody></table>"#,
     );
     let vals = |q: &str| match quarb::run(q, &m).unwrap() {
-        quarb::QueryResult::Values(vs) => {
-            vs.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-        }
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };
     assert_eq!(vals("//*<table>::lemma"), vec!["Emu War"]);
@@ -305,12 +301,199 @@ fn marginalia_is_the_aside_family() {
         ["The advance stalled at the fence line."]
     );
     // the cited one resolves the noteref through the open family
-    assert_eq!(
-        vals(&m, r#"/aside[::onym = "mg"]<-aside @| count"#),
-        ["2"]
-    );
+    assert_eq!(vals(&m, r#"/aside[::onym = "mg"]<-aside @| count"#), ["2"]);
     assert_eq!(vals(&m, "//*<note> @| count"), ["0"]);
     // the Tufte class is ordinary prose, not an aside
     assert_eq!(vals(&m, "//aside @| count"), ["5"]);
     assert_eq!(vals(&m, "//*<dangling> @| count"), ["0"]);
+}
+
+// ---------------------------------------------------------------
+// Declared identity: what the head says lands on the document.
+
+const META_DOC: &str = r##"<!doctype html>
+<html lang="en">
+  <head>
+    <title>Quarb — Capsa: The Data a Query Carries</title>
+    <link rel="canonical" href="https://quarb.org/capsa.html">
+    <meta name="description" content="The register and the marks">
+    <meta name="keywords" content="capsa, register, Execution Model">
+    <meta name="author" content="The Quarb Project">
+    <meta property="og:type" content="article">
+    <meta property="article:section" content="Data Model">
+    <meta property="article:tag" content="marks">
+    <meta property="article:published_time" content="2026-09-05T10:00:00Z">
+    <script type="application/ld+json">
+    {"@context": "https://schema.org", "@type": "TechArticle",
+     "headline": "Capsa", "keywords": ["capsa", "topic"],
+     "author": {"@type": "Organization", "name": "The Quarb Project"}}
+    </script>
+  </head>
+  <body>
+    <main>
+      <h1>Capsa</h1>
+      <p>The capsule of state. See <a rel="tag" href="/tags/context">context</a>.</p>
+    </main>
+  </body>
+</html>"##;
+
+#[test]
+fn head_declarations_land_on_the_document() {
+    use quarb::{AstAdapter, Value};
+    let m = quarb_text_html::parse(META_DOC);
+    let root = m.root();
+    // The curated core: tags as traits, in trait spelling; the
+    // category too.
+    let traits = m.traits(root);
+    for t in [
+        "tag:capsa",
+        "tag:register",
+        "tag:Execution-Model",
+        "tag:marks",
+        "tag:topic",
+        "tag:context",
+        "category:Data-Model",
+    ] {
+        assert!(
+            traits.contains(&t.to_string()),
+            "missing trait {t} in {traits:?}"
+        );
+    }
+    assert_eq!(
+        m.property(root, "tags"),
+        Some(Value::List(
+            [
+                "capsa",
+                "register",
+                "Execution Model",
+                "topic",
+                "marks",
+                "context"
+            ]
+            .iter()
+            .map(|s| Value::Str(s.to_string()))
+            .collect()
+        ))
+    );
+    assert_eq!(
+        m.property(root, "category"),
+        Some(Value::Str("Data Model".into()))
+    );
+    assert_eq!(
+        m.property(root, "description"),
+        Some(Value::Str("The register and the marks".into()))
+    );
+    assert_eq!(
+        m.property(root, "author"),
+        Some(Value::Str("The Quarb Project".into()))
+    );
+    assert_eq!(
+        m.property(root, "title"),
+        Some(Value::Str("Quarb — Capsa: The Data a Query Carries".into()))
+    );
+    assert!(matches!(
+        m.property(root, "published"),
+        Some(Value::Instant { .. })
+    ));
+    // The lossless layer: every declaration under its own name.
+    assert_eq!(
+        m.metadata(root, "og:type"),
+        Some(Value::Str("article".into()))
+    );
+    assert_eq!(
+        m.metadata(root, "article:section"),
+        Some(Value::Str("Data Model".into()))
+    );
+    assert_eq!(
+        m.metadata(root, "schema:@type"),
+        Some(Value::Str("TechArticle".into()))
+    );
+    assert_eq!(
+        m.metadata(root, "schema:author.name"),
+        Some(Value::Str("The Quarb Project".into()))
+    );
+    assert_eq!(m.metadata(root, "lang"), Some(Value::Str("en".into())));
+    assert_eq!(
+        m.metadata(root, "canonical"),
+        Some(Value::Str("https://quarb.org/capsa.html".into()))
+    );
+    // Sections are untouched: no page traits leak onto them.
+    let section = m.children(root)[0];
+    assert!(!m.traits(section).contains(&"tag:capsa".to_string()));
+    assert!(!traits.contains(&"capsa".to_string()), "tags are namespaced");
+    // The prose is still the prose.
+    assert_eq!(nodes_of(&m, "//section"), vec!["/section"]);
+}
+
+fn nodes_of(m: &TextModel, query: &str) -> Vec<String> {
+    match quarb::run(query, m).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| m.locator(n)).collect(),
+        quarb::QueryResult::Values(_) => panic!("expected nodes"),
+    }
+}
+
+/// The document's declared identity through the query language:
+/// the root is where a query starts, so a leading projection
+/// reads the page itself.
+#[test]
+fn head_declarations_answer_queries() {
+    let m = quarb_text_html::parse(META_DOC);
+    let vals = |q: &str| match quarb::run(q, &m).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(vals("::category"), vec!["Data Model"]);
+    // A declared name with a colon is quoted, like an XML
+    // namespaced attribute: `::::"og:type"`.
+    assert_eq!(vals("::::\"og:type\""), vec!["article"]);
+    assert_eq!(vals("(())::::\"article:section\""), vec!["Data Model"]);
+    assert_eq!(vals("::::\"schema:@type\""), vec!["TechArticle"]);
+}
+
+/// Links into a document: the canonical URL is the base, a
+/// section with an id links exactly, a paragraph below it adds a
+/// text fragment, and `| link` packages title, href, and text.
+#[test]
+fn links_narrow_as_far_as_html_allows() {
+    use quarb::{AstAdapter, Value};
+    let doc = r##"<!doctype html><html><head><title>Capsa</title>
+<link rel="canonical" href="https://quarb.org/capsa.html"></head>
+<body><main><h1>Capsa</h1><h2 id="marks">Marks</h2>
+<p>A mark is a pocketed reference to a node, filed as the path passes it and recalled later by name or by position, the capsa's node store.</p>
+<p>Short one.</p></main></body></html>"##;
+    let m = quarb_text_html::parse(doc);
+    let vals = |q: &str| match quarb::run(q, &m).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(m.property(m.root(), "href"), Some(Value::Str("https://quarb.org/capsa.html".into())));
+    assert_eq!(vals("//section[::lemma = \"Marks\"]::href"), vec!["https://quarb.org/capsa.html#marks"]);
+    assert_eq!(vals("//section[::lemma = \"Marks\"]::anchor"), vec!["marks"]);
+    assert_eq!(
+        vals("//paragraph[1]::href"),
+        vec!["https://quarb.org/capsa.html#marks:~:text=A%20mark%20is%20a%20pocketed%20reference,by%20position%2C%20the%20capsa%27s%20node%20store%2E"]
+    );
+    assert_eq!(vals("//paragraph[2]::href"), vec!["https://quarb.org/capsa.html#marks:~:text=Short%20one%2E"]);
+    assert_eq!(
+        vals("//paragraph[2] | link"),
+        vec!["%(title = \"Capsa\"; href = \"https://quarb.org/capsa.html#marks:~:text=Short%20one%2E\"; text = \"Short one.\")"]
+    );
+    // A projected topic still links the section it came from.
+    assert_eq!(vals("//section[::lemma = \"Marks\"]::lemma | link | :href"), vec!["https://quarb.org/capsa.html#marks"]);
+    // No URL declared, no path given: nothing to link.
+    let bare = quarb_text_html::parse("<h1>T</h1><p>x</p>");
+    assert_eq!(bare.property(bare.root(), "href"), None);
+    // A mount path stands in, and a non-HTML form links the document alone.
+    let mut doc2 = quarb_text_html::parse("<h1>T</h1><h2 id=\"a\">A</h2><p>x</p>");
+    doc2.set_document_path("/notes/page.html");
+    assert_eq!(
+        quarb::run("//paragraph::href", &doc2).map(|r| format!("{r:?}")).unwrap(),
+        "Values([Str(\"/notes/page.html#a:~:text=x\")])"
+    );
+    let mut pdf = quarb_text_html::parse("<h1>T</h1><h2 id=\"a\">A</h2><p>x</p>");
+    pdf.set_document_path("/notes/paper.pdf");
+    assert_eq!(
+        quarb::run("//paragraph::href", &pdf).map(|r| format!("{r:?}")).unwrap(),
+        "Values([Str(\"/notes/paper.pdf\")])"
+    );
 }

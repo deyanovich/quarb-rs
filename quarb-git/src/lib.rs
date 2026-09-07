@@ -650,12 +650,15 @@ impl AstAdapter for GitAdapter {
     /// root have no commit ancestor and answer source only. No
     /// dpid — the commit hash stays on `::hash` / `::::short`.
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        let instant = self
+            .commit_ancestor(node)
+            .and_then(|h| self.commit_info(&h))
+            .map(|info| (info.date, 0, info.date_offset));
         quarb::Provenance {
             source: Some(self.repo.display().to_string()),
-            instant: self
-                .commit_ancestor(node)
-                .and_then(|h| self.commit_info(&h))
-                .map(|info| (info.date, 0, info.date_offset)),
+            path: None,
+            instant_from: instant.map(|_| quarb::InstantFrom::Node),
+            instant,
             dpid: None,
         }
     }

@@ -26,6 +26,11 @@ quarb-markdown = { path = "../quarb-markdown" }
 quarb-text = { path = "../quarb-text" }
 quarb-text-html = { path = "../quarb-text-html" }
 quarb-text-markdown = { path = "../quarb-text-markdown" }
+# A site as a tarball: the web level over its archive store (tar
+# + gzip, pure Rust), pages grafted at the text level; the
+# source-level grafts (tree-sitter) stay out of the wasm build.
+quarb-web = { path = "../quarb-web", default-features = false, features = ["archive"] }
+quarb-model = { path = "../quarb-model" }
 wasm-bindgen = "0.2"
 serde_json.workspace = true
 # scraper (via quarb-html) → ahash → getrandom: the JS backend

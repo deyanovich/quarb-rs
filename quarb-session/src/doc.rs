@@ -145,6 +145,40 @@ impl quarb::AstAdapter for Dyn {
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.0.unit_scale(expr)
     }
+    // The rest of the surface, forwarded too: an adapter behind
+    // this door keeps its own answers to names and traits (a web
+    // level's rows answer to their kind), its index hooks, its
+    // provenance, and its shell gate.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        self.0.answers_to(node, name)
+    }
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        self.0.has_trait(node, name)
+    }
+    fn has_node(&self, node: NodeId) -> bool {
+        self.0.has_node(node)
+    }
+    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
+        self.0.document_by_ref(id)
+    }
+    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+        self.0.reverse_resolve(node, property, hint)
+    }
+    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
+        self.0.descendants_named(node, name)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.0.prefetch_links(nodes, dir)
+    }
+    fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        self.0.provenance(node)
+    }
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
+        self.0.provenance_list(node)
+    }
+    fn allow_shell(&self) -> bool {
+        self.0.allow_shell()
+    }
 }
 
 impl Doc {

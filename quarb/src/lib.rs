@@ -55,7 +55,10 @@ pub mod temporal;
 mod unparse;
 mod value;
 
-pub use adapter::{AllowShell, AstAdapter, NodeId, Provenance, QuantifierBound, WithNow};
+pub use adapter::{
+    AllowShell, AstAdapter, InstantFrom, LinkDir, NodeId, Provenance, ProvenanceList,
+    QuantifierBound, WithNow,
+};
 pub use error::{QuarbError, Result};
 pub mod koine;
 
@@ -97,7 +100,7 @@ pub fn now_secs() -> i64 {
             .unwrap_or(0),
     }
 }
-pub use exec::{set_ref_targets, take_refs, QueryResult};
+pub use exec::{set_ref_targets, take_refs, Origin, Origins, Prov, QueryResult, Traced, ORIGIN_CAP, name_path, resolved_provenance, set_reproducible};
 pub use parser::Defs;
 pub use value::Value;
 
@@ -134,6 +137,15 @@ pub fn run_traced(query: &str, adapter: &impl AstAdapter) -> Result<Vec<(NodeId,
     let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
     checked(exec::eval_traced(&ast, adapter))
+}
+
+/// Like [`run_traced`], with each value's provenance: the origins
+/// of its topic, per field for a record ([`exec::Traced`]).
+pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<exec::Traced>> {
+    let tokens = lexer::lex(query)?;
+    let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
+    exec::gate_shell(&ast, adapter)?;
+    checked(exec::eval_traced_prov(&ast, adapter))
 }
 
 /// Parse a definitions file — `def &name(params): body;` statements
@@ -177,6 +189,18 @@ pub fn run_traced_with_defs(
     let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
     checked(exec::eval_traced(&ast, adapter))
+}
+
+/// Like [`run_traced_prov`], with a pre-seeded fragment table.
+pub fn run_traced_prov_with_defs(
+    query: &str,
+    defs: &Defs,
+    adapter: &impl AstAdapter,
+) -> Result<Vec<exec::Traced>> {
+    let tokens = lexer::lex(query)?;
+    let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
+    exec::gate_shell(&ast, adapter)?;
+    checked(exec::eval_traced_prov(&ast, adapter))
 }
 
 /// True if `query` (inline defs allowed) opens with an expression

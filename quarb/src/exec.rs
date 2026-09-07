@@ -5,7 +5,7 @@
 //! register (breadcrumbs) and a current topic — that the pipeline
 //! stages transform, aggregate, push, and recall.
 
-use crate::adapter::{AstAdapter, NodeId};
+use crate::adapter::{AstAdapter, InstantFrom, NodeId, Provenance, ProvenanceList};
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
     PathElem,
@@ -17,11 +17,144 @@ use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-/// One entry in a capsa's register.
+/// The most origins a value keeps by name; beyond it only the
+/// count grows (`Origins::more`).
+pub const ORIGIN_CAP: usize = 8;
+
+/// Where a value was read: a node, and the pipeline stage (1-based
+/// ordinal of the top-level stage; 0 = branch level) during which
+/// it was read. The coordinate a capsa's provenance is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Origin {
+    pub node: NodeId,
+    pub stage: u32,
+}
+
+impl Default for Origin {
+    fn default() -> Self {
+        Origin { node: NodeId(0), stage: 0 }
+    }
+}
+
+/// A bounded set of origins: the first [`ORIGIN_CAP`] distinct
+/// coordinates by name, and how many more were seen. Exact when
+/// `more == 0`; past the bound the count is an upper bound (two
+/// bounded sets cannot tell which of their unnamed origins they
+/// share) and saturates rather than overflow — a value that has
+/// been through twenty rounds of unions over a whole context has
+/// more history than a counter holds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Origins {
+    pub known: Vec<Origin>,
+    pub more: u32,
+}
+
+impl Origins {
+    pub fn at(node: NodeId, stage: u32) -> Origins {
+        Origins { known: vec![Origin { node, stage }], more: 0 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.known.is_empty() && self.more == 0
+    }
+
+    pub fn insert(&mut self, o: Origin) {
+        if self.known.contains(&o) {
+            return;
+        }
+        if self.known.len() < ORIGIN_CAP {
+            self.known.push(o);
+        } else {
+            self.more = self.more.saturating_add(1);
+        }
+    }
+
+    pub fn union(&mut self, other: &Origins) {
+        for o in &other.known {
+            self.insert(*o);
+        }
+        self.more = self.more.saturating_add(other.more);
+    }
+
+    /// The origins' nodes, in first-read order.
+    pub fn nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.known.iter().map(|o| o.node)
+    }
+}
+
+/// A value's provenance: its origin set, and — for a record or a
+/// list — one part per field (by field name) or item (by decimal
+/// index), so a field keeps its own origins through a record and
+/// out again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prov {
+    pub origins: Origins,
+    pub parts: Vec<(String, Prov)>,
+}
+
+impl Prov {
+    pub fn at(node: NodeId, stage: u32) -> Prov {
+        Prov { origins: Origins::at(node, stage), parts: Vec::new() }
+    }
+
+    pub fn leaf(origins: Origins) -> Prov {
+        Prov { origins, parts: Vec::new() }
+    }
+
+    /// A record's provenance: the union of its parts' origins.
+    pub fn record(parts: Vec<(String, Prov)>) -> Prov {
+        let mut origins = Origins::default();
+        for (_, p) in &parts {
+            origins.union(&p.origins);
+        }
+        Prov { origins, parts }
+    }
+
+    /// A list's provenance: parts keyed by decimal index.
+    pub fn list(items: Vec<Prov>) -> Prov {
+        Prov::record(items.into_iter().enumerate().map(|(i, p)| (i.to_string(), p)).collect())
+    }
+
+    /// The named part, else the whole (a value read as one).
+    pub fn part(&self, key: &str) -> Prov {
+        self.parts
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, p)| p.clone())
+            .unwrap_or_else(|| Prov::leaf(self.origins.clone()))
+    }
+
+    pub fn item(&self, i: usize) -> Prov {
+        self.part(&i.to_string())
+    }
+
+    /// The origins alone, parts dropped.
+    pub fn flat(&self) -> Prov {
+        Prov::leaf(self.origins.clone())
+    }
+}
+
+/// A final capsa with its provenance: the node it stands at, its
+/// topic (`None` for a node result), and where the topic's value
+/// — per field, for a record — was read.
+#[derive(Clone, Debug)]
+pub struct Traced {
+    pub node: NodeId,
+    pub topic: Option<Value>,
+    pub prov: Prov,
+}
+
+/// One entry in a capsa's register: the value, where it was read
+/// (`prov`), and where it was pushed (`site`).
 #[derive(Clone)]
 struct Reg {
     name: Option<String>,
     value: Value,
+    prov: Prov,
+    /// Where the push happened — the coordinate a cross-capsa read
+    /// will address; unread until that lands.
+    #[allow(dead_code)]
+    site: Origin,
 }
 
 /// One entry in a thread's mark array: a node pocketed during
@@ -44,14 +177,42 @@ struct Mark {
 /// forks one thread per node); a miss yields nothing, never an
 /// error.
 fn anchor_nodes(
+    adapter: &impl AstAdapter,
     anchor: &Anchor,
     current: NodeId,
-    root: NodeId,
-    marks: &[Mark],
+    trace: &Trace,
+    bound: &[Option<NodeId>],
+    scope: Scope<'_>,
 ) -> Vec<NodeId> {
+    let marks = scope.marks;
     match anchor {
         Anchor::Current => vec![current],
-        Anchor::Root => vec![root],
+        Anchor::Root => vec![adapter.root()],
+        // `((!expr))` — coordinates stood on again: every id the
+        // expression yields (an integer, a coordinate record's
+        // `id`, a list of either), deduplicated; an id the adapter
+        // never minted is no node. The reads the anchor makes are
+        // not origins.
+        Anchor::Id(op) => {
+            let vs = discard(|| eval_operand(adapter, current, op, trace, bound, scope));
+            let mut ids: Vec<NodeId> = Vec::new();
+            fn collect(v: &Value, out: &mut Vec<NodeId>) {
+                match v {
+                    Value::Int(n) if *n >= 0 => out.push(NodeId(*n as u64)),
+                    Value::Record(fields) => {
+                        if let Some((_, id)) = fields.iter().find(|(k, _)| k == "id") {
+                            collect(id, out);
+                        }
+                    }
+                    Value::List(items) => items.iter().for_each(|i| collect(i, out)),
+                    _ => {}
+                }
+            }
+            for v in &vs {
+                collect(v, &mut ids);
+            }
+            dedup(ids).into_iter().filter(|&n| adapter.has_node(n)).collect()
+        }
         Anchor::Mark(m) => marks
             .iter()
             .rev()
@@ -80,6 +241,8 @@ struct Capsa {
     node: NodeId,
     register: Vec<Reg>,
     topic: Option<Value>,
+    /// Where the topic's value was read (per field for a record).
+    prov: Prov,
     /// A group's member capsae (empty everywhere else). Carried by
     /// `@| group` alongside the list topic so keyed aggregates on
     /// `|` can work per group and `@| ungroup` can flatten back.
@@ -122,6 +285,33 @@ const PARENT: &str = "[parent]";
 const NEXT: &str = "[next]";
 const PREV: &str = "[prev]";
 
+/// A stage's input context as its expressions see it (`@*`, the
+/// cross-capsa read): the snapshot, and an index of who stands
+/// where, built on first use — `X:.r` over a big context must not
+/// scan every peer per read.
+struct Peers {
+    caps: Vec<Capsa>,
+    by_node: std::cell::OnceCell<HashMap<NodeId, Vec<usize>>>,
+}
+
+impl Peers {
+    fn new(caps: Vec<Capsa>) -> Peers {
+        Peers { caps, by_node: std::cell::OnceCell::new() }
+    }
+
+    /// The peers standing at `node`, in context order.
+    fn at(&self, node: NodeId) -> &[usize] {
+        let index = self.by_node.get_or_init(|| {
+            let mut m: HashMap<NodeId, Vec<usize>> = HashMap::new();
+            for (i, c) in self.caps.iter().enumerate() {
+                m.entry(c.node).or_default().push(i);
+            }
+            m
+        });
+        index.get(&node).map_or(&[], |v| v.as_slice())
+    }
+}
+
 /// The capsa scope a value expression may reach: the register (for
 /// `$.name` recalls) and the topic (`$_`). Empty where no capsa
 /// exists yet (navigation predicates).
@@ -129,6 +319,8 @@ const PREV: &str = "[prev]";
 struct Scope<'a> {
     register: &'a [Reg],
     topic: Option<&'a Value>,
+    /// The topic's provenance, where the scope belongs to a capsa.
+    prov: Option<&'a Prov>,
     /// 1-based position in the current context, when known.
     ordinal: Option<usize>,
     /// Regex captures from the last matching filter (`$1` …).
@@ -148,7 +340,7 @@ struct Scope<'a> {
     /// The stage's input context (`@*`), where one exists — the
     /// snapshot rule: a stage is the transition, so "the context"
     /// during its evaluation is what it received.
-    peers: Option<&'a [Capsa]>,
+    peers: Option<&'a Peers>,
     /// The invoking capsa's scope, one subcontext out (`$.name`,
     /// `$$_`, `$$ord`); `None` at the top level.
     outer: Option<&'a Scope<'a>>,
@@ -159,6 +351,7 @@ struct Scope<'a> {
 }
 
 const NO_SCOPE: Scope<'static> = Scope {
+    prov: None,
     register: &[],
     topic: None,
     ordinal: None,
@@ -227,6 +420,57 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+thread_local! {
+    /// The read frames: while a stage evaluates a value, the
+    /// innermost frame collects the origins of every node read.
+    /// No frame, no cost — navigation predicates and filters
+    /// record nothing.
+    static READS: std::cell::RefCell<Vec<Origins>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The 1-based ordinal of the top-level pipeline stage in
+    /// progress (0 during navigation and at the branch level);
+    /// the second coordinate of an origin.
+    static STAGE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` under a fresh read frame and return what it read.
+fn capture<T>(f: impl FnOnce() -> T) -> (T, Origins) {
+    READS.with(|r| r.borrow_mut().push(Origins::default()));
+    let out = f();
+    let origins = READS.with(|r| r.borrow_mut().pop()).unwrap_or_default();
+    (out, origins)
+}
+
+/// Run `f` under a frame that is dropped: a predicate's reads are
+/// tests, not origins of the value being computed.
+fn discard<T>(f: impl FnOnce() -> T) -> T {
+    READS.with(|r| r.borrow_mut().push(Origins::default()));
+    let out = f();
+    READS.with(|r| r.borrow_mut().pop());
+    out
+}
+
+/// Record a node read into the innermost frame, if any.
+fn note(node: NodeId) {
+    READS.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            top.insert(Origin { node, stage: STAGE.with(|s| s.get()) });
+        }
+    });
+}
+
+/// Record a value's origins into the innermost frame, if any.
+fn note_all(o: &Origins) {
+    READS.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            top.union(o);
+        }
+    });
+}
+
+fn stage_now() -> u32 {
+    STAGE.with(|s| s.get())
+}
+
 fn record_ref(id: String) {
     REFS.with(|n| { n.borrow_mut().insert(id); });
 }
@@ -266,6 +510,8 @@ pub(crate) fn record_refusal(msg: String) {
 fn clear_refusal() {
     REFUSAL.with(|r| *r.borrow_mut() = None);
     clear_refs();
+    READS.with(|r| r.borrow_mut().clear());
+    STAGE.with(|s| s.set(0));
 }
 
 /// Take the refusal recorded during the last [`eval`] /
@@ -308,7 +554,7 @@ fn uses_shell_stage(stage: &Stage) -> bool {
         Stage::Func(call) | Stage::Agg(call) => call.name == "sh" || args(call),
         Stage::RecordPush { call, .. } => args(call),
         Stage::Subcontext { body, .. } => uses_shell_query(body),
-        Stage::Map(inner) => uses_shell_stage(inner),
+        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => uses_shell_stage(inner),
         Stage::Filter(e) => uses_shell_pred(e),
         Stage::Select(p) => match p {
             Predicate::Expr(e) => uses_shell_pred(e),
@@ -382,6 +628,7 @@ fn uses_shell_operand(o: &Operand) -> bool {
         Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => {
             steps.iter().any(uses_shell_elem)
         }
+        Operand::PeerReg { at, .. } => uses_shell_operand(at),
         _ => false,
     }
 }
@@ -396,6 +643,15 @@ pub fn eval(query: &Query, adapter: &impl AstAdapter) -> QueryResult {
 /// each result value still knows which node produced it. A `None`
 /// topic is a node result (no projection ran).
 pub fn eval_traced(query: &Query, adapter: &impl AstAdapter) -> Vec<(NodeId, Option<Value>)> {
+    eval_traced_prov(query, adapter)
+        .into_iter()
+        .map(|t| (t.node, t.topic))
+        .collect()
+}
+
+/// [`eval_traced`] with each value's provenance: where its topic —
+/// per field, for a record — was read.
+pub fn eval_traced_prov(query: &Query, adapter: &impl AstAdapter) -> Vec<Traced> {
     clear_refusal();
     let (caps, projected) =
         eval_query_caps(query, adapter, adapter.root(), &Correlation::default());
@@ -406,7 +662,7 @@ pub fn eval_traced(query: &Query, adapter: &impl AstAdapter) -> Vec<(NodeId, Opt
             } else {
                 c.topic
             };
-            (c.node, topic)
+            Traced { node: c.node, topic, prov: c.prov }
         })
         .collect()
 }
@@ -489,13 +745,22 @@ fn eval_query_caps_outer(
     // capsae as they then stand, and the rest of the pipeline
     // follows.
     let at = query.join_at.min(query.pipeline.len());
-    for stage in &query.pipeline[..at] {
+    // The stage ordinal is the origin coordinate: set at the top
+    // level only (a body's stages inherit the stage that runs it).
+    let top = outer.is_none();
+    for (i, stage) in query.pipeline[..at].iter().enumerate() {
+        if top {
+            STAGE.with(|s| s.set(i as u32 + 1));
+        }
         caps = apply_stage(stage, caps, adapter, &trace, outer);
     }
     if !query.correlations.is_empty() {
         caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
     }
-    for stage in &query.pipeline[at..] {
+    for (i, stage) in query.pipeline[at..].iter().enumerate() {
+        if top {
+            STAGE.with(|s| s.set((at + i) as u32 + 1));
+        }
         caps = apply_stage(stage, caps, adapter, &trace, outer);
     }
     (caps, pipeline_projected(query))
@@ -545,6 +810,7 @@ fn correlate_gate(
         .filter_map(|mut c| {
             let tuple = {
                 let driver = Scope {
+                    prov: Some(&c.prov),
                     register: &c.register,
                     topic: c.topic.as_ref(),
                     ordinal: None,
@@ -603,6 +869,7 @@ fn bind_entries(
         // register, marks and captures with the candidate as the
         // current node; `_` is the driver.
         let scope = Scope {
+            prov: None,
             register: driver.register,
             topic: driver.topic,
             captures: driver.captures,
@@ -703,11 +970,19 @@ fn union_branches(
         // register, marks and captures ride in; the node is new.
         let seed: &[Mark] = outer.map(|s| s.marks).unwrap_or(&[]);
         let seed_register: &[Reg] = outer.map(|s| s.register).unwrap_or(&[]);
-        for from in anchor_nodes(&branch.anchor, start, adapter.root(), seed) {
+        // The scope an id anchor's expression evaluates in: the
+        // invoker's, at the top level none.
+        let anchor_scope = Scope {
+            marks: seed,
+            register: seed_register,
+            ..outer.copied().unwrap_or(NO_SCOPE)
+        };
+        for from in anchor_nodes(adapter, &branch.anchor, start, trace, &[], anchor_scope) {
         for (node, register, marks, arrived) in
             navigate_paths(&branch.steps, adapter, from, trace, outer, &[], seed, seed_register)
         {
             caps.push(Capsa {
+                prov: if branch.projection.is_some() { Prov::at(node, stage_now()) } else { Prov::default() },
                 node,
                 arrived,
                 marks,
@@ -736,9 +1011,34 @@ fn union_branches(
     // reached along walks with different breadcrumbs — stay
     // distinct; without pushes every key is (node, empty) and the
     // old node dedup is preserved.
-    let mut seen = HashSet::new();
-    caps.retain(|c| seen.insert((c.node, reg_key(&c.register))));
-    caps
+    dedup_merge(caps)
+}
+
+/// Dedup capsae by (node, register), first-seen order, merging a
+/// dropped duplicate's origins into the survivor: the same value
+/// reached along another walk was read there too.
+fn dedup_merge(caps: Vec<Capsa>) -> Vec<Capsa> {
+    let mut kept: Vec<Capsa> = Vec::new();
+    let mut index: HashMap<(NodeId, RegKey), usize> = HashMap::new();
+    for c in caps {
+        let key = (c.node, reg_key(&c.register));
+        match index.get(&key) {
+            Some(&i) => merge_prov(&mut kept[i], &c),
+            None => {
+                index.insert(key, kept.len());
+                kept.push(c);
+            }
+        }
+    }
+    kept
+}
+
+/// Fold `other`'s origins (topic and regulae) into `into`.
+fn merge_prov(into: &mut Capsa, other: &Capsa) {
+    into.prov.origins.union(&other.prov.origins);
+    for (a, b) in into.register.iter_mut().zip(&other.register) {
+        a.prov.origins.union(&b.prov.origins);
+    }
 }
 
 /// Whether a stage's expressions read `@*` (directly or through a
@@ -748,7 +1048,8 @@ fn union_branches(
 fn stage_reads_context(stage: &Stage) -> bool {
     fn op(o: &Operand) -> bool {
         match o {
-            Operand::Capsae { .. } => true,
+            Operand::Capsae { .. } | Operand::PeerReg { .. } => true,
+            Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => op(base),
             Operand::Piped { expr, stages } => op(expr) || stages.iter().any(stage_reads_context),
             Operand::Arith { left, right, .. } => op(left) || op(right),
             Operand::Neg(inner) | Operand::Outer(inner) => op(inner),
@@ -801,7 +1102,7 @@ fn stage_reads_context(stage: &Stage) -> bool {
         }
     }
     match stage {
-        Stage::Map(inner) => stage_reads_context(inner),
+        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => stage_reads_context(inner),
         Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => op(e),
         Stage::Filter(e) => pred(e),
         Stage::Select(Predicate::Expr(e)) => pred(e),
@@ -838,8 +1139,8 @@ fn apply_stage(
 ) -> Vec<Capsa> {
     // The `@*` snapshot: materialized only when the stage actually
     // reads the context (the scan is cheap; the clone is not).
-    let snapshot = stage_reads_context(stage).then(|| caps.clone());
-    let peers = snapshot.as_deref();
+    let snapshot = stage_reads_context(stage).then(|| Peers::new(caps.clone()));
+    let peers = snapshot.as_ref();
     match stage {
         // `sh('cmd')` — the shell stage (gated: [`gate_shell`]
         // refused it long before we got here unless the adapter
@@ -875,6 +1176,7 @@ fn apply_stage(
                             Value::Str(crate::koine::render_node(adapter, c.node, kind))
                         }
                     };
+                    c.prov = effective_prov(&c);
                     c.topic = Some(v);
                     c
                 })
@@ -887,7 +1189,20 @@ fn apply_stage(
                     Some(t) => Value::Str(t.to_json()),
                     None => Value::Str(node_to_json(adapter, c.node).to_json()),
                 };
+                c.prov = effective_prov(&c);
                 c.topic = Some(v);
+                c
+            })
+            .collect(),
+        // `| link`: the capsa's node as a clickable result — the
+        // adapter's `::link` record (title, href, text), whatever
+        // the topic was, so `::lemma | link` still links the
+        // section. An adapter with no notion of a link yields null.
+        Stage::Func(call) if call.name == "link" => caps
+            .into_iter()
+            .map(|mut c| {
+                c.topic = Some(adapter.property(c.node, "link").unwrap_or(Value::Null));
+                c.prov = Prov::at(c.node, stage_now());
                 c
             })
             .collect(),
@@ -904,6 +1219,7 @@ fn apply_stage(
                         &node_to_json(adapter, c.node),
                     )),
                 };
+                c.prov = effective_prov(&c);
                 c.topic = Some(Value::Str(doc.unwrap_or_else(|e| e)));
                 c
             })
@@ -919,6 +1235,7 @@ fn apply_stage(
                     Some(t) => value_to_xml(t, "item"),
                     None => node_to_xml(adapter, c.node),
                 };
+                c.prov = effective_prov(&c);
                 c.topic = Some(Value::Str(xml));
                 c
             })
@@ -928,6 +1245,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -941,17 +1259,20 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let cmd = call.args.first().map(|a| match a {
+                let (cmd, o) = capture(|| call.args.first().map(|a| match a {
                     Arg::Lit(v) => v.to_string(),
                     Arg::Expr(e) => operand_scalar(adapter, c.node, e, trace, scope).to_string(),
                     Arg::Range(..) => String::new(),
-                });
+                }));
                 c.topic = Some(match cmd {
                     Some(cmd) if !cmd.is_empty() => {
                         run_shell(&cmd, c.topic.as_ref()).unwrap_or(Value::Null)
                     }
                     _ => Value::Null,
                 });
+                let mut prov = c.prov.flat();
+                prov.origins.union(&o);
+                c.prov = prov;
                 c
             })
             .collect(),
@@ -965,7 +1286,8 @@ fn apply_stage(
             .into_iter()
             .map(|mut c| {
                 let topic = c.topic.take().unwrap_or(Value::Null);
-                let v = if matches!(topic, Value::Null) {
+                let taken = matches!(topic, Value::Null);
+                let (v, o) = capture(|| if taken {
                     match call.args.first() {
                         Some(Arg::Lit(v)) => v.clone(),
                         Some(Arg::Expr(e)) => operand_scalar(
@@ -974,6 +1296,7 @@ fn apply_stage(
                             e,
                             trace,
                             Scope {
+                                prov: None,
                                 node: Some(c.node),
                                 register: &c.register,
                                 topic: None,
@@ -992,7 +1315,8 @@ fn apply_stage(
                     }
                 } else {
                     topic
-                };
+                });
+                c.prov = if taken { Prov::leaf(o) } else { c.prov.flat() };
                 c.topic = Some(v);
                 c
             })
@@ -1005,6 +1329,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1018,8 +1343,9 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let value = build_record(call, adapter, c.node, trace, scope);
-                c.topic = Some(value);
+                let (fields, prov) = split_fields(record_fields_prov(&call.args, adapter, c.node, trace, scope));
+                c.topic = Some(Value::Record(fields));
+                c.prov = prov;
                 c
             })
             .collect(),
@@ -1032,6 +1358,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1046,13 +1373,19 @@ fn apply_stage(
                     outer,
                 };
                 let mut fields = named_register_fields(&c.register);
-                for (name, value) in record_fields(&call.args, adapter, c.node, trace, scope) {
+                let mut parts = named_register_parts(&c.register);
+                for (name, value, p) in record_fields_prov(&call.args, adapter, c.node, trace, scope) {
                     match fields.iter_mut().find(|(n, _)| n == &name) {
                         Some((_, v)) => *v = value,
-                        None => fields.push((name, value)),
+                        None => fields.push((name.clone(), value)),
+                    }
+                    match parts.iter_mut().find(|(n, _)| n == &name) {
+                        Some((_, q)) => *q = p,
+                        None => parts.push((name, p)),
                     }
                 }
                 c.topic = Some(Value::Record(fields));
+                c.prov = Prov::record(parts);
                 c
             })
             .collect(),
@@ -1084,6 +1417,7 @@ fn apply_stage(
                         })
                         .collect(),
                 ));
+                c.prov = Prov::list(members.iter().map(effective_prov).collect());
                 c.members = members;
                 c
             })
@@ -1106,6 +1440,7 @@ fn apply_stage(
                     1 => out.pop().expect("len checked"),
                     _ => Value::List(out),
                 });
+                c.prov = c.prov.flat();
                 c.members = Vec::new();
                 c
             })
@@ -1116,9 +1451,11 @@ fn apply_stage(
             .into_iter()
             .flat_map(|c| {
                 let topic = c.topic.clone().unwrap_or(Value::Null);
+                let prov = c.prov.flat();
                 stdlib::apply_scalar(call, topic, &|e| adapter.unit_scale(e))
                     .into_iter()
                     .map(move |v| Capsa {
+                        prov: prov.clone(),
                         node: c.node,
                         register: c.register.clone(),
                         topic: Some(v),
@@ -1135,6 +1472,34 @@ fn apply_stage(
         // the topic, per capsa — capsae unchanged, the list
         // reassembled (an expanding inner stage flattens). Inside,
         // `$_` is the element and `@*` reads the element-context.
+        // `.v(body){N}` — the iteration loop (ruling #60): the push
+        // applied round after round, every round a stage of its own
+        // (its own snapshot, so each capsa reads the previous
+        // round's values); exactly N rounds for `{N}`, else at least
+        // `min` and on until a round repoints no name and changes
+        // no topic, or `max` (the quantifier bound when open).
+        Stage::Repeat { stage: inner, min, max } => {
+            let mut caps = caps;
+            let limit = max.unwrap_or_else(|| adapter.quantifier_bound());
+            let exact = *max == Some(*min);
+            let signature = |caps: &[Capsa]| -> Vec<RoundState> {
+                caps.iter()
+                    .map(|c| (c.node, c.topic.clone(), named_register_fields(&c.register)))
+                    .collect()
+            };
+            let mut round = 0;
+            while round < limit {
+                let before = if exact || round < *min { None } else { Some(signature(&caps)) };
+                caps = apply_stage(inner, caps, adapter, trace, outer);
+                round += 1;
+                if let Some(b) = before
+                    && b == signature(&caps)
+                {
+                    break;
+                }
+            }
+            caps
+        }
         Stage::Map(inner) => caps
             .into_iter()
             .map(|mut c| {
@@ -1147,9 +1512,12 @@ fn apply_stage(
                     }
                     Some(other) => (vec![other], false),
                 };
+                let provs: Vec<Prov> = (0..items.len()).map(|i| if was_list { c.prov.item(i) } else { c.prov.clone() }).collect();
                 let pseudo: Vec<Capsa> = items
                     .into_iter()
-                    .map(|v| Capsa {
+                    .zip(provs)
+                    .map(|(v, prov)| Capsa {
+                        prov,
                         node: c.node,
                         register: c.register.clone(),
                         topic: Some(v),
@@ -1161,18 +1529,17 @@ fn apply_stage(
                         arrived: c.arrived.clone(),
                     })
                     .collect();
-                let mut out: Vec<Value> = apply_stage(inner, pseudo, adapter, trace, outer)
+                let (mut out, mut provs): (Vec<Value>, Vec<Prov>) = apply_stage(inner, pseudo, adapter, trace, outer)
                     .into_iter()
-                    .map(|p| p.topic.unwrap_or(Value::Null))
-                    .collect();
-                c.topic = Some(if was_list {
-                    Value::List(out)
+                    .map(|p| (p.topic.unwrap_or(Value::Null), p.prov))
+                    .unzip();
+                if was_list || out.len() != 1 {
+                    c.prov = Prov::list(provs);
+                    c.topic = Some(Value::List(out));
                 } else {
-                    match out.len() {
-                        1 => out.pop().expect("len checked"),
-                        _ => Value::List(out),
-                    }
-                });
+                    c.prov = provs.pop().unwrap_or_default();
+                    c.topic = Some(out.pop().expect("len checked"));
+                }
                 c
             })
             .collect(),
@@ -1190,10 +1557,13 @@ fn apply_stage(
                     Some(Value::Null) | None => Vec::new(),
                     Some(other) => vec![other],
                 };
+                let was_list = matches!(c.topic, Some(Value::List(_)));
                 if *outer && values.is_empty() {
                     values.push(Value::Null);
                 }
-                values.into_iter().map(move |v| Capsa {
+                let provs: Vec<Prov> = (0..values.len()).map(|i| if was_list { c.prov.item(i) } else { c.prov.clone() }).collect();
+                values.into_iter().zip(provs).map(move |(v, prov)| Capsa {
+                    prov,
                     node: c.node,
                     register: c.register.clone(),
                     topic: Some(v),
@@ -1221,8 +1591,23 @@ fn apply_stage(
                 // nothing, like every anchor miss. `(@)` re-seeds
                 // the thread from every pocket — one fork per
                 // marked node, registers and marks carried.
+                let anchor_scope = Scope {
+                    prov: Some(&c.prov),
+                    node: Some(c.node),
+                    register: &c.register,
+                    topic: c.topic.as_ref(),
+                    ordinal: None,
+                    captures: &c.captures,
+                    named: &c.named,
+                    marks: &c.marks,
+                    bindings: &c.bindings,
+                    edge: None,
+                    arrived: &c.arrived,
+                    peers,
+                    outer,
+                };
                 for from in
-                    anchor_nodes(&branch.anchor, c.node, adapter.root(), &c.marks)
+                    anchor_nodes(adapter, &branch.anchor, c.node, trace, &[], anchor_scope)
                 {
                 for (node, register, marks, arrived) in navigate_paths(
                     &branch.steps,
@@ -1238,6 +1623,7 @@ fn apply_stage(
                     &c.register,
                 ) {
                     out.push(Capsa {
+                        prov: if branch.projection.is_some() { Prov::at(node, stage_now()) } else { Prov::default() },
                         node,
                         register,
                         marks,
@@ -1254,9 +1640,7 @@ fn apply_stage(
                 }
                 }
             }
-            let mut seen = HashSet::new();
-            out.retain(|c| seen.insert((c.node, reg_key(&c.register))));
-            out
+            dedup_merge(out)
         }
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: the shared push spelling is
@@ -1272,6 +1656,8 @@ fn apply_stage(
                         node: c.node,
                     }),
                     Some(topic) => c.register.push(Reg {
+                        prov: c.prov.clone(),
+                        site: Origin { node: c.node, stage: stage_now() },
                         name: name.clone(),
                         value: topic,
                     }),
@@ -1289,6 +1675,7 @@ fn apply_stage(
                 // `$.name` / `$$_` / `$$ord` reach it (correlated
                 // subqueries).
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1302,11 +1689,14 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let value = subcontext_scalar(body, adapter, c.node, trace, Some(&scope));
+                let (value, prov) = subcontext_traced(body, adapter, c.node, trace, Some(&scope));
                 c.register.push(Reg {
+                    prov: prov.clone(),
+                    site: Origin { node: c.node, stage: stage_now() },
                     name: name.clone(),
                     value: value.clone(),
                 });
+                c.prov = prov;
                 // Visible as the topic; the push still returns
                 // the thread to navigation mode (see ExprPush).
                 c.topic = Some(value);
@@ -1320,6 +1710,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1333,8 +1724,9 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let value = operand_scalar(adapter, c.node, expr, trace, scope);
+                let (value, o) = capture(|| operand_scalar(adapter, c.node, expr, trace, scope));
                 c.topic = Some(value);
+                c.prov = Prov::leaf(o);
                 c
             })
             .collect(),
@@ -1344,6 +1736,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1357,8 +1750,11 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let value = operand_scalar(adapter, c.node, expr, trace, scope);
+                let (value, o) = capture(|| operand_scalar(adapter, c.node, expr, trace, scope));
+                c.prov = Prov::leaf(o);
                 c.register.push(Reg {
+                    prov: c.prov.clone(),
+                    site: Origin { node: c.node, stage: stage_now() },
                     name: name.clone(),
                     value: value.clone(),
                 });
@@ -1379,6 +1775,8 @@ fn apply_stage(
                 if let Some(Value::Record(fields)) = &c.topic {
                     for (k, v) in fields.clone() {
                         c.register.push(Reg {
+                            prov: c.prov.part(&k),
+                            site: Origin { node: c.node, stage: stage_now() },
                             name: Some(k),
                             value: v,
                         });
@@ -1399,6 +1797,7 @@ fn apply_stage(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1412,23 +1811,31 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let fields = if *enriched {
+                let (fields, prov) = if *enriched {
                     let mut fields = named_register_fields(&c.register);
-                    for (name, value) in record_fields(&call.args, adapter, c.node, trace, scope) {
+                    let mut parts = named_register_parts(&c.register);
+                    for (name, value, p) in record_fields_prov(&call.args, adapter, c.node, trace, scope) {
                         match fields.iter_mut().find(|(n, _)| n == &name) {
                             Some((_, v)) => *v = value,
-                            None => fields.push((name, value)),
+                            None => fields.push((name.clone(), value)),
+                        }
+                        match parts.iter_mut().find(|(n, _)| n == &name) {
+                            Some((_, q)) => *q = p,
+                            None => parts.push((name, p)),
                         }
                     }
-                    fields
+                    (fields, Prov::record(parts))
                 } else {
-                    record_fields(&call.args, adapter, c.node, trace, scope)
+                    split_fields(record_fields_prov(&call.args, adapter, c.node, trace, scope))
                 };
                 let value = Value::Record(fields);
                 c.register.push(Reg {
+                    prov: prov.clone(),
+                    site: Origin { node: c.node, stage: stage_now() },
                     name: name.clone(),
                     value: value.clone(),
                 });
+                c.prov = prov;
                 c.topic = Some(value);
                 c
             })
@@ -1488,6 +1895,9 @@ fn apply_stage(
             let mut caps: Vec<Capsa> = caps
                 .into_iter()
                 .map(|mut c| {
+                    if c.topic.is_none() {
+                        c.prov = Prov::at(c.node, stage_now());
+                    }
                     c.topic = Some(
                         c.topic
                             .take()
@@ -1511,16 +1921,21 @@ fn apply_stage(
                 },
                 "reverse" => caps.reverse(),
                 "unique" => {
-                    let mut seen: Vec<String> = Vec::new();
-                    caps.retain(|c| {
-                        let key = topic_of(c).to_string();
-                        if seen.contains(&key) {
-                            false
-                        } else {
-                            seen.push(key);
-                            true
+                    // A dropped duplicate hands its origins to the
+                    // survivor: the value was read there too.
+                    let mut kept: Vec<Capsa> = Vec::new();
+                    let mut index: HashMap<String, usize> = HashMap::new();
+                    for c in caps.drain(..) {
+                        let key = topic_of(&c).to_string();
+                        match index.get(&key) {
+                            Some(&i) => kept[i].prov.origins.union(&c.prov.origins),
+                            None => {
+                                index.insert(key, kept.len());
+                                kept.push(c);
+                            }
                         }
-                    });
+                    }
+                    caps = kept;
                 }
                 "first" => caps.truncate(1),
                 "last" => {
@@ -1551,6 +1966,7 @@ fn apply_stage(
             .enumerate()
             .filter_map(|(i, mut c)| {
                 let scope = Scope {
+                    prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
                     topic: c.topic.as_ref(),
@@ -1606,10 +2022,49 @@ fn apply_stage(
                         .unwrap_or_else(|| node_scalar(adapter, c.node))
                 })
                 .collect();
+            // The reduction's origins: every reduced value's, bounded.
+            let mut origins = Origins::default();
+            for c in &caps {
+                match &c.topic {
+                    Some(_) => origins.union(&c.prov.origins),
+                    None => origins.insert(Origin { node: c.node, stage: stage_now() }),
+                }
+            }
             let node = caps.first().map_or(adapter.root(), |c| c.node);
+            // A reduction that hands back one of its inputs (max,
+            // min, first, last, unique, sort, reverse) keeps that
+            // input's origins, so `((!$_:::origin))` after `@| max`
+            // lands on the winner; a computed reduction (sum, count,
+            // avg) keeps the union.
+            let selects = matches!(
+                call.name.as_str(),
+                "max" | "min" | "first" | "last" | "unique" | "sort" | "reverse"
+            );
+            let per_input: Vec<Origins> = if selects {
+                caps.iter()
+                    .map(|c| match &c.topic {
+                        Some(_) => c.prov.origins.clone(),
+                        None => {
+                            let mut o = Origins::default();
+                            o.insert(Origin { node: c.node, stage: stage_now() });
+                            o
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let inputs = if selects { topics.clone() } else { Vec::new() };
             stdlib::apply(call, topics, &|e| adapter.unit_scale(e))
                 .into_iter()
                 .map(|v| Capsa {
+                    prov: Prov::leaf(
+                        inputs
+                            .iter()
+                            .position(|t| *t == v)
+                            .map(|i| per_input[i].clone())
+                            .unwrap_or_else(|| origins.clone()),
+                    ),
                     node,
                     register: Vec::new(),
                     topic: Some(v),
@@ -1626,6 +2081,7 @@ fn apply_stage(
         Stage::Recall(r) => caps
             .into_iter()
             .map(|mut c| {
+                c.prov = recall_prov(&c.register, r);
                 c.topic = Some(recall(&c.register, r));
                 c
             })
@@ -1644,7 +2100,7 @@ fn keyed_agg(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-    peers: Option<&[Capsa]>,
+    peers: Option<&Peers>,
 ) -> Vec<Capsa> {
     // `top` / `bottom` carry their count as a leading literal.
     let (count, key_args): (Option<usize>, &[Arg]) = match call.args.split_first() {
@@ -1663,6 +2119,7 @@ fn keyed_agg(
                     e,
                     trace,
                     Scope {
+                        prov: Some(&c.prov),
                         node: Some(c.node),
                         register: &c.register,
                         topic: c.topic.as_ref(),
@@ -1701,10 +2158,11 @@ fn keyed_agg(
     // fields pushed as named regs for later recall ($.city).
     if call.name == "group" {
         // (key, key fields, members) per group.
-        type Group = (Vec<Value>, Vec<(String, Value)>, Vec<Capsa>);
+        type Group = (Vec<Value>, Vec<(String, Value, Prov)>, Vec<Capsa>);
         let mut groups: Vec<Group> = Vec::new();
         for (i, c) in caps.into_iter().enumerate() {
             let scope = Scope {
+                prov: Some(&c.prov),
                 node: Some(c.node),
                 register: &c.register,
                 topic: c.topic.as_ref(),
@@ -1718,8 +2176,8 @@ fn keyed_agg(
                 peers,
                 outer,
             };
-            let fields = record_fields(&call.args, adapter, c.node, trace, scope);
-            let key: Vec<Value> = fields.iter().map(|(_, v)| v.clone()).collect();
+            let fields = record_fields_prov(&call.args, adapter, c.node, trace, scope);
+            let key: Vec<Value> = fields.iter().map(|(_, v, _)| v.clone()).collect();
             if key.iter().any(|v| matches!(v, Value::Null)) {
                 continue;
             }
@@ -1729,7 +2187,13 @@ fn keyed_agg(
                         a.compare_with(b, &|e| adapter.unit_scale(e)) == Ordering::Equal
                     })
             }) {
-                Some((_, _, members)) => members.push(c),
+                Some((_, kf, members)) => {
+                    // The key was read from this member too.
+                    for ((_, _, p), (_, _, q)) in kf.iter_mut().zip(&fields) {
+                        p.origins.union(&q.origins);
+                    }
+                    members.push(c)
+                }
                 None => groups.push((key, fields, vec![c])),
             }
         }
@@ -1739,11 +2203,17 @@ fn keyed_agg(
                 let node = members[0].node;
                 let register = fields
                     .into_iter()
-                    .map(|(name, value)| Reg {
+                    .map(|(name, value, prov)| Reg {
+                        prov,
+                        site: Origin { node, stage: stage_now() },
                         name: Some(name),
                         value,
                     })
                     .collect();
+                let prov = Prov::list(members.iter().map(|m| match &m.topic {
+                    Some(_) => m.prov.clone(),
+                    None => Prov::at(m.node, stage_now()),
+                }).collect());
                 let topics: Vec<Value> = members
                     .iter()
                     .map(|m| {
@@ -1753,6 +2223,7 @@ fn keyed_agg(
                     })
                     .collect();
                 Capsa {
+                    prov,
                     node,
                     register,
                     topic: Some(Value::List(topics)),
@@ -1824,6 +2295,15 @@ fn keyed_agg(
     keyed.into_iter().map(|(_, c)| c).collect()
 }
 
+/// The provenance of a capsa's effective topic: the topic's, else
+/// the node read at this stage.
+fn effective_prov(c: &Capsa) -> Prov {
+    match &c.topic {
+        Some(_) => c.prov.clone(),
+        None => Prov::at(c.node, stage_now()),
+    }
+}
+
 /// A capsa's effective topic: the topic if set, else the node's
 /// default scalar.
 fn effective_topic(c: &Capsa, adapter: &impl AstAdapter) -> Value {
@@ -1845,7 +2325,7 @@ fn peer_lists(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-    peers: Option<&[Capsa]>,
+    peers: Option<&Peers>,
 ) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
     let Some(key) = key else {
         let all: Vec<usize> = (0..caps.len()).collect();
@@ -1856,6 +2336,7 @@ fn peer_lists(
     let mut of = Vec::with_capacity(caps.len());
     for (i, c) in caps.iter().enumerate() {
         let scope = Scope {
+            prov: Some(&c.prov),
             node: Some(c.node),
             register: &c.register,
             topic: c.topic.as_ref(),
@@ -1921,7 +2402,7 @@ fn window_stage(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-    peers: Option<&[Capsa]>,
+    peers: Option<&Peers>,
 ) -> Vec<Capsa> {
     let (from, to, key) = window_args(call);
     let (lists, of) = peer_lists(&caps, key, adapter, trace, outer, peers);
@@ -1955,6 +2436,7 @@ fn window_stage(
                     .map(|m| effective_topic(m, adapter))
                     .collect(),
             ));
+            c.prov = Prov::list(members.iter().map(effective_prov).collect());
             c.members = members;
             c
         })
@@ -1971,7 +2453,7 @@ fn shift_stage(
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-    peers: Option<&[Capsa]>,
+    peers: Option<&Peers>,
 ) -> Vec<Capsa> {
     let (n, key) = match call.args.split_first() {
         Some((Arg::Lit(Value::Int(n)), rest)) => (
@@ -1984,100 +2466,111 @@ fn shift_stage(
         _ => (1, None),
     };
     let (lists, of) = peer_lists(&caps, key, adapter, trace, outer, peers);
-    let topics: Vec<Value> = of
+    let topics: Vec<(Value, Prov)> = of
         .iter()
         .map(|&(li, p)| {
             let list = &lists[li];
             // Saturating: `shift(i64::MIN)` must not overflow.
             let idx = (p as i64).saturating_sub(n);
             if idx < 0 || idx >= list.len() as i64 {
-                Value::Null
+                (Value::Null, Prov::default())
             } else {
-                effective_topic(&caps[list[idx as usize]], adapter)
+                let src = &caps[list[idx as usize]];
+                (effective_topic(src, adapter), effective_prov(src))
             }
         })
         .collect();
     caps.into_iter()
         .zip(topics)
-        .map(|(mut c, t)| {
+        .map(|(mut c, (t, p))| {
             c.topic = Some(t);
+            c.prov = p;
             c.members = Vec::new();
             c
         })
         .collect()
 }
 
-/// Build a `record(...)` value for one capsa: a literal-string
-/// argument names the argument after it; a projection argument names
-/// itself (validated at parse time).
-fn build_record(
-    call: &FnCall,
-    adapter: &impl AstAdapter,
-    node: NodeId,
-    trace: &Trace,
-    scope: Scope<'_>,
-) -> Value {
-    Value::Record(record_fields(&call.args, adapter, node, trace, scope))
-}
 
-/// Evaluate record-convention arguments (a literal string names the
-/// argument after it; a projection names itself) into named fields.
-/// Shared by `record(...)` and `group(...)`'s keys.
-fn record_fields(
+
+/// Record-convention arguments with each field's provenance: every
+/// field expression is evaluated under its own read frame.
+fn record_fields_prov(
     args: &[Arg],
     adapter: &impl AstAdapter,
     node: NodeId,
     trace: &Trace,
     scope: Scope<'_>,
-) -> Vec<(String, Value)> {
-    let mut fields: Vec<(String, Value)> = Vec::new();
+) -> Vec<(String, Value, Prov)> {
+    let mut fields: Vec<(String, Value, Prov)> = Vec::new();
     let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
         match arg {
             Arg::Lit(Value::Str(name)) => {
-                let value = match args.next() {
-                    Some(Arg::Expr(e)) => operand_scalar_bound(adapter, node, e, trace, &[], scope),
-                    Some(Arg::Lit(v)) => v.clone(),
-                    Some(Arg::Range(_, _)) | None => Value::Null,
+                let (value, prov) = match args.next() {
+                    Some(Arg::Expr(e)) => {
+                        let (v, o) = capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
+                        (v, Prov::leaf(o))
+                    }
+                    Some(Arg::Lit(v)) => (v.clone(), Prov::default()),
+                    Some(Arg::Range(_, _)) | None => (Value::Null, Prov::default()),
                 };
-                fields.push((name.clone(), value));
+                fields.push((name.clone(), value, prov));
             }
             Arg::Expr(e) => {
-                let name = crate::ast::auto_field_name(e)
-                    .unwrap_or_default()
-                    .to_string();
-                fields.push((
-                    name,
-                    operand_scalar_bound(adapter, node, e, trace, &[], scope),
-                ));
+                let name = crate::ast::auto_field_name(e).unwrap_or_default().to_string();
+                let (v, o) = capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
+                fields.push((name, v, Prov::leaf(o)));
             }
-            Arg::Lit(v) => {
-                // Unreachable after parse-time validation; keep a
-                // defensive unnamed field.
-                fields.push((String::new(), v.clone()));
-            }
-            // A range argument never reaches the record convention.
+            Arg::Lit(v) => fields.push((String::new(), v.clone(), Prov::default())),
             Arg::Range(_, _) => {}
         }
     }
     fields
 }
 
-/// Evaluate a subcontext body from `node` and reduce it to a scalar.
-fn subcontext_scalar(
+/// Split provenance-bearing fields into the record's fields and
+/// its provenance.
+fn split_fields(fields: Vec<(String, Value, Prov)>) -> (Vec<(String, Value)>, Prov) {
+    let mut vs = Vec::with_capacity(fields.len());
+    let mut ps = Vec::with_capacity(fields.len());
+    for (k, v, p) in fields {
+        vs.push((k.clone(), v));
+        ps.push((k, p));
+    }
+    (vs, Prov::record(ps))
+}
+
+
+/// [`subcontext_scalar`] with the reduced value's provenance: one
+/// value's own, several as a list, a node result the nodes'.
+fn subcontext_traced(
     body: &Query,
     adapter: &impl AstAdapter,
     node: NodeId,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-) -> Value {
-    match eval_query_outer(body, adapter, node, trace, outer) {
-        QueryResult::Values(mut vs) => match vs.len() {
-            0 => Value::Null,
+) -> (Value, Prov) {
+    let (caps, projected) = eval_query_caps_outer(body, adapter, node, trace, outer);
+    if projected {
+        let mut vs: Vec<(Value, Prov)> = caps
+            .into_iter()
+            .map(|c| (c.topic.clone().unwrap_or(Value::Null), c.prov))
+            .collect();
+        match vs.len() {
+            0 => (Value::Null, Prov::default()),
             1 => vs.pop().unwrap(),
-            _ => Value::List(vs),
-        },
-        QueryResult::Nodes(ns) => Value::Int(ns.len() as i64),
+            _ => {
+                let (values, provs): (Vec<Value>, Vec<Prov>) = vs.into_iter().unzip();
+                (Value::List(values), Prov::list(provs))
+            }
+        }
+    } else {
+        let mut o = Origins::default();
+        for c in &caps {
+            o.insert(Origin { node: c.node, stage: stage_now() });
+        }
+        (Value::Int(caps.len() as i64), Prov::leaf(o))
     }
 }
 
@@ -2491,6 +2984,54 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
     }
 }
 
+/// The provenance a register reference recalls: the regula's own,
+/// or, for the views, a record/list of the regulae's.
+fn recall_prov(register: &[Reg], r: &RegRef) -> Prov {
+    match r {
+        RegRef::Top => register.last().map(|r| r.prov.clone()).unwrap_or_default(),
+        RegRef::Index(n) => register
+            .get(n.saturating_sub(1))
+            .map(|r| r.prov.clone())
+            .unwrap_or_default(),
+        RegRef::Named(name) => register
+            .iter()
+            .rev()
+            .find(|r| r.name.as_deref() == Some(name.as_str()))
+            .map(|r| r.prov.clone())
+            .unwrap_or_default(),
+        RegRef::Whole => Prov::list(register.iter().map(|r| r.prov.clone()).collect()),
+        RegRef::Record => Prov::record(named_register_parts(register)),
+        RegRef::FullRecord => {
+            let mut parts: Vec<(String, Prov)> = Vec::new();
+            for (i, reg) in register.iter().enumerate() {
+                match &reg.name {
+                    Some(name) => match parts.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, p)) => *p = reg.prov.clone(),
+                        None => parts.push((name.clone(), reg.prov.clone())),
+                    },
+                    None => parts.push((format!(".{}", i + 1), reg.prov.clone())),
+                }
+            }
+            Prov::record(parts)
+        }
+    }
+}
+
+/// The `%.` layout's provenance: one part per name, first-push
+/// order, the latest push's.
+fn named_register_parts(register: &[Reg]) -> Vec<(String, Prov)> {
+    let mut parts: Vec<(String, Prov)> = Vec::new();
+    for reg in register {
+        if let Some(name) = &reg.name {
+            match parts.iter_mut().find(|(n, _)| n == name) {
+                Some((_, p)) => *p = reg.prov.clone(),
+                None => parts.push((name.clone(), reg.prov.clone())),
+            }
+        }
+    }
+    parts
+}
+
 /// The `%.` layout: one field per named regula, in first-push
 /// order, carrying the latest value pushed under that name — so a
 /// repointed column keeps its place in the row. Unnamed regulae
@@ -2510,7 +3051,14 @@ fn named_register_fields(register: &[Reg]) -> Vec<(String, Value)> {
 
 /// A register rendered as a hashable dedup key: names plus value
 /// text (Value carries floats, so it cannot be a key itself).
-fn reg_key(register: &[Reg]) -> Vec<(Option<String>, String)> {
+/// A register's identity: its regulae's names and value texts.
+type RegKey = Vec<(Option<String>, String)>;
+
+/// What a round of a quantified push may change on a capsa: its
+/// node, its topic, and the named view of its register.
+type RoundState = (NodeId, Option<Value>, Vec<(String, Value)>);
+
+fn reg_key(register: &[Reg]) -> RegKey {
     register
         .iter()
         .map(|r| (r.name.clone(), r.value.to_string()))
@@ -2550,6 +3098,9 @@ fn navigate_paths(
         // Each element starts a fresh crossing record: `@-` is the
         // FINAL hop's edges, so only the last element's survive.
         let mut next: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> = Vec::new();
+        if let PathElem::Step(step) = elem {
+            prefetch_hint(adapter, step, ctx.iter().map(|c| c.0));
+        }
         for (node, register, marks, _) in &ctx {
             match elem {
                 PathElem::Step(step) => {
@@ -2594,7 +3145,11 @@ fn navigate_paths(
         for (n, r, m, arrived) in next {
             match index.entry((n, reg_key(&r), mark_key(&m))) {
                 std::collections::hash_map::Entry::Occupied(e) => {
-                    let slot = &mut merged[*e.get()].3;
+                    let kept = &mut merged[*e.get()];
+                    for (a, b) in kept.1.iter_mut().zip(&r) {
+                        a.prov.origins.union(&b.prov.origins);
+                    }
+                    let slot = &mut kept.3;
                     for edge in arrived {
                         if !slot.contains(&edge) {
                             slot.push(edge);
@@ -2828,7 +3383,7 @@ fn arrived_edge(
 /// still has edges to take when `N_max` rounds are spent refuses
 /// rather than passing off its first `N_max` rounds as the
 /// closure. A walk whose frontier drains before the bound — or a
-/// proximal reach that found its nearest tier — is complete and
+/// proximal reach that found its first tier — is complete and
 /// stays silent.
 fn expand_group(
     adapter: &impl AstAdapter,
@@ -2858,7 +3413,7 @@ fn expand_group(
     let hi = group.quant.max.unwrap_or(n_max);
     // The group's predicates filter matches BEFORE reach — the
     // walk continues from the full frontier, but only survivors
-    // are candidates. `(...)+[P]?` is therefore "the nearest
+    // are candidates. `(...)+[P]?` is therefore "the proximal
     // satisfying P": a shortest-path search.
     let admits = |p: &GPath| group_admits(adapter, group, p, trace, outer, witness);
     let mut matches: Vec<(GPath, usize)> = Vec::new();
@@ -2984,6 +3539,7 @@ fn group_admits(
         })
         .collect();
     let scope = Scope {
+        prov: None,
         outer,
         edge: path.last_edge.as_ref(),
         marks: &path.marks,
@@ -3025,6 +3581,9 @@ fn expand_elems(
             continue;
         }
         let mut next = Vec::new();
+        if let PathElem::Step(step) = elem {
+            prefetch_hint(adapter, step, paths.iter().map(|p| p.node));
+        }
         for path in &paths {
             match elem {
                 PathElem::Step(step) => {
@@ -3061,21 +3620,25 @@ fn expand_elems(
                 // not move.
                 PathElem::Push { name, body } => {
                     let scope = Scope {
+                        prov: None,
                         edge: path.last_edge.as_ref(),
                         outer,
                         bindings: witness,
                         ..NO_SCOPE
                     };
-                    let value = match body {
+                    let (value, prov) = match body {
                         PushBody::Query(q) => {
-                            subcontext_scalar(q, adapter, path.node, trace, Some(&scope))
+                            subcontext_traced(q, adapter, path.node, trace, Some(&scope))
                         }
                         PushBody::Expr(e) => {
-                            operand_scalar_bound(adapter, path.node, e, trace, witness, scope)
+                            let (v, o) = capture(|| operand_scalar_bound(adapter, path.node, e, trace, witness, scope));
+                            (v, Prov::leaf(o))
                         }
                     };
                     let mut p = path.clone();
                     p.register.push(Reg {
+                        prov,
+                        site: Origin { node: path.node, stage: stage_now() },
                         name: name.clone(),
                         value,
                     });
@@ -3097,8 +3660,23 @@ fn expand_elems(
 
 /// Deduplicate in-flight paths while preserving first-seen order.
 fn dedup_paths(paths: Vec<GPath>) -> Vec<GPath> {
-    let mut seen = HashSet::new();
-    paths.into_iter().filter(|p| seen.insert(p.key())).collect()
+    let mut kept: Vec<GPath> = Vec::new();
+    let mut index: HashMap<_, usize> = HashMap::new();
+    for p in paths {
+        let key = p.key();
+        match index.get(&key) {
+            Some(&i) => {
+                for (a, b) in kept[i].register.iter_mut().zip(&p.register) {
+                    a.prov.origins.union(&b.prov.origins);
+                }
+            }
+            None => {
+                index.insert(key, kept.len());
+                kept.push(p);
+            }
+        }
+    }
+    kept
 }
 
 /// Project one node to a scalar value.
@@ -3108,6 +3686,227 @@ fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection) -> Value 
         Projection::Property(None) => adapter.default_value(node).unwrap_or(Value::Null),
         Projection::CoreMeta(key) => core_meta(adapter, node, key).unwrap_or(Value::Null),
         Projection::AdapterMeta(key) => adapter.metadata(node, key).unwrap_or(Value::Null),
+    }
+}
+
+thread_local! {
+    /// `--reproducible`: hold back the machine-dependent instant
+    /// rungs (a source's mtime, the moment of reading) so the same
+    /// source answers the same provenance run after run.
+    static REPRODUCIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether provenance answers hold back the source and access
+/// instant rungs (see [`resolved_provenance`]).
+pub fn set_reproducible(on: bool) {
+    REPRODUCIBLE.with(|c| c.set(on));
+}
+
+/// The node's name-path from the adapter's root: `/teams/0/members/0`.
+pub fn name_path<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if adapter.parent(n).is_none() {
+            break;
+        }
+        if let Some(t) = adapter.name(n) {
+            parts.push(t);
+        }
+        cur = adapter.parent(n);
+    }
+    parts.reverse();
+    format!("/{}", parts.join("/"))
+}
+
+/// A node's provenance as the query answers it: the adapter's
+/// entries (one empty entry where it records nothing), each with
+/// its path filled from the arbor root where no layer set it, and
+/// the instant ladder completed — the datum's own timestamp, else
+/// the source's modification time (both the adapters' work), else
+/// the moment of reading, the invocation instant. Under
+/// [`set_reproducible`] the last two rungs are held back: only what
+/// the data itself recorded travels.
+pub fn resolved_provenance<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) -> ProvenanceList {
+    let mut list = adapter.provenance_list(node);
+    if list.entries.is_empty() {
+        list.entries.push(Provenance::default());
+    }
+    let reproducible = REPRODUCIBLE.with(|c| c.get());
+    let access = adapter.invocation_instant();
+    let mut path: Option<String> = None;
+    for e in &mut list.entries {
+        if e.path.is_none() {
+            e.path = Some(path.get_or_insert_with(|| name_path(adapter, node)).clone());
+        }
+        if reproducible {
+            if matches!(e.instant_from, Some(InstantFrom::Source | InstantFrom::Access)) {
+                e.instant = None;
+                e.instant_from = None;
+            }
+        } else if e.instant.is_none()
+            && let Some((secs, nanos)) = access
+        {
+            e.instant = Some((secs, nanos, Some(0)));
+            e.instant_from = Some(InstantFrom::Access);
+        }
+    }
+    list
+}
+
+/// A value's provenance keys over its origin set: `source` the
+/// anchoring (first) origin's, `dpid` likewise, `instant` the latest
+/// (a derived value is as fresh as its newest input), `provenance`
+/// the canonical list `?a@ts#x;b#y` (entries deduplicated by
+/// source and dpid, first-read order), `origins` one canonical text
+/// per origin, `elided` how many the bound dropped.
+fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Value> {
+    let (entries, elided) = origin_entries(adapter, o);
+    match key {
+        "source" => Some(entries.first().and_then(|p| p.source.clone()).map_or(Value::Null, Value::Str)),
+        "dpid" => Some(entries.first().and_then(|p| p.dpid.clone()).map_or(Value::Null, Value::Str)),
+        "path" => Some(entries.first().and_then(|p| p.path.clone()).map_or(Value::Null, Value::Str)),
+        "instant" => Some(
+            entries
+                .iter()
+                .filter_map(|p| p.instant)
+                .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+                .map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant { secs, nanos, offset_min }),
+        ),
+        "provenance" => {
+            Some(Provenance::canonical_list(&entries, elided).map_or(Value::Null, Value::Str))
+        }
+        // The record: the same answers the singular keys give.
+        "%provenance" => {
+            let newest = entries
+                .iter()
+                .filter(|p| p.instant.is_some())
+                .max_by(|a, b| (a.instant.unwrap().0, a.instant.unwrap().1).cmp(&(b.instant.unwrap().0, b.instant.unwrap().1)));
+            Some(prov_record(&Provenance {
+                source: entries.first().and_then(|p| p.source.clone()),
+                path: entries.first().and_then(|p| p.path.clone()),
+                instant: newest.and_then(|p| p.instant),
+                instant_from: newest.and_then(|p| p.instant_from),
+                dpid: entries.first().and_then(|p| p.dpid.clone()),
+            }))
+        }
+        "@provenance" => Some(Value::List(entries.iter().map(prov_record).collect())),
+        // The coordinates: the first origin's id, its record, all.
+        "origin" => Some(o.known.first().map_or(Value::Null, |x| Value::Int(x.node.0 as i64))),
+        "%origin" => Some(o.known.first().map_or(Value::Null, |x| origin_record(*x))),
+        "@origin" => Some(Value::List(o.known.iter().map(|x| origin_record(*x)).collect())),
+        "elided" => Some(Value::Int(elided as i64)),
+        _ => None,
+    }
+}
+
+/// A provenance entry as a record: `%(source; path; instant;
+/// instant-from; dpid)`, absent components null.
+fn prov_record(p: &Provenance) -> Value {
+    Value::Record(vec![
+        ("source".to_string(), p.source.clone().map_or(Value::Null, Value::Str)),
+        ("path".to_string(), p.path.clone().map_or(Value::Null, Value::Str)),
+        (
+            "instant".to_string(),
+            p.instant.map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant { secs, nanos, offset_min }),
+        ),
+        (
+            "instant-from".to_string(),
+            p.instant_from.map_or(Value::Null, |f| Value::Str(f.name().to_string())),
+        ),
+        ("dpid".to_string(), p.dpid.clone().map_or(Value::Null, Value::Str)),
+    ])
+}
+
+/// An origin coordinate as a record: `%(id; stage)`.
+fn origin_record(o: Origin) -> Value {
+    Value::Record(vec![
+        ("id".to_string(), Value::Int(o.node.0 as i64)),
+        ("stage".to_string(), Value::Int(o.stage as i64)),
+    ])
+}
+
+/// The origins' provenance entries, resolved through the adapter's
+/// layers (an origin that itself records a list contributes every
+/// entry), deduplicated by (source, dpid) in first-read order, with
+/// the count elided: by the origin bound, and by the origins' own
+/// records. An origin that answers nothing contributes nothing.
+fn origin_entries(adapter: &impl AstAdapter, o: &Origins) -> (Vec<Provenance>, u32) {
+    let mut out: Vec<Provenance> = Vec::new();
+    let mut elided = o.more;
+    for n in o.nodes() {
+        let list = resolved_provenance(adapter, n);
+        elided = elided.saturating_add(list.elided);
+        for p in list.entries {
+            // One entry per data point: the source's own key where
+            // it assigned one (several nodes under one dpid are one
+            // datum by the source's claim), the path otherwise.
+            let key = |e: &Provenance| (e.source.clone(), e.dpid.clone().or_else(|| e.path.clone()));
+            let pk = key(&p);
+            match out.iter_mut().find(|q| key(q) == pk) {
+                Some(q) => {
+                    // The same datum read twice: the latest observation.
+                    if p.instant.map(|i| (i.0, i.1)) > q.instant.map(|i| (i.0, i.1)) {
+                        q.instant = p.instant;
+                        q.instant_from = p.instant_from;
+                    }
+                }
+                None => out.push(p),
+            }
+        }
+    }
+    (out, elided)
+}
+
+/// The node set a bare node operand denotes — a path from the
+/// current node (the anchor's rule), a correlation context
+/// reference, the served node one scope out — deduplicated, in
+/// walk order. The node side of the cross-capsa read.
+fn operand_nodes(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    at: &Operand,
+    trace: &Trace,
+    bound: &[Option<NodeId>],
+    scope: Scope<'_>,
+) -> Vec<NodeId> {
+    match at {
+        Operand::Rel { steps, anchor, .. } => {
+            let witness = if bound.is_empty() { scope.bindings } else { bound };
+            let mut nodes = Vec::new();
+            for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
+                nodes.extend(navigate_from(
+                    steps,
+                    adapter,
+                    from,
+                    trace,
+                    scope.outer,
+                    witness,
+                    scope.marks,
+                ));
+            }
+            dedup(nodes)
+        }
+        Operand::Ctx { index, steps, .. } => {
+            let bound = if bound.is_empty() { scope.bindings } else { bound };
+            let base = match index {
+                Some(k) => bound.get(k.saturating_sub(1)).copied(),
+                None => Some(Some(node)),
+            };
+            let Some(Some(base)) = base else {
+                return Vec::new();
+            };
+            if steps.is_empty() {
+                vec![base]
+            } else {
+                dedup(navigate_from(steps, adapter, base, trace, scope.outer, bound, scope.marks))
+            }
+        }
+        Operand::Outer(inner) => match scope.outer {
+            Some(o) => operand_nodes(adapter, o.node.unwrap_or(node), inner, trace, bound, *o),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
@@ -3167,15 +3966,22 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
             Some(n.0.to_string())
         }))),
         // Data provenance: the layered, adapter-supplied triple and
-        // its composite. Absent components answer null — honest
+        // its composite. Absent components answer null — a stated
         // absence, never the invocation clock.
         "source" => Some(
-            adapter
-                .provenance(node)
+            resolved_provenance(adapter, node)
+                .first()
                 .source
                 .map_or(Value::Null, Value::Str),
         ),
-        "instant" => Some(adapter.provenance(node).instant.map_or(
+        "path" => Some(
+            resolved_provenance(adapter, node)
+                .first()
+                .path
+                .map_or(Value::Null, Value::Str),
+        ),
+        // The instant of a datum with several sources is its newest.
+        "instant" => Some(resolved_provenance(adapter, node).instant_max().map_or(
             Value::Null,
             |(secs, nanos, offset_min)| Value::Instant {
                 secs,
@@ -3184,17 +3990,29 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
             },
         )),
         "dpid" => Some(
-            adapter
-                .provenance(node)
+            resolved_provenance(adapter, node)
+                .first()
                 .dpid
                 .map_or(Value::Null, Value::Str),
         ),
+        // The composite is the list: `?a@ts#x;b#y;+N` where the
+        // substrate records several sources, one entry otherwise.
         "provenance" => Some(
-            adapter
-                .provenance(node)
+            resolved_provenance(adapter, node)
                 .canonical()
                 .map_or(Value::Null, Value::Str),
         ),
+        // The shaped keys (ruling #58): `%` the record, `@` the
+        // list — of the provenance entries, and of the origin
+        // coordinates. A node's origin is itself, at stage 0.
+        "%provenance" => Some(prov_record(&resolved_provenance(adapter, node).first())),
+        "@provenance" => Some(Value::List(
+            resolved_provenance(adapter, node).entries.iter().map(prov_record).collect(),
+        )),
+        "origin" => Some(Value::Int(node.0 as i64)),
+        "%origin" => Some(origin_record(Origin { node, stage: 0 })),
+        "@origin" => Some(Value::List(vec![origin_record(Origin { node, stage: 0 })])),
+        "elided" => Some(Value::Int(resolved_provenance(adapter, node).elided as i64)),
         _ => None,
     }
 }
@@ -3304,8 +4122,18 @@ fn apply_step(
             ));
         }
         Axis::Descendant(reach) => {
+            // An adapter that indexes names answers `//name` in one
+            // call (its answer is the walk's, by contract); the
+            // nameless tests still run here.
             let mut found = Vec::new();
-            descendants(adapter, node, 1, step, &mut found);
+            let indexed = match &step.matcher {
+                Matcher::Name(n) => adapter.descendants_named(node, n),
+                _ => None,
+            };
+            match indexed {
+                Some(v) => found.extend(v.into_iter().filter(|&(n, _)| tests_ok(adapter, n, step))),
+                None => descendants(adapter, node, 1, step, &mut found),
+            }
             let found = apply_predicates(
                 adapter,
                 found,
@@ -3606,7 +4434,10 @@ fn apply_step(
                         Some((d, f)) if !f.is_empty() => (d.to_string(), Some(f.to_string())),
                         _ => (ext.trim_end_matches('#').to_string(), None),
                     };
-                    match ref_target(&doc) {
+                    // The host's registration first, then the
+                    // adapter's own lookup (a store of pages
+                    // answers by URL), else the acquisition loop.
+                    match ref_target(&doc).or_else(|| adapter.document_by_ref(&doc)) {
                         Some(root) => {
                             let landed = frag
                                 .and_then(|f| adapter.resolve_fragment(root, &f))
@@ -3648,21 +4479,31 @@ fn apply_step(
             // resolves to `node`. The naive scan walks the whole arbor
             // from the root; an adapter with a reverse index could
             // shortcut this later.
-            let mut all = Vec::new();
-            collect_subtree(adapter, adapter.root(), &mut all);
             let prop_of = |source: NodeId| {
                 property
                     .clone()
                     .or_else(|| adapter.ref_property(source))
             };
-            let matched: Vec<NodeId> = all
-                .into_iter()
-                .filter(|&source| {
-                    prop_of(source).is_some_and(|p| {
-                        adapter.resolve(source, &p, hint.as_deref()) == Some(node)
-                    }) && tests_ok(adapter, source, step)
-                })
-                .collect();
+            // An adapter with a reverse index answers outright;
+            // otherwise the whole arbor is walked.
+            let matched: Vec<NodeId> =
+                match adapter.reverse_resolve(node, property.as_deref(), hint.as_deref()) {
+                    Some(sources) => sources
+                        .into_iter()
+                        .filter(|&source| tests_ok(adapter, source, step))
+                        .collect(),
+                    None => {
+                        let mut all = Vec::new();
+                        collect_subtree(adapter, adapter.root(), &mut all);
+                        all.into_iter()
+                            .filter(|&source| {
+                                prop_of(source).is_some_and(|p| {
+                                    adapter.resolve(source, &p, hint.as_deref()) == Some(node)
+                                }) && tests_ok(adapter, source, step)
+                            })
+                            .collect()
+                    }
+                };
             out.extend(apply_predicates(
                 adapter,
                 matched,
@@ -3684,6 +4525,24 @@ fn apply_step(
                 },
             ));
         }
+    }
+}
+
+/// Tell the adapter which crosslinks a hop is about to follow from
+/// which nodes — a batching hint, no semantics.
+fn prefetch_hint(adapter: &impl AstAdapter, step: &Step, nodes: impl Iterator<Item = NodeId>) {
+    let dirs: &[crate::adapter::LinkDir] = match step.axis {
+        Axis::OutLink => &[crate::adapter::LinkDir::Out],
+        Axis::InLink => &[crate::adapter::LinkDir::In],
+        Axis::BothLink => &[crate::adapter::LinkDir::Out, crate::adapter::LinkDir::In],
+        _ => return,
+    };
+    let nodes: Vec<NodeId> = nodes.collect();
+    if nodes.len() < 2 {
+        return;
+    }
+    for d in dirs {
+        adapter.prefetch_links(&nodes, *d);
     }
 }
 
@@ -3784,6 +4643,7 @@ fn apply_predicates<T>(
                     // the shared capsa) and its marks; `_` is the
                     // served node.
                     let scope = Scope {
+                        prov: None,
                         outer,
                         edge: edge.as_ref(),
                         marks,
@@ -3943,6 +4803,7 @@ fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool {
             // A relative path never references a context itself, but
             // its nested step predicates (`./sub[$*1::k = 1]`) can.
             Operand::Rel { steps, .. } => steps_mention(steps, bound),
+            Operand::PeerReg { at, .. } => op_mentions(at, bound),
             Operand::Neg(inner) | Operand::Outer(inner) => op_mentions(inner, bound),
             Operand::Arith { left, right, .. } => {
                 op_mentions(left, bound) || op_mentions(right, bound)
@@ -4022,8 +4883,10 @@ fn traits_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
     if step.traits.is_empty() {
         return true;
     }
-    let node_traits = adapter.traits(node);
-    step.traits.iter().all(|c| c.matches(&node_traits))
+    let any = !adapter.traits(node).is_empty();
+    step.traits
+        .iter()
+        .all(|c| c.matches_with(any, |name| adapter.has_trait(node, name)))
 }
 
 /// Walk a filter condition for `=~` comparisons and return the
@@ -4157,15 +5020,15 @@ fn eval_operand(
             arms,
             other,
         } => {
-            let subject = operand_scalar_bound(adapter, node, scrutinee, trace, bound, scope);
+            let subject = discard(|| operand_scalar_bound(adapter, node, scrutinee, trace, bound, scope));
             for (test, regex, result) in arms {
-                let hit = if *regex {
+                let hit = discard(|| if *regex {
                     let pat = operand_scalar_bound(adapter, node, test, trace, bound, scope);
                     regex_test(&subject, &pat, true)
                 } else {
                     let t = operand_scalar_bound(adapter, node, test, trace, bound, scope);
                     value_eq(&subject, &t, &|e| adapter.unit_scale(e))
-                };
+                });
                 if hit {
                     return eval_operand(adapter, node, result, trace, bound, scope);
                 }
@@ -4186,9 +5049,33 @@ fn eval_operand(
                 .unwrap_or(Value::Null),
         ],
         // Capsa-scope operands: a register recall and the topic.
-        Operand::Recall(r) => vec![recall(scope.register, r)],
-        Operand::Topic => vec![scope.topic.cloned().unwrap_or(Value::Null)],
-        // `base:name` — a record's field; null on a non-record.
+        Operand::Recall(r) => {
+            note_all(&recall_prov(scope.register, r).origins);
+            vec![recall(scope.register, r)]
+        }
+        Operand::Topic => {
+            if let Some(p) = scope.prov {
+                note_all(&p.origins);
+            }
+            vec![scope.topic.cloned().unwrap_or(Value::Null)]
+        }
+        // `base:name` — a record's field; null on a non-record. A
+        // field of a recalled record keeps that field's origins.
+        Operand::Field { base, name } if matches!(base.as_ref(), Operand::Recall(_)) => {
+            let Operand::Recall(r) = base.as_ref() else { unreachable!() };
+            note_all(&recall_prov(scope.register, r).part(name).origins);
+            vec![match recall(scope.register, r) {
+                Value::Record(fields) => fields.into_iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap_or(Value::Null),
+                _ => Value::Null,
+            }]
+        }
+        // `value:::key` — the value's provenance over the origins it
+        // was read from; the answer's own origins are those.
+        Operand::ValueMeta { base, key } => {
+            let (_, o) = capture(|| eval_operand(adapter, node, base, trace, bound, scope));
+            note_all(&o);
+            vec![origins_meta(adapter, &o, key).unwrap_or(Value::Null)]
+        }
         Operand::Field { base, name } => eval_operand(adapter, node, base, trace, bound, scope)
             .into_iter()
             .map(|v| match v {
@@ -4224,12 +5111,35 @@ fn eval_operand(
         // `(cond ? then : else)` — only the taken branch
         // evaluates (an untaken branch's paths never navigate).
         Operand::Cond { cond, then, other } => {
-            let taken = if eval_pred_expr(adapter, node, cond, trace, bound, scope) {
+            let taken = if discard(|| eval_pred_expr(adapter, node, cond, trace, bound, scope)) {
                 then
             } else {
                 other
             };
             eval_operand(adapter, node, taken, trace, bound, scope)
+        }
+        // `X:.r` — the cross-capsa read (ruling #57): at each node
+        // `at` reaches, the regula of every capsa of the stage's
+        // input context standing there — the snapshot, so the read
+        // is synchronous within the stage. One value per (node,
+        // capsa), in context order; none where nobody stands; null
+        // where no context exists. The value's origins are the
+        // regula's own (where it was read), not the node it is
+        // read at: the navigation to `at` is not a read.
+        Operand::PeerReg { at, reg } => {
+            let Some(peers) = scope.peers else {
+                return vec![Value::Null];
+            };
+            let nodes = discard(|| operand_nodes(adapter, node, at, trace, bound, scope));
+            let mut out = Vec::new();
+            for n in nodes {
+                for &i in peers.at(n) {
+                    let p = &peers.caps[i];
+                    note_all(&recall_prov(&p.register, reg).origins);
+                    out.push(recall(&p.register, reg));
+                }
+            }
+            out
         }
         // `@*` — the stage's input context: bare, the peers'
         // topics; projected, the projection over their nodes. Null
@@ -4239,13 +5149,20 @@ fn eval_operand(
                 return vec![Value::Null];
             };
             let vs: Vec<Value> = peers
+                .caps
                 .iter()
                 .map(|p| match projection {
-                    None => p
-                        .topic
-                        .clone()
-                        .unwrap_or_else(|| node_scalar(adapter, p.node)),
-                    Some(proj) => project(adapter, p.node, proj),
+                    None => {
+                        match &p.topic {
+                            Some(_) => note_all(&p.prov.origins),
+                            None => note(p.node),
+                        }
+                        p.topic.clone().unwrap_or_else(|| node_scalar(adapter, p.node))
+                    }
+                    Some(proj) => {
+                        note(p.node);
+                        project(adapter, p.node, proj)
+                    }
                 })
                 .collect();
             vec![Value::List(vs)]
@@ -4256,7 +5173,37 @@ fn eval_operand(
         // mirror the pipeline by construction. `@|` sees a single
         // list value as a context of its elements.
         Operand::Piped { expr, stages } => {
-            let mut state = eval_operand(adapter, node, expr, trace, bound, scope);
+            // A path head keeps its nodes: `(<-link | ::rank @| sum)`
+            // reads each reached node, not the node the operand sits
+            // on. Its values are what the path operand yields (the
+            // projection, else existence), one per node, in order.
+            let mut node_of: Vec<NodeId> = Vec::new();
+            // Each value's provenance rides beside it through the
+            // stages; what the tail finally yields is noted into the
+            // enclosing frame at the end.
+            let mut provs: Vec<Prov>;
+            let mut state = match expr.as_ref() {
+                Operand::Rel { steps, projection, anchor } => {
+                    let witness = if bound.is_empty() { scope.bindings } else { bound };
+                    let mut nodes = Vec::new();
+                    for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
+                        nodes.extend(navigate_from(steps, adapter, from, trace, scope.outer, witness, scope.marks));
+                    }
+                    let nodes = dedup(nodes);
+                    let values: Vec<Value> = match projection {
+                        Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
+                        None => vec![Value::Bool(true); nodes.len()],
+                    };
+                    provs = nodes.iter().map(|&n| Prov::at(n, stage_now())).collect();
+                    node_of = nodes;
+                    values
+                }
+                _ => {
+                    let (values, o) = capture(|| eval_operand(adapter, node, expr, trace, bound, scope));
+                    provs = vec![Prov::leaf(o); values.len()];
+                    values
+                }
+            };
             for stage in stages.iter() {
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
@@ -4267,6 +5214,7 @@ fn eval_operand(
                     && matches!(stage, Stage::Func(c) if c.name == "default")
                 {
                     state.push(Value::Null);
+                    provs.push(Prov::default());
                 }
                 // A lone list value explodes into a context for the
                 // aggregating forms.
@@ -4277,12 +5225,16 @@ fn eval_operand(
                     let Some(Value::List(items)) = state.pop() else {
                         unreachable!("matched above");
                     };
+                    let whole = provs.pop().unwrap_or_default();
+                    provs = (0..items.len()).map(|i| whole.item(i)).collect();
                     state = items;
                 }
                 let caps: Vec<Capsa> = state
                     .into_iter()
-                    .map(|v| Capsa {
-                        node,
+                    .enumerate()
+                    .map(|(i, v)| Capsa {
+                        prov: provs.get(i).cloned().unwrap_or_default(),
+                        node: node_of.get(i).copied().unwrap_or(node),
                         register: scope.register.to_vec(),
                         topic: Some(v),
                         members: Vec::new(),
@@ -4293,10 +5245,16 @@ fn eval_operand(
                         arrived: scope.arrived.to_vec(),
                     })
                     .collect();
-                state = apply_stage(stage, caps, adapter, trace, Some(&scope))
-                    .into_iter()
-                    .map(|c| c.topic.unwrap_or(Value::Null))
-                    .collect();
+                let out = apply_stage(stage, caps, adapter, trace, Some(&scope));
+                // The nodes ride along while the stage keeps capsae
+                // one for one; an aggregate leaves the path behind.
+                node_of = if matches!(stage, Stage::Agg(_)) { Vec::new() } else { out.iter().map(|c| c.node).collect() };
+                let (values, ps): (Vec<Value>, Vec<Prov>) = out.into_iter().map(|c| (c.topic.unwrap_or(Value::Null), c.prov)).unzip();
+                state = values;
+                provs = ps;
+            }
+            for p in &provs {
+                note_all(&p.origins);
             }
             state
         }
@@ -4411,7 +5369,7 @@ fn eval_operand(
             // step predicates read `$*k` per thread.
             let witness = if bound.is_empty() { scope.bindings } else { bound };
             let mut nodes = Vec::new();
-            for from in anchor_nodes(anchor, node, adapter.root(), scope.marks) {
+            for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
                 nodes.extend(navigate_from(
                     steps,
                     adapter,
@@ -4423,6 +5381,9 @@ fn eval_operand(
                 ));
             }
             let nodes = dedup(nodes);
+            for &n in &nodes {
+                note(n);
+            }
             match projection {
                 Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
                 None => vec![Value::Bool(true); nodes.len()],
@@ -4462,9 +5423,9 @@ fn eval_operand(
             }]
         }
         // A boolean group in operand position is its truth value.
-        Operand::Group(e) => vec![Value::Bool(eval_pred_expr(
+        Operand::Group(e) => vec![Value::Bool(discard(|| eval_pred_expr(
             adapter, node, e, trace, bound, scope,
-        ))],
+        )))],
         Operand::Ctx {
             index,
             steps,
@@ -4495,6 +5456,9 @@ fn eval_operand(
             } else {
                 navigate_from(steps, adapter, base, trace, scope.outer, bound, scope.marks)
             };
+            for &n in &nodes {
+                note(n);
+            }
             match projection {
                 Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
                 None => vec![Value::Bool(true); nodes.len()],
@@ -6279,7 +7243,7 @@ mod tests {
     fn provenance_core_metadata() {
         let mut t = MockTree::sample();
         // x.rs carries a full triple; y.txt only a source; z.rs only
-        // a dpid; everything else answers honest nulls.
+        // a dpid; everything else answers null.
         let (secs, nanos, off) = crate::temporal::parse_iso("2026-04-07T02:00:01Z").unwrap();
         t.prov.insert(
             2,
@@ -6287,6 +7251,7 @@ mod tests {
                 source: Some("api-gateway".into()),
                 instant: Some((secs, nanos, off)),
                 dpid: Some("request-42".into()),
+                ..Default::default()
             },
         );
         t.prov.insert(
@@ -6925,5 +7890,495 @@ mod tests {
             vals("/a:::name | . | $.", &t),
             vec![Value::Str("a".into())]
         );
+    }
+
+    // ---- capsa provenance: origins on every value ----------------
+
+    fn traced(q: &str, t: &MockTree) -> Vec<Traced> {
+        eval_traced_prov(&parse(&lex(q).unwrap()).unwrap(), t)
+    }
+
+    fn origins(known: &[(u64, u32)]) -> Origins {
+        Origins {
+            known: known.iter().map(|&(n, s)| Origin { node: NodeId(n), stage: s }).collect(),
+            more: 0,
+        }
+    }
+
+    /// Two nodes with a provenance triple each, for the projections.
+    fn provenanced() -> MockTree {
+        let mut t = MockTree::sample();
+        let (s2, n2, o2) = crate::temporal::parse_iso("2026-04-07T02:00:01Z").unwrap();
+        let (s7, n7, o7) = crate::temporal::parse_iso("2026-05-01T00:00:00Z").unwrap();
+        t.prov.insert(
+            2,
+            Provenance {
+                source: Some("api-gateway".into()),
+                instant: Some((s2, n2, o2)),
+                dpid: Some("request-42".into()),
+                ..Default::default()
+            },
+        );
+        t.prov.insert(
+            7,
+            Provenance {
+                source: Some("crm".into()),
+                instant: Some((s7, n7, o7)),
+                dpid: Some("row-7".into()),
+                ..Default::default()
+            },
+        );
+        t
+    }
+
+    #[test]
+    fn push_records_the_read_node_and_stage() {
+        let t = MockTree::sample();
+        // A push at stage 1 reads the node it stands at.
+        let rows = traced("/a/* | .n(:::name)", &t);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].node, NodeId(2));
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 1)]));
+        assert_eq!(rows[1].prov.origins, origins(&[(3, 1)]));
+        // A branch-level projection is stage 0.
+        let rows = traced("/a/x.rs:::name", &t);
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 0)]));
+    }
+
+    #[test]
+    fn expression_unions_its_operands_origins() {
+        let t = MockTree::sample();
+        // The recall carries the push's coordinate; the fresh read
+        // is at the current node and stage.
+        let rows = traced("/a/x.rs | .n(:::index) | ->ref | $.n + :::index", &t);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node, NodeId(7));
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 1), (7, 3)]));
+    }
+
+    #[test]
+    fn selection_aggregate_keeps_the_winners_origins() {
+        let t = MockTree::sample();
+        // `max` hands back one input: its origins are that input's
+        // alone, not the union of everything reduced.
+        let rows = traced("/a/*:::index @| max", &t);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prov.origins.known.len(), 1);
+        let all = traced("/a/*:::index @| count", &t);
+        assert!(all[0].prov.origins.known.len() > 1, "a computed reduction keeps the union");
+    }
+
+    #[test]
+    fn fork_keeps_the_register_provenance() {
+        let t = MockTree::sample();
+        // The cross-capsa scenario: after a hop the capsa stands
+        // elsewhere, but the regula still says where it was read.
+        let rows = traced("/a/x.rs | .n(:::name) | ->ref | $.n", &t);
+        assert_eq!(rows[0].node, NodeId(7));
+        assert_eq!(rows[0].topic, Some(Value::Str("x.rs".into())));
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 1)]));
+    }
+
+    #[test]
+    fn record_keeps_a_part_per_field() {
+        let t = MockTree::sample();
+        let rows = traced("/a/x.rs | .n(:::index) | ->ref | %(a = $.n; b = :::name)", &t);
+        let p = &rows[0].prov;
+        assert_eq!(p.origins, origins(&[(2, 1), (7, 3)]));
+        assert_eq!(p.part("a").origins, origins(&[(2, 1)]));
+        assert_eq!(p.part("b").origins, origins(&[(7, 3)]));
+        // `.%` spreads the parts into registers; a recall gets the
+        // field's own part back.
+        let rows = traced(
+            "/a/x.rs | .n(:::index) | ->ref | %(a = $.n; b = :::name) | .% | $.b",
+            &t,
+        );
+        assert_eq!(rows[0].prov.origins, origins(&[(7, 3)]));
+        let rows = traced(
+            "/a/x.rs | .n(:::index) | ->ref | %(a = $.n; b = :::name) | .% | %.",
+            &t,
+        );
+        assert_eq!(rows[0].prov.part("a").origins, origins(&[(2, 1)]));
+        assert_eq!(rows[0].prov.part("b").origins, origins(&[(7, 3)]));
+    }
+
+    #[test]
+    fn aggregate_unions_and_bounds() {
+        let t = MockTree::sample();
+        let rows = traced("/a/* | :::index @| count", &t);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 1), (3, 1)]));
+        // Past the cap only the count grows.
+        let mut wide = MockTree::sample();
+        wide.names = (0..13)
+            .map(|i| if i == 0 { None } else { Some(format!("n{i}")) })
+            .collect();
+        wide.kids = HashMap::new();
+        wide.kids.insert(0, (1..13).collect());
+        wide.links = HashMap::new();
+        let rows = traced("/* | :::index @| sum", &wide);
+        assert_eq!(rows[0].prov.origins.known.len(), ORIGIN_CAP);
+        assert_eq!(rows[0].prov.origins.more, 4);
+    }
+
+    #[test]
+    fn predicate_reads_are_not_origins() {
+        let t = MockTree::sample();
+        // The condition's test reads w.rs, the taken branch reads
+        // only the register.
+        let rows = traced(
+            "/a/x.rs | .n(:::index) | ->ref | (:::name = \"w.rs\" ? $.n : 0)",
+            &t,
+        );
+        assert_eq!(rows[0].topic, Some(Value::Int(1)));
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 1)]));
+    }
+
+    #[test]
+    fn group_and_ungroup_carry_origins() {
+        let t = MockTree::sample();
+        // Files grouped by their directory's name: the key was read
+        // at the parent (one origin, deduplicated on join); the
+        // group's own provenance is its members' — the index each
+        // member read at itself.
+        let rows = traced("/*/* | .d(\\:::name) | :::index @| group(d = $.d)", &t);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 2), (3, 2)]));
+        assert_eq!(rows[1].prov.origins, origins(&[(5, 2), (6, 2)]));
+        let rows = traced("/*/* | .d(\\:::name) | :::index @| group(d = $.d) | $.d", &t);
+        assert_eq!(rows[0].prov.origins, origins(&[(1, 1)]));
+        let rows = traced(
+            "/*/* | .d(\\:::name) | :::index @| group(d = $.d) @| ungroup | $.d",
+            &t,
+        );
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[3].prov.origins, origins(&[(4, 1)]));
+    }
+
+    #[test]
+    fn piped_operand_reads_its_path() {
+        let t = MockTree::sample();
+        let rows = traced("/a/x.rs | .n(->ref @| count)", &t);
+        assert_eq!(rows[0].topic, Some(Value::Int(1)));
+        assert!(rows[0].prov.origins.known.iter().any(|o| o.node == NodeId(7)));
+    }
+
+    #[test]
+    fn value_side_provenance_projection() {
+        let t = provenanced();
+        // One origin: the node's own canonical text.
+        assert_eq!(
+            vals("/a/x.rs | .n(:::index) | $.n:::provenance", &t),
+            vec![Value::Str("?api-gateway@2026-04-07T02:00:01Z#request-42".into())]
+        );
+        assert_eq!(
+            vals("/a/x.rs | .n(:::index) | $.n:::source", &t),
+            vec![Value::Str("api-gateway".into())]
+        );
+        // Two origins: the list, `;`-separated, first-read order;
+        // the source and dpid of the first; the instant of the
+        // newest.
+        let q = "/a/x.rs | .n(:::index) | ->ref | $.n + :::index";
+        assert_eq!(
+            vals(&format!("{q} | $_:::provenance"), &t),
+            vec![Value::Str(
+                "?api-gateway@2026-04-07T02:00:01Z#request-42;crm@2026-05-01T00:00:00Z#row-7".into()
+            )]
+        );
+        assert_eq!(
+            vals(&format!("{q} | $_:::source"), &t),
+            vec![Value::Str("api-gateway".into())]
+        );
+        assert_eq!(
+            vals(&format!("{q} | $_:::dpid"), &t),
+            vec![Value::Str("request-42".into())]
+        );
+        let (s7, n7, o7) = crate::temporal::parse_iso("2026-05-01T00:00:00Z").unwrap();
+        assert_eq!(
+            vals(&format!("{q} | $_:::instant"), &t),
+            vec![Value::Instant { secs: s7, nanos: n7, offset_min: o7 }]
+        );
+        // The shaped keys: the entries as records, the coordinates.
+        let (s2, n2, o2) = crate::temporal::parse_iso("2026-04-07T02:00:01Z").unwrap();
+        // The record: source, the node's path within it, the
+        // instant and the rung it came from (the mock records
+        // instants without a rung), the dpid.
+        let rec = |src: &str, path: &str, inst: (i64, u32, Option<i16>), dpid: &str| {
+            Value::Record(vec![
+                ("source".into(), Value::Str(src.into())),
+                ("path".into(), Value::Str(path.into())),
+                ("instant".into(), Value::Instant { secs: inst.0, nanos: inst.1, offset_min: inst.2 }),
+                ("instant-from".into(), Value::Null),
+                ("dpid".into(), Value::Str(dpid.into())),
+            ])
+        };
+        assert_eq!(
+            vals(&format!("{q} | $_:::@provenance"), &t),
+            vec![Value::List(vec![
+                rec("api-gateway", "/a/x.rs", (s2, n2, o2), "request-42"),
+                rec("crm", "/b/deep/w.rs", (s7, n7, o7), "row-7"),
+            ])]
+        );
+        assert_eq!(
+            vals(&format!("{q} | $_:::%provenance"), &t),
+            vec![rec("api-gateway", "/a/x.rs", (s7, n7, o7), "request-42")]
+        );
+        assert_eq!(vals(&format!("{q} | $_:::path"), &t), vec![Value::Str("/a/x.rs".into())]);
+        // A node with no recorded provenance still has a path; the
+        // access rung needs an invocation instant, which the mock
+        // does not bind.
+        assert_eq!(vals("/a/y.txt:::path", &t), vec![Value::Str("/a/y.txt".into())]);
+        assert_eq!(vals("/a/y.txt:::instant", &t), vec![Value::Null]);
+        let coord = |id: i64, stage: i64| {
+            Value::Record(vec![("id".into(), Value::Int(id)), ("stage".into(), Value::Int(stage))])
+        };
+        assert_eq!(vals(&format!("{q} | $_:::origin"), &t), vec![Value::Int(2)]);
+        assert_eq!(vals(&format!("{q} | $_:::%origin"), &t), vec![coord(2, 1)]);
+        assert_eq!(
+            vals(&format!("{q} | $_:::@origin"), &t),
+            vec![Value::List(vec![coord(2, 1), coord(7, 3)])]
+        );
+        // The coordinate stood on again: the node-id anchor.
+        assert_eq!(
+            vals(&format!("{q} | $_:::origin | . | ((!7)):::name"), &t),
+            vec![Value::Str("w.rs".into())]
+        );
+        assert_eq!(vals(&format!("{q} | $_:::elided"), &t), vec![Value::Int(0)]);
+        // A record field's own part, through the field colon.
+        assert_eq!(
+            vals(
+                "/a/x.rs | .n(:::index) | ->ref | .r%(a = $.n; b = :::name) | $.r:b:::source",
+                &t
+            ),
+            vec![Value::Str("crm".into())]
+        );
+        // Built into a shape of the user's own.
+        let vs = vals(
+            "/a/x.rs | .n(:::index) | %(v = $.n; from = $.n:::provenance)",
+            &t,
+        );
+        let Value::Record(fields) = &vs[0] else { panic!("expected a record") };
+        assert_eq!(
+            fields[1],
+            ("from".to_string(), Value::Str("?api-gateway@2026-04-07T02:00:01Z#request-42".into()))
+        );
+        // A node answers the shaped keys too: one entry, its own
+        // coordinate, none elided.
+        assert_eq!(
+            vals("/a/x.rs:::@provenance | count", &t),
+            vec![Value::Int(1)]
+        );
+        assert_eq!(vals("/a/x.rs:::origin", &t), vec![Value::Int(2)]);
+        assert_eq!(vals("/a/x.rs:::%origin", &t), vec![coord(2, 0)]);
+        assert_eq!(vals("/a/x.rs:::elided", &t), vec![Value::Int(0)]);
+        // Origins without provenance answer null.
+        assert_eq!(
+            vals("/a/y.txt | .n(:::index) | $.n:::provenance", &t),
+            vec![Value::Null]
+        );
+    }
+
+    #[test]
+    fn value_meta_needs_a_value_base() {
+        assert!(parse(&lex("/a/x.rs | 1:::source").unwrap()).is_err());
+        assert!(parse(&lex("/a | $.n:::provenance").unwrap()).is_ok());
+    }
+
+    // ---- cross-capsa reads: X:.r ------------------------------------
+
+    #[test]
+    fn peer_read_is_by_location() {
+        let t = MockTree::sample();
+        // x.rs --ref--> w.rs. Every file's capsa files its index;
+        // x.rs reads the regula of the capsa standing at w.rs, w.rs
+        // reads x.rs's through the reverse link; nobody stands at
+        // the other end for y.txt and z.rs: no value, null as a
+        // scalar.
+        assert_eq!(
+            vals("//*<file> | .v(:::index) | ->ref:.v", &t),
+            vec![Value::Int(1), Value::Null, Value::Null, Value::Null]
+        );
+        assert_eq!(
+            vals("//*<file> | .v(:::index) | <-ref:.v", &t),
+            vec![Value::Null, Value::Null, Value::Null, Value::Int(1)]
+        );
+        // The other accessors: the top regula, positional, the
+        // whole register, the record views.
+        assert_eq!(vals("/a/x.rs | .v(7) | ->ref:.v", &t), vec![Value::Null]);
+        let t2 = MockTree::sample();
+        assert_eq!(
+            vals("//*<file> | .v(:::index) | .w(:::name) | ->ref:. | (:::name = \"x.rs\" ? $_ : \"-\")", &t2),
+            vec![Value::Str("w.rs".into()), Value::Str("-".into()), Value::Str("-".into()), Value::Str("-".into())]
+        );
+        // Positional: the first regula of the peer at w.rs.
+        assert_eq!(
+            vals("//*<file> | .v(:::index * 10) | .w(:::name) | ->ref:.1", &t),
+            vec![Value::Int(10), Value::Null, Value::Null, Value::Null]
+        );
+    }
+
+    #[test]
+    fn peer_read_sees_the_input_snapshot() {
+        let t = MockTree::sample();
+        // A round that both reads a peer's value and repoints the
+        // same name: every capsa reads the value the stage
+        // received, whatever the evaluation order — x.rs and w.rs
+        // swap through the link in one stage.
+        let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
+        let vs = vals(
+            &format!("{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .v((:::name = \"x.rs\" ? ->ref:.v : <-ref:.v)) | $.v"),
+            &t,
+        );
+        // x.rs (evaluated first) takes w.rs's 9; w.rs takes x.rs's 5
+        // — the value the stage received, not the 9 x.rs just
+        // filed.
+        assert_eq!(vs, vec![Value::Int(9), Value::Int(5)]);
+        // Two rounds: x.rs files a from w.rs's v, w.rs then reads
+        // x.rs's a as b.
+        assert_eq!(
+            vals(&format!("{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"), &t),
+            vec![Value::Null, Value::Int(9)]
+        );
+    }
+
+    #[test]
+    fn peer_read_after_a_fork_reads_the_children() {
+        let t = MockTree::sample();
+        // The thread at `a` files p, forks into its children, each
+        // files its index. Nobody stands at `a` any more, so a read
+        // at `a` finds nothing; the family is its children, read
+        // by navigating to them: every member answers, the shared
+        // prefix in copies.
+        assert_eq!(
+            vals("/a | .p(1) | /* | .r(:::index) | \\:.p", &t),
+            vec![Value::Null, Value::Null]
+        );
+        assert_eq!(
+            vals("/a | .p(1) | /* | .r(:::index) | (\\/*:.r @| sum)", &t),
+            vec![Value::Int(3), Value::Int(3)]
+        );
+        assert_eq!(
+            vals("/a | .p(1) | /* | .r(:::index) | (\\/*:.p @| count)", &t),
+            vec![Value::Int(2), Value::Int(2)]
+        );
+        // A record per peer: `%.` at each sibling.
+        assert_eq!(
+            vals("/a | .p(1) | /* | .r(:::index) | (\\/*:%. | :r @| sum)", &t),
+            vec![Value::Int(3), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn peer_read_answers_every_capsa_standing_there() {
+        let t = MockTree::sample();
+        // Two capsae converge on `a` with different registers: both
+        // are read. With equal registers they deduplicate into one.
+        assert_eq!(
+            vals("/a/* | .v(:::index) | \\ | (\\/a:.v @| count)", &t),
+            vec![Value::Int(2), Value::Int(2)]
+        );
+        assert_eq!(
+            vals("/a/* | .v(1) | \\ | (\\/a:.v @| count)", &t),
+            vec![Value::Int(1)]
+        );
+    }
+
+    #[test]
+    fn peer_read_carries_the_regula_provenance() {
+        let t = MockTree::sample();
+        // The value read from w.rs's capsa keeps where w.rs read it
+        // (node 7, stage 1); the node it is read at is not an
+        // origin, nor is the navigation.
+        let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
+        let rows = traced(&format!("{pair} | .v(:::index) | ->ref:.v"), &t);
+        assert_eq!(rows[0].node, NodeId(2));
+        assert_eq!(rows[0].prov.origins, origins(&[(7, 1)]));
+        let t2 = provenanced();
+        assert_eq!(
+            vals(&format!("{pair} | .v(:::index) | ->ref:.v:::source"), &t2)[0],
+            Value::Str("crm".into())
+        );
+    }
+
+    #[test]
+    fn peer_read_is_null_without_a_context() {
+        let t = MockTree::sample();
+        // In a navigation predicate no context exists: null, so the
+        // comparison fails.
+        assert_eq!(run("/a/x.rs[->ref:.v = 1]", &t), Vec::<u64>::new());
+        assert_eq!(run("/a/x.rs[!->ref:.v]", &t), vec![2]);
+    }
+
+    #[test]
+    fn peer_read_needs_a_node_side() {
+        // A projected path is a value, not a node; so is a recall.
+        assert!(parse(&lex("/a | $.v:.r").unwrap()).is_err());
+        assert!(parse(&lex("/a | ->ref::x:.r").unwrap()).is_err());
+        // A spaced colon is still the conditional's else.
+        assert!(parse(&lex("/a | (::x ? 1 : .5)").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn node_id_anchor() {
+        let t = MockTree::sample();
+        // `((!N))` stands on the node with that id, at the branch
+        // level and in operand position; an id the adapter never
+        // minted (the mock indexes by id and would panic) is no
+        // node.
+        assert_eq!(run("((!7))", &t), vec![7]);
+        assert_eq!(vals("((!7)):::name", &t), vec![Value::Str("w.rs".into())]);
+        assert_eq!(vals("/a | ((!7))\\:::name", &t), vec![Value::Str("deep".into())]);
+        assert_eq!(run("((!99))", &t), Vec::<u64>::new());
+        assert_eq!(vals("/a | ((!99)):::name", &t), Vec::<Value>::new());
+        // Round trip through the id key: what `:::id` and
+        // `:::origin` report, the anchor accepts.
+        assert_eq!(vals("/b/deep/w.rs:::id", &t), vec![Value::Int(7)]);
+        assert_eq!(vals("/a/x.rs | .v(:::index) | ->ref | $.v:::origin", &t), vec![Value::Int(2)]);
+        // The anchor takes an expression: a value's origin stood on
+        // again, a coordinate record by its id, an arithmetic id, a
+        // list of ids forking one thread each.
+        assert_eq!(
+            vals("/a/x.rs | .v(:::index) | ->ref | .o($.v:::origin) | ((!$.o)):::name", &t),
+            vec![Value::Str("x.rs".into())]
+        );
+        assert_eq!(
+            vals("/a/x.rs | .v(:::index) | ->ref | ((!$.v:::%origin)):::name", &t),
+            vec![Value::Str("x.rs".into())]
+        );
+        assert_eq!(
+            vals("/a/* | .v(:::index) | ((!$.v + 1)):::name", &t),
+            vec![Value::Str("x.rs".into()), Value::Str("y.txt".into())]
+        );
+        assert_eq!(
+            vals("/a | ((!@(2; 3; 99))):::name", &t),
+            vec![Value::Str("x.rs".into()), Value::Str("y.txt".into())]
+        );
+        // The anchor's reads are not origins.
+        let rows = traced("/a/x.rs | .v(:::index) | ->ref | ((!$.v:::origin)) | :::name", &t);
+        assert_eq!(rows[0].node, NodeId(2));
+        assert_eq!(rows[0].prov.origins, origins(&[(2, 4)]));
+    }
+
+    #[test]
+    fn quantified_push_iterates() {
+        let t = MockTree::sample();
+        // `{N}` files N regulae, each round reading the last.
+        assert_eq!(vals("/a | .v(1) | .v($.v * 2){3} | $.v", &t), vec![Value::Int(8)]);
+        assert_eq!(vals("/a | .v(1) | .v($.v * 2){3} | @. | count", &t), vec![Value::Int(4)]);
+        // A round is synchronous: peers read the previous round's
+        // values through the snapshot, whatever the order.
+        let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
+        assert_eq!(
+            vals(&format!("{pair} | .v(:::index * 10) | .v(($.v + (->ref:.v | default(0)) + (<-ref:.v | default(0)))){{2}} | $.v"), &t),
+            vec![Value::Int(40), Value::Int(40)]
+        );
+        // The open forms stop at a fixpoint: a round that repoints
+        // no name — after `min` rounds, within the bound.
+        assert_eq!(vals("/a | .v(5) | .v(($.v > 8 ? $.v : $.v + 1)){1;} | @. | count", &t), vec![Value::Int(6)]);
+        assert_eq!(vals("/a | .v(5) | .v($.v){3;} | @. | count", &t), vec![Value::Int(5)]);
+        assert_eq!(vals("/a | .v(5) | .v($.v + 1){2;3} | $.v", &t), vec![Value::Int(8)]);
+        // Only a push takes the quantifier.
+        assert!(parse(&lex("/a | upper{3}").unwrap()).is_err());
+        assert!(parse(&lex("/a | .v(1){3;2}").unwrap()).is_err());
     }
 }

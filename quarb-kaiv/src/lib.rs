@@ -25,10 +25,14 @@
 //!   written unit stays on display and in `::::unit`.
 //! - Provenance surfaces twice. Raw, as leaf adapter metadata:
 //!   `::::source` (the declared id), `::::source-uri` (its declared
-//!   URI), `::::timestamp` (the compact string), `::::dpid`. And
+//!   URI), `::::timestamp` (the instant as written), `::::dpid` —
+//!   the first entry's, where a leaf lists several sources
+//!   (`?a;b;+N`) — and `::::sources` (every listed id). And
 //!   resolved, as the core data-provenance keys: `:::source` (the
-//!   URI), `:::instant` (a typed Instant), `:::dpid`, and their
-//!   composite `:::provenance`.
+//!   URI), `:::instant` (a typed Instant; the newest of a list),
+//!   `:::dpid`, their composite `:::provenance` (the whole list,
+//!   `;`-separated, the elision marker kept), `:::@provenance` (one
+//!   record per entry) and `:::elided`.
 //! - Authored sugar (variables, blocks, `+:=`, maps, units,
 //!   named-type imports) is resolved by kaiv's own compiler before
 //!   mounting, and `$field` references are denormalized to their
@@ -68,19 +72,48 @@ struct Leaf {
     /// `std/time/datetime`), when the line carried one.
     ty: Option<String>,
     unit: Option<String>,
-    source: Option<String>,
+    /// The provenance entries as written, in order.
+    prov: Vec<ProvEntry>,
+    /// The elision marker's count (`;+N`), 0 when absent.
+    elided: u32,
+}
+
+/// One provenance entry as written: `src[@ts][#dpid]`. The source
+/// is empty only on a legacy source-less line (`!int#dpid'…`), a
+/// shape the spec never admitted but earlier builders emitted.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ProvEntry {
+    source: String,
     timestamp: Option<String>,
     dpid: Option<String>,
 }
 
+impl ProvEntry {
+    /// `src[@ts][#dpid]`, peeled right to left (an instant admits
+    /// neither `#` nor `@`).
+    fn parse(mut s: &str) -> ProvEntry {
+        let mut e = ProvEntry::default();
+        if let Some((head, dpid)) = s.rsplit_once('#') {
+            e.dpid = Some(dpid.to_string());
+            s = head;
+        }
+        if let Some((src, ts)) = s.split_once('@') {
+            e.timestamp = Some(ts.to_string());
+            s = src;
+        }
+        e.source = s.to_string();
+        e
+    }
+}
+
 /// The parsed pieces of a canonical left side:
-/// `!TYPE[:UNIT][?SRC[@TS]][#DPID]'NAMEPATH`.
+/// `!TYPE[:UNIT][?PROV-LIST]'NAMEPATH`, the provenance list
+/// `src[@ts][#dpid](;src[@ts][#dpid])*(;+N)?`.
 struct LeftSide<'a> {
     ty: &'a str,
     unit: Option<&'a str>,
-    source: Option<&'a str>,
-    timestamp: Option<&'a str>,
-    dpid: Option<&'a str>,
+    prov: Vec<ProvEntry>,
+    elided: u32,
     namepath: &'a str,
 }
 
@@ -92,9 +125,8 @@ fn parse_left(left: &str) -> Option<LeftSide<'_>> {
     let q = rest.find('\'')?;
     let (meta, namepath) = (&rest[..q], &rest[q + 1..]);
     let mut unit = None;
-    let mut source = None;
-    let mut timestamp = None;
-    let mut dpid = None;
+    let mut prov = Vec::new();
+    let mut elided = 0;
     // Split the meta at its markers, left to right.
     let mut cut = meta.len();
     for (i, c) in meta.char_indices() {
@@ -111,24 +143,26 @@ fn parse_left(left: &str) -> Option<LeftSide<'_>> {
         tail = &rest[end..];
     }
     if let Some(rest) = tail.strip_prefix('?') {
-        let end = rest.find(['@', '#']).unwrap_or(rest.len());
-        source = Some(&rest[..end]);
-        tail = &rest[end..];
-        if let Some(rest) = tail.strip_prefix('@') {
-            let end = rest.find('#').unwrap_or(rest.len());
-            timestamp = Some(&rest[..end]);
-            tail = &rest[end..];
+        // The list: entries in order, the elision marker last.
+        for item in rest.split(';') {
+            match item.strip_prefix('+') {
+                Some(n) => elided = n.parse().unwrap_or(0),
+                None if !item.is_empty() => prov.push(ProvEntry::parse(item)),
+                None => {}
+            }
         }
-    }
-    if let Some(rest) = tail.strip_prefix('#') {
-        dpid = Some(rest);
+    } else if let Some(dpid) = tail.strip_prefix('#') {
+        // Legacy: a dpid with no source.
+        prov.push(ProvEntry {
+            dpid: Some(dpid.to_string()),
+            ..Default::default()
+        });
     }
     Some(LeftSide {
         ty,
         unit,
-        source,
-        timestamp,
-        dpid,
+        prov,
+        elided,
         namepath,
     })
 }
@@ -411,9 +445,8 @@ impl KaivAdapter {
                         value: v,
                         ty: ty_meta,
                         unit: l.unit.map(str::to_string),
-                        source: l.source.map(str::to_string),
-                        timestamp: l.timestamp.map(str::to_string),
-                        dpid: l.dpid.map(str::to_string),
+                        prov: l.prov,
+                        elided: l.elided,
                     };
                     let id = a.nodes.len();
                     a.nodes.push(Node {
@@ -541,47 +574,71 @@ impl AstAdapter for KaivAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = self.node(node)?;
         let l = n.leaf.as_ref()?;
+        // The raw tier reads the first (anchoring) entry; the list
+        // as a whole is `::::sources` and the core tier.
+        let first = l.prov.first();
+        let source = first.map(|e| e.source.as_str()).filter(|s| !s.is_empty());
         match key {
             "type" => l.ty.clone().map(Value::Str),
             "unit" => l.unit.clone().map(Value::Str),
-            "source" => l.source.clone().map(Value::Str),
+            "source" => source.map(|s| Value::Str(s.to_string())),
             "source-uri" => {
-                let id = l.source.as_deref()?;
+                let id = source?;
                 self.sources
                     .iter()
                     .find(|(i, _)| i == id)
                     .map(|(_, uri)| Value::Str(uri.clone()))
             }
-            "timestamp" => l.timestamp.clone().map(Value::Str),
-            "dpid" => l.dpid.clone().map(Value::Str),
+            "sources" => Some(Value::List(
+                l.prov
+                    .iter()
+                    .filter(|e| !e.source.is_empty())
+                    .map(|e| Value::Str(e.source.clone()))
+                    .collect(),
+            )),
+            "timestamp" => first.and_then(|e| e.timestamp.clone()).map(Value::Str),
+            "dpid" => first.and_then(|e| e.dpid.clone()).map(Value::Str),
             _ => None,
         }
     }
 
     /// The resolved data-provenance triple (`:::source` /
-    /// `:::instant` / `:::dpid`): the leaf's own `?src@ts#dpid`,
-    /// with the source id resolved through the document's `.?`
-    /// declarations to its URI (the id alone does not travel across
-    /// mounts; the raw id stays on `::::source`) and the compact
-    /// timestamp bridged to a typed Instant. Containers answer
-    /// nothing — a mount layer above fills what it knows.
+    /// `:::instant` / `:::dpid`): the leaf's anchoring (first)
+    /// entry, with the source id resolved through the document's
+    /// `.?` declarations to its URI (the id alone does not travel
+    /// across mounts; the raw id stays on `::::source`) and the
+    /// timestamp — dashed, or the deprecated compact form — bridged
+    /// to a typed Instant. Containers answer nothing — a mount layer
+    /// above fills what it knows.
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
+        self.provenance_list(node).first()
+    }
+
+    /// Every entry the leaf lists, resolved the same way, and its
+    /// elision count — a leaf written `?a;b;+3` has two entries and
+    /// three more it does not name.
+    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
         let Some(l) = self.node(node).and_then(|n| n.leaf.as_ref()) else {
-            return quarb::Provenance::default();
+            return quarb::ProvenanceList::default();
         };
-        quarb::Provenance {
-            source: l.source.as_ref().map(|id| {
+        let resolve = |e: &ProvEntry| quarb::Provenance {
+            source: Some(&e.source).filter(|s| !s.is_empty()).map(|id| {
                 self.sources
                     .iter()
                     .find(|(i, _)| i == id)
                     .map(|(_, uri)| uri.clone())
                     .unwrap_or_else(|| id.clone())
             }),
-            instant: l
-                .timestamp
-                .as_deref()
-                .and_then(quarb::temporal::parse_iso_compact),
-            dpid: l.dpid.clone(),
+            path: None,
+            instant: e.timestamp.as_deref().and_then(|t| {
+                quarb::temporal::parse_iso(t).or_else(|| quarb::temporal::parse_iso_compact(t))
+            }),
+            instant_from: e.timestamp.as_ref().map(|_| quarb::InstantFrom::Node),
+            dpid: e.dpid.clone(),
+        };
+        quarb::ProvenanceList {
+            entries: l.prov.iter().map(resolve).filter(|p| !p.is_empty()).collect(),
+            elided: l.elided,
         }
     }
 
@@ -639,6 +696,8 @@ mod tests {
             ".!kaiv 1\n",
             ".?sensor1 https://sensors.example.com/1\n",
             "!int?sensor1@20250115T093000Z#req-42'/readings::temp=100\n",
+            ".?backup https://sensors.example.com/2\n",
+            "!float?sensor1@2025-01-15T09:30:00Z#req-42;backup@2025-01-16T09:30:00Z#req-43;+3'/readings::mean=21.7\n",
             "!float:km'/trip::length=42\n",
             "!float:W'/rig::power=290\n",
             "!acme/net/label'/net::host=web-01\n",
@@ -670,13 +729,30 @@ mod tests {
             ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42"]
         );
         assert_eq!(values(&a, "/readings/temp::::timestamp"), ["20250115T093000Z"]);
-        // A typed temporal criterion over the bridged instant.
+        // A typed temporal criterion over the bridged instant (the
+        // list-carrying leaf's newest entry qualifies it too).
         assert_eq!(
             values(&a, "//*[:::instant > 2025-01-01]::"),
-            ["100"]
+            ["100", "21.7"]
         );
-        // Containers and provenance-less leaves answer honest nulls
-        // (null displays as the empty string).
+        // A leaf listing several sources: the raw tier reads the
+        // first entry and names every id; the core tier answers the
+        // whole list, the newest instant, and the elision count.
+        assert_eq!(values(&a, "/readings/mean::::source"), ["sensor1"]);
+        assert_eq!(values(&a, "/readings/mean::::dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/readings/mean::::sources"), ["sensor1, backup"]);
+        assert_eq!(values(&a, "/readings/mean::::sources | count"), ["2"]);
+        assert_eq!(
+            values(&a, "/readings/mean:::provenance"),
+            ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42;https://sensors.example.com/2@2025-01-16T09:30:00Z#req-43;+3"]
+        );
+        assert_eq!(values(&a, "/readings/mean:::source"), ["https://sensors.example.com/1"]);
+        assert_eq!(values(&a, "/readings/mean:::instant"), ["2025-01-16T09:30:00Z"]);
+        assert_eq!(values(&a, "/readings/mean:::@provenance | count"), ["2"]);
+        assert_eq!(values(&a, "/readings/mean:::elided"), ["3"]);
+        assert_eq!(values(&a, "/readings/temp:::elided"), ["0"]);
+        // Containers and provenance-less leaves answer null (which
+        // displays as the empty string).
         assert_eq!(values(&a, "/readings:::provenance"), [""]);
         assert_eq!(values(&a, "/trip/length:::source"), [""]);
         assert_eq!(values(&a, "/trip/length::::unit"), ["km"]);

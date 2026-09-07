@@ -301,13 +301,19 @@ impl AstAdapter for FsAdapter {
 
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         let path = &self.paths[node.0 as usize];
+        // The file is its own source; its mtime is the node's own
+        // timestamp (a graft inside it re-labels that as the
+        // source rung), and it is the root of itself.
+        let instant = std::fs::metadata(path)
+            .ok()
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs() as i64, d.subsec_nanos(), None));
         quarb::Provenance {
             source: Some(path.display().to_string()),
-            instant: std::fs::metadata(path)
-                .ok()
-                .and_then(|md| md.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| (d.as_secs() as i64, d.subsec_nanos(), None)),
+            path: Some("/".to_string()),
+            instant_from: instant.map(|_| quarb::InstantFrom::Node),
+            instant,
             dpid: None,
         }
     }

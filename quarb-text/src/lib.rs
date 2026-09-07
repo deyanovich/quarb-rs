@@ -70,7 +70,10 @@ pub enum Block {
     Text { text: String },
     /// Open a nesting container. Items take their `unordered-` /
     /// `ordered-` flavor (and taxis) from the enclosing list.
-    Open { kind: Container, lemma: Option<String> },
+    Open {
+        kind: Container,
+        lemma: Option<String>,
+    },
     /// Close the innermost open container, optionally with its
     /// hypograph (footer or attribution).
     Close { hypograph: Option<String> },
@@ -192,7 +195,9 @@ pub enum Container {
     Blockquote,
     UnorderedList,
     /// `start` is the first item's ordinal (Markdown's `3.` lists).
-    OrderedList { start: i64 },
+    OrderedList {
+        start: i64,
+    },
     /// A list item; flavor and taxis come from the enclosing list.
     Item,
     /// A note body (the noted, ruling #35): opens a note node of
@@ -393,13 +398,11 @@ impl Node {
 /// the name. External refs resolve at query time, through the
 /// engine's reference machinery.
 fn resolve_refs(nodes: &mut [Node]) -> std::collections::HashMap<String, NodeId> {
-    let mut onyms: std::collections::HashMap<String, NodeId> =
-        std::collections::HashMap::new();
+    let mut onyms: std::collections::HashMap<String, NodeId> = std::collections::HashMap::new();
     // Citation keys are a namespace of their own, separate from
     // labels (LaTeX's \bibcite vs \newlabel precedent): `cit`
     // resolves against `bib` bearers only.
-    let mut bibs: std::collections::HashMap<String, NodeId> =
-        std::collections::HashMap::new();
+    let mut bibs: std::collections::HashMap<String, NodeId> = std::collections::HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
         if n.deixis || matches!(n.kind, Kind::IndexMark | Kind::Ref | Kind::Cit) {
             continue;
@@ -427,10 +430,7 @@ fn resolve_refs(nodes: &mut [Node]) -> std::collections::HashMap<String, NodeId>
                     .map(|t| t.trim_start_matches('#').to_string())
                     .unwrap_or_default(),
             ),
-            Kind::Cit => (
-                &bibs,
-                nodes[i].target.clone().unwrap_or_default(),
-            ),
+            Kind::Cit => (&bibs, nodes[i].target.clone().unwrap_or_default()),
             _ => continue,
         };
         match map.get(&key) {
@@ -452,6 +452,92 @@ pub fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What a document declares about itself, in a standard
+/// vocabulary its format provides — HTML's `<head>` (the `meta`
+/// name/property pairs, `title`, the `lang` attribute, the
+/// canonical link, `rel="tag"` links) and a schema.org JSON-LD
+/// block. Two layers: every declaration lands verbatim under
+/// `::::name` (`::::description`, `::::og:type`,
+/// `::::article:section`, `::::schema:@type`), so nothing a page
+/// says is lost; and the standard vocabularies feed a curated
+/// core — the tags (`keywords`, `article:tag`, `rel=tag`, JSON-LD
+/// `keywords`) become traits on the document and `::tags`, the
+/// one classification (`article:section` / `articleSection`)
+/// becomes `::category` and a trait too, `description`, `author`,
+/// and the `published` / `modified` instants. Declared identity
+/// only: a format adapter reads a cited vocabulary, never a class
+/// name or a layout.
+#[derive(Debug, Clone, Default)]
+pub struct HeadMeta {
+    /// Every declaration, name → values, in document order; a
+    /// repeated name accumulates.
+    pub declared: Vec<(String, Vec<String>)>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    /// The one classification (a section of the site, a category).
+    pub category: Option<String>,
+    /// The tags, as written, first appearance wins.
+    pub tags: Vec<String>,
+    pub published: Option<Value>,
+    pub modified: Option<Value>,
+}
+
+impl HeadMeta {
+    /// Record a declaration verbatim (the lossless layer).
+    pub fn declare(&mut self, name: &str, value: &str) {
+        let value = normalize_ws(value);
+        if name.is_empty() || value.is_empty() {
+            return;
+        }
+        match self.declared.iter_mut().find(|(k, _)| k == name) {
+            Some((_, vs)) => vs.push(value),
+            None => self.declared.push((name.to_string(), vec![value])),
+        }
+    }
+
+    /// Add a tag unless already present (case-insensitively).
+    pub fn tag(&mut self, tag: &str) {
+        let tag = normalize_ws(tag);
+        if tag.is_empty() || self.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            return;
+        }
+        self.tags.push(tag);
+    }
+
+    /// A declaration's value: the string when declared once, the
+    /// list when repeated.
+    pub fn declared_value(&self, name: &str) -> Option<Value> {
+        let (_, vs) = self.declared.iter().find(|(k, _)| k == name)?;
+        Some(match vs.as_slice() {
+            [one] => Value::Str(one.clone()),
+            many => Value::List(many.iter().cloned().map(Value::Str).collect()),
+        })
+    }
+
+    /// The trait spelling of a tag or category: as declared, case
+    /// kept, with runs of anything a name cannot carry (spaces,
+    /// slashes, parentheses) collapsed to one dash — `Execution
+    /// Model` is `<tag:Execution-Model>`, `now()` is `<tag:now>`.
+    pub fn trait_name(s: &str) -> String {
+        let mut out = String::new();
+        let mut dash = false;
+        for c in s.chars() {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '+') {
+                out.push(c);
+                dash = c == '-';
+            } else if !dash && !out.is_empty() {
+                out.push('-');
+                dash = true;
+            }
+        }
+        while out.ends_with('-') {
+            out.pop();
+        }
+        out
+    }
+}
+
 /// A Quarb adapter over a text-level document.
 pub struct TextModel {
     nodes: Vec<Node>,
@@ -463,12 +549,23 @@ pub struct TextModel {
     onyms: std::collections::HashMap<String, NodeId>,
     /// The document's own URL, when the mount knows it.
     document_url: Option<url::Url>,
+    /// The base relative reference targets join against when the
+    /// document declares one (html's `<base href>`); else the
+    /// document's own URL.
+    link_base: Option<url::Url>,
+    /// Where the document is served from when no absolute URL is
+    /// known — the mount's path, an archive member's path — the
+    /// base `::href` links against.
+    document_path: Option<String>,
     /// Alias → canonical campus, for bib field lookup: the
     /// bibliogramma vocabulary's census (BibLaTeX's field names
     /// are its English rows), so `::author` answers as
     /// `::auctor` — in any covered language. Set by the koine
     /// route, which holds the dialektos.
     bib_aliases: std::collections::HashMap<String, String>,
+    /// What the document declares about itself (see [`HeadMeta`]);
+    /// answered on the document node.
+    head: HeadMeta,
 }
 
 impl TextModel {
@@ -562,7 +659,11 @@ impl TextModel {
                     // litogramma's canonical document-end
                     // placement — whatever else is open.
                     let kind = match kind {
-                        Container::Note { onym, family, margin } => {
+                        Container::Note {
+                            onym,
+                            family,
+                            margin,
+                        } => {
                             let id = push(&mut nodes, family.kind(), root);
                             let n = &mut nodes[id.0 as usize];
                             n.onym = Some(onym.trim().to_string()).filter(|o| !o.is_empty());
@@ -609,14 +710,19 @@ impl TextModel {
                 }
                 Block::Close { hypograph } => {
                     if let Some(open) = containers.pop() {
-                        nodes[open.0 as usize].hypograph =
-                            hypograph.map(|h| normalize_ws(&h)).filter(|h| !h.is_empty());
+                        nodes[open.0 as usize].hypograph = hypograph
+                            .map(|h| normalize_ws(&h))
+                            .filter(|h| !h.is_empty());
                     }
                 }
                 // The callout: a `footnote` child of the flow
                 // block it sits in, `<deixis>`-traited; the edge
                 // to its body resolves after the stream.
-                Block::NoteRef { onym, family, margin } => {
+                Block::NoteRef {
+                    onym,
+                    family,
+                    margin,
+                } => {
                     let parent = last_flow.unwrap_or(root);
                     // A declared family names the callout now; an
                     // undeclared one is settled at resolution from
@@ -629,7 +735,11 @@ impl TextModel {
                     n.margin = margin;
                     n.onym = Some(onym.trim().to_string()).filter(|o| !o.is_empty());
                 }
-                Block::Ref { target, text, internal } => {
+                Block::Ref {
+                    target,
+                    text,
+                    internal,
+                } => {
                     let parent = last_flow.unwrap_or(root);
                     let id = push(&mut nodes, Kind::Ref, parent);
                     let n = &mut nodes[id.0 as usize];
@@ -661,7 +771,9 @@ impl TextModel {
                         .map(|(k, v)| (k.trim().to_string(), normalize_ws(&v)))
                         .filter(|(k, v)| !k.is_empty() && !v.is_empty())
                         .collect();
-                    n.genus = genus.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
+                    n.genus = genus
+                        .map(|g| g.trim().to_string())
+                        .filter(|g| !g.is_empty());
                 }
                 Block::Anchor { onym } => {
                     let parent = last_flow.unwrap_or(root);
@@ -696,8 +808,7 @@ impl TextModel {
                 Block::IndexMark { term } => {
                     let parent = last_flow.unwrap_or(root);
                     let id = push(&mut nodes, Kind::IndexMark, parent);
-                    nodes[id.0 as usize].onym =
-                        Some(quarb_term(&term)).filter(|t| !t.is_empty());
+                    nodes[id.0 as usize].onym = Some(quarb_term(&term)).filter(|t| !t.is_empty());
                 }
                 Block::Verbatim { lang, text } => {
                     let parent = cursor(&sections, &containers, root);
@@ -736,7 +847,10 @@ impl TextModel {
             root,
             onyms,
             document_url: None,
+            link_base: None,
+            document_path: None,
             bib_aliases: Default::default(),
+            head: HeadMeta::default(),
         }
     }
 
@@ -751,6 +865,165 @@ impl TextModel {
     /// target joins against when `-->` reaches across documents.
     pub fn set_document_url(&mut self, url: &str) {
         self.document_url = url::Url::parse(url).ok();
+    }
+
+    /// Declare the base relative reference targets join against
+    /// — html's `<base href>` — when it differs from the
+    /// document's own URL.
+    pub fn set_link_base(&mut self, url: &str) {
+        self.link_base = url::Url::parse(url).ok();
+    }
+
+    /// Declare where the document is served from when it declares
+    /// no absolute URL of its own: the base `::href` links against
+    /// (a mount path, an archive member's path).
+    pub fn set_document_path(&mut self, path: &str) {
+        self.document_path = Some(path.to_string());
+    }
+
+    /// The base `::href` links against: the document's URL, else
+    /// its declared path.
+    fn href_base(&self) -> Option<String> {
+        if let Some(u) = &self.document_url {
+            return Some(u.to_string());
+        }
+        self.document_path.clone()
+    }
+
+    /// The nearest bearer of a name, the node itself first, then
+    /// its ancestors — the anchor a link into this node lands on.
+    /// `exact` says the node bears it itself.
+    fn nearest_onym(&self, node: NodeId) -> Option<(String, bool)> {
+        let mut cur = Some(node);
+        let mut exact = true;
+        while let Some(id) = cur {
+            let n = &self.nodes[id.0 as usize];
+            if n.kind != Kind::Document && !n.deixis && let Some(o) = &n.onym {
+                return Some((o.clone(), exact));
+            }
+            exact = false;
+            cur = n.parent;
+        }
+        None
+    }
+
+    /// A link into `node`, as far as the served form can narrow
+    /// it. The base is the document's URL (its canonical link,
+    /// else the mount's path). An HTML page — a base ending in
+    /// `.html` / `.htm` / `/` or without an extension — narrows
+    /// with the nearest anchor and, for a block below the anchored
+    /// one, a text fragment (`#:~:text=start,end`) built from the
+    /// node's own prose. A PDF narrows to nothing yet; any other
+    /// form links the document alone, since no browser takes a
+    /// fragment into it. The narrowing stays available as data
+    /// beside the link (`::anchor`, the prose) for a client that
+    /// renders the document itself.
+    fn href(&self, node: NodeId) -> Option<String> {
+        let base = self.href_base()?;
+        let n = &self.nodes[node.0 as usize];
+        if n.kind == Kind::Document {
+            return Some(base);
+        }
+        let served = base.split(['?', '#']).next().unwrap_or(&base);
+        let last = served.rsplit('/').next().unwrap_or(served);
+        let html = served.ends_with('/')
+            || !last.contains('.')
+            || last.ends_with(".html")
+            || last.ends_with(".htm");
+        if !html {
+            return Some(base);
+        }
+        let mut out = base;
+        let (anchor, exact) = match self.nearest_onym(node) {
+            Some((a, exact)) => (Some(a), exact),
+            None => (None, false),
+        };
+        if let Some(a) = &anchor {
+            out.push('#');
+            out.push_str(a);
+        }
+        if !exact {
+            let words: Vec<&str> = n.prose.split_whitespace().collect();
+            if !words.is_empty() {
+                use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+                let enc = |ws: &[&str]| utf8_percent_encode(&ws.join(" "), NON_ALPHANUMERIC).to_string();
+                if anchor.is_none() {
+                    out.push('#');
+                }
+                out.push_str(":~:text=");
+                if words.len() <= 12 {
+                    out.push_str(&enc(&words));
+                } else {
+                    out.push_str(&enc(&words[..6]));
+                    out.push(',');
+                    out.push_str(&enc(&words[words.len() - 6..]));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The document's title for a link: what its head declares,
+    /// else its first top-level section's lemma.
+    fn document_title(&self) -> Option<String> {
+        if let Some(t) = &self.head.title {
+            return Some(t.clone());
+        }
+        self.nodes[self.root.0 as usize]
+            .children
+            .iter()
+            .map(|c| &self.nodes[c.0 as usize])
+            .find(|n| n.kind == Kind::Section)
+            .and_then(|n| n.lemma.clone())
+    }
+
+    /// Attach what the document declares about itself; the format
+    /// adapter reads it from the source's own metadata vocabulary.
+    pub fn set_head_meta(&mut self, head: HeadMeta) {
+        self.head = head;
+    }
+
+    /// What the document declares about itself.
+    pub fn head_meta(&self) -> &HeadMeta {
+        &self.head
+    }
+
+    /// The document's text as one string: every section's lemma
+    /// and every block's prose, one per line, in document order —
+    /// the lowering a substrate stores beside the document so a
+    /// substring predicate inside the graft can be prefiltered on
+    /// it. The invariant a prefilter relies on: every grafted
+    /// node's prose (and every lemma) is a substring of this.
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            let n = &self.nodes[id.0 as usize];
+            if let Some(l) = &n.lemma
+                && !l.is_empty()
+            {
+                out.push_str(l);
+                out.push('\n');
+            }
+            // Every node's own prose, leaf or not: a paragraph that
+            // holds a ref or an anchor still has prose of its own,
+            // and the invariant covers it too.
+            if !n.prose.is_empty() && n.kind != Kind::Document {
+                out.push_str(&n.prose);
+                out.push('\n');
+            }
+            for c in n.children.iter().rev() {
+                stack.push(*c);
+            }
+        }
+        out
+    }
+
+    /// How many nodes the document holds (the root included) — the
+    /// bound a host needs to pack this document's node ids into a
+    /// wider id space.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     /// Read plain text: blank-line-separated paragraphs, each
@@ -829,7 +1102,9 @@ fn resolve_notes(nodes: &mut [Node]) {
             && !n.deixis
             && let Some(o) = &n.onym
         {
-            bodies.entry((n.kind, o.clone())).or_insert(NodeId(i as u64));
+            bodies
+                .entry((n.kind, o.clone()))
+                .or_insert(NodeId(i as u64));
         }
     }
     for i in 0..nodes.len() {
@@ -849,7 +1124,9 @@ fn resolve_notes(nodes: &mut [Node]) {
                 .into_iter()
                 .find_map(|k| bodies.get(&(k, onym.clone())).map(|b| (k, *b)))
         } else {
-            bodies.get(&(nodes[i].kind, onym)).map(|b| (nodes[i].kind, *b))
+            bodies
+                .get(&(nodes[i].kind, onym))
+                .map(|b| (nodes[i].kind, *b))
         };
         match hit {
             Some((family, body)) => {
@@ -944,7 +1221,9 @@ fn lower_verse(
     {
         let n = &mut nodes[verse.0 as usize];
         n.lemma = lemma.map(|l| normalize_ws(&l)).filter(|l| !l.is_empty());
-        n.hypograph = hypograph.map(|h| normalize_ws(&h)).filter(|h| !h.is_empty());
+        n.hypograph = hypograph
+            .map(|h| normalize_ws(&h))
+            .filter(|h| !h.is_empty());
     }
     let mut line_no = 0i64;
     for (i, strophe) in strophes.into_iter().enumerate() {
@@ -976,10 +1255,7 @@ fn lower_verse(
 /// reverse index scan suffices — no recursion.
 fn flatten_prose(nodes: &mut [Node]) {
     for i in (0..nodes.len()).rev() {
-        let inline_lemma = matches!(
-            nodes[i].kind,
-            Kind::UnorderedItem | Kind::OrderedItem
-        );
+        let inline_lemma = matches!(nodes[i].kind, Kind::UnorderedItem | Kind::OrderedItem);
         let mut lemma_part: Option<String> = None;
         let mut parts: Vec<String> = Vec::new();
         if let Some(lemma) = &nodes[i].lemma
@@ -1089,6 +1365,31 @@ impl AstAdapter for TextModel {
     fn traits(&self, node: NodeId) -> Vec<String> {
         let n = &self.nodes[node.0 as usize];
         let mut out = Vec::new();
+        // The document wears its declared classification: one
+        // trait per tag and one for the category — the LDAP rule,
+        // where a multi-valued classifying attribute is the node's
+        // traits — each in its own namespace (`<tag:pandas>`,
+        // `<category:Guides>`), so a tag can never collide with a
+        // structural trait like `<table>` or `<note>`, and spelled
+        // as declared, case kept.
+        if n.kind == Kind::Document {
+            for (ns, t) in self
+                .head
+                .tags
+                .iter()
+                .map(|t| ("tag", t))
+                .chain(self.head.category.iter().map(|c| ("category", c)))
+            {
+                let name = HeadMeta::trait_name(t);
+                if name.is_empty() {
+                    continue;
+                }
+                let name = format!("{ns}:{name}");
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
         // A callout is inline apparatus, not a block (ruling #35);
         // so is an index mark (ruling #36). Strophes and stichos
         // lines are sub-block structure (ruling #37, litogramma's
@@ -1117,7 +1418,9 @@ impl AstAdapter for TextModel {
         }
         // A structured entry's genus (liber, commentarius, …)
         // surfaces as its trait, the genos rule.
-        if n.kind == Kind::Bib && let Some(g) = &n.genus {
+        if n.kind == Kind::Bib
+            && let Some(g) = &n.genus
+        {
             out.push(g.clone());
         }
         if n.kind == Kind::Anchor
@@ -1176,6 +1479,24 @@ impl AstAdapter for TextModel {
     /// spelling was written.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
+        // The document node answers its declared identity: the
+        // curated core of what the head says.
+        if n.kind == Kind::Document {
+            let h = &self.head;
+            match name {
+                "title" | "lemma" => return h.title.clone().map(Value::Str),
+                "description" => return h.description.clone().map(Value::Str),
+                "author" => return h.author.clone().map(Value::Str),
+                "category" => return h.category.clone().map(Value::Str),
+                "tags" => {
+                    return (!h.tags.is_empty())
+                        .then(|| Value::List(h.tags.iter().cloned().map(Value::Str).collect()));
+                }
+                "published" => return h.published.clone(),
+                "modified" => return h.modified.clone(),
+                _ => {}
+            }
+        }
         // A structured entry answers its campi first — under the
         // canonical Latin name or any census alias (BibLaTeX's
         // field names included), case-insensitively — ahead of
@@ -1192,15 +1513,33 @@ impl AstAdapter for TextModel {
             }
         }
         match name {
+            // A link into the node, as far as the served form can
+            // narrow it; the anchor it lands on; and the record a
+            // client renders as a clickable result.
+            "href" => return self.href(node).map(Value::Str),
+            "anchor" => return self.nearest_onym(node).map(|(a, _)| Value::Str(a)),
+            "link" => {
+                let href = self.href(node)?;
+                let text = match self.default_value(node) {
+                    Some(Value::Str(t)) => t,
+                    _ => String::new(),
+                };
+                return Some(Value::Record(vec![
+                    ("title".to_string(), self.document_title().map(Value::Str).unwrap_or(Value::Null)),
+                    ("href".to_string(), Value::Str(href)),
+                    ("text".to_string(), Value::Str(text)),
+                ]));
+            }
+            _ => {}
+        }
+        match name {
             "lemma" | "title" => n.lemma.clone().map(Value::Str),
             "onym" => n.onym.clone().map(Value::Str),
             // On an index mark the onym IS the term (ruling #36).
             "term" if n.kind == Kind::IndexMark => n.onym.clone().map(Value::Str),
             // A ref's word: the identifier as written. Never the
             // resolved content — that is what `-->` is for.
-            "target" if matches!(n.kind, Kind::Ref | Kind::Cit) => {
-                n.target.clone().map(Value::Str)
-            }
+            "target" if matches!(n.kind, Kind::Ref | Kind::Cit) => n.target.clone().map(Value::Str),
             // A structured entry answers its campi (auctor,
             // titulus, annus, …) — the bibliogramma vocabulary,
             // canonicalized upstream.
@@ -1219,7 +1558,11 @@ impl AstAdapter for TextModel {
             "taxis" | "ord" => n.taxis.map(Value::Int),
             "grammata" | "body" => {
                 let g = self.grammata(node);
-                if g.is_empty() { None } else { Some(Value::Str(g)) }
+                if g.is_empty() {
+                    None
+                } else {
+                    Some(Value::Str(g))
+                }
             }
             "text" => Some(Value::Str(n.prose.clone())),
             _ => None,
@@ -1380,9 +1723,12 @@ impl AstAdapter for TextModel {
         }
         let u = match url::Url::parse(t) {
             Ok(u) => u,
-            Err(url::ParseError::RelativeUrlWithoutBase) => {
-                self.document_url.as_ref()?.join(t).ok()?
-            }
+            Err(url::ParseError::RelativeUrlWithoutBase) => self
+                .link_base
+                .as_ref()
+                .or(self.document_url.as_ref())?
+                .join(t)
+                .ok()?,
             Err(_) => return None,
         };
         if u.scheme() != "http" && u.scheme() != "https" {
@@ -1408,6 +1754,13 @@ impl AstAdapter for TextModel {
     /// `::::lang` on verbatim blocks (the declared language).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
+        // The lossless layer: on the document node, every
+        // declaration under the name it was declared with.
+        if n.kind == Kind::Document
+            && let Some(v) = self.head.declared_value(key)
+        {
+            return Some(v);
+        }
         match key {
             "level" => n.level.map(|l| Value::Int(l as i64)),
             "lang" => n.lang.clone().map(Value::Str),

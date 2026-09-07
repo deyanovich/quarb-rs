@@ -231,17 +231,6 @@ pub fn format_instant(secs: i64, nanos: u32, offset: Option<i16>) -> String {
     out
 }
 
-/// Format a UTC instant in the compact ISO-8601 basic spelling
-/// `YYYYMMDDTHHmmSSZ` — the exact shape kaiv's builder validates
-/// for `@ts` provenance. Nanos truncate (kaiv's grammar has no
-/// sub-second field); a preserved display offset does not shift
-/// the digits (the instant is already UTC). Callers must guard:
-/// a year outside 0000–9999 yields a string of the wrong width.
-pub fn format_instant_compact(secs: i64) -> String {
-    let (y, mo, d, h, mi, s) = components(secs);
-    format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z")
-}
-
 /// Format a duration as ISO-8601: `P{d}DT{h}H{m}M{s}S`, zero parts
 /// omitted, `PT0S` for zero, a leading `-` for negative durations.
 pub fn format_duration(secs: i64, nanos: u32) -> String {
@@ -895,13 +884,10 @@ mod tests {
         }
         // parse_iso itself still rejects the compact spelling.
         assert_eq!(parse_iso("20240215T132640Z"), None);
-        // Round trip through the compact formatter; nanos truncate.
+        // The compact form parses to the same instant the dashed
+        // one formats to; nothing emits the compact form any more.
         let (secs, _, _) = parse_iso_compact("20240215T132640Z").unwrap();
-        assert_eq!(format_instant_compact(secs), "20240215T132640Z");
-        assert_eq!(
-            parse_iso_compact(&format_instant_compact(secs)),
-            Some((secs, 0, Some(0)))
-        );
+        assert_eq!(format_instant(secs, 0, Some(0)), "2024-02-15T13:26:40Z");
     }
 
     #[test]
