@@ -5,7 +5,10 @@ name: "Publish @quarb/wasm to npm"
 # wasm modules with wasm-pack, assembles the package via
 # quarb-wasm/npm/mk-npm.sh, and publishes to npm using OIDC
 # trusted publishing — no API token secret needed on the GitHub
-# side, and npm attaches provenance attestations automatically.
+# side. Provenance is switched off: npm verifies the attestation
+# against package.json's repository URL, and ours names the
+# canonical GitLab project, not this mirror (the 0.29.0 run
+# failed with E422 on exactly that mismatch).
 #
 # One-time setup required before the first publish:
 #
@@ -82,5 +85,5 @@ jobs:
           done
 
       - name: Publish
-        run: npm publish
+        run: npm publish --provenance=false
         working-directory: quarb-wasm/npm/dist
