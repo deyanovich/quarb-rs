@@ -58,8 +58,10 @@ fn translations() {
     );
     // HAVING may name the aggregate by call, alias, or function.
     assert_eq!(
-        t("SELECT customer, SUM(qty) AS total FROM invoices GROUP BY customer \
-           HAVING SUM(qty) > 1"),
+        t(
+            "SELECT customer, SUM(qty) AS total FROM invoices GROUP BY customer \
+           HAVING SUM(qty) > 1"
+        ),
         "/invoices/* | ::qty @| group(::customer) | sum | .total | [$_ > 1] | %."
     );
     // An aliased group key names the key field.
@@ -292,8 +294,7 @@ fn identifiers_are_gated() {
     assert!(pushdown("/t/*[::\"a OR b\" = 5] | ::x").is_none());
     assert!(pushdown("/\"t; DROP TABLE u\"/*[::a = 5] | ::x").is_none());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::aid = _::\"album-id\"] | %(t = $$1::title)")
-            .is_none()
+        pushdown("/albums/* <=> /tracks/*[::aid = _::\"album-id\"] | %(t = $$1::title)").is_none()
     );
     // The display translation double-quotes (ANSI) with a note.
     let t = export("/t/*[::\"a OR b\" = 5] | ::x").unwrap();
@@ -426,7 +427,11 @@ fn partial_pushdown_gate() {
     assert_eq!(p.where_sql, "kind = 'rare'");
     // Only the LEADING expression run pushes; positional first = out.
     assert!(
-        partial_pushdown("/t/*[2][::a = 1] | ::a @| group(\"g\", ::a) | count | .n | %.", None).is_none()
+        partial_pushdown(
+            "/t/*[2][::a = 1] | ::a @| group(\"g\", ::a) | count | .n | %.",
+            None
+        )
+        .is_none()
     );
     // Reaching the table twice (a ^-anchored subcontext) = out.
     assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n", None).is_none());
@@ -436,8 +441,11 @@ fn partial_pushdown_gate() {
     assert!(partial_pushdown("/t/*[::a = 1] | ::::table", None).is_none());
     // Non-strict predicates (LIKE folding) = out.
     assert!(
-        partial_pushdown("/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.", None)
-            .is_none()
+        partial_pushdown(
+            "/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.",
+            None
+        )
+        .is_none()
     );
 }
 
@@ -467,9 +475,9 @@ fn pushdown_refuses_keyword_aliases() {
     let pushdown_explained = |q: &str| quarb_sql::pushdown_explained(q, None);
     // `AS order` is an SQL syntax error; quoting portably differs
     // by dialect, so strict pushdown refuses outright.
-    let Err(err) = pushdown_explained(
-        "/albums/* <=> /tracks/*[::album_id = _::id] | %(order = $$1::title)",
-    ) else {
+    let Err(err) =
+        pushdown_explained("/albums/* <=> /tracks/*[::album_id = _::id] | %(order = $$1::title)")
+    else {
         panic!("keyword alias must refuse")
     };
     assert!(format!("{err}").contains("needs SQL quoting"), "{err}");
@@ -510,9 +518,7 @@ fn join_projections_qualify_by_operand_index() {
     assert!(p.sql.contains("tracks.title AS t"), "{}", p.sql);
     // Beyond the joined operand there is no verified mapping.
     assert!(
-        pushdown_explained(
-            "/albums/* <=> /tracks/*[::album_id = _::id] | %(x = $$2::title)"
-        )
-        .is_err()
+        pushdown_explained("/albums/* <=> /tracks/*[::album_id = _::id] | %(x = $$2::title)")
+            .is_err()
     );
 }

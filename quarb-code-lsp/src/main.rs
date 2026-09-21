@@ -163,7 +163,10 @@ impl Lexer {
     /// refusal, each through the full wire.
     #[test]
     fn kaivrpc_query_round_trips() {
-        let fx = concat!(env!("CARGO_MANIFEST_DIR"), "/../quarb-code/tests/fixtures/vocab.rs");
+        let fx = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../quarb-code/tests/fixtures/vocab.rs"
+        );
         let ask = |q: &str| {
             answer(
                 format!(

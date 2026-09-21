@@ -33,20 +33,24 @@ pub fn serve() -> Result<()> {
                 if !root.is_empty() {
                     ws = Workspace::new(Some(core::uri_to_path(&root)));
                 }
-                respond(&mut writer, id, json!({
-                    "capabilities": {
-                        "textDocumentSync": 1,
-                        "documentSymbolProvider": true,
-                        "definitionProvider": true,
-                        "referencesProvider": true,
-                        "hoverProvider": true,
-                        "workspaceSymbolProvider": true
-                    },
-                    "serverInfo": {
-                        "name": "quarb-code-lsp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }))?;
+                respond(
+                    &mut writer,
+                    id,
+                    json!({
+                        "capabilities": {
+                            "textDocumentSync": 1,
+                            "documentSymbolProvider": true,
+                            "definitionProvider": true,
+                            "referencesProvider": true,
+                            "hoverProvider": true,
+                            "workspaceSymbolProvider": true
+                        },
+                        "serverInfo": {
+                            "name": "quarb-code-lsp",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }),
+                )?;
             }
             "initialized" => {}
             "shutdown" => {
@@ -89,12 +93,8 @@ pub fn serve() -> Result<()> {
                 let word = word_at(texts.get(&uri).unwrap_or(&empty), line, col);
                 let result = match (method, word) {
                     (_, None) => Value::Null,
-                    ("textDocument/definition", Some(w)) => {
-                        locations(&ws.definition(&uri, &w))
-                    }
-                    ("textDocument/references", Some(w)) => {
-                        locations(&ws.references(&uri, &w))
-                    }
+                    ("textDocument/definition", Some(w)) => locations(&ws.definition(&uri, &w)),
+                    ("textDocument/references", Some(w)) => locations(&ws.references(&uri, &w)),
                     (_, Some(w)) => hover(&ws.hover(&uri, &w)),
                 };
                 respond(&mut writer, id, result)?;
@@ -118,8 +118,10 @@ pub fn serve() -> Result<()> {
                         respond_error(&mut writer, id, -32803, &msg)?
                     }
                     core::QueryAnswer::Values(vals) => {
-                        let rows: Vec<Value> =
-                            vals.into_iter().map(|value| json!({"value": value})).collect();
+                        let rows: Vec<Value> = vals
+                            .into_iter()
+                            .map(|value| json!({"value": value}))
+                            .collect();
                         respond(&mut writer, id, json!({"rows": rows}))?
                     }
                     core::QueryAnswer::Locations(rows) => {
@@ -191,7 +193,10 @@ fn hover(rows: &[core::HoverRow]) -> Value {
         md.push_str(doc);
     }
     if rows.len() > 1 {
-        md.push_str(&format!("\n\n_{} more candidates (fan-out)_", rows.len() - 1));
+        md.push_str(&format!(
+            "\n\n_{} more candidates (fan-out)_",
+            rows.len() - 1
+        ));
     }
     json!({"contents": {"kind": "markdown", "value": md}})
 }

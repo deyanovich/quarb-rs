@@ -689,7 +689,15 @@ impl AstAdapter for GitAdapter {
     /// the arbor instead of falling silently null on entries.
     fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
         &[
-            "short", "hash", "n-parents", "n-changed", "tags", "n-tags", "type", "mode", "size",
+            "short",
+            "hash",
+            "n-parents",
+            "n-changed",
+            "tags",
+            "n-tags",
+            "type",
+            "mode",
+            "size",
         ]
     }
 

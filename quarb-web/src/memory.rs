@@ -106,7 +106,9 @@ pub(crate) fn dom_links(html: &str) -> (Option<String>, Vec<Found>) {
             if matches!(tag, "nav" | "header" | "footer" | "script" | "style") {
                 continue;
             }
-            if el.attr("typeof").is_some_and(|t| t.contains("mw:Transclusion"))
+            if el
+                .attr("typeof")
+                .is_some_and(|t| t.contains("mw:Transclusion"))
                 || el.attr("about").is_some_and(|a| a.starts_with("#mwt"))
             {
                 transcluded = true;
@@ -127,8 +129,16 @@ pub(crate) fn dom_links(html: &str) -> (Option<String>, Vec<Found>) {
                 let anchor = scraper::ElementRef::wrap(node)
                     .map(|e| quarb_text::normalize_ws(&e.text().collect::<String>()))
                     .filter(|s| !s.is_empty());
-                let red = el.attr("class").is_some_and(|c| c.split_whitespace().any(|w| w == "new"));
-                out.push(Found { href: href.trim().to_string(), anchor, section: section.clone(), red, transcluded });
+                let red = el
+                    .attr("class")
+                    .is_some_and(|c| c.split_whitespace().any(|w| w == "new"));
+                out.push(Found {
+                    href: href.trim().to_string(),
+                    anchor,
+                    section: section.clone(),
+                    red,
+                    transcluded,
+                });
             }
         }
         // children in document order: push reversed
@@ -153,8 +163,12 @@ fn infer_base(files: &[PageFile]) -> Option<String> {
             continue;
         }
         let doc = Html::parse_document(&f.html);
-        let Some(href) = doc.select(&sel).next().and_then(|e| e.value().attr("href")) else { continue };
-        let Ok(u) = url::Url::parse(href.trim()) else { continue };
+        let Some(href) = doc.select(&sel).next().and_then(|e| e.value().attr("href")) else {
+            continue;
+        };
+        let Ok(u) = url::Url::parse(href.trim()) else {
+            continue;
+        };
         let rel = f.path.trim_start_matches("./").trim_start_matches('/');
         let path = u.path();
         let stem = rel.strip_suffix("index.html").unwrap_or(rel);
@@ -201,7 +215,11 @@ impl MemoryStore {
         // so creating rows in path order sees every parent first.
         let mut pages: BTreeMap<String, String> = BTreeMap::new();
         for f in files {
-            let path = f.path.trim_start_matches("./").trim_start_matches('/').to_string();
+            let path = f
+                .path
+                .trim_start_matches("./")
+                .trim_start_matches('/')
+                .to_string();
             let lower = path.to_ascii_lowercase();
             // An html file by name, or a page fetched under an
             // extension-less URL (`docs/intro`) whose body is
@@ -227,30 +245,34 @@ impl MemoryStore {
                 dirs.insert(cur.clone());
             }
         }
-        let blank = |k: PageKey, parent: Option<PageKey>, kind: PageKind, name: String, path: String| LightRow {
-            key: k,
-            site: sid,
-            container: Container::Pages,
-            parent,
-            kind,
-            name,
-            path,
-            title: None,
-            url: None,
-            depth: 0,
-            tree_rank: 0,
-            category: None,
-            categories: Vec::new(),
-            tags: Vec::new(),
-            description: None,
-            modified: None,
-            published: None,
-            redirect_to: None,
-            analytics: Analytics::default(),
-        };
+        let blank =
+            |k: PageKey, parent: Option<PageKey>, kind: PageKind, name: String, path: String| {
+                LightRow {
+                    key: k,
+                    site: sid,
+                    container: Container::Pages,
+                    parent,
+                    kind,
+                    name,
+                    path,
+                    title: None,
+                    url: None,
+                    depth: 0,
+                    tree_rank: 0,
+                    category: None,
+                    categories: Vec::new(),
+                    tags: Vec::new(),
+                    description: None,
+                    modified: None,
+                    published: None,
+                    redirect_to: None,
+                    analytics: Analytics::default(),
+                }
+            };
         let mut by_path: BTreeMap<String, usize> = BTreeMap::new();
         let mut built: Vec<Built> = Vec::new();
-        let mut entries: Vec<(String, Option<String>)> = dirs.into_iter().map(|d| (d, None)).collect();
+        let mut entries: Vec<(String, Option<String>)> =
+            dirs.into_iter().map(|d| (d, None)).collect();
         entries.extend(pages.into_iter().map(|(p, h)| (p, Some(h))));
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         for (path, html) in entries {
@@ -262,7 +284,10 @@ impl MemoryStore {
             next_key += 1;
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             let Some(html) = html else {
-                built.push(Built { row: blank(k, parent, PageKind::Dir, name, path.clone()), html: None });
+                built.push(Built {
+                    row: blank(k, parent, PageKind::Dir, name, path.clone()),
+                    html: None,
+                });
                 by_path.insert(path, built.len() - 1);
                 continue;
             };
@@ -271,7 +296,10 @@ impl MemoryStore {
             let head = quarb_text_html::head_meta(&scraper::Html::parse_document(&html));
             let url = match head.declared_value("canonical") {
                 Some(Value::Str(u)) => Some(u),
-                _ => base.as_ref().and_then(|b| b.join(&path).ok()).map(|u| u.to_string()),
+                _ => base
+                    .as_ref()
+                    .and_then(|b| b.join(&path).ok())
+                    .map(|u| u.to_string()),
             };
             let mut row = blank(k, parent, PageKind::Page, name, path.clone());
             row.title = head.title.clone();
@@ -282,7 +310,10 @@ impl MemoryStore {
             row.description = head.description.clone();
             row.modified = head.modified.clone();
             row.published = head.published.clone();
-            built.push(Built { row, html: Some(html) });
+            built.push(Built {
+                row,
+                html: Some(html),
+            });
             by_path.insert(path, built.len() - 1);
         }
 
@@ -292,7 +323,13 @@ impl MemoryStore {
             kids.entry(b.row.parent).or_default().push(i);
         }
         for v in kids.values_mut() {
-            v.sort_by(|&a, &b| built[a].row.name.as_bytes().cmp(built[b].row.name.as_bytes()));
+            v.sort_by(|&a, &b| {
+                built[a]
+                    .row
+                    .name
+                    .as_bytes()
+                    .cmp(built[b].row.name.as_bytes())
+            });
         }
         let mut rank = 0u64;
         let mut stack: Vec<(usize, u32)> = kids
@@ -379,8 +416,18 @@ impl MemoryStore {
             if b.row.kind != PageKind::Page {
                 continue;
             }
-            let cs: Vec<PageKey> = b.row.categories.iter().filter_map(|c| key_of_name.get(&(PageKind::Category, c.clone())).copied()).collect();
-            let ts: Vec<PageKey> = b.row.tags.iter().filter_map(|t| key_of_name.get(&(PageKind::Tag, t.clone())).copied()).collect();
+            let cs: Vec<PageKey> = b
+                .row
+                .categories
+                .iter()
+                .filter_map(|c| key_of_name.get(&(PageKind::Category, c.clone())).copied())
+                .collect();
+            let ts: Vec<PageKey> = b
+                .row
+                .tags
+                .iter()
+                .filter_map(|t| key_of_name.get(&(PageKind::Tag, t.clone())).copied())
+                .collect();
             if !cs.is_empty() {
                 page_categories.insert(b.row.key, cs);
             }
@@ -396,7 +443,10 @@ impl MemoryStore {
         }
 
         // 4. Links from the DOM, resolved against the page's URL.
-        let key_by_path: HashMap<&str, PageKey> = by_path.iter().map(|(p, &i)| (p.as_str(), built[i].row.key)).collect();
+        let key_by_path: HashMap<&str, PageKey> = by_path
+            .iter()
+            .map(|(p, &i)| (p.as_str(), built[i].row.key))
+            .collect();
         let mut by_url: HashMap<String, PageKey> = HashMap::new();
         for r in &rows {
             if let Some(u) = &r.url {
@@ -420,15 +470,24 @@ impl MemoryStore {
             };
             for f in found {
                 let Some(pu) = &join_base else { break };
-                let Ok(mut u) = pu.join(&f.href) else { continue };
+                let Ok(mut u) = pu.join(&f.href) else {
+                    continue;
+                };
                 u.set_fragment(None);
                 let to = base
                     .as_ref()
                     .and_then(|bs| site_path(&u, bs))
-                    .and_then(|p| path_variants(&p).into_iter().find_map(|v| key_by_path.get(v.as_str()).copied()));
+                    .and_then(|p| {
+                        path_variants(&p)
+                            .into_iter()
+                            .find_map(|v| key_by_path.get(v.as_str()).copied())
+                    });
                 // A same-site path no page answers to is a redlink.
                 let red = f.red
-                    || (to.is_none() && base.as_ref().is_some_and(|bs| bs.host_str() == u.host_str()));
+                    || (to.is_none()
+                        && base
+                            .as_ref()
+                            .is_some_and(|bs| bs.host_str() == u.host_str()));
                 if let Some(t) = to {
                     if t == k || seen.contains_key(&t) {
                         continue;
@@ -453,7 +512,10 @@ impl MemoryStore {
         // document of its own (none from a set of files).
         let pages: Vec<PageKey> = rows
             .iter()
-            .filter(|r| r.kind == PageKind::Page || (r.kind == PageKind::Category && html.contains_key(&r.key)))
+            .filter(|r| {
+                r.kind == PageKind::Page
+                    || (r.kind == PageKind::Category && html.contains_key(&r.key))
+            })
             .map(|r| r.key)
             .collect();
         let mut edges: Vec<(PageKey, PageKey)> = Vec::new();
@@ -519,10 +581,24 @@ impl WebStore for MemoryStore {
     fn row(&self, key: PageKey) -> Option<LightRow> {
         self.row_ref(key).cloned()
     }
-    fn children(&self, _site: SiteId, container: Container, parent: Option<PageKey>) -> Vec<PageKey> {
-        self.children.get(&(container, parent)).cloned().unwrap_or_default()
+    fn children(
+        &self,
+        _site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+    ) -> Vec<PageKey> {
+        self.children
+            .get(&(container, parent))
+            .cloned()
+            .unwrap_or_default()
     }
-    fn children_named(&self, site: SiteId, container: Container, parent: Option<PageKey>, name: &str) -> Vec<PageKey> {
+    fn children_named(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        name: &str,
+    ) -> Vec<PageKey> {
         self.children(site, container, parent)
             .into_iter()
             .filter(|k| self.row_ref(*k).is_some_and(|r| r.name == name))
@@ -536,9 +612,13 @@ impl WebStore for MemoryStore {
                 .map(|v| v.iter().filter_map(|l| l.to).collect())
                 .unwrap_or_default(),
             (LinkKind::Link, LinkDir::In) => self.in_links.get(&key).cloned().unwrap_or_default(),
-            (LinkKind::Category, LinkDir::Out) => self.page_categories.get(&key).cloned().unwrap_or_default(),
+            (LinkKind::Category, LinkDir::Out) => {
+                self.page_categories.get(&key).cloned().unwrap_or_default()
+            }
             (LinkKind::Tag, LinkDir::Out) => self.page_tags.get(&key).cloned().unwrap_or_default(),
-            (LinkKind::Category | LinkKind::Tag, LinkDir::In) => self.members.get(&key).cloned().unwrap_or_default(),
+            (LinkKind::Category | LinkKind::Tag, LinkDir::In) => {
+                self.members.get(&key).cloned().unwrap_or_default()
+            }
             (LinkKind::Redirect, _) => Vec::new(),
         }
     }
@@ -551,13 +631,23 @@ impl WebStore for MemoryStore {
     /// Rows of `kind` below `parent`, by rank: the container's rows
     /// are in rank order already, and a subtree is a contiguous
     /// run of ranks after its root, bounded by depth.
-    fn descendants_of_kind(&self, _site: SiteId, container: Container, parent: Option<PageKey>, kind: PageKind) -> Vec<(PageKey, u32)> {
+    fn descendants_of_kind(
+        &self,
+        _site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        kind: PageKind,
+    ) -> Vec<(PageKey, u32)> {
         let (from_rank, base_depth) = match parent.and_then(|p| self.row_ref(p)) {
             Some(r) => (r.tree_rank, r.depth),
             None => (0, 0),
         };
         let mut out = Vec::new();
-        let mut ranked: Vec<&LightRow> = self.rows.iter().filter(|r| r.container == container && r.tree_rank > from_rank).collect();
+        let mut ranked: Vec<&LightRow> = self
+            .rows
+            .iter()
+            .filter(|r| r.container == container && r.tree_rank > from_rank)
+            .collect();
         ranked.sort_by_key(|r| r.tree_rank);
         for r in ranked {
             if r.depth <= base_depth {
@@ -582,7 +672,11 @@ impl WebStore for MemoryStore {
         let variants = path_variants(&path);
         self.rows
             .iter()
-            .find(|r| r.container == Container::Pages && r.kind == PageKind::Page && variants.contains(&r.path))
+            .find(|r| {
+                r.container == Container::Pages
+                    && r.kind == PageKind::Page
+                    && variants.contains(&r.path)
+            })
             .map(|r| r.key)
     }
 }

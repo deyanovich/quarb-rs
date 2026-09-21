@@ -104,10 +104,7 @@ fn namespaced_names() {
 fn predicates_and_pipelines() {
     // numeric coercion of a string attribute in a predicate
     assert_eq!(values("//book[::pages > 200]::id"), vec!["b2"]);
-    assert_eq!(
-        values("//author:: @| join(\", \")"),
-        vec!["Ada, Bo, Cy"]
-    );
+    assert_eq!(values("//author:: @| join(\", \")"), vec!["Ada, Bo, Cy"]);
     assert_eq!(values("//book @| count"), vec!["2"]);
 }
 

@@ -57,8 +57,5 @@ fn live_sparql() {
     assert_eq!(values(&a, "/Person/Bo<-knows::jobTitle"), ["engineer"]);
 
     // The full IRI rides the metadata channel.
-    assert_eq!(
-        values(&a, "/Person/Ada::::iri"),
-        ["http://example.org/ada"]
-    );
+    assert_eq!(values(&a, "/Person/Ada::::iri"), ["http://example.org/ada"]);
 }

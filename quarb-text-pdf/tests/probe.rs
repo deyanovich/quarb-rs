@@ -3,7 +3,9 @@
 
 #[test]
 fn probe() {
-    let Ok(path) = std::env::var("QUARB_PDF_PROBE") else { return };
+    let Ok(path) = std::env::var("QUARB_PDF_PROBE") else {
+        return;
+    };
     let bytes = std::fs::read(&path).unwrap();
     let doc = lopdf::Document::load_mem(&bytes).unwrap();
     let pages = doc.get_pages();
@@ -32,7 +34,10 @@ fn probe() {
         Err(e) => println!("content decode FAILED: {e}"),
     }
     let (res, ids) = doc.get_page_resources(pid).unwrap();
-    println!("inline resources: {}; resource objs: {ids:?}", res.is_some());
+    println!(
+        "inline resources: {}; resource objs: {ids:?}",
+        res.is_some()
+    );
     if let Some(r) = res.or_else(|| {
         ids.first()
             .and_then(|id| doc.get_object(*id).ok())

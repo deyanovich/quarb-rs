@@ -1,0 +1,13 @@
+[package]
+name = "quarb-trace"
+description = "The quarb/trace viz contract: payload types and their kaiv serialization"
+keywords = ["quarb", "trace", "kaiv", "visualization"]
+categories = ["data-structures", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

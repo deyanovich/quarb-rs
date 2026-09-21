@@ -61,7 +61,8 @@ fn serve(listener: TcpListener) {
                 headers_end = pos + 4;
                 let head = String::from_utf8_lossy(&buf[..pos]);
                 assert!(
-                    head.to_lowercase().contains("authorization: aws4-hmac-sha256"),
+                    head.to_lowercase()
+                        .contains("authorization: aws4-hmac-sha256"),
                     "request not SigV4-signed:\n{head}"
                 );
                 content_length = head
@@ -85,7 +86,11 @@ fn serve(listener: TcpListener) {
             serde_json::from_slice(&buf[headers_end..]).unwrap_or_default();
         let op = head
             .lines()
-            .find_map(|l| l.to_lowercase().strip_prefix("x-amz-target:").map(str::to_string))
+            .find_map(|l| {
+                l.to_lowercase()
+                    .strip_prefix("x-amz-target:")
+                    .map(str::to_string)
+            })
             .unwrap_or_default()
             .trim()
             .trim_start_matches("amazonathena.")
@@ -176,11 +181,7 @@ fn serve(listener: TcpListener) {
                     )
                 } else if q.contains("SELECT") {
                     // Pushed-down SQL: a canned single-value answer.
-                    result_set(
-                        &[("n", "bigint")],
-                        &[vec!["n"], vec!["2"]],
-                        None,
-                    )
+                    result_set(&[("n", "bigint")], &[vec!["n"], vec!["2"]], None)
                 } else {
                     result_set(&[], &[], None)
                 }

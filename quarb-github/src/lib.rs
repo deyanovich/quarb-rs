@@ -76,18 +76,31 @@ impl Sec {
 enum Kind {
     Root,
     /// A user or organization, by login.
-    User { login: String },
+    User {
+        login: String,
+    },
     /// A repository; `key` is `owner/name`.
-    Repo { key: String },
-    Section { repo: String, sec: Sec },
+    Repo {
+        key: String,
+    },
+    Section {
+        repo: String,
+        sec: Sec,
+    },
     /// An issue, pull request, or release (told apart by their
     /// JSON: releases carry `tag_name`, pulls `head` or
     /// `pull_request`).
     Item,
     /// A directory in a repository's default-branch tree.
-    Dir { repo: String, path: String },
+    Dir {
+        repo: String,
+        path: String,
+    },
     /// A file (or symlink/submodule); content is the value.
-    File { repo: String, path: String },
+    File {
+        repo: String,
+        path: String,
+    },
 }
 
 struct Node {
@@ -194,9 +207,9 @@ impl GithubAdapter {
         match anchor.split_once('/') {
             None if anchor.is_empty() => {
                 // Probe: auth and reachability surface here.
-                adapter.call("/rate_limit").map_err(|e| {
-                    GithubError::Gh(format!("{e} (is `gh auth login` done?)"))
-                })?;
+                adapter
+                    .call("/rate_limit")
+                    .map_err(|e| GithubError::Gh(format!("{e} (is `gh auth login` done?)")))?;
             }
             None => {
                 let u = adapter
@@ -478,12 +491,7 @@ impl GithubAdapter {
                 .iter()
                 .filter_map(|r| {
                     let tag = r.get("tag_name")?.as_str()?.to_string();
-                    Some(self.item_node(
-                        format!("{repo}@{tag}"),
-                        tag,
-                        Some(node),
-                        r.clone(),
-                    ))
+                    Some(self.item_node(format!("{repo}@{tag}"), tag, Some(node), r.clone()))
                 })
                 .collect(),
         }
@@ -563,9 +571,10 @@ impl AstAdapter for GithubAdapter {
         let plan = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Root => Plan::Root,
             Kind::User { login } => Plan::User(login.clone()),
-            Kind::Section { repo, sec: sec @ (Sec::Issues | Sec::Pulls) } => {
-                Plan::Section(repo.clone(), *sec)
-            }
+            Kind::Section {
+                repo,
+                sec: sec @ (Sec::Issues | Sec::Pulls),
+            } => Plan::Section(repo.clone(), *sec),
             _ => Plan::Other,
         };
         match plan {
@@ -596,12 +605,7 @@ impl AstAdapter for GithubAdapter {
                 let Ok(d) = self.call(&path) else {
                     return Vec::new();
                 };
-                vec![self.item_node(
-                    format!("{repo}#{num}"),
-                    num.to_string(),
-                    Some(node),
-                    d,
-                )]
+                vec![self.item_node(format!("{repo}#{num}"), num.to_string(), Some(node), d)]
             }
             Plan::Other => {
                 // Default: enumerate and filter by name.
@@ -682,11 +686,7 @@ impl AstAdapter for GithubAdapter {
                     }
                 }
                 if let Some(topics) = d.and_then(|d| d.get("topics")).and_then(|v| v.as_array()) {
-                    ts.extend(
-                        topics
-                            .iter()
-                            .filter_map(|t| t.as_str().map(str::to_string)),
-                    );
+                    ts.extend(topics.iter().filter_map(|t| t.as_str().map(str::to_string)));
                 }
                 ts
             }
@@ -694,7 +694,8 @@ impl AstAdapter for GithubAdapter {
                 let mut ts = Vec::new();
                 let kind = if d.is_some_and(|d| d.get("tag_name").is_some()) {
                     "release"
-                } else if d.is_some_and(|d| d.get("head").is_some() || d.get("pull_request").is_some())
+                } else if d
+                    .is_some_and(|d| d.get("head").is_some() || d.get("pull_request").is_some())
                 {
                     "pull"
                 } else {
@@ -1125,7 +1126,10 @@ mod tests {
             Some(json!({"number": 1, "state": "open",
                 "labels": [{"name": "bug"}, {"name": "good first issue"}]})),
         );
-        assert_eq!(a.traits(issue), ["issue", "open", "bug", "good first issue"]);
+        assert_eq!(
+            a.traits(issue),
+            ["issue", "open", "bug", "good first issue"]
+        );
         let pull = a.push_node(
             Kind::Item,
             Some("2".into()),

@@ -59,7 +59,12 @@ pub fn diagnostics(text: &str) -> Vec<Diag> {
         Err(e) => {
             let message = e.to_string();
             let (line, col_start, col_end) = anchor(query, &message);
-            vec![Diag { line, col_start, col_end, message }]
+            vec![Diag {
+                line,
+                col_start,
+                col_end,
+                message,
+            }]
         }
     }
 }
@@ -113,11 +118,7 @@ fn byte_at(text: &str, line: u32, character: u32) -> usize {
     let mut offset = 0;
     for (i, l) in text.split_inclusive('\n').enumerate() {
         if i as u32 == line {
-            let col: usize = l
-                .chars()
-                .take(character as usize)
-                .map(char::len_utf8)
-                .sum();
+            let col: usize = l.chars().take(character as usize).map(char::len_utf8).sum();
             return offset + col.min(l.len());
         }
         offset += l.len();

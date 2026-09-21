@@ -161,7 +161,12 @@ impl quarb::AstAdapter for Dyn {
     fn document_by_ref(&self, id: &str) -> Option<NodeId> {
         self.0.document_by_ref(id)
     }
-    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
         self.0.reverse_resolve(node, property, hint)
     }
     fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
@@ -219,8 +224,12 @@ impl Doc {
             "jsonl" | "ndjson" => quarb_json::JsonAdapter::parse_lines(input)
                 .map(Doc::Json)
                 .context("parsing JSONL"),
-            "yaml" | "yml" => quarb_yaml::parse(input).map(Doc::Json).context("parsing YAML"),
-            "toml" => quarb_toml::parse(input).map(Doc::Json).context("parsing TOML"),
+            "yaml" | "yml" => quarb_yaml::parse(input)
+                .map(Doc::Json)
+                .context("parsing YAML"),
+            "toml" => quarb_toml::parse(input)
+                .map(Doc::Json)
+                .context("parsing TOML"),
             "csv" => quarb_csv::CsvAdapter::parse_with_delimiter(input, b',')
                 .map(Doc::Csv)
                 .context("parsing CSV"),
@@ -371,7 +380,12 @@ impl Doc {
         enriched.locator(node, |bn| self.render(bn))
     }
 
-    pub fn run(&self, query: &str, now: (i64, u32), allow_shell: bool) -> quarb::Result<QueryResult> {
+    pub fn run(
+        &self,
+        query: &str,
+        now: (i64, u32),
+        allow_shell: bool,
+    ) -> quarb::Result<QueryResult> {
         let (secs, nanos) = now;
         macro_rules! go {
             ($a:expr) => {{
@@ -417,6 +431,48 @@ impl Doc {
     }
 
     /// Render a node result as its source-appropriate locator.
+    /// The adapter family this document is mounted through — the
+    /// `adapter` a trace payload's meta names.
+    pub fn family(&self) -> &'static str {
+        match self {
+            Doc::Json(_) => "json",
+            Doc::Csv(_) => "csv",
+            Doc::Xml(_) => "xml",
+            Doc::Html(_) => "html",
+            Doc::Text(_) => "text",
+            #[cfg(feature = "sqlite")]
+            Doc::Sqlite(_) => "sqlite",
+            #[cfg(feature = "native")]
+            Doc::Fs(_) | Doc::FsDeep(_) => "fs",
+            #[cfg(feature = "native")]
+            Doc::Git(_) => "git",
+            #[cfg(feature = "native")]
+            Doc::Archive(_) | Doc::ArchiveRaw(_) => "archive",
+            #[cfg(feature = "native")]
+            Doc::Xlsx(_) => "xlsx",
+            #[cfg(feature = "native")]
+            Doc::Syntax(_) => "tree-sitter",
+            #[cfg(feature = "native")]
+            Doc::Code(_) => "code",
+            Doc::Mount(_) => "mount",
+            Doc::Boxed(..) => "boxed",
+        }
+    }
+
+    /// The `quarb/trace` payload for `committed` (plus an uncommitted
+    /// `staged` suffix) over this document — every snapshot, thread,
+    /// ribbon, and lookahead verdict, windowed per `opts`. Locators
+    /// are this document's [`render`](Self::render).
+    pub fn trace(
+        &self,
+        committed: &str,
+        staged: Option<&str>,
+        opts: &quarb::trace::Options,
+    ) -> quarb::Result<quarb_trace::Payload> {
+        let base = quarb_model::Borrowed(self.base_dyn());
+        quarb::trace::trace(committed, staged, &base, &|n| self.render(n), opts)
+    }
+
     pub fn render(&self, node: NodeId) -> String {
         match self {
             Doc::Json(a) => a.pointer(node),
@@ -463,9 +519,7 @@ impl Doc {
     /// reports itself instead of failing to link.
     #[cfg(not(feature = "sqlite"))]
     pub fn sqlite_bytes(_bytes: &[u8]) -> Result<Doc> {
-        anyhow::bail!(
-            "this quarb-session was built without the `sqlite` feature"
-        )
+        anyhow::bail!("this quarb-session was built without the `sqlite` feature")
     }
 
     /// Mount already-built documents as named children of one root —
@@ -652,10 +706,9 @@ impl Doc {
             if let Some(fmt) = format {
                 let imported = match fmt.as_str() {
                     "atd" | "atk" => {
-                        let model =
-                            quarb_text_koine::parse_file(target).with_context(|| {
-                                format!("reading {} as an atrep document", target.display())
-                            })?;
+                        let model = quarb_text_koine::parse_file(target).with_context(|| {
+                            format!("reading {} as an atrep document", target.display())
+                        })?;
                         return Ok(Doc::Text(model));
                     }
                     "md" | "markdown" => quarb_text_koine::parse_markdown(&read()?),
@@ -808,10 +861,8 @@ impl Doc {
                 let fs = quarb_fs::FsAdapter::with_options(target, fsopts)
                     .with_context(|| format!("opening directory {}", target.display()))?;
                 return Ok(Doc::FsDeep(
-                    quarb_compose::ComposeAdapter::with_source_paths(fs, |fs, n| {
-                        Some(fs.path(n))
-                    })
-                    .with_source_graft(quarb_compose::SourceGraft::Code),
+                    quarb_compose::ComposeAdapter::with_source_paths(fs, |fs, n| Some(fs.path(n)))
+                        .with_source_graft(quarb_compose::SourceGraft::Code),
                 ));
             }
             let a = quarb_code::CodeModel::open(target)
@@ -827,7 +878,8 @@ impl Doc {
         if let Some(e) = &ext
             && quarb_tree_sitter::supported(e)
         {
-            let a = quarb_tree_sitter::TreeSitterAdapter::open(path).context("parsing source file")?;
+            let a =
+                quarb_tree_sitter::TreeSitterAdapter::open(path).context("parsing source file")?;
             return Ok(Doc::Syntax(a));
         }
         if matches!(ext.as_deref(), Some("xlsx" | "xls" | "ods")) {
@@ -860,8 +912,8 @@ impl Doc {
         }
 
         // Text documents.
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let text = text
             .strip_prefix('\u{feff}')
             .map(str::to_owned)
@@ -927,7 +979,6 @@ impl Doc {
         }
         Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
     }
-
 }
 
 /// A name-path locator built from the adapter trait alone

@@ -174,7 +174,12 @@ impl ArchiveAdapter {
         for (i, n) in self.nodes.iter().enumerate() {
             let Some(entry) = n.entry else { continue };
             if let Some(text) = self.content(entry) {
-                out.push((self.locator(NodeId(i as u64)).trim_start_matches('/').to_string(), text));
+                out.push((
+                    self.locator(NodeId(i as u64))
+                        .trim_start_matches('/')
+                        .to_string(),
+                    text,
+                ));
             }
         }
         out

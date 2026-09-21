@@ -1,7 +1,7 @@
 //! Aliasing node constructors, and `rel` — a relation no property
 //! carries, evaluated per pair.
 
-use quarb_model::{parse_model, ModelAdapter};
+use quarb_model::{ModelAdapter, parse_model};
 use quarb_sqlite::SqliteAdapter;
 use rusqlite::Connection;
 
@@ -25,7 +25,9 @@ fn ops(model: &str) -> ModelAdapter<SqliteAdapter> {
 fn values(a: &ModelAdapter<SqliteAdapter>, q: &str) -> Vec<String> {
     match quarb::run(q, a).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
-        quarb::QueryResult::Nodes(ns) => ns.len().to_string().split(' ').map(String::from).collect(),
+        quarb::QueryResult::Nodes(ns) => {
+            ns.len().to_string().split(' ').map(String::from).collect()
+        }
     }
 }
 

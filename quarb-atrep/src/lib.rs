@@ -272,9 +272,10 @@ impl AtrepAdapter {
             let target = match b.nodes[idx].kind {
                 Kind::AxiomaRef => b.axiomata.get(&r.key).copied(),
                 Kind::Anaphor => None,
-                _ if b.nodes[idx].sim.as_ref().is_some_and(|s| {
-                    s.keyword.as_deref() == Some("key")
-                }) =>
+                _ if b.nodes[idx]
+                    .sim
+                    .as_ref()
+                    .is_some_and(|s| s.keyword.as_deref() == Some("key")) =>
                 {
                     b.cite_keys.get(&r.key).copied()
                 }
@@ -1124,14 +1125,26 @@ impl AstAdapter for AtrepAdapter {
                 self.dialect_version.clone().map(Value::Str)
             }
             "dialect" if n.kind == Kind::Englossis => n.param.clone().map(Value::Str),
-            "short-desc" => n.sim.as_ref().and_then(|s| s.short_desc.clone()).map(Value::Str),
-            "long-desc" => n.sim.as_ref().and_then(|s| s.long_desc.clone()).map(Value::Str),
+            "short-desc" => n
+                .sim
+                .as_ref()
+                .and_then(|s| s.short_desc.clone())
+                .map(Value::Str),
+            "long-desc" => n
+                .sim
+                .as_ref()
+                .and_then(|s| s.long_desc.clone())
+                .map(Value::Str),
             "form" => n
                 .sim
                 .as_ref()
                 .and_then(|s| s.form)
                 .map(|f| Value::Str(f.to_string())),
-            "keyword" => n.sim.as_ref().and_then(|s| s.keyword.clone()).map(Value::Str),
+            "keyword" => n
+                .sim
+                .as_ref()
+                .and_then(|s| s.keyword.clone())
+                .map(Value::Str),
             "bracket-matching" => n
                 .sim
                 .as_ref()
@@ -1141,9 +1154,7 @@ impl AstAdapter for AtrepAdapter {
                 .reference
                 .as_ref()
                 .map(|r| Value::Bool(r.resolved.is_some())),
-            "lang" if n.kind == Kind::Verbatim => {
-                n.genoses.first().cloned().map(Value::Str)
-            }
+            "lang" if n.kind == Kind::Verbatim => n.genoses.first().cloned().map(Value::Str),
             "media" if n.kind == Kind::Enmedia => n.param.clone().map(Value::Str),
             "sha256" if n.kind == Kind::Enmedia => n.scheme_value.clone().map(Value::Str),
             _ => None,
@@ -1171,9 +1182,11 @@ impl AstAdapter for AtrepAdapter {
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let n = self.node(node);
         let target = match property {
-            "param" | "target" => n.reference.as_ref().and_then(|r| r.resolved).or_else(|| {
-                n.param.as_ref().and_then(|p| self.onyms.get(p).copied())
-            }),
+            "param" | "target" => n
+                .reference
+                .as_ref()
+                .and_then(|r| r.resolved)
+                .or_else(|| n.param.as_ref().and_then(|p| self.onyms.get(p).copied())),
             "onym" => n.onym.as_ref().and_then(|o| self.onyms.get(o).copied()),
             _ => None,
         }?;
@@ -1336,8 +1349,8 @@ The onym query language.
 
     #[test]
     fn unknown_dialect_is_a_clean_error() {
-        let err = AtrepAdapter::parse_str("@@@!no-such-dialect\n\nHi.\n", Path::new("."))
-            .unwrap_err();
+        let err =
+            AtrepAdapter::parse_str("@@@!no-such-dialect\n\nHi.\n", Path::new(".")).unwrap_err();
         assert!(matches!(err, AtrepError::Atrep(_)));
     }
 

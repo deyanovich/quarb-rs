@@ -33,7 +33,15 @@ fn live_redis() {
     // The colon convention is the tree.
     assert_eq!(
         values(&a, "/*:::name"),
-        ["config", "events", "leaderboard", "session", "tags", "ttl", "user"]
+        [
+            "config",
+            "events",
+            "leaderboard",
+            "session",
+            "tags",
+            "ttl",
+            "user"
+        ]
     );
     assert_eq!(values(&a, "/user/*:::name"), ["1", "2"]);
 
@@ -55,14 +63,8 @@ fn live_redis() {
     // Streams are bounded snapshots: id-named entries, typed
     // ;;;ts instants, fields as properties.
     assert_eq!(values(&a, "/events/* @| count"), ["2"]);
-    assert_eq!(
-        values(&a, "/events/*[::kind = \"buy\"]::amount"),
-        ["45"]
-    );
-    assert_eq!(
-        values(&a, "/events/*[::::ts > 2020-01-01] @| count"),
-        ["2"]
-    );
+    assert_eq!(values(&a, "/events/*[::kind = \"buy\"]::amount"), ["45"]);
+    assert_eq!(values(&a, "/events/*[::::ts > 2020-01-01] @| count"), ["2"]);
 
     // TTL is a typed duration.
     assert_eq!(values(&a, "/ttl/token[::::ttl > 1h] @| count"), ["1"]);

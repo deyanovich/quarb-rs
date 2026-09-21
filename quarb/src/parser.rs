@@ -17,8 +17,7 @@
 use crate::adapter::AstAdapter;
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem,
-    PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RegRef, Stage, Step,
+    PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RegRef, Stage, Step,
     TraitClause,
 };
 use crate::error::{QuarbError, Result};
@@ -495,7 +494,12 @@ impl Parser<'_> {
         let mut pipeline = Vec::new();
         let mut correlations = Vec::new();
         let mut join_at = 0usize;
-        self.union_element(&mut branches, &mut pipeline, &mut correlations, &mut join_at)?;
+        self.union_element(
+            &mut branches,
+            &mut pipeline,
+            &mut correlations,
+            &mut join_at,
+        )?;
         // `||` or its word (`.or.`, the family's spellings): the
         // rounding follows the glyph, not the position.
         while matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
@@ -507,7 +511,12 @@ impl Parser<'_> {
                 ));
             }
             self.pos += 1;
-            self.union_element(&mut branches, &mut pipeline, &mut correlations, &mut join_at)?;
+            self.union_element(
+                &mut branches,
+                &mut pipeline,
+                &mut correlations,
+                &mut join_at,
+            )?;
         }
 
         // Pipeline over the whole union. The entering mode is
@@ -552,9 +561,7 @@ impl Parser<'_> {
         // try-a-query fallback sites (subquery_depth): a subcontext
         // body's value reading, anchored at the current node, is
         // the meaning there.
-        if branches.is_empty()
-            && self.subquery_depth == 0
-            && matches!(self.peek(), Some(Token::Eq))
+        if branches.is_empty() && self.subquery_depth == 0 && matches!(self.peek(), Some(Token::Eq))
         {
             self.pos += 1;
             let expr = self.additive()?;
@@ -598,9 +605,7 @@ impl Parser<'_> {
             // carrying a pipeline, a correlation, an anchor, or a
             // projected union.
             if splices_as_path(&q)
-                && (q.branches.len() == 1
-                    || quant.is_some()
-                    || self.splice_refinement_ahead())
+                && (q.branches.len() == 1 || quant.is_some() || self.splice_refinement_ahead())
             {
                 let (elems, projection) =
                     self.finish_splice(&name, q.branches, quant, SplicePos::MidPath)?;
@@ -639,7 +644,7 @@ impl Parser<'_> {
                         .into(),
                 ));
             }
-            if matches!(self.peek(), Some(Token::Lt)) {
+            if matches!(self.peek(), Some(Token::Lt { .. })) {
                 return Err(QuarbError::Parse(
                     "a fragment does not take a trailing trait selector; \
                      put the trait inside a definition: \
@@ -688,8 +693,8 @@ impl Parser<'_> {
                 | Token::ColonColon
                 | Token::ColonColonColon
                 | Token::SemiSemiSemi
-                | Token::Lt
-                | Token::Gt
+                | Token::Lt { .. }
+                | Token::Gt { .. }
                 | Token::NextSibling
                 | Token::PrevSibling,
             ) => true,
@@ -738,7 +743,10 @@ impl Parser<'_> {
                             ));
                         }
                         if max.is_some_and(|n| n < min) {
-                            return Err(QuarbError::Parse(format!("a quantifier's bounds are ordered: {{{min};{}}}", max.unwrap())));
+                            return Err(QuarbError::Parse(format!(
+                                "a quantifier's bounds are ordered: {{{min};{}}}",
+                                max.unwrap()
+                            )));
                         }
                         self.pos += 1;
                         stage = Stage::Repeat {
@@ -847,9 +855,7 @@ impl Parser<'_> {
                     // (`| (->e)+`) or a parenthesized expression
                     // (`| (/kids/*::name)`). Try the branch
                     // reading; fall back to the expression.
-                    if matches!(self.peek(), Some(Token::LParen))
-                        && !self.mark_anchor_ahead()
-                    {
+                    if matches!(self.peek(), Some(Token::LParen)) && !self.mark_anchor_ahead() {
                         let save = self.pos;
                         if let Ok(b) = self.branch()
                             && !self.expr_continues()
@@ -1076,10 +1082,13 @@ impl Parser<'_> {
                     // A mark named `_N` is reserved: `((_N))` is the
                     // join's N-th node in the rounded spelling.
                     if name.as_deref().is_some_and(|n| {
-                        n.len() > 1 && n.starts_with('_') && n[1..].chars().all(|c| c.is_ascii_digit())
+                        n.len() > 1
+                            && n.starts_with('_')
+                            && n[1..].chars().all(|c| c.is_ascii_digit())
                     }) {
                         return Err(QuarbError::Parse(
-                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)".into(),
+                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)"
+                                .into(),
                         ));
                     }
                     Ok(Stage::Push(name))
@@ -1185,8 +1194,8 @@ impl Parser<'_> {
                     | Token::SlashSlash
                     | Token::Backslash
                     | Token::BackslashBackslash
-                    | Token::Gt
-                    | Token::Lt
+                    | Token::Gt { .. }
+                    | Token::Lt { .. }
                     | Token::NextSibling
                     | Token::PrevSibling
                     | Token::FollowingSiblings(_)
@@ -1211,7 +1220,11 @@ impl Parser<'_> {
     /// `?`. Decides branch-vs-expression for a path-shaped stage.
     fn expr_continues(&self) -> bool {
         match self.peek() {
-            Some(Token::Name { text, quoted: false, .. }) => {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => {
                 matches!(text.as_str(), "+" | "-" | "*" | "div" | "idiv" | "mod")
             }
             Some(Token::Question) => true,
@@ -1603,7 +1616,12 @@ impl Parser<'_> {
 
     /// The expansion's raw output values (each `.to_string()`ed),
     /// before joining — see [`Self::expand_macro_text`].
-    fn expand_macro_values(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<Vec<String>> {
+    fn expand_macro_values(
+        &self,
+        name: &str,
+        def: &Def,
+        args: Vec<Operand>,
+    ) -> Result<Vec<String>> {
         let n = def.params.len();
         let arity_ok = match def.rest {
             Some(_) => args.len() >= n,
@@ -2251,9 +2269,9 @@ impl Parser<'_> {
         // — a splice has no single step to carry traits. (`&frag<sib`,
         // the previous-sibling axis, continues the walk as usual: the
         // trait shape is `<name>` with nothing walkable after.)
-        if matches!(self.peek(), Some(Token::Lt))
+        if matches!(self.peek(), Some(Token::Lt { .. }))
             && matches!(self.toks.get(self.pos + 1), Some(Token::Name { .. }))
-            && matches!(self.toks.get(self.pos + 2), Some(Token::Gt))
+            && matches!(self.toks.get(self.pos + 2), Some(Token::Gt { .. }))
             && !matches!(
                 self.toks.get(self.pos + 3),
                 Some(Token::Name { .. } | Token::Regex(_))
@@ -2322,8 +2340,9 @@ impl Parser<'_> {
     /// pattern scopes inherited — generated text obeys the same
     /// contextual restrictions hand-written text would.
     fn parse_expansion_query(&self, name: &str, text: &str) -> Result<Query> {
-        let wrap =
-            |e: QuarbError| QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"));
+        let wrap = |e: QuarbError| {
+            QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
+        };
         let tokens = lexer::lex(text).map_err(wrap)?;
         if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
             return Err(QuarbError::Expansion(format!(
@@ -2425,20 +2444,20 @@ impl Parser<'_> {
             // `(@)` all marks; `(@name)` all marks under a name.
             Some(Token::At) => match self.toks.get(self.pos + 2) {
                 Some(Token::RParen) => Some((Anchor::MarksAll, 3)),
-                Some(Token::Name { text, quoted: false, .. })
-                    if word(text)
-                        && matches!(
-                            self.toks.get(self.pos + 3),
-                            Some(Token::RParen)
-                        ) =>
-                {
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) if word(text) && matches!(self.toks.get(self.pos + 3), Some(Token::RParen)) => {
                     Some((Anchor::MarksNamed(text.clone()), 4))
                 }
                 _ => None,
             },
-            Some(Token::Name { text, quoted: false, .. })
-                if matches!(self.toks.get(self.pos + 2), Some(Token::RParen)) =>
-            {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if matches!(self.toks.get(self.pos + 2), Some(Token::RParen)) => {
                 if text == "." {
                     // `(.)` — the latest mark (the array's top).
                     Some((Anchor::MarkTop, 3))
@@ -3151,7 +3170,11 @@ impl Parser<'_> {
     /// A bare `and` / `or` / `not` where a connective may stand is
     /// refused with the pointer to the symbol and the dotted word.
     fn refuse_bare_bool_word(&self) -> Result<()> {
-        if let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+        if let Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) = self.peek()
             && let Some((w, sym)) = BARE_BOOL_WORDS.iter().find(|(w, _)| w == text)
         {
             return Err(QuarbError::Parse(format!(
@@ -3212,6 +3235,17 @@ impl Parser<'_> {
 
     fn pred_primary(&mut self) -> Result<PredExpr> {
         let left = self.additive()?;
+        if let Some(t @ (Token::Gt { spaced: false } | Token::Lt { spaced: false })) = self.peek() {
+            let c = if matches!(t, Token::Gt { .. }) {
+                '>'
+            } else {
+                '<'
+            };
+            return Err(QuarbError::Parse(format!(
+                "'{c}' glued to what follows is the sibling hop; the comparison \
+                 is spaced: '::x {c} 3'"
+            )));
+        }
         if let Some(op) = self.cmp_op() {
             // `==` / `!==` are the pattern comparisons: a regex or
             // pattern literal rides them only. `=` / `!=` are
@@ -3237,7 +3271,8 @@ impl Parser<'_> {
                     let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
                     return Err(QuarbError::Parse(format!(
                         "a pattern literal after '{}' is retired: the pattern comparison is '{eq}' ('{eq} {}')",
-                        cmp_text(op), crate::unparse::operand_text(&right)
+                        cmp_text(op),
+                        crate::unparse::operand_text(&right)
                     )));
                 }
                 let op = match op {
@@ -3265,9 +3300,7 @@ impl Parser<'_> {
     /// string or arithmetic parses as before.
     fn pattern_operand(&mut self) -> Result<Option<Operand>> {
         let start = self.pos;
-        let star = |t: &Token| {
-            matches!(t, Token::Name { text, quoted: false, .. } if text == "*")
-        };
+        let star = |t: &Token| matches!(t, Token::Name { text, quoted: false, .. } if text == "*");
         let is_glued = |t: &Token| match t {
             Token::Name { glued, .. } => *glued,
             _ => false,
@@ -3448,7 +3481,13 @@ impl Parser<'_> {
             let bare = |o: &Operand| {
                 matches!(
                     o,
-                    Operand::Rel { projection: None, .. } | Operand::Ctx { projection: None, .. }
+                    Operand::Rel {
+                        projection: None,
+                        ..
+                    } | Operand::Ctx {
+                        projection: None,
+                        ..
+                    }
                 )
             };
             let ok = match &o {
@@ -3489,14 +3528,25 @@ impl Parser<'_> {
         // rung after a register value or the topic). A node path
         // parsed its own `:::` as a projection already.
         while matches!(self.peek(), Some(Token::ColonColonColon)) {
-            if !matches!(o, Operand::Recall(_) | Operand::Topic | Operand::Field { .. } | Operand::ValueMeta { .. } | Operand::Piped { .. } | Operand::PeerReg { .. }) {
+            if !matches!(
+                o,
+                Operand::Recall(_)
+                    | Operand::Topic
+                    | Operand::Field { .. }
+                    | Operand::ValueMeta { .. }
+                    | Operand::Piped { .. }
+                    | Operand::PeerReg { .. }
+            ) {
                 return Err(QuarbError::Parse(
                     "':::key' after a value reads its provenance: write it after a register value ($.name), the topic ($_), or a record field".into(),
                 ));
             }
             self.pos += 1;
             let key = self.require_projection_name("value provenance `:::`")?;
-            o = Operand::ValueMeta { base: Box::new(o), key };
+            o = Operand::ValueMeta {
+                base: Box::new(o),
+                key,
+            };
         }
         Ok(o)
     }
@@ -3688,13 +3738,11 @@ impl Parser<'_> {
             | Stage::ExprPush { .. }
             | Stage::RecordPush { .. }
             | Stage::FieldsPush
-            | Stage::Subcontext { .. } => {
-                Err(QuarbError::Parse(
-                    "a pipe inside an expression transforms a value; \
+            | Stage::Subcontext { .. } => Err(QuarbError::Parse(
+                "a pipe inside an expression transforms a value; \
                      pushes belong to real capsae (use a stage)"
-                        .into(),
-                ))
-            }
+                    .into(),
+            )),
             _ => Ok(stage),
         }
     }
@@ -3793,7 +3841,6 @@ impl Parser<'_> {
             steps,
             projection,
             anchor: Anchor::Current,
-
         })
     }
 
@@ -3845,7 +3892,8 @@ impl Parser<'_> {
             match p.peek() {
                 Some(Token::Pipe) if matches!(p.toks.get(p.pos + 1), Some(Token::Amp)) => {
                     p.pos += 1;
-                    p.invoke_inline_fragment("|", &mut stages).map_err(context)?;
+                    p.invoke_inline_fragment("|", &mut stages)
+                        .map_err(context)?;
                 }
                 Some(Token::Pipe) => {
                     p.pos += 1;
@@ -3856,7 +3904,8 @@ impl Parser<'_> {
                         && matches!(p.toks.get(p.pos + 2), Some(Token::Amp)) =>
                 {
                     p.pos += 2;
-                    p.invoke_inline_fragment("@|", &mut stages).map_err(context)?;
+                    p.invoke_inline_fragment("@|", &mut stages)
+                        .map_err(context)?;
                 }
                 Some(Token::At) if matches!(p.toks.get(p.pos + 1), Some(Token::Pipe)) => {
                     p.pos += 2;
@@ -3925,6 +3974,48 @@ impl Parser<'_> {
         Ok(expr)
     }
 
+    /// A relative path operand that opens with a step (`/`, `//`,
+    /// `\\`, a sibling hop, an arrow): steps as long as they come,
+    /// then the projection.
+    fn rel_operand_from_step(&mut self) -> Result<Operand> {
+        self.rel_operand_continue(Vec::new())
+    }
+
+    fn rel_operand_continue(&mut self, mut steps: Vec<PathElem>) -> Result<Operand> {
+        loop {
+            if self.is_resolution_ahead() {
+                steps.push(self.path_elem()?);
+                continue;
+            }
+            if matches!(
+                self.peek(),
+                Some(
+                    Token::Slash
+                        | Token::SlashSlash
+                        | Token::Backslash
+                        | Token::BackslashBackslash
+                        | Token::FollowingSiblings(_)
+                        | Token::PrecedingSiblings(_)
+                        | Token::NextSibling
+                        | Token::PrevSibling
+                        | Token::ArrowOut
+                        | Token::ArrowIn
+                        | Token::DashDash
+                        | Token::LParen
+                )
+            ) {
+                steps.push(self.path_elem()?);
+                continue;
+            }
+            break;
+        }
+        let projection = self.projection()?;
+        Ok(Operand::Rel {
+            steps,
+            projection,
+            anchor: Anchor::Current,
+        })
+    }
 
     fn operand(&mut self) -> Result<Operand> {
         match self.peek() {
@@ -4023,9 +4114,14 @@ impl Parser<'_> {
             // rounded `;-` / `-;`), or follow a crosslink (`->`,
             // `<-`, `--`), so a structural predicate can ask "has any
             // outgoing link?" with `[->*]` and a record can carry the
-            // parent's name with `rec(dir, \*:::name)`. (The bare
-            // `>` / `<` sibling hops are the comparison operators in
-            // operand position; their rounded spellings serve.)
+            // parent's name with `rec(dir, \*:::name)`. The bare
+            // `>` / `<` glued to a name are the sibling hops here as
+            // anywhere: spacing decides (a spaced `>` is the
+            // comparison, and cannot open an operand).
+            Some(Token::Gt { spaced: false } | Token::Lt { spaced: false }) => {
+                let first = self.path_elem()?;
+                self.rel_operand_continue(vec![first])
+            }
             Some(
                 Token::Slash
                 | Token::SlashSlash
@@ -4038,43 +4134,7 @@ impl Parser<'_> {
                 | Token::ArrowOut
                 | Token::ArrowIn
                 | Token::DashDash,
-            ) => {
-                let mut steps = Vec::new();
-                loop {
-                    if self.is_resolution_ahead() {
-                        steps.push(self.path_elem()?);
-                        continue;
-                    }
-                    if matches!(
-                        self.peek(),
-                        Some(
-                            Token::Slash
-                                | Token::SlashSlash
-                                | Token::Backslash
-                                | Token::BackslashBackslash
-                                | Token::FollowingSiblings(_)
-                                | Token::PrecedingSiblings(_)
-                                | Token::NextSibling
-                                | Token::PrevSibling
-                                | Token::ArrowOut
-                                | Token::ArrowIn
-                                | Token::DashDash
-                                | Token::LParen
-                        )
-                    ) {
-                        steps.push(self.path_elem()?);
-                        continue;
-                    }
-                    break;
-                }
-                let projection = self.projection()?;
-                Ok(Operand::Rel {
-                    steps,
-                    projection,
-                    anchor: Anchor::Current,
-
-                })
-            }
+            ) => self.rel_operand_from_step(),
             // A resolution chain in operand position: follow the
             // reference(s), then project (`::album_id~>::title`).
             Some(Token::ColonColon) if self.is_resolution_ahead() => {
@@ -4111,7 +4171,6 @@ impl Parser<'_> {
                     steps,
                     projection,
                     anchor: Anchor::Current,
-
                 })
             }
             Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi) => {
@@ -4120,7 +4179,6 @@ impl Parser<'_> {
                     steps: Vec::new(),
                     projection: Some(projection),
                     anchor: Anchor::Current,
-
                 })
             }
             // A call operand: a function word glued to `(` — the
@@ -4367,123 +4425,127 @@ impl Parser<'_> {
                         }
                     }
                 }
-                let index = if joined.is_some() { joined } else { match self.peek() {
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text.starts_with('*') => {
-                        let digits = text[1..].to_string();
-                        self.pos += 1;
-                        if digits.is_empty() {
-                            None
-                        } else {
-                            return Err(QuarbError::Parse(format!(
-                                "'$*{digits}' is retired: the join's N-th node is '$${digits}'"
-                            )));
+                let index = if joined.is_some() {
+                    joined
+                } else {
+                    match self.peek() {
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text.starts_with('*') => {
+                            let digits = text[1..].to_string();
+                            self.pos += 1;
+                            if digits.is_empty() {
+                                None
+                            } else {
+                                return Err(QuarbError::Parse(format!(
+                                    "'$*{digits}' is retired: the join's N-th node is '$${digits}'"
+                                )));
+                            }
                         }
-                    }
-                    // `$.name` / `$.` — a register recall as an
-                    // operand (the value pushed under that name).
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text.starts_with('.') => {
-                        let rest = text[1..].to_string();
-                        self.pos += 1;
-                        let r = if rest.is_empty() {
-                            RegRef::Top
-                        } else if let Ok(n) = rest.parse::<usize>() {
-                            RegRef::Index(n)
-                        } else {
-                            RegRef::Named(rest)
-                        };
-                        return Ok(Operand::Recall(r));
-                    }
-                    // `$_` — the topic (the current pipeline value).
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text == "_" => {
-                        self.pos += 1;
-                        return Ok(Operand::Topic);
-                    }
-                    // `$ordinal` / `$ord` — the capsa's position in
-                    // the current context.
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text == "ord" => {
-                        self.pos += 1;
-                        return Ok(Operand::Ordinal);
-                    }
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text == "ordinal" => {
-                        return Err(QuarbError::Parse(
-                            "'$ordinal' is retired: write '$ord'".into(),
-                        ));
-                    }
-                    // `$1` … `$9` — a regex capture from the last
-                    // successful `=~` match in a filter stage.
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text.chars().all(|c| c.is_ascii_digit()) => {
-                        let n: usize = text.parse().map_err(|_| {
-                            QuarbError::Parse(format!("bad capture reference '${text}'"))
-                        })?;
-                        if n == 0 {
+                        // `$.name` / `$.` — a register recall as an
+                        // operand (the value pushed under that name).
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text.starts_with('.') => {
+                            let rest = text[1..].to_string();
+                            self.pos += 1;
+                            let r = if rest.is_empty() {
+                                RegRef::Top
+                            } else if let Ok(n) = rest.parse::<usize>() {
+                                RegRef::Index(n)
+                            } else {
+                                RegRef::Named(rest)
+                            };
+                            return Ok(Operand::Recall(r));
+                        }
+                        // `$_` — the topic (the current pipeline value).
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "_" => {
+                            self.pos += 1;
+                            return Ok(Operand::Topic);
+                        }
+                        // `$ordinal` / `$ord` — the capsa's position in
+                        // the current context.
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "ord" => {
+                            self.pos += 1;
+                            return Ok(Operand::Ordinal);
+                        }
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "ordinal" => {
                             return Err(QuarbError::Parse(
-                                "capture references are 1-based ('$1')".into(),
+                                "'$ordinal' is retired: write '$ord'".into(),
                             ));
                         }
-                        self.pos += 1;
-                        return Ok(Operand::Capture(n));
-                    }
-                    // `$-` — the arrived-by edge; bare or with an
-                    // edge-property projection (`$-::since`).
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if text == "-" => {
-                        self.pos += 1;
-                        let projection = self.projection()?;
-                        if matches!(
-                            projection,
-                            Some(Projection::CoreMeta(_) | Projection::AdapterMeta(_))
-                        ) {
-                            return Err(QuarbError::Parse(
-                                "an edge carries plain properties only ($-::prop)".into(),
-                            ));
+                        // `$1` … `$9` — a regex capture from the last
+                        // successful `=~` match in a filter stage.
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text.chars().all(|c| c.is_ascii_digit()) => {
+                            let n: usize = text.parse().map_err(|_| {
+                                QuarbError::Parse(format!("bad capture reference '${text}'"))
+                            })?;
+                            if n == 0 {
+                                return Err(QuarbError::Parse(
+                                    "capture references are 1-based ('$1')".into(),
+                                ));
+                            }
+                            self.pos += 1;
+                            return Ok(Operand::Capture(n));
                         }
-                        return Ok(Operand::Edge { projection });
-                    }
-                    // `$name` — a fragment parameter, inside a def
-                    // body whose parameter list declares it.
-                    Some(Token::Name {
-                        text,
-                        quoted: false,
-                        ..
-                    }) if self.def_params.iter().any(|p| p == text) => {
-                        let name = text.clone();
-                        self.pos += 1;
-                        return Ok(Operand::Param(name));
-                    }
-                    _ => {
-                        return Err(QuarbError::Parse(
+                        // `$-` — the arrived-by edge; bare or with an
+                        // edge-property projection (`$-::since`).
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "-" => {
+                            self.pos += 1;
+                            let projection = self.projection()?;
+                            if matches!(
+                                projection,
+                                Some(Projection::CoreMeta(_) | Projection::AdapterMeta(_))
+                            ) {
+                                return Err(QuarbError::Parse(
+                                    "an edge carries plain properties only ($-::prop)".into(),
+                                ));
+                            }
+                            return Ok(Operand::Edge { projection });
+                        }
+                        // `$name` — a fragment parameter, inside a def
+                        // body whose parameter list declares it.
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if self.def_params.iter().any(|p| p == text) => {
+                            let name = text.clone();
+                            self.pos += 1;
+                            return Ok(Operand::Param(name));
+                        }
+                        _ => {
+                            return Err(QuarbError::Parse(
                             "expected '*N', '.name', '_', '-', or 'ord' after '$' in an operand"
                                 .into(),
                         ));
+                        }
                     }
-                } };
+                };
                 // Optional descending navigation from the bound context
                 // node, then a projection — the same shape as a `Rel`
                 // operand from the current node.
@@ -4701,9 +4763,9 @@ impl Parser<'_> {
         let op = match self.peek()? {
             Token::Eq => CmpOp::Eq,
             Token::Ne => CmpOp::Ne,
-            Token::Lt => CmpOp::Lt,
+            Token::Lt { spaced: true } => CmpOp::Lt,
             Token::Le => CmpOp::Le,
-            Token::Gt => CmpOp::Gt,
+            Token::Gt { spaced: true } => CmpOp::Gt,
             Token::Ge => CmpOp::Ge,
             Token::MatchEq => CmpOp::Match,
             Token::NotMatchEq => CmpOp::NotMatch,
@@ -4778,7 +4840,6 @@ impl Parser<'_> {
         false
     }
 
-
     fn expect(&mut self, tok: Token, what: &str) -> Result<()> {
         if self.peek() == Some(&tok) {
             self.pos += 1;
@@ -4797,7 +4858,7 @@ impl Parser<'_> {
     /// well-formed trait\,---\,e.g. a bare `<name` that is really a
     /// previous-sibling hop.
     fn try_trait(&mut self) -> Result<Option<Vec<TraitClause>>> {
-        if !matches!(self.peek(), Some(Token::Lt)) {
+        if !matches!(self.peek(), Some(Token::Lt { spaced: false })) {
             return Ok(None);
         }
         let start = self.pos;
@@ -4806,7 +4867,7 @@ impl Parser<'_> {
             self.pos = start;
             return Ok(None);
         };
-        if !matches!(self.peek(), Some(Token::Gt)) {
+        if !matches!(self.peek(), Some(Token::Gt { .. })) {
             self.pos = start;
             return Ok(None);
         }
@@ -4888,8 +4949,19 @@ impl Parser<'_> {
             Some(Token::SlashSlash) => Axis::Descendant(self.reach()),
             Some(Token::Backslash) => Axis::Parent,
             Some(Token::BackslashBackslash) => Axis::Ancestor(self.reach()),
-            Some(Token::Gt) | Some(Token::NextSibling) => Axis::NextSibling,
-            Some(Token::Lt) | Some(Token::PrevSibling) => Axis::PrevSibling,
+            Some(Token::Gt { spaced: false }) | Some(Token::NextSibling) => Axis::NextSibling,
+            Some(Token::Lt { spaced: false }) | Some(Token::PrevSibling) => Axis::PrevSibling,
+            Some(t @ (Token::Gt { spaced: true } | Token::Lt { spaced: true })) => {
+                let c = if matches!(t, Token::Gt { .. }) {
+                    '>'
+                } else {
+                    '<'
+                };
+                return Err(QuarbError::Parse(format!(
+                    "'{c}' followed by a space is the comparison; the sibling hop \
+                     is glued to its name: '{c}name' ('{c}*' for any)"
+                )));
+            }
             Some(Token::FollowingSiblings(mark)) => Axis::FollowingSiblings(mark_reach(*mark)),
             Some(Token::PrecedingSiblings(mark)) => Axis::PrecedingSiblings(mark_reach(*mark)),
             Some(Token::ArrowOut) => Axis::OutLink,
@@ -4944,8 +5016,10 @@ impl Parser<'_> {
     /// A name after them is still the check it always was (`\x`).
     fn matcher_after(&mut self, axis: &Axis) -> Result<Matcher> {
         if matches!(axis, Axis::Parent | Axis::Ancestor(_))
-            && (!matches!(self.peek(), Some(Token::Name { .. } | Token::Regex(_) | Token::Lt))
-                || self.peek_word(OR_WORDS))
+            && (!matches!(
+                self.peek(),
+                Some(Token::Name { .. } | Token::Regex(_) | Token::Lt { .. })
+            ) || self.peek_word(OR_WORDS))
         {
             return Ok(Matcher::Any);
         }
@@ -4957,7 +5031,7 @@ impl Parser<'_> {
         // `/<block>` is sugar for `/*<block>`: a trait block directly
         // after an axis matches any node, the traits filtering it.
         // Leave the `<` for finish_step's trait parser to consume.
-        if matches!(self.peek(), Some(Token::Lt)) {
+        if matches!(self.peek(), Some(Token::Lt { .. })) {
             return Ok(Matcher::Any);
         }
         match self.bump() {
@@ -5483,7 +5557,10 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
 
 fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
     match stage {
-        Stage::Func(call) | Stage::Agg(call) | Stage::RecordWith(call) | Stage::RecordPush { call, .. } => {
+        Stage::Func(call)
+        | Stage::Agg(call)
+        | Stage::RecordWith(call)
+        | Stage::RecordPush { call, .. } => {
             for arg in &mut call.args {
                 if let Arg::Expr(e) = arg {
                     subst_operand(e, map);
@@ -5503,7 +5580,11 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
         Stage::Filter(e) => subst_pred_expr(e, map),
         Stage::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
         Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => subst_stage(inner, map),
-        Stage::Select(_) | Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => {}
+        Stage::Select(_)
+        | Stage::Push(_)
+        | Stage::FieldsPush
+        | Stage::Recall(_)
+        | Stage::Spread { .. } => {}
     }
 }
 
@@ -5613,7 +5694,11 @@ fn max_ctx_query(q: &Query) -> usize {
     q.correlations
         .iter()
         .map(max_ctx_query)
-        .chain(q.branches.iter().flat_map(|b| b.steps.iter().map(max_ctx_elem)))
+        .chain(
+            q.branches
+                .iter()
+                .flat_map(|b| b.steps.iter().map(max_ctx_elem)),
+        )
         .chain(q.pipeline.iter().map(max_ctx_stage))
         .max()
         .unwrap_or(0)
@@ -5659,7 +5744,10 @@ pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
 
 fn max_ctx_stage(st: &Stage) -> usize {
     match st {
-        Stage::Func(call) | Stage::Agg(call) | Stage::RecordWith(call) | Stage::RecordPush { call, .. } => call
+        Stage::Func(call)
+        | Stage::Agg(call)
+        | Stage::RecordWith(call)
+        | Stage::RecordPush { call, .. } => call
             .args
             .iter()
             .map(|a| match a {
@@ -5687,8 +5775,9 @@ fn max_ctx_operand(o: &Operand) -> usize {
         Operand::Arith { left, right, .. } => max_ctx_operand(left).max(max_ctx_operand(right)),
         Operand::Neg(inner) | Operand::Outer(inner) => max_ctx_operand(inner),
         Operand::Group(e) => max_ctx_pred_expr(e),
-        Operand::Piped { expr, stages } => max_ctx_operand(expr)
-            .max(stages.iter().map(max_ctx_stage).max().unwrap_or(0)),
+        Operand::Piped { expr, stages } => {
+            max_ctx_operand(expr).max(stages.iter().map(max_ctx_stage).max().unwrap_or(0))
+        }
         Operand::Cond { cond, then, other } => max_ctx_pred_expr(cond)
             .max(max_ctx_operand(then))
             .max(max_ctx_operand(other)),
@@ -5869,27 +5958,25 @@ fn op_mentions_outer(o: &Operand) -> bool {
                 | Anchor::MarksNamed(_),
             ..
         } => true,
-        Operand::Rel { anchor: Anchor::Id(op), steps, .. } => {
-            op_mentions_outer(op) || steps.iter().any(elem_mentions_outer)
-        }
+        Operand::Rel {
+            anchor: Anchor::Id(op),
+            steps,
+            ..
+        } => op_mentions_outer(op) || steps.iter().any(elem_mentions_outer),
         Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => op_mentions_outer(base),
         Operand::PeerReg { at, .. } => op_mentions_outer(at),
         Operand::List(items) => items.iter().any(op_mentions_outer),
         Operand::Ctx { steps, .. } | Operand::Rel { steps, .. } => {
             steps.iter().any(elem_mentions_outer)
         }
-        Operand::Arith { left, right, .. } => {
-            op_mentions_outer(left) || op_mentions_outer(right)
-        }
+        Operand::Arith { left, right, .. } => op_mentions_outer(left) || op_mentions_outer(right),
         Operand::Neg(inner) => op_mentions_outer(inner),
         Operand::Group(e) => pred_mentions_outer(e),
         Operand::Piped { expr, stages } => {
             op_mentions_outer(expr) || stages.iter().any(stage_mentions_outer)
         }
         Operand::Cond { cond, then, other } => {
-            pred_mentions_outer(cond)
-                || op_mentions_outer(then)
-                || op_mentions_outer(other)
+            pred_mentions_outer(cond) || op_mentions_outer(then) || op_mentions_outer(other)
         }
         Operand::Match {
             scrutinee,
@@ -5959,6 +6046,38 @@ fn query_mentions_outer(q: &Query) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_sibling_hop_leads_an_operand() {
+        // At the start of an operand `>name` / `<name` is the hop
+        // (no comparison can stand there); the rounded spellings
+        // parse to the same tree.
+        let tree = |q: &str| format!("{:?}", parse(&lexer::lex(q).unwrap()).unwrap());
+        assert_eq!(
+            tree("//p[substr(::; 1..3) = substr(>p::; 1..3)]"),
+            tree("//p[substr(::; 1..3) = substr(;-p::; 1..3)]")
+        );
+        assert_eq!(
+            tree("/x | %(prev = <y::; next = >y::)"),
+            tree("/x | %(prev = -;y::; next = ;-y::)")
+        );
+        assert_eq!(tree("//p[>p::n = 3]"), tree("//p[;-p::n = 3]"));
+        // Spaced, `>` is the comparison; glued after an operand it is
+        // refused with the pointer, as is a spaced hop.
+        assert!(parse(&lexer::lex("//p[::n > 3]").unwrap()).is_ok());
+        assert!(parse(&lexer::lex("//p[substr(::; 1..3) > 3]").unwrap()).is_ok());
+        assert!(parse(&lexer::lex("//p[::n > 3 && ::m < 2]").unwrap()).is_ok());
+        let e = parse(&lexer::lex("//p[::n>3]").unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("spaced"), "{e}");
+        let e = parse(&lexer::lex("//h2 > p::").unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("glued"), "{e}");
+        assert!(parse(&lexer::lex("//h2>p::").unwrap()).is_ok());
+        assert!(parse(&lexer::lex("//*<function>[::n > 1]").unwrap()).is_ok());
+    }
 
     #[test]
     fn adversarial_nesting_is_an_error_not_an_abort() {
@@ -6063,9 +6182,13 @@ mod tests {
             let toks = lexer::lex(q).unwrap();
             assert!(parse(&toks).is_ok(), "should parse: {q}");
         }
-        let e = parse(&lexer::lex("/r/* | .1(::a) | %.").unwrap()).unwrap_err().to_string();
+        let e = parse(&lexer::lex("/r/* | .1(::a) | %.").unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("starts with a letter"), "{e}");
-        let e = parse(&lexer::lex("/r/* | ._id(::a)").unwrap()).unwrap_err().to_string();
+        let e = parse(&lexer::lex("/r/* | ._id(::a)").unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("starts with a letter"), "{e}");
     }
 
@@ -6088,7 +6211,10 @@ mod tests {
             // A joined expression cannot reference itself or later
             // entries.
             ("/a/* <=> /b/*[::x = $$1::x]", "joined expression #1"),
-            ("/a/* <=> /b/*[::x = $$2::x] <=> /c/*", "joined expression #1"),
+            (
+                "/a/* <=> /b/*[::x = $$2::x] <=> /c/*",
+                "joined expression #1",
+            ),
             // The pipeline cannot outrun the join count.
             ("/a/* <=> /b/* | %($$2::n)", "only 1 expression"),
             // Join conditions sit on the final step.
@@ -6222,7 +6348,6 @@ mod tests {
     }
 }
 
-
 /// Find a top-level bash hole operator (ruling #34): a `:` followed
 /// by `?` or `-`, outside quotes, parens, brackets, and braces, and
 /// not part of a `::` projection run (an ISO instant's time colon
@@ -6293,10 +6418,21 @@ fn cmp_word(word: &str) -> Option<CmpOp> {
     Some(match word {
         // English (the Fortran heritage), French, Greek (tonos
         // optional), Latin, Russian, Spanish.
-        ".lt." | ".inf." | ".μικρότερο." | ".μικροτερο." | ".minor." | ".менее." | ".menor." => CmpOp::Lt,
-        ".le." | ".nonsup." | ".τοπολύ." | ".τοπολυ." | ".nonmaior." | ".неболее." | ".nomayor." => CmpOp::Le,
-        ".gt." | ".sup." | ".μεγαλύτερο." | ".μεγαλυτερο." | ".maior." | ".более." | ".mayor." => CmpOp::Gt,
-        ".ge." | ".noninf." | ".τουλάχιστον." | ".τουλαχιστον." | ".nonminor." | ".неменее." | ".nomenor." => CmpOp::Ge,
+        ".lt." | ".inf." | ".μικρότερο." | ".μικροτερο." | ".minor." | ".менее." | ".menor." => {
+            CmpOp::Lt
+        }
+        ".le." | ".nonsup." | ".τοπολύ." | ".τοπολυ." | ".nonmaior." | ".неболее."
+        | ".nomayor." => CmpOp::Le,
+        ".gt." | ".sup." | ".μεγαλύτερο." | ".μεγαλυτερο." | ".maior." | ".более." | ".mayor." => {
+            CmpOp::Gt
+        }
+        ".ge."
+        | ".noninf."
+        | ".τουλάχιστον."
+        | ".τουλαχιστον."
+        | ".nonminor."
+        | ".неменее."
+        | ".nomenor." => CmpOp::Ge,
         _ => return None,
     })
 }

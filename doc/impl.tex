@@ -4,7 +4,9 @@
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{booktabs}
+\usepackage{array}
 \usepackage{tabularx}
+\usepackage{xltabular} % the crate tables run over several pages
 \usepackage[unicode,pdfencoding=auto]{hyperref}
 \hypersetup{
     colorlinks=true,
@@ -113,7 +115,7 @@ query runs unchanged over any adapter.
 The engine is a Cargo workspace mirroring the intended separation of
 concerns\,---\,the core engine, one crate per adapter, and the CLI:
 
-\begin{tabularx}{\textwidth}{l X}
+\begin{xltabular}{\textwidth}{l X}
 \toprule
 \textbf{Crate} & \textbf{Responsibility} \\
 \midrule
@@ -471,6 +473,24 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{analyze}, \texttt{index} (pg\_trgm). \texttt{qua}:
   \texttt{web:<dir|archive|site.db|postgres://…>},
   \texttt{--explain} / \texttt{--no-pushdown}. \\
+\texttt{quarb-trace} & The \texttt{quarb/trace} viz contract as
+  Rust: the payload types (arbor snapshot, steps, threads,
+  snapshots, window and stubs, positions, ribbons, lookahead
+  verdicts, results) and their kaiv writer; no dependencies, no
+  reader. \texttt{quarb::trace::trace} fills one by
+  \emph{replaying} the query rather than instrumenting the
+  evaluator: one hop per live thread through the evaluator's own
+  \texttt{navigate\_paths} (candidates with the predicates
+  stripped, survivors with them --- the fork, the verdicts, the
+  walked edges), \texttt{apply\_stage} per thread for filters and
+  over the whole context for aggregates, a hand-iterated walk for
+  quantified groups (one frame per depth), then checks the final
+  context against a plain evaluation. A staged suffix marks the
+  steps beyond the committed query (a filter preview); a window
+  selects the slice of a large result list to embed and what the
+  stubs on either side measure. \texttt{Doc::trace} in
+  \texttt{quarb-session} is the entry; the renderers read the
+  kaiv document (quarbopsis: \texttt{quao trace}). \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
   and mbox mailboxes: headers as properties (lowercased), the
   body as the value, \texttt{::::epoch} parsing the Date header
@@ -750,7 +770,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   canonical kaiv (typed leaves with per-value provenance; needs the
   sibling \texttt{kaiv-rs} checkout). \\
 \bottomrule
-\end{tabularx}
+\end{xltabular}
 
 \medskip
 
@@ -829,7 +849,7 @@ ladder's transfer reductions are cost reductions.
 The engine implements essentially the whole language. A query is a
 root-anchored sequence of hops, each an axis followed by a name:
 
-\begin{tabularx}{\textwidth}{l X}
+\begin{xltabular}{\textwidth}{>{\raggedright\arraybackslash}p{0.36\textwidth} X}
 \toprule
 \textbf{Form} & \textbf{Meaning} \\
 \midrule
@@ -1032,7 +1052,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     the quantifier bound. PageRank over quarb.org is one such push;
     the stored column matches to $2\times10^{-17}$ \\
 \bottomrule
-\end{tabularx}
+\end{xltabular}
 
 \medskip
 

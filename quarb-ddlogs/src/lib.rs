@@ -264,20 +264,21 @@ fn decode_event(o: &Json) -> Option<Event> {
         .and_then(|v| v.as_object())
         .map(|m| m.iter().map(|(k, v)| (k.clone(), decode_json(v))).collect())
         .unwrap_or_default();
-    let trace = a
-        .pointer("/attributes/dd/trace_id")
-        .and_then(|v| match v {
-            Json::String(s) => Some(s.clone()),
-            Json::Number(n) => Some(n.to_string()),
-            _ => None,
-        });
+    let trace = a.pointer("/attributes/dd/trace_id").and_then(|v| match v {
+        Json::String(s) => Some(s.clone()),
+        Json::Number(n) => Some(n.to_string()),
+        _ => None,
+    });
     let tags: Vec<(String, String)> = a
         .pointer("/tags")
         .and_then(|v| v.as_array())
         .map(|ts| {
             ts.iter()
                 .filter_map(|t| t.as_str())
-                .filter_map(|t| t.split_once(':').map(|(k, v)| (k.to_string(), v.to_string())))
+                .filter_map(|t| {
+                    t.split_once(':')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -300,7 +301,10 @@ fn decode_event(o: &Json) -> Option<Event> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         trace,
-        id: o.pointer("/id").and_then(|v| v.as_str()).map(str::to_string),
+        id: o
+            .pointer("/id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         index: a
             .pointer("/index")
             .and_then(|v| v.as_str())
@@ -325,7 +329,11 @@ impl DdlAdapter {
         let site = t
             .site
             .clone()
-            .or_else(|| std::env::var("DD_SITE").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                std::env::var("DD_SITE")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| "datadoghq.com".into());
         let base = t
             .endpoint
@@ -577,10 +585,7 @@ impl AstAdapter for DdlAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match self.entry_of(node) {
-            Some(i) => vec![
-                "entry".into(),
-                self.events[i].status.to_ascii_lowercase(),
-            ],
+            Some(i) => vec!["entry".into(), self.events[i].status.to_ascii_lowercase()],
             None => Vec::new(),
         }
     }
@@ -702,12 +707,18 @@ mod tests {
         assert_eq!(run("/entry[::order]::order"), vec!["o-1402"]);
         assert_eq!(run("/entry[::team]::team"), vec!["payments"]);
         // Nested custom attributes navigate as children.
-        assert_eq!(run("/entry[/http/status_code:: = 500]::service"), vec!["gateway"]);
+        assert_eq!(
+            run("/entry[/http/status_code:: = 500]::service"),
+            vec!["gateway"]
+        );
         // The minted trace joins the two services.
         let joined = run(
             "/entry<error> <=> /entry[::service = 'gateway'][::trace = _::trace] \
              | %(::order; edge = $$1::)",
         );
-        assert_eq!(joined, vec!["%(order = \"o-1402\"; edge = \"POST /pay 500\")"]);
+        assert_eq!(
+            joined,
+            vec!["%(order = \"o-1402\"; edge = \"POST /pay 500\")"]
+        );
     }
 }

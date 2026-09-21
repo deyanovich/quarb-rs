@@ -48,23 +48,33 @@ fn mock_gitlab() {
     // <repo> is the forge-neutral alias for <project>.
     assert_eq!(v("/tesslab//*<repo>::name @| sort"), ["gauge", "kettle"]);
     assert_eq!(v("/tesslab/kettle::stars"), ["128"]);
-    assert_eq!(v("/tesslab/kettle<thermo>::description"), [
-        "Boils anything. Library."
-    ]);
+    assert_eq!(
+        v("/tesslab/kettle<thermo>::description"),
+        ["Boils anything. Library."]
+    );
 
     // Issues: the open listing, labels as traits (scoped labels
     // included), closed by direct address.
     assert_eq!(v("/tesslab/kettle/issues/* @| count"), ["2"]);
-    assert_eq!(v("/tesslab/kettle/issues/*<bug>::title"), ["Whistle never stops"]);
+    assert_eq!(
+        v("/tesslab/kettle/issues/*<bug>::title"),
+        ["Whistle never stops"]
+    );
     assert_eq!(
         v("/tesslab/kettle/issues/*<'temp::high'>::author"),
         ["grace"]
     );
     assert_eq!(v("/tesslab/kettle/issues/2::state"), ["closed"]);
-    assert_eq!(v("/tesslab/kettle/issues/4::"), ["Steam escapes the schedule."]);
+    assert_eq!(
+        v("/tesslab/kettle/issues/4::"),
+        ["Steam escapes the schedule."]
+    );
 
     // Merge requests and releases.
-    assert_eq!(v("/tesslab/kettle/mrs/5<draft>::title"), ["Add pressure valve"]);
+    assert_eq!(
+        v("/tesslab/kettle/mrs/5<draft>::title"),
+        ["Add pressure valve"]
+    );
     assert_eq!(v("/tesslab/kettle/mrs/5->reviewer::username"), ["grace"]);
     assert_eq!(v("/tesslab/kettle/mrs/5::source-branch"), ["valve"]);
     assert_eq!(v("/tesslab/kettle/releases/*::tag"), ["v1.0"]);
@@ -78,22 +88,21 @@ fn mock_gitlab() {
     assert_eq!(v("/tesslab/kettle/pipelines/902::ref"), ["valve"]);
 
     // The file tree; content is the value.
-    assert_eq!(v("/tesslab/kettle/files/src/main.rs::::path"), [
-        "/tesslab/kettle/files/src/main.rs"
-    ]);
-    assert_eq!(v("/tesslab/kettle/files/README.md::"), [
-        "# kettle\n\nBoils anything. Library.\n"
-    ]);
+    assert_eq!(
+        v("/tesslab/kettle/files/src/main.rs::::path"),
+        ["/tesslab/kettle/files/src/main.rs"]
+    );
+    assert_eq!(
+        v("/tesslab/kettle/files/README.md::"),
+        ["# kettle\n\nBoils anything. Library.\n"]
+    );
 
     // Member edges carry access as edge data.
     assert_eq!(
         v("/tesslab/kettle(->member[$-::role = 'developer'])::username"),
         ["grace"]
     );
-    assert_eq!(
-        v("/tesslab(->member[$-::access >= 50])::username"),
-        ["ada"]
-    );
+    assert_eq!(v("/tesslab(->member[$-::access >= 50])::username"), ["ada"]);
 
     // Forks: parent property, reference, and backlinks.
     assert_eq!(v("/ada/*<fork>::parent"), ["tesslab/kettle"]);

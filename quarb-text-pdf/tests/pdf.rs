@@ -33,7 +33,10 @@ fn pdf(objects: &[&str]) -> Vec<u8> {
 }
 
 fn stream(body: &str) -> String {
-    format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len() + 1)
+    format!(
+        "<< /Length {} >>\nstream\n{body}\nendstream",
+        body.len() + 1
+    )
 }
 
 fn values(model: &quarb_text_pdf::PdfText, q: &str) -> Vec<String> {

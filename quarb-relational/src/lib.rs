@@ -261,9 +261,7 @@ impl RelationalModel {
     }
 
     fn cell_node(t: usize, r: usize, c: usize) -> NodeId {
-        NodeId(
-            (t as u64 + 1) << TABLE_SHIFT | (r as u64 + 1) << COL_BITS | (c as u64 + 1),
-        )
+        NodeId((t as u64 + 1) << TABLE_SHIFT | (r as u64 + 1) << COL_BITS | (c as u64 + 1))
     }
 
     /// Decode a table or row node: `(table, Some(row))` for a row,
@@ -533,8 +531,14 @@ mod tests {
             fks: vec![],
         };
         let rows = vec![
-            RowSpec { rowid: 1, values: vec![Value::Int(1), Value::Str("{\"p\":\"hi\"}".into())] },
-            RowSpec { rowid: 2, values: vec![Value::Int(2), Value::Str("{\"p\":\"lo\"}".into())] },
+            RowSpec {
+                rowid: 1,
+                values: vec![Value::Int(1), Value::Str("{\"p\":\"hi\"}".into())],
+            },
+            RowSpec {
+                rowid: 2,
+                values: vec![Value::Int(2), Value::Str("{\"p\":\"lo\"}".into())],
+            },
         ];
         RelationalModel::build(vec![(spec, rows)])
     }

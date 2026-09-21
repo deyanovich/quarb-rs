@@ -49,16 +49,32 @@ fn urldecode(s: &str) -> String {
 }
 
 fn ada() -> serde_json::Value {
-    vertex("p1", "Person", serde_json::json!({"name": "Ada", "role": "engineer", "city": "Oslo"}))
+    vertex(
+        "p1",
+        "Person",
+        serde_json::json!({"name": "Ada", "role": "engineer", "city": "Oslo"}),
+    )
 }
 fn bo() -> serde_json::Value {
-    vertex("p2", "Person", serde_json::json!({"name": "Bo", "role": "analyst", "city": "Novi Sad"}))
+    vertex(
+        "p2",
+        "Person",
+        serde_json::json!({"name": "Bo", "role": "analyst", "city": "Novi Sad"}),
+    )
 }
 fn oslo() -> serde_json::Value {
-    vertex("c1", "City", serde_json::json!({"name": "Oslo", "country": "NO"}))
+    vertex(
+        "c1",
+        "City",
+        serde_json::json!({"name": "Oslo", "country": "NO"}),
+    )
 }
 fn novisad() -> serde_json::Value {
-    vertex("c2", "City", serde_json::json!({"name": "Novi Sad", "country": "RS"}))
+    vertex(
+        "c2",
+        "City",
+        serde_json::json!({"name": "Novi Sad", "country": "RS"}),
+    )
 }
 
 fn answer(query: &str) -> String {

@@ -53,7 +53,9 @@ use std::cell::RefCell;
 pub enum KafkaError {
     #[error("kafka: {0}")]
     Api(String),
-    #[error("kafka target: {0} (expected kafka://HOST:PORT[,HOST:PORT…][?topics=…&from=…&until=…])")]
+    #[error(
+        "kafka target: {0} (expected kafka://HOST:PORT[,HOST:PORT…][?topics=…&from=…&until=…])"
+    )]
     Target(String),
 }
 
@@ -89,17 +91,9 @@ struct Msg {
 
 enum Kind {
     Root,
-    Topic {
-        name: String,
-        partitions: Vec<i32>,
-    },
-    Message {
-        topic: String,
-        msg: Msg,
-    },
-    Field {
-        value: Field,
-    },
+    Topic { name: String, partitions: Vec<i32> },
+    Message { topic: String, msg: Msg },
+    Field { value: Field },
 }
 
 struct Node {
@@ -149,7 +143,10 @@ fn parse_bound(s: &str) -> Option<(i64, u32)> {
         return Some((secs, nanos));
     }
     let ms: i64 = s.parse().ok()?;
-    Some((ms.div_euclid(1000), (ms.rem_euclid(1000) as u32) * 1_000_000))
+    Some((
+        ms.div_euclid(1000),
+        (ms.rem_euclid(1000) as u32) * 1_000_000,
+    ))
 }
 
 impl KafkaAdapter {
@@ -401,8 +398,7 @@ impl KafkaAdapter {
                     let mut out = Vec::new();
                     let mut cur = start;
                     while cur < watermark {
-                        let (batch, _) =
-                            pc.fetch_records(cur, 1..8 * 1024 * 1024, 500).await?;
+                        let (batch, _) = pc.fetch_records(cur, 1..8 * 1024 * 1024, 500).await?;
                         if batch.is_empty() {
                             break;
                         }
@@ -614,7 +610,10 @@ mod tests {
             parse_bound("2026-07-24T12:00:00Z"),
             quarb::temporal::parse_iso("2026-07-24T12:00:00Z").map(|(s, n, _)| (s, n))
         );
-        assert_eq!(parse_bound("1753358400123"), Some((1753358400, 123_000_000)));
+        assert_eq!(
+            parse_bound("1753358400123"),
+            Some((1753358400, 123_000_000))
+        );
         assert_eq!(parse_bound("half past nine"), None);
     }
 
@@ -644,9 +643,6 @@ mod tests {
             decode_payload(Some(&[0xff, 0xfe])),
             Field::Scalar(Value::Null)
         ));
-        assert!(matches!(
-            decode_payload(None),
-            Field::Scalar(Value::Null)
-        ));
+        assert!(matches!(decode_payload(None), Field::Scalar(Value::Null)));
     }
 }

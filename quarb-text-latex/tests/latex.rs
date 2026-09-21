@@ -96,7 +96,10 @@ fn footnotes_are_the_apparatus() {
 #[test]
 fn quote_list_verbatim() {
     let m = parse(DOC);
-    assert_eq!(values(&m, "//blockquote::"), ["They can face machine guns."]);
+    assert_eq!(
+        values(&m, "//blockquote::"),
+        ["They can face machine guns."]
+    );
     assert_eq!(values(&m, "//unordered-item::"), ["alpha", "beta"]);
     assert_eq!(values(&m, "//verbatim::"), ["qua '//section' war.tex"]);
 }
@@ -109,10 +112,7 @@ One.\footnotemark[7] Two.
 
 \footnotetext[7]{The seventh.}"#,
     );
-    assert_eq!(
-        values(&m, "//*<deixis>->footnote::"),
-        ["The seventh."]
-    );
+    assert_eq!(values(&m, "//*<deixis>->footnote::"), ["The seventh."]);
     assert_eq!(values(&m, "//*<note>::onym"), ["7"]);
 }
 
@@ -190,7 +190,10 @@ After."#,
         ["outer\ninner", "outer two"]
     );
     assert_eq!(values(&m, "//ordered-item::"), ["inner"]);
-    assert_eq!(values(&m, r#"//section[::lemma = "B"]/paragraph::"#), ["After."]);
+    assert_eq!(
+        values(&m, r#"//section[::lemma = "B"]/paragraph::"#),
+        ["After."]
+    );
 }
 
 #[test]
@@ -299,7 +302,10 @@ In his own ground.
         values(&m, "//stichos[::taxis = 2]::"),
         ["A few paternal acres bound,"]
     );
-    assert_eq!(values(&m, "//stichos[::taxis = 4]::"), ["In his own ground."]);
+    assert_eq!(
+        values(&m, "//stichos[::taxis = 4]::"),
+        ["In his own ground."]
+    );
 }
 
 #[test]
@@ -307,9 +313,7 @@ fn multibyte_prose_survives() {
     // The scanner pushed bytes as chars, Latin-1-izing UTF-8 —
     // curly quotes and Greek in free prose mangled (found by the
     // Iliad fixtures: "unnumber’d", χραισμεῖν).
-    let m = parse(
-        "\\section{S}\nOf χραισμεῖν, Buttmann observes “it helps thee not”.",
-    );
+    let m = parse("\\section{S}\nOf χραισμεῖν, Buttmann observes “it helps thee not”.");
     assert_eq!(
         values(&m, "/section/paragraph::"),
         ["Of χραισμεῖν, Buttmann observes “it helps thee not”."]
@@ -342,8 +346,6 @@ Knuth said so \cite{knuth84}, twice \citep{knuth84,lamport94}.
     assert_eq!(values(&m, "//cit[!::::resolved] @| count"), ["0"]);
     // Citation keys are their own namespace: a \ref to a bib key
     // does not resolve (LaTeX's \newlabel vs \bibcite).
-    let m2 = quarb_text_latex::parse(
-        "\\section{A}\\label{knuth84}\nSee \\cite{knuth84}.\n",
-    );
+    let m2 = quarb_text_latex::parse("\\section{A}\\label{knuth84}\nSee \\cite{knuth84}.\n");
     assert_eq!(values(&m2, "//cit[!::::resolved] @| count"), ["1"]);
 }

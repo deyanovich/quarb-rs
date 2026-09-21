@@ -91,7 +91,10 @@ enum Kind {
     Root,
     /// A log group (full name, short node name), events lazy.
     Group(String),
-    Event { group: usize, idx: usize },
+    Event {
+        group: usize,
+        idx: usize,
+    },
     Field(Field),
 }
 
@@ -267,9 +270,15 @@ fn decode_event(o: &Json) -> Option<Event> {
     Some(Event {
         secs: ms.div_euclid(1000),
         nanos: (ms.rem_euclid(1000) as u32) * 1_000_000,
-        received: o.pointer("/ingestionTime").and_then(|v| v.as_i64()).map(|ms| {
-            (ms.div_euclid(1000), (ms.rem_euclid(1000) as u32) * 1_000_000)
-        }),
+        received: o
+            .pointer("/ingestionTime")
+            .and_then(|v| v.as_i64())
+            .map(|ms| {
+                (
+                    ms.div_euclid(1000),
+                    (ms.rem_euclid(1000) as u32) * 1_000_000,
+                )
+            }),
         stream: o
             .pointer("/logStreamName")
             .and_then(|v| v.as_str())
@@ -302,8 +311,7 @@ impl CwlAdapter {
             )
         })?;
         let region = quarb_aws::region(region.as_deref());
-        let endpoint =
-            endpoint.unwrap_or_else(|| format!("https://logs.{region}.amazonaws.com/"));
+        let endpoint = endpoint.unwrap_or_else(|| format!("https://logs.{region}.amazonaws.com/"));
         let adapter = CwlAdapter {
             t,
             creds,
@@ -660,7 +668,10 @@ impl AstAdapter for CwlAdapter {
             }
             if let Some(Field::Map(fields)) = &e.payload {
                 for k in ["message", "logMessage"] {
-                    if let Some(v) = fields.iter().find(|(key, _)| key == k).and_then(|(_, f)| f.scalar())
+                    if let Some(v) = fields
+                        .iter()
+                        .find(|(key, _)| key == k)
+                        .and_then(|(_, f)| f.scalar())
                     {
                         return Some(v);
                     }
@@ -699,7 +710,10 @@ mod tests {
 
     #[test]
     fn bounded_mount_is_enforced() {
-        assert!(matches!(parse_target("cwl:/aws/lambda/fn"), Err(CwlError::Target(_))));
+        assert!(matches!(
+            parse_target("cwl:/aws/lambda/fn"),
+            Err(CwlError::Target(_))
+        ));
         assert!(parse_target("cwl:/aws/lambda/fn?since=1h").is_ok());
         assert!(parse_target("cwl:?limit=100").is_ok());
         assert!(parse_target("cloudwatch:?since=2026-07-25T00:00:00Z").is_ok());

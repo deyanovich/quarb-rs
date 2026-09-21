@@ -26,7 +26,10 @@ pub fn export(quarb: &str) -> Result<Translation, JqError> {
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| JqError::Syntax(0, format!("parsing Quarb: {e}")))?;
     if has_group(&arbor) {
-        return Err(JqError::Syntax(0, "path patterns (groups and quantifiers) have no jq translation".into()));
+        return Err(JqError::Syntax(
+            0,
+            "path patterns (groups and quantifiers) have no jq translation".into(),
+        ));
     }
     let mut ex = Exporter {
         arbor,

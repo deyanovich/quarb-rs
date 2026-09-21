@@ -98,7 +98,11 @@ fn parse_target(target: &str) -> Result<Target, Neo4jError> {
         q.split('&')
             .find_map(|kv| kv.strip_prefix("key=").map(str::to_string))
     });
-    let pass = pass.or_else(|| std::env::var("QUARB_NEO4J_PASS").ok().filter(|p| !p.is_empty()));
+    let pass = pass.or_else(|| {
+        std::env::var("QUARB_NEO4J_PASS")
+            .ok()
+            .filter(|p| !p.is_empty())
+    });
     Ok(Target {
         host,
         port,
@@ -115,7 +119,11 @@ fn base64(input: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
         for (i, &x) in idx.iter().enumerate() {
@@ -156,7 +164,10 @@ impl Client {
         if let Some(errors) = json.pointer("/errors").and_then(|v| v.as_array())
             && let Some(first) = errors.first()
         {
-            let code = first.pointer("/code").and_then(|v| v.as_str()).unwrap_or("");
+            let code = first
+                .pointer("/code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let msg = first
                 .pointer("/message")
                 .and_then(|v| v.as_str())
@@ -223,7 +234,9 @@ fn short_id(eid: &str) -> String {
 enum Kind {
     Root,
     /// A label, indexed into the catalog.
-    Label { index: usize },
+    Label {
+        index: usize,
+    },
     /// A graph node: its `elementId`, labels in storage order, and
     /// decoded properties.
     Entity {
@@ -368,7 +381,11 @@ impl Neo4jAdapter {
         let mut nodes = self.nodes.borrow_mut();
         let id = NodeId(nodes.len() as u64);
         nodes.push(Node {
-            kind: Kind::Entity { eid: eid.clone(), labels, props },
+            kind: Kind::Entity {
+                eid: eid.clone(),
+                labels,
+                props,
+            },
             name: Some(name),
             parent,
             children: RefCell::new(None),
@@ -399,7 +416,11 @@ impl Neo4jAdapter {
             .filter_map(|row| {
                 let label = row.first()?.as_str()?.to_string();
                 let other = self.intern(&row[2..])?;
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 let props: Vec<(String, Value)> = row
                     .get(1)
                     .and_then(|v| v.as_object())
@@ -509,14 +530,11 @@ impl AstAdapter for Neo4jAdapter {
             (Kind::Entity { labels, .. }, "labels") => Some(Value::List(
                 labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
-            (Kind::Entity { labels, .. }, "label") => {
-                labels.first().map(|l| Value::Str(l.clone()))
-            }
+            (Kind::Entity { labels, .. }, "label") => labels.first().map(|l| Value::Str(l.clone())),
             (Kind::Entity { eid, .. }, "out-degree" | "in-degree") => {
                 let arrow = if key == "out-degree" { "-->" } else { "<--" };
-                let stmt = format!(
-                    "MATCH (n) WHERE elementId(n) = $eid RETURN COUNT {{ (n){arrow}() }}"
-                );
+                let stmt =
+                    format!("MATCH (n) WHERE elementId(n) = $eid RETURN COUNT {{ (n){arrow}() }}");
                 let eid = eid.clone();
                 drop(nodes);
                 let rows = self
@@ -579,7 +597,10 @@ impl AstAdapter for Neo4jAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         let (s_eid, t_eid) = {
             let nodes = self.nodes.borrow();
@@ -605,7 +626,10 @@ impl AstAdapter for Neo4jAdapter {
             .iter()
             .map(|(k, v)| (k.clone(), cell_value(v)))
             .collect();
-        let out = props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        let out = props
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone());
         self.edge_props
             .borrow_mut()
             .insert((source, label.to_string(), target), props);

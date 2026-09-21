@@ -40,7 +40,9 @@ pub enum AthenaError {
     Plan(String),
     #[error("athena target: {0} (expected athena://DATABASE[?region=R&workgroup=W&output=s3://…])")]
     Target(String),
-    #[error("athena: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)")]
+    #[error(
+        "athena: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)"
+    )]
     NoCredentials,
 }
 
@@ -258,8 +260,7 @@ impl Client {
                             .is_some_and(|cells| {
                                 cells.len() == columns.len()
                                     && cells.iter().zip(&columns).all(|(c, (n, _))| {
-                                        c.pointer("/VarCharValue")
-                                            .and_then(|v| v.as_str())
+                                        c.pointer("/VarCharValue").and_then(|v| v.as_str())
                                             == Some(n.as_str())
                                     })
                             });
@@ -280,10 +281,7 @@ impl Client {
                             .enumerate()
                             .map(|(i, c)| {
                                 let text = c.pointer("/VarCharValue").and_then(|v| v.as_str());
-                                typed(
-                                    text,
-                                    columns.get(i).map(|(_, t)| t.as_str()).unwrap_or(""),
-                                )
+                                typed(text, columns.get(i).map(|(_, t)| t.as_str()).unwrap_or(""))
                             })
                             .collect(),
                     );
@@ -347,10 +345,7 @@ impl AthenaAdapter {
         Self::connect_impl(target, Some((table.to_string(), where_sql.to_string())))
     }
 
-    fn connect_impl(
-        target: &str,
-        filter: Option<(String, String)>,
-    ) -> Result<Self, AthenaError> {
+    fn connect_impl(target: &str, filter: Option<(String, String)>) -> Result<Self, AthenaError> {
         let client = client_for(target)?;
         let specs = introspect(&client)?;
         let db = client.t.database.clone();

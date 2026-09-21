@@ -52,8 +52,7 @@ struct ItemRows {
 
 pub fn serve(socket: &str) -> Result<()> {
     let _ = std::fs::remove_file(socket);
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("binding {socket}"))?;
+    let listener = UnixListener::bind(socket).with_context(|| format!("binding {socket}"))?;
     eprintln!("quarb-lsp: kaivrpc on {socket}");
     for conn in listener.incoming() {
         let mut conn = conn?;

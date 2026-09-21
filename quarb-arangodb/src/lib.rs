@@ -46,7 +46,11 @@ fn base64(input: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
         for (i, &x) in idx.iter().enumerate() {
@@ -81,7 +85,9 @@ fn is_system(key: &str) -> bool {
 
 enum Kind {
     Root,
-    Collection { index: usize },
+    Collection {
+        index: usize,
+    },
     /// A document: its `_id`, collection, and body.
     Doc {
         id: String,
@@ -90,7 +96,9 @@ enum Kind {
         body: Json,
     },
     /// A node inside a document's JSON subtree.
-    Field { value: Json },
+    Field {
+        value: Json,
+    },
 }
 
 struct Node {
@@ -372,8 +380,14 @@ impl ArangoAdapter {
                 let Some(t) = row.pointer("/t").filter(|t| !t.is_null()) else {
                     continue;
                 };
-                let Some(other) = self.intern(t) else { continue };
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let Some(other) = self.intern(t) else {
+                    continue;
+                };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 let props: Vec<(String, Value)> = row
                     .pointer("/e")
                     .and_then(|e| e.as_object())
@@ -472,9 +486,9 @@ impl AstAdapter for ArangoAdapter {
                 .pointer(&format!("/{name}"))
                 .filter(|v| !v.is_null() && !is_system(name))
                 .map(cell_value),
-            Kind::Field { value: Json::Object(o) } => {
-                o.get(name).filter(|v| !v.is_null()).map(cell_value)
-            }
+            Kind::Field {
+                value: Json::Object(o),
+            } => o.get(name).filter(|v| !v.is_null()).map(cell_value),
             _ => None,
         }
     }
@@ -508,10 +522,7 @@ impl AstAdapter for ArangoAdapter {
                 let name = self.collections[*index].clone();
                 drop(nodes);
                 let rows = self
-                    .aql(
-                        "RETURN LENGTH(@@c)",
-                        serde_json::json!({ "@c": name }),
-                    )
+                    .aql("RETURN LENGTH(@@c)", serde_json::json!({ "@c": name }))
                     .ok()?;
                 rows.first().map(cell_value)
             }
@@ -563,7 +574,10 @@ impl AstAdapter for ArangoAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props

@@ -55,10 +55,7 @@ fn live_kafka() {
     );
 
     // Record timestamps are typed instants.
-    assert_eq!(
-        values(&a, "/events/*[::::ts > 2020-01-01] @| count"),
-        ["5"]
-    );
+    assert_eq!(values(&a, "/events/*[::::ts > 2020-01-01] @| count"), ["5"]);
 
     // Key-named messages repeat: u1's history, in time order.
     assert_eq!(values(&a, "/users/'u1' @| count"), ["2"]);
@@ -67,10 +64,7 @@ fn live_kafka() {
 
     // The stream-table join: resolve lands on the LATEST message
     // with the key — the compacted topic's current row.
-    assert_eq!(
-        values(&a, "/events/'e3'::user_id-->users::name"),
-        ["Bo"]
-    );
+    assert_eq!(values(&a, "/events/'e3'::user_id-->users::name"), ["Bo"]);
     assert_eq!(values(&a, "/events/'e2'::user_id-->users::tier"), ["gold"]);
     // Hint-less: user_id → the `users` topic by convention.
     assert_eq!(values(&a, "/events/'e2'::user_id-->::name"), ["Ada"]);

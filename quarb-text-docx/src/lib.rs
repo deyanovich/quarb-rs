@@ -131,8 +131,7 @@ fn append_notes(
             .map_err(|e| DocxError::Xml(part, e))?;
         match &ev {
             Event::Start(e) if e.name().as_ref() == tag => {
-                let separator = attr(e, b"w:type")
-                    .is_some_and(|t| t.ends_with("eparator"));
+                let separator = attr(e, b"w:type").is_some_and(|t| t.ends_with("eparator"));
                 let id = attr(e, b"w:id").unwrap_or_default();
                 if separator || id.is_empty() {
                     current = None;
@@ -203,14 +202,26 @@ fn parse_styles(xml: &str) -> Styles {
             Event::Start(e) if e.name().as_ref() == b"w:style" => {
                 let id = attr(e, b"w:styleId").unwrap_or_default();
                 let quote = QUOTE_IDS.contains(&id.as_str());
-                current = Some((id, Style { quote, ..Style::default() }));
+                current = Some((
+                    id,
+                    Style {
+                        quote,
+                        ..Style::default()
+                    },
+                ));
             }
             // A childless style still names itself (Quote often
             // carries nothing but its id).
             Event::Empty(e) if e.name().as_ref() == b"w:style" && current.is_none() => {
                 let id = attr(e, b"w:styleId").unwrap_or_default();
                 let quote = QUOTE_IDS.contains(&id.as_str());
-                out.insert(id, Style { quote, ..Style::default() });
+                out.insert(
+                    id,
+                    Style {
+                        quote,
+                        ..Style::default()
+                    },
+                );
             }
             Event::End(e) if e.name().as_ref() == b"w:style" => {
                 if let Some((id, style)) = current.take() {
@@ -321,9 +332,7 @@ fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
     let mut buf = Vec::new();
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match &ev {
-            Event::Start(e) | Event::Empty(e)
-                if e.name().as_ref() == b"Relationship" =>
-            {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"Relationship" => {
                 if let (Some(id), Some(target)) = (attr(e, b"Id"), attr(e, b"Target")) {
                     out.insert(id, target);
                 }
@@ -354,7 +363,10 @@ fn field_ref(instr: &str) -> Option<(String, bool)> {
                 let bm = rest.trim().split_whitespace().next()?.trim_matches('"');
                 (!bm.is_empty()).then(|| (bm.to_string(), true))
             } else {
-                let url = rest.split('"').nth(1).or_else(|| rest.split_whitespace().next())?;
+                let url = rest
+                    .split('"')
+                    .nth(1)
+                    .or_else(|| rest.split_whitespace().next())?;
                 (!url.is_empty()).then(|| (url.to_string(), false))
             }
         }
@@ -413,14 +425,25 @@ fn lower(
         match &ev {
             Event::Start(e) if e.name().as_ref() == b"w:p" => {
                 let para = read_para(&mut reader, rels)?;
-                emit_para(para, styles, numbering, &mut frames, &mut quote_open, &mut out);
+                emit_para(
+                    para,
+                    styles,
+                    numbering,
+                    &mut frames,
+                    &mut quote_open,
+                    &mut out,
+                );
             }
             Event::Start(e) if e.name().as_ref() == b"w:tbl" => {
                 close_lists(&mut frames, 0, &mut out);
                 close_quote(&mut quote_open, &mut out);
                 let (headers, rows) = read_table(&mut reader)?;
                 if !rows.is_empty() || headers.is_some() {
-                    out.push(Block::Table { lemma: None, headers, rows });
+                    out.push(Block::Table {
+                        lemma: None,
+                        headers,
+                        rows,
+                    });
                 }
             }
             Event::Eof => break,
@@ -453,7 +476,10 @@ fn emit_para(
         close_lists(frames, 0, out);
         close_quote(quote_open, out);
         if !text.is_empty() {
-            out.push(Block::Heading { level: level + 1, lemma: text });
+            out.push(Block::Heading {
+                level: level + 1,
+                lemma: text,
+            });
         }
         emit_callouts(&para, out);
         return;
@@ -464,9 +490,7 @@ fn emit_para(
         close_lists(frames, depth.min(frames.len()), out);
         // A different declared list at this level closes the open
         // one: numId is the list's identity.
-        if frames.len() == depth
-            && frames.last().is_some_and(|f| &f.num_id != num_id)
-        {
+        if frames.len() == depth && frames.last().is_some_and(|f| &f.num_id != num_id) {
             close_lists(frames, depth - 1, out);
         }
         while frames.len() < depth {
@@ -476,13 +500,19 @@ fn emit_para(
                 Container::UnorderedList
             };
             out.push(Block::Open { kind, lemma: None });
-            frames.push(Frame { num_id: num_id.clone(), item_open: false });
+            frames.push(Frame {
+                num_id: num_id.clone(),
+                item_open: false,
+            });
         }
         if let Some(frame) = frames.last_mut() {
             if frame.item_open {
                 out.push(Block::Close { hypograph: None });
             }
-            out.push(Block::Open { kind: Container::Item, lemma: None });
+            out.push(Block::Open {
+                kind: Container::Item,
+                lemma: None,
+            });
             frame.item_open = true;
         }
         if !text.is_empty() {
@@ -499,7 +529,10 @@ fn emit_para(
     if quote {
         close_lists(frames, 0, out);
         if !*quote_open {
-            out.push(Block::Open { kind: Container::Blockquote, lemma: None });
+            out.push(Block::Open {
+                kind: Container::Blockquote,
+                lemma: None,
+            });
             *quote_open = true;
         }
         if !text.is_empty() {
@@ -661,12 +694,14 @@ fn read_para(
                     b"w:tab" | b"w:br" | b"w:cr" => para.text.push(' '),
                     b"w:footnoteReference" => {
                         if let Some(id) = attr(e, b"w:id") {
-                            para.apparatus.push(Apparatus::Note(id, NoteFamily::Footnote));
+                            para.apparatus
+                                .push(Apparatus::Note(id, NoteFamily::Footnote));
                         }
                     }
                     b"w:endnoteReference" => {
                         if let Some(id) = attr(e, b"w:id") {
-                            para.apparatus.push(Apparatus::Note(id, NoteFamily::Endnote));
+                            para.apparatus
+                                .push(Apparatus::Note(id, NoteFamily::Endnote));
                         }
                     }
                     b"w:bookmarkStart" => {
@@ -686,7 +721,8 @@ fn read_para(
                         if let Some((t, internal)) = field_ref(&si) {
                             // No result runs: a mention without
                             // visible text.
-                            para.apparatus.push(Apparatus::Ref(t, String::new(), internal));
+                            para.apparatus
+                                .push(Apparatus::Ref(t, String::new(), internal));
                         }
                     }
                     b"w:fldChar" => {
@@ -702,7 +738,8 @@ fn read_para(
                                     // The visible result follows.
                                     pending_field = Some((t, internal, para.text.len()));
                                 } else {
-                                    para.apparatus.push(Apparatus::Ref(t, String::new(), internal));
+                                    para.apparatus
+                                        .push(Apparatus::Ref(t, String::new(), internal));
                                 }
                             }
                             instr.clear();
@@ -722,9 +759,7 @@ fn read_para(
                     if let Ok(s) = t.decode() {
                         instr.push_str(&s);
                     }
-                } else if in_text
-                    && let Ok(s) = t.decode()
-                {
+                } else if in_text && let Ok(s) = t.decode() {
                     para.text.push_str(&s);
                 }
             }

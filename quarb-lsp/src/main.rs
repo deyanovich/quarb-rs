@@ -59,7 +59,10 @@ method=quarb-lsp/complete
         let out = answer(req.as_bytes());
         assert!(out.contains("::status=ok"), "{out}");
         assert!(out.contains("count"), "{out}");
-        assert!(out.ends_with("!int'::n=2\n") || out.contains("::n="), "{out}");
+        assert!(
+            out.ends_with("!int'::n=2\n") || out.contains("::n="),
+            "{out}"
+        );
     }
 
     #[test]

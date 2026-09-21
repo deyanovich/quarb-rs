@@ -863,7 +863,9 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     // GROUP BY: the aggregate rides the plain pipe.
     if let Some(k) = &group_by {
         if distinct {
-            return Err(SqlError::Unsupported("SELECT DISTINCT with GROUP BY".into()));
+            return Err(SqlError::Unsupported(
+                "SELECT DISTINCT with GROUP BY".into(),
+            ));
         }
         let aggs: Vec<&SelectItem> = items
             .iter()
@@ -915,9 +917,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             }
         }
         match &key_alias {
-            Some(ka) => {
-                write!(q, " @| group({}, {})", quarb_str(ka), scope.operand(k)?).unwrap()
-            }
+            Some(ka) => write!(q, " @| group({}, {})", quarb_str(ka), scope.operand(k)?).unwrap(),
             None => write!(q, " @| group({})", scope.operand(k)?).unwrap(),
         }
         let name = alias.clone().unwrap_or_else(|| agg_fn(a).to_string());
@@ -1010,7 +1010,9 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                             // The witness side names its field with
                             // the SQL qualifier, so two-sided select
                             // lists keep distinct keys.
-                            None if op.starts_with("$$") && op[2..].starts_with(|c: char| c.is_ascii_digit()) => {
+                            None if op.starts_with("$$")
+                                && op[2..].starts_with(|c: char| c.is_ascii_digit()) =>
+                            {
                                 let name = match &c.table {
                                     Some(t) => format!("{t}.{}", c.column),
                                     None => c.column.clone(),

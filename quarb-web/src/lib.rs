@@ -19,16 +19,16 @@
 //! resolves (`-->`) to the page it names when the store holds
 //! one.
 
+#[cfg(feature = "archive")]
+pub mod archive;
 pub mod contract;
 pub mod db;
+#[cfg(feature = "fs")]
+pub mod fs;
 #[cfg(feature = "ingest")]
 pub mod ingest;
 pub mod memory;
 pub mod plan;
-#[cfg(feature = "archive")]
-pub mod archive;
-#[cfg(feature = "fs")]
-pub mod fs;
 
 pub use contract::*;
 pub use memory::{MemoryStore, PageFile, SiteInput};
@@ -141,12 +141,18 @@ impl<S: WebStore> WebAdapter<S> {
                     {
                         next.push(p);
                     }
-                    self.rows.borrow_mut().entry(r.key).or_insert_with(|| Rc::new(r));
+                    self.rows
+                        .borrow_mut()
+                        .entry(r.key)
+                        .or_insert_with(|| Rc::new(r));
                 }
             }
             frontier = next;
         }
-        self.scope = Some(Scope { pages: keys.into_iter().collect(), ancestors });
+        self.scope = Some(Scope {
+            pages: keys.into_iter().collect(),
+            ancestors,
+        });
         self
     }
 
@@ -257,7 +263,10 @@ impl<S: WebStore> WebAdapter<S> {
     fn hydrate(&self, keys: &[PageKey]) {
         let missing: Vec<PageKey> = {
             let cache = self.rows.borrow();
-            keys.iter().copied().filter(|k| !cache.contains_key(k)).collect()
+            keys.iter()
+                .copied()
+                .filter(|k| !cache.contains_key(k))
+                .collect()
         };
         if missing.len() < 2 {
             return;
@@ -319,8 +328,15 @@ impl<S: WebStore> WebAdapter<S> {
             Node::Site(s) => format!("/sites/{}", self.host(s)),
             Node::Container(s, c) => format!("/sites/{}/{}", self.host(s), c.name()),
             Node::Row(k, inner) => {
-                let Some(r) = self.row(k) else { return format!("/?{}", k.0) };
-                let base = format!("/sites/{}/{}/{}", self.host(r.site), r.container.name(), r.path);
+                let Some(r) = self.row(k) else {
+                    return format!("/?{}", k.0);
+                };
+                let base = format!(
+                    "/sites/{}/{}/{}",
+                    self.host(r.site),
+                    r.container.name(),
+                    r.path
+                );
                 if inner == 0 {
                     return base;
                 }
@@ -352,15 +368,29 @@ impl<S: WebStore> WebAdapter<S> {
     /// document of its own (a category page), that document after.
     fn row_children(&self, r: &LightRow) -> Vec<NodeId> {
         if r.kind == PageKind::Page {
-            let Some(g) = self.graft(r.key) else { return Vec::new() };
-            return g.children(g.root()).into_iter().map(|n| self.inner_id(r.key, n)).collect();
+            let Some(g) = self.graft(r.key) else {
+                return Vec::new();
+            };
+            return g
+                .children(g.root())
+                .into_iter()
+                .map(|n| self.inner_id(r.key, n))
+                .collect();
         }
         let kids = self.store.children(r.site, r.container, Some(r.key));
-        let mut out: Vec<NodeId> = self.scoped_keys(kids).into_iter().map(|k| self.page_node(k)).collect();
+        let mut out: Vec<NodeId> = self
+            .scoped_keys(kids)
+            .into_iter()
+            .map(|k| self.page_node(k))
+            .collect();
         if r.kind == PageKind::Category
             && let Some(g) = self.graft(r.key)
         {
-            out.extend(g.children(g.root()).into_iter().map(|n| self.inner_id(r.key, n)));
+            out.extend(
+                g.children(g.root())
+                    .into_iter()
+                    .map(|n| self.inner_id(r.key, n)),
+            );
         }
         out
     }
@@ -381,7 +411,11 @@ impl<S: WebStore> WebAdapter<S> {
 
     fn instant_of(v: &Option<Value>) -> Option<(i64, u32, Option<i16>)> {
         match v {
-            Some(Value::Instant { secs, nanos, offset_min }) => Some((*secs, *nanos, *offset_min)),
+            Some(Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+            }) => Some((*secs, *nanos, *offset_min)),
             _ => None,
         }
     }
@@ -430,18 +464,29 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 .iter()
                 .map(|s| self.encode(Node::Site(s.id)))
                 .collect(),
-            Node::Site(s) => Container::ALL.iter().map(|&c| self.encode(Node::Container(s, c))).collect(),
+            Node::Site(s) => Container::ALL
+                .iter()
+                .map(|&c| self.encode(Node::Container(s, c)))
+                .collect(),
             Node::Container(s, c) => {
                 let kids = self.store.children(s, c, None);
-                self.scoped_keys(kids).into_iter().map(|k| self.page_node(k)).collect()
+                self.scoped_keys(kids)
+                    .into_iter()
+                    .map(|k| self.page_node(k))
+                    .collect()
             }
             Node::Row(k, 0) => match self.row(k) {
                 Some(r) => self.row_children(&r),
                 None => Vec::new(),
             },
             Node::Row(k, _) => {
-                let Some((_, g, n)) = self.graft_node(id) else { return Vec::new() };
-                g.children(n).into_iter().map(|c| self.inner_id(k, c)).collect()
+                let Some((_, g, n)) = self.graft_node(id) else {
+                    return Vec::new();
+                };
+                g.children(n)
+                    .into_iter()
+                    .map(|c| self.inner_id(k, c))
+                    .collect()
             }
         }
     }
@@ -486,40 +531,85 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         match self.decode(id) {
             Node::Container(s, c) => {
                 if kind_named(name).is_some() {
-                    return self.children(id).into_iter().filter(|c| self.answers_to(*c, name)).collect();
+                    return self
+                        .children(id)
+                        .into_iter()
+                        .filter(|c| self.answers_to(*c, name))
+                        .collect();
                 }
                 let mut ks = self.store.children_named(s, c, None, name);
                 if ks.is_empty() && c == Container::Pages {
-                    ks = self.store.children_named(s, c, None, &format!("{name}.html"));
+                    ks = self
+                        .store
+                        .children_named(s, c, None, &format!("{name}.html"));
                 }
-                self.scoped_keys(ks).into_iter().map(|k| self.page_node(k)).collect()
+                self.scoped_keys(ks)
+                    .into_iter()
+                    .map(|k| self.page_node(k))
+                    .collect()
             }
             Node::Row(k, 0) => {
-                let Some(r) = self.row(k) else { return Vec::new() };
+                let Some(r) = self.row(k) else {
+                    return Vec::new();
+                };
                 if r.kind == PageKind::Page {
-                    let Some(g) = self.graft(k) else { return Vec::new() };
-                    return g.children_named(g.root(), name).into_iter().map(|n| self.inner_id(k, n)).collect();
+                    let Some(g) = self.graft(k) else {
+                        return Vec::new();
+                    };
+                    return g
+                        .children_named(g.root(), name)
+                        .into_iter()
+                        .map(|n| self.inner_id(k, n))
+                        .collect();
                 }
                 if kind_named(name).is_some() {
-                    return self.row_children(&r).into_iter().filter(|c| self.answers_to(*c, name)).collect();
+                    return self
+                        .row_children(&r)
+                        .into_iter()
+                        .filter(|c| self.answers_to(*c, name))
+                        .collect();
                 }
-                let mut ks = self.store.children_named(r.site, r.container, Some(k), name);
+                let mut ks = self
+                    .store
+                    .children_named(r.site, r.container, Some(k), name);
                 if ks.is_empty() && r.container == Container::Pages {
-                    ks = self.store.children_named(r.site, r.container, Some(k), &format!("{name}.html"));
+                    ks = self.store.children_named(
+                        r.site,
+                        r.container,
+                        Some(k),
+                        &format!("{name}.html"),
+                    );
                 }
-                let mut out: Vec<NodeId> = self.scoped_keys(ks).into_iter().map(|c| self.page_node(c)).collect();
+                let mut out: Vec<NodeId> = self
+                    .scoped_keys(ks)
+                    .into_iter()
+                    .map(|c| self.page_node(c))
+                    .collect();
                 if r.kind == PageKind::Category
                     && let Some(g) = self.graft(k)
                 {
-                    out.extend(g.children_named(g.root(), name).into_iter().map(|n| self.inner_id(k, n)));
+                    out.extend(
+                        g.children_named(g.root(), name)
+                            .into_iter()
+                            .map(|n| self.inner_id(k, n)),
+                    );
                 }
                 out
             }
             Node::Row(k, _) => {
-                let Some((_, g, n)) = self.graft_node(id) else { return Vec::new() };
-                g.children_named(n, name).into_iter().map(|c| self.inner_id(k, c)).collect()
+                let Some((_, g, n)) = self.graft_node(id) else {
+                    return Vec::new();
+                };
+                g.children_named(n, name)
+                    .into_iter()
+                    .map(|c| self.inner_id(k, c))
+                    .collect()
             }
-            _ => self.children(id).into_iter().filter(|c| self.answers_to(*c, name)).collect(),
+            _ => self
+                .children(id)
+                .into_iter()
+                .filter(|c| self.answers_to(*c, name))
+                .collect(),
         }
     }
 
@@ -548,7 +638,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         match self.decode(id) {
             Node::Site(_) => vec!["site".to_string()],
             Node::Row(k, 0) => {
-                let Some(r) = self.row(k) else { return Vec::new() };
+                let Some(r) = self.row(k) else {
+                    return Vec::new();
+                };
                 let mut out = vec![r.kind.name().to_string()];
                 if r.kind == PageKind::Category {
                     for t in &r.tags {
@@ -608,10 +700,16 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     return false;
                 }
                 if let Some(t) = name.strip_prefix("tag:") {
-                    return r.tags.iter().any(|x| quarb_text::HeadMeta::trait_name(x) == t);
+                    return r
+                        .tags
+                        .iter()
+                        .any(|x| quarb_text::HeadMeta::trait_name(x) == t);
                 }
                 if let Some(c) = name.strip_prefix("category:") {
-                    return r.category.as_deref().is_some_and(|x| quarb_text::HeadMeta::trait_name(x) == c);
+                    return r
+                        .category
+                        .as_deref()
+                        .is_some_and(|x| quarb_text::HeadMeta::trait_name(x) == c);
                 }
                 if name == "orphan" {
                     return r.analytics.in_degree == 0;
@@ -663,9 +761,18 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     "pagerank" => Some(Value::Float(a.pagerank)),
                     "redlinks" => Some(Value::Int(a.redlinks as i64)),
                     "link" if r.kind == PageKind::Page => Some(Value::Record(vec![
-                        ("title".to_string(), r.title.clone().map(Value::Str).unwrap_or(Value::Null)),
-                        ("href".to_string(), r.url.clone().map(Value::Str).unwrap_or(Value::Null)),
-                        ("text".to_string(), r.description.clone().map(Value::Str).unwrap_or(Value::Null)),
+                        (
+                            "title".to_string(),
+                            r.title.clone().map(Value::Str).unwrap_or(Value::Null),
+                        ),
+                        (
+                            "href".to_string(),
+                            r.url.clone().map(Value::Str).unwrap_or(Value::Null),
+                        ),
+                        (
+                            "text".to_string(),
+                            r.description.clone().map(Value::Str).unwrap_or(Value::Null),
+                        ),
                     ])),
                     _ => None,
                 };
@@ -694,7 +801,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     // A category page: its document's text when it
                     // has one, else its name.
                     PageKind::Category => match self.graft(k) {
-                        Some(g) => g.default_value(g.root()).or_else(|| r.title.clone().map(Value::Str)),
+                        Some(g) => g
+                            .default_value(g.root())
+                            .or_else(|| r.title.clone().map(Value::Str)),
                         None => r.title.clone().map(Value::Str),
                     },
                     _ => r.title.clone().map(Value::Str),
@@ -767,7 +876,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 if let Some(v) = self.links_out.borrow().get(&k) {
                     return v.as_ref().clone();
                 }
-                let Some(r) = self.row(k) else { return Vec::new() };
+                let Some(r) = self.row(k) else {
+                    return Vec::new();
+                };
                 let mut out = Vec::new();
                 match r.kind {
                     PageKind::Page | PageKind::Redirect => {
@@ -808,8 +919,13 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 out
             }
             Node::Row(k, _) => {
-                let Some((_, g, n)) = self.graft_node(id) else { return Vec::new() };
-                g.links(n).into_iter().map(|(l, t)| (l, self.map_back(k, &g, t))).collect()
+                let Some((_, g, n)) = self.graft_node(id) else {
+                    return Vec::new();
+                };
+                g.links(n)
+                    .into_iter()
+                    .map(|(l, t)| (l, self.map_back(k, &g, t)))
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -821,7 +937,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 if let Some(v) = self.links_in.borrow().get(&k) {
                     return v.as_ref().clone();
                 }
-                let Some(r) = self.row(k) else { return Vec::new() };
+                let Some(r) = self.row(k) else {
+                    return Vec::new();
+                };
                 let mut out = Vec::new();
                 match r.kind {
                     PageKind::Page | PageKind::Redirect => {
@@ -845,7 +963,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                                 out.push(("link".to_string(), self.page_node(s)));
                             }
                         }
-                        let kind = if r.kind == PageKind::Category { LinkKind::Category } else { LinkKind::Tag };
+                        let kind = if r.kind == PageKind::Category {
+                            LinkKind::Category
+                        } else {
+                            LinkKind::Tag
+                        };
                         for s in self.store.related(k, kind, LinkDir::In) {
                             let label = self.row(s).map(|m| m.kind.name()).unwrap_or("page");
                             out.push((label.to_string(), self.page_node(s)));
@@ -861,8 +983,13 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 out
             }
             Node::Row(k, _) => {
-                let Some((_, g, n)) = self.graft_node(id) else { return Vec::new() };
-                g.backlinks(n).into_iter().map(|(l, t)| (l, self.map_back(k, &g, t))).collect()
+                let Some((_, g, n)) = self.graft_node(id) else {
+                    return Vec::new();
+                };
+                g.backlinks(n)
+                    .into_iter()
+                    .map(|(l, t)| (l, self.map_back(k, &g, t)))
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -943,8 +1070,14 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         let sites: Vec<SiteId> = self.store.catalog().sites.iter().map(|s| s.id).collect();
         // (site, container, parent, depth offset from `id`)
         let scopes: Vec<(SiteId, Container, Option<PageKey>, usize)> = match self.decode(id) {
-            Node::Root => sites.iter().flat_map(|&s| Container::ALL.iter().map(move |&c| (s, c, None, 3))).collect(),
-            Node::Sites => sites.iter().flat_map(|&s| Container::ALL.iter().map(move |&c| (s, c, None, 2))).collect(),
+            Node::Root => sites
+                .iter()
+                .flat_map(|&s| Container::ALL.iter().map(move |&c| (s, c, None, 3)))
+                .collect(),
+            Node::Sites => sites
+                .iter()
+                .flat_map(|&s| Container::ALL.iter().map(move |&c| (s, c, None, 2)))
+                .collect(),
             Node::Site(s) => Container::ALL.iter().map(|&c| (s, c, None, 1)).collect(),
             Node::Container(s, c) => vec![(s, c, None, 0)],
             // A directory, or a category holding rows beneath it (the
@@ -991,7 +1124,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
             // Hydrate the rows the sweep is about to read, in chunks.
             let missing: Vec<PageKey> = {
                 let cache = self.rows.borrow();
-                found.iter().map(|(k, _)| *k).filter(|k| !cache.contains_key(k)).collect()
+                found
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .filter(|k| !cache.contains_key(k))
+                    .collect()
             };
             for chunk in missing.chunks(2000) {
                 let rows = self.store.rows(chunk);

@@ -113,9 +113,10 @@ fn bottled_cosmos() {
             "Ym90dGxlZC1jb3Ntb3Mta2V5LWZvci10ZXN0aW5n",
         );
     }
-    let a =
-        CosmosAdapter::connect(&format!("cosmos://shop/shop?endpoint=http://127.0.0.1:{port}"))
-            .unwrap();
+    let a = CosmosAdapter::connect(&format!(
+        "cosmos://shop/shop?endpoint=http://127.0.0.1:{port}"
+    ))
+    .unwrap();
     assert_eq!(values(&a, "/*:::name"), ["customers", "orders"]);
     // both feed pages arrive; docs are id-named and id-sorted
     assert_eq!(values(&a, "/orders/*:::name"), ["o-1", "o-2"]);

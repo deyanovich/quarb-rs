@@ -56,7 +56,14 @@ pub struct Limit {
 
 impl Plan {
     fn scan(reason: impl Into<String>) -> Plan {
-        Plan { rung: Rung::Scan, where_sql: String::new(), params: Vec::new(), reason: reason.into(), unverified: Vec::new(), limit: None }
+        Plan {
+            rung: Rung::Scan,
+            where_sql: String::new(),
+            params: Vec::new(),
+            reason: reason.into(),
+            unverified: Vec::new(),
+            limit: None,
+        }
     }
 }
 
@@ -78,22 +85,34 @@ impl Sql {
     /// `col` contains `lit` (case-sensitive, exact).
     fn contains(&mut self, col: &str, lit: &str) -> String {
         match self.dialect {
-            Dialect::Sqlite => format!("instr({col}, {}) > 0", self.param(Param::Str(lit.to_string()))),
-            Dialect::Postgres => format!("{col} LIKE {} ESCAPE '\\'", self.param(Param::Str(format!("%{}%", like_escape(lit))))),
+            Dialect::Sqlite => format!(
+                "instr({col}, {}) > 0",
+                self.param(Param::Str(lit.to_string()))
+            ),
+            Dialect::Postgres => format!(
+                "{col} LIKE {} ESCAPE '\\'",
+                self.param(Param::Str(format!("%{}%", like_escape(lit))))
+            ),
         }
     }
 
     /// `col` matches the LIKE pattern (already escaped).
     fn like(&mut self, col: &str, pattern: String) -> String {
         match self.dialect {
-            Dialect::Sqlite => format!("{col} LIKE {} ESCAPE '\\'", self.param(Param::Str(pattern))),
-            Dialect::Postgres => format!("{col} LIKE {} ESCAPE '\\'", self.param(Param::Str(pattern))),
+            Dialect::Sqlite => {
+                format!("{col} LIKE {} ESCAPE '\\'", self.param(Param::Str(pattern)))
+            }
+            Dialect::Postgres => {
+                format!("{col} LIKE {} ESCAPE '\\'", self.param(Param::Str(pattern)))
+            }
         }
     }
 }
 
 fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// One translated conjunct.
@@ -126,7 +145,10 @@ impl Q<'_> {
         }
     }
     fn kids_named(&self, n: NodeId, name: &str) -> Vec<NodeId> {
-        self.kids(n).into_iter().filter(|c| self.name(*c) == name).collect()
+        self.kids(n)
+            .into_iter()
+            .filter(|c| self.name(*c) == name)
+            .collect()
     }
     /// Every node below `n` (depth-first).
     fn all_below(&self, n: NodeId) -> Vec<NodeId> {
@@ -150,12 +172,29 @@ const SAFE_AXES: &[&str] = &["/", "//", "//?", "//!", "->", "<-", "--", "-->"];
 /// keyed rows, never an enumeration).
 const ASCENT_AXES: &[&str] = &["\\", "\\\\", "\\\\?", "\\\\!"];
 /// Node kinds that carry navigation the planner does not follow.
-const UNSAFE_KINDS: &[&str] = &["mark", "subcontext", "push", "expr-push", "context", "ordinal", "topic", "recall", "match"];
+const UNSAFE_KINDS: &[&str] = &[
+    "mark",
+    "subcontext",
+    "push",
+    "expr-push",
+    "context",
+    "ordinal",
+    "topic",
+    "recall",
+    "match",
+];
 
 fn anchored(q: &Q, path: NodeId) -> bool {
-    ["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name"]
-        .iter()
-        .any(|k| q.prop(path, k).is_some())
+    [
+        "anchored",
+        "mark",
+        "mark-index",
+        "mark-top",
+        "marks-all",
+        "marks-name",
+    ]
+    .iter()
+    .any(|k| q.prop(path, k).is_some())
 }
 
 /// Whether a path (a `path` operand or a branch tail) stays off
@@ -192,7 +231,11 @@ fn pred_is_safe(q: &Q, pred: NodeId) -> bool {
             return false;
         }
         if name == "path" {
-            let steps: Vec<NodeId> = q.kids(n).into_iter().filter(|c| q.name(*c) == "step" || q.name(*c) == "group").collect();
+            let steps: Vec<NodeId> = q
+                .kids(n)
+                .into_iter()
+                .filter(|c| q.name(*c) == "step" || q.name(*c) == "group")
+                .collect();
             for &s in &steps {
                 if q.name(s) == "group" {
                     // A group's alternatives are steps of their own.
@@ -204,7 +247,11 @@ fn pred_is_safe(q: &Q, pred: NodeId) -> bool {
                     }
                 }
             }
-            let plain: Vec<NodeId> = steps.iter().copied().filter(|s| q.name(*s) == "step").collect();
+            let plain: Vec<NodeId> = steps
+                .iter()
+                .copied()
+                .filter(|s| q.name(*s) == "step")
+                .collect();
             if !path_is_safe(q, n, &plain) {
                 return false;
             }
@@ -269,7 +316,9 @@ pub fn regex_factors(re: &str) -> Vec<String> {
             _ => {}
         }
     }
-    let Ok(hir) = regex_syntax::parse(re) else { return Vec::new() };
+    let Ok(hir) = regex_syntax::parse(re) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     walk(&hir, &mut out);
     // A one-character factor is sound but names nearly everything;
@@ -283,29 +332,66 @@ pub fn regex_factors(re: &str) -> Vec<String> {
 fn translate(q: &Q, n: NodeId, sql: &mut Sql) -> Option<Conj> {
     match q.name(n).as_str() {
         "and" => {
-            let parts: Vec<Option<Conj>> = q.kids(n).into_iter().map(|c| translate(q, c, sql)).collect();
+            let parts: Vec<Option<Conj>> = q
+                .kids(n)
+                .into_iter()
+                .map(|c| translate(q, c, sql))
+                .collect();
             let some: Vec<Conj> = parts.into_iter().flatten().collect();
             if some.is_empty() {
                 return None;
             }
             let exact = some.len() == 2 && some.iter().all(|c| c.exact);
-            let note = some.iter().filter(|c| !c.exact).map(|c| c.note.clone()).collect::<Vec<_>>().join(" and ");
+            let note = some
+                .iter()
+                .filter(|c| !c.exact)
+                .map(|c| c.note.clone())
+                .collect::<Vec<_>>()
+                .join(" and ");
             Some(Conj {
-                sql: format!("({})", some.iter().map(|c| c.sql.clone()).collect::<Vec<_>>().join(" AND ")),
+                sql: format!(
+                    "({})",
+                    some.iter()
+                        .map(|c| c.sql.clone())
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ),
                 exact,
-                note: if exact { String::new() } else if some.len() == 2 { note } else { "one side of an and".to_string() },
+                note: if exact {
+                    String::new()
+                } else if some.len() == 2 {
+                    note
+                } else {
+                    "one side of an and".to_string()
+                },
             })
         }
         "or" => {
-            let parts: Vec<Conj> = q.kids(n).into_iter().map(|c| translate(q, c, sql)).collect::<Option<Vec<_>>>()?;
+            let parts: Vec<Conj> = q
+                .kids(n)
+                .into_iter()
+                .map(|c| translate(q, c, sql))
+                .collect::<Option<Vec<_>>>()?;
             if parts.len() != 2 {
                 return None;
             }
             let exact = parts.iter().all(|c| c.exact);
             Some(Conj {
-                sql: format!("({})", parts.iter().map(|c| c.sql.clone()).collect::<Vec<_>>().join(" OR ")),
+                sql: format!(
+                    "({})",
+                    parts
+                        .iter()
+                        .map(|c| c.sql.clone())
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                ),
                 exact,
-                note: parts.iter().filter(|c| !c.exact).map(|c| c.note.clone()).collect::<Vec<_>>().join(" or "),
+                note: parts
+                    .iter()
+                    .filter(|c| !c.exact)
+                    .map(|c| c.note.clone())
+                    .collect::<Vec<_>>()
+                    .join(" or "),
             })
         }
         "not" => {
@@ -315,7 +401,11 @@ fn translate(q: &Q, n: NodeId, sql: &mut Sql) -> Option<Conj> {
             if !c.exact {
                 return None;
             }
-            Some(Conj { sql: format!("NOT {}", c.sql), exact: true, note: String::new() })
+            Some(Conj {
+                sql: format!("NOT {}", c.sql),
+                exact: true,
+                note: String::new(),
+            })
         }
         "compare" => translate_compare(q, n, sql),
         "path" => translate_truthy_path(q, n, sql),
@@ -337,7 +427,11 @@ fn translate_truthy_path(q: &Q, path: NodeId, _sql: &mut Sql) -> Option<Conj> {
         return None;
     }
     let col = degree_of(q, s)?;
-    Some(Conj { sql: format!("{col} > 0"), exact: true, note: String::new() })
+    Some(Conj {
+        sql: format!("{col} > 0"),
+        exact: true,
+        note: String::new(),
+    })
 }
 
 /// `->link` / `<-link` as a degree column.
@@ -370,7 +464,10 @@ fn lhs_of(q: &Q, path: NodeId) -> Option<Lhs> {
         if steps.len() != 1 || !q.kids_named(kids[0], "projection").is_empty() {
             return None;
         }
-        if q.name(kids[1]) != "agg" || q.text(kids[1], "name").as_deref() != Some("count") || !q.kids(kids[1]).is_empty() {
+        if q.name(kids[1]) != "agg"
+            || q.text(kids[1], "name").as_deref() != Some("count")
+            || !q.kids(kids[1]).is_empty()
+        {
             return None;
         }
         let col = degree_of(q, steps[0])?;
@@ -416,31 +513,56 @@ fn translate_compare(q: &Q, n: NodeId, sql: &mut Sql) -> Option<Conj> {
                 (Value::Int(i), true) => {
                     let p = sql.param(Param::Int(*i));
                     let sop = sql_op(&op)?;
-                    Some(Conj { sql: format!("{col} {sop} {p}"), exact: true, note: String::new() })
+                    Some(Conj {
+                        sql: format!("{col} {sop} {p}"),
+                        exact: true,
+                        note: String::new(),
+                    })
                 }
                 (Value::Float(f), true) => {
                     let p = sql.param(Param::Float(*f));
                     let sop = sql_op(&op)?;
-                    Some(Conj { sql: format!("{col} {sop} {p}"), exact: true, note: String::new() })
+                    Some(Conj {
+                        sql: format!("{col} {sop} {p}"),
+                        exact: true,
+                        note: String::new(),
+                    })
                 }
                 (Value::Str(s), false) => match op.as_str() {
                     "=" => {
                         let p = sql.param(Param::Str(s.clone()));
-                        Some(Conj { sql: format!("{col} = {p}"), exact: true, note: String::new() })
+                        Some(Conj {
+                            sql: format!("{col} = {p}"),
+                            exact: true,
+                            note: String::new(),
+                        })
                     }
                     "!=" => {
                         let p = sql.param(Param::Str(s.clone()));
-                        Some(Conj { sql: format!("({col} IS NULL OR {col} != {p})"), exact: false, note: format!("{col} != …") })
+                        Some(Conj {
+                            sql: format!("({col} IS NULL OR {col} != {p})"),
+                            exact: false,
+                            note: format!("{col} != …"),
+                        })
                     }
-                    "*=" => Some(Conj { sql: sql.contains(col, s), exact: true, note: String::new() }),
+                    "*=" => Some(Conj {
+                        sql: sql.contains(col, s),
+                        exact: true,
+                        note: String::new(),
+                    }),
                     "==" => {
                         // A regex: its required literal factors.
                         let factors = regex_factors(s);
                         if factors.is_empty() {
                             return None;
                         }
-                        let parts: Vec<String> = factors.iter().map(|f| sql.contains(col, f)).collect();
-                        Some(Conj { sql: format!("({})", parts.join(" AND ")), exact: false, note: format!("{col} == regex") })
+                        let parts: Vec<String> =
+                            factors.iter().map(|f| sql.contains(col, f)).collect();
+                        Some(Conj {
+                            sql: format!("({})", parts.join(" AND ")),
+                            exact: false,
+                            note: format!("{col} == regex"),
+                        })
                     }
                     _ => None,
                 },
@@ -458,7 +580,11 @@ fn translate_compare(q: &Q, n: NodeId, sql: &mut Sql) -> Option<Conj> {
                     _ => return None,
                 }
             }
-            Some(Conj { sql: sql.like(col, pat), exact: false, note: format!("{col} pattern") })
+            Some(Conj {
+                sql: sql.like(col, pat),
+                exact: false,
+                note: format!("{col} pattern"),
+            })
         }
         _ => None,
     }
@@ -515,7 +641,9 @@ fn translate_text_reach(q: &Q, path: NodeId, sql: &mut Sql) -> Option<Conj> {
                 if !matches!(key.as_deref(), None | Some("lemma")) {
                     continue;
                 }
-                let Some(Value::Str(lit)) = q.prop(kids[1], "value") else { continue };
+                let Some(Value::Str(lit)) = q.prop(kids[1], "value") else {
+                    continue;
+                };
                 match op.as_str() {
                     "*=" => lits.push(lit),
                     "=" if key.is_some() => lits.push(lit),
@@ -530,7 +658,10 @@ fn translate_text_reach(q: &Q, path: NodeId, sql: &mut Sql) -> Option<Conj> {
     }
     let tests: Vec<String> = lits.iter().map(|l| sql.contains("t.plain", l)).collect();
     Some(Conj {
-        sql: format!("EXISTS (SELECT 1 FROM page_text t WHERE t.page_id = p.id AND {})", tests.join(" AND ")),
+        sql: format!(
+            "EXISTS (SELECT 1 FROM page_text t WHERE t.page_id = p.id AND {})",
+            tests.join(" AND ")
+        ),
         exact: false,
         note: "the text-level reach".to_string(),
     })
@@ -538,7 +669,9 @@ fn translate_text_reach(q: &Q, path: NodeId, sql: &mut Sql) -> Option<Conj> {
 
 /// A trait clause on the enumerating step.
 fn translate_trait(q: &Q, t: NodeId, sql: &mut Sql) -> Option<Conj> {
-    let Some(Value::List(alts)) = q.prop(t, "alts") else { return None };
+    let Some(Value::List(alts)) = q.prop(t, "alts") else {
+        return None;
+    };
     let mut parts = Vec::new();
     for a in alts {
         let Value::Str(a) = a else { return None };
@@ -551,10 +684,14 @@ fn translate_trait(q: &Q, t: NodeId, sql: &mut Sql) -> Option<Conj> {
             "p.in_degree = 0".to_string()
         } else if let Some(x) = a.strip_prefix("tag:") {
             let p = sql.param(Param::Str(x.to_string()));
-            format!("EXISTS (SELECT 1 FROM page_terms pt JOIN pages r ON r.id = pt.term_id WHERE pt.page_id = p.id AND r.kind = 'tag' AND r.path = {p})")
+            format!(
+                "EXISTS (SELECT 1 FROM page_terms pt JOIN pages r ON r.id = pt.term_id WHERE pt.page_id = p.id AND r.kind = 'tag' AND r.path = {p})"
+            )
         } else if let Some(x) = a.strip_prefix("category:") {
             let p = sql.param(Param::Str(x.to_string()));
-            format!("EXISTS (SELECT 1 FROM page_terms pt JOIN pages r ON r.id = pt.term_id WHERE pt.page_id = p.id AND r.kind = 'category' AND r.path = {p})")
+            format!(
+                "EXISTS (SELECT 1 FROM page_terms pt JOIN pages r ON r.id = pt.term_id WHERE pt.page_id = p.id AND r.kind = 'category' AND r.path = {p})"
+            )
         } else {
             // A trait the store does not index (a text-level trait
             // on the document, an alias): no constraint.
@@ -562,7 +699,11 @@ fn translate_trait(q: &Q, t: NodeId, sql: &mut Sql) -> Option<Conj> {
         };
         parts.push(part);
     }
-    Some(Conj { sql: format!("({})", parts.join(" OR ")), exact: true, note: String::new() })
+    Some(Conj {
+        sql: format!("({})", parts.join(" OR ")),
+        exact: true,
+        note: String::new(),
+    })
 }
 
 /// Plan `query` for a store speaking `dialect`. `model_in_force`
@@ -591,7 +732,11 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         return Plan::scan("more than one branch");
     }
     let branch = branches[0];
-    let elems: Vec<NodeId> = q.kids(branch).into_iter().filter(|c| q.name(*c) != "projection").collect();
+    let elems: Vec<NodeId> = q
+        .kids(branch)
+        .into_iter()
+        .filter(|c| q.name(*c) != "projection")
+        .collect();
     // The enumerating step: `//page` with a prefix of child steps
     // (`/sites/<host>/pages`, a directory) before it.
     let mut host: Option<String> = None;
@@ -607,11 +752,17 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         let axis = q.text(e, "axis").unwrap_or_default();
         let matcher = q.text(e, "matcher").unwrap_or_default();
         let mkind = q.text(e, "matcher-kind").unwrap_or_default();
-        if (axis == "//" || axis == "//?" || axis == "//!") && (matcher == "page" || matcher == "category") && mkind == "name" {
+        if (axis == "//" || axis == "//?" || axis == "//!")
+            && (matcher == "page" || matcher == "category")
+            && mkind == "name"
+        {
             enumerating = Some(i);
             break;
         }
-        if !matches!(axis.as_str(), "/" | "//" | "//?" | "//!") || !q.kids_named(e, "predicate").is_empty() || !q.kids_named(e, "trait").is_empty() {
+        if !matches!(axis.as_str(), "/" | "//" | "//?" | "//!")
+            || !q.kids_named(e, "predicate").is_empty()
+            || !q.kids_named(e, "trait").is_empty()
+        {
             return Plan::scan("a prefix step with tests before //page");
         }
         if prev_matcher == "sites" && mkind == "name" {
@@ -628,7 +779,9 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         return Plan::scan("no //page enumeration");
     };
     let estep = elems[ei];
-    let kind = q.text(estep, "matcher").unwrap_or_else(|| "page".to_string());
+    let kind = q
+        .text(estep, "matcher")
+        .unwrap_or_else(|| "page".to_string());
     // Everything after: safe axes only, nothing that re-enters.
     let tail: Vec<NodeId> = elems[ei + 1..].to_vec();
     for &e in &tail {
@@ -682,7 +835,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     }
     // The enumerating step's own tests.
     let preds = q.kids_named(estep, "predicate");
-    if preds.iter().any(|p| q.text(*p, "kind").as_deref() != Some("expr")) {
+    if preds
+        .iter()
+        .any(|p| q.text(*p, "kind").as_deref() != Some("expr"))
+    {
         return Plan::scan("a positional predicate on //page");
     }
     for &p in &preds {
@@ -690,7 +846,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
             return Plan::scan("a predicate on //page that re-enters the tree");
         }
     }
-    let mut sql = Sql { dialect, params: Vec::new() };
+    let mut sql = Sql {
+        dialect,
+        params: Vec::new(),
+    };
     // The site clause first: parameters are positional, and the
     // clause text leads.
     let mut where_parts = vec![format!("p.kind = '{kind}'")];
@@ -698,7 +857,9 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         && h != "*"
     {
         let p = sql.param(Param::Str(h.clone()));
-        where_parts.push(format!("p.site_id IN (SELECT id FROM sites WHERE host = {p})"));
+        where_parts.push(format!(
+            "p.site_id IN (SELECT id FROM sites WHERE host = {p})"
+        ));
     }
     let mut conjs: Vec<Conj> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
@@ -709,9 +870,12 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         }
     }
     for &p in &preds {
-        let Some(expr) = q.kids(p).into_iter().next() else { continue };
+        let Some(expr) = q.kids(p).into_iter().next() else {
+            continue;
+        };
         let c = match q.name(expr).as_str() {
-            "path" => translate_text_reach(&q, expr, &mut sql).or_else(|| translate_truthy_path(&q, expr, &mut sql)),
+            "path" => translate_text_reach(&q, expr, &mut sql)
+                .or_else(|| translate_truthy_path(&q, expr, &mut sql)),
             _ => translate(&q, expr, &mut sql),
         };
         match c {
@@ -725,7 +889,12 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     }
     let where_sql = where_parts.join(" AND ");
     let all_exact = dropped.is_empty() && conjs.iter().all(|c| c.exact);
-    let unverified: Vec<String> = conjs.iter().filter(|c| !c.exact).map(|c| c.note.clone()).chain(dropped.iter().cloned()).collect();
+    let unverified: Vec<String> = conjs
+        .iter()
+        .filter(|c| !c.exact)
+        .map(|c| c.note.clone())
+        .chain(dropped.iter().cloned())
+        .collect();
     // Full: a bare count over the enumeration, everything exact.
     let bare_count = tail.is_empty()
         && q.kids_named(branch, "projection").is_empty()
@@ -746,7 +915,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     // `@| top(n; ::col)` first in the pipeline, over the whole
     // container with exact tests only: the store names the n rows
     // the engine's stable sort would keep.
-    let limit = (tail.is_empty() && q.kids_named(branch, "projection").is_empty() && all_exact && whole_container)
+    let limit = (tail.is_empty()
+        && q.kids_named(branch, "projection").is_empty()
+        && all_exact
+        && whole_container)
         .then(|| stages.first().and_then(|s| limit_of(&q, *s)))
         .flatten();
     if let Some(l) = limit {
@@ -772,7 +944,11 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     }
     if translated == 0 {
         return Plan::scan(if dropped.is_empty() {
-            if bare_count && !whole_container { "a count below a directory: the tree walk".to_string() } else { "no predicate to push".to_string() }
+            if bare_count && !whole_container {
+                "a count below a directory: the tree walk".to_string()
+            } else {
+                "no predicate to push".to_string()
+            }
         } else {
             dropped.join("; ")
         });
@@ -783,7 +959,11 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         params: sql.params,
         reason: format!(
             "{translated} conjunct(s) name the candidates{}",
-            if unverified.is_empty() { String::new() } else { format!("; the engine verifies {}", unverified.join(", ")) }
+            if unverified.is_empty() {
+                String::new()
+            } else {
+                format!("; the engine verifies {}", unverified.join(", "))
+            }
         ),
         unverified,
         limit: None,
@@ -805,7 +985,9 @@ fn limit_of(q: &Q, stage: NodeId) -> Option<Limit> {
     if kids.len() != 2 || q.name(kids[0]) != "literal" || q.name(kids[1]) != "path" {
         return None;
     }
-    let Some(Value::Int(n)) = q.prop(kids[0], "value") else { return None };
+    let Some(Value::Int(n)) = q.prop(kids[0], "value") else {
+        return None;
+    };
     if n < 0 {
         return None;
     }
@@ -813,5 +995,9 @@ fn limit_of(q: &Q, stage: NodeId) -> Option<Limit> {
     if !numeric {
         return None;
     }
-    Some(Limit { column: col.to_string(), descending, n })
+    Some(Limit {
+        column: col.to_string(),
+        descending,
+        n,
+    })
 }

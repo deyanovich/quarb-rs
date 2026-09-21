@@ -43,7 +43,9 @@ use std::cell::RefCell;
 pub enum ObjstoreError {
     #[error("objstore: {0}")]
     Http(String),
-    #[error("objstore target: {0} (expected gs://BUCKET[/PREFIX], s3://BUCKET[/PREFIX], or az://ACCOUNT/CONTAINER[/PREFIX])")]
+    #[error(
+        "objstore target: {0} (expected gs://BUCKET[/PREFIX], s3://BUCKET[/PREFIX], or az://ACCOUNT/CONTAINER[/PREFIX])"
+    )]
     Target(String),
 }
 
@@ -234,7 +236,11 @@ impl ObjstoreAdapter {
                     }
                 }
             }
-            Backend::Azure { account, key: Some(k), .. } => {
+            Backend::Azure {
+                account,
+                key: Some(k),
+                ..
+            } => {
                 let date = rfc1123_now();
                 for (name, value) in azure_shared_key_headers(url, account, k, &date) {
                     req = req.set(&name, &value);
@@ -252,7 +258,10 @@ impl ObjstoreAdapter {
     /// The Azure URL root; SAS tokens are appended by
     /// [`Self::azure_url`], not here.
     fn azure_root(&self) -> String {
-        let Backend::Azure { account, endpoint, .. } = &self.backend else {
+        let Backend::Azure {
+            account, endpoint, ..
+        } = &self.backend
+        else {
             unreachable!("azure_root on a non-Azure backend");
         };
         match endpoint {
@@ -412,11 +421,9 @@ impl ObjstoreAdapter {
                 self.bucket,
                 urlencode(&key)
             ),
-            Backend::S3 { .. } => format!(
-                "{}/{}",
-                self.s3_root(),
-                urlencode(&key).replace("%2F", "/")
-            ),
+            Backend::S3 { .. } => {
+                format!("{}/{}", self.s3_root(), urlencode(&key).replace("%2F", "/"))
+            }
             Backend::Azure { .. } => self.azure_url(format!(
                 "{}/{}",
                 self.azure_root(),
@@ -597,8 +604,8 @@ fn rfc1123_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
-    let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        [((days + 4).rem_euclid(7)) as usize];
+    let weekday =
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][((days + 4).rem_euclid(7)) as usize];
     let month = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][(mo - 1) as usize];
@@ -649,8 +656,7 @@ fn azure_shared_key_headers(
         resource.push_str(&format!("\n{k}:{v}"));
     }
     let headers = format!("x-ms-date:{date}\nx-ms-version:{version}\n");
-    let string_to_sign =
-        format!("GET\n\n\n\n\n\n\n\n\n\n\n\n{headers}{resource}");
+    let string_to_sign = format!("GET\n\n\n\n\n\n\n\n\n\n\n\n{headers}{resource}");
     let sig = quarb::base64(&hmac_sha256(key, string_to_sign.as_bytes()));
     vec![
         ("x-ms-date".to_string(), date.to_string()),

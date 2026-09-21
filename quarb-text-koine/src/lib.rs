@@ -264,7 +264,13 @@ const HEADINGS: &[&str] = &[
 ];
 
 /// Sims whose content is not part of the linear text.
-const SKIP: &[&str] = &["toc", "section-break", "ordinal", "manuscript-note", "index-marker"];
+const SKIP: &[&str] = &[
+    "toc",
+    "section-break",
+    "ordinal",
+    "manuscript-note",
+    "index-marker",
+];
 
 /// Inline apparatus collected while flattening a paragraph,
 /// emitted after its block in source order.
@@ -322,9 +328,7 @@ fn bib_entry(block: &ABlock, bg: &Dialektos) -> Option<Block> {
 fn finish_model(blocks: Vec<Block>) -> TextModel {
     let has_bib = blocks.iter().any(|b| matches!(b, Block::Bib { .. }));
     let mut model = TextModel::build(blocks);
-    if has_bib
-        && let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma")
-    {
+    if has_bib && let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma") {
         model.set_bib_aliases(bib_alias_census(&bg));
     }
     model
@@ -392,12 +396,14 @@ impl Lower {
                 // paragraph (the at-html family): the level lives
                 // in the name; the shared derivation builds the
                 // outline as it does for h1/h2.
-                if let [Inline::Endo {
-                    symbol,
-                    content,
-                    ann,
-                    ..
-                }] = inlines.as_slice()
+                if let [
+                    Inline::Endo {
+                        symbol,
+                        content,
+                        ann,
+                        ..
+                    },
+                ] = inlines.as_slice()
                     && let Some(level) = flat_heading_level(&sim_name(dial, symbol))
                 {
                     let lemma = self.flatten(content, dial);
@@ -542,11 +548,7 @@ impl Lower {
                     // anchoring is the recorded follow-up).
                     let strophes = strophes
                         .iter()
-                        .map(|s| {
-                            s.0.iter()
-                                .map(|line| self.flatten(line, dial))
-                                .collect()
-                        })
+                        .map(|s| s.0.iter().map(|line| self.flatten(line, dial)).collect())
                         .collect();
                     self.out.push(Block::Verse {
                         lemma: (!lemma.is_empty()).then_some(lemma),
@@ -585,7 +587,11 @@ impl Lower {
                     }
                     return;
                 }
-                let text = children.iter().map(block_text).collect::<Vec<_>>().join("\n\n");
+                let text = children
+                    .iter()
+                    .map(block_text)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
                 self.out.push(Block::Verbatim {
                     lang: Some(dialect.clone()),
                     text,
@@ -733,9 +739,8 @@ impl Lower {
                     // position — the point style.
                     self.pending.push(Pending::Point(o.clone()));
                 }
-                Inline::Milestone { .. }
-                | Inline::EndoAxioma { .. }
-                | Inline::AxiomaRef { .. } => {}
+                Inline::Milestone { .. } | Inline::EndoAxioma { .. } | Inline::AxiomaRef { .. } => {
+                }
             }
         }
     }
@@ -855,9 +860,7 @@ fn block_text(block: &ABlock) -> String {
         }
         ABlock::Stichoi { strophes, .. } => strophes
             .iter()
-            .map(|s| {
-                s.0.iter().map(|l| flat(l)).collect::<Vec<_>>().join("\n")
-            })
+            .map(|s| s.0.iter().map(|l| flat(l)).collect::<Vec<_>>().join("\n"))
             .collect::<Vec<_>>()
             .join("\n\n"),
         ABlock::VerbatimBlock { content, .. } => content.clone(),

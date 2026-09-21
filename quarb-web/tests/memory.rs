@@ -29,10 +29,19 @@ fn the_tree_from_paths() {
     // Document order is the tree's pre-order, siblings bytewise.
     assert_eq!(
         strs(&a, "//page::path"),
-        ["about.html", "guides/jq.html", "guides/notes.html", "guides/sql.html", "index.html"]
+        [
+            "about.html",
+            "guides/jq.html",
+            "guides/notes.html",
+            "guides/sql.html",
+            "index.html"
+        ]
     );
     // A page answers to its stem as well as its file name.
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq::title"), ["Quarb for jq users"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq::title"),
+        ["Quarb for jq users"]
+    );
     assert_eq!(strs(&a, "/sites/*<site>::host"), ["example.org"]);
     assert_eq!(strs(&a, "/sites/example.org::::n-pages"), ["5"]);
 }
@@ -41,18 +50,42 @@ fn the_tree_from_paths() {
 fn declared_identity() {
     let a = site();
     assert_eq!(strs(&a, "//page<tag:JSON> @| count"), ["2"]);
-    assert_eq!(strs(&a, "//page<category:Guides>::title"), ["Quarb for jq users", "Notes", "Quarb for SQL users"]);
-    assert_eq!(strs(&a, "//page[::category = \"Start\"]::path"), ["about.html", "index.html"]);
+    assert_eq!(
+        strs(&a, "//page<category:Guides>::title"),
+        ["Quarb for jq users", "Notes", "Quarb for SQL users"]
+    );
+    assert_eq!(
+        strs(&a, "//page[::category = \"Start\"]::path"),
+        ["about.html", "index.html"]
+    );
     // The canonical URL wins over the joined path; the rest join.
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq::href"), ["https://example.org/guides/jq.html"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/about.html::href"), ["https://example.org/about.html"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/index.html::description"), ["The front page"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq::href"),
+        ["https://example.org/guides/jq.html"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/about.html::href"),
+        ["https://example.org/about.html"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/index.html::description"),
+        ["The front page"]
+    );
     // Tags and categories are rows of their own containers.
     assert_eq!(strs(&a, "//tag::title"), ["JSON", "SQL", "jq"]);
     assert_eq!(strs(&a, "//category::title"), ["Guides", "Start"]);
-    assert_eq!(strs(&a, "/sites/example.org/tags/JSON<-page::title"), ["Quarb for jq users", "Quarb for SQL users"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq->tag::title"), ["jq", "JSON"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq->category::title"), ["Guides"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/tags/JSON<-page::title"),
+        ["Quarb for jq users", "Quarb for SQL users"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq->tag::title"),
+        ["jq", "JSON"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq->category::title"),
+        ["Guides"]
+    );
 }
 
 #[test]
@@ -64,14 +97,29 @@ fn links_from_the_dom() {
         strs(&a, "/sites/example.org/pages/index.html->link::path"),
         ["guides/jq.html", "guides/sql.html", "about.html"]
     );
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq<-link::path"), ["guides/sql.html", "index.html"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq<-link::path"),
+        ["guides/sql.html", "index.html"]
+    );
     assert_eq!(strs(&a, "//page<orphan>::path"), ["guides/notes.html"]);
     // A link inside a heading counts (an index's `<h3><a href>`).
-    assert_eq!(strs(&a, "/sites/example.org/pages/about.html<-link::path"), ["guides/sql.html", "index.html"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/about.html<-link::path"),
+        ["guides/sql.html", "index.html"]
+    );
     assert_eq!(strs(&a, "//page[::in_degree = 0]::title"), ["Notes"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq::redlinks"), ["1"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/jq::mutual_degree"), ["1"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/index.html::out_degree"), ["3"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq::redlinks"),
+        ["1"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/jq::mutual_degree"),
+        ["1"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/index.html::out_degree"),
+        ["3"]
+    );
     // Rank sums to one over the graph's nodes: the pages (a
     // category with no page of its own is a term, not a node).
     let total: f64 = values(&a, "//page::pagerank")
@@ -87,7 +135,10 @@ fn links_from_the_dom() {
 #[test]
 fn the_graft_and_the_prose_arrow() {
     let a = site();
-    assert_eq!(strs(&a, "/sites/example.org/pages/guides/sql//section::lemma"), ["Quarb for SQL users", "Joins", "About"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guides/sql//section::lemma"),
+        ["Quarb for SQL users", "Joins", "About"]
+    );
     assert_eq!(strs(&a, "//page//paragraph @| count"), ["6"]);
     // A prose ref leaving its page lands on the page it names —
     // on the fragment's bearer when it names one.
@@ -104,16 +155,24 @@ fn the_graft_and_the_prose_arrow() {
     );
     // The text level's deep link narrows through the page's URL.
     assert_eq!(
-        strs(&a, "/sites/example.org/pages/guides/sql//section[::lemma = \"Joins\"]::href"),
+        strs(
+            &a,
+            "/sites/example.org/pages/guides/sql//section[::lemma = \"Joins\"]::href"
+        ),
         ["https://example.org/guides/sql.html#joins"]
     );
     assert_eq!(
         strs(&a, "//page<tag:jq> | link"),
-        ["%(title = \"Quarb for jq users\"; href = \"https://example.org/guides/jq.html\"; text = null)"]
+        [
+            "%(title = \"Quarb for jq users\"; href = \"https://example.org/guides/jq.html\"; text = null)"
+        ]
     );
     // Ascent from a graft node reaches the page, then its dir.
     assert_eq!(
-        strs(&a, "/sites/example.org/pages/guides/sql//section[::lemma = \"Joins\"]\\\\<dir>::path"),
+        strs(
+            &a,
+            "/sites/example.org/pages/guides/sql//section[::lemma = \"Joins\"]\\\\<dir>::path"
+        ),
         ["guides"]
     );
 }
@@ -145,7 +204,13 @@ fn the_name_index_agrees_with_the_walk() {
     let a = site();
     let model = quarb_model::parse_model("alias leaf page;").unwrap();
     let walked = quarb_model::ModelAdapter::new(site(), model);
-    for q in ["//page::path", "//dir::path", "/sites/example.org/pages/guides//page::path", "//tag::title", "//page @| count"] {
+    for q in [
+        "//page::path",
+        "//dir::path",
+        "/sites/example.org/pages/guides//page::path",
+        "//tag::title",
+        "//page @| count",
+    ] {
         let fast = strs(&a, q);
         let slow = match quarb::run(q, &walked).unwrap() {
             QueryResult::Values(v) => v.into_iter().map(|v| v.to_string()).collect::<Vec<_>>(),
@@ -160,16 +225,36 @@ fn base_href_moves_the_join_base() {
     let files = vec![
         PageFile {
             path: "wiki/Roma.html".into(),
-            html: page("Roma", "<base href=\"//example.org/wiki/\"><link rel=\"canonical\" href=\"https://example.org/wiki/Roma.html\">", "<p>See <a href=\"./Lazio.html\">Lazio</a>.</p>"),
+            html: page(
+                "Roma",
+                "<base href=\"//example.org/wiki/\"><link rel=\"canonical\" href=\"https://example.org/wiki/Roma.html\">",
+                "<p>See <a href=\"./Lazio.html\">Lazio</a>.</p>",
+            ),
         },
         PageFile {
             path: "wiki/Lazio.html".into(),
-            html: page("Lazio", "<link rel=\"canonical\" href=\"https://example.org/wiki/Lazio.html\">", "<p>A region.</p>"),
+            html: page(
+                "Lazio",
+                "<link rel=\"canonical\" href=\"https://example.org/wiki/Lazio.html\">",
+                "<p>A region.</p>",
+            ),
         },
     ];
-    let a = WebAdapter::new(MemoryStore::build(SiteInput { base_url: String::new(), snapshot: None }, files));
-    assert_eq!(strs(&a, "/sites/example.org/pages/wiki/Roma->link::title"), ["Lazio"]);
-    assert_eq!(strs(&a, "/sites/example.org/pages/wiki/Roma//ref-->::title"), ["Lazio"]);
+    let a = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: String::new(),
+            snapshot: None,
+        },
+        files,
+    ));
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/wiki/Roma->link::title"),
+        ["Lazio"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/wiki/Roma//ref-->::title"),
+        ["Lazio"]
+    );
     assert_eq!(strs(&a, "/sites/*::host"), ["example.org"]);
 }
 
@@ -186,7 +271,13 @@ fn extensionless_pages_and_both_link_spellings() {
         PageFile { path: "docs/intro".into(), html: r#"<title>Intro</title><p>x</p>"#.into() },
         PageFile { path: "notes".into(), html: "plain text, not a page".into() },
     ];
-    let store = MemoryStore::build(SiteInput { base_url: "https://x.example/".into(), snapshot: None }, files);
+    let store = MemoryStore::build(
+        SiteInput {
+            base_url: "https://x.example/".into(),
+            snapshot: None,
+        },
+        files,
+    );
     let a = WebAdapter::new(store);
     let values = |q: &str| -> Vec<String> {
         match quarb::run(q, &a).unwrap() {
@@ -194,9 +285,21 @@ fn extensionless_pages_and_both_link_spellings() {
             quarb::QueryResult::Nodes(n) => n.into_iter().map(|n| a.locator(n)).collect(),
         }
     };
-    assert_eq!(values("//page::path"), ["about", "docs/index.html", "docs/intro", "index.html"]);
-    assert_eq!(values("//page[::path = \"about\"] | <-link::path"), ["docs/index.html", "index.html"]);
-    assert_eq!(values("//page[::path = \"docs/index.html\"] | <-link::path"), ["about", "index.html"]);
-    assert_eq!(values("//page[::path = \"docs/intro\"] | <-link::path"), ["index.html"]);
+    assert_eq!(
+        values("//page::path"),
+        ["about", "docs/index.html", "docs/intro", "index.html"]
+    );
+    assert_eq!(
+        values("//page[::path = \"about\"] | <-link::path"),
+        ["docs/index.html", "index.html"]
+    );
+    assert_eq!(
+        values("//page[::path = \"docs/index.html\"] | <-link::path"),
+        ["about", "index.html"]
+    );
+    assert_eq!(
+        values("//page[::path = \"docs/intro\"] | <-link::path"),
+        ["index.html"]
+    );
     assert_eq!(values("//page[::redlinks > 0] @| count"), ["0"]);
 }

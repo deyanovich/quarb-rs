@@ -1007,7 +1007,10 @@ mod tests {
     fn typed_metadata_respects_session_flag() {
         let mut typed = false;
         ask(json!({"op": "hello", "typed": true}), &mut typed);
-        let resp = ask(json!({"op": "metadata", "node": 1, "name": "created"}), &mut typed);
+        let resp = ask(
+            json!({"op": "metadata", "node": 1, "name": "created"}),
+            &mut typed,
+        );
         assert_eq!(
             resp.pointer("/value/t").and_then(|t| t.as_str()),
             Some("instant")

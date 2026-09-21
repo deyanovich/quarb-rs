@@ -898,7 +898,10 @@ impl TextModel {
         let mut exact = true;
         while let Some(id) = cur {
             let n = &self.nodes[id.0 as usize];
-            if n.kind != Kind::Document && !n.deixis && let Some(o) = &n.onym {
+            if n.kind != Kind::Document
+                && !n.deixis
+                && let Some(o) = &n.onym
+            {
                 return Some((o.clone(), exact));
             }
             exact = false;
@@ -946,7 +949,8 @@ impl TextModel {
             let words: Vec<&str> = n.prose.split_whitespace().collect();
             if !words.is_empty() {
                 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-                let enc = |ws: &[&str]| utf8_percent_encode(&ws.join(" "), NON_ALPHANUMERIC).to_string();
+                let enc =
+                    |ws: &[&str]| utf8_percent_encode(&ws.join(" "), NON_ALPHANUMERIC).to_string();
                 if anchor.is_none() {
                     out.push('#');
                 }
@@ -1525,7 +1529,10 @@ impl AstAdapter for TextModel {
                     _ => String::new(),
                 };
                 return Some(Value::Record(vec![
-                    ("title".to_string(), self.document_title().map(Value::Str).unwrap_or(Value::Null)),
+                    (
+                        "title".to_string(),
+                        self.document_title().map(Value::Str).unwrap_or(Value::Null),
+                    ),
                     ("href".to_string(), Value::Str(href)),
                     ("text".to_string(), Value::Str(text)),
                 ]));

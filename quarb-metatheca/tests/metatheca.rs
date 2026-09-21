@@ -95,7 +95,10 @@ fn fact_timelines() {
     );
     // Every content change is a blob-ref event with an instant.
     assert_eq!(
-        values(&a, "/paths/docs/a.md/*[::kind = \"core/blob-ref\"] @| count"),
+        values(
+            &a,
+            "/paths/docs/a.md/*[::kind = \"core/blob-ref\"] @| count"
+        ),
         ["2"]
     );
     assert_eq!(
@@ -141,8 +144,14 @@ fn added_and_changed() {
     );
     assert_eq!(values(&a, "/states/'~2'->added->state | ::::seq"), ["4"]);
     // The diff surface: the one entry that changed in that state.
-    assert_eq!(values(&a, "/states/'~2'/entries/*<changed> @| count"), ["1"]);
-    assert_eq!(values(&a, "/states/'~2'/entries/*<changed>::path"), ["docs/a.md"]);
+    assert_eq!(
+        values(&a, "/states/'~2'/entries/*<changed> @| count"),
+        ["1"]
+    );
+    assert_eq!(
+        values(&a, "/states/'~2'/entries/*<changed>::path"),
+        ["docs/a.md"]
+    );
 }
 
 #[test]

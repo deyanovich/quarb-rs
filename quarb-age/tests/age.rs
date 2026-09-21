@@ -39,7 +39,10 @@ fn live_age() {
     // ?key= names vertices; properties project.
     assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
-    assert_eq!(values(&a, "/City/*[::country = \"RS\"]::name"), ["Novi Sad"]);
+    assert_eq!(
+        values(&a, "/City/*[::country = \"RS\"]::name"),
+        ["Novi Sad"]
+    );
 
     // Edge labels are typed crosslinks, both directions.
     assert_eq!(values(&a, "/Person/Ada->LIVES_IN::name"), ["Oslo"]);

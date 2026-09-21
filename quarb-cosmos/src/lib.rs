@@ -39,9 +39,16 @@ pub enum CosmosError {
 
 enum Kind {
     Root,
-    Container { name: String },
-    Doc { container: String, body: serde_json::Value },
-    Field { value: serde_json::Value },
+    Container {
+        name: String,
+    },
+    Doc {
+        container: String,
+        body: serde_json::Value,
+    },
+    Field {
+        value: serde_json::Value,
+    },
 }
 
 struct Node {
@@ -535,8 +542,8 @@ fn rfc1123_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
-    let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        [((days + 4).rem_euclid(7)) as usize];
+    let weekday =
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][((days + 4).rem_euclid(7)) as usize];
     let month = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][(mo - 1) as usize];

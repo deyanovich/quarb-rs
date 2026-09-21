@@ -50,8 +50,7 @@ fn mounted_sqlite_grafts_json_columns() {
         )
         .unwrap();
     }
-    let (adapter, _loc) =
-        open_target(path.to_str().unwrap(), &OpenOpts::default()).expect("mount");
+    let (adapter, _loc) = open_target(path.to_str().unwrap(), &OpenOpts::default()).expect("mount");
     let adapter = Dyn(adapter);
     let run = |q: &str| -> Vec<String> {
         match quarb::run(q, &adapter).unwrap() {
@@ -83,9 +82,15 @@ fn dir_mount_grafts_only_with_graft() {
     std::fs::write(dir.join("cfg.json"), r#"{"port": 8080}"#).unwrap();
 
     let (a, _) = open_target(dir.to_str().unwrap(), &OpenOpts::default()).expect("mount");
-    assert!(run_q(&Dyn(a), "/cfg.json/port::").is_empty(), "bare dir must !graft");
+    assert!(
+        run_q(&Dyn(a), "/cfg.json/port::").is_empty(),
+        "bare dir must !graft"
+    );
 
-    let opts = OpenOpts { graft: true, ..OpenOpts::default() };
+    let opts = OpenOpts {
+        graft: true,
+        ..OpenOpts::default()
+    };
     let (a, _) = open_target(dir.to_str().unwrap(), &opts).expect("mount");
     assert_eq!(run_q(&Dyn(a), "/cfg.json/port::"), ["8080"]);
 }
@@ -108,11 +113,21 @@ fn archive_no_graft_holds_members_opaque() {
     assert_eq!(run_q(&Dyn(a), "/cfg.json/port::"), ["8080"]);
 
     // no_graft: the tar -t view — members listed, sized, opaque.
-    let opts = OpenOpts { no_graft: true, ..OpenOpts::default() };
+    let opts = OpenOpts {
+        no_graft: true,
+        ..OpenOpts::default()
+    };
     let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
     let a = Dyn(a);
-    assert!(run_q(&a, "/cfg.json/port::").is_empty(), "no_graft must !cross the boundary");
-    assert_eq!(run_q(&a, "/cfg.json::::size").len(), 1, "the member stays listable && sizable");
+    assert!(
+        run_q(&a, "/cfg.json/port::").is_empty(),
+        "no_graft must !cross the boundary"
+    );
+    assert_eq!(
+        run_q(&a, "/cfg.json::::size").len(),
+        1,
+        "the member stays listable && sizable"
+    );
 }
 
 #[test]
@@ -129,13 +144,19 @@ fn sqlite_no_graft_keeps_columns_flat() {
         )
         .unwrap();
     }
-    let opts = OpenOpts { no_graft: true, ..OpenOpts::default() };
+    let opts = OpenOpts {
+        no_graft: true,
+        ..OpenOpts::default()
+    };
     let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
     let a = Dyn(a);
     // The column stays the server's own scalar: no inner arbor,
     // the text intact.
     assert!(run_q(&a, "/s/1/meta/geo/city::").is_empty());
-    assert_eq!(run_q(&a, "/s/1/meta::"), [r#"{"device":"phone","geo":{"city":"London"}}"#]);
+    assert_eq!(
+        run_q(&a, "/s/1/meta::"),
+        [r#"{"device":"phone","geo":{"city":"London"}}"#]
+    );
 }
 
 #[test]
@@ -143,7 +164,10 @@ fn no_graft_refuses_code_prefix() {
     let dir = std::env::temp_dir().join("qua-mount-no-graft-code-test");
     std::fs::create_dir_all(&dir).unwrap();
     let target = format!("code:{}", dir.display());
-    let opts = OpenOpts { no_graft: true, ..OpenOpts::default() };
+    let opts = OpenOpts {
+        no_graft: true,
+        ..OpenOpts::default()
+    };
     let err = match open_target(&target, &opts) {
         Err(e) => e,
         Ok(_) => panic!("must refuse"),

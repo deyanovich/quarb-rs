@@ -14,9 +14,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use quarb_web::db::sqlite::SqliteStore;
 use quarb_web::db::postgres::PostgresStore;
-use quarb_web::db::{analyze, SqlStore};
+use quarb_web::db::sqlite::SqliteStore;
+use quarb_web::db::{SqlStore, analyze};
 use quarb_web::ingest::{self, Options, Tree};
 use quarb_web::{SiteId, WebStore};
 use std::path::PathBuf;
@@ -93,9 +93,13 @@ enum Store {
 impl Store {
     fn open(spec: &str) -> Result<Store> {
         if spec.starts_with("postgres://") || spec.starts_with("postgresql://") {
-            PostgresStore::open(spec).map(Store::Postgres).map_err(|e| anyhow::anyhow!("{e}"))
+            PostgresStore::open(spec)
+                .map(Store::Postgres)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
-            SqliteStore::open(std::path::Path::new(spec)).map(Store::Sqlite).map_err(|e| anyhow::anyhow!("{e}"))
+            SqliteStore::open(std::path::Path::new(spec))
+                .map(Store::Sqlite)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
     fn empty(spec: &str, fresh: bool) -> Result<Store> {
@@ -103,9 +107,13 @@ impl Store {
             if fresh {
                 PostgresStore::drop_all(spec).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            PostgresStore::empty(spec).map(Store::Postgres).map_err(|e| anyhow::anyhow!("{e}"))
+            PostgresStore::empty(spec)
+                .map(Store::Postgres)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
-            SqliteStore::empty(std::path::Path::new(spec)).map(Store::Sqlite).map_err(|e| anyhow::anyhow!("{e}"))
+            SqliteStore::empty(std::path::Path::new(spec))
+                .map(Store::Sqlite)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
     fn sql(&mut self) -> &mut dyn SqlStore {
@@ -122,22 +130,42 @@ fn main() -> Result<()> {
         Cmd::Crawl { source, into, base } => {
             let t = std::time::Instant::now();
             let site = if source.is_dir() {
-                quarb_web::fs::open_dir(&source, &base).with_context(|| format!("reading {}", source.display()))?
+                quarb_web::fs::open_dir(&source, &base)
+                    .with_context(|| format!("reading {}", source.display()))?
             } else {
-                quarb_web::archive::open_path(&source, &base).with_context(|| format!("reading {}", source.display()))?
+                quarb_web::archive::open_path(&source, &base)
+                    .with_context(|| format!("reading {}", source.display()))?
             };
             let cat = site.store().catalog();
-            eprintln!("read {}: {} page(s), {} link(s) in {:.1?}", cat.sites[0].host, cat.sites[0].page_count, cat.sites[0].link_count, t.elapsed());
+            eprintln!(
+                "read {}: {} page(s), {} link(s) in {:.1?}",
+                cat.sites[0].host,
+                cat.sites[0].page_count,
+                cat.sites[0].link_count,
+                t.elapsed()
+            );
             let t = std::time::Instant::now();
             if into.starts_with("postgres://") || into.starts_with("postgresql://") {
                 PostgresStore::drop_all(&into).map_err(|e| anyhow::anyhow!("{e}"))?;
-                PostgresStore::create(&into, site.store()).map_err(|e| anyhow::anyhow!("writing {into}: {e}"))?;
+                PostgresStore::create(&into, site.store())
+                    .map_err(|e| anyhow::anyhow!("writing {into}: {e}"))?;
             } else {
-                SqliteStore::create(std::path::Path::new(&into), site.store()).map_err(|e| anyhow::anyhow!("writing {into}: {e}"))?;
+                SqliteStore::create(std::path::Path::new(&into), site.store())
+                    .map_err(|e| anyhow::anyhow!("writing {into}: {e}"))?;
             }
             eprintln!("wrote {into} in {:.1?}", t.elapsed());
         }
-        Cmd::Wikipedia { dumps, into, limit, workers, tree, root, snapshot, fresh, no_templates } => {
+        Cmd::Wikipedia {
+            dumps,
+            into,
+            limit,
+            workers,
+            tree,
+            root,
+            snapshot,
+            fresh,
+            no_templates,
+        } => {
             let opts = Options {
                 base_url: String::new(),
                 limit,
@@ -159,16 +187,26 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!(
                 "ingested {} article(s), {} categor(ies), {} redirect(s), {} link(s), {} skipped in {:.1?}",
-                summary.articles, summary.categories, summary.redirects, summary.links, summary.skipped, t.elapsed()
+                summary.articles,
+                summary.categories,
+                summary.redirects,
+                summary.links,
+                summary.skipped,
+                t.elapsed()
             );
             let t = std::time::Instant::now();
             let site = summary.site.unwrap_or(SiteId(1));
-            for line in ingest::finish(store.sql(), site, &opts).map_err(|e| anyhow::anyhow!("{e}"))? {
+            for line in
+                ingest::finish(store.sql(), site, &opts).map_err(|e| anyhow::anyhow!("{e}"))?
+            {
                 eprintln!("{line}");
             }
             eprintln!("finished in {:.1?}", t.elapsed());
         }
-        Cmd::Analyze { store, no_templates } => {
+        Cmd::Analyze {
+            store,
+            no_templates,
+        } => {
             let mut st = Store::open(&store)?;
             let sites: Vec<SiteId> = st.sql().catalog().sites.iter().map(|s| s.id).collect();
             for s in sites {

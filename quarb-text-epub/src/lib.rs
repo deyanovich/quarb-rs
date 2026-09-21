@@ -48,11 +48,9 @@ pub fn parse(bytes: &[u8]) -> Result<TextModel, EpubError> {
 /// linear chapters, in declared order, through the HTML reading.
 pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, EpubError> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let container =
-        member(&mut zip, "META-INF/container.xml").ok_or(EpubError::NoContainer)?;
+    let container = member(&mut zip, "META-INF/container.xml").ok_or(EpubError::NoContainer)?;
     let opf_path = rootfile(&container).ok_or(EpubError::NoRootfile)?;
-    let opf =
-        member(&mut zip, &opf_path).ok_or_else(|| EpubError::NoPackage(opf_path.clone()))?;
+    let opf = member(&mut zip, &opf_path).ok_or_else(|| EpubError::NoPackage(opf_path.clone()))?;
     let base = match opf_path.rfind('/') {
         Some(i) => &opf_path[..=i],
         None => "",

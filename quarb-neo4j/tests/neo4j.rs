@@ -48,17 +48,11 @@ fn relationships_are_crosslinks() {
         values("/Person/3->REPORTS_TO->REPORTS_TO::name"),
         vec!["Alice"]
     );
-    assert_eq!(
-        values("/Person/2<-REPORTS_TO::name"),
-        vec!["Carol", "Dan"]
-    );
+    assert_eq!(values("/Person/2<-REPORTS_TO::name"), vec!["Carol", "Dan"]);
     // wildcard edge: Bob's outgoing = REPORTS_TO Alice + FRIEND Carol
     assert_eq!(values("/Person/2->*::name"), vec!["Carol", "Alice"]);
     // BOM descent
-    assert_eq!(
-        values("/Part/100->CONTAINS->CONTAINS::name"),
-        vec!["Tooth"]
-    );
+    assert_eq!(values("/Part/100->CONTAINS->CONTAINS::name"), vec!["Tooth"]);
 }
 
 #[test]
@@ -71,10 +65,7 @@ fn quantified_paths() {
     );
     assert_eq!(values("/Person/3(->REPORTS_TO)+!::name"), vec!["Alice"]);
     // everyone under Alice, transitively
-    assert_eq!(
-        values("/Person/1(<-REPORTS_TO)+::name @| count"),
-        vec!["3"]
-    );
+    assert_eq!(values("/Person/1(<-REPORTS_TO)+::name @| count"), vec!["3"]);
 }
 
 #[test]
@@ -83,15 +74,9 @@ fn multi_label_nodes() {
     // Employee excludes plain-Person Eve
     assert_eq!(values("/Employee::::n-rows"), vec!["4"]);
     // the same node appears under both labels, interned once
-    assert_eq!(
-        values("/Employee/1::name"),
-        values("/Person/1::name")
-    );
+    assert_eq!(values("/Employee/1::name"), values("/Person/1::name"));
     // trait filters see every label from any path
-    assert_eq!(
-        values("/Person/*<Employee>::name @| count"),
-        vec!["4"]
-    );
+    assert_eq!(values("/Person/*<Employee>::name @| count"), vec!["4"]);
     // canonical parent is the first label in storage order
     assert_eq!(values("/Person/1:::name"), vec!["1"]);
     assert_eq!(values("/Person/1::::labels @| count"), vec!["1"]);

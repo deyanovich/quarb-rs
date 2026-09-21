@@ -27,9 +27,7 @@ fn declarator_leaf(ts: &TreeSitterAdapter, start: usize) -> Option<usize> {
         }
         if let Some(d) = field_child(ts, i, "declarator") {
             i = d;
-        } else if ts.nodes()[i].kind.ends_with("_declarator")
-            && ts.nodes()[i].children.len() == 1
-        {
+        } else if ts.nodes()[i].kind.ends_with("_declarator") && ts.nodes()[i].children.len() == 1 {
             i = ts.nodes()[i].children[0].0 as usize;
         } else {
             return None;

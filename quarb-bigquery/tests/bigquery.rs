@@ -32,7 +32,10 @@ fn catalog_rows_and_fk_chain() {
         ["Bartok"]
     );
     // Reverse resolution.
-    assert_eq!(values(&a, "/artists/1::id<--[::secs > 400] @| count"), ["0"]);
+    assert_eq!(
+        values(&a, "/artists/1::id<--[::secs > 400] @| count"),
+        ["0"]
+    );
 }
 
 #[test]

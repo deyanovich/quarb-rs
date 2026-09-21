@@ -22,6 +22,7 @@ default = ["colligo"]
 colligo = ["dep:colligo"]
 
 [dependencies]
+quarb-trace = { path = "../quarb-trace", version = "0.30.0" }
 kaiv = { version = "0.14.0", default-features = false }
 thiserror.workspace = true
 globset.workspace = true

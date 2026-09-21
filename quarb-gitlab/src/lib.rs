@@ -83,22 +83,40 @@ impl Sec {
 enum Kind {
     Root,
     /// A group or subgroup, by full path.
-    Group { path: String },
+    Group {
+        path: String,
+    },
     /// A project, by full path (`path_with_namespace`).
-    Project { path: String },
+    Project {
+        path: String,
+    },
     /// A user (a personal namespace), by username.
-    User { username: String },
-    Section { proj: String, sec: Sec },
+    User {
+        username: String,
+    },
+    Section {
+        proj: String,
+        sec: Sec,
+    },
     /// An issue, merge request, or release (told apart by their
     /// JSON: releases carry `tag_name`, MRs `source_branch`).
     Item,
     /// A pipeline; jobs are its children.
-    Pipeline { proj: String, id: i64 },
+    Pipeline {
+        proj: String,
+        id: i64,
+    },
     Job,
     /// A directory in the default branch's tree.
-    Dir { proj: String, path: String },
+    Dir {
+        proj: String,
+        path: String,
+    },
     /// A file (blob); content is the value.
-    File { proj: String, path: String },
+    File {
+        proj: String,
+        path: String,
+    },
 }
 
 struct Node {
@@ -225,9 +243,9 @@ impl GitlabAdapter {
         let mut adapter = adapter;
         if anchor.is_empty() {
             // Probe: auth and reachability surface here.
-            adapter.call("version").map_err(|e| {
-                GitlabError::Glab(format!("{e} (is `glab auth login` done?)"))
-            })?;
+            adapter
+                .call("version")
+                .map_err(|e| GitlabError::Glab(format!("{e} (is `glab auth login` done?)")))?;
         } else {
             let n = adapter
                 .fetch_project(anchor)
@@ -559,12 +577,7 @@ impl GitlabAdapter {
                 .iter()
                 .filter_map(|r| {
                     let tag = r.get("tag_name")?.as_str()?.to_string();
-                    Some(self.item_node(
-                        format!("{proj}!r!{tag}"),
-                        tag,
-                        Some(node),
-                        r.clone(),
-                    ))
+                    Some(self.item_node(format!("{proj}!r!{tag}"), tag, Some(node), r.clone()))
                 })
                 .collect(),
             Sec::Pipelines => self
@@ -654,9 +667,7 @@ impl AstAdapter for GitlabAdapter {
                 let mut subs: Vec<(String, Json)> = self
                     .call_paged(&format!("groups/{p}/subgroups?all_available=true"))
                     .into_iter()
-                    .filter_map(|g| {
-                        Some((g.get("full_path")?.as_str()?.to_string(), g))
-                    })
+                    .filter_map(|g| Some((g.get("full_path")?.as_str()?.to_string(), g)))
                     .collect();
                 subs.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut projs: Vec<(String, Json)> = self
@@ -795,10 +806,8 @@ impl AstAdapter for GitlabAdapter {
                     _ => ('i', "issues"),
                 };
                 if sec == Sec::Pipelines {
-                    let Ok(d) = self.call(&format!(
-                        "projects/{}/pipelines/{num}",
-                        enc(&proj)
-                    )) else {
+                    let Ok(d) = self.call(&format!("projects/{}/pipelines/{num}", enc(&proj)))
+                    else {
                         return Vec::new();
                     };
                     return vec![self.push_node(
@@ -1195,7 +1204,10 @@ mod tests {
 
     #[test]
     fn paths_encode() {
-        assert_eq!(enc("tesslab/instruments/gauge"), "tesslab%2Finstruments%2Fgauge");
+        assert_eq!(
+            enc("tesslab/instruments/gauge"),
+            "tesslab%2Finstruments%2Fgauge"
+        );
     }
 
     #[test]

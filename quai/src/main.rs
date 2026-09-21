@@ -330,11 +330,16 @@ fn main() -> Result<()> {
         session.borrow_mut().seed_defs(&text)?;
     }
     let sources = if cli.paths.is_empty() {
-        "a bare root — calculator session; lines open with '= expr', :mount adds sources".to_string()
+        "a bare root — calculator session; lines open with '= expr', :mount adds sources"
+            .to_string()
     } else {
         cli.paths.join(", ")
     };
-    let mode = if cli.daemon { "daemon-backed" } else { "in-process" };
+    let mode = if cli.daemon {
+        "daemon-backed"
+    } else {
+        "in-process"
+    };
     println!(
         "quai — interactive Quarb over {sources} ({mode}).  :help for commands, :quit (or Ctrl-D) to leave."
     );
@@ -460,7 +465,9 @@ impl rustyline::completion::Completer for QuaiHelper {
         let head = &line[..pos.min(line.len())];
         let mut start = head
             .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
-            .map_or(0, |i| i + head[i..].chars().next().map_or(1, char::len_utf8));
+            .map_or(0, |i| {
+                i + head[i..].chars().next().map_or(1, char::len_utf8)
+            });
         // Register spellings carry their `$`; widen the span so the
         // typed sigil isn't doubled.
         if start > 0
@@ -575,7 +582,11 @@ fn follow_refs(
                 "note: {} external reference(s) not mounted: {}{} — {}",
                 refs.len(),
                 shown.join(", "),
-                if more > 0 { format!(" (+{more})") } else { String::new() },
+                if more > 0 {
+                    format!(" (+{more})")
+                } else {
+                    String::new()
+                },
                 if ctx.follow_depth == 0 {
                     ":follow on acquires and re-runs"
                 } else {
@@ -585,8 +596,8 @@ fn follow_refs(
             break;
         }
         rounds += 1;
-        let was_single_bare = ctx.web.is_empty()
-            && matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
+        let was_single_bare =
+            ctx.web.is_empty() && matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
         let single_stem = ctx.specs.first().and_then(|s| {
             s.name
                 .clone()
@@ -630,7 +641,9 @@ fn follow_refs(
             if let Some(stem) = single_stem {
                 let rebased = rebase(&q, &format!("/{stem}"));
                 if rebased != q {
-                    eprintln!("note: sources now mount as named children — re-running as: {rebased}");
+                    eprintln!(
+                        "note: sources now mount as named children — re-running as: {rebased}"
+                    );
                     q = rebased;
                 }
             }
@@ -721,8 +734,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  pinned at start; restart quai with the source added"
             ),
             Some(ctx) => {
-                let was_single =
-                    matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
+                let was_single = matches!(ctx.specs.as_slice(), [one] if one.name.is_none());
                 ctx.specs.push(MountSpec::parse(arg));
                 match local_executor(ctx) {
                     Ok(executor) => {

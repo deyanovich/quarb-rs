@@ -420,7 +420,10 @@ fn head_declarations_land_on_the_document() {
     // Sections are untouched: no page traits leak onto them.
     let section = m.children(root)[0];
     assert!(!m.traits(section).contains(&"tag:capsa".to_string()));
-    assert!(!traits.contains(&"capsa".to_string()), "tags are namespaced");
+    assert!(
+        !traits.contains(&"capsa".to_string()),
+        "tags are namespaced"
+    );
     // The prose is still the prose.
     assert_eq!(nodes_of(&m, "//section"), vec!["/section"]);
 }
@@ -466,20 +469,39 @@ fn links_narrow_as_far_as_html_allows() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         quarb::QueryResult::Nodes(_) => panic!("expected values"),
     };
-    assert_eq!(m.property(m.root(), "href"), Some(Value::Str("https://quarb.org/capsa.html".into())));
-    assert_eq!(vals("//section[::lemma = \"Marks\"]::href"), vec!["https://quarb.org/capsa.html#marks"]);
-    assert_eq!(vals("//section[::lemma = \"Marks\"]::anchor"), vec!["marks"]);
+    assert_eq!(
+        m.property(m.root(), "href"),
+        Some(Value::Str("https://quarb.org/capsa.html".into()))
+    );
+    assert_eq!(
+        vals("//section[::lemma = \"Marks\"]::href"),
+        vec!["https://quarb.org/capsa.html#marks"]
+    );
+    assert_eq!(
+        vals("//section[::lemma = \"Marks\"]::anchor"),
+        vec!["marks"]
+    );
     assert_eq!(
         vals("//paragraph[1]::href"),
-        vec!["https://quarb.org/capsa.html#marks:~:text=A%20mark%20is%20a%20pocketed%20reference,by%20position%2C%20the%20capsa%27s%20node%20store%2E"]
+        vec![
+            "https://quarb.org/capsa.html#marks:~:text=A%20mark%20is%20a%20pocketed%20reference,by%20position%2C%20the%20capsa%27s%20node%20store%2E"
+        ]
     );
-    assert_eq!(vals("//paragraph[2]::href"), vec!["https://quarb.org/capsa.html#marks:~:text=Short%20one%2E"]);
+    assert_eq!(
+        vals("//paragraph[2]::href"),
+        vec!["https://quarb.org/capsa.html#marks:~:text=Short%20one%2E"]
+    );
     assert_eq!(
         vals("//paragraph[2] | link"),
-        vec!["%(title = \"Capsa\"; href = \"https://quarb.org/capsa.html#marks:~:text=Short%20one%2E\"; text = \"Short one.\")"]
+        vec![
+            "%(title = \"Capsa\"; href = \"https://quarb.org/capsa.html#marks:~:text=Short%20one%2E\"; text = \"Short one.\")"
+        ]
     );
     // A projected topic still links the section it came from.
-    assert_eq!(vals("//section[::lemma = \"Marks\"]::lemma | link | :href"), vec!["https://quarb.org/capsa.html#marks"]);
+    assert_eq!(
+        vals("//section[::lemma = \"Marks\"]::lemma | link | :href"),
+        vec!["https://quarb.org/capsa.html#marks"]
+    );
     // No URL declared, no path given: nothing to link.
     let bare = quarb_text_html::parse("<h1>T</h1><p>x</p>");
     assert_eq!(bare.property(bare.root(), "href"), None);
@@ -487,13 +509,17 @@ fn links_narrow_as_far_as_html_allows() {
     let mut doc2 = quarb_text_html::parse("<h1>T</h1><h2 id=\"a\">A</h2><p>x</p>");
     doc2.set_document_path("/notes/page.html");
     assert_eq!(
-        quarb::run("//paragraph::href", &doc2).map(|r| format!("{r:?}")).unwrap(),
+        quarb::run("//paragraph::href", &doc2)
+            .map(|r| format!("{r:?}"))
+            .unwrap(),
         "Values([Str(\"/notes/page.html#a:~:text=x\")])"
     );
     let mut pdf = quarb_text_html::parse("<h1>T</h1><h2 id=\"a\">A</h2><p>x</p>");
     pdf.set_document_path("/notes/paper.pdf");
     assert_eq!(
-        quarb::run("//paragraph::href", &pdf).map(|r| format!("{r:?}")).unwrap(),
+        quarb::run("//paragraph::href", &pdf)
+            .map(|r| format!("{r:?}"))
+            .unwrap(),
         "Values([Str(\"/notes/paper.pdf\")])"
     );
 }

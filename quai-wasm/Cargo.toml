@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # The text-format subset only (no `native` feature): json/yaml/toml/
 # csv/xml/html/markdown, driven by Doc::parse. No daemon, no fs.
 quarb-session = { path = "../quarb-session", default-features = false, features = ["sqlite"] }
-quarb-model = { path = "../quarb-model", version = "0.29.0" }
+quarb-model = { path = "../quarb-model", version = "0.30.0" }
 quarb = { path = "../quarb" }
 # The web level over pages held in memory (a site loaded from its
 # sitemap by the browser extension): the memory store alone — no

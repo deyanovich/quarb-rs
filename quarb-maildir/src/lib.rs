@@ -298,15 +298,13 @@ impl AstAdapter for MaildirAdapter {
             "epoch" => parse_date(self.header(node, "date")?).map(Value::Int),
             // The Date header, minted as an instant (the written
             // offset preserved for display).
-            "date" => {
-                parse_date_full(self.header(node, "date")?).map(|(secs, offset_min)| {
-                    Value::Instant {
-                        secs,
-                        nanos: 0,
-                        offset_min: Some(offset_min),
-                    }
-                })
-            }
+            "date" => parse_date_full(self.header(node, "date")?).map(|(secs, offset_min)| {
+                Value::Instant {
+                    secs,
+                    nanos: 0,
+                    offset_min: Some(offset_min),
+                }
+            }),
             "n-headers" => Some(Value::Int(self.msg(node)?.headers.len() as i64)),
             _ => None,
         }

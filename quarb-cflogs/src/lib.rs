@@ -224,7 +224,9 @@ fn decode_rec(o: &Json) -> Option<Rec> {
         };
         if k == "EdgeStartTimestamp" {
             match &val {
-                Value::Instant { secs: s, nanos: n, .. } => {
+                Value::Instant {
+                    secs: s, nanos: n, ..
+                } => {
                     secs = *s;
                     nanos = *n;
                 }
@@ -238,7 +240,11 @@ fn decode_rec(o: &Json) -> Option<Rec> {
         }
         fields.push((k.clone(), val));
     }
-    Some(Rec { secs, nanos, fields })
+    Some(Rec {
+        secs,
+        nanos,
+        fields,
+    })
 }
 
 impl CflAdapter {
@@ -252,9 +258,7 @@ impl CflAdapter {
         let token = std::env::var("CLOUDFLARE_API_TOKEN")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                CflError::Api("no $CLOUDFLARE_API_TOKEN in the environment".into())
-            })?;
+            .ok_or_else(|| CflError::Api("no $CLOUDFLARE_API_TOKEN in the environment".into()))?;
         let base = endpoint.unwrap_or_else(|| "https://api.cloudflare.com".to_string());
         // Logpull refuses ranges that reach into the last minute.
         let until = t.until_secs.unwrap_or(now_secs - 65).min(now_secs - 65);
@@ -347,7 +351,11 @@ impl AstAdapter for CflAdapter {
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         match self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => self.nodes.borrow()[0].children.borrow().clone().unwrap_or_default(),
+            Kind::Root => self.nodes.borrow()[0]
+                .children
+                .borrow()
+                .clone()
+                .unwrap_or_default(),
             Kind::Entry(_) => Vec::new(),
         }
     }
@@ -456,7 +464,10 @@ mod tests {
 
     #[test]
     fn since_is_mandatory() {
-        assert!(matches!(parse_target("cfl:zone9", 1_000_000), Err(CflError::Target(_))));
+        assert!(matches!(
+            parse_target("cfl:zone9", 1_000_000),
+            Err(CflError::Target(_))
+        ));
         assert!(matches!(
             parse_target("cfl:zone9?limit=100", 1_000_000),
             Err(CflError::Target(_))
@@ -480,7 +491,10 @@ mod tests {
         );
         // Fields are properties; ::ray is the join key; the cache
         // status rides metadata.
-        assert_eq!(run("/entry[::EdgeResponseStatus = 500]::ray"), vec!["8a1b2c3d4e5f0001"]);
+        assert_eq!(
+            run("/entry[::EdgeResponseStatus = 500]::ray"),
+            vec!["8a1b2c3d4e5f0001"]
+        );
         assert_eq!(run("/entry[::::cache = 'hit'] @| count"), vec!["1"]);
         // The typed instant.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);

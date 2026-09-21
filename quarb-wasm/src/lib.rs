@@ -167,19 +167,27 @@ impl Site {
             .map(|(path, html)| {
                 let html = match html {
                     serde_json::Value::String(s) => Ok(s),
-                    _ => Err(JsError::new(&format!("page {path}: the value must be an HTML string"))),
+                    _ => Err(JsError::new(&format!(
+                        "page {path}: the value must be an HTML string"
+                    ))),
                 }?;
                 Ok(quarb_web::PageFile { path, html })
             })
             .collect::<Result<Vec<_>, JsError>>()?;
         let store = quarb_web::MemoryStore::build(
-            quarb_web::SiteInput { base_url: base_url.to_string(), snapshot: None },
+            quarb_web::SiteInput {
+                base_url: base_url.to_string(),
+                snapshot: None,
+            },
             files,
         );
         Self::over(quarb_web::WebAdapter::new(store), model)
     }
 
-    fn over(site: quarb_web::WebAdapter<quarb_web::MemoryStore>, model: &str) -> Result<Site, JsError> {
+    fn over(
+        site: quarb_web::WebAdapter<quarb_web::MemoryStore>,
+        model: &str,
+    ) -> Result<Site, JsError> {
         let model = quarb_model::parse_model(model)
             .map_err(|e| JsError::new(&format!("reading the model: {e}")))?;
         Ok(Site {

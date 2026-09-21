@@ -77,4 +77,3 @@ fn alias_statements_are_checked_at_parse_time() {
     assert!(parse_model("alias <chunk> block;").is_err());
     assert!(parse_model("alias <chunk> <block>;").is_ok());
 }
-

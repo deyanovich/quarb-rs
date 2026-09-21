@@ -554,9 +554,10 @@ pub fn quarb_key(k: &str) -> String {
     let position = k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit());
     let bare = position
         || !k.is_empty()
-        && k.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        && k.chars().all(|c| c.is_alphanumeric() || c == '_')
-        && !crate::parser::is_bool_word(k);
+            && k.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && k.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !crate::parser::is_bool_word(k);
     if bare { k.to_string() } else { quarb_string(k) }
 }
-

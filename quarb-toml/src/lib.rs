@@ -58,8 +58,7 @@ mod tests {
         // toml deserializes a datetime as a single-field struct; a
         // naive parse leaves `when` as an object hiding the private
         // key. After flattening it is the plain datetime string.
-        let mut v: serde_json::Value =
-            toml::from_str("when = 2026-07-14T10:00:00Z\n").unwrap();
+        let mut v: serde_json::Value = toml::from_str("when = 2026-07-14T10:00:00Z\n").unwrap();
         assert!(v["when"].is_object(), "precondition: raw datetime tunnel");
         flatten_datetimes(&mut v);
         assert_eq!(

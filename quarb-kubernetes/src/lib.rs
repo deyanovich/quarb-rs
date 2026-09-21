@@ -260,11 +260,18 @@ enum Kind {
     Root,
     /// A resource listing: at the root (cluster-scoped, or the
     /// all-namespaces view) or scoped under one namespace.
-    Listing { res: usize, ns: Option<String> },
+    Listing {
+        res: usize,
+        ns: Option<String>,
+    },
     /// An object; `key` indexes the objects table.
-    Object { key: String },
+    Object {
+        key: String,
+    },
     /// A field value inside an object.
-    Field { value: Field },
+    Field {
+        value: Field,
+    },
 }
 
 struct Node {
@@ -306,8 +313,7 @@ impl KubernetesAdapter {
             .or_else(|| target.strip_prefix("kubernetes:"))
             .ok_or_else(|| KubernetesError::Target(target.to_string()))?;
         let context = (!ctx.is_empty()).then(|| ctx.to_string());
-        let kubectl =
-            std::env::var("QUARB_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
+        let kubectl = std::env::var("QUARB_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
         let mut adapter = KubernetesAdapter {
             kubectl,
             context,
@@ -661,18 +667,16 @@ impl AstAdapter for KubernetesAdapter {
         match key {
             "path" => Some(Value::Str(self.locator(node))),
             "n-fields" => match &self.nodes.borrow()[node.0 as usize].kind {
-                Kind::Object { key } => {
-                    Some(Value::Int(self.object(key)?.fields.len() as i64))
-                }
+                Kind::Object { key } => Some(Value::Int(self.object(key)?.fields.len() as i64)),
                 _ => None,
             },
             "length" => match &self.nodes.borrow()[node.0 as usize].kind {
-                Kind::Field { value: Field::Array(items) } => {
-                    Some(Value::Int(items.len() as i64))
-                }
-                Kind::Field { value: Field::Map(entries) } => {
-                    Some(Value::Int(entries.len() as i64))
-                }
+                Kind::Field {
+                    value: Field::Array(items),
+                } => Some(Value::Int(items.len() as i64)),
+                Kind::Field {
+                    value: Field::Map(entries),
+                } => Some(Value::Int(entries.len() as i64)),
                 Kind::Field {
                     value: Field::Scalar(Value::Str(s)),
                 } => Some(Value::Int(s.chars().count() as i64)),
@@ -803,7 +807,10 @@ mod tests {
         assert_eq!(info.kind, "Pod"); // filled from the resource
         assert_eq!(info.phase.as_deref(), Some("Running"));
         assert_eq!(info.node_name.as_deref(), Some("worker-1"));
-        assert_eq!(info.owners, [("ReplicaSet".to_string(), "web-rs".to_string())]);
+        assert_eq!(
+            info.owners,
+            [("ReplicaSet".to_string(), "web-rs".to_string())]
+        );
         assert_eq!(info.labels, [("app".to_string(), "web".to_string())]);
         assert!(matches!(info.created, Some(Value::Instant { .. })));
     }

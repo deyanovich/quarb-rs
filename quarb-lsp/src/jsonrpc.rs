@@ -35,18 +35,22 @@ pub fn serve() -> Result<()> {
 
         match method {
             "initialize" => {
-                respond(&mut writer, id, json!({
-                    "capabilities": {
-                        "textDocumentSync": 1,
-                        "completionProvider": {
-                            "triggerCharacters": ["|", "/", ":", "$", "<", "-", "@"]
+                respond(
+                    &mut writer,
+                    id,
+                    json!({
+                        "capabilities": {
+                            "textDocumentSync": 1,
+                            "completionProvider": {
+                                "triggerCharacters": ["|", "/", ":", "$", "<", "-", "@"]
+                            }
+                        },
+                        "serverInfo": {
+                            "name": "quarb-lsp",
+                            "version": env!("CARGO_PKG_VERSION")
                         }
-                    },
-                    "serverInfo": {
-                        "name": "quarb-lsp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }))?;
+                    }),
+                )?;
             }
             "initialized" => {}
             "shutdown" => {
@@ -80,8 +84,7 @@ pub fn serve() -> Result<()> {
             "textDocument/completion" => {
                 let uri = str_at(&params, &["textDocument", "uri"]);
                 let line = params["position"]["line"].as_u64().unwrap_or(0) as u32;
-                let character =
-                    params["position"]["character"].as_u64().unwrap_or(0) as u32;
+                let character = params["position"]["character"].as_u64().unwrap_or(0) as u32;
                 let empty = String::new();
                 let text = docs.get(&uri).unwrap_or(&empty);
                 let items: Vec<Value> = core::completions(text, line, character)
@@ -133,8 +136,12 @@ fn publish(w: &mut impl Write, uri: &str, text: &str) -> Result<()> {
             })
         })
         .collect();
-    notify(w, "textDocument/publishDiagnostics", json!({
-        "uri": uri,
-        "diagnostics": diags
-    }))
+    notify(
+        w,
+        "textDocument/publishDiagnostics",
+        json!({
+            "uri": uri,
+            "diagnostics": diags
+        }),
+    )
 }

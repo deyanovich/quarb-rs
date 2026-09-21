@@ -202,10 +202,17 @@ impl ProvenanceList {
     /// entry.
     pub fn or(self, outer: Provenance) -> ProvenanceList {
         if self.entries.is_empty() {
-            return ProvenanceList { entries: ProvenanceList::single(outer).entries, elided: self.elided };
+            return ProvenanceList {
+                entries: ProvenanceList::single(outer).entries,
+                elided: self.elided,
+            };
         }
         ProvenanceList {
-            entries: self.entries.into_iter().map(|p| p.or(outer.clone())).collect(),
+            entries: self
+                .entries
+                .into_iter()
+                .map(|p| p.or(outer.clone()))
+                .collect(),
             elided: self.elided,
         }
     }

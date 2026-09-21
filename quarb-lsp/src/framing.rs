@@ -10,11 +10,14 @@ use serde_json::{Value, json};
 
 /// Reply to a request: `{jsonrpc, id, result}`.
 pub fn respond(w: &mut impl Write, id: Option<Value>, result: Value) -> Result<()> {
-    write_message(w, &json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "result": result
-    }))
+    write_message(
+        w,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "result": result
+        }),
+    )
 }
 
 /// Reply with a JSON-RPC error: `{jsonrpc, id, error}`.
@@ -24,20 +27,26 @@ pub fn respond_error(
     code: i64,
     message: &str,
 ) -> Result<()> {
-    write_message(w, &json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "error": {"code": code, "message": message}
-    }))
+    write_message(
+        w,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {"code": code, "message": message}
+        }),
+    )
 }
 
 /// Send a server-initiated notification: `{jsonrpc, method, params}`.
 pub fn notify(w: &mut impl Write, method: &str, params: Value) -> Result<()> {
-    write_message(w, &json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params
-    }))
+    write_message(
+        w,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }),
+    )
 }
 
 pub fn write_message(w: &mut impl Write, v: &Value) -> Result<()> {

@@ -8,8 +8,7 @@
 use crate::adapter::{AstAdapter, InstantFrom, NodeId, Provenance, ProvenanceList};
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem,
-    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
+    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::stdlib;
 use crate::value::Value;
@@ -32,7 +31,10 @@ pub struct Origin {
 
 impl Default for Origin {
     fn default() -> Self {
-        Origin { node: NodeId(0), stage: 0 }
+        Origin {
+            node: NodeId(0),
+            stage: 0,
+        }
     }
 }
 
@@ -51,7 +53,10 @@ pub struct Origins {
 
 impl Origins {
     pub fn at(node: NodeId, stage: u32) -> Origins {
-        Origins { known: vec![Origin { node, stage }], more: 0 }
+        Origins {
+            known: vec![Origin { node, stage }],
+            more: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -94,11 +99,17 @@ pub struct Prov {
 
 impl Prov {
     pub fn at(node: NodeId, stage: u32) -> Prov {
-        Prov { origins: Origins::at(node, stage), parts: Vec::new() }
+        Prov {
+            origins: Origins::at(node, stage),
+            parts: Vec::new(),
+        }
     }
 
     pub fn leaf(origins: Origins) -> Prov {
-        Prov { origins, parts: Vec::new() }
+        Prov {
+            origins,
+            parts: Vec::new(),
+        }
     }
 
     /// A record's provenance: the union of its parts' origins.
@@ -112,7 +123,13 @@ impl Prov {
 
     /// A list's provenance: parts keyed by decimal index.
     pub fn list(items: Vec<Prov>) -> Prov {
-        Prov::record(items.into_iter().enumerate().map(|(i, p)| (i.to_string(), p)).collect())
+        Prov::record(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (i.to_string(), p))
+                .collect(),
+        )
     }
 
     /// The named part, else the whole (a value read as one).
@@ -147,7 +164,7 @@ pub struct Traced {
 /// One entry in a capsa's register: the value, where it was read
 /// (`prov`), and where it was pushed (`site`).
 #[derive(Clone)]
-struct Reg {
+pub(crate) struct Reg {
     name: Option<String>,
     value: Value,
     prov: Prov,
@@ -166,7 +183,7 @@ struct Reg {
 /// both are references layered over the indices — and node
 /// identity never enters the value space.
 #[derive(Clone, PartialEq)]
-struct Mark {
+pub(crate) struct Mark {
     name: Option<String>,
     node: NodeId,
 }
@@ -211,7 +228,10 @@ fn anchor_nodes(
             for v in &vs {
                 collect(v, &mut ids);
             }
-            dedup(ids).into_iter().filter(|&n| adapter.has_node(n)).collect()
+            dedup(ids)
+                .into_iter()
+                .filter(|&n| adapter.has_node(n))
+                .collect()
         }
         Anchor::Mark(m) => marks
             .iter()
@@ -220,9 +240,7 @@ fn anchor_nodes(
             .map(|k| k.node)
             .into_iter()
             .collect(),
-        Anchor::MarkIndex(n) => {
-            marks.get(n - 1).map(|k| k.node).into_iter().collect()
-        }
+        Anchor::MarkIndex(n) => marks.get(n - 1).map(|k| k.node).into_iter().collect(),
         Anchor::MarkTop => marks.last().map(|k| k.node).into_iter().collect(),
         Anchor::MarksAll => marks.iter().map(|k| k.node).collect(),
         Anchor::MarksNamed(m) => marks
@@ -237,10 +255,10 @@ fn anchor_nodes(
 /// current topic (the scalar being worked on, once a projection has
 /// run).
 #[derive(Clone)]
-struct Capsa {
-    node: NodeId,
-    register: Vec<Reg>,
-    topic: Option<Value>,
+pub(crate) struct Capsa {
+    pub(crate) node: NodeId,
+    pub(crate) register: Vec<Reg>,
+    pub(crate) topic: Option<Value>,
     /// Where the topic's value was read (per field for a record).
     prov: Prov,
     /// A group's member capsae (empty everywhere else). Carried by
@@ -264,6 +282,25 @@ struct Capsa {
     arrived: Vec<EdgeCtx>,
 }
 
+impl Capsa {
+    /// A bare capsa standing at `node` with `topic` — what the
+    /// tracer hands a pipeline stage when it replays one thread.
+    pub(crate) fn bare(node: NodeId, topic: Option<Value>) -> Capsa {
+        Capsa {
+            node,
+            register: Vec::new(),
+            topic,
+            prov: Prov::default(),
+            members: Vec::new(),
+            captures: Vec::new(),
+            named: Vec::new(),
+            marks: Vec::new(),
+            bindings: Vec::new(),
+            arrived: Vec::new(),
+        }
+    }
+}
+
 /// The edge the current thread most recently walked — the `$-`
 /// operand's referent, defined after every hop (a hop walks a
 /// labeled edge; the tree is the distinguished subset). Crosslink
@@ -274,9 +311,9 @@ struct Capsa {
 /// collide with adapter labels.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct EdgeCtx {
-    source: NodeId,
-    label: String,
-    target: NodeId,
+    pub(crate) source: NodeId,
+    pub(crate) label: String,
+    pub(crate) target: NodeId,
 }
 
 /// The engine-reserved structural edge labels.
@@ -296,7 +333,10 @@ struct Peers {
 
 impl Peers {
     fn new(caps: Vec<Capsa>) -> Peers {
-        Peers { caps, by_node: std::cell::OnceCell::new() }
+        Peers {
+            caps,
+            by_node: std::cell::OnceCell::new(),
+        }
     }
 
     /// The peers standing at `node`, in context order.
@@ -316,7 +356,7 @@ impl Peers {
 /// `$.name` recalls) and the topic (`$_`). Empty where no capsa
 /// exists yet (navigation predicates).
 #[derive(Clone, Copy)]
-struct Scope<'a> {
+pub(crate) struct Scope<'a> {
     register: &'a [Reg],
     topic: Option<&'a Value>,
     /// The topic's provenance, where the scope belongs to a capsa.
@@ -382,7 +422,7 @@ pub enum QueryResult {
 /// of bound nodes that satisfied it (the *witness*), which the
 /// pipeline's `$*k` operands read back.
 #[derive(Default)]
-struct Correlation {
+pub(crate) struct Correlation {
     /// Per-context outer flags (`<=>?`): an outer context may bind
     /// null when no real tuple admits a row.
     outer: Vec<bool>,
@@ -390,7 +430,7 @@ struct Correlation {
     witnesses: std::cell::RefCell<std::collections::HashMap<u64, Vec<Option<NodeId>>>>,
 }
 
-type Trace = Correlation;
+pub(crate) type Trace = Correlation;
 
 thread_local! {
     /// The first execution refusal recorded during an eval.
@@ -453,7 +493,10 @@ fn discard<T>(f: impl FnOnce() -> T) -> T {
 fn note(node: NodeId) {
     READS.with(|r| {
         if let Some(top) = r.borrow_mut().last_mut() {
-            top.insert(Origin { node, stage: STAGE.with(|s| s.get()) });
+            top.insert(Origin {
+                node,
+                stage: STAGE.with(|s| s.get()),
+            });
         }
     });
 }
@@ -472,7 +515,9 @@ fn stage_now() -> u32 {
 }
 
 fn record_ref(id: String) {
-    REFS.with(|n| { n.borrow_mut().insert(id); });
+    REFS.with(|n| {
+        n.borrow_mut().insert(id);
+    });
 }
 
 fn ref_target(id: &str) -> Option<NodeId> {
@@ -662,7 +707,11 @@ pub fn eval_traced_prov(query: &Query, adapter: &impl AstAdapter) -> Vec<Traced>
             } else {
                 c.topic
             };
-            Traced { node: c.node, topic, prov: c.prov }
+            Traced {
+                node: c.node,
+                topic,
+                prov: c.prov,
+            }
         })
         .collect()
 }
@@ -701,7 +750,7 @@ fn eval_query_outer(
 
 /// [`eval_query`]'s capsa-level form: the final capsae plus the
 /// static value-vs-node typing, before reduction to a result.
-fn eval_query_caps(
+pub(crate) fn eval_query_caps(
     query: &Query,
     adapter: &impl AstAdapter,
     start: NodeId,
@@ -978,33 +1027,44 @@ fn union_branches(
             ..outer.copied().unwrap_or(NO_SCOPE)
         };
         for from in anchor_nodes(adapter, &branch.anchor, start, trace, &[], anchor_scope) {
-        for (node, register, marks, arrived) in
-            navigate_paths(&branch.steps, adapter, from, trace, outer, &[], seed, seed_register)
-        {
-            caps.push(Capsa {
-                prov: if branch.projection.is_some() { Prov::at(node, stage_now()) } else { Prov::default() },
-                node,
-                arrived,
-                marks,
-                // A pattern that pushed hands its breadcrumbs to the
-                // result capsa; plain navigation hands an empty
-                // register, exactly as before.
-                register,
-                topic: branch
-                    .projection
-                    .as_ref()
-                    .map(|p| project(adapter, node, p)),
-                members: Vec::new(),
-                captures: outer.map(|s| s.captures.to_vec()).unwrap_or_default(),
-                named: outer.map(|s| s.named.to_vec()).unwrap_or_default(),
-                bindings: trace
-                    .witnesses
-                    .borrow()
-                    .get(&node.0)
-                    .cloned()
-                    .unwrap_or_default(),
-            });
-        }
+            for (node, register, marks, arrived) in navigate_paths(
+                &branch.steps,
+                adapter,
+                from,
+                trace,
+                outer,
+                &[],
+                seed,
+                seed_register,
+            ) {
+                caps.push(Capsa {
+                    prov: if branch.projection.is_some() {
+                        Prov::at(node, stage_now())
+                    } else {
+                        Prov::default()
+                    },
+                    node,
+                    arrived,
+                    marks,
+                    // A pattern that pushed hands its breadcrumbs to the
+                    // result capsa; plain navigation hands an empty
+                    // register, exactly as before.
+                    register,
+                    topic: branch
+                        .projection
+                        .as_ref()
+                        .map(|p| project(adapter, node, p)),
+                    members: Vec::new(),
+                    captures: outer.map(|s| s.captures.to_vec()).unwrap_or_default(),
+                    named: outer.map(|s| s.named.to_vec()).unwrap_or_default(),
+                    bindings: trace
+                        .witnesses
+                        .borrow()
+                        .get(&node.0)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
         }
     }
     // Dedup by (node, register): per-path results — the same node
@@ -1106,10 +1166,12 @@ fn stage_reads_context(stage: &Stage) -> bool {
         Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => op(e),
         Stage::Filter(e) => pred(e),
         Stage::Select(Predicate::Expr(e)) => pred(e),
-        Stage::Func(call) | Stage::Agg(call) | Stage::RecordPush { call, .. } => call.args.iter().any(|a| match a {
-            Arg::Expr(e) => op(e),
-            _ => false,
-        }),
+        Stage::Func(call) | Stage::Agg(call) | Stage::RecordPush { call, .. } => {
+            call.args.iter().any(|a| match a {
+                Arg::Expr(e) => op(e),
+                _ => false,
+            })
+        }
         _ => false,
     }
 }
@@ -1130,7 +1192,7 @@ fn to_result(caps: Vec<Capsa>, projected: bool) -> QueryResult {
 }
 
 /// Apply one pipeline stage to the capsa context.
-fn apply_stage(
+pub(crate) fn apply_stage(
     stage: &Stage,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -1160,21 +1222,16 @@ fn apply_stage(
         // quotes, lists, verbatim — whatever vocabulary the
         // adapter speaks); a topic value renders as text. The
         // export button and the pipe are the same verb.
-        Stage::Func(call)
-            if matches!(call.name.as_str(), "markdown" | "html" | "atrep") =>
-        {
+        Stage::Func(call) if matches!(call.name.as_str(), "markdown" | "html" | "atrep") => {
             let kind = crate::koine::Render::from_name(&call.name)
                 .expect("stage names are valid render names");
             caps.into_iter()
                 .map(|mut c| {
                     let v = match &c.topic {
-                        Some(t) => Value::Str(crate::koine::render_values(
-                            std::slice::from_ref(t),
-                            kind,
-                        )),
-                        None => {
-                            Value::Str(crate::koine::render_node(adapter, c.node, kind))
+                        Some(t) => {
+                            Value::Str(crate::koine::render_values(std::slice::from_ref(t), kind))
                         }
+                        None => Value::Str(crate::koine::render_node(adapter, c.node, kind)),
                     };
                     c.prov = effective_prov(&c);
                     c.topic = Some(v);
@@ -1215,9 +1272,9 @@ fn apply_stage(
             .map(|mut c| {
                 let doc = match &c.topic {
                     Some(t) => crate::kaiv_out::document(std::slice::from_ref(t)),
-                    None => crate::kaiv_out::document(std::slice::from_ref(
-                        &node_to_json(adapter, c.node),
-                    )),
+                    None => crate::kaiv_out::document(std::slice::from_ref(&node_to_json(
+                        adapter, c.node,
+                    ))),
                 };
                 c.prov = effective_prov(&c);
                 c.topic = Some(Value::Str(doc.unwrap_or_else(|e| e)));
@@ -1259,11 +1316,15 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let (cmd, o) = capture(|| call.args.first().map(|a| match a {
-                    Arg::Lit(v) => v.to_string(),
-                    Arg::Expr(e) => operand_scalar(adapter, c.node, e, trace, scope).to_string(),
-                    Arg::Range(..) => String::new(),
-                }));
+                let (cmd, o) = capture(|| {
+                    call.args.first().map(|a| match a {
+                        Arg::Lit(v) => v.to_string(),
+                        Arg::Expr(e) => {
+                            operand_scalar(adapter, c.node, e, trace, scope).to_string()
+                        }
+                        Arg::Range(..) => String::new(),
+                    })
+                });
                 c.topic = Some(match cmd {
                     Some(cmd) if !cmd.is_empty() => {
                         run_shell(&cmd, c.topic.as_ref()).unwrap_or(Value::Null)
@@ -1287,34 +1348,36 @@ fn apply_stage(
             .map(|mut c| {
                 let topic = c.topic.take().unwrap_or(Value::Null);
                 let taken = matches!(topic, Value::Null);
-                let (v, o) = capture(|| if taken {
-                    match call.args.first() {
-                        Some(Arg::Lit(v)) => v.clone(),
-                        Some(Arg::Expr(e)) => operand_scalar(
-                            adapter,
-                            c.node,
-                            e,
-                            trace,
-                            Scope {
-                                prov: None,
-                                node: Some(c.node),
-                                register: &c.register,
-                                topic: None,
-                                ordinal: None,
-                                captures: &c.captures,
-                    named: &c.named,
-                                marks: &c.marks,
-                                bindings: &c.bindings,
-                                edge: None,
-                                arrived: &c.arrived,
-                                peers,
-                                outer,
-                            },
-                        ),
-                        _ => Value::Null,
+                let (v, o) = capture(|| {
+                    if taken {
+                        match call.args.first() {
+                            Some(Arg::Lit(v)) => v.clone(),
+                            Some(Arg::Expr(e)) => operand_scalar(
+                                adapter,
+                                c.node,
+                                e,
+                                trace,
+                                Scope {
+                                    prov: None,
+                                    node: Some(c.node),
+                                    register: &c.register,
+                                    topic: None,
+                                    ordinal: None,
+                                    captures: &c.captures,
+                                    named: &c.named,
+                                    marks: &c.marks,
+                                    bindings: &c.bindings,
+                                    edge: None,
+                                    arrived: &c.arrived,
+                                    peers,
+                                    outer,
+                                },
+                            ),
+                            _ => Value::Null,
+                        }
+                    } else {
+                        topic
                     }
-                } else {
-                    topic
                 });
                 c.prov = if taken { Prov::leaf(o) } else { c.prov.flat() };
                 c.topic = Some(v);
@@ -1343,7 +1406,9 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                let (fields, prov) = split_fields(record_fields_prov(&call.args, adapter, c.node, trace, scope));
+                let (fields, prov) = split_fields(record_fields_prov(
+                    &call.args, adapter, c.node, trace, scope,
+                ));
                 c.topic = Some(Value::Record(fields));
                 c.prov = prov;
                 c
@@ -1374,7 +1439,9 @@ fn apply_stage(
                 };
                 let mut fields = named_register_fields(&c.register);
                 let mut parts = named_register_parts(&c.register);
-                for (name, value, p) in record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                for (name, value, p) in
+                    record_fields_prov(&call.args, adapter, c.node, trace, scope)
+                {
                     match fields.iter_mut().find(|(n, _)| n == &name) {
                         Some((_, v)) => *v = value,
                         None => fields.push((name.clone(), value)),
@@ -1478,7 +1545,11 @@ fn apply_stage(
         // round's values); exactly N rounds for `{N}`, else at least
         // `min` and on until a round repoints no name and changes
         // no topic, or `max` (the quantifier bound when open).
-        Stage::Repeat { stage: inner, min, max } => {
+        Stage::Repeat {
+            stage: inner,
+            min,
+            max,
+        } => {
             let mut caps = caps;
             let limit = max.unwrap_or_else(|| adapter.quantifier_bound());
             let exact = *max == Some(*min);
@@ -1489,7 +1560,11 @@ fn apply_stage(
             };
             let mut round = 0;
             while round < limit {
-                let before = if exact || round < *min { None } else { Some(signature(&caps)) };
+                let before = if exact || round < *min {
+                    None
+                } else {
+                    Some(signature(&caps))
+                };
                 caps = apply_stage(inner, caps, adapter, trace, outer);
                 round += 1;
                 if let Some(b) = before
@@ -1512,7 +1587,15 @@ fn apply_stage(
                     }
                     Some(other) => (vec![other], false),
                 };
-                let provs: Vec<Prov> = (0..items.len()).map(|i| if was_list { c.prov.item(i) } else { c.prov.clone() }).collect();
+                let provs: Vec<Prov> = (0..items.len())
+                    .map(|i| {
+                        if was_list {
+                            c.prov.item(i)
+                        } else {
+                            c.prov.clone()
+                        }
+                    })
+                    .collect();
                 let pseudo: Vec<Capsa> = items
                     .into_iter()
                     .zip(provs)
@@ -1529,10 +1612,11 @@ fn apply_stage(
                         arrived: c.arrived.clone(),
                     })
                     .collect();
-                let (mut out, mut provs): (Vec<Value>, Vec<Prov>) = apply_stage(inner, pseudo, adapter, trace, outer)
-                    .into_iter()
-                    .map(|p| (p.topic.unwrap_or(Value::Null), p.prov))
-                    .unzip();
+                let (mut out, mut provs): (Vec<Value>, Vec<Prov>) =
+                    apply_stage(inner, pseudo, adapter, trace, outer)
+                        .into_iter()
+                        .map(|p| (p.topic.unwrap_or(Value::Null), p.prov))
+                        .unzip();
                 if was_list || out.len() != 1 {
                     c.prov = Prov::list(provs);
                     c.topic = Some(Value::List(out));
@@ -1561,7 +1645,15 @@ fn apply_stage(
                 if *outer && values.is_empty() {
                     values.push(Value::Null);
                 }
-                let provs: Vec<Prov> = (0..values.len()).map(|i| if was_list { c.prov.item(i) } else { c.prov.clone() }).collect();
+                let provs: Vec<Prov> = (0..values.len())
+                    .map(|i| {
+                        if was_list {
+                            c.prov.item(i)
+                        } else {
+                            c.prov.clone()
+                        }
+                    })
+                    .collect();
                 values.into_iter().zip(provs).map(move |(v, prov)| Capsa {
                     prov,
                     node: c.node,
@@ -1569,7 +1661,7 @@ fn apply_stage(
                     topic: Some(v),
                     members: Vec::new(),
                     captures: c.captures.clone(),
-                        named: c.named.clone(),
+                    named: c.named.clone(),
                     marks: c.marks.clone(),
                     bindings: c.bindings.clone(),
                     arrived: c.arrived.clone(),
@@ -1606,38 +1698,41 @@ fn apply_stage(
                     peers,
                     outer,
                 };
-                for from in
-                    anchor_nodes(adapter, &branch.anchor, c.node, trace, &[], anchor_scope)
+                for from in anchor_nodes(adapter, &branch.anchor, c.node, trace, &[], anchor_scope)
                 {
-                for (node, register, marks, arrived) in navigate_paths(
-                    &branch.steps,
-                    adapter,
-                    from,
-                    trace,
-                    outer,
-                    // The thread's witness travels with the hop, so
-                    // step predicates on the way read `$*k` per
-                    // thread (the results carry it on, below).
-                    &c.bindings,
-                    &c.marks,
-                    &c.register,
-                ) {
-                    out.push(Capsa {
-                        prov: if branch.projection.is_some() { Prov::at(node, stage_now()) } else { Prov::default() },
-                        node,
-                        register,
-                        marks,
-                        arrived,
-                        topic: branch
-                            .projection
-                            .as_ref()
-                            .map(|p| project(adapter, node, p)),
-                        members: Vec::new(),
-                        captures: c.captures.clone(),
-                        named: c.named.clone(),
-                        bindings: c.bindings.clone(),
-                    });
-                }
+                    for (node, register, marks, arrived) in navigate_paths(
+                        &branch.steps,
+                        adapter,
+                        from,
+                        trace,
+                        outer,
+                        // The thread's witness travels with the hop, so
+                        // step predicates on the way read `$*k` per
+                        // thread (the results carry it on, below).
+                        &c.bindings,
+                        &c.marks,
+                        &c.register,
+                    ) {
+                        out.push(Capsa {
+                            prov: if branch.projection.is_some() {
+                                Prov::at(node, stage_now())
+                            } else {
+                                Prov::default()
+                            },
+                            node,
+                            register,
+                            marks,
+                            arrived,
+                            topic: branch
+                                .projection
+                                .as_ref()
+                                .map(|p| project(adapter, node, p)),
+                            members: Vec::new(),
+                            captures: c.captures.clone(),
+                            named: c.named.clone(),
+                            bindings: c.bindings.clone(),
+                        });
+                    }
                 }
             }
             dedup_merge(out)
@@ -1657,7 +1752,10 @@ fn apply_stage(
                     }),
                     Some(topic) => c.register.push(Reg {
                         prov: c.prov.clone(),
-                        site: Origin { node: c.node, stage: stage_now() },
+                        site: Origin {
+                            node: c.node,
+                            stage: stage_now(),
+                        },
                         name: name.clone(),
                         value: topic,
                     }),
@@ -1692,7 +1790,10 @@ fn apply_stage(
                 let (value, prov) = subcontext_traced(body, adapter, c.node, trace, Some(&scope));
                 c.register.push(Reg {
                     prov: prov.clone(),
-                    site: Origin { node: c.node, stage: stage_now() },
+                    site: Origin {
+                        node: c.node,
+                        stage: stage_now(),
+                    },
                     name: name.clone(),
                     value: value.clone(),
                 });
@@ -1754,7 +1855,10 @@ fn apply_stage(
                 c.prov = Prov::leaf(o);
                 c.register.push(Reg {
                     prov: c.prov.clone(),
-                    site: Origin { node: c.node, stage: stage_now() },
+                    site: Origin {
+                        node: c.node,
+                        stage: stage_now(),
+                    },
                     name: name.clone(),
                     value: value.clone(),
                 });
@@ -1776,7 +1880,10 @@ fn apply_stage(
                     for (k, v) in fields.clone() {
                         c.register.push(Reg {
                             prov: c.prov.part(&k),
-                            site: Origin { node: c.node, stage: stage_now() },
+                            site: Origin {
+                                node: c.node,
+                                stage: stage_now(),
+                            },
                             name: Some(k),
                             value: v,
                         });
@@ -1814,7 +1921,9 @@ fn apply_stage(
                 let (fields, prov) = if *enriched {
                     let mut fields = named_register_fields(&c.register);
                     let mut parts = named_register_parts(&c.register);
-                    for (name, value, p) in record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                    for (name, value, p) in
+                        record_fields_prov(&call.args, adapter, c.node, trace, scope)
+                    {
                         match fields.iter_mut().find(|(n, _)| n == &name) {
                             Some((_, v)) => *v = value,
                             None => fields.push((name.clone(), value)),
@@ -1826,12 +1935,17 @@ fn apply_stage(
                     }
                     (fields, Prov::record(parts))
                 } else {
-                    split_fields(record_fields_prov(&call.args, adapter, c.node, trace, scope))
+                    split_fields(record_fields_prov(
+                        &call.args, adapter, c.node, trace, scope,
+                    ))
                 };
                 let value = Value::Record(fields);
                 c.register.push(Reg {
                     prov: prov.clone(),
-                    site: Origin { node: c.node, stage: stage_now() },
+                    site: Origin {
+                        node: c.node,
+                        stage: stage_now(),
+                    },
                     name: name.clone(),
                     value: value.clone(),
                 });
@@ -2027,7 +2141,10 @@ fn apply_stage(
             for c in &caps {
                 match &c.topic {
                     Some(_) => origins.union(&c.prov.origins),
-                    None => origins.insert(Origin { node: c.node, stage: stage_now() }),
+                    None => origins.insert(Origin {
+                        node: c.node,
+                        stage: stage_now(),
+                    }),
                 }
             }
             let node = caps.first().map_or(adapter.root(), |c| c.node);
@@ -2046,7 +2163,10 @@ fn apply_stage(
                         Some(_) => c.prov.origins.clone(),
                         None => {
                             let mut o = Origins::default();
-                            o.insert(Origin { node: c.node, stage: stage_now() });
+                            o.insert(Origin {
+                                node: c.node,
+                                stage: stage_now(),
+                            });
                             o
                         }
                     })
@@ -2070,7 +2190,7 @@ fn apply_stage(
                     topic: Some(v),
                     members: Vec::new(),
                     captures: Vec::new(),
-                named: Vec::new(),
+                    named: Vec::new(),
                     marks: Vec::new(),
                     bindings: Vec::new(),
                     arrived: Vec::new(),
@@ -2125,7 +2245,7 @@ fn keyed_agg(
                         topic: c.topic.as_ref(),
                         ordinal: Some(i + 1),
                         captures: &c.captures,
-                    named: &c.named,
+                        named: &c.named,
                         marks: &c.marks,
                         bindings: &c.bindings,
                         edge: None,
@@ -2168,7 +2288,7 @@ fn keyed_agg(
                 topic: c.topic.as_ref(),
                 ordinal: Some(i + 1),
                 captures: &c.captures,
-                    named: &c.named,
+                named: &c.named,
                 marks: &c.marks,
                 bindings: &c.bindings,
                 edge: None,
@@ -2205,15 +2325,23 @@ fn keyed_agg(
                     .into_iter()
                     .map(|(name, value, prov)| Reg {
                         prov,
-                        site: Origin { node, stage: stage_now() },
+                        site: Origin {
+                            node,
+                            stage: stage_now(),
+                        },
                         name: Some(name),
                         value,
                     })
                     .collect();
-                let prov = Prov::list(members.iter().map(|m| match &m.topic {
-                    Some(_) => m.prov.clone(),
-                    None => Prov::at(m.node, stage_now()),
-                }).collect());
+                let prov = Prov::list(
+                    members
+                        .iter()
+                        .map(|m| match &m.topic {
+                            Some(_) => m.prov.clone(),
+                            None => Prov::at(m.node, stage_now()),
+                        })
+                        .collect(),
+                );
                 let topics: Vec<Value> = members
                     .iter()
                     .map(|m| {
@@ -2229,7 +2357,7 @@ fn keyed_agg(
                     topic: Some(Value::List(topics)),
                     members,
                     captures: Vec::new(),
-                named: Vec::new(),
+                    named: Vec::new(),
                     marks: Vec::new(),
                     bindings: Vec::new(),
                     arrived: Vec::new(),
@@ -2342,7 +2470,7 @@ fn peer_lists(
             topic: c.topic.as_ref(),
             ordinal: Some(i + 1),
             captures: &c.captures,
-                    named: &c.named,
+            named: &c.named,
             marks: &c.marks,
             bindings: &c.bindings,
             edge: None,
@@ -2491,8 +2619,6 @@ fn shift_stage(
         .collect()
 }
 
-
-
 /// Record-convention arguments with each field's provenance: every
 /// field expression is evaluated under its own read frame.
 fn record_fields_prov(
@@ -2509,7 +2635,8 @@ fn record_fields_prov(
             Arg::Lit(Value::Str(name)) => {
                 let (value, prov) = match args.next() {
                     Some(Arg::Expr(e)) => {
-                        let (v, o) = capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
+                        let (v, o) =
+                            capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
                         (v, Prov::leaf(o))
                     }
                     Some(Arg::Lit(v)) => (v.clone(), Prov::default()),
@@ -2518,7 +2645,9 @@ fn record_fields_prov(
                 fields.push((name.clone(), value, prov));
             }
             Arg::Expr(e) => {
-                let name = crate::ast::auto_field_name(e).unwrap_or_default().to_string();
+                let name = crate::ast::auto_field_name(e)
+                    .unwrap_or_default()
+                    .to_string();
                 let (v, o) = capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
                 fields.push((name, v, Prov::leaf(o)));
             }
@@ -2540,7 +2669,6 @@ fn split_fields(fields: Vec<(String, Value, Prov)>) -> (Vec<(String, Value)>, Pr
     }
     (vs, Prov::record(ps))
 }
-
 
 /// [`subcontext_scalar`] with the reduced value's provenance: one
 /// value's own, several as a list, a node result the nodes'.
@@ -2568,7 +2696,10 @@ fn subcontext_traced(
     } else {
         let mut o = Origins::default();
         for c in &caps {
-            o.insert(Origin { node: c.node, stage: stage_now() });
+            o.insert(Origin {
+                node: c.node,
+                stage: stage_now(),
+            });
         }
         (Value::Int(caps.len() as i64), Prov::leaf(o))
     }
@@ -3071,7 +3202,7 @@ fn reg_key(register: &[Reg]) -> RegKey {
 /// node — the plain semantics, unchanged. `witness` is the invoking
 /// thread's correlation tuple (empty where there is none): step
 /// predicates and pattern guards along the way read `$*k` under it.
-fn navigate_paths(
+pub(crate) fn navigate_paths(
     elems: &[PathElem],
     adapter: &impl AstAdapter,
     start: NodeId,
@@ -3081,8 +3212,12 @@ fn navigate_paths(
     seed_marks: &[Mark],
     seed_register: &[Reg],
 ) -> Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> {
-    let mut ctx: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> =
-        vec![(start, seed_register.to_vec(), seed_marks.to_vec(), Vec::new())];
+    let mut ctx: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> = vec![(
+        start,
+        seed_register.to_vec(),
+        seed_marks.to_vec(),
+        Vec::new(),
+    )];
     for elem in elems {
         // A mark is not a hop: label the current node in place and
         // keep the crossing record intact.
@@ -3140,8 +3275,14 @@ fn navigate_paths(
         // the collapsed duplicates — a node reached three ways keeps
         // one entry whose `@-` has three elements.
         let mut merged: Vec<(NodeId, Vec<Reg>, Vec<Mark>, Vec<EdgeCtx>)> = Vec::new();
-        let mut index: HashMap<(NodeId, Vec<(Option<String>, String)>, Vec<(Option<String>, u64)>), usize> =
-            HashMap::new();
+        let mut index: HashMap<
+            (
+                NodeId,
+                Vec<(Option<String>, String)>,
+                Vec<(Option<String>, u64)>,
+            ),
+            usize,
+        > = HashMap::new();
         for (n, r, m, arrived) in next {
             match index.entry((n, reg_key(&r), mark_key(&m))) {
                 std::collections::hash_map::Entry::Occupied(e) => {
@@ -3189,7 +3330,14 @@ fn navigate_from(
 ) -> Vec<NodeId> {
     dedup(
         navigate_paths(
-            elems, adapter, start, trace, outer, witness, seed_marks, &[],
+            elems,
+            adapter,
+            start,
+            trace,
+            outer,
+            witness,
+            seed_marks,
+            &[],
         )
         .into_iter()
         .map(|(n, _, _, _)| n)
@@ -3631,14 +3779,19 @@ fn expand_elems(
                             subcontext_traced(q, adapter, path.node, trace, Some(&scope))
                         }
                         PushBody::Expr(e) => {
-                            let (v, o) = capture(|| operand_scalar_bound(adapter, path.node, e, trace, witness, scope));
+                            let (v, o) = capture(|| {
+                                operand_scalar_bound(adapter, path.node, e, trace, witness, scope)
+                            });
                             (v, Prov::leaf(o))
                         }
                     };
                     let mut p = path.clone();
                     p.register.push(Reg {
                         prov,
-                        site: Origin { node: path.node, stage: stage_now() },
+                        site: Origin {
+                            node: path.node,
+                            stage: stage_now(),
+                        },
                         name: name.clone(),
                         value,
                     });
@@ -3680,7 +3833,7 @@ fn dedup_paths(paths: Vec<GPath>) -> Vec<GPath> {
 }
 
 /// Project one node to a scalar value.
-fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection) -> Value {
+pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection) -> Value {
     match proj {
         Projection::Property(Some(name)) => property_or_alias(adapter, node, name),
         Projection::Property(None) => adapter.default_value(node).unwrap_or(Value::Null),
@@ -3740,7 +3893,10 @@ pub fn resolved_provenance<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) ->
             e.path = Some(path.get_or_insert_with(|| name_path(adapter, node)).clone());
         }
         if reproducible {
-            if matches!(e.instant_from, Some(InstantFrom::Source | InstantFrom::Access)) {
+            if matches!(
+                e.instant_from,
+                Some(InstantFrom::Source | InstantFrom::Access)
+            ) {
                 e.instant = None;
                 e.instant_from = None;
             }
@@ -3763,15 +3919,34 @@ pub fn resolved_provenance<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) ->
 fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Value> {
     let (entries, elided) = origin_entries(adapter, o);
     match key {
-        "source" => Some(entries.first().and_then(|p| p.source.clone()).map_or(Value::Null, Value::Str)),
-        "dpid" => Some(entries.first().and_then(|p| p.dpid.clone()).map_or(Value::Null, Value::Str)),
-        "path" => Some(entries.first().and_then(|p| p.path.clone()).map_or(Value::Null, Value::Str)),
+        "source" => Some(
+            entries
+                .first()
+                .and_then(|p| p.source.clone())
+                .map_or(Value::Null, Value::Str),
+        ),
+        "dpid" => Some(
+            entries
+                .first()
+                .and_then(|p| p.dpid.clone())
+                .map_or(Value::Null, Value::Str),
+        ),
+        "path" => Some(
+            entries
+                .first()
+                .and_then(|p| p.path.clone())
+                .map_or(Value::Null, Value::Str),
+        ),
         "instant" => Some(
             entries
                 .iter()
                 .filter_map(|p| p.instant)
                 .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
-                .map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant { secs, nanos, offset_min }),
+                .map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant {
+                    secs,
+                    nanos,
+                    offset_min,
+                }),
         ),
         "provenance" => {
             Some(Provenance::canonical_list(&entries, elided).map_or(Value::Null, Value::Str))
@@ -3781,7 +3956,10 @@ fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Val
             let newest = entries
                 .iter()
                 .filter(|p| p.instant.is_some())
-                .max_by(|a, b| (a.instant.unwrap().0, a.instant.unwrap().1).cmp(&(b.instant.unwrap().0, b.instant.unwrap().1)));
+                .max_by(|a, b| {
+                    (a.instant.unwrap().0, a.instant.unwrap().1)
+                        .cmp(&(b.instant.unwrap().0, b.instant.unwrap().1))
+                });
             Some(prov_record(&Provenance {
                 source: entries.first().and_then(|p| p.source.clone()),
                 path: entries.first().and_then(|p| p.path.clone()),
@@ -3792,9 +3970,15 @@ fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Val
         }
         "@provenance" => Some(Value::List(entries.iter().map(prov_record).collect())),
         // The coordinates: the first origin's id, its record, all.
-        "origin" => Some(o.known.first().map_or(Value::Null, |x| Value::Int(x.node.0 as i64))),
+        "origin" => Some(
+            o.known
+                .first()
+                .map_or(Value::Null, |x| Value::Int(x.node.0 as i64)),
+        ),
         "%origin" => Some(o.known.first().map_or(Value::Null, |x| origin_record(*x))),
-        "@origin" => Some(Value::List(o.known.iter().map(|x| origin_record(*x)).collect())),
+        "@origin" => Some(Value::List(
+            o.known.iter().map(|x| origin_record(*x)).collect(),
+        )),
         "elided" => Some(Value::Int(elided as i64)),
         _ => None,
     }
@@ -3804,17 +3988,32 @@ fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Val
 /// instant-from; dpid)`, absent components null.
 fn prov_record(p: &Provenance) -> Value {
     Value::Record(vec![
-        ("source".to_string(), p.source.clone().map_or(Value::Null, Value::Str)),
-        ("path".to_string(), p.path.clone().map_or(Value::Null, Value::Str)),
+        (
+            "source".to_string(),
+            p.source.clone().map_or(Value::Null, Value::Str),
+        ),
+        (
+            "path".to_string(),
+            p.path.clone().map_or(Value::Null, Value::Str),
+        ),
         (
             "instant".to_string(),
-            p.instant.map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant { secs, nanos, offset_min }),
+            p.instant
+                .map_or(Value::Null, |(secs, nanos, offset_min)| Value::Instant {
+                    secs,
+                    nanos,
+                    offset_min,
+                }),
         ),
         (
             "instant-from".to_string(),
-            p.instant_from.map_or(Value::Null, |f| Value::Str(f.name().to_string())),
+            p.instant_from
+                .map_or(Value::Null, |f| Value::Str(f.name().to_string())),
         ),
-        ("dpid".to_string(), p.dpid.clone().map_or(Value::Null, Value::Str)),
+        (
+            "dpid".to_string(),
+            p.dpid.clone().map_or(Value::Null, Value::Str),
+        ),
     ])
 }
 
@@ -3841,7 +4040,8 @@ fn origin_entries(adapter: &impl AstAdapter, o: &Origins) -> (Vec<Provenance>, u
             // One entry per data point: the source's own key where
             // it assigned one (several nodes under one dpid are one
             // datum by the source's claim), the path otherwise.
-            let key = |e: &Provenance| (e.source.clone(), e.dpid.clone().or_else(|| e.path.clone()));
+            let key =
+                |e: &Provenance| (e.source.clone(), e.dpid.clone().or_else(|| e.path.clone()));
             let pk = key(&p);
             match out.iter_mut().find(|q| key(q) == pk) {
                 Some(q) => {
@@ -3872,7 +4072,11 @@ fn operand_nodes(
 ) -> Vec<NodeId> {
     match at {
         Operand::Rel { steps, anchor, .. } => {
-            let witness = if bound.is_empty() { scope.bindings } else { bound };
+            let witness = if bound.is_empty() {
+                scope.bindings
+            } else {
+                bound
+            };
             let mut nodes = Vec::new();
             for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
                 nodes.extend(navigate_from(
@@ -3888,7 +4092,11 @@ fn operand_nodes(
             dedup(nodes)
         }
         Operand::Ctx { index, steps, .. } => {
-            let bound = if bound.is_empty() { scope.bindings } else { bound };
+            let bound = if bound.is_empty() {
+                scope.bindings
+            } else {
+                bound
+            };
             let base = match index {
                 Some(k) => bound.get(k.saturating_sub(1)).copied(),
                 None => Some(Some(node)),
@@ -3899,7 +4107,15 @@ fn operand_nodes(
             if steps.is_empty() {
                 vec![base]
             } else {
-                dedup(navigate_from(steps, adapter, base, trace, scope.outer, bound, scope.marks))
+                dedup(navigate_from(
+                    steps,
+                    adapter,
+                    base,
+                    trace,
+                    scope.outer,
+                    bound,
+                    scope.marks,
+                ))
             }
         }
         Operand::Outer(inner) => match scope.outer {
@@ -4007,7 +4223,11 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         // coordinates. A node's origin is itself, at stage 0.
         "%provenance" => Some(prov_record(&resolved_provenance(adapter, node).first())),
         "@provenance" => Some(Value::List(
-            resolved_provenance(adapter, node).entries.iter().map(prov_record).collect(),
+            resolved_provenance(adapter, node)
+                .entries
+                .iter()
+                .map(prov_record)
+                .collect(),
         )),
         "origin" => Some(Value::Int(node.0 as i64)),
         "%origin" => Some(origin_record(Origin { node, stage: 0 })),
@@ -4110,7 +4330,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 |&n| {
                     Some(EdgeCtx {
@@ -4141,7 +4362,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&(n, _)| n,
                 // The arrived-by edge of a descendant match is its
                 // own incoming tree edge.
@@ -4168,7 +4390,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 // Walked direction: from the child up.
                 |&p| {
@@ -4205,7 +4428,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&(n, _)| n,
                 |&(n, _)| {
                     Some(EdgeCtx {
@@ -4229,7 +4453,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 |&sib| {
                     Some(EdgeCtx {
@@ -4252,7 +4477,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 |&sib| {
                     Some(EdgeCtx {
@@ -4295,7 +4521,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&(n, _)| n,
                 |&(sib, _)| {
                     Some(EdgeCtx {
@@ -4322,7 +4549,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |(_, n)| *n,
                 |(label, target)| {
                     Some(EdgeCtx {
@@ -4349,7 +4577,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |(_, n)| *n,
                 // The walked edge points INTO the current node.
                 |(label, source)| {
@@ -4388,7 +4617,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |(_, n, _)| *n,
                 |(label, other, outgoing)| {
                     Some(if *outgoing {
@@ -4416,8 +4646,10 @@ fn apply_step(
             let prop = property.clone().or_else(|| adapter.ref_property(node));
             let Some(prop) = prop else { return };
             let property = &prop;
-            let mut resolved: Vec<NodeId> =
-                adapter.resolve(node, property, hint.as_deref()).into_iter().collect();
+            let mut resolved: Vec<NodeId> = adapter
+                .resolve(node, property, hint.as_deref())
+                .into_iter()
+                .collect();
             if resolved.is_empty() {
                 // The property may hold an external reference — a
                 // document outside the arbor. Its fragment part is
@@ -4459,7 +4691,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 // A resolution edge is labeled by its relation —
                 // html's rel — falling back to the property name.
@@ -4479,11 +4712,8 @@ fn apply_step(
             // resolves to `node`. The naive scan walks the whole arbor
             // from the root; an adapter with a reverse index could
             // shortcut this later.
-            let prop_of = |source: NodeId| {
-                property
-                    .clone()
-                    .or_else(|| adapter.ref_property(source))
-            };
+            let prop_of =
+                |source: NodeId| property.clone().or_else(|| adapter.ref_property(source));
             // An adapter with a reverse index answers outright;
             // otherwise the whole arbor is walked.
             let matched: Vec<NodeId> =
@@ -4511,7 +4741,8 @@ fn apply_step(
                 trace,
                 outer,
                 witness,
-                marks, register,
+                marks,
+                register,
                 |&n| n,
                 // Stored direction: the found node's property points
                 // at the current one.
@@ -4667,14 +4898,7 @@ fn apply_predicates<T>(
                     }
                     // No witness yet (a driver path, a body's own
                     // navigation): the existential over the trace.
-                    exists_binding(
-                        adapter,
-                        node_of(item),
-                        &run,
-                        trace,
-                        &mut Vec::new(),
-                        scope,
-                    )
+                    exists_binding(adapter, node_of(item), &run, trace, &mut Vec::new(), scope)
                 });
             }
         }
@@ -4829,12 +5053,8 @@ fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool {
                     || op_mentions(other, bound)
             }
             Operand::Interp(segs) => segs.iter().any(|seg| match seg {
-                InterpSeg::Expr(inner) | InterpSeg::Strict(inner, _) => {
-                    op_mentions(inner, bound)
-                }
-                InterpSeg::Default(e, f) => {
-                    op_mentions(e, bound) || op_mentions(f, bound)
-                }
+                InterpSeg::Expr(inner) | InterpSeg::Strict(inner, _) => op_mentions(inner, bound),
+                InterpSeg::Default(e, f) => op_mentions(e, bound) || op_mentions(f, bound),
                 InterpSeg::Text(_) => false,
             }),
             _ => false,
@@ -5020,14 +5240,17 @@ fn eval_operand(
             arms,
             other,
         } => {
-            let subject = discard(|| operand_scalar_bound(adapter, node, scrutinee, trace, bound, scope));
+            let subject =
+                discard(|| operand_scalar_bound(adapter, node, scrutinee, trace, bound, scope));
             for (test, regex, result) in arms {
-                let hit = discard(|| if *regex {
-                    let pat = operand_scalar_bound(adapter, node, test, trace, bound, scope);
-                    regex_test(&subject, &pat, true)
-                } else {
-                    let t = operand_scalar_bound(adapter, node, test, trace, bound, scope);
-                    value_eq(&subject, &t, &|e| adapter.unit_scale(e))
+                let hit = discard(|| {
+                    if *regex {
+                        let pat = operand_scalar_bound(adapter, node, test, trace, bound, scope);
+                        regex_test(&subject, &pat, true)
+                    } else {
+                        let t = operand_scalar_bound(adapter, node, test, trace, bound, scope);
+                        value_eq(&subject, &t, &|e| adapter.unit_scale(e))
+                    }
                 });
                 if hit {
                     return eval_operand(adapter, node, result, trace, bound, scope);
@@ -5062,10 +5285,16 @@ fn eval_operand(
         // `base:name` — a record's field; null on a non-record. A
         // field of a recalled record keeps that field's origins.
         Operand::Field { base, name } if matches!(base.as_ref(), Operand::Recall(_)) => {
-            let Operand::Recall(r) = base.as_ref() else { unreachable!() };
+            let Operand::Recall(r) = base.as_ref() else {
+                unreachable!()
+            };
             note_all(&recall_prov(scope.register, r).part(name).origins);
             vec![match recall(scope.register, r) {
-                Value::Record(fields) => fields.into_iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap_or(Value::Null),
+                Value::Record(fields) => fields
+                    .into_iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v)
+                    .unwrap_or(Value::Null),
                 _ => Value::Null,
             }]
         }
@@ -5157,7 +5386,9 @@ fn eval_operand(
                             Some(_) => note_all(&p.prov.origins),
                             None => note(p.node),
                         }
-                        p.topic.clone().unwrap_or_else(|| node_scalar(adapter, p.node))
+                        p.topic
+                            .clone()
+                            .unwrap_or_else(|| node_scalar(adapter, p.node))
                     }
                     Some(proj) => {
                         note(p.node);
@@ -5183,11 +5414,27 @@ fn eval_operand(
             // enclosing frame at the end.
             let mut provs: Vec<Prov>;
             let mut state = match expr.as_ref() {
-                Operand::Rel { steps, projection, anchor } => {
-                    let witness = if bound.is_empty() { scope.bindings } else { bound };
+                Operand::Rel {
+                    steps,
+                    projection,
+                    anchor,
+                } => {
+                    let witness = if bound.is_empty() {
+                        scope.bindings
+                    } else {
+                        bound
+                    };
                     let mut nodes = Vec::new();
                     for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
-                        nodes.extend(navigate_from(steps, adapter, from, trace, scope.outer, witness, scope.marks));
+                        nodes.extend(navigate_from(
+                            steps,
+                            adapter,
+                            from,
+                            trace,
+                            scope.outer,
+                            witness,
+                            scope.marks,
+                        ));
                     }
                     let nodes = dedup(nodes);
                     let values: Vec<Value> = match projection {
@@ -5199,7 +5446,8 @@ fn eval_operand(
                     values
                 }
                 _ => {
-                    let (values, o) = capture(|| eval_operand(adapter, node, expr, trace, bound, scope));
+                    let (values, o) =
+                        capture(|| eval_operand(adapter, node, expr, trace, bound, scope));
                     provs = vec![Prov::leaf(o); values.len()];
                     values
                 }
@@ -5210,9 +5458,7 @@ fn eval_operand(
                 // the stage — seed the null it exists to replace,
                 // so `(a) | default$$.b` coalesces missing paths
                 // too (ruling #21).
-                if state.is_empty()
-                    && matches!(stage, Stage::Func(c) if c.name == "default")
-                {
+                if state.is_empty() && matches!(stage, Stage::Func(c) if c.name == "default") {
                     state.push(Value::Null);
                     provs.push(Prov::default());
                 }
@@ -5248,8 +5494,15 @@ fn eval_operand(
                 let out = apply_stage(stage, caps, adapter, trace, Some(&scope));
                 // The nodes ride along while the stage keeps capsae
                 // one for one; an aggregate leaves the path behind.
-                node_of = if matches!(stage, Stage::Agg(_)) { Vec::new() } else { out.iter().map(|c| c.node).collect() };
-                let (values, ps): (Vec<Value>, Vec<Prov>) = out.into_iter().map(|c| (c.topic.unwrap_or(Value::Null), c.prov)).unzip();
+                node_of = if matches!(stage, Stage::Agg(_)) {
+                    Vec::new()
+                } else {
+                    out.iter().map(|c| c.node).collect()
+                };
+                let (values, ps): (Vec<Value>, Vec<Prov>) = out
+                    .into_iter()
+                    .map(|c| (c.topic.unwrap_or(Value::Null), c.prov))
+                    .unzip();
                 state = values;
                 provs = ps;
             }
@@ -5367,7 +5620,11 @@ fn eval_operand(
             // (`scope.bindings`) takes over — the same rule as `$*k`
             // itself. Either way it travels into the path, so its
             // step predicates read `$*k` per thread.
-            let witness = if bound.is_empty() { scope.bindings } else { bound };
+            let witness = if bound.is_empty() {
+                scope.bindings
+            } else {
+                bound
+            };
             let mut nodes = Vec::new();
             for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
                 nodes.extend(navigate_from(
@@ -5423,9 +5680,9 @@ fn eval_operand(
             }]
         }
         // A boolean group in operand position is its truth value.
-        Operand::Group(e) => vec![Value::Bool(discard(|| eval_pred_expr(
-            adapter, node, e, trace, bound, scope,
-        )))],
+        Operand::Group(e) => vec![Value::Bool(discard(|| {
+            eval_pred_expr(adapter, node, e, trace, bound, scope)
+        }))],
         Operand::Ctx {
             index,
             steps,
@@ -5953,7 +6210,10 @@ mod tests {
         assert!(!pattern_test(&p, &Value::Null));
         assert!(pattern_test(&p, &Value::Str("axb".into())));
         // non-string values test their string rendering, as `*=` does
-        assert!(pattern_test(&[Star, Lit("42".into()), Star], &Value::Int(142)));
+        assert!(pattern_test(
+            &[Star, Lit("42".into()), Star],
+            &Value::Int(142)
+        ));
     }
 
     #[test]
@@ -6855,7 +7115,10 @@ mod tests {
             vec![Value::Str("[child]".into())]
         );
         // Depth as a value: count the breadcrumbs.
-        assert_eq!(vals("//a(->e .(1))+! | @. | count", &t), vec![Value::Int(2)]);
+        assert_eq!(
+            vals("//a(->e .(1))+! | @. | count", &t),
+            vec![Value::Int(2)]
+        );
         // A named push lands as a named regula. (Spaced: glued
         // `.q(` would lex into the matcher name, exactly as
         // `/x.rs(...)` keeps its filename.)
@@ -7345,7 +7608,10 @@ mod tests {
         let t = MockTree::sample();
         // Mark mid-path; recall in a later step predicate — the
         // intra-path back-reference (Cypher's node variables).
-        assert_eq!(run("/a .a /*[:::name = $$.a:::name]", &t), Vec::<u64>::new());
+        assert_eq!(
+            run("/a .a /*[:::name = $$.a:::name]", &t),
+            Vec::<u64>::new()
+        );
         assert_eq!(run("//deep .d /w.rs[$$.d:::name = \"deep\"]", &t), vec![7]);
         // Recall in a pipeline stage operand.
         assert_eq!(
@@ -7724,10 +7990,23 @@ mod tests {
         // explicit — `| %+ | .%` pushes every group under its name,
         // seen by the record view and recalled as a register.
         let t = MockTree::sample();
-        let bare = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %.", &t);
-        assert!(bare.iter().all(|r| matches!(r, Value::Record(f) if f.is_empty())), "{bare:?}");
-        let stems = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:stem", &t);
-        assert!(stems.iter().all(|v| matches!(v, Value::Str(_))), "{stems:?}");
+        let bare = vals(
+            "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %.",
+            &t,
+        );
+        assert!(
+            bare.iter()
+                .all(|r| matches!(r, Value::Record(f) if f.is_empty())),
+            "{bare:?}"
+        );
+        let stems = vals(
+            "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:stem",
+            &t,
+        );
+        assert!(
+            stems.iter().all(|v| matches!(v, Value::Str(_))),
+            "{stems:?}"
+        );
         let q = "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+ | .% | %.";
         let rows = vals(q, &t);
         assert!(!rows.is_empty());
@@ -7738,8 +8017,15 @@ mod tests {
             let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
             assert_eq!(keys, vec!["stem", "ext"], "{r:?}");
         }
-        let exts = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+ | .% | $.ext", &t);
-        assert!(exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
+        let exts = vals(
+            "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+ | .% | $.ext",
+            &t,
+        );
+        assert!(
+            exts.iter()
+                .all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")),
+            "{exts:?}"
+        );
         // the numbered captures still bind alongside
         let stems = vals("/a/* | [:::name == (/^(?<stem>\\w+)\\.(\\w+)$/)] | $1", &t);
         assert_eq!(stems.len(), exts.len());
@@ -7752,20 +8038,41 @@ mod tests {
         let t = MockTree::sample();
         let q = "/a/* | [:::name == (/^(?<stem>\\w+)\\.(?<ext>\\w+)$/)] | %+:ext";
         let exts = vals(q, &t);
-        assert!(!exts.is_empty() && exts.iter().all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")), "{exts:?}");
+        assert!(
+            !exts.is_empty()
+                && exts
+                    .iter()
+                    .all(|v| matches!(v, Value::Str(s) if s == "rs" || s == "txt")),
+            "{exts:?}"
+        );
         let recs = vals("/a/* | [:::name == (/^(?<stem>\\w+)/)] | %+", &t);
-        assert!(recs.iter().all(|r| matches!(r, Value::Record(f) if f.len() == 1 && f[0].0 == "stem")), "{recs:?}");
+        assert!(
+            recs.iter()
+                .all(|r| matches!(r, Value::Record(f) if f.len() == 1 && f[0].0 == "stem")),
+            "{recs:?}"
+        );
         // a constructed record's field, from the topic and from a register
         let ones = vals("/a/* | %(:::name; n = 1) | :n", &t);
-        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        assert!(
+            !ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))),
+            "{ones:?}"
+        );
         let ones = vals("/a/* | %(:::name; n = 1) | .r | $.r:n", &t);
-        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        assert!(
+            !ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))),
+            "{ones:?}"
+        );
         // a missing field, and a non-record, read as null
         let nulls = vals("/a/* | %(:::name; n = 1) | :zzz", &t);
         assert!(nulls.iter().all(|v| matches!(v, Value::Null)), "{nulls:?}");
         // outside any match, `%+` is the empty record
         let empty = vals("/a/* | %+", &t);
-        assert!(empty.iter().all(|v| matches!(v, Value::Record(f) if f.is_empty())), "{empty:?}");
+        assert!(
+            empty
+                .iter()
+                .all(|v| matches!(v, Value::Record(f) if f.is_empty())),
+            "{empty:?}"
+        );
     }
 
     #[test]
@@ -7775,14 +8082,24 @@ mod tests {
         let t = MockTree::sample();
         assert_eq!(
             vals("/a | @(1; \"x\"; 2 + 1)", &t),
-            vec![Value::List(vec![Value::Int(1), Value::Str("x".into()), Value::Int(3)])]
+            vec![Value::List(vec![
+                Value::Int(1),
+                Value::Str("x".into()),
+                Value::Int(3)
+            ])]
         );
         let gathered = vals("/a | @(/*:::name)", &t);
-        assert!(matches!(&gathered[0], Value::List(items) if items.len() > 1), "{gathered:?}");
+        assert!(
+            matches!(&gathered[0], Value::List(items) if items.len() > 1),
+            "{gathered:?}"
+        );
         assert_eq!(vals("/a | @()", &t), vec![Value::List(Vec::new())]);
         assert_eq!(vals("/a | *(1; 2)", &t), vals("/a | @(1; 2)", &t));
         // display: the Quarb form, bare scalars, quoted strings
-        assert_eq!(vals("/a | @(1; \"x\")", &t)[0].display_form(), "@(1; \"x\")");
+        assert_eq!(
+            vals("/a | @(1; \"x\")", &t)[0].display_form(),
+            "@(1; \"x\")"
+        );
     }
 
     #[test]
@@ -7791,14 +8108,30 @@ mod tests {
         // whole stream as one array; `@| jsonl` one document per line.
         let t = MockTree::sample();
         let each = vals("/a/* | :::name | json", &t);
-        assert!(each.len() > 1 && each.iter().all(|v| matches!(v, Value::Str(s) if s.starts_with('"'))), "{each:?}");
+        assert!(
+            each.len() > 1
+                && each
+                    .iter()
+                    .all(|v| matches!(v, Value::Str(s) if s.starts_with('"'))),
+            "{each:?}"
+        );
         let whole = vals("/a/* | :::name @| json", &t);
-        assert!(matches!(&whole[..], [Value::Str(s)] if s.starts_with("[\"") && s.ends_with(']')), "{whole:?}");
+        assert!(
+            matches!(&whole[..], [Value::Str(s)] if s.starts_with("[\"") && s.ends_with(']')),
+            "{whole:?}"
+        );
         let lines = vals("/a/* | :::name @| jsonl", &t);
-        assert!(matches!(&lines[..], [Value::Str(s)] if s.lines().count() == each.len()), "{lines:?}");
+        assert!(
+            matches!(&lines[..], [Value::Str(s)] if s.lines().count() == each.len()),
+            "{lines:?}"
+        );
         // a record's JSON is unchanged by the display ruling
         let rec = vals("/a/* | %(n = :::name) | json", &t);
-        assert!(rec.iter().all(|v| matches!(v, Value::Str(s) if s.starts_with("{\"n\": "))), "{rec:?}");
+        assert!(
+            rec.iter()
+                .all(|v| matches!(v, Value::Str(s) if s.starts_with("{\"n\": "))),
+            "{rec:?}"
+        );
     }
 
     #[test]
@@ -7806,14 +8139,28 @@ mod tests {
         // Ruling #49: `.%(...)` builds and pushes; `.name%(...)` names it.
         let t = MockTree::sample();
         let ones = vals("/a/* | .r%(:::name, \"n\", 1) | $.r:n", &t);
-        assert!(!ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))), "{ones:?}");
+        assert!(
+            !ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))),
+            "{ones:?}"
+        );
         let views = vals("/a/* | .r%(:::name) | %.", &t);
-        assert!(views.iter().all(|v| matches!(v, Value::Record(f) if f.len() == 1 && f[0].0 == "r")), "{views:?}");
+        assert!(
+            views
+                .iter()
+                .all(|v| matches!(v, Value::Record(f) if f.len() == 1 && f[0].0 == "r")),
+            "{views:?}"
+        );
         let anon = vals("/a/* | .%(:::name, \"n\", 2) | $.:n", &t);
-        assert!(!anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))), "{anon:?}");
+        assert!(
+            !anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))),
+            "{anon:?}"
+        );
         // the enriched form carries the register's named regulae
         let rich = vals("/a/* | .k(:::name) | .%%(\"n\", 3) | :k", &t);
-        assert!(!rich.is_empty() && rich.iter().all(|v| matches!(v, Value::Str(_))), "{rich:?}");
+        assert!(
+            !rich.is_empty() && rich.iter().all(|v| matches!(v, Value::Str(_))),
+            "{rich:?}"
+        );
     }
 
     #[test]
@@ -7886,10 +8233,7 @@ mod tests {
         assert_eq!(fields[0], ("dir".to_string(), Value::Str("a".into())));
         // A bare push files the projected topic and reopens
         // navigation the same way.
-        assert_eq!(
-            vals("/a:::name | . | $.", &t),
-            vec![Value::Str("a".into())]
-        );
+        assert_eq!(vals("/a:::name | . | $.", &t), vec![Value::Str("a".into())]);
     }
 
     // ---- capsa provenance: origins on every value ----------------
@@ -7900,7 +8244,13 @@ mod tests {
 
     fn origins(known: &[(u64, u32)]) -> Origins {
         Origins {
-            known: known.iter().map(|&(n, s)| Origin { node: NodeId(n), stage: s }).collect(),
+            known: known
+                .iter()
+                .map(|&(n, s)| Origin {
+                    node: NodeId(n),
+                    stage: s,
+                })
+                .collect(),
             more: 0,
         }
     }
@@ -7965,7 +8315,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].prov.origins.known.len(), 1);
         let all = traced("/a/*:::index @| count", &t);
-        assert!(all[0].prov.origins.known.len() > 1, "a computed reduction keeps the union");
+        assert!(
+            all[0].prov.origins.known.len() > 1,
+            "a computed reduction keeps the union"
+        );
     }
 
     #[test]
@@ -7982,7 +8335,10 @@ mod tests {
     #[test]
     fn record_keeps_a_part_per_field() {
         let t = MockTree::sample();
-        let rows = traced("/a/x.rs | .n(:::index) | ->ref | %(a = $.n; b = :::name)", &t);
+        let rows = traced(
+            "/a/x.rs | .n(:::index) | ->ref | %(a = $.n; b = :::name)",
+            &t,
+        );
         let p = &rows[0].prov;
         assert_eq!(p.origins, origins(&[(2, 1), (7, 3)]));
         assert_eq!(p.part("a").origins, origins(&[(2, 1)]));
@@ -8045,7 +8401,10 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].prov.origins, origins(&[(2, 2), (3, 2)]));
         assert_eq!(rows[1].prov.origins, origins(&[(5, 2), (6, 2)]));
-        let rows = traced("/*/* | .d(\\:::name) | :::index @| group(d = $.d) | $.d", &t);
+        let rows = traced(
+            "/*/* | .d(\\:::name) | :::index @| group(d = $.d) | $.d",
+            &t,
+        );
         assert_eq!(rows[0].prov.origins, origins(&[(1, 1)]));
         let rows = traced(
             "/*/* | .d(\\:::name) | :::index @| group(d = $.d) @| ungroup | $.d",
@@ -8060,7 +8419,14 @@ mod tests {
         let t = MockTree::sample();
         let rows = traced("/a/x.rs | .n(->ref @| count)", &t);
         assert_eq!(rows[0].topic, Some(Value::Int(1)));
-        assert!(rows[0].prov.origins.known.iter().any(|o| o.node == NodeId(7)));
+        assert!(
+            rows[0]
+                .prov
+                .origins
+                .known
+                .iter()
+                .any(|o| o.node == NodeId(7))
+        );
     }
 
     #[test]
@@ -8069,7 +8435,9 @@ mod tests {
         // One origin: the node's own canonical text.
         assert_eq!(
             vals("/a/x.rs | .n(:::index) | $.n:::provenance", &t),
-            vec![Value::Str("?api-gateway@2026-04-07T02:00:01Z#request-42".into())]
+            vec![Value::Str(
+                "?api-gateway@2026-04-07T02:00:01Z#request-42".into()
+            )]
         );
         assert_eq!(
             vals("/a/x.rs | .n(:::index) | $.n:::source", &t),
@@ -8082,7 +8450,8 @@ mod tests {
         assert_eq!(
             vals(&format!("{q} | $_:::provenance"), &t),
             vec![Value::Str(
-                "?api-gateway@2026-04-07T02:00:01Z#request-42;crm@2026-05-01T00:00:00Z#row-7".into()
+                "?api-gateway@2026-04-07T02:00:01Z#request-42;crm@2026-05-01T00:00:00Z#row-7"
+                    .into()
             )]
         );
         assert_eq!(
@@ -8096,7 +8465,11 @@ mod tests {
         let (s7, n7, o7) = crate::temporal::parse_iso("2026-05-01T00:00:00Z").unwrap();
         assert_eq!(
             vals(&format!("{q} | $_:::instant"), &t),
-            vec![Value::Instant { secs: s7, nanos: n7, offset_min: o7 }]
+            vec![Value::Instant {
+                secs: s7,
+                nanos: n7,
+                offset_min: o7
+            }]
         );
         // The shaped keys: the entries as records, the coordinates.
         let (s2, n2, o2) = crate::temporal::parse_iso("2026-04-07T02:00:01Z").unwrap();
@@ -8107,7 +8480,14 @@ mod tests {
             Value::Record(vec![
                 ("source".into(), Value::Str(src.into())),
                 ("path".into(), Value::Str(path.into())),
-                ("instant".into(), Value::Instant { secs: inst.0, nanos: inst.1, offset_min: inst.2 }),
+                (
+                    "instant".into(),
+                    Value::Instant {
+                        secs: inst.0,
+                        nanos: inst.1,
+                        offset_min: inst.2,
+                    },
+                ),
                 ("instant-from".into(), Value::Null),
                 ("dpid".into(), Value::Str(dpid.into())),
             ])
@@ -8123,14 +8503,23 @@ mod tests {
             vals(&format!("{q} | $_:::%provenance"), &t),
             vec![rec("api-gateway", "/a/x.rs", (s7, n7, o7), "request-42")]
         );
-        assert_eq!(vals(&format!("{q} | $_:::path"), &t), vec![Value::Str("/a/x.rs".into())]);
+        assert_eq!(
+            vals(&format!("{q} | $_:::path"), &t),
+            vec![Value::Str("/a/x.rs".into())]
+        );
         // A node with no recorded provenance still has a path; the
         // access rung needs an invocation instant, which the mock
         // does not bind.
-        assert_eq!(vals("/a/y.txt:::path", &t), vec![Value::Str("/a/y.txt".into())]);
+        assert_eq!(
+            vals("/a/y.txt:::path", &t),
+            vec![Value::Str("/a/y.txt".into())]
+        );
         assert_eq!(vals("/a/y.txt:::instant", &t), vec![Value::Null]);
         let coord = |id: i64, stage: i64| {
-            Value::Record(vec![("id".into(), Value::Int(id)), ("stage".into(), Value::Int(stage))])
+            Value::Record(vec![
+                ("id".into(), Value::Int(id)),
+                ("stage".into(), Value::Int(stage)),
+            ])
         };
         assert_eq!(vals(&format!("{q} | $_:::origin"), &t), vec![Value::Int(2)]);
         assert_eq!(vals(&format!("{q} | $_:::%origin"), &t), vec![coord(2, 1)]);
@@ -8157,10 +8546,15 @@ mod tests {
             "/a/x.rs | .n(:::index) | %(v = $.n; from = $.n:::provenance)",
             &t,
         );
-        let Value::Record(fields) = &vs[0] else { panic!("expected a record") };
+        let Value::Record(fields) = &vs[0] else {
+            panic!("expected a record")
+        };
         assert_eq!(
             fields[1],
-            ("from".to_string(), Value::Str("?api-gateway@2026-04-07T02:00:01Z#request-42".into()))
+            (
+                "from".to_string(),
+                Value::Str("?api-gateway@2026-04-07T02:00:01Z#request-42".into())
+            )
         );
         // A node answers the shaped keys too: one entry, its own
         // coordinate, none elided.
@@ -8207,8 +8601,16 @@ mod tests {
         assert_eq!(vals("/a/x.rs | .v(7) | ->ref:.v", &t), vec![Value::Null]);
         let t2 = MockTree::sample();
         assert_eq!(
-            vals("//*<file> | .v(:::index) | .w(:::name) | ->ref:. | (:::name = \"x.rs\" ? $_ : \"-\")", &t2),
-            vec![Value::Str("w.rs".into()), Value::Str("-".into()), Value::Str("-".into()), Value::Str("-".into())]
+            vals(
+                "//*<file> | .v(:::index) | .w(:::name) | ->ref:. | (:::name = \"x.rs\" ? $_ : \"-\")",
+                &t2
+            ),
+            vec![
+                Value::Str("w.rs".into()),
+                Value::Str("-".into()),
+                Value::Str("-".into()),
+                Value::Str("-".into())
+            ]
         );
         // Positional: the first regula of the peer at w.rs.
         assert_eq!(
@@ -8226,7 +8628,9 @@ mod tests {
         // swap through the link in one stage.
         let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
         let vs = vals(
-            &format!("{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .v((:::name = \"x.rs\" ? ->ref:.v : <-ref:.v)) | $.v"),
+            &format!(
+                "{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .v((:::name = \"x.rs\" ? ->ref:.v : <-ref:.v)) | $.v"
+            ),
             &t,
         );
         // x.rs (evaluated first) takes w.rs's 9; w.rs takes x.rs's 5
@@ -8236,7 +8640,12 @@ mod tests {
         // Two rounds: x.rs files a from w.rs's v, w.rs then reads
         // x.rs's a as b.
         assert_eq!(
-            vals(&format!("{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"), &t),
+            vals(
+                &format!(
+                    "{pair} | .v((:::name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"
+                ),
+                &t
+            ),
             vec![Value::Null, Value::Int(9)]
         );
     }
@@ -8327,22 +8736,34 @@ mod tests {
         // node.
         assert_eq!(run("((!7))", &t), vec![7]);
         assert_eq!(vals("((!7)):::name", &t), vec![Value::Str("w.rs".into())]);
-        assert_eq!(vals("/a | ((!7))\\:::name", &t), vec![Value::Str("deep".into())]);
+        assert_eq!(
+            vals("/a | ((!7))\\:::name", &t),
+            vec![Value::Str("deep".into())]
+        );
         assert_eq!(run("((!99))", &t), Vec::<u64>::new());
         assert_eq!(vals("/a | ((!99)):::name", &t), Vec::<Value>::new());
         // Round trip through the id key: what `:::id` and
         // `:::origin` report, the anchor accepts.
         assert_eq!(vals("/b/deep/w.rs:::id", &t), vec![Value::Int(7)]);
-        assert_eq!(vals("/a/x.rs | .v(:::index) | ->ref | $.v:::origin", &t), vec![Value::Int(2)]);
+        assert_eq!(
+            vals("/a/x.rs | .v(:::index) | ->ref | $.v:::origin", &t),
+            vec![Value::Int(2)]
+        );
         // The anchor takes an expression: a value's origin stood on
         // again, a coordinate record by its id, an arithmetic id, a
         // list of ids forking one thread each.
         assert_eq!(
-            vals("/a/x.rs | .v(:::index) | ->ref | .o($.v:::origin) | ((!$.o)):::name", &t),
+            vals(
+                "/a/x.rs | .v(:::index) | ->ref | .o($.v:::origin) | ((!$.o)):::name",
+                &t
+            ),
             vec![Value::Str("x.rs".into())]
         );
         assert_eq!(
-            vals("/a/x.rs | .v(:::index) | ->ref | ((!$.v:::%origin)):::name", &t),
+            vals(
+                "/a/x.rs | .v(:::index) | ->ref | ((!$.v:::%origin)):::name",
+                &t
+            ),
             vec![Value::Str("x.rs".into())]
         );
         assert_eq!(
@@ -8354,7 +8775,10 @@ mod tests {
             vec![Value::Str("x.rs".into()), Value::Str("y.txt".into())]
         );
         // The anchor's reads are not origins.
-        let rows = traced("/a/x.rs | .v(:::index) | ->ref | ((!$.v:::origin)) | :::name", &t);
+        let rows = traced(
+            "/a/x.rs | .v(:::index) | ->ref | ((!$.v:::origin)) | :::name",
+            &t,
+        );
         assert_eq!(rows[0].node, NodeId(2));
         assert_eq!(rows[0].prov.origins, origins(&[(2, 4)]));
     }
@@ -8363,20 +8787,43 @@ mod tests {
     fn quantified_push_iterates() {
         let t = MockTree::sample();
         // `{N}` files N regulae, each round reading the last.
-        assert_eq!(vals("/a | .v(1) | .v($.v * 2){3} | $.v", &t), vec![Value::Int(8)]);
-        assert_eq!(vals("/a | .v(1) | .v($.v * 2){3} | @. | count", &t), vec![Value::Int(4)]);
+        assert_eq!(
+            vals("/a | .v(1) | .v($.v * 2){3} | $.v", &t),
+            vec![Value::Int(8)]
+        );
+        assert_eq!(
+            vals("/a | .v(1) | .v($.v * 2){3} | @. | count", &t),
+            vec![Value::Int(4)]
+        );
         // A round is synchronous: peers read the previous round's
         // values through the snapshot, whatever the order.
         let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
         assert_eq!(
-            vals(&format!("{pair} | .v(:::index * 10) | .v(($.v + (->ref:.v | default(0)) + (<-ref:.v | default(0)))){{2}} | $.v"), &t),
+            vals(
+                &format!(
+                    "{pair} | .v(:::index * 10) | .v(($.v + (->ref:.v | default(0)) + (<-ref:.v | default(0)))){{2}} | $.v"
+                ),
+                &t
+            ),
             vec![Value::Int(40), Value::Int(40)]
         );
         // The open forms stop at a fixpoint: a round that repoints
         // no name — after `min` rounds, within the bound.
-        assert_eq!(vals("/a | .v(5) | .v(($.v > 8 ? $.v : $.v + 1)){1;} | @. | count", &t), vec![Value::Int(6)]);
-        assert_eq!(vals("/a | .v(5) | .v($.v){3;} | @. | count", &t), vec![Value::Int(5)]);
-        assert_eq!(vals("/a | .v(5) | .v($.v + 1){2;3} | $.v", &t), vec![Value::Int(8)]);
+        assert_eq!(
+            vals(
+                "/a | .v(5) | .v(($.v > 8 ? $.v : $.v + 1)){1;} | @. | count",
+                &t
+            ),
+            vec![Value::Int(6)]
+        );
+        assert_eq!(
+            vals("/a | .v(5) | .v($.v){3;} | @. | count", &t),
+            vec![Value::Int(5)]
+        );
+        assert_eq!(
+            vals("/a | .v(5) | .v($.v + 1){2;3} | $.v", &t),
+            vec![Value::Int(8)]
+        );
         // Only a push takes the quantifier.
         assert!(parse(&lex("/a | upper{3}").unwrap()).is_err());
         assert!(parse(&lex("/a | .v(1){3;2}").unwrap()).is_err());

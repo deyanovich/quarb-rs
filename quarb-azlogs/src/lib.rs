@@ -86,7 +86,10 @@ enum Kind {
     Root,
     /// A mounted table's slot in `tables`.
     Table(usize),
-    Entry { table: usize, idx: usize },
+    Entry {
+        table: usize,
+        idx: usize,
+    },
     Field(Field),
 }
 
@@ -182,7 +185,12 @@ fn parse_target(target: &str) -> Result<(Target, Option<String>), AzlError> {
         })
     };
     let tables: Vec<String> = param("table")
-        .map(|t| t.split(',').map(str::to_string).filter(|s| !s.is_empty()).collect())
+        .map(|t| {
+            t.split(',')
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     if tables.is_empty() {
         return Err(AzlError::Target(format!(
@@ -336,7 +344,9 @@ fn decode_table(t: &Json) -> Vec<Row> {
                 _ => decode_json(v),
             };
             if name == "TimeGenerated"
-                && let Some(Value::Instant { secs: s, nanos: n, .. }) = field.scalar()
+                && let Some(Value::Instant {
+                    secs: s, nanos: n, ..
+                }) = field.scalar()
             {
                 secs = s;
                 nanos = n;
@@ -388,8 +398,7 @@ impl AzlAdapter {
     pub fn open(target: &str) -> Result<Self, AzlError> {
         let (t, endpoint) = parse_target(target)?;
         let token = bearer_token()?;
-        let base = endpoint
-            .unwrap_or_else(|| "https://api.loganalytics.io".to_string());
+        let base = endpoint.unwrap_or_else(|| "https://api.loganalytics.io".to_string());
         let url = format!(
             "{}/v1/workspaces/{}/query",
             base.trim_end_matches('/'),
@@ -406,8 +415,8 @@ impl AzlAdapter {
             let text = resp
                 .into_string()
                 .map_err(|e| AzlError::Api(format!("{table}: {e}")))?;
-            let doc: Json = serde_json::from_str(&text)
-                .map_err(|e| AzlError::Api(format!("{table}: {e}")))?;
+            let doc: Json =
+                serde_json::from_str(&text).map_err(|e| AzlError::Api(format!("{table}: {e}")))?;
             let rows = doc
                 .pointer("/tables")
                 .and_then(|v| v.as_array())
@@ -686,7 +695,9 @@ impl AstAdapter for AzlAdapter {
             }
             // The AppRequests shape: name + result code.
             if let Some(n) = get("Name") {
-                let code = get("ResultCode").map(|c| format!(" {c}")).unwrap_or_default();
+                let code = get("ResultCode")
+                    .map(|c| format!(" {c}"))
+                    .unwrap_or_default();
                 return Some(Value::Str(format!("{n}{code}")));
             }
             return None;
@@ -718,7 +729,10 @@ mod tests {
 
     #[test]
     fn table_and_bound_are_enforced() {
-        assert!(matches!(parse_target("azl:ws-1?since=1h"), Err(AzlError::Target(_))));
+        assert!(matches!(
+            parse_target("azl:ws-1?since=1h"),
+            Err(AzlError::Target(_))
+        ));
         assert!(matches!(
             parse_target("azl:ws-1?table=AppRequests"),
             Err(AzlError::Target(_))
@@ -729,10 +743,9 @@ mod tests {
 
     #[test]
     fn kql_composition() {
-        let (t, _) = parse_target(
-            "azl:ws?table=AppRequests&since=1h&filter=Success%20==%20false&limit=100",
-        )
-        .unwrap();
+        let (t, _) =
+            parse_target("azl:ws?table=AppRequests&since=1h&filter=Success%20==%20false&limit=100")
+                .unwrap();
         assert_eq!(
             compose_kql(&t, "AppRequests"),
             "AppRequests | where TimeGenerated >= ago(1h) \

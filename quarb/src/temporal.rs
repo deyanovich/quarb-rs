@@ -867,7 +867,10 @@ mod tests {
         );
         // Leap day passes the same civil validation as the dashed form.
         let (leap, _, _) = parse_iso("2024-02-29").unwrap();
-        assert_eq!(parse_iso_compact("20240229T000000Z"), Some((leap, 0, Some(0))));
+        assert_eq!(
+            parse_iso_compact("20240229T000000Z"),
+            Some((leap, 0, Some(0)))
+        );
         // Shape violations: wrong length, separators, lowercase z,
         // bad month/day, out-of-range time.
         for bad in [

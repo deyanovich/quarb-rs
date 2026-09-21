@@ -17,8 +17,8 @@
 mod parse;
 
 pub use parse::{
-    parse_model, resolve_mount_target, AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount,
-    NodeDecl, RefDecl, RelDecl,
+    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl,
+    parse_model, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -217,7 +217,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
         match result {
             Ok(QueryResult::Values(vs)) => {
                 let mut seen = std::collections::HashSet::new();
-                Members::Values(vs.into_iter().filter(|v| seen.insert(v.to_string())).collect())
+                Members::Values(
+                    vs.into_iter()
+                        .filter(|v| seen.insert(v.to_string()))
+                        .collect(),
+                )
             }
             Ok(QueryResult::Nodes(ns)) => {
                 let mut seen = std::collections::HashSet::new();
@@ -284,7 +288,9 @@ impl<A: AstAdapter> ModelAdapter<A> {
 
     /// The value node in `container` whose string equals `value`.
     fn find_value(&self, container: usize, value: &Value) -> Option<NodeId> {
-        let idx = *self.containers()[container].by_str.get(&value.to_string())?;
+        let idx = *self.containers()[container]
+            .by_str
+            .get(&value.to_string())?;
         Some(Self::value_node(container, idx))
     }
 
@@ -319,15 +325,14 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 // The explicit form names the target property the
                 // value matches (`[::id = $]`); the short form uses
                 // the member key (the default projection).
-                let by_key: Option<HashMap<String, NodeId>> =
-                    decl.key_field.as_deref().map(|f| {
-                        (1..=self.containers()[container].members.len())
-                            .filter_map(|v| {
-                                let n = Self::value_node(container, v - 1);
-                                self.property(n, f).map(|k| (k.to_string(), n))
-                            })
-                            .collect()
-                    });
+                let by_key: Option<HashMap<String, NodeId>> = decl.key_field.as_deref().map(|f| {
+                    (1..=self.containers()[container].members.len())
+                        .filter_map(|v| {
+                            let n = Self::value_node(container, v - 1);
+                            self.property(n, f).map(|k| (k.to_string(), n))
+                        })
+                        .collect()
+                });
                 for node in self.scope_nodes(&decl.scope, &defs) {
                     let Some(value) = self.base.property(node, &decl.field) else {
                         continue;
@@ -345,34 +350,37 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     };
                     let mut first = true;
                     for value in elements {
-                    let target = match &by_key {
-                        Some(idx) => idx.get(&value.to_string()).copied(),
-                        None => self.find_value(container, &value),
-                    };
-                    let Some(target) = target else {
-                        continue;
-                    };
-                    // A hop is labelled by the role of the node it
-                    // lands on — never by the property it came
-                    // from. Forward, that is the target container's
-                    // role; backward, it is the base node's own
-                    // name. (`--ip` from an ip node therefore names
-                    // no relation at all, which is the point: it
-                    // would land on a row, not an ip.)
-                    let fwd = self.containers()[container].role.clone();
-                    // Backward the hop lands on the source node — on
-                    // the alias if a `node` gave it a role, else on
-                    // the raw node, named by the path that found it.
-                    let (back_node, back) = match f.alias.get(&node) {
-                        Some((alias, role)) => (*alias, role.clone()),
-                        None => (node, scope_role(&decl.scope)),
-                    };
-                    if first {
-                        f.resolve.insert((node, decl.field.clone()), target);
-                        first = false;
-                    }
-                    f.ref_fwd.entry(node).or_default().push((fwd, target));
-                    f.ref_back.entry(target).or_default().push((back, back_node));
+                        let target = match &by_key {
+                            Some(idx) => idx.get(&value.to_string()).copied(),
+                            None => self.find_value(container, &value),
+                        };
+                        let Some(target) = target else {
+                            continue;
+                        };
+                        // A hop is labelled by the role of the node it
+                        // lands on — never by the property it came
+                        // from. Forward, that is the target container's
+                        // role; backward, it is the base node's own
+                        // name. (`--ip` from an ip node therefore names
+                        // no relation at all, which is the point: it
+                        // would land on a row, not an ip.)
+                        let fwd = self.containers()[container].role.clone();
+                        // Backward the hop lands on the source node — on
+                        // the alias if a `node` gave it a role, else on
+                        // the raw node, named by the path that found it.
+                        let (back_node, back) = match f.alias.get(&node) {
+                            Some((alias, role)) => (*alias, role.clone()),
+                            None => (node, scope_role(&decl.scope)),
+                        };
+                        if first {
+                            f.resolve.insert((node, decl.field.clone()), target);
+                            first = false;
+                        }
+                        f.ref_fwd.entry(node).or_default().push((fwd, target));
+                        f.ref_back
+                            .entry(target)
+                            .or_default()
+                            .push((back, back_node));
                     }
                 }
             }
@@ -423,8 +431,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     if matches!(va, Value::Null) || matches!(vb, Value::Null) {
                         continue;
                     }
-                    let (Some(na), Some(nb)) =
-                        (self.find_value(ca, &va), self.find_value(cb, &vb))
+                    let (Some(na), Some(nb)) = (self.find_value(ca, &va), self.find_value(cb, &vb))
                     else {
                         continue;
                     };
@@ -506,10 +513,13 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 c @ ('$' | '_')
                     if (c == '$' && b.get(i + 1) == Some(&'$'))
                         || (c == '_'
-                            && !(i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_' || b[i - 1] == '-'))
-                            && !b
-                                .get(i + 1)
-                                .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')) =>
+                            && !(i > 0
+                                && (b[i - 1].is_alphanumeric()
+                                    || b[i - 1] == '_'
+                                    || b[i - 1] == '-'))
+                            && !b.get(i + 1).is_some_and(|c| {
+                                c.is_alphanumeric() || *c == '_' || *c == '-'
+                            })) =>
                 {
                     if c == '$' {
                         i += 2;
@@ -526,8 +536,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     let value = if b.get(i) == Some(&':') && b.get(i + 1) == Some(&':') {
                         i += 2;
                         let start = i;
-                        while i < b.len()
-                            && (b[i].is_alphanumeric() || b[i] == '_' || b[i] == '-')
+                        while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_' || b[i] == '-')
                         {
                             i += 1;
                         }
@@ -556,7 +565,10 @@ fn literal(v: Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "''".to_string(),
-        other => format!("'{}'", other.to_string().replace('\\', "\\\\").replace('\'', "\\'")),
+        other => format!(
+            "'{}'",
+            other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
+        ),
     }
 }
 
@@ -689,7 +701,11 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
         self.base.descendants_named(node, name)
     }
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        let base: Vec<NodeId> = nodes.iter().copied().filter(|n| n.0 & MODEL_TAG == 0).collect();
+        let base: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| n.0 & MODEL_TAG == 0)
+            .collect();
         if !base.is_empty() {
             self.base.prefetch_links(&base, dir);
         }
@@ -754,7 +770,9 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             Some((c, 0)) => {
                 let cont = &self.containers()[c];
                 if name == cont.role {
-                    (0..cont.members.len()).map(|v| Self::value_node(c, v)).collect()
+                    (0..cont.members.len())
+                        .map(|v| Self::value_node(c, v))
+                        .collect()
                 } else {
                     Vec::new()
                 }
@@ -887,7 +905,11 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         if canonical == name {
             return true;
         }
-        let aliases = self.model.aliases.iter().filter(|a| a.kind == AliasKind::Name);
+        let aliases = self
+            .model
+            .aliases
+            .iter()
+            .filter(|a| a.kind == AliasKind::Name);
         for a in aliases {
             if a.admits(name, &canonical) {
                 return true;
@@ -1041,7 +1063,12 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     /// The base's reverse index answers only when the model adds
     /// no reference fabric of its own; otherwise the walk sees
     /// both.
-    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
         if self.decode(node).is_some()
             || !self.model.refs.is_empty()
             || !self.model.rels.is_empty()
@@ -1066,7 +1093,11 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        let base: Vec<NodeId> = nodes.iter().copied().filter(|n| self.decode(*n).is_none()).collect();
+        let base: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| self.decode(*n).is_none())
+            .collect();
         if !base.is_empty() {
             self.base.prefetch_links(&base, dir);
         }

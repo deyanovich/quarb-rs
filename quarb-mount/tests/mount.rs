@@ -141,7 +141,10 @@ fn mount_forwards_children_named_alias() {
 /// dropped.
 #[test]
 fn mount_forwards_link_property() {
-    assert_eq!(graph_values("/g/a->knows[$-::since = 2016]:::name"), vec!["b"]);
+    assert_eq!(
+        graph_values("/g/a->knows[$-::since = 2016]:::name"),
+        vec!["b"]
+    );
 }
 
 /// The mount layer fills a missing `:::source` — target where one
@@ -150,10 +153,7 @@ fn mount_forwards_link_property() {
 #[test]
 fn mount_fills_provenance_source() {
     // Target recorded → the real-world address, not the alias.
-    assert_eq!(
-        values("/people/row[1]:::source"),
-        vec!["data/people.csv"]
-    );
+    assert_eq!(values("/people/row[1]:::source"), vec!["data/people.csv"]);
     // No target → the mount name stands in.
     assert_eq!(values("/cities:::source"), vec!["cities"]);
     // No inner instant/dpid to inherit, so the composite is source-only.

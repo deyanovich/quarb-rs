@@ -769,7 +769,10 @@ impl Parser {
                     ));
                 }
                 self.expect_nothing_weird(&prefix)?;
-                Ok((format!("{subject} == (/^{}/)", regex_escape(&prefix)), false))
+                Ok((
+                    format!("{subject} == (/^{}/)", regex_escape(&prefix)),
+                    false,
+                ))
             }
             Some(Tok::Name(f, true)) if f == "text" => self.pred_path(),
             Some(Tok::Name(f, true)) => Err(XPathError::Unsupported(format!(

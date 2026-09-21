@@ -94,7 +94,12 @@ impl HtmlAdapter {
         nodes[0].text = nodes[html_node.0 as usize].text.clone();
         nodes[0].children = vec![html_node];
 
-        HtmlAdapter { nodes, ids, root, document_url: None }
+        HtmlAdapter {
+            nodes,
+            ids,
+            root,
+            document_url: None,
+        }
     }
 
     /// A locator path to `node`, like `/html/body/div[2]/p`, for

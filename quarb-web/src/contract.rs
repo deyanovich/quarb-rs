@@ -184,7 +184,8 @@ pub trait WebStore {
     fn row(&self, key: PageKey) -> Option<LightRow>;
     /// The children of `parent` inside `container` (`None` = the
     /// container's top level), in tree-rank order.
-    fn children(&self, site: SiteId, container: Container, parent: Option<PageKey>) -> Vec<PageKey>;
+    fn children(&self, site: SiteId, container: Container, parent: Option<PageKey>)
+    -> Vec<PageKey>;
     /// The children named `name` — one for a tree, possibly several
     /// where a store admits duplicates.
     fn children_named(

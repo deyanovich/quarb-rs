@@ -8,12 +8,14 @@ mod common;
 use common::site;
 use quarb::QueryResult;
 use quarb_web::db::postgres::PostgresStore;
-use quarb_web::db::{analyze, Dialect, SqlStore};
-use quarb_web::plan::{plan, Rung};
+use quarb_web::db::{Dialect, SqlStore, analyze};
+use quarb_web::plan::{Rung, plan};
 use quarb_web::{WebAdapter, WebStore};
 
 fn url(db: &str) -> Option<String> {
-    std::env::var("QUARB_WEB_PG").ok().map(|p| format!("{p}{db}"))
+    std::env::var("QUARB_WEB_PG")
+        .ok()
+        .map(|p| format!("{p}{db}"))
 }
 
 fn lines<S: WebStore>(a: &WebAdapter<S>, q: &str) -> Vec<String> {
@@ -82,11 +84,18 @@ fn the_postgres_store_agrees_with_the_memory_store_and_the_planner() {
             Rung::Prefilter => {
                 assert!(store.estimate_where(&p.where_sql, &p.params).is_some());
                 let keys = match &p.limit {
-                    Some(l) => store.keys_where_top(&p.where_sql, &p.params, &l.column, l.descending, l.n),
+                    Some(l) => {
+                        store.keys_where_top(&p.where_sql, &p.params, &l.column, l.descending, l.n)
+                    }
                     None => store.keys_where(&p.where_sql, &p.params),
                 };
                 let scoped = WebAdapter::new(store).with_scope(keys);
-                assert_eq!(expected, lines(&scoped, q), "{q}: prefilter ({})", p.where_sql);
+                assert_eq!(
+                    expected,
+                    lines(&scoped, q),
+                    "{q}: prefilter ({})",
+                    p.where_sql
+                );
             }
             Rung::Scan => {}
         }
@@ -97,16 +106,28 @@ fn the_postgres_store_agrees_with_the_memory_store_and_the_planner() {
     pg.execute("UPDATE pages SET in_degree = 0, out_degree = 0, mutual_degree = 0, pagerank = 0, redlinks = 0").unwrap();
     analyze::analyze(&pg, quarb_web::SiteId(1), false).unwrap();
     pg.reload().unwrap();
-    for (k, _) in mem.store().descendants_of_kind(quarb_web::SiteId(1), quarb_web::Container::Pages, None, quarb_web::PageKind::Page) {
+    for (k, _) in mem.store().descendants_of_kind(
+        quarb_web::SiteId(1),
+        quarb_web::Container::Pages,
+        None,
+        quarb_web::PageKind::Page,
+    ) {
         let a = mem.store().row(k).unwrap().analytics;
         let b = pg.row(k).unwrap().analytics;
-        assert_eq!((a.in_degree, a.out_degree, a.mutual_degree, a.redlinks), (b.in_degree, b.out_degree, b.mutual_degree, b.redlinks));
+        assert_eq!(
+            (a.in_degree, a.out_degree, a.mutual_degree, a.redlinks),
+            (b.in_degree, b.out_degree, b.mutual_degree, b.redlinks)
+        );
         assert!((a.pagerank - b.pagerank).abs() < 1e-9);
     }
     let done = analyze::index(&pg).unwrap();
     assert!(done.iter().any(|s| s.contains("gin_trgm_ops")));
     // The text prefilter after the index pass still agrees.
-    let p = plan("//page[//paragraph[:: *= \"jq guide\"]]::path", Dialect::Postgres, false);
+    let p = plan(
+        "//page[//paragraph[:: *= \"jq guide\"]]::path",
+        Dialect::Postgres,
+        false,
+    );
     let keys = pg.keys_where(&p.where_sql, &p.params);
     assert_eq!(keys.len(), 2, "{}", p.where_sql);
 }

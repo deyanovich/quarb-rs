@@ -12,9 +12,24 @@ fn jsdoc(ts: &TreeSitterAdapter, i: usize) -> Option<String> {
 /// `const lex = () => {}` (variable_declarator) and
 /// `lex = () => {}` (assignment_expression).
 fn adopt(ts: &TreeSitterAdapter, i: usize) -> Option<String> {
-    adopted_name(ts, i, "variable_declarator", "name", "value", &["identifier"]).or_else(
-        || adopted_name(ts, i, "assignment_expression", "left", "right", &["identifier"]),
+    adopted_name(
+        ts,
+        i,
+        "variable_declarator",
+        "name",
+        "value",
+        &["identifier"],
     )
+    .or_else(|| {
+        adopted_name(
+            ts,
+            i,
+            "assignment_expression",
+            "left",
+            "right",
+            &["identifier"],
+        )
+    })
 }
 
 pub(crate) fn lower_node(ts: &TreeSitterAdapter, i: usize) -> Option<Lowered> {
@@ -33,7 +48,11 @@ pub(crate) fn lower_node(ts: &TreeSitterAdapter, i: usize) -> Option<Lowered> {
         "arrow_function" | "function_expression" | "function" => {
             let adopted = adopt(ts, i);
             Some(Lowered {
-                construct: if adopted.is_some() { "function" } else { "lambda" },
+                construct: if adopted.is_some() {
+                    "function"
+                } else {
+                    "lambda"
+                },
                 name: adopted,
                 signature: signature(ts, i),
                 n_params: field_child(ts, i, "parameters").map(|p| count_params(ts, p)),

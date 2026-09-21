@@ -5,11 +5,11 @@
 use crate::contract::*;
 use quarb::Value;
 
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
+pub mod analyze;
 #[cfg(feature = "postgres")]
 pub mod postgres;
-pub mod analyze;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 /// The SQL dialect a store speaks — the one construct that differs
 /// is the parameter marker and the substring test.
@@ -38,7 +38,14 @@ pub trait SqlStore: WebStore {
     fn count_where(&self, where_sql: &str, params: &[Param]) -> i64;
     /// The first `n` keys by `column` (descending or not), ties in
     /// document order — the engine's stable sort, cut by the store.
-    fn keys_where_top(&self, where_sql: &str, params: &[Param], column: &str, descending: bool, n: i64) -> Vec<PageKey> {
+    fn keys_where_top(
+        &self,
+        where_sql: &str,
+        params: &[Param],
+        column: &str,
+        descending: bool,
+        n: i64,
+    ) -> Vec<PageKey> {
         let _ = (where_sql, params, column, descending, n);
         Vec::new()
     }
@@ -67,7 +74,12 @@ pub trait SqlStore: WebStore {
     fn set_analytics(&self, rows: &[(PageKey, Analytics)]) -> Result<(), String>;
     /// Move rows between containers (the category tree puts the
     /// categories into the pages container).
-    fn set_container(&self, site: SiteId, kind: PageKind, container: Container) -> Result<u64, String> {
+    fn set_container(
+        &self,
+        site: SiteId,
+        kind: PageKind,
+        container: Container,
+    ) -> Result<u64, String> {
         self.execute(&format!(
             "UPDATE pages SET container = '{}' WHERE site_id = {} AND kind = '{}'",
             container.name(),
@@ -167,7 +179,11 @@ pub fn ddl(dialect: Dialect) -> Vec<String> {
     };
     stmts
         .iter()
-        .map(|s| s.replace("{BIG}", big).replace("{DBL}", dbl).replace("REFERENCES pages(id)", fk))
+        .map(|s| {
+            s.replace("{BIG}", big)
+                .replace("{DBL}", dbl)
+                .replace("REFERENCES pages(id)", fk)
+        })
         .collect()
 }
 
@@ -223,7 +239,9 @@ pub fn export<S: WebStore>(store: &S, sink: &mut dyn Sink) -> Result<(), String>
                 if let Some(k) = parent {
                     let Some(row) = store.row(k) else { continue };
                     let html = store.html(k);
-                    let plain = html.as_deref().map(|h| quarb_text_html::parse(h).plain_text());
+                    let plain = html
+                        .as_deref()
+                        .map(|h| quarb_text_html::parse(h).plain_text());
                     sink.page(&PageRecord {
                         row: &row,
                         html: html.as_deref(),
@@ -265,7 +283,9 @@ pub fn instant(secs: Option<i64>, off: Option<i64>) -> Option<Value> {
 /// The stored form of an instant value.
 pub fn instant_cols(v: &Option<Value>) -> (Option<i64>, Option<i64>) {
     match v {
-        Some(Value::Instant { secs, offset_min, .. }) => (Some(*secs), offset_min.map(|o| o as i64)),
+        Some(Value::Instant {
+            secs, offset_min, ..
+        }) => (Some(*secs), offset_min.map(|o| o as i64)),
         _ => (None, None),
     }
 }
@@ -300,7 +320,11 @@ pub fn hierarchy_name(h: Hierarchy) -> &'static str {
 }
 
 pub fn hierarchy_of(name: &str) -> Hierarchy {
-    if name == "categories" { Hierarchy::Categories } else { Hierarchy::Directories }
+    if name == "categories" {
+        Hierarchy::Categories
+    } else {
+        Hierarchy::Directories
+    }
 }
 
 /// A JSON list of strings, as the tag and category columns hold.

@@ -50,10 +50,7 @@ impl LocalExecutor {
 
     /// Register the reference targets (identifier → mounted root)
     /// the arrow may land on. See [`Doc::url_roots`].
-    pub fn with_url_roots(
-        mut self,
-        map: std::collections::HashMap<String, quarb::NodeId>,
-    ) -> Self {
+    pub fn with_url_roots(mut self, map: std::collections::HashMap<String, quarb::NodeId>) -> Self {
         self.url_roots = map;
         self
     }
@@ -88,12 +85,20 @@ impl LocalExecutor {
 }
 
 /// Run one query against a `Doc`, rendering its result to [`Cell`]s.
-fn run_doc(doc: &Doc, query: &str, now: (i64, u32), allow_shell: bool) -> anyhow::Result<Vec<Cell>> {
+fn run_doc(
+    doc: &Doc,
+    query: &str,
+    now: (i64, u32),
+    allow_shell: bool,
+) -> anyhow::Result<Vec<Cell>> {
     let result = doc
         .run(query, now, allow_shell)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(match result {
-        QueryResult::Nodes(nodes) => nodes.into_iter().map(|n| Cell::Node(doc.render(n))).collect(),
+        QueryResult::Nodes(nodes) => nodes
+            .into_iter()
+            .map(|n| Cell::Node(doc.render(n)))
+            .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
     })
 }

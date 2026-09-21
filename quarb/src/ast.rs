@@ -86,7 +86,9 @@ impl PartialEq for Anchor {
             | (Anchor::Root, Anchor::Root)
             | (Anchor::MarkTop, Anchor::MarkTop)
             | (Anchor::MarksAll, Anchor::MarksAll) => true,
-            (Anchor::Mark(a), Anchor::Mark(b)) | (Anchor::MarksNamed(a), Anchor::MarksNamed(b)) => a == b,
+            (Anchor::Mark(a), Anchor::Mark(b)) | (Anchor::MarksNamed(a), Anchor::MarksNamed(b)) => {
+                a == b
+            }
             (Anchor::MarkIndex(a), Anchor::MarkIndex(b)) => a == b,
             // Two id anchors are equal when they are spelled alike.
             (Anchor::Id(a), Anchor::Id(b)) => {
@@ -279,7 +281,11 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     }
     // `<-link:.v` — a peer's named regula derives its name as a
     // recall does.
-    if let Operand::PeerReg { reg: RegRef::Named(n), .. } = op {
+    if let Operand::PeerReg {
+        reg: RegRef::Named(n),
+        ..
+    } = op
+    {
         return Some(n);
     }
     if matches!(op, Operand::Ordinal) {

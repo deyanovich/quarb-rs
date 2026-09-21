@@ -281,7 +281,10 @@ fn a_tarball_of_pages_at_the_text_level() {
         values(&site, "//*<tag:guide>::title"),
         vec!["Quarb for jq Users", "Quarb for SQL Users"]
     );
-    assert_eq!(values(&site, "//*<tag:capsa>::category"), vec!["Data Model"]);
+    assert_eq!(
+        values(&site, "//*<tag:capsa>::category"),
+        vec!["Data Model"]
+    );
     assert_eq!(
         values(&site, "//*[::category = \"Guides\"]::tags"),
         vec!["guide, jq", "guide, sql"]
@@ -291,7 +294,9 @@ fn a_tarball_of_pages_at_the_text_level() {
     // A hit links back to its page, narrowed to its section.
     assert_eq!(
         values(&site, "//paragraph[:: *= \"witness\"] | link | :href"),
-        vec!["https://quarb.org/guides/sql.html#joins:~:text=The%20register%20keeps%20the%20witness%2E"]
+        vec![
+            "https://quarb.org/guides/sql.html#joins:~:text=The%20register%20keeps%20the%20witness%2E"
+        ]
     );
     // The DOM level is still the default.
     let dom = ComposeAdapter::new(ArchiveAdapter::from_tar_bytes(&bytes).unwrap());

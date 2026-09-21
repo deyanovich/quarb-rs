@@ -136,11 +136,7 @@ fn pattern_pushes_round_trip() {
 
 #[test]
 fn arrived_edges_round_trip() {
-    for q in [
-        "/a->e | .(@-::qty)",
-        "/a->e | .(@-)",
-        "/a | %(::x; l = @-)",
-    ] {
+    for q in ["/a->e | .(@-::qty)", "/a->e | .(@-)", "/a | %(::x; l = @-)"] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
     assert!(refuse("/a | .(@-:::depth)").contains("plain properties"));
@@ -247,13 +243,21 @@ fn headless_arrow_round_trips() {
 fn resolution_respell_canonicalizes() {
     // `-->` / `<--` are canonical; the tilde forms remain accepted
     // and canonicalize on unparse, like `;;;` to `::::`.
-    assert_eq!(canon("/tracks/1::album_id-->::title"), "/tracks/1::album_id-->::title");
-    assert_eq!(canon("/tracks/1::album_id-->::title"), "/tracks/1::album_id-->::title");
+    assert_eq!(
+        canon("/tracks/1::album_id-->::title"),
+        "/tracks/1::album_id-->::title"
+    );
+    assert_eq!(
+        canon("/tracks/1::album_id-->::title"),
+        "/tracks/1::album_id-->::title"
+    );
     assert_eq!(canon("/loan::book-->shelf"), "/loan::book-->shelf");
     assert_eq!(canon("/page::id<--"), "/page::id<--");
     assert_eq!(canon("/page::id<--cite"), "/page::id<--cite");
-    // the digit guard holds: `<-3` is still a comparison shape
-    assert_eq!(canon("/x[::a <-3]"), "/x[::a < -3]");
+    // spacing decides: `< -3` is the comparison and stays so; `<-3`
+    // glues the hop to a name and is refused in a comparison seat
+    assert_eq!(canon("/x[::a < -3]"), "/x[::a < -3]");
+    assert!(quarb::expand("/x[::a <-3]", &quarb::Defs::default()).is_err());
 }
 
 #[test]
@@ -315,10 +319,16 @@ fn rounded_family_canonicalizes() {
         canon("//user(:admin && !banned)::name"),
         canon("//user<admin && !banned>::name")
     );
-    assert_eq!(canon("//user(:admin)(?::age > 18)"), canon("//user<admin>[::age > 18]"));
+    assert_eq!(
+        canon("//user(:admin)(?::age > 18)"),
+        canon("//user<admin>[::age > 18]")
+    );
     assert_eq!(canon("//x(:.custom)"), canon("//x<.custom>"));
     // a group opening on a projection, or on the :- arrow, stays a group
-    assert_eq!(canon("/a(?(::x = 1 || ::y = 2))"), "/a[(::x = 1 || ::y = 2)]");
+    assert_eq!(
+        canon("/a(?(::x = 1 || ::y = 2))"),
+        "/a[(::x = 1 || ::y = 2)]"
+    );
     assert_eq!(canon("/e(:-manager_id)+::name"), "/e(->manager_id)+::name");
     // quantifier
     assert_eq!(canon("/a(/b)(+2;3)"), "/a(/b){2;3}");
@@ -337,7 +347,10 @@ fn root_anchor_and_comparison_words_canonicalize() {
     // rounded spelling …
     assert_eq!(canon("(())/a/b::x"), canon("^/a/b::x"));
     assert_eq!(canon("(())//x"), canon("^//x"));
-    assert_eq!(canon("/a[::x = (())/set/*::x]"), canon("/a[::x = ^/set/*::x]"));
+    assert_eq!(
+        canon("/a[::x = (())/set/*::x]"),
+        canon("/a[::x = ^/set/*::x]")
+    );
     assert_eq!(canon("(()) | count"), canon("^ | count"));
     // … but a glued pair is a call's argument list, untouched
     assert_eq!(canon("/x[::t < now()]"), canon("/x[::t < now()]"));
@@ -386,13 +399,28 @@ fn boolean_words_canonicalize() {
         assert_eq!(canon(q), pointy, "{q}");
     }
     // the words are loose like `not`: they negate a whole condition
-    assert_eq!(canon("/u(?.не. ::age .nonminor. 18)"), canon("/u[!::age >= 18]"));
+    assert_eq!(
+        canon("/u(?.не. ::age .nonminor. 18)"),
+        canon("/u[!::age >= 18]")
+    );
     // English joins the comparison words (the Fortran heritage)
-    assert_eq!(canon("/u[::age .lt. 18 .or. ::age .ge. 65]"), canon("/u[::age < 18 || ::age >= 65]"));
-    assert_eq!(canon("/u[::age .gt. 18 .and. ::age .le. 65]"), canon("/u[::age > 18 && ::age <= 65]"));
+    assert_eq!(
+        canon("/u[::age .lt. 18 .or. ::age .ge. 65]"),
+        canon("/u[::age < 18 || ::age >= 65]")
+    );
+    assert_eq!(
+        canon("/u[::age .gt. 18 .and. ::age .le. 65]"),
+        canon("/u[::age > 18 && ::age <= 65]")
+    );
     // Spanish joins the comparison words
-    assert_eq!(canon("/u[::age .menor. 18 .o. ::age .nomenor. 65]"), canon("/u[::age < 18 || ::age >= 65]"));
-    assert_eq!(canon("/u[::age .mayor. 18 .y. ::age .nomayor. 65]"), canon("/u[::age > 18 && ::age <= 65]"));
+    assert_eq!(
+        canon("/u[::age .menor. 18 .o. ::age .nomenor. 65]"),
+        canon("/u[::age < 18 || ::age >= 65]")
+    );
+    assert_eq!(
+        canon("/u[::age .mayor. 18 .y. ::age .nomayor. 65]"),
+        canon("/u[::age > 18 && ::age <= 65]")
+    );
     // a quoted field keeps a word as its name
     assert!(canon("/u[::\"и\" = 1]").contains("и"));
 }
@@ -403,7 +431,10 @@ fn rounded_pipes_registers_anchors_canonicalize() {
     // all-then, `,__` each-then.
     assert_eq!(canon("/a __ count"), canon("/a | count"));
     assert_eq!(canon("/a::x *__ max"), canon("/a::x @| max"));
-    assert_eq!(canon("/a::x ,__ (?(_) .maior. 2)"), canon("/a::x $| [$_ > 2]"));
+    assert_eq!(
+        canon("/a::x ,__ (?(_) .maior. 2)"),
+        canon("/a::x $| [$_ > 2]")
+    );
     assert_eq!(canon("/a __ ..."), canon("/a | ..."));
     assert_eq!(canon("/a __ ...?"), canon("/a | ...?"));
     // the correlation, mirrored like the arrows
@@ -419,19 +450,29 @@ fn rounded_pipes_registers_anchors_canonicalize() {
     assert_eq!(canon("/a ,__ (?(_) .maior. 2)"), canon("/a $| [$_ > 2]"));
     assert_eq!(canon("/a .s /b __ (.s)"), canon("/a .s /b | $.s"));
     assert_eq!(canon("/a . /b . __ (.2)"), canon("/a . /b . | $.2"));
-    assert_eq!(canon("/a :-b(?(-)::w .maior. 1)"), canon("/a->b[$-::w > 1]"));
+    assert_eq!(
+        canon("/a :-b(?(-)::w .maior. 1)"),
+        canon("/a->b[$-::w > 1]")
+    );
     assert_eq!(
         canon("/users/* :=: /orders/*(?/uid:: = _/id::) __ %(::name; amt = ((1))/amt::)"),
         canon("/users/* <=> /orders/*[/uid:: = _/id::] | %(::name; amt = $$1/amt::)")
     );
     // the node side: double parens are canonical, single parens the
     // deprecated alias — and `(.)` is now the register file
-    assert_eq!(canon("/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f"), "/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f");
+    assert_eq!(
+        canon("/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f"),
+        "/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f"
+    );
     // the single-paren anchors are retired (the value side): refused
     // with a pointer at the double form
-    let e = quarb::expand("/a . /b .m | (@)/e", &quarb::Defs::default()).unwrap_err().to_string();
+    let e = quarb::expand("/a . /b .m | (@)/e", &quarb::Defs::default())
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("((@))"), "{e}");
-    let e = quarb::expand("/a . /b .m | (@m)/f", &quarb::Defs::default()).unwrap_err().to_string();
+    let e = quarb::expand("/a . /b .m | (@m)/f", &quarb::Defs::default())
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("((@m))"), "{e}");
     // `(N)` is the match capture `$N` — a value; the mark at N is `((N))`
     assert_eq!(
@@ -442,9 +483,13 @@ fn rounded_pipes_registers_anchors_canonicalize() {
     assert_eq!(canon("$$.m/address"), "$$.m/address");
     // the single-paren anchor is retired: single parens are the value
     // side, and the refusal points at the double form
-    let e = quarb::expand("/a .m /b[::x = (m)::y]", &quarb::Defs::default()).unwrap_err().to_string();
+    let e = quarb::expand("/a .m /b[::x = (m)::y]", &quarb::Defs::default())
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("$$.m"), "{e}");
-    let e = quarb::expand("/a | . | (@)::y", &quarb::Defs::default()).unwrap_err().to_string();
+    let e = quarb::expand("/a | . | (@)::y", &quarb::Defs::default())
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("((@))"), "{e}");
 }
 
@@ -493,7 +538,10 @@ fn boolean_words_in_traits_canonicalize() {
     ] {
         assert_eq!(canon(q), pointy, "{q}");
     }
-    assert_eq!(canon("/div(:(a .ou. b) .et. .non. c)"), canon("/div<(a || b) && !c>"));
+    assert_eq!(
+        canon("/div(:(a .ou. b) .et. .non. c)"),
+        canon("/div<(a || b) && !c>")
+    );
     // the bare foreign words are no longer keywords: `et` is a name
     assert!(quarb::expand("/u[::a = 1 et ::b = 2]", &quarb::Defs::default()).is_err());
     // a lone word is still a trait name
@@ -513,7 +561,10 @@ fn record_field_colon_canonicalizes() {
     assert_eq!(canon("/a | [:n .maior. 1]"), canon("/a | [$_:n > 1]"));
     assert_eq!(canon("/a | %+"), "/a | %+");
     assert_eq!(canon("/a | %+:year"), "/a | %+:year");
-    assert_eq!(canon("/a | [%+:year .maior. 2000]"), "/a | [%+:year > 2000]");
+    assert_eq!(
+        canon("/a | [%+:year .maior. 2000]"),
+        "/a | [%+:year > 2000]"
+    );
     // a node has properties, not fields
     assert!(refuse("/user/*:name").contains("::name"));
     // the else colon is spaced; glued, it reads as a field
@@ -562,7 +613,10 @@ fn operand_paths_ascend_and_step_sideways() {
     assert_eq!(canon("/a/b[\\*::x = 1]"), "/a/b[\\::x = 1]");
     assert_eq!(canon("/a/b[\\\\?c::x = 1]"), "/a/b[\\\\?c::x = 1]");
     // (a bare key is a string; canonical output quotes it)
-    assert_eq!(canon("/p | %(dir; \\*:::name; me; ::city)"), "/p | %(dir = \\:::name; me = ::city)");
+    assert_eq!(
+        canon("/p | %(dir; \\*:::name; me; ::city)"),
+        "/p | %(dir = \\:::name; me = ::city)"
+    );
     assert_eq!(canon("/a[;-*::x = 1]"), "/a[>*::x = 1]");
     assert_eq!(canon("/a[>>?*::x = 1]"), "/a[>>?*::x = 1]");
     assert_eq!(canon("/a | %(up; /..::n)"), "/a | %(up = \\::n)");
@@ -572,22 +626,46 @@ fn operand_paths_ascend_and_step_sideways() {
 fn record_convention_canonicalizes() {
     // Ruling #50: `%(k = v; k2 = v2)` — the kaiv form — is the
     // record's canonical spelling; keys bare when identifiers.
-    assert_eq!(canon("/a | %(n = ::age; city = /profile::city)"), "/a | %(n = ::age; city = /profile::city)");
+    assert_eq!(
+        canon("/a | %(n = ::age; city = /profile::city)"),
+        "/a | %(n = ::age; city = /profile::city)"
+    );
     // the flat Perl-list form and the comma both parse, and canonicalize
-    assert_eq!(canon("/a | %(n = ::age; city = /profile::city)"), "/a | %(n = ::age; city = /profile::city)");
-    assert_eq!(canon("/a | %(n = ::age, city = /profile::city)"), "/a | %(n = ::age; city = /profile::city)");
+    assert_eq!(
+        canon("/a | %(n = ::age; city = /profile::city)"),
+        "/a | %(n = ::age; city = /profile::city)"
+    );
+    assert_eq!(
+        canon("/a | %(n = ::age, city = /profile::city)"),
+        "/a | %(n = ::age; city = /profile::city)"
+    );
     assert_eq!(canon("/a | %(n; ::age)"), "/a | %(n = ::age)");
     // auto-named values mix with keyed ones
-    assert_eq!(canon("/a | %(::name; kb = ::size)"), "/a | %(::name; kb = ::size)");
+    assert_eq!(
+        canon("/a | %(::name; kb = ::size)"),
+        "/a | %(::name; kb = ::size)"
+    );
     // a non-identifier key quotes; a value may be a comparison
-    assert_eq!(canon("/a | %(\"my-key\" = 1; adult = ::age >= 18)"), "/a | %(\"my-key\" = 1; adult = (::age >= 18))");
+    assert_eq!(
+        canon("/a | %(\"my-key\" = 1; adult = ::age >= 18)"),
+        "/a | %(\"my-key\" = 1; adult = (::age >= 18))"
+    );
     assert_eq!(canon("/a | %(and = 1)"), "/a | %(and = 1)");
     // an identifier in any script is a bare key
-    assert_eq!(canon("/a | %(имя = ::имя; 名前 = 1)"), "/a | %(имя = ::имя; 名前 = 1)");
+    assert_eq!(
+        canon("/a | %(имя = ::имя; 名前 = 1)"),
+        "/a | %(имя = ::имя; 名前 = 1)"
+    );
     // the same convention in the enriched view, the record push, and group
     assert_eq!(canon("/a | %%(k = 2)"), "/a | %%(k = 2)");
-    assert_eq!(canon("/a | .r%(k = ::x; j = 1)"), "/a | .r%(k = ::x; j = 1)");
-    assert_eq!(canon("/a @| group(k = ::x; ::y)"), "/a @| group(k = ::x; ::y)");
+    assert_eq!(
+        canon("/a | .r%(k = ::x; j = 1)"),
+        "/a | .r%(k = ::x; j = 1)"
+    );
+    assert_eq!(
+        canon("/a @| group(k = ::x; ::y)"),
+        "/a @| group(k = ::x; ::y)"
+    );
     assert_eq!(canon("/a @| group(\"k\", ::x)"), "/a @| group(k = ::x)");
 }
 
@@ -598,7 +676,10 @@ fn list_literal_canonicalizes() {
     assert_eq!(canon("/a | @(1; 2; 3)"), "/a | @(1; 2; 3)");
     assert_eq!(canon("/a | @(1, 2, 3)"), "/a | @(1; 2; 3)");
     assert_eq!(canon("/a | @()"), "/a | @()");
-    assert_eq!(canon("/a | %(tags = @(::x; \"y\"); n = 1)"), "/a | %(tags = @(::x; \"y\"); n = 1)");
+    assert_eq!(
+        canon("/a | %(tags = @(::x; \"y\"); n = 1)"),
+        "/a | %(tags = @(::x; \"y\"); n = 1)"
+    );
     assert_eq!(canon("/a | @(/tags/*::)"), "/a | @(/tags/*::)");
     // the expression head canonicalizes as `^ | …` (exprhead.rs)
     assert_eq!(canon("= @(1; 2) | count"), "^ | @(1; 2) | count");
@@ -618,7 +699,9 @@ fn decimal_comma_and_group_underscores_canonicalize() {
     assert_eq!(canon("/a | %(a = 1,5; b = 2)"), "/a | %(a = 1.5; b = 2)");
     assert_eq!(canon("/a | @(1,5)"), "/a | @(1.5)");
     assert_eq!(canon("/a | @(1, 5)"), "/a | @(1; 5)");
-    let e = quarb::expand("= 1,000,000", &quarb::Defs::default()).unwrap_err().to_string();
+    let e = quarb::expand("= 1,000,000", &quarb::Defs::default())
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("1_000_000"), "{e}");
     // a quantifier's bounds are integers: no ambiguity; the semicolon
     // is canonical, the regex comma sugar
@@ -633,8 +716,14 @@ fn decimal_comma_and_group_underscores_canonicalize() {
     assert_eq!(canon("/a(->b)(+2;)"), "/a(->b){2;}");
     // the join binds where it is written: the driver's stages before
     // `<=>` stay before it, and a served-node stage prints bare
-    assert_eq!(canon("/a | .t(::x) <=> /b[::y = $.t] | %(::z)"), "/a | .t(::x) <=> /b[::y = $.t] | %(::z)");
-    assert_eq!(canon("/a <=> /b[::y = _::t] | .t(::x)"), "/a <=> /b[::y = _::t] | .t(::x)");
+    assert_eq!(
+        canon("/a | .t(::x) <=> /b[::y = $.t] | %(::z)"),
+        "/a | .t(::x) <=> /b[::y = $.t] | %(::z)"
+    );
+    assert_eq!(
+        canon("/a <=> /b[::y = _::t] | .t(::x)"),
+        "/a <=> /b[::y = _::t] | .t(::x)"
+    );
     assert_eq!(canon("/a | _::x | _/kid::y"), "/a | _::x | _/kid::y");
     // the parent and the ancestors take no name: bare is canonical,
     // the star accepted; the rounded ascent is a hop in name position
@@ -656,8 +745,14 @@ fn decimal_comma_and_group_underscores_canonicalize() {
 fn rounded_hole_canonicalizes() {
     // `(,expr)` in a double-quoted string is the rounded `${expr}`;
     // canonical text prints the pointy hole.
-    assert_eq!(canon(r#"/r | "(,::name) is (,::age)""#), canon(r#"/r | "${::name} is ${::age}""#));
-    assert_eq!(canon(r#"/r | ::f | .f | "fare (,(.f)), doubled (,(_) * 2)""#), canon(r#"/r | ::f | .f | "fare ${$.f}, doubled ${$_ * 2}""#));
+    assert_eq!(
+        canon(r#"/r | "(,::name) is (,::age)""#),
+        canon(r#"/r | "${::name} is ${::age}""#)
+    );
+    assert_eq!(
+        canon(r#"/r | ::f | .f | "fare (,(.f)), doubled (,(_) * 2)""#),
+        canon(r#"/r | ::f | .f | "fare ${$.f}, doubled ${$_ * 2}""#)
+    );
     assert!(canon(r#"/r | "(,::name)""#).contains("${::name}"));
 }
 
@@ -665,8 +760,14 @@ fn rounded_hole_canonicalizes() {
 fn tail_colon_aliases_canonicalize() {
     // `:-` and `:--` — the tail-colon spellings — are permanent
     // typing-friendly aliases of `->` and `-->`.
-    assert_eq!(canon("/employees/6(:-manager_id)+::name"), "/employees/6(->manager_id)+::name");
-    assert_eq!(canon("/tracks/1::album_id:--::title"), "/tracks/1::album_id-->::title");
+    assert_eq!(
+        canon("/employees/6(:-manager_id)+::name"),
+        "/employees/6(->manager_id)+::name"
+    );
+    assert_eq!(
+        canon("/tracks/1::album_id:--::title"),
+        "/tracks/1::album_id-->::title"
+    );
     assert_eq!(canon("/a:-b"), "/a->b");
     // a conditional's glued else-negative is untouched
     assert_eq!(

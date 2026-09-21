@@ -85,9 +85,7 @@ fn quote(ident: &str) -> String {
 
 fn cell(row: &Row, i: usize, d: Decode) -> Value {
     match d {
-        Decode::Bool => row
-            .get::<bool, _>(i)
-            .map_or(Value::Null, Value::Bool),
+        Decode::Bool => row.get::<bool, _>(i).map_or(Value::Null, Value::Bool),
         Decode::TinyInt => row
             .get::<u8, _>(i)
             .map_or(Value::Null, |n| Value::Int(n as i64)),
@@ -166,8 +164,7 @@ fn parse_target(target: &str) -> Result<Config, MssqlError> {
         config.trust_cert();
         Ok(config)
     } else if target.contains('=') {
-        let mut config =
-            Config::from_ado_string(target).map_err(MssqlError::Mssql)?;
+        let mut config = Config::from_ado_string(target).map_err(MssqlError::Mssql)?;
         config.trust_cert();
         Ok(config)
     } else {
@@ -204,10 +201,7 @@ impl MssqlAdapter {
         Self::connect_impl(target, Some((table.to_string(), where_sql.to_string())))
     }
 
-    fn connect_impl(
-        target: &str,
-        filter: Option<(String, String)>,
-    ) -> Result<Self, MssqlError> {
+    fn connect_impl(target: &str, filter: Option<(String, String)>) -> Result<Self, MssqlError> {
         let config = parse_target(target)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -248,9 +242,7 @@ impl MssqlAdapter {
 
 /// The catalog: every `dbo` table's spec plus each column's
 /// decode kind.
-async fn introspect(
-    conn: &mut Conn,
-) -> Result<(Vec<TableSpec>, Vec<Vec<Decode>>), MssqlError> {
+async fn introspect(conn: &mut Conn) -> Result<(Vec<TableSpec>, Vec<Vec<Decode>>), MssqlError> {
     let names: Vec<String> = conn
         .query(
             "SELECT table_name FROM INFORMATION_SCHEMA.TABLES \
@@ -459,12 +451,7 @@ pub fn raw_query(
         let rows = conn.query(sql, &[]).await?.into_first_result().await?;
         let cols: Vec<String> = rows
             .first()
-            .map(|r| {
-                r.columns()
-                    .iter()
-                    .map(|c| c.name().to_string())
-                    .collect()
-            })
+            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
             .unwrap_or_default();
         let out = rows
             .iter()

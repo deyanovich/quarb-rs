@@ -263,9 +263,16 @@ impl AstAdapter for MountAdapter {
 
     /// A reverse index answers within the node's own mount; the
     /// other mounts cannot reference into it.
-    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
         let (m, inner) = self.decode(node)?;
-        let v = self.mounts[m].adapter.reverse_resolve(inner, property, hint)?;
+        let v = self.mounts[m]
+            .adapter
+            .reverse_resolve(inner, property, hint)?;
         Some(v.into_iter().map(|t| self.encode(m, t)).collect())
     }
 
@@ -306,16 +313,20 @@ impl AstAdapter for MountAdapter {
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         match self.decode(node) {
             None => quarb::Provenance::default(),
-            Some((m, inner)) => self.mounts[m].adapter.provenance(inner).or(self.source_fill(m, inner)),
+            Some((m, inner)) => self.mounts[m]
+                .adapter
+                .provenance(inner)
+                .or(self.source_fill(m, inner)),
         }
     }
     /// The same layering, entry by entry.
     fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
         match self.decode(node) {
             None => quarb::ProvenanceList::default(),
-            Some((m, inner)) => {
-                self.mounts[m].adapter.provenance_list(inner).or(self.source_fill(m, inner))
-            }
+            Some((m, inner)) => self.mounts[m]
+                .adapter
+                .provenance_list(inner)
+                .or(self.source_fill(m, inner)),
         }
     }
 }
@@ -337,10 +348,7 @@ impl MountAdapter {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| (d.as_secs() as i64, d.subsec_nanos(), Some(0)));
         quarb::Provenance {
-            source: mount
-                .target
-                .clone()
-                .or_else(|| Some(mount.name.clone())),
+            source: mount.target.clone().or_else(|| Some(mount.name.clone())),
             path: Some(quarb::name_path(&*mount.adapter, inner)),
             instant_from: instant.map(|_| quarb::InstantFrom::Source),
             instant,

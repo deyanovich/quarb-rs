@@ -36,7 +36,10 @@ fn live_memgraph() {
     assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
     assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
-    assert_eq!(values(&a, "/City/*[::country = \"RS\"]::name"), ["Novi Sad"]);
+    assert_eq!(
+        values(&a, "/City/*[::country = \"RS\"]::name"),
+        ["Novi Sad"]
+    );
 
     assert_eq!(values(&a, "/Person/Ada->LIVES_IN::name"), ["Oslo"]);
     assert_eq!(values(&a, "/Person/Bo<-MENTORS::name"), ["Ada"]);

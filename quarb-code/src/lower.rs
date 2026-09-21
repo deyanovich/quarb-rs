@@ -194,7 +194,10 @@ pub(crate) fn strip_comment_markers(text: &str) -> String {
         })
         .collect();
     let start = lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
-    let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |e| e + 1);
+    let end = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map_or(0, |e| e + 1);
     lines[start..end.max(start)].join("\n")
 }
 
@@ -210,9 +213,7 @@ pub(crate) fn adopted_name(
     name_kinds: &[&str],
 ) -> Option<String> {
     let parent = ts.nodes()[i].parent?.0 as usize;
-    if ts.nodes()[parent].kind != binding_kind
-        || field_child(ts, parent, value_field) != Some(i)
-    {
+    if ts.nodes()[parent].kind != binding_kind || field_child(ts, parent, value_field) != Some(i) {
         return None;
     }
     let name = field_child(ts, parent, name_field)?;

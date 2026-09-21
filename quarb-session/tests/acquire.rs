@@ -11,8 +11,7 @@ const HOME: &str = r##"<html><head><title>Home</title></head><body>
   <a href="/about.html">About</a>
   <a href="https://other.example/faq.html">FAQ</a>
   <a href="#top" id="top">Top</a></body></html>"##;
-const ABOUT: &str =
-    "<html><head><title>About Us</title></head><body><p>Hi</p></body></html>";
+const ABOUT: &str = "<html><head><title>About Us</title></head><body><p>Hi</p></body></html>";
 
 fn mount(parts: &[(&str, &str, Option<&str>)]) -> LocalExecutor {
     let mut docs = Vec::new();
@@ -99,7 +98,11 @@ fn fragment_lands_inside_the_target_document() {
     ]);
     let cells = ex.run("/home//a::href--> ::id").unwrap();
     let lines: Vec<String> = cells.iter().map(|c| c.display()).collect();
-    assert_eq!(lines, vec!["team"], "landed on the #team element: {lines:?}");
+    assert_eq!(
+        lines,
+        vec!["team"],
+        "landed on the #team element: {lines:?}"
+    );
     assert_eq!(ex.refs(), Vec::<String>::new());
 }
 
@@ -150,19 +153,25 @@ fn text_level_refs_cross_documents() {
     g.attach_url("https://shop.example/guide.html");
     let mut sp = Doc::parse(spec, "text-html").unwrap();
     sp.attach_url("https://shop.example/spec.html");
-    let doc = Doc::mount_docs(vec![
-        ("guide".to_string(), g),
-        ("spec".to_string(), sp),
-    ])
-    .unwrap();
+    let doc = Doc::mount_docs(vec![("guide".to_string(), g), ("spec".to_string(), sp)]).unwrap();
     let urls = vec![
-        ("guide".to_string(), "https://shop.example/guide.html".to_string()),
-        ("spec".to_string(), "https://shop.example/spec.html".to_string()),
+        (
+            "guide".to_string(),
+            "https://shop.example/guide.html".to_string(),
+        ),
+        (
+            "spec".to_string(),
+            "https://shop.example/spec.html".to_string(),
+        ),
     ];
     let roots = doc.url_roots(&urls);
     let ex = LocalExecutor::new(doc, (1_753_500_000, 0), false).with_url_roots(roots);
     let cells = ex.run("/guide//ref--> ::lemma").unwrap();
     let lines: Vec<String> = cells.iter().map(|c| c.display()).collect();
-    assert_eq!(lines, vec!["Usage"], "fragment lands on the labeled section: {lines:?}");
+    assert_eq!(
+        lines,
+        vec!["Usage"],
+        "fragment lands on the labeled section: {lines:?}"
+    );
     assert_eq!(ex.refs(), vec!["https://other.example/faq.html"]);
 }

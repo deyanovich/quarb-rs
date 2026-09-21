@@ -637,7 +637,12 @@ impl AstAdapter for KaivAdapter {
             dpid: e.dpid.clone(),
         };
         quarb::ProvenanceList {
-            entries: l.prov.iter().map(resolve).filter(|p| !p.is_empty()).collect(),
+            entries: l
+                .prov
+                .iter()
+                .map(resolve)
+                .filter(|p| !p.is_empty())
+                .collect(),
             elided: l.elided,
         }
     }
@@ -728,7 +733,10 @@ mod tests {
             values(&a, "/readings/temp:::provenance"),
             ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42"]
         );
-        assert_eq!(values(&a, "/readings/temp::::timestamp"), ["20250115T093000Z"]);
+        assert_eq!(
+            values(&a, "/readings/temp::::timestamp"),
+            ["20250115T093000Z"]
+        );
         // A typed temporal criterion over the bridged instant (the
         // list-carrying leaf's newest entry qualifies it too).
         assert_eq!(
@@ -744,10 +752,18 @@ mod tests {
         assert_eq!(values(&a, "/readings/mean::::sources | count"), ["2"]);
         assert_eq!(
             values(&a, "/readings/mean:::provenance"),
-            ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42;https://sensors.example.com/2@2025-01-16T09:30:00Z#req-43;+3"]
+            [
+                "?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42;https://sensors.example.com/2@2025-01-16T09:30:00Z#req-43;+3"
+            ]
         );
-        assert_eq!(values(&a, "/readings/mean:::source"), ["https://sensors.example.com/1"]);
-        assert_eq!(values(&a, "/readings/mean:::instant"), ["2025-01-16T09:30:00Z"]);
+        assert_eq!(
+            values(&a, "/readings/mean:::source"),
+            ["https://sensors.example.com/1"]
+        );
+        assert_eq!(
+            values(&a, "/readings/mean:::instant"),
+            ["2025-01-16T09:30:00Z"]
+        );
         assert_eq!(values(&a, "/readings/mean:::@provenance | count"), ["2"]);
         assert_eq!(values(&a, "/readings/mean:::elided"), ["3"]);
         assert_eq!(values(&a, "/readings/temp:::elided"), ["0"]);

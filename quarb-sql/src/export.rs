@@ -149,10 +149,7 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         // table's (driver-first correlation).
         Some(ex.from_table.clone())
     };
-    let join_left = ex
-        .join_table
-        .clone()
-        .map(|t| (t, ex.join_on_cols.clone()));
+    let join_left = ex.join_table.clone().map(|t| (t, ex.join_on_cols.clone()));
     Ok(Pushdown {
         sql,
         order_table,
@@ -502,9 +499,7 @@ impl Exporter {
         }
         let branches = self.kids(q, "branch");
         if branches.len() != 1 {
-            return Err(SqlError::Unsupported(
-                "a branch union".into(),
-            ));
+            return Err(SqlError::Unsupported("a branch union".into()));
         }
         let (table, preds) = self.table_branch(branches[0])?;
 
@@ -730,12 +725,7 @@ impl Exporter {
                 // (the graft refuses to order Str against them).
                 Dialect::Sqlite => {
                     let ex = json_extract(d, None, col, path);
-                    Some(json_valid_guard(
-                        d,
-                        None,
-                        col,
-                        format!("{ex} {op} '{raw}'"),
-                    ))
+                    Some(json_valid_guard(d, None, col, format!("{ex} {op} '{raw}'")))
                 }
                 // Text ordering elsewhere runs into collation; the
                 // engine keeps those.
@@ -865,7 +855,10 @@ impl Exporter {
                 let col = self.sql_ident(&col, "column name")?;
                 sel.select.push(format!("{lsql}.{col}"));
             }
-            if self.kid(self.kids(*corr, "branch")[0], "projection").is_some() {
+            if self
+                .kid(self.kids(*corr, "branch")[0], "projection")
+                .is_some()
+            {
                 return Err(SqlError::Unsupported(
                     "a projection on the joined expression (project the witness \
                      in the pipeline: '$*1::col')"
@@ -1063,9 +1056,7 @@ impl Exporter {
                 // prefilter ladder covers these shapes.
                 if self.dialect.is_some() {
                     for side in [kids[0], kids[1]] {
-                        if self.json_path(side).is_some()
-                            || self.json_path_loose(side).is_some()
-                        {
+                        if self.json_path(side).is_some() || self.json_path_loose(side).is_some() {
                             return Err(SqlError::Semantics(
                                 "a JSON-path comparison pushes whole only as \
                                  fixed-path string equality (Quarb coerces \
@@ -1407,7 +1398,10 @@ impl Exporter {
             // Plain object keys only — no array indices, no
             // characters that would need per-dialect path escaping.
             let plain = !name.is_empty()
-                && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !plain {
                 return None;
@@ -1915,15 +1909,17 @@ mod null_and_literal_tests {
         // contains and multi-segment shapes
         let p = pushdown("/users/*[::name == *'web'*]::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
-        let p = pushdown("/users/*[::name == *'a'*'.gz']::id", Some(Dialect::Postgres)).unwrap();
+        let p = pushdown(
+            "/users/*[::name == *'a'*'.gz']::id",
+            Some(Dialect::Postgres),
+        )
+        .unwrap();
         assert!(p.sql.contains("LIKE '%a%.gz'"), "{}", p.sql);
         // LIKE metacharacters in a segment are escaped
         let p = pushdown("/users/*[::name == *'50%_x'*]::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%50\\%\\_x%'"), "{}", p.sql);
         // `!=` with a pattern rides the scan
-        assert!(
-            pushdown("/users/*[::name !== *'web'*]::id", Some(Dialect::Postgres)).is_none()
-        );
+        assert!(pushdown("/users/*[::name !== *'web'*]::id", Some(Dialect::Postgres)).is_none());
         // the `*=` alias gains the same PostgreSQL rung
         let p = pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
@@ -2052,8 +2048,7 @@ mod null_and_literal_tests {
              WHEN jsonb_typeof(payload::jsonb #> '{total}') = 'string' \
              THEN true ELSE false END)"
         );
-        let p =
-            partial_pushdown("/orders/*[/payload/gift]::id", Some(Dialect::Postgres)).unwrap();
+        let p = partial_pushdown("/orders/*[/payload/gift]::id", Some(Dialect::Postgres)).unwrap();
         assert_eq!(
             p.where_sql,
             "(jsonb_typeof(payload::jsonb #> '{gift}') IS NOT NULL)"
@@ -2120,7 +2115,9 @@ mod null_and_literal_tests {
         assert!(pushdown("/t/*[::name = \"it's\"] | ::name", None).is_none());
         assert!(partial_pushdown(&format!("/t/*[::name = \"it's\"]{GROUPED}"), None).is_none());
         assert_eq!(
-            pushdown("/t/*[::name = \"rare\"] | ::name", None).unwrap().sql,
+            pushdown("/t/*[::name = \"rare\"] | ::name", None)
+                .unwrap()
+                .sql,
             "SELECT name FROM t WHERE name = 'rare'"
         );
     }

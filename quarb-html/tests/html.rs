@@ -109,10 +109,7 @@ fn predicates_and_pipelines() {
     // regex match with a /.../ literal (equivalent to ~(...))
     assert_eq!(values("//a[::href == (/example/)]::"), vec!["external"]);
     // ... and no anchor's href contains "missing"
-    assert_eq!(
-        values("//a[::href *= \"missing\"]::"),
-        Vec::<String>::new()
-    );
+    assert_eq!(values("//a[::href *= \"missing\"]::"), Vec::<String>::new());
 }
 
 #[test]

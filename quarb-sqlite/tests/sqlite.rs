@@ -278,7 +278,8 @@ fn filtered_open_matches_scan() {
     }
     let q = "/events/*[::kind = \"a\"] | ::amount @| group(\"half\", ::amount idiv 25) \
              | count | .n | %.";
-    let plan = quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect("partial plan");
+    let plan =
+        quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect("partial plan");
     let run = |a: &SqliteAdapter| -> Vec<String> {
         match quarb::run(q, a).unwrap() {
             quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
@@ -485,10 +486,7 @@ fn headless_arrow_walks_both_directions() {
     // outgoing reference — so the bipartite closure spells without
     // direction claims, and the wildcard form walks the whole
     // component (both node kinds).
-    assert_eq!(
-        forum_nodes("/posts/1--cookie"),
-        vec!["/cookies/ck-1"]
-    );
+    assert_eq!(forum_nodes("/posts/1--cookie"), vec!["/cookies/ck-1"]);
     assert_eq!(
         forum_nodes("/cookies/ck-2--cookie"),
         vec!["/posts/2", "/posts/3"]
@@ -527,15 +525,16 @@ fn headless_arrow_union_on_self_reference() {
     .unwrap();
     let a = SqliteAdapter::load(&conn).unwrap();
     let vals = |q: &str| match quarb::run(q, &a).unwrap() {
-        quarb::QueryResult::Values(vs) => {
-            vs.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-        }
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };
     // Bo's neighbors under manager_id: his manager and his report.
     assert_eq!(vals("/employees/2--manager_id::name"), vec!["Ada", "Dee"]);
     // The whole org is one undirected component from any seat.
-    assert_eq!(vals("/employees/4(--manager_id)+::name @| count"), vec!["3"]);
+    assert_eq!(
+        vals("/employees/4(--manager_id)+::name @| count"),
+        vec!["3"]
+    );
 }
 
 /// JSON-column prefilter identity on an adversarial table: mixed

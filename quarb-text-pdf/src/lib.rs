@@ -63,10 +63,24 @@ struct OutlineEntry {
 }
 
 enum Node {
-    Root { children: Vec<usize> },
-    Section { lemma: String, level: u8, parent: usize, children: Vec<usize> },
-    Page { index: u32, parent: usize, children: Vec<usize> },
-    Line { line: Line, parent: usize },
+    Root {
+        children: Vec<usize>,
+    },
+    Section {
+        lemma: String,
+        level: u8,
+        parent: usize,
+        children: Vec<usize>,
+    },
+    Page {
+        index: u32,
+        parent: usize,
+        children: Vec<usize>,
+    },
+    Line {
+        line: Line,
+        parent: usize,
+    },
 }
 
 pub struct PdfText {
@@ -103,7 +117,9 @@ fn assemble(lines: &mut Vec<Line>, outline: Vec<OutlineEntry>) -> PdfText {
             .partial_cmp(&(b.page, ordf(a.y), ordf(b.x)))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut nodes = vec![Node::Root { children: Vec::new() }];
+    let mut nodes = vec![Node::Root {
+        children: Vec::new(),
+    }];
     if outline.is_empty() {
         let mut page_node: Option<(u32, usize)> = None;
         for line in lines.drain(..) {
@@ -111,7 +127,11 @@ fn assemble(lines: &mut Vec<Line>, outline: Vec<OutlineEntry>) -> PdfText {
                 Some((p, n)) if p == line.page => n,
                 _ => {
                     let n = nodes.len();
-                    nodes.push(Node::Page { index: line.page, parent: 0, children: Vec::new() });
+                    nodes.push(Node::Page {
+                        index: line.page,
+                        parent: 0,
+                        children: Vec::new(),
+                    });
                     if let Node::Root { children } = &mut nodes[0] {
                         children.push(n);
                     }
@@ -131,26 +151,25 @@ fn assemble(lines: &mut Vec<Line>, outline: Vec<OutlineEntry>) -> PdfText {
     // destination up to the next entry's. Front matter stays at
     // the root. Nesting follows the entry levels.
     let mut line_iter = lines.drain(..).peekable();
-    let mut take_until = |nodes: &mut Vec<Node>,
-                          parent: usize,
-                          stop: Option<&(u32, Option<f64>)>| {
-        while let Some(line) = line_iter.peek() {
-            if let Some(stop) = stop
-                && at_or_after(line, stop)
-            {
-                break;
+    let mut take_until =
+        |nodes: &mut Vec<Node>, parent: usize, stop: Option<&(u32, Option<f64>)>| {
+            while let Some(line) = line_iter.peek() {
+                if let Some(stop) = stop
+                    && at_or_after(line, stop)
+                {
+                    break;
+                }
+                let line = line_iter.next().unwrap();
+                let ln = nodes.len();
+                nodes.push(Node::Line { line, parent });
+                match &mut nodes[parent] {
+                    Node::Root { children }
+                    | Node::Section { children, .. }
+                    | Node::Page { children, .. } => children.push(ln),
+                    Node::Line { .. } => unreachable!(),
+                }
             }
-            let line = line_iter.next().unwrap();
-            let ln = nodes.len();
-            nodes.push(Node::Line { line, parent });
-            match &mut nodes[parent] {
-                Node::Root { children }
-                | Node::Section { children, .. }
-                | Node::Page { children, .. } => children.push(ln),
-                Node::Line { .. } => unreachable!(),
-            }
-        }
-    };
+        };
     // Front matter: everything before the first destination.
     take_until(&mut nodes, 0, Some(&outline[0].dest));
     let mut stack: Vec<(u8, usize)> = Vec::new(); // (level, node)
@@ -198,7 +217,9 @@ mod ordered {
 
 fn extract_outline(doc: &Document, page_index: &HashMap<ObjectId, u32>) -> Vec<OutlineEntry> {
     let mut out = Vec::new();
-    let Ok(catalog) = doc.catalog() else { return out };
+    let Ok(catalog) = doc.catalog() else {
+        return out;
+    };
     let Some(outlines) = resolve_dict(doc, catalog.get(b"Outlines").ok()) else {
         return out;
     };
@@ -226,7 +247,9 @@ fn walk_outline(
         if guard > 4096 {
             return;
         }
-        let Some(dict) = resolve_dict(doc, Some(&obj)).cloned() else { return };
+        let Some(dict) = resolve_dict(doc, Some(&obj)).cloned() else {
+            return;
+        };
         let title = match resolve(doc, dict.get(b"Title").ok()) {
             Some(Object::String(bytes, _)) => text_string(bytes),
             _ => String::new(),
@@ -237,7 +260,14 @@ fn walk_outline(
             out.push(OutlineEntry { level, title, dest });
         }
         if let Ok(first) = dict.get(b"First") {
-            walk_outline(doc, page_index, Some(first.clone()), level + 1, out, depth + 1);
+            walk_outline(
+                doc,
+                page_index,
+                Some(first.clone()),
+                level + 1,
+                out,
+                depth + 1,
+            );
         }
         item = dict.get(b"Next").ok().cloned();
     }
@@ -279,12 +309,8 @@ fn dest_target(
             // [page /XYZ x y z] carries the y; the /Fit family is
             // page-granular.
             let y = match (parts.get(1), parts.get(3)) {
-                (Some(Object::Name(k)), Some(Object::Integer(y))) if k == b"XYZ" => {
-                    Some(*y as f64)
-                }
-                (Some(Object::Name(k)), Some(Object::Real(y))) if k == b"XYZ" => {
-                    Some(*y as f64)
-                }
+                (Some(Object::Name(k)), Some(Object::Integer(y))) if k == b"XYZ" => Some(*y as f64),
+                (Some(Object::Name(k)), Some(Object::Real(y))) if k == b"XYZ" => Some(*y as f64),
                 _ => None,
             };
             Some((page, y))
@@ -422,7 +448,9 @@ fn font_decoders(doc: &Document, page: ObjectId) -> HashMap<Vec<u8>, Decoder> {
     let mut out = HashMap::new();
     // Resources may sit inline on the page or behind an indirect
     // reference (get_page_resources returns those as ids).
-    let Ok((inline, ids)) = doc.get_page_resources(page) else { return out };
+    let Ok((inline, ids)) = doc.get_page_resources(page) else {
+        return out;
+    };
     let resolved;
     let res = match inline {
         Some(r) => r,
@@ -438,9 +466,13 @@ fn font_decoders(doc: &Document, page: ObjectId) -> HashMap<Vec<u8>, Decoder> {
             resolved
         }
     };
-    let Some(fonts) = resolve_dict(doc, res.get(b"Font").ok()) else { return out };
+    let Some(fonts) = resolve_dict(doc, res.get(b"Font").ok()) else {
+        return out;
+    };
     for (name, fobj) in fonts.iter() {
-        let Some(fd) = resolve_dict(doc, Some(fobj)) else { continue };
+        let Some(fd) = resolve_dict(doc, Some(fobj)) else {
+            continue;
+        };
         let decoder = if let Some(Object::Stream(s)) = resolve(doc, fd.get(b"ToUnicode").ok()) {
             // A filterless stream's decompressed_content is empty
             // by lopdf's contract; the raw bytes ARE the content.
@@ -452,7 +484,11 @@ fn font_decoders(doc: &Document, page: ObjectId) -> HashMap<Vec<u8>, Decoder> {
             parse_cmap(&data)
         } else {
             let composite = matches!(fd.get(b"Subtype"), Ok(Object::Name(n)) if n == b"Type0");
-            if composite { Decoder::None } else { Decoder::Ascii }
+            if composite {
+                Decoder::None
+            } else {
+                Decoder::Ascii
+            }
         };
         out.insert(name.to_vec(), decoder);
     }
@@ -480,11 +516,16 @@ fn parse_cmap(data: &[u8]) -> Decoder {
             .collect()
     };
     let utf16 = |b: &[u8]| -> String {
-        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = b
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&units)
     };
     for section in text.split("beginbfchar").skip(1) {
-        let Some(body) = section.split("endbfchar").next() else { continue };
+        let Some(body) = section.split("endbfchar").next() else {
+            continue;
+        };
         for line in body.lines() {
             let h = hexes(line);
             if h.len() == 2 {
@@ -494,7 +535,9 @@ fn parse_cmap(data: &[u8]) -> Decoder {
         }
     }
     for section in text.split("beginbfrange").skip(1) {
-        let Some(body) = section.split("endbfrange").next() else { continue };
+        let Some(body) = section.split("endbfrange").next() else {
+            continue;
+        };
         for line in body.lines() {
             let h = hexes(line);
             if h.len() == 3 && h[0].len() <= 2 && h[0].len() == h[1].len() {
@@ -522,7 +565,11 @@ fn parse_cmap(data: &[u8]) -> Decoder {
             }
         }
     }
-    if map.is_empty() { Decoder::None } else { Decoder::CMap(map, width) }
+    if map.is_empty() {
+        Decoder::None
+    } else {
+        Decoder::CMap(map, width)
+    }
 }
 
 fn be(b: &[u8]) -> u64 {
@@ -532,8 +579,12 @@ fn be(b: &[u8]) -> u64 {
 fn extract_lines(doc: &Document, pages: &std::collections::BTreeMap<u32, ObjectId>) -> Vec<Line> {
     let mut lines: HashMap<(u32, u64), Line> = HashMap::new();
     for (&pnum, &pid) in pages {
-        let Ok(content) = doc.get_page_content(pid) else { continue };
-        let Ok(ops) = lopdf::content::Content::decode(&content) else { continue };
+        let Ok(content) = doc.get_page_content(pid) else {
+            continue;
+        };
+        let Ok(ops) = lopdf::content::Content::decode(&content) else {
+            continue;
+        };
         let decoders = font_decoders(doc, pid);
         let mut ctm = Matrix::IDENTITY;
         let mut stack: Vec<Matrix> = Vec::new();
@@ -625,8 +676,7 @@ fn extract_lines(doc: &Document, pages: &std::collections::BTreeMap<u32, ObjectI
                                 // word glue -200..-400). The same
                                 // number on every machine.
                                 adj => {
-                                    if num(adj).is_some_and(|a| a <= -180.0)
-                                        && !text.ends_with(' ')
+                                    if num(adj).is_some_and(|a| a <= -180.0) && !text.ends_with(' ')
                                     {
                                         text.push(' ');
                                     }
@@ -730,7 +780,10 @@ impl AstAdapter for PdfText {
         NodeId(0)
     }
     fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.kids(node.0 as usize).iter().map(|&i| NodeId(i as u64)).collect()
+        self.kids(node.0 as usize)
+            .iter()
+            .map(|&i| NodeId(i as u64))
+            .collect()
     }
     fn name(&self, node: NodeId) -> Option<String> {
         Some(match &self.nodes[node.0 as usize] {
@@ -743,9 +796,9 @@ impl AstAdapter for PdfText {
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         match &self.nodes[node.0 as usize] {
             Node::Root { .. } => None,
-            Node::Section { parent, .. } | Node::Page { parent, .. } | Node::Line { parent, .. } => {
-                Some(NodeId(*parent as u64))
-            }
+            Node::Section { parent, .. }
+            | Node::Page { parent, .. }
+            | Node::Line { parent, .. } => Some(NodeId(*parent as u64)),
         }
     }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {

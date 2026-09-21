@@ -46,7 +46,10 @@ pub fn parse(html: &str) -> TextModel {
     // writes `//host/wiki/`).
     if let Some(b) = base_href(&document) {
         let joined = match head.declared_value("canonical") {
-            Some(quarb::Value::Str(u)) => url::Url::parse(&u).ok().and_then(|u| u.join(&b).ok()).map(|u| u.to_string()),
+            Some(quarb::Value::Str(u)) => url::Url::parse(&u)
+                .ok()
+                .and_then(|u| u.join(&b).ok())
+                .map(|u| u.to_string()),
             _ => None,
         };
         model.set_link_base(joined.as_deref().unwrap_or(&b));

@@ -263,7 +263,8 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 let kids = self.outer.children(n);
                 if kids.is_empty() {
                     if let Some(u) = f(&self.outer, n) {
-                        map.entry(u.split('#').next().unwrap_or(&u).to_string()).or_insert(n);
+                        map.entry(u.split('#').next().unwrap_or(&u).to_string())
+                            .or_insert(n);
                     }
                 } else {
                     stack.extend(kids);
@@ -466,7 +467,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     /// (its aliases included).
     fn answers_to(&self, node: NodeId, name: &str) -> bool {
         match self.split(node) {
-            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().answers_to(inner, name),
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .answers_to(inner, name),
             None => self.outer.answers_to(node, name),
         }
     }
@@ -562,7 +566,11 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 let (inner_prov, outer_leaf, inner_path) = {
                     let grafts = self.grafts.borrow();
                     let a = grafts[g].inner.adapter();
-                    (a.provenance(inner), grafts[g].outer, quarb::name_path(a, inner))
+                    (
+                        a.provenance(inner),
+                        grafts[g].outer,
+                        quarb::name_path(a, inner),
+                    )
                 };
                 inner_prov.or(self.graft_fill(outer_leaf, inner_path))
             }
@@ -576,7 +584,11 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 let (inner_list, outer_leaf, inner_path) = {
                     let grafts = self.grafts.borrow();
                     let a = grafts[g].inner.adapter();
-                    (a.provenance_list(inner), grafts[g].outer, quarb::name_path(a, inner))
+                    (
+                        a.provenance_list(inner),
+                        grafts[g].outer,
+                        quarb::name_path(a, inner),
+                    )
                 };
                 inner_list.or(self.graft_fill(outer_leaf, inner_path))
             }
@@ -601,7 +613,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     /// the graft's root, as `traits` does.
     fn has_trait(&self, node: NodeId, name: &str) -> bool {
         match self.split(node) {
-            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().has_trait(inner, name),
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .has_trait(inner, name),
             None => {
                 self.outer.has_trait(node, name)
                     || self.graft_at(node).is_some_and(|g| {
@@ -634,7 +649,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
 
     fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
         match self.split(node) {
-            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().ref_label(inner, property),
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .ref_label(inner, property),
             None => self.outer.ref_label(node, property),
         }
     }
@@ -644,7 +662,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
         match self.split(node) {
             Some((g, inner)) => {
-                let t = self.grafts.borrow()[g].inner.adapter().resolve_fragment(inner, fragment)?;
+                let t = self.grafts.borrow()[g]
+                    .inner
+                    .adapter()
+                    .resolve_fragment(inner, fragment)?;
                 Some(self.wrap(g, t))
             }
             None => match self.graft_at(node) {
@@ -675,10 +696,18 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     /// A reverse index answers on one side of the boundary only:
     /// inside a graft, or on the outer tree when no graft could
     /// hold a referrer (the outer's answer cannot see grafts).
-    fn reverse_resolve(&self, node: NodeId, property: Option<&str>, hint: Option<&str>) -> Option<Vec<NodeId>> {
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
         match self.split(node) {
             Some((g, inner)) => {
-                let v = self.grafts.borrow()[g].inner.adapter().reverse_resolve(inner, property, hint)?;
+                let v = self.grafts.borrow()[g]
+                    .inner
+                    .adapter()
+                    .reverse_resolve(inner, property, hint)?;
                 Some(v.into_iter().map(|t| self.wrap(g, t)).collect())
             }
             None => None,
@@ -689,12 +718,19 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     /// a name may also live inside grafts, so the walk stays.
     fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
         let (g, inner) = self.split(node)?;
-        let v = self.grafts.borrow()[g].inner.adapter().descendants_named(inner, name)?;
+        let v = self.grafts.borrow()[g]
+            .inner
+            .adapter()
+            .descendants_named(inner, name)?;
         Some(v.into_iter().map(|(t, d)| (self.wrap(g, t), d)).collect())
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        let outer: Vec<NodeId> = nodes.iter().copied().filter(|n| self.split(*n).is_none()).collect();
+        let outer: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| self.split(*n).is_none())
+            .collect();
         if !outer.is_empty() {
             self.outer.prefetch_links(&outer, dir);
         }

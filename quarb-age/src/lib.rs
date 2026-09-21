@@ -85,7 +85,11 @@ fn parse_target(target: &str) -> Result<Target, AgeError> {
             .find_map(|kv| kv.strip_prefix("key=").map(str::to_string))
     });
     let pass = pass
-        .or_else(|| std::env::var("QUARB_AGE_PASS").ok().filter(|p| !p.is_empty()))
+        .or_else(|| {
+            std::env::var("QUARB_AGE_PASS")
+                .ok()
+                .filter(|p| !p.is_empty())
+        })
         .or_else(|| std::env::var("PGPASSWORD").ok().filter(|p| !p.is_empty()));
     Ok(Target {
         host,
@@ -103,7 +107,13 @@ fn parse_target(target: &str) -> Result<Target, AgeError> {
 fn agtype_json(text: &str) -> Option<Json> {
     let t = text.trim();
     let t = match t.rfind("::") {
-        Some(i) if t[i + 2..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => &t[..i],
+        Some(i)
+            if t[i + 2..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+        {
+            &t[..i]
+        }
         _ => t,
     };
     serde_json::from_str(t).ok()
@@ -141,7 +151,9 @@ fn cypher_literal(v: &Value) -> String {
 
 enum Kind {
     Root,
-    Label { index: usize },
+    Label {
+        index: usize,
+    },
     /// A vertex: its graph id, label, and decoded properties.
     Entity {
         gid: i64,
@@ -193,9 +205,7 @@ impl AgeAdapter {
                 let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
                 tokio::spawn(connection);
                 client
-                    .batch_execute(
-                        "LOAD 'age'; SET search_path = ag_catalog, \"$user\", public;",
-                    )
+                    .batch_execute("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public;")
                     .await?;
                 Ok::<_, tokio_postgres::Error>(client)
             })
@@ -354,8 +364,7 @@ impl AgeAdapter {
             _ => return Vec::new(),
         };
         let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
-        let stmt =
-            format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY id(r)");
+        let stmt = format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY id(r)");
         let rows = self.cypher(&stmt, 2).unwrap_or_default();
         rows.iter()
             .filter_map(|row| {
@@ -363,7 +372,11 @@ impl AgeAdapter {
                 let vert = agtype_json(row.get(1)?)?;
                 let label = edge.pointer("/label")?.as_str()?.to_string();
                 let other = self.intern(&vert)?;
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 let props: Vec<(String, Value)> = edge
                     .pointer("/properties")
                     .and_then(|p| p.as_object())
@@ -503,7 +516,10 @@ impl AstAdapter for AgeAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props
@@ -523,7 +539,12 @@ mod tests {
     fn target_forms() {
         let t = parse_target("age://localhost/postgres/office").unwrap();
         assert_eq!(
-            (t.host.as_str(), t.port, t.database.as_str(), t.graph.as_str()),
+            (
+                t.host.as_str(),
+                t.port,
+                t.database.as_str(),
+                t.graph.as_str()
+            ),
             ("localhost", 5432, "postgres", "office")
         );
         assert_eq!(t.user, "postgres");
@@ -541,26 +562,19 @@ mod tests {
 
     #[test]
     fn agtype_parsing() {
-        let v = agtype_json(
-            r#"{"id": 42, "label": "City", "properties": {"name": "Oslo"}}::vertex"#,
-        )
-        .unwrap();
+        let v =
+            agtype_json(r#"{"id": 42, "label": "City", "properties": {"name": "Oslo"}}::vertex"#)
+                .unwrap();
         assert_eq!(v.pointer("/properties/name").unwrap(), "Oslo");
         assert_eq!(agtype_json("3").unwrap(), serde_json::json!(3));
         assert_eq!(agtype_json("1.5::numeric").unwrap(), serde_json::json!(1.5));
         // a `::` inside a string is not an annotation
-        assert_eq!(
-            agtype_json(r#""a::b""#).unwrap(),
-            serde_json::json!("a::b")
-        );
+        assert_eq!(agtype_json(r#""a::b""#).unwrap(), serde_json::json!("a::b"));
     }
 
     #[test]
     fn literals_escape() {
         assert_eq!(cypher_literal(&Value::Int(7)), "7");
-        assert_eq!(
-            cypher_literal(&Value::Str("O'Slo".into())),
-            r"'O\'Slo'"
-        );
+        assert_eq!(cypher_literal(&Value::Str("O'Slo".into())), r"'O\'Slo'");
     }
 }

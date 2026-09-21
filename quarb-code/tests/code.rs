@@ -63,7 +63,10 @@ fn rust_properties_and_metadata() {
     let m = model("rs");
     assert_eq!(v(&m, "//lex::doc"), ["Scan the input."]);
     assert_eq!(v(&m, "//Lexer<type>::doc"), ["A cursor over the input."]);
-    assert_eq!(v(&m, "//lex::signature"), ["pub fn lex(input: &str) -> Vec<char>"]);
+    assert_eq!(
+        v(&m, "//lex::signature"),
+        ["pub fn lex(input: &str) -> Vec<char>"]
+    );
     // &mut self is a declared parameter, as written.
     assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
     // The escape hatch, and its two-colon alias (ruling #29).
@@ -82,7 +85,10 @@ fn rust_adoption_and_definitions() {
     assert_eq!(v(&m, "//f::::kind"), ["closure_expression"]);
     assert_eq!(v(&m, "//lambda @| count"), ["0"]);
     // Calls resolve to same-file declarations by identifier.
-    assert_eq!(v(&m, "//*<call>->definition:::name"), ["is_name_char", "f", "helper"]);
+    assert_eq!(
+        v(&m, "//*<call>->definition:::name"),
+        ["is_name_char", "f", "helper"]
+    );
     assert_eq!(v(&m, "//f<-definition @| count"), ["1"]);
     assert_eq!(v(&m, "//helper<-definition @| count"), ["1"]);
 }
@@ -102,7 +108,10 @@ fn rust_dissolve() {
 #[test]
 fn python_table() {
     let m = model("py");
-    assert_eq!(v(&m, "//*<function>:::name"), ["__init__", "lex", "helper", "f", "run"]);
+    assert_eq!(
+        v(&m, "//*<function>:::name"),
+        ["__init__", "lex", "helper", "f", "run"]
+    );
     assert_eq!(v(&m, "/Lexer/lex:::name"), ["lex"]);
     assert_eq!(v(&m, "//lex::doc"), ["Scan the input."]);
     assert_eq!(v(&m, "//Lexer::doc"), ["A lexer."]);
@@ -157,7 +166,10 @@ fn c_table() {
     // The declarator chain: a pointer-returning function is named
     // by its leaf identifier, never the whole declarator.
     assert_eq!(v(&m, "//*<function>:::name"), ["helper", "main"]);
-    assert_eq!(v(&m, "//helper::signature"), ["static int *helper(int a, int b)"]);
+    assert_eq!(
+        v(&m, "//helper::signature"),
+        ["static int *helper(int a, int b)"]
+    );
     assert_eq!(v(&m, "//helper::doc"), ["Advance to the limit."]);
     // The prototype dissolves: one helper, not decl + def.
     assert_eq!(v(&m, "//helper<function> @| count"), ["1"]);
@@ -187,7 +199,10 @@ fn uniformity_across_languages() {
         let m = model(ext);
         // One query shape everywhere.
         let functions = v(&m, "//*<function>:::name");
-        assert!(functions.iter().any(|n| n == "helper"), "{ext}: {functions:?}");
+        assert!(
+            functions.iter().any(|n| n == "helper"),
+            "{ext}: {functions:?}"
+        );
         assert_eq!(v(&m, "//helper<-definition @| count"), ["1"], "{ext}");
         assert_ne!(v(&m, "//*<loop> @| count"), ["0"], "{ext}");
         assert_ne!(v(&m, "//*<conditional> @| count"), ["0"], "{ext}");
@@ -195,7 +210,10 @@ fn uniformity_across_languages() {
         assert_ne!(v(&m, "//*<import> @| count"), ["0"], "{ext}");
         // The dissolve proof: every minted construct is vocabulary.
         for construct in v(&m, "//*::::construct @| unique") {
-            assert!(VOCABULARY.contains(&construct.as_str()), "{ext}: {construct}");
+            assert!(
+                VOCABULARY.contains(&construct.as_str()),
+                "{ext}: {construct}"
+            );
         }
         // No backend vocabulary in the namespace.
         assert_eq!(v(&m, "//identifier @| count"), ["0"], "{ext}");
@@ -206,7 +224,9 @@ fn uniformity_across_languages() {
 #[test]
 fn unsupported_extension_and_parity() {
     assert!(CodeModel::parse("x", "zig").is_err());
-    for ext in ["rs", "py", "js", "mjs", "cjs", "jsx", "c", "h", "zig", "", "txt"] {
+    for ext in [
+        "rs", "py", "js", "mjs", "cjs", "jsx", "c", "h", "zig", "", "txt",
+    ] {
         assert_eq!(
             quarb_code::supported(ext),
             quarb_tree_sitter::supported(ext),
@@ -225,6 +245,10 @@ fn cache_reuse() {
     let b = CodeModel::parse(RS, "rs").unwrap();
     quarb_tree_sitter::set_cache(None);
     assert_eq!(v(&a, "//*<function>:::name"), v(&b, "//*<function>:::name"));
-    assert!(std::fs::read_dir(&dir).map(|d| d.count() > 0).unwrap_or(false));
+    assert!(
+        std::fs::read_dir(&dir)
+            .map(|d| d.count() > 0)
+            .unwrap_or(false)
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -51,10 +51,13 @@ pub(crate) fn lower_node(ts: &TreeSitterAdapter, i: usize) -> Option<Lowered> {
             n_params: None,
         }),
         "lambda" => {
-            let adopted =
-                adopted_name(ts, i, "assignment", "left", "right", &["identifier"]);
+            let adopted = adopted_name(ts, i, "assignment", "left", "right", &["identifier"]);
             Some(Lowered {
-                construct: if adopted.is_some() { "function" } else { "lambda" },
+                construct: if adopted.is_some() {
+                    "function"
+                } else {
+                    "lambda"
+                },
                 name: adopted,
                 n_params: field_child(ts, i, "parameters").map(|p| count_params(ts, p)),
                 ..Lowered::anon("lambda", FUNCTION)

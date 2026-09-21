@@ -177,7 +177,9 @@ impl KuzuAdapter {
             let idx = |want: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(want));
             let (ni, ti) = (idx("name"), idx("type"));
             for row in result {
-                let (Some(ni), Some(ti)) = (ni, ti) else { break };
+                let (Some(ni), Some(ti)) = (ni, ti) else {
+                    break;
+                };
                 let name = match row.get(ni) {
                     Some(kuzu::Value::String(s)) => s.clone(),
                     _ => continue,
@@ -351,7 +353,11 @@ impl KuzuAdapter {
                 };
                 let other = self.intern(nv)?;
                 let label = rv.get_label_name().clone();
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 let props: Vec<(String, Value)> = rv
                     .get_properties()
                     .iter()
@@ -513,7 +519,10 @@ impl AstAdapter for KuzuAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props

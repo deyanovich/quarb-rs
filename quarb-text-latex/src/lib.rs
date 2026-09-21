@@ -94,7 +94,14 @@ const DROP: &[&str] = &[
 ];
 
 /// Environments whose entire content is out of the prose.
-const SKIP_ENVS: &[&str] = &["tikzpicture", "titlepage", "comment", "tabular", "figure", "table"];
+const SKIP_ENVS: &[&str] = &[
+    "tikzpicture",
+    "titlepage",
+    "comment",
+    "tabular",
+    "figure",
+    "table",
+];
 
 /// Lower LaTeX source into the block event stream.
 pub fn blocks(source: &str) -> Vec<Block> {
@@ -172,7 +179,8 @@ impl<'a> Lower<'a> {
                 b'\n' => {
                     // A blank line ends the paragraph.
                     let mut look = self.pos + 1;
-                    while look < self.src.len() && (self.src[look] == b' ' || self.src[look] == b'\t')
+                    while look < self.src.len()
+                        && (self.src[look] == b' ' || self.src[look] == b'\t')
                     {
                         look += 1;
                     }
@@ -431,7 +439,10 @@ impl<'a> Lower<'a> {
                 // position.
                 if let Some(key) = self.braced() {
                     if self.para.trim().is_empty()
-                        && matches!(self.out.last(), Some(Block::Heading { .. } | Block::Label { .. }))
+                        && matches!(
+                            self.out.last(),
+                            Some(Block::Heading { .. } | Block::Label { .. })
+                        )
                     {
                         self.out.push(Block::Label { onym: key });
                     } else {
@@ -469,7 +480,9 @@ impl<'a> Lower<'a> {
                 // so it reads as front-matter prose.
                 if let Some(t) = self.braced() {
                     self.flush_para();
-                    self.out.push(Block::Paragraph { text: strip_inline(&t) });
+                    self.out.push(Block::Paragraph {
+                        text: strip_inline(&t),
+                    });
                 }
             }
             _ if DROP.contains(&name.as_str()) => {
@@ -610,11 +623,15 @@ impl<'a> Lower<'a> {
                             margin,
                         }),
                         Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
-                Inline::Ref(target, text, internal) => {
-                    self.out.push(Block::Ref { target, text, internal });
-                }
-                Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
-                Inline::Cite(target) => self.out.push(Block::Cite { target }),
+                        Inline::Ref(target, text, internal) => {
+                            self.out.push(Block::Ref {
+                                target,
+                                text,
+                                internal,
+                            });
+                        }
+                        Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
+                        Inline::Cite(target) => self.out.push(Block::Cite { target }),
                     }
                 }
             }
@@ -742,7 +759,11 @@ impl<'a> Lower<'a> {
                 }),
                 Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
                 Inline::Ref(target, text, internal) => {
-                    self.out.push(Block::Ref { target, text, internal });
+                    self.out.push(Block::Ref {
+                        target,
+                        text,
+                        internal,
+                    });
                 }
                 Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
                 Inline::Cite(target) => self.out.push(Block::Cite { target }),
@@ -795,7 +816,8 @@ impl<'a> Lower<'a> {
     }
 
     fn skip_ws(&mut self) {
-        while self.pos < self.src.len() && (self.src[self.pos] == b' ' || self.src[self.pos] == b'\t')
+        while self.pos < self.src.len()
+            && (self.src[self.pos] == b' ' || self.src[self.pos] == b'\t')
         {
             self.pos += 1;
         }
@@ -830,10 +852,7 @@ fn strip_inline(raw: &str) -> String {
             _ => {
                 let start = lower.pos;
                 while lower.pos < lower.src.len()
-                    && !matches!(
-                        lower.src[lower.pos],
-                        b'%' | b'\\' | b'{' | b'}' | b'~'
-                    )
+                    && !matches!(lower.src[lower.pos], b'%' | b'\\' | b'{' | b'}' | b'~')
                 {
                     lower.pos += 1;
                 }

@@ -177,10 +177,7 @@ impl OracleAdapter {
         Self::connect_impl(target, Some((table.to_string(), where_sql.to_string())))
     }
 
-    fn connect_impl(
-        target: &str,
-        filter: Option<(String, String)>,
-    ) -> Result<Self, OracleError> {
+    fn connect_impl(target: &str, filter: Option<(String, String)>) -> Result<Self, OracleError> {
         let (user, pass, connect) = parse_target(target)?;
         let conn = oracle::Connection::connect(&user, &pass, &connect)?;
         let (specs, decodes) = introspect(&conn)?;
@@ -220,7 +217,10 @@ fn introspect(
     conn: &oracle::Connection,
 ) -> Result<(Vec<TableSpec>, Vec<Vec<(Decode, bool)>>), OracleError> {
     let mut names = Vec::new();
-    for r in conn.query("SELECT table_name FROM user_tables ORDER BY table_name", &[])? {
+    for r in conn.query(
+        "SELECT table_name FROM user_tables ORDER BY table_name",
+        &[],
+    )? {
         names.push(r?.get::<usize, String>(0)?);
     }
 

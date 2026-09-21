@@ -1067,7 +1067,12 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
     {
         let src = rest.to_string();
         return match web_level(rest)? {
-            WebSite::Memory(adapter) => run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src.as_str())),
+            WebSite::Memory(adapter) => run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src.as_str()),
+            ),
             WebSite::Sqlite(store) => run_web_store(cli, query, store, &src),
             WebSite::Postgres(store) => run_web_store(cli, query, store, &src),
         };
@@ -2651,7 +2656,14 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
     let plan = if pushdown_applies(cli) {
         quarb_web::plan::plan(query, store.dialect(), model)
     } else {
-        Plan { rung: Rung::Scan, where_sql: String::new(), params: Vec::new(), reason: "disabled".into(), unverified: Vec::new(), limit: None }
+        Plan {
+            rung: Rung::Scan,
+            where_sql: String::new(),
+            params: Vec::new(),
+            reason: "disabled".into(),
+            unverified: Vec::new(),
+            limit: None,
+        }
     };
     if cli.explain {
         eprintln!("web: {} — {}", web_rung_name(&plan.rung), plan.reason);
@@ -2670,18 +2682,34 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
         }
         Rung::Prefilter => {
             let keys = match &plan.limit {
-                Some(l) => store.keys_where_top(&plan.where_sql, &plan.params, &l.column, l.descending, l.n),
+                Some(l) => store.keys_where_top(
+                    &plan.where_sql,
+                    &plan.params,
+                    &l.column,
+                    l.descending,
+                    l.n,
+                ),
                 None => store.keys_where(&plan.where_sql, &plan.params),
             };
             if cli.explain {
                 eprintln!("web: {} candidate(s)", keys.len());
             }
             let adapter = quarb_web::WebAdapter::new(store).with_scope(keys);
-            run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src))
+            run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src),
+            )
         }
         Rung::Scan => {
             let adapter = quarb_web::WebAdapter::new(store);
-            run(query, &adapter, |n| adapter.locator(n), cli.kaiv.then_some(src))
+            run(
+                query,
+                &adapter,
+                |n| adapter.locator(n),
+                cli.kaiv.then_some(src),
+            )
         }
     }
 }
@@ -2732,7 +2760,11 @@ fn web_level(spec: &str) -> anyhow::Result<WebSite> {
             .with_context(|| format!("reading {} as a site", target.display()));
     }
     // An index-backed store: a site.db built by quarb-web-ingest.
-    if target.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3")) {
+    if target
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3"))
+    {
         return quarb_web::db::sqlite::SqliteStore::open(target)
             .map(WebSite::Sqlite)
             .map_err(|e| anyhow::anyhow!("opening {} as a site store: {e}", target.display()));
@@ -3968,8 +4000,8 @@ fn emit_kaiv(
     cap: usize,
 ) -> anyhow::Result<String> {
     use kaiv::{KaivBuilder, ProvEntry, Provenance};
-    use quarb::kaiv_out::{ident_of, kaiv_put, ProvCtx};
     use quarb::Prov;
+    use quarb::kaiv_out::{ProvCtx, ident_of, kaiv_put};
     let mut b = KaivBuilder::new();
     b.declare_source("q", source).map_err(kaiv_err)?;
     // Every node a leaf may be attributed to, in first-appearance
@@ -4044,7 +4076,11 @@ fn emit_kaiv(
         let resolve = |o: &quarb::Origins| -> Option<Provenance> {
             let mut entries: Vec<ProvEntry> = Vec::new();
             let mut elided = o.more;
-            let ns: Vec<NodeId> = if o.is_empty() { vec![row.node] } else { o.nodes().collect() };
+            let ns: Vec<NodeId> = if o.is_empty() {
+                vec![row.node]
+            } else {
+                o.nodes().collect()
+            };
             for n in ns {
                 let list = prov_of(n);
                 elided = elided.saturating_add(list.elided);
@@ -4055,7 +4091,10 @@ fn emit_kaiv(
                 };
                 for p in ps {
                     let e = entry_of(n, &p);
-                    match entries.iter().position(|q| q.source == e.source && q.dpid == e.dpid) {
+                    match entries
+                        .iter()
+                        .position(|q| q.source == e.source && q.dpid == e.dpid)
+                    {
                         // The dashed form orders as it reads.
                         Some(at) => {
                             if e.timestamp > entries[at].timestamp {
@@ -4200,7 +4239,10 @@ mod tests {
         // row 0 (authored block form); row 1 shares the source but
         // falls back to its locator dpid; row 2 rides `q`.
         assert!(out.contains(".?src1 https://sensors.example.com/1\n"));
-        assert!(out.contains("!int?src1@2026-07-17T12:00:00Z#req-42\nvalue=7"), "{out}");
+        assert!(
+            out.contains("!int?src1@2026-07-17T12:00:00Z#req-42\nvalue=7"),
+            "{out}"
+        );
         assert!(out.contains("!int?src1#row-2\nvalue=9"));
         assert!(out.contains("!int?q#row-3\nvalue=11"));
 
@@ -4297,7 +4339,10 @@ mod tests {
         let at = |ns: &[u64]| {
             let mut o = Origins::default();
             for &n in ns {
-                o.insert(Origin { node: NodeId(n), stage: 1 });
+                o.insert(Origin {
+                    node: NodeId(n),
+                    stage: 1,
+                });
             }
             Prov::leaf(o)
         };
@@ -4322,14 +4367,20 @@ mod tests {
         assert!(out.contains(".?src1 https://s.example.com/3\n"), "{out}");
         assert!(out.contains(".?src2 https://s.example.com/1\n"), "{out}");
         assert!(out.contains(".?src3 https://s.example.com/2\n"), "{out}");
-        assert!(out.contains("!int?src2@2026-07-17T12:00:00Z#row-1\nv=1\n"), "{out}");
+        assert!(
+            out.contains("!int?src2@2026-07-17T12:00:00Z#row-1\nv=1\n"),
+            "{out}"
+        );
         assert!(
             out.contains(
                 "!int?src2@2026-07-17T12:00:00Z#row-1;src3@2026-07-18T12:00:00Z#row-2\nn=2\n"
             ),
             "{out}"
         );
-        assert!(out.contains("!int?src1@2026-07-17T12:00:00Z#row-3\nk=3\n"), "{out}");
+        assert!(
+            out.contains("!int?src1@2026-07-17T12:00:00Z#row-3\nk=3\n"),
+            "{out}"
+        );
         // The round trip: the emitted document re-mounts, and the
         // list-carrying field answers the same two entries — the
         // declared ids resolved back to their URIs.
@@ -4340,7 +4391,9 @@ mod tests {
         };
         assert_eq!(
             prov("/@results/0/n:::provenance"),
-            ["?https://s.example.com/1@2026-07-17T12:00:00Z#row-1;https://s.example.com/2@2026-07-18T12:00:00Z#row-2"]
+            [
+                "?https://s.example.com/1@2026-07-17T12:00:00Z#row-1;https://s.example.com/2@2026-07-18T12:00:00Z#row-2"
+            ]
         );
         assert_eq!(prov("/@results/0/n:::instant"), ["2026-07-18T12:00:00Z"]);
         assert_eq!(prov("/@results/0/n:::@provenance | count"), ["2"]);
@@ -4351,7 +4404,10 @@ mod tests {
         // the count.
         let mut o = Origins::default();
         for n in 1..=12 {
-            o.insert(Origin { node: NodeId(n), stage: 1 });
+            o.insert(Origin {
+                node: NodeId(n),
+                stage: 1,
+            });
         }
         assert_eq!(o.more, 12 - quarb::ORIGIN_CAP as u32);
         let rows = vec![quarb::Traced {
@@ -4365,7 +4421,10 @@ mod tests {
         assert!(line.ends_with(";+9"), "{line}");
         let back = quarb_kaiv::KaivAdapter::parse_kaiv(&out).unwrap();
         assert_eq!(prov_back(&back, "/@results/0/value:::elided"), ["9"]);
-        assert_eq!(prov_back(&back, "/@results/0/value:::@provenance | count"), ["3"]);
+        assert_eq!(
+            prov_back(&back, "/@results/0/value:::@provenance | count"),
+            ["3"]
+        );
 
         // The same (source, dpid) read twice keeps one entry with
         // the newest instant.

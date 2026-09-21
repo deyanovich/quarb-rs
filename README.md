@@ -134,6 +134,12 @@ signing and the AWS credential chain, no SDK).
 an inner arbor), [`quarb-serve`](quarb-serve/) (expose any
 adapter to `qua` over a child process).
 
+**Visualization** — [`quarb-trace`](quarb-trace/) (the
+`quarb/trace` viz contract as Rust: the payload the engine emits
+for a query's evaluation — snapshots, threads, ribbons, lookahead
+verdicts, windowed — and its kaiv writer; `Doc::trace` in
+`quarb-session` builds one; the renderer lives in quarbopsis).
+
 **Importers** — translate foreign queries to Quarb:
 [`quarb-xpath`](quarb-xpath/) (XPath 1.0),
 [`quarb-jq`](quarb-jq/) (jq filters), [`quarb-sql`](quarb-sql/)

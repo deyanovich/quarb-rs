@@ -29,7 +29,10 @@ pub fn export(quarb: &str) -> Result<Translation, XPathError> {
     let arbor = QueryArbor::parse(quarb)
         .map_err(|e| XPathError::Syntax(0, format!("parsing Quarb: {e}")))?;
     if has_group(&arbor) {
-        return Err(XPathError::Syntax(0, "path patterns (groups and quantifiers) have no XPath 1.0 translation".into()));
+        return Err(XPathError::Syntax(
+            0,
+            "path patterns (groups and quantifiers) have no XPath 1.0 translation".into(),
+        ));
     }
     let mut ex = Exporter {
         arbor,

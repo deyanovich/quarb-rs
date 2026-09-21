@@ -91,8 +91,9 @@ const SCALAR: &[&str] = &[
 ];
 
 const AGGREGATE: &[&str] = &[
-    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "json", "jsonl", "kaiv", "sort",
-    "unique", "reverse", "first", "last", "join", "ungroup", "window", "shift",
+    "count", "sum", "product", "min", "max", "mean", "avg", "median", "stddev", "variance", "json",
+    "jsonl", "kaiv", "sort", "unique", "reverse", "first", "last", "join", "ungroup", "window",
+    "shift",
 ];
 
 /// Whether `name` is a whole-context stage that never works per
@@ -278,9 +279,7 @@ pub fn apply_scalar(
                 return vec![Value::Null];
             }
             let n = text.chars().count() as i64;
-            let pos = |i: i64| -> i64 {
-                if i < 0 { n + i + 1 } else { i }
-            };
+            let pos = |i: i64| -> i64 { if i < 0 { n + i + 1 } else { i } };
             let from = pos(a.unwrap_or(1)).max(1);
             let to = pos(b.unwrap_or(-1)).min(n);
             if from > to {
@@ -321,8 +320,7 @@ pub fn apply_scalar(
             if have >= n || fill.is_empty() {
                 vec![Value::Str(text.clone())]
             } else {
-                let pad: String =
-                    fill.chars().cycle().take(n - have).collect();
+                let pad: String = fill.chars().cycle().take(n - have).collect();
                 vec![Value::Str(if call.name == "lpad" {
                     format!("{pad}{text}")
                 } else {
@@ -571,19 +569,17 @@ pub fn apply_scalar(
             let target = arg_str(call, 0, "").to_string();
             let lifted;
             let topic = match &topic {
-                Value::Str(s) => {
-                    match crate::quantity::parse_unit_text_with(s, scale) {
-                        Some((value, base, wv, wu)) => {
-                            lifted = Value::Quantity {
-                                value,
-                                base,
-                                written: Some((wv, wu)),
-                            };
-                            &lifted
-                        }
-                        None => &topic,
+                Value::Str(s) => match crate::quantity::parse_unit_text_with(s, scale) {
+                    Some((value, base, wv, wu)) => {
+                        lifted = Value::Quantity {
+                            value,
+                            base,
+                            written: Some((wv, wu)),
+                        };
+                        &lifted
                     }
-                }
+                    None => &topic,
+                },
                 t => t,
             };
             vec![match &topic {
@@ -689,8 +685,7 @@ pub fn apply_scalar(
         // The one-value kaiv document; `@| kaiv` renders the whole
         // stream as one (ruling #51's family, the kaiv member).
         "kaiv" => vec![Value::Str(
-            crate::kaiv_out::document(std::slice::from_ref(&topic))
-                .unwrap_or_else(|e| e),
+            crate::kaiv_out::document(std::slice::from_ref(&topic)).unwrap_or_else(|e| e),
         )],
         // `| link` reads the capsa's node (the executor, which has
         // the adapter, handles it); a bare value has nothing to
@@ -1223,7 +1218,10 @@ mod tests {
         let s = |t: &str| Value::Str(t.to_string());
         let int = |n: i64| Arg::Lit(Value::Int(n));
         let lit = |t: &str| Arg::Lit(Value::Str(t.to_string()));
-        assert_eq!(sc("title", s("emu WAR of 1932")), vec![s("Emu War Of 1932")]);
+        assert_eq!(
+            sc("title", s("emu WAR of 1932")),
+            vec![s("Emu War Of 1932")]
+        );
         assert_eq!(sc("ltrim", s("  x  ")), vec![s("x  ")]);
         assert_eq!(sc("rtrim", s("  x  ")), vec![s("  x")]);
         // counts: codepoints vs bytes vs words vs lines
@@ -1240,11 +1238,7 @@ mod tests {
         let prose = s("He paid 3.50 today. Then he slept! Did he?");
         assert_eq!(
             sc("sentences", prose.clone()),
-            vec![
-                s("He paid 3.50 today."),
-                s("Then he slept!"),
-                s("Did he?"),
-            ]
+            vec![s("He paid 3.50 today."), s("Then he slept!"), s("Did he?"),]
         );
         assert_eq!(sc("sc", prose), vec![Value::Int(3)]);
         assert_eq!(
@@ -1275,7 +1269,10 @@ mod tests {
             vec![s("ль")]
         );
         // a bare position is the [n] reading: one character
-        assert_eq!(scalar_with("substr", s("abcdef"), vec![int(3)]), vec![s("c")]);
+        assert_eq!(
+            scalar_with("substr", s("abcdef"), vec![int(3)]),
+            vec![s("c")]
+        );
         assert_eq!(
             scalar_with("substr", s("abcdef"), range(Some(5), Some(3))),
             vec![s("")]
@@ -1290,7 +1287,10 @@ mod tests {
             scalar_with("rpad", s("ab"), vec![int(5), lit("xy")]),
             vec![s("abxyx")]
         );
-        assert_eq!(scalar_with("lpad", s("abcd"), vec![int(3)]), vec![s("abcd")]);
+        assert_eq!(
+            scalar_with("lpad", s("abcd"), vec![int(3)]),
+            vec![s("abcd")]
+        );
         // centered: the odd extra falls right (Python's center)
         assert_eq!(scalar_with("pad", s("ab"), vec![int(5)]), vec![s(" ab  ")]);
         assert_eq!(
@@ -1298,7 +1298,10 @@ mod tests {
             vec![s("--ab--")]
         );
         // repeat: the one honest home for repetition
-        assert_eq!(scalar_with("repeat", s("ab"), vec![int(3)]), vec![s("ababab")]);
+        assert_eq!(
+            scalar_with("repeat", s("ab"), vec![int(3)]),
+            vec![s("ababab")]
+        );
         assert_eq!(scalar_with("repeat", s("ab"), vec![int(0)]), vec![s("")]);
     }
 

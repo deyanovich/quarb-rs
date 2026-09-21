@@ -1,8 +1,8 @@
 //! The filesystem store: a directory of built pages (a static
 //! site's output tree), read once into memory.
 
-use crate::memory::{MemoryStore, PageFile, SiteInput};
 use crate::WebAdapter;
+use crate::memory::{MemoryStore, PageFile, SiteInput};
 use std::path::Path;
 
 /// Open a directory of pages as a site whose paths join against
@@ -45,7 +45,10 @@ pub fn open_dir(root: &Path, base_url: &str) -> std::io::Result<WebAdapter<Memor
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs().to_string());
     Ok(WebAdapter::new(MemoryStore::build(
-        SiteInput { base_url: base_url.to_string(), snapshot },
+        SiteInput {
+            base_url: base_url.to_string(),
+            snapshot,
+        },
         files,
     )))
 }

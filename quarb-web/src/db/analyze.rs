@@ -16,7 +16,11 @@ pub const ITERATIONS: usize = 20;
 /// distinct neighbours), `reds` the redlink counts. One
 /// computation for every store, so the in-memory store and the
 /// pass over a database give the same numbers.
-pub fn compute(pages: &[PageKey], edges: &[(PageKey, PageKey)], reds: &HashMap<PageKey, u32>) -> Vec<(PageKey, Analytics)> {
+pub fn compute(
+    pages: &[PageKey],
+    edges: &[(PageKey, PageKey)],
+    reds: &HashMap<PageKey, u32>,
+) -> Vec<(PageKey, Analytics)> {
     let idx: HashMap<PageKey, usize> = pages.iter().enumerate().map(|(i, &k)| (k, i)).collect();
     let n = pages.len();
     let mut outs: Vec<HashSet<usize>> = vec![HashSet::new(); n];
@@ -80,7 +84,12 @@ pub fn analyze(store: &dyn SqlStore, site: SiteId, exclude_templates: bool) -> R
     // column is exactly what the axis returns.
     let mut pages: Vec<PageKey> = Vec::new();
     for c in Container::ALL {
-        pages.extend(store.descendants_of_kind(site, c, None, PageKind::Page).into_iter().map(|(k, _)| k));
+        pages.extend(
+            store
+                .descendants_of_kind(site, c, None, PageKind::Page)
+                .into_iter()
+                .map(|(k, _)| k),
+        );
     }
     pages.extend(store.documented(site, PageKind::Category));
     let edges = store.link_edges(site, exclude_templates);
@@ -103,7 +112,11 @@ pub fn analyze(store: &dyn SqlStore, site: SiteId, exclude_templates: bool) -> R
 }
 
 /// Resolve link targets by URL, then through redirects, for `site`.
-pub fn resolve_links(store: &dyn SqlStore, site: SiteId, dialect: Dialect) -> Result<(u64, u64), String> {
+pub fn resolve_links(
+    store: &dyn SqlStore,
+    site: SiteId,
+    dialect: Dialect,
+) -> Result<(u64, u64), String> {
     let s = site.0 as i64;
     let by_url = match dialect {
         // A lookup table keyed by URL: the correlated form let the
@@ -149,7 +162,9 @@ pub fn resolve_links(store: &dyn SqlStore, site: SiteId, dialect: Dialect) -> Re
 /// (PostgreSQL only; SQLite has no substring index).
 pub fn index(store: &dyn SqlStore) -> Result<Vec<String>, String> {
     match store.dialect() {
-        Dialect::Sqlite => Ok(vec!["sqlite: no substring index (the planner's text prefilter scans page_text)".to_string()]),
+        Dialect::Sqlite => Ok(vec![
+            "sqlite: no substring index (the planner's text prefilter scans page_text)".to_string(),
+        ]),
         Dialect::Postgres => {
             let mut done = Vec::new();
             for sql in [
@@ -181,7 +196,14 @@ pub fn rank_tree(nodes: &[(i64, Option<i64>, String)]) -> Vec<(i64, Option<i64>,
     }
     let mut out = Vec::with_capacity(nodes.len());
     let mut rank = 0i64;
-    let mut stack: Vec<(usize, i64)> = kids.get(&None).cloned().unwrap_or_default().into_iter().rev().map(|i| (i, 1)).collect();
+    let mut stack: Vec<(usize, i64)> = kids
+        .get(&None)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .map(|i| (i, 1))
+        .collect();
     while let Some((i, depth)) = stack.pop() {
         rank += 1;
         out.push((nodes[i].0, nodes[i].1, depth, rank));

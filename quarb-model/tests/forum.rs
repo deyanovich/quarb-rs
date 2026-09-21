@@ -2,7 +2,7 @@
 //! bipartite closure conjured entirely by a model file.
 
 use quarb::AstAdapter as _;
-use quarb_model::{parse_model, ModelAdapter};
+use quarb_model::{ModelAdapter, parse_model};
 use quarb_sqlite::SqliteAdapter;
 use rusqlite::Connection;
 
@@ -35,7 +35,10 @@ fn forum() -> ModelAdapter<SqliteAdapter> {
 fn values(a: &ModelAdapter<SqliteAdapter>, q: &str) -> Vec<String> {
     match quarb::run(q, a).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
-        quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| a.name(n).unwrap_or_default()).collect(),
+        quarb::QueryResult::Nodes(ns) => ns
+            .into_iter()
+            .map(|n| a.name(n).unwrap_or_default())
+            .collect(),
     }
 }
 
@@ -68,7 +71,10 @@ fn declared_refs_resolve_and_backlink() {
     // Backward it lands on a row, so it is named for the row.
     // `--cookie` from a cookie node names no relation at all: it
     // would have to land on something that is not a cookie.
-    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-2']--posts::id"), vec!["2", "3"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-2']--posts::id"),
+        vec!["2", "3"]
+    );
     assert_eq!(
         values(&a, "/cookies/cookie[:: = 'ck-2']--cookie @| count"),
         vec!["0"]
@@ -90,14 +96,20 @@ fn pair_edges_close_the_walk() {
         vec!["0"]
     );
     // parallel edge collapsed: ck-1 has exactly one ip neighbour
-    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-1']--ip @| count"), vec!["1"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-1']--ip @| count"),
+        vec!["1"]
+    );
 }
 
 #[test]
 fn derived_nodes_carry_container_traits() {
     let a = forum();
     assert_eq!(values(&a, "/ips/*<ip> @| count"), vec!["3"]);
-    assert_eq!(values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::"), vec!["ck-1"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie<cookie>[:: = 'ck-1']::"),
+        vec!["ck-1"]
+    );
 }
 
 #[test]
@@ -113,7 +125,10 @@ fn elevated_nodes_answer_derivation_provenance_only() {
         values(&a, "/cookies/cookie[:: = 'ck-1']:::provenance"),
         vec!["?model:/cookies"]
     );
-    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-1']:::instant"), vec![""]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-1']:::instant"),
+        vec![""]
+    );
     assert_eq!(values(&a, "/cookies:::source"), vec!["model:/cookies"]);
     // Base rows forward to the base adapter (which records none).
     assert_eq!(values(&a, "/posts/1:::source"), vec![""]);

@@ -19,15 +19,24 @@ fn scan_filter_resolve() {
     let target = std::env::var("QUARB_DYNAMODB_TEST").expect("QUARB_DYNAMODB_TEST");
     let a = DynamodbAdapter::connect(&target).unwrap();
     // deterministic key-sorted listing, hash-named items repeating
-    assert_eq!(values(&a, "/tracks/*:::name"), ["Bartok", "Bartok", "Holst"]);
+    assert_eq!(
+        values(&a, "/tracks/*:::name"),
+        ["Bartok", "Bartok", "Holst"]
+    );
     // the sort key stays a property to filter on
-    assert_eq!(values(&a, "/tracks/Bartok[::song = 'Ostinato']::secs"), ["105"]);
+    assert_eq!(
+        values(&a, "/tracks/Bartok[::song = 'Ostinato']::secs"),
+        ["105"]
+    );
     // nested attribute trees: map field, list elements
     assert_eq!(values(&a, "/artists/Holst/contact::fee"), ["1200"]);
     assert_eq!(values(&a, "/artists/Holst/labels/* @| count"), ["2"]);
     // hinted resolution is a GetItem, hint-less tries the _id stem
     assert_eq!(
-        values(&a, "/tracks/*[::song = 'Jupiter']::artist_id-->artists::country"),
+        values(
+            &a,
+            "/tracks/*[::song = 'Jupiter']::artist_id-->artists::country"
+        ),
         ["England"]
     );
     assert_eq!(

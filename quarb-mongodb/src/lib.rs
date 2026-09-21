@@ -50,12 +50,18 @@ pub enum MongodbError {
 enum Kind {
     Root,
     /// A collection, by name.
-    Collection { name: String },
+    Collection {
+        name: String,
+    },
     /// A document: `path` is `collection/id`.
-    Doc { path: String },
+    Doc {
+        path: String,
+    },
     /// A field value inside a document (scalar, embedded
     /// document, or array element).
-    Field { value: Field },
+    Field {
+        value: Field,
+    },
 }
 
 /// A decoded BSON value.
@@ -171,7 +177,9 @@ impl MongodbAdapter {
         }
         let mut opts = ClientOptions::parse(target).run()?;
         let Some(dbname) = opts.default_database.clone() else {
-            return Err(MongodbError::Target(format!("{target}: no database in path")));
+            return Err(MongodbError::Target(format!(
+                "{target}: no database in path"
+            )));
         };
         if opts.server_selection_timeout.is_none() {
             opts.server_selection_timeout = Some(Duration::from_secs(5));
@@ -434,9 +442,7 @@ impl AstAdapter for MongodbAdapter {
                 Value::Null => None,
                 other => Some(other.clone()),
             },
-            (_, Field::Reference { coll, id, db }) => {
-                Some(self.ref_value(coll, id, db.as_deref()))
-            }
+            (_, Field::Reference { coll, id, db }) => Some(self.ref_value(coll, id, db.as_deref())),
             _ => None,
         }
     }
@@ -466,12 +472,12 @@ impl AstAdapter for MongodbAdapter {
                 _ => None,
             },
             "length" => match &self.nodes.borrow()[node.0 as usize].kind {
-                Kind::Field { value: Field::Array(items) } => {
-                    Some(Value::Int(items.len() as i64))
-                }
-                Kind::Field { value: Field::Map(entries) } => {
-                    Some(Value::Int(entries.len() as i64))
-                }
+                Kind::Field {
+                    value: Field::Array(items),
+                } => Some(Value::Int(items.len() as i64)),
+                Kind::Field {
+                    value: Field::Map(entries),
+                } => Some(Value::Int(entries.len() as i64)),
                 Kind::Field {
                     value: Field::Scalar(Value::Str(s)),
                 } => Some(Value::Int(s.chars().count() as i64)),
@@ -492,9 +498,7 @@ impl AstAdapter for MongodbAdapter {
             let docs = self.docs.borrow();
             let fields = docs.get(&path)?;
             match fields.iter().find(|(k, _)| k == property)? {
-                (_, Field::Reference { coll, id, db }) => {
-                    (coll.clone(), id.clone(), db.clone())
-                }
+                (_, Field::Reference { coll, id, db }) => (coll.clone(), id.clone(), db.clone()),
                 _ => return None,
             }
         };

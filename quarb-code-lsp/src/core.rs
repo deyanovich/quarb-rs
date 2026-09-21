@@ -227,8 +227,8 @@ impl Workspace {
             Ok(quarb::QueryResult::Nodes(ns)) => QueryAnswer::Locations(
                 ns.into_iter()
                     .map(|n| {
-                        let locator = forest
-                            .locator(n, |o| forest.outer().path(o).display().to_string());
+                        let locator =
+                            forest.locator(n, |o| forest.outer().path(o).display().to_string());
                         let (file, tail) = split_locator(&locator);
                         Location {
                             file,

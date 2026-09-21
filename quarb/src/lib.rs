@@ -37,15 +37,16 @@
 //! assert!(matches!(hits, QueryResult::Nodes(ns) if ns.is_empty()));
 //! ```
 
-pub mod kaiv_out;
 pub mod adapter;
 mod ast;
 mod encoding;
 mod error;
 mod exec;
+pub mod kaiv_out;
 mod lexer;
 mod parser;
 pub mod reflect;
+pub mod trace;
 pub use encoding::{base64, base64_decode, sha256, sha256_hex};
 pub mod complete;
 pub mod highlight;
@@ -100,7 +101,10 @@ pub fn now_secs() -> i64 {
             .unwrap_or(0),
     }
 }
-pub use exec::{set_ref_targets, take_refs, Origin, Origins, Prov, QueryResult, Traced, ORIGIN_CAP, name_path, resolved_provenance, set_reproducible};
+pub use exec::{
+    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, Traced, name_path, resolved_provenance,
+    set_ref_targets, set_reproducible, take_refs,
+};
 pub use parser::Defs;
 pub use value::Value;
 
@@ -165,7 +169,13 @@ pub fn parse_defs(text: &str) -> Result<Defs> {
 /// query lexer itself has no comment syntax.
 pub fn strip_defs_comments(text: &str) -> String {
     text.lines()
-        .map(|l| if l.trim_start().starts_with('#') { "" } else { l })
+        .map(|l| {
+            if l.trim_start().starts_with('#') {
+                ""
+            } else {
+                l
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

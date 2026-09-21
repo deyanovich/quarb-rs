@@ -71,7 +71,10 @@ fn rec_refuses_call_operand_position() {
         "rec as macro argument must refuse"
     );
     // the honest spelling still parses and round-trips
-    assert_eq!(exp("/row | (\"seen\" | %(::Fare))"), "/row | (\"seen\" | %(::Fare))");
+    assert_eq!(
+        exp("/row | (\"seen\" | %(::Fare))"),
+        "/row | (\"seen\" | %(::Fare))"
+    );
 }
 
 /// Ruling #22: capture must be invited through an argument. A
@@ -88,14 +91,16 @@ fn invited_capture() {
     assert!(
         err("macro &m($n): //step[1] | \"| .t(9)\"; \
              ^ | .t(1) | &m(/x) | %(v = $.t)")
-            .contains("invited through an argument"),
+        .contains("invited through an argument"),
         "uninvited capture must refuse"
     );
     // aif: the caller's branch arrives as an argument carrying
     // `$.it`, so the emitted `.it` push is invited.
     assert_eq!(
-        exp("macro &aif($c, $t): /c | \"| .it(${::form}) | ${^/t::form}\"; \
-             /row | &aif(::Fare, ($.it))"),
+        exp(
+            "macro &aif($c, $t): /c | \"| .it(${::form}) | ${^/t::form}\"; \
+             /row | &aif(::Fare, ($.it))"
+        ),
         "/row | .it(::Fare) | $.it"
     );
     // Pivot shape: uninvited pushes swept up by `%.` — no outside
@@ -138,11 +143,14 @@ fn expand_first_steps() {
     );
     // Diagnostics still fire in the -1 lens: the full parse runs.
     assert!(
-        expand_first("macro &m($n): //step[1] | \"| .t(9)\"; \
-                      ^ | .t(1) | &m(/x) | %(v = $.t)", &Defs::default())
-            .unwrap_err()
-            .to_string()
-            .contains("invited through an argument")
+        expand_first(
+            "macro &m($n): //step[1] | \"| .t(9)\"; \
+                      ^ | .t(1) | &m(/x) | %(v = $.t)",
+            &Defs::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invited through an argument")
     );
 }
 
@@ -162,10 +170,7 @@ fn path_splice() {
         "/cookies/C(<-cookie->ip<-ip->cookie)+ @| count"
     );
     // trailing predicate group-wraps (expression predicates only)
-    assert_eq!(
-        exp("def &a: /row; &a[::x > 1]"),
-        "(/row)[::x > 1]"
-    );
+    assert_eq!(exp("def &a: /row; &a[::x > 1]"), "(/row)[::x > 1]");
     // trailing projection: the body ends the branch
     assert_eq!(exp("def &a: /row; &a::name"), "/row::name");
     // a projected body ends the branch where it stands
@@ -188,16 +193,19 @@ fn path_splice() {
 #[test]
 fn union_body_as_group() {
     // a union body mid-path becomes a path-pattern group
-    assert_eq!(
-        exp("def &either: /a || /b; /x&either/c::"),
-        "/x(/a|/b)/c::"
-    );
+    assert_eq!(exp("def &either: /a || /b; /x&either/c::"), "/x(/a|/b)/c::");
     // ... adopting a written quantifier directly
     assert_eq!(exp("def &either: /a || /b; /x&either{2}"), "/x(/a|/b){2}");
     // at branch head a bare union splices whole (the historical
     // behavior) — the group form appears only under refinement
-    assert_eq!(exp("def &either: /a || /b; &either @| count"), "/a || /b @| count");
-    assert_eq!(exp("def &either: /a || /b; &either+ @| count"), "(/a|/b)+ @| count");
+    assert_eq!(
+        exp("def &either: /a || /b; &either @| count"),
+        "/a || /b @| count"
+    );
+    assert_eq!(
+        exp("def &either: /a || /b; &either+ @| count"),
+        "(/a|/b)+ @| count"
+    );
     // a projected union splices whole at head, as before
     assert_eq!(
         exp("def &two: /a::x || /b::y; &two @| count"),
@@ -248,10 +256,7 @@ fn predicate_splice() {
         "//div[(::x > 1) && ::y = 2]::"
     );
     // a bare navigation body in a predicate is an existence test
-    assert_eq!(
-        exp("def &guard: /flag; //row[&guard]::"),
-        "//row[/flag]::"
-    );
+    assert_eq!(exp("def &guard: /flag; //row[&guard]::"), "//row[/flag]::");
     // a projected body compares by value
     assert_eq!(
         exp("def &price: /span::; //div[&price > 10]::"),
@@ -275,9 +280,7 @@ fn path_splice_errors() {
     // a pipeline-carrying body cannot enter a walk
     assert!(err("def &s: /row | upper; /x&s").contains("carries a pipeline"));
     // ... nor a correlation
-    assert!(
-        err("def &j: /a <=> /b[::x = _::x]; /x&j").contains("carries a correlation")
-    );
+    assert!(err("def &j: /a <=> /b[::x = _::x]; /x&j").contains("carries a correlation"));
     // ... nor a re-anchoring body
     assert!(err("def &t: ^/a; /x&t").contains("re-anchors"));
     // a projected body cannot continue the walk
@@ -292,14 +295,10 @@ fn path_splice_errors() {
     // a guard needs something to refine
     assert!(err("def &vis: [::x]; &vis").contains("nothing precedes"));
     // reverse resolution stays out of predicates, spliced or not
-    assert!(
-        err("def &back: ::id<--; /row[&back]::").contains("reverse resolution")
-    );
+    assert!(err("def &back: ::id<--; /row[&back]::").contains("reverse resolution"));
     // trailing-refinement refusals survive for pipeline-carrying
     // bodies, where refine-through-the-pipe is still the truth
-    assert!(
-        err("def &s: /row | upper; &s[::x > 1]").contains("pipeline filter")
-    );
+    assert!(err("def &s: /row | upper; &s[::x > 1]").contains("pipeline filter"));
     assert!(err("def &s: /row | upper; &s::name").contains("through the pipe"));
 }
 
@@ -465,10 +464,7 @@ fn defs_file_comments() {
          def &gregorian: | tp(\"%Y-%m-%d\") | ($_ + 12d);\n",
     )
     .unwrap();
-    assert_eq!(
-        expand("&adults", &defs).unwrap(),
-        "/row[::Age >= 18]"
-    );
+    assert_eq!(expand("&adults", &defs).unwrap(), "/row[::Age >= 18]");
     assert_eq!(
         expand("/x | &gregorian", &defs).unwrap(),
         "/x | tp(\"%Y-%m-%d\") | $_ + \"12d\""
@@ -516,9 +512,11 @@ fn unparse_fixpoint() {
         // Round-trip regressions (2026-07-21 review): constant and
         // operand stages keep their parens; a quoted dot-leading
         // string stays a constant topic; quoted trait names reprint
-        // quoted; `<-`/`<` keep their axis before digit-/dash-led
-        // matchers; a trailing leaf anchor regroups before a plain
-        // pipe instead of reparsing as the map pipe.
+        // quoted; `<-` keeps its axis before a digit-led matcher; a
+        // dash-led name after the sibling hop `<` reprints quoted
+        // (spaced, `<` would be the comparison); a trailing leaf
+        // anchor regroups before a plain pipe instead of reparsing
+        // as the map pipe.
         "/a | (3)",
         "/a | (now())",
         "/a | (- 3)",
@@ -526,7 +524,8 @@ fn unparse_fixpoint() {
         "/files | \".gitignore\"",
         "//x<\"my trait\">",
         "//a <- 3",
-        "//a < -x",
+        "//a<\"-x\"",
+        "//a<-3",
         "def &f: /a$; &f | upper",
         // Path-position splices (ruling #17): the expansions must
         // themselves round-trip.
@@ -555,6 +554,8 @@ fn rounded_fragment_and_parameter_spellings() {
 fn rounded_hole_with_a_parameter() {
     // `"(,(,c))"` is `"${$c}"` — the hole's dollar and the parameter's,
     // both in their value-side digraph.
-    assert_eq!(exp(r#"def &f($c): | "x=${$c}"; /* | &f(::a)"#), exp(r#"def (=f)((,c)): | "x=(,(,c))"; /* | (=f)(::a)"#));
+    assert_eq!(
+        exp(r#"def &f($c): | "x=${$c}"; /* | &f(::a)"#),
+        exp(r#"def (=f)((,c)): | "x=(,(,c))"; /* | (=f)(::a)"#)
+    );
 }
-

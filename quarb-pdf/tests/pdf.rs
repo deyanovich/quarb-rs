@@ -67,7 +67,10 @@ fn references_are_edges() {
     assert_eq!(values(&a, "/objects/pages<-Parent @| count"), ["2"]);
     // walk: catalog -> Pages -> items -> back up by Parent
     assert_eq!(
-        values(&a, "/objects/catalog->Pages->Kids[::Rotate = 90]->Parent::id"),
+        values(
+            &a,
+            "/objects/catalog->Pages->Kids[::Rotate = 90]->Parent::id"
+        ),
         ["2 0"]
     );
 }
@@ -77,11 +80,13 @@ fn direct_structure_is_children() {
     let a = doc();
     // MediaBox is a direct array: a child named by its key, its
     // scalar elements as items
-    assert_eq!(values(&a, "/objects/page/MediaBox/item::"), ["0", "0", "612", "792"]);
+    assert_eq!(
+        values(&a, "/objects/page/MediaBox/item::"),
+        ["0", "0", "612", "792"]
+    );
 }
 
 #[test]
 fn not_a_pdf_refuses() {
     assert!(PdfAdapter::load(b"nope").is_err());
 }
-

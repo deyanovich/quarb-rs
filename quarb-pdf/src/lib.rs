@@ -63,7 +63,10 @@ pub struct PdfAdapter {
 impl PdfAdapter {
     pub fn load(bytes: &[u8]) -> Result<Self, PdfError> {
         let doc = lopdf::Document::load_mem(bytes)?;
-        let mut a = PdfAdapter { nodes: Vec::new(), back: Vec::new() };
+        let mut a = PdfAdapter {
+            nodes: Vec::new(),
+            back: Vec::new(),
+        };
         let root = a.push(None, None);
         // One node per indirect object, allocated up front so
         // references can link forward.
@@ -78,7 +81,9 @@ impl PdfAdapter {
         }
         for (id, obj) in &doc.objects {
             let n = by_id[id];
-            a.nodes[n].props.push(("id".into(), Value::Str(format!("{} {}", id.0, id.1))));
+            a.nodes[n]
+                .props
+                .push(("id".into(), Value::Str(format!("{} {}", id.0, id.1))));
             match obj {
                 Object::Dictionary(d) => {
                     if let Some(t) = type_name(d) {
@@ -169,7 +174,9 @@ impl PdfAdapter {
             match item {
                 Object::Reference(id) => {
                     if let Some(t) = by_id.get(id) {
-                        self.nodes[link_node].links.push((link_label.to_string(), *t));
+                        self.nodes[link_node]
+                            .links
+                            .push((link_label.to_string(), *t));
                     }
                 }
                 Object::Dictionary(inner) => {

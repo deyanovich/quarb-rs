@@ -232,10 +232,7 @@ fn headerless_table_keeps_bare_cells() {
         headers: None,
         rows: vec![vec!["Alice".into(), "captain".into()]],
     }]);
-    assert_eq!(
-        values(&m, "//unordered-item::"),
-        vec!["Alice", "captain"]
-    );
+    assert_eq!(values(&m, "//unordered-item::"), vec!["Alice", "captain"]);
 }
 
 /// Plain text: blank-line-separated paragraphs, each collapsed to
@@ -286,12 +283,10 @@ fn row_labels_become_cell_lemmas() {
     let m = TextModel::build(vec![Block::Table {
         lemma: None,
         headers: None,
-        rows: vec![vec![
-            quarb_text::Cell {
-                label: Some("Location".into()),
-                text: "Campion".into(),
-            },
-        ]],
+        rows: vec![vec![quarb_text::Cell {
+            label: Some("Location".into()),
+            text: "Campion".into(),
+        }]],
     }]);
     assert_eq!(values(&m, "//*<cell>::lemma"), vec!["Location"]);
     assert_eq!(values(&m, "//*<cell>::"), vec!["Location: Campion"]);
@@ -358,9 +353,7 @@ fn serialization_stages_render_subtrees() {
     // explicit close markers.
     assert_eq!(
         values(&m, r#"//section[::lemma = "First attempt"] | atrep"#),
-        vec![
-            "@@@!litogramma\n\n@# First attempt\n\nThe birds split into small groups.\n\n#@"
-        ]
+        vec!["@@@!litogramma\n\n@# First attempt\n\nThe birds split into small groups.\n\n#@"]
     );
 }
 
@@ -415,10 +408,7 @@ fn atrep_emits_litogramma_forms() {
 /// accepts. Env-gated: needs ATREP_BIN and LITOGRAMMA_DIA.
 #[test]
 fn atrep_output_parses() {
-    let (Ok(bin), Ok(dia)) = (
-        std::env::var("ATREP_BIN"),
-        std::env::var("LITOGRAMMA_DIA"),
-    ) else {
+    let (Ok(bin), Ok(dia)) = (std::env::var("ATREP_BIN"), std::env::var("LITOGRAMMA_DIA")) else {
         eprintln!("skip: set ATREP_BIN && LITOGRAMMA_DIA to run the parse gate");
         return;
     };
@@ -496,7 +486,10 @@ fn grammata_and_the_friendly_aliases() {
     ]);
     // A section's grammata is its body without the title.
     assert_eq!(
-        values(&m, "//section[::lemma = \"Aftermath\"]::grammata @| [1] | [$_ == (/^The emus/)] @| count"),
+        values(
+            &m,
+            "//section[::lemma = \"Aftermath\"]::grammata @| [1] | [$_ == (/^The emus/)] @| count"
+        ),
         vec!["1"]
     );
     // A cell's body is the value without the label fold.
@@ -525,15 +518,24 @@ fn grammata_and_the_friendly_aliases() {
 #[test]
 fn closed_surface_adapters_alias_their_metadata() {
     let m = TextModel::build(vec![
-        Block::Heading { level: 3, lemma: "Aftermath".into() },
-        Block::Verbatim { lang: Some("rust".into()), text: "fn main() {}".into() },
+        Block::Heading {
+            level: 3,
+            lemma: "Aftermath".into(),
+        },
+        Block::Verbatim {
+            lang: Some("rust".into()),
+            text: "fn main() {}".into(),
+        },
     ]);
     // The annotation answers at either depth.
     assert_eq!(values(&m, "//section::level"), vec!["3"]);
     assert_eq!(values(&m, "//section::::level"), vec!["3"]);
     assert_eq!(values(&m, "//verbatim::lang"), vec!["rust"]);
     // Predicates see the alias too.
-    assert_eq!(values(&m, "//section[::level = 3]::lemma"), vec!["Aftermath"]);
+    assert_eq!(
+        values(&m, "//section[::level = 3]::lemma"),
+        vec!["Aftermath"]
+    );
     // An undeclared metadata key stays four-colon only.
     assert_eq!(values(&m, "//section::nonesuch"), vec![""]);
     // Core metadata is never aliased: `::name` is not `:::name`.
@@ -548,21 +550,47 @@ fn closed_surface_adapters_alias_their_metadata() {
 fn open_family_callouts_take_their_bodys_family() {
     use quarb_text::NoteFamily;
     let m = TextModel::build(vec![
-        Block::Paragraph { text: "Prose.".into() },
-        Block::NoteRef { onym: "a".into(), family: None, margin: false },
-        Block::NoteRef { onym: "b".into(), family: None, margin: false },
-        Block::NoteRef { onym: "c".into(), family: None, margin: false },
+        Block::Paragraph {
+            text: "Prose.".into(),
+        },
+        Block::NoteRef {
+            onym: "a".into(),
+            family: None,
+            margin: false,
+        },
+        Block::NoteRef {
+            onym: "b".into(),
+            family: None,
+            margin: false,
+        },
+        Block::NoteRef {
+            onym: "c".into(),
+            family: None,
+            margin: false,
+        },
         Block::Open {
-            kind: Container::Note { onym: "a".into(), family: NoteFamily::Footnote, margin: false },
+            kind: Container::Note {
+                onym: "a".into(),
+                family: NoteFamily::Footnote,
+                margin: false,
+            },
             lemma: None,
         },
-        Block::Text { text: "The footnote.".into() },
+        Block::Text {
+            text: "The footnote.".into(),
+        },
         Block::Close { hypograph: None },
         Block::Open {
-            kind: Container::Note { onym: "b".into(), family: NoteFamily::Endnote, margin: false },
+            kind: Container::Note {
+                onym: "b".into(),
+                family: NoteFamily::Endnote,
+                margin: false,
+            },
             lemma: None,
         },
-        Block::Text { text: "The endnote.".into() },
+        Block::Text {
+            text: "The endnote.".into(),
+        },
         Block::Close { hypograph: None },
     ]);
     assert_eq!(values(&m, "//*<deixis>->footnote::"), ["The footnote."]);
@@ -580,9 +608,13 @@ fn open_family_callouts_take_their_bodys_family() {
 #[test]
 fn index_marks_are_invisible_anchors() {
     let m = TextModel::build(vec![
-        Block::Paragraph { text: "Emus advanced.".into() },
+        Block::Paragraph {
+            text: "Emus advanced.".into(),
+        },
         Block::IndexMark { term: "emu".into() },
-        Block::IndexMark { term: "wheat districts|textbf".into() },
+        Block::IndexMark {
+            term: "wheat districts|textbf".into(),
+        },
     ]);
     assert_eq!(values(&m, "//index-mark::term"), ["emu", "wheat districts"]);
     assert_eq!(values(&m, "/paragraph::"), ["Emus advanced."]);
@@ -598,10 +630,14 @@ fn verse_lines_carry_the_citation_coordinate() {
     let m = TextModel::build(vec![Block::Verse {
         lemma: Some("Ode".into()),
         strophes: vec![
-            vec!["Happy the man, whose wish && care".into(),
-                 "A few paternal acres bound,".into()],
-            vec!["Content to breathe his native air,".into(),
-                 "In his own ground.".into()],
+            vec![
+                "Happy the man, whose wish && care".into(),
+                "A few paternal acres bound,".into(),
+            ],
+            vec![
+                "Content to breathe his native air,".into(),
+                "In his own ground.".into(),
+            ],
         ],
         hypograph: None,
     }]);
@@ -617,7 +653,9 @@ fn verse_lines_carry_the_citation_coordinate() {
     // strophes separate with a blank line in the flattened prose
     assert_eq!(
         values(&m, "//verse::"),
-        ["Ode\nHappy the man, whose wish && care\nA few paternal acres bound,\n\nContent to breathe his native air,\nIn his own ground."]
+        [
+            "Ode\nHappy the man, whose wish && care\nA few paternal acres bound,\n\nContent to breathe his native air,\nIn his own ground."
+        ]
     );
     // sub-block structure: only the verse block carries <block>
     assert_eq!(values(&m, "//verse<block> @| count"), ["1"]);

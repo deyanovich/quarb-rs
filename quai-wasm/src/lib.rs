@@ -49,7 +49,10 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     };
-    let chars: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let chars: Vec<u8> = s
+        .bytes()
+        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
+        .collect();
     let mut out = Vec::with_capacity(chars.len() * 3 / 4);
     for chunk in chars.chunks(4) {
         let mut acc = 0u32;
@@ -144,8 +147,13 @@ fn build_doc(
 /// door the way kaiv does: the adapter is Rc-shared between the
 /// Doc and its locator renderer.
 fn site_doc(text: &str) -> Result<Doc, String> {
-    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("reading the site: {e}"))?;
-    let base = v.get("base").and_then(|b| b.as_str()).unwrap_or("").to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("reading the site: {e}"))?;
+    let base = v
+        .get("base")
+        .and_then(|b| b.as_str())
+        .unwrap_or("")
+        .to_string();
     let pages = v
         .get("pages")
         .and_then(|p| p.as_object())
@@ -153,10 +161,19 @@ fn site_doc(text: &str) -> Result<Doc, String> {
     let files = pages
         .iter()
         .filter_map(|(path, html)| {
-            html.as_str().map(|h| quarb_web::PageFile { path: path.clone(), html: h.to_string() })
+            html.as_str().map(|h| quarb_web::PageFile {
+                path: path.clone(),
+                html: h.to_string(),
+            })
         })
         .collect();
-    let store = quarb_web::MemoryStore::build(quarb_web::SiteInput { base_url: base, snapshot: None }, files);
+    let store = quarb_web::MemoryStore::build(
+        quarb_web::SiteInput {
+            base_url: base,
+            snapshot: None,
+        },
+        files,
+    );
     let a = std::rc::Rc::new(quarb_web::WebAdapter::new(store));
     let r = a.clone();
     Ok(Doc::Boxed(
@@ -175,7 +192,12 @@ fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
 
 /// A result envelope for JS: the `&N` label, the output lines, and an
 /// optional note or error (exactly one of note/error, or neither).
-fn envelope(label: &str, lines: Vec<String>, note: Option<String>, error: Option<String>) -> String {
+fn envelope(
+    label: &str,
+    lines: Vec<String>,
+    note: Option<String>,
+    error: Option<String>,
+) -> String {
     envelope_refs(label, lines, note, error, Vec::new())
 }
 
@@ -229,9 +251,8 @@ impl QuaiSession {
     /// one-document constructor does.
     pub fn mount(sources_json: &str, now_millis: f64) -> Result<QuaiSession, JsError> {
         let (doc, roots) = build_doc(sources_json)?;
-        let executor = Box::new(
-            LocalExecutor::new(doc, now_parts(now_millis), false).with_url_roots(roots),
-        );
+        let executor =
+            Box::new(LocalExecutor::new(doc, now_parts(now_millis), false).with_url_roots(roots));
         Ok(QuaiSession {
             session: Session::new(executor, Box::new(MemStore)),
         })
@@ -323,9 +344,7 @@ impl QuaiSession {
         if t.is_empty() {
             return envelope("", vec![], None, None);
         }
-        if (t.starts_with("def ") || t.starts_with("macro "))
-            && quarb::parse_defs(t).is_ok()
-        {
+        if (t.starts_with("def ") || t.starts_with("macro ")) && quarb::parse_defs(t).is_ok() {
             return match self.session.add_def(t) {
                 Ok(()) => envelope("", vec![], Some("definitions added".into()), None),
                 Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
@@ -383,7 +402,9 @@ impl QuaiSession {
                     "",
                     vec![],
                     None,
-                    Some(format!("&{n}# has no captured result (line {n} hasn't run)")),
+                    Some(format!(
+                        "&{n}# has no captured result (line {n} hasn't run)"
+                    )),
                 ),
             };
         }

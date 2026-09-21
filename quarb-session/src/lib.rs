@@ -58,9 +58,9 @@ impl MountSpec {
 }
 pub use local::LocalExecutor;
 pub use session::Session;
-pub use store::{MemStore, SessionState, Store};
 #[cfg(feature = "native")]
 pub use store::FileStore;
+pub use store::{MemStore, SessionState, Store};
 
 use quarb::Value;
 

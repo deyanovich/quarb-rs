@@ -67,7 +67,10 @@ fn arithmetic_paths_stay_expressions() {
     // A dangling operator after the path means the stage was a
     // value expression all along — the operand reading survives
     // (null-propagating arithmetic over child values).
-    assert_eq!(canon("/items/* | /price:: * /qty::"), "/items/* | (/price:: * /qty::)");
+    assert_eq!(
+        canon("/items/* | /price:: * /qty::"),
+        "/items/* | (/price:: * /qty::)"
+    );
 }
 
 #[test]

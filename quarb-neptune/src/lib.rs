@@ -38,7 +38,9 @@ pub enum NeptuneError {
     Api(String),
     #[error("neptune target: {0} (expected neptune://HOST[:8182][?region=…&key=PROP])")]
     Target(String),
-    #[error("neptune: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)")]
+    #[error(
+        "neptune: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)"
+    )]
     NoCredentials,
 }
 
@@ -73,7 +75,9 @@ fn cypher_literal(v: &Value) -> String {
 
 enum Kind {
     Root,
-    Label { index: usize },
+    Label {
+        index: usize,
+    },
     /// A graph node: its `~id`, labels, and decoded properties.
     Entity {
         nid: String,
@@ -159,7 +163,10 @@ impl NeptuneAdapter {
             labels = adapter
                 .cypher("MATCH (n) UNWIND labels(n) AS l RETURN DISTINCT l ORDER BY l")?
                 .iter()
-                .filter_map(|row| row.pointer("/l").and_then(|v| v.as_str().map(str::to_string)))
+                .filter_map(|row| {
+                    row.pointer("/l")
+                        .and_then(|v| v.as_str().map(str::to_string))
+                })
                 .collect();
         }
         labels.sort();
@@ -285,7 +292,11 @@ impl NeptuneAdapter {
         let labels: Vec<String> = j
             .pointer("/~labels")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let props: Vec<(String, Value)> = j
             .pointer("/~properties")
@@ -341,7 +352,11 @@ impl NeptuneAdapter {
                 let vert = row.pointer("/m")?;
                 let label = edge.pointer("/~type")?.as_str()?.to_string();
                 let other = self.intern(vert)?;
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 let props: Vec<(String, Value)> = edge
                     .pointer("/~properties")
                     .and_then(|p| p.as_object())
@@ -441,10 +456,7 @@ impl AstAdapter for NeptuneAdapter {
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
-                let stmt = format!(
-                    "MATCH (m:`{}`) RETURN count(m) AS c",
-                    self.labels[*index]
-                );
+                let stmt = format!("MATCH (m:`{}`) RETURN count(m) AS c", self.labels[*index]);
                 drop(nodes);
                 let rows = self.cypher(&stmt).ok()?;
                 rows.first()?.pointer("/c").map(cell_value)
@@ -494,7 +506,10 @@ impl AstAdapter for NeptuneAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props

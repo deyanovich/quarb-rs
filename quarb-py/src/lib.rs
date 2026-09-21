@@ -176,9 +176,7 @@ impl Doc {
             Doc::Sqlite(a) => a.locator(node),
             Doc::Kaiv(a) => a.locator(node),
             Doc::Fs(a) => a.path(node).display().to_string(),
-            Doc::FsDeep(a) => {
-                a.locator(node, |o| a.outer().path(o).display().to_string())
-            }
+            Doc::FsDeep(a) => a.locator(node, |o| a.outer().path(o).display().to_string()),
             Doc::Git(a) => a.locator(node),
             Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
             Doc::ArchiveRaw(a) => a.locator(node),
@@ -190,7 +188,6 @@ impl Doc {
         }
     }
 }
-
 
 /// A boxed adapter behind the one trait — the remote targets'
 /// uniform carrier (no Box blanket impl exists upstream).
@@ -311,8 +308,10 @@ fn open_remote(s: &str) -> Option<Result<Doc, String>> {
     } else if s.starts_with("k8s:") || s.starts_with("kubernetes:") {
         arm!(quarb_kubernetes::KubernetesAdapter::connect(s))
     } else if s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://") {
-        arm!(quarb_objstore::ObjstoreAdapter::connect(s)
-            .map(|a| quarb_compose::ComposeAdapter::new(a)))
+        arm!(
+            quarb_objstore::ObjstoreAdapter::connect(s)
+                .map(|a| quarb_compose::ComposeAdapter::new(a))
+        )
     } else if s.starts_with("metatheca:") || s.starts_with("mt:") {
         #[cfg(unix)]
         {
@@ -697,11 +696,17 @@ fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Docu
     let err = |e: String| PyValueError::new_err(e);
     if let Some(remote) = open_remote(path) {
         let doc = remote.map_err(err)?;
-        return Ok(Document { doc, fmt: "remote".into() });
+        return Ok(Document {
+            doc,
+            fmt: "remote".into(),
+        });
     }
     if let Some(repo) = path.strip_prefix("git:") {
         let a = quarb_git::GitAdapter::open(Path::new(repo)).map_err(|e| err(e.to_string()))?;
-        return Ok(Document { doc: Doc::Git(a), fmt: "git".into() });
+        return Ok(Document {
+            doc: Doc::Git(a),
+            fmt: "git".into(),
+        });
     }
     let p = PathBuf::from(path);
     if p.is_dir() {
@@ -712,13 +717,17 @@ fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Docu
         let a = quarb_fs::FsAdapter::with_options(&p, opts).map_err(|e| err(e.to_string()))?;
         return Ok(if graft {
             Document {
-                doc: Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(a, |fs, n| {
-                    Some(fs.path(n))
-                })),
+                doc: Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(
+                    a,
+                    |fs, n| Some(fs.path(n)),
+                )),
                 fmt: "fs".into(),
             }
         } else {
-            Document { doc: Doc::Fs(a), fmt: "fs".into() }
+            Document {
+                doc: Doc::Fs(a),
+                fmt: "fs".into(),
+            }
         });
     }
     let ext = p
@@ -752,9 +761,9 @@ fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Docu
             }
         }
         "xlsx" => Doc::Xlsx(quarb_xlsx::XlsxAdapter::open(&p).map_err(|e| err(e.to_string()))?),
-        e if quarb_tree_sitter::supported(e) => {
-            Doc::Syntax(quarb_tree_sitter::TreeSitterAdapter::open(&p).map_err(|e| err(e.to_string()))?)
-        }
+        e if quarb_tree_sitter::supported(e) => Doc::Syntax(
+            quarb_tree_sitter::TreeSitterAdapter::open(&p).map_err(|e| err(e.to_string()))?,
+        ),
         _ => return load(p, None),
     };
     Ok(Document { doc, fmt: ext })
@@ -784,7 +793,9 @@ fn translate(source: &str, lang: &str) -> PyResult<String> {
         "sql" => quarb_sql::translate(source)
             .map(|t| t.query)
             .map_err(|e| e.to_string()),
-        other => Err(format!("unknown source language: {other} (jq | xpath | sql)")),
+        other => Err(format!(
+            "unknown source language: {other} (jq | xpath | sql)"
+        )),
     }
     .map_err(PyValueError::new_err)?;
     Ok(q)

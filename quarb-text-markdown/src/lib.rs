@@ -81,10 +81,12 @@ fn citation_key(rest: &[char]) -> Option<String> {
         if c.is_alphanumeric() || c == '_' {
             key.push(c);
             i += 1;
-        } else if matches!(c, ':' | '.' | '#' | '$' | '%' | '&' | '-' | '+' | '?' | '<' | '>' | '~' | '/')
-            && rest
-                .get(i + 1)
-                .is_some_and(|n| n.is_alphanumeric() || *n == '_')
+        } else if matches!(
+            c,
+            ':' | '.' | '#' | '$' | '%' | '&' | '-' | '+' | '?' | '<' | '>' | '~' | '/'
+        ) && rest
+            .get(i + 1)
+            .is_some_and(|n| n.is_alphanumeric() || *n == '_')
         {
             key.push(c);
             i += 1;

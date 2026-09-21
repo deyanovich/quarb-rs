@@ -78,10 +78,7 @@ fn spine_order_and_chapter_outline() {
     let m = parse(&epub()).unwrap();
     // declared spine order, not manifest order; the chapters' own
     // headings carry the outline
-    assert_eq!(
-        values(&m, "/section::lemma"),
-        ["The war", "Aftermath"]
-    );
+    assert_eq!(values(&m, "/section::lemma"), ["The war", "Aftermath"]);
     assert_eq!(
         values(&m, r#"/section[::lemma = "Aftermath"]/section::lemma"#),
         ["Questions"]

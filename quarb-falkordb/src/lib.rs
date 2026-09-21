@@ -131,7 +131,9 @@ fn parse_entity(v: &R) -> Option<EntityCell> {
 
 enum Kind {
     Root,
-    Label { index: usize },
+    Label {
+        index: usize,
+    },
     Entity {
         gid: i64,
         labels: Vec<String>,
@@ -181,8 +183,7 @@ impl FalkorAdapter {
             q.split('&')
                 .find_map(|kv| kv.strip_prefix("key=").map(str::to_string))
         });
-        let client =
-            redis::Client::open(format!("{scheme}://{hostpart}")).map_err(api)?;
+        let client = redis::Client::open(format!("{scheme}://{hostpart}")).map_err(api)?;
         let conn = client.get_connection().map_err(api)?;
         let adapter = FalkorAdapter {
             conn: RefCell::new(conn),
@@ -321,16 +322,19 @@ impl FalkorAdapter {
             _ => return Vec::new(),
         };
         let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
-        let stmt = format!(
-            "MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)"
-        );
+        let stmt =
+            format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)");
         let rows = self.cypher(&stmt).unwrap_or_default();
         rows.iter()
             .filter_map(|row| {
                 let e = parse_entity(row.first()?)?;
                 let label = e.rel_type?;
                 let other = self.intern(row.get(1)?)?;
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 self.edge_props
                     .borrow_mut()
                     .entry((source, label.clone(), target))
@@ -416,10 +420,7 @@ impl AstAdapter for FalkorAdapter {
                     .collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
-                let stmt = format!(
-                    "MATCH (m:`{}`) RETURN count(m)",
-                    self.labels[*index]
-                );
+                let stmt = format!("MATCH (m:`{}`) RETURN count(m)", self.labels[*index]);
                 drop(nodes);
                 let rows = self.cypher(&stmt).ok()?;
                 rows.first()?.first().map(cell_value)
@@ -468,7 +469,10 @@ impl AstAdapter for FalkorAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props

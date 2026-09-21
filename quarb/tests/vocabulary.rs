@@ -148,7 +148,15 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // symmetry: (N), (.), (@), (@name)).
     (
         "branch",
-        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name", "node-id"],
+        &[
+            "anchored",
+            "mark",
+            "mark-index",
+            "mark-top",
+            "marks-all",
+            "marks-name",
+            "node-id",
+        ],
     ),
     // v1 additive growth: capsae, piped (2026-07-11, @* + inline
     // pipes).
@@ -202,7 +210,15 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // anchor keys (2026-07-24, marks symmetry).
     (
         "path",
-        &["anchored", "mark", "mark-index", "mark-top", "marks-all", "marks-name", "node-id"],
+        &[
+            "anchored",
+            "mark",
+            "mark-index",
+            "mark-top",
+            "marks-all",
+            "marks-name",
+            "node-id",
+        ],
     ),
     // v1 additive growth: peer-reg (2026-09-07, the cross-capsa read
     // `X:.r`).

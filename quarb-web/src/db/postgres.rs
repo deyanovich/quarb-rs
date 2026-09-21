@@ -69,17 +69,26 @@ impl PostgresStore {
     pub fn open(config: &str) -> Result<PostgresStore, String> {
         let (rt, client) = Self::connect(config)?;
         let catalog = Self::read_catalog(&rt, &client)?;
-        Ok(PostgresStore { rt, client: RefCell::new(client), catalog })
+        Ok(PostgresStore {
+            rt,
+            client: RefCell::new(client),
+            catalog,
+        })
     }
 
     /// Connect and create the schema (tables that exist stay).
     pub fn empty(config: &str) -> Result<PostgresStore, String> {
         let (rt, client) = Self::connect(config)?;
         for stmt in ddl(Dialect::Postgres) {
-            rt.block_on(client.batch_execute(&stmt)).map_err(|e| format!("{e}: {stmt}"))?;
+            rt.block_on(client.batch_execute(&stmt))
+                .map_err(|e| format!("{e}: {stmt}"))?;
         }
         let catalog = Self::read_catalog(&rt, &client)?;
-        Ok(PostgresStore { rt, client: RefCell::new(client), catalog })
+        Ok(PostgresStore {
+            rt,
+            client: RefCell::new(client),
+            catalog,
+        })
     }
 
     /// Create the schema and fill it from `store`.
@@ -105,11 +114,18 @@ impl PostgresStore {
     /// Write rows into this store with COPY (one transaction from
     /// `begin` to `finish`).
     pub fn sink(&mut self) -> impl Sink + '_ {
-        CopyWriter { rt: &self.rt, client: self.client.get_mut(), bufs: Default::default() }
+        CopyWriter {
+            rt: &self.rt,
+            client: self.client.get_mut(),
+            bufs: Default::default(),
+        }
     }
 
     fn connect(config: &str) -> Result<(Runtime, Client), String> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
         let client = rt
             .block_on(async {
                 let (client, connection) = tokio_postgres::connect(config, NoTls).await?;
@@ -152,7 +168,11 @@ impl PostgresStore {
         let client = self.client.borrow();
         self.rt
             .block_on(client.query(sql, &refs))
-            .map(|rows| rows.iter().map(|r| PageKey(r.get::<_, i64>(0) as u64)).collect())
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| PageKey(r.get::<_, i64>(0) as u64))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -166,12 +186,20 @@ impl WebStore for PostgresStore {
         let client = self.client.borrow();
         let r = self
             .rt
-            .block_on(client.query_opt(&format!("SELECT {ROW_COLS} FROM pages WHERE id = $1"), &[&(key.0 as i64)]))
+            .block_on(client.query_opt(
+                &format!("SELECT {ROW_COLS} FROM pages WHERE id = $1"),
+                &[&(key.0 as i64)],
+            ))
             .ok()??;
         Some(row_from(&r))
     }
 
-    fn children(&self, site: SiteId, container: Container, parent: Option<PageKey>) -> Vec<PageKey> {
+    fn children(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+    ) -> Vec<PageKey> {
         match parent {
             Some(p) => self.keys(
                 "SELECT id FROM pages WHERE site_id = $1 AND container = $2 AND parent_id = $3 ORDER BY tree_rank",
@@ -184,7 +212,13 @@ impl WebStore for PostgresStore {
         }
     }
 
-    fn children_named(&self, site: SiteId, container: Container, parent: Option<PageKey>, name: &str) -> Vec<PageKey> {
+    fn children_named(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        name: &str,
+    ) -> Vec<PageKey> {
         match parent {
             Some(p) => self.keys(
                 "SELECT id FROM pages WHERE site_id = $1 AND container = $2 AND parent_id = $3 AND name = $4 ORDER BY tree_rank",
@@ -244,7 +278,10 @@ impl WebStore for PostgresStore {
     fn html(&self, key: PageKey) -> Option<String> {
         let client = self.client.borrow();
         self.rt
-            .block_on(client.query_opt("SELECT html FROM page_html WHERE page_id = $1", &[&(key.0 as i64)]))
+            .block_on(client.query_opt(
+                "SELECT html FROM page_html WHERE page_id = $1",
+                &[&(key.0 as i64)],
+            ))
             .ok()?
             .map(|r| r.get(0))
     }
@@ -285,16 +322,28 @@ impl WebStore for PostgresStore {
         let ids: Vec<i64> = keys.iter().map(|k| k.0 as i64).collect();
         let client = self.client.borrow();
         self.rt
-            .block_on(client.query(&format!("SELECT {ROW_COLS} FROM pages WHERE id = ANY($1)"), &[&ids]))
+            .block_on(client.query(
+                &format!("SELECT {ROW_COLS} FROM pages WHERE id = ANY($1)"),
+                &[&ids],
+            ))
             .map(|rows| rows.iter().map(row_from).collect())
             .unwrap_or_default()
     }
 
-    fn descendants_of_kind(&self, site: SiteId, container: Container, parent: Option<PageKey>, kind: PageKind) -> Vec<(PageKey, u32)> {
+    fn descendants_of_kind(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        kind: PageKind,
+    ) -> Vec<(PageKey, u32)> {
         let client = self.client.borrow();
         let (from_rank, base_depth): (i64, i64) = match parent {
             Some(p) => {
-                let Ok(r) = self.rt.block_on(client.query_one("SELECT tree_rank, depth FROM pages WHERE id = $1", &[&(p.0 as i64)])) else {
+                let Ok(r) = self.rt.block_on(client.query_one(
+                    "SELECT tree_rank, depth FROM pages WHERE id = $1",
+                    &[&(p.0 as i64)],
+                )) else {
                     return Vec::new();
                 };
                 (r.get(0), r.get::<_, i64>(1))
@@ -331,9 +380,19 @@ impl SqlStore for PostgresStore {
         Dialect::Postgres
     }
     fn keys_where(&self, where_sql: &str, params: &[Param]) -> Vec<PageKey> {
-        self.keys(&format!("SELECT p.id FROM pages p WHERE {where_sql} ORDER BY p.tree_rank"), params)
+        self.keys(
+            &format!("SELECT p.id FROM pages p WHERE {where_sql} ORDER BY p.tree_rank"),
+            params,
+        )
     }
-    fn keys_where_top(&self, where_sql: &str, params: &[Param], column: &str, descending: bool, n: i64) -> Vec<PageKey> {
+    fn keys_where_top(
+        &self,
+        where_sql: &str,
+        params: &[Param],
+        column: &str,
+        descending: bool,
+        n: i64,
+    ) -> Vec<PageKey> {
         self.keys(
             &format!(
                 "SELECT p.id FROM pages p WHERE {where_sql} ORDER BY {column} {}, p.tree_rank LIMIT {n}",
@@ -347,7 +406,10 @@ impl SqlStore for PostgresStore {
         let refs: Vec<&(dyn ToSql + Sync)> = b.iter().map(|x| x.as_ref()).collect();
         let client = self.client.borrow();
         self.rt
-            .block_on(client.query_one(&format!("SELECT count(*) FROM pages p WHERE {where_sql}"), &refs))
+            .block_on(client.query_one(
+                &format!("SELECT count(*) FROM pages p WHERE {where_sql}"),
+                &refs,
+            ))
             .map(|r| r.get::<_, i64>(0))
             .unwrap_or(0)
     }
@@ -355,12 +417,25 @@ impl SqlStore for PostgresStore {
         let b = boxed(params);
         let refs: Vec<&(dyn ToSql + Sync)> = b.iter().map(|x| x.as_ref()).collect();
         let client = self.client.borrow();
-        let rows = self.rt.block_on(client.query(&format!("EXPLAIN SELECT p.id FROM pages p WHERE {where_sql}"), &refs)).ok()?;
-        Some(rows.iter().map(|r| r.get::<_, String>(0).trim().to_string()).collect::<Vec<_>>().join("; "))
+        let rows = self
+            .rt
+            .block_on(client.query(
+                &format!("EXPLAIN SELECT p.id FROM pages p WHERE {where_sql}"),
+                &refs,
+            ))
+            .ok()?;
+        Some(
+            rows.iter()
+                .map(|r| r.get::<_, String>(0).trim().to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
     fn execute(&self, sql: &str) -> Result<u64, String> {
         let client = self.client.borrow();
-        self.rt.block_on(client.execute(sql, &[])).map_err(|e| format!("{e}: {sql}"))
+        self.rt
+            .block_on(client.execute(sql, &[]))
+            .map_err(|e| format!("{e}: {sql}"))
     }
     fn tree_nodes(&self, site: SiteId, container: Container) -> Vec<TreeNode> {
         let client = self.client.borrow();
@@ -406,11 +481,24 @@ impl SqlStore for PostgresStore {
         let client = self.client.borrow();
         let sql = format!(
             "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = $1 AND l.to_id IS NOT NULL{}",
-            if exclude_templates { " AND l.via_template = 0" } else { "" }
+            if exclude_templates {
+                " AND l.via_template = 0"
+            } else {
+                ""
+            }
         );
         self.rt
             .block_on(client.query(&sql, &[&(site.0 as i64)]))
-            .map(|rows| rows.iter().map(|r| (PageKey(r.get::<_, i64>(0) as u64), PageKey(r.get::<_, i64>(1) as u64))).collect())
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        (
+                            PageKey(r.get::<_, i64>(0) as u64),
+                            PageKey(r.get::<_, i64>(1) as u64),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
     fn red_counts(&self, site: SiteId) -> Vec<(PageKey, u32)> {
@@ -462,7 +550,10 @@ impl SqlStore for PostgresStore {
 
 /// COPY text-format escaping.
 fn copy_field(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn copy_opt(s: Option<&str>) -> String {
@@ -473,7 +564,8 @@ fn copy_opt(s: Option<&str>) -> String {
 }
 
 fn copy_num<T: ToString>(v: Option<T>) -> String {
-    v.map(|v| v.to_string()).unwrap_or_else(|| "\\N".to_string())
+    v.map(|v| v.to_string())
+        .unwrap_or_else(|| "\\N".to_string())
 }
 
 /// The COPY sink: one buffer per table, flushed in dependency
@@ -488,7 +580,10 @@ const TABLES: [(&str, &str); 5] = [
     ("pages", ROW_COLS),
     ("page_html", "page_id, html"),
     ("page_text", "page_id, plain"),
-    ("links", "from_id, pos, to_id, to_url, anchor, section, kind, via_template"),
+    (
+        "links",
+        "from_id, pos, to_id, to_url, anchor, section, kind, via_template",
+    ),
     ("page_terms", "page_id, term_id, pos"),
 ];
 
@@ -501,7 +596,10 @@ impl CopyWriter<'_> {
             let data = std::mem::take(&mut self.bufs[i]);
             self.rt
                 .block_on(async {
-                    let sink = self.client.copy_in(&format!("COPY {table} ({cols}) FROM STDIN")).await?;
+                    let sink = self
+                        .client
+                        .copy_in(&format!("COPY {table} ({cols}) FROM STDIN"))
+                        .await?;
                     let mut sink = std::pin::pin!(sink);
                     sink.send(Bytes::from(data)).await?;
                     sink.as_mut().finish().await?;
@@ -522,7 +620,9 @@ impl CopyWriter<'_> {
 
 impl Sink for CopyWriter<'_> {
     fn begin(&mut self) -> Result<(), String> {
-        self.rt.block_on(self.client.batch_execute("BEGIN")).map_err(|e| e.to_string())
+        self.rt
+            .block_on(self.client.batch_execute("BEGIN"))
+            .map_err(|e| e.to_string())
     }
     fn site(&mut self, s: &SiteRow, lowering: &str) -> Result<(), String> {
         self.rt
@@ -594,6 +694,8 @@ impl Sink for CopyWriter<'_> {
     }
     fn finish(&mut self) -> Result<(), String> {
         self.flush()?;
-        self.rt.block_on(self.client.batch_execute("COMMIT")).map_err(|e| e.to_string())
+        self.rt
+            .block_on(self.client.batch_execute("COMMIT"))
+            .map_err(|e| e.to_string())
     }
 }

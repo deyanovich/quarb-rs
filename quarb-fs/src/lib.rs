@@ -149,8 +149,8 @@ impl FsAdapter {
 fn file_class(ext: &str) -> Option<&'static str> {
     let class = match ext {
         "rs" | "py" | "c" | "cpp" | "cc" | "h" | "hpp" | "js" | "mjs" | "cjs" | "jsx" | "ts"
-        | "go" | "java" | "rb" | "php" | "sh" | "swift" | "kt" | "lua" | "pl" | "scala"
-        | "clj" | "ex" | "hs" => "code",
+        | "go" | "java" | "rb" | "php" | "sh" | "swift" | "kt" | "lua" | "pl" | "scala" | "clj"
+        | "ex" | "hs" => "code",
         "txt" | "md" | "rst" | "adoc" | "org" | "tex" => "text",
         "pdf" | "doc" | "docx" | "odt" | "rtf" | "ps" | "epub" => "document",
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "tiff" | "ico" => "image",

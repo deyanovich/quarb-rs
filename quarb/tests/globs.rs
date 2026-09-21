@@ -23,7 +23,10 @@ fn pattern_forms_round_trip() {
     assert_eq!(canon("/x[::n == *\"web\"*]"), "/x[::n == *\"web\"*]");
     assert_eq!(canon("/x[::n == \"app\"*]"), "/x[::n == \"app\"*]");
     assert_eq!(canon("/x[::n == *\".gz\"]"), "/x[::n == *\".gz\"]");
-    assert_eq!(canon("/x[::n == *\"a\"*\"b\"*]"), "/x[::n == *\"a\"*\"b\"*]");
+    assert_eq!(
+        canon("/x[::n == *\"a\"*\"b\"*]"),
+        "/x[::n == *\"a\"*\"b\"*]"
+    );
     // double quotes canonicalize to the single-quoted literal
     assert_eq!(canon("/x[::n == *\"web\"*]"), "/x[::n == *\"web\"*]");
     // `!=` takes the same operand

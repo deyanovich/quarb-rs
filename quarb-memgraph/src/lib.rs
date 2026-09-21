@@ -94,7 +94,9 @@ fn props_of_rel(r: &neo4rs::Relation) -> Vec<(String, Value)> {
 
 enum Kind {
     Root,
-    Label { index: usize },
+    Label {
+        index: usize,
+    },
     Entity {
         gid: i64,
         labels: Vec<String>,
@@ -190,8 +192,8 @@ impl MemgraphAdapter {
         };
         let mut labels: Vec<String> = Vec::new();
         {
-            let rows = adapter
-                .rows("MATCH (n) UNWIND labels(n) AS l RETURN DISTINCT l ORDER BY l")?;
+            let rows =
+                adapter.rows("MATCH (n) UNWIND labels(n) AS l RETURN DISTINCT l ORDER BY l")?;
             for row in rows {
                 if let Ok(l) = row.get::<String>("l") {
                     labels.push(l);
@@ -282,9 +284,8 @@ impl MemgraphAdapter {
             _ => return Vec::new(),
         };
         let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
-        let stmt = format!(
-            "MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)"
-        );
+        let stmt =
+            format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)");
         let rows = self.rows(&stmt).unwrap_or_default();
         rows.iter()
             .filter_map(|row| {
@@ -292,7 +293,11 @@ impl MemgraphAdapter {
                 let m: neo4rs::Node = row.get("m").ok()?;
                 let label = r.typ().to_string();
                 let other = self.intern(&m)?;
-                let (source, target) = if incoming { (other, node) } else { (node, other) };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
                 self.edge_props
                     .borrow_mut()
                     .entry((source, label.clone(), target))
@@ -372,10 +377,7 @@ impl AstAdapter for MemgraphAdapter {
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
-                let stmt = format!(
-                    "MATCH (m:`{}`) RETURN count(m) AS c",
-                    self.labels[*index]
-                );
+                let stmt = format!("MATCH (m:`{}`) RETURN count(m) AS c", self.labels[*index]);
                 drop(nodes);
                 let rows = self.rows(&stmt).ok()?;
                 rows.first()?.get::<i64>("c").ok().map(Value::Int)
@@ -424,7 +426,10 @@ impl AstAdapter for MemgraphAdapter {
             .borrow()
             .get(&(source, label.to_string(), target))
         {
-            return props.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            return props
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         self.edges(source, false);
         self.edge_props

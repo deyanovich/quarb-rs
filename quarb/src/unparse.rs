@@ -10,8 +10,7 @@
 
 use crate::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PatSeg, PathElem,
-    PredExpr,
-    Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
+    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::value::Value;
 
@@ -23,11 +22,22 @@ pub fn unparse(query: &Query) -> String {
     let n = query.correlations.len();
     // The join prints where it binds: the driver's stages before
     // `join_at` precede the `<=>` entries, the rest follow them.
-    let at = if n == 0 { 0 } else { query.join_at.min(query.pipeline.len()) };
+    let at = if n == 0 {
+        0
+    } else {
+        query.join_at.min(query.pipeline.len())
+    };
     let (pre, post) = query.pipeline.split_at(at);
     let main_pipes = post.first().is_some_and(|s| stage(s).starts_with('|'));
     let pre_pipes = pre.first().is_some_and(|s| stage(s).starts_with('|'));
-    let mut out = branches_join(query, if at > 0 { pre_pipes } else { n == 0 && main_pipes });
+    let mut out = branches_join(
+        query,
+        if at > 0 {
+            pre_pipes
+        } else {
+            n == 0 && main_pipes
+        },
+    );
     for stage_ast in pre {
         out.push(' ');
         out.push_str(&stage(stage_ast));
@@ -112,7 +122,7 @@ fn anchor(a: &crate::ast::Anchor) -> String {
     }
 }
 
-fn elem(e: &PathElem) -> String {
+pub(crate) fn elem(e: &PathElem) -> String {
     match e {
         // A mark prints spaced for the same lexing reason as the
         // named push below; the anonymous mark is a lone dot.
@@ -137,7 +147,7 @@ fn elem(e: &PathElem) -> String {
 /// A path-pattern group in canonical (strict) form: every
 /// alternative spells its nav-ops, `{2,2}` reprints as `{2}`, and
 /// the open-ended forms reprint as `+` / `*`.
-fn group(g: &Group) -> String {
+pub(crate) fn group(g: &Group) -> String {
     let alts: Vec<String> = g
         .alts
         .iter()
@@ -162,7 +172,7 @@ fn group(g: &Group) -> String {
     )
 }
 
-fn step(s: &Step) -> String {
+pub(crate) fn step(s: &Step) -> String {
     let mut out = String::new();
     match &s.axis {
         Axis::Child => out.push('/'),
@@ -206,22 +216,34 @@ fn step(s: &Step) -> String {
     }
     // The parent and the ancestors take no name: the wildcard is
     // implied, and the bare axis is the canonical spelling.
-    let m = if matches!(s.axis, Axis::Parent | Axis::Ancestor(_)) && matches!(s.matcher, Matcher::Any) {
+    let m = if matches!(s.axis, Axis::Parent | Axis::Ancestor(_))
+        && matches!(s.matcher, Matcher::Any)
+    {
         String::new()
     } else {
         matcher(&s.matcher)
     };
     // The lexer reads `<-3` as less-than-minus-three and `<-x` as
     // an incoming crosslink, so a digit-leading matcher after `<-`
-    // (and a dash-leading one after `<`) needs a separating space
-    // to keep its axis on reparse. Quoting would corrupt globs;
-    // the space is meaning-preserving everywhere.
+    // needs a separating space to keep its axis on reparse; the
+    // space is meaning-preserving there. A dash-leading name after
+    // the sibling hop `<` cannot take a space (spaced, `<` is the
+    // comparison) and reprints quoted instead: `<"-x"`. A glob led
+    // by a dash has no spelling after `<` at all (quoting would make
+    // it a literal name); it prints as it is and does not reparse.
+    let m = if matches!(s.axis, Axis::PrevSibling)
+        && matches!(s.matcher, Matcher::Name(_))
+        && m.starts_with('-')
+    {
+        crate::value::quarb_string(&m)
+    } else {
+        m
+    };
     let glue_breaks = match &s.axis {
         Axis::InLink => m.starts_with(|c: char| c.is_ascii_digit()),
         // `--` then a dash-leading matcher would fuse into a longer
         // dash run on reparse.
         Axis::BothLink => m.starts_with('-'),
-        Axis::PrevSibling => m.starts_with('-'),
         _ => false,
     };
     if glue_breaks {
@@ -302,7 +324,7 @@ impl OrPat for Option<(String, String)> {
     }
 }
 
-fn matcher(m: &Matcher) -> String {
+pub(crate) fn matcher(m: &Matcher) -> String {
     match m {
         Matcher::Name(n) => name_text(n),
         Matcher::Glob(g) => g.glob().glob().to_string(),
@@ -360,7 +382,7 @@ fn proj_name(k: &str) -> String {
     }
 }
 
-fn projection(p: &Projection) -> String {
+pub(crate) fn projection(p: &Projection) -> String {
     match p {
         Projection::Property(None) => "::".to_string(),
         Projection::Property(Some(k)) => format!("::{}", proj_name(k)),
@@ -369,7 +391,7 @@ fn projection(p: &Projection) -> String {
     }
 }
 
-fn predicate(p: &Predicate) -> String {
+pub(crate) fn predicate(p: &Predicate) -> String {
     match p {
         Predicate::Index(n) => format!("[{n}]"),
         Predicate::Range(from, to) => {
@@ -381,7 +403,7 @@ fn predicate(p: &Predicate) -> String {
     }
 }
 
-fn pred_expr(e: &PredExpr) -> String {
+pub(crate) fn pred_expr(e: &PredExpr) -> String {
     match e {
         PredExpr::Or(a, b) => format!("{} || {}", pred_term(a), pred_term(b)),
         PredExpr::And(a, b) => format!("{} && {}", pred_term(a), pred_term(b)),
@@ -400,11 +422,8 @@ fn pred_expr(e: &PredExpr) -> String {
             if matches!(op, CmpOp::Contains)
                 && let Operand::Lit(Value::Str(t)) = r
             {
-                let pat = Operand::Pattern(vec![
-                    PatSeg::Star,
-                    PatSeg::Lit(t.clone()),
-                    PatSeg::Star,
-                ]);
+                let pat =
+                    Operand::Pattern(vec![PatSeg::Star, PatSeg::Lit(t.clone()), PatSeg::Star]);
                 return format!("{} == {}", operand(l), operand(&pat));
             }
             // A pattern literal is a pattern comparison however it
@@ -669,7 +688,7 @@ fn literal(v: &Value) -> String {
     }
 }
 
-fn stage(st: &Stage) -> String {
+pub(crate) fn stage(st: &Stage) -> String {
     match st {
         // `s/pat/repl/mods` keeps its substitution spelling.
         Stage::Func(call)
@@ -749,7 +768,9 @@ fn stage(st: &Stage) -> String {
         }
         // `%(...)` is the record constructor's canonical spelling
         // (ruling #38); `rec` / `record` are its aliases.
-        Stage::Func(call) if is_record_call(&call.name) => format!("| %{}", record_args(call, "; ")),
+        Stage::Func(call) if is_record_call(&call.name) => {
+            format!("| %{}", record_args(call, "; "))
+        }
         Stage::Func(call) => format!("| {}", fn_call(call)),
         // `%%(...)`: the record sigil's enriched register view.
         Stage::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
@@ -760,7 +781,11 @@ fn stage(st: &Stage) -> String {
             enriched,
         } => {
             let sigil = if *enriched { "%%" } else { "%" };
-            format!("| .{}{sigil}{}", name.as_deref().map(push_name).unwrap_or_default(), record_args(call, "; "))
+            format!(
+                "| .{}{sigil}{}",
+                name.as_deref().map(push_name).unwrap_or_default(),
+                record_args(call, "; ")
+            )
         }
         // `group(...)` follows the record convention: its keys print
         // as a record's do.
@@ -768,7 +793,11 @@ fn stage(st: &Stage) -> String {
         Stage::Agg(call) => format!("@| {}", fn_call(call)),
         Stage::Spread { outer: false } => "| ...".to_string(),
         Stage::Spread { outer: true } => "| ...?".to_string(),
-        Stage::Repeat { stage: inner, min, max } => {
+        Stage::Repeat {
+            stage: inner,
+            min,
+            max,
+        } => {
             let quant = match max {
                 Some(n) if n == min => format!("{{{min}}}"),
                 Some(n) => format!("{{{min};{n}}}"),
@@ -832,7 +861,8 @@ fn is_record_call(name: &str) -> bool {
 /// otherwise (`."3"`, a pivot's data-driven column).
 fn push_name(n: &str) -> String {
     if n.chars().next().is_some_and(|c| c.is_alphabetic())
-        && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        && n.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
         n.to_string()
     } else {
@@ -957,7 +987,10 @@ mod tests {
             // as every such stage does; the spelling inside is the
             // written one.
             let canon = assert_fixpoint(q);
-            assert!(canon.contains(&q[q.rfind("| ").unwrap() + 2..]), "{q:?} -> {canon:?}");
+            assert!(
+                canon.contains(&q[q.rfind("| ").unwrap() + 2..]),
+                "{q:?} -> {canon:?}"
+            );
         }
         // The rounded twin prints pointy.
         assert_eq!(rt("/a | \\/*:(*.)"), rt("/a | \\/*:@."));

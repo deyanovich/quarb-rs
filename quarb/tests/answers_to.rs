@@ -121,7 +121,8 @@ impl AstAdapter for Threads {
         }
     }
     fn default_value(&self, node: NodeId) -> Option<Value> {
-        (node.0 == 11).then(|| Value::Str("alice pin".into()))
+        (node.0 == 11)
+            .then(|| Value::Str("alice pin".into()))
             .or((node.0 == 21).then(|| Value::Str("bob pin".into())))
     }
     fn answers_to(&self, node: NodeId, name: &str) -> bool {
@@ -134,11 +135,7 @@ impl AstAdapter for Threads {
             && let Some(account) = rest.strip_suffix(".pinned")
         {
             return self.name(node).as_deref() == Some("pinned")
-                && self
-                    .parent(node)
-                    .and_then(|p| self.name(p))
-                    .as_deref()
-                    == Some(account);
+                && self.parent(node).and_then(|p| self.name(p)).as_deref() == Some(account);
         }
         false
     }

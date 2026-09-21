@@ -33,8 +33,10 @@ pub enum Token {
     Backslash,
     /// `\\`
     BackslashBackslash,
-    /// `>`
-    Gt,
+    /// `>` — `spaced` when a space (or the end) follows. Spaced, it
+    /// is the comparison; glued to what follows, the next-sibling
+    /// hop. Spacing alone decides, in every position.
+    Gt { spaced: bool },
     /// `;-` — the next-sibling hop's rounded spelling. A token of
     /// its own, not `Gt`: the alias names the hop only, never the
     /// comparison `>` (which gets its own rounded form).
@@ -45,8 +47,9 @@ pub enum Token {
     /// `>>`, `>>?`, `>>!` — all / proximal / distal following
     /// siblings.
     FollowingSiblings(char),
-    /// `<`
-    Lt,
+    /// `<` — see [`Token::Gt`]: spaced, the comparison; glued, the
+    /// previous-sibling hop or a trait's opener.
+    Lt { spaced: bool },
     /// `<<`, `<<?`, `<<!` — all / proximal / distal preceding
     /// siblings. The payload is the reach mark (' ', '?', '!').
     PrecedingSiblings(char),
@@ -256,10 +259,7 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
     if !double && matches!(chars.get(j), Some('=') | Some(',')) {
         j += 1;
     }
-    while chars
-        .get(j)
-        .is_some_and(|&c| is_name_char(c) || c == '@')
-    {
+    while chars.get(j).is_some_and(|&c| is_name_char(c) || c == '@') {
         j += 1;
     }
     if !double
@@ -284,7 +284,10 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
             }
             // `((.N))` — the mark at position N (the push dot, as in
             // `$.N`); `((N))` is its heritage spelling.
-            b if b.starts_with('.') && b.len() > 1 && b[1..].bytes().all(|c| c.is_ascii_digit()) => {
+            b if b.starts_with('.')
+                && b.len() > 1
+                && b[1..].bytes().all(|c| c.is_ascii_digit()) =>
+            {
                 vec![Token::MarkOpen, name(&b[1..]), Token::RParen]
             }
             "*" | "@" => vec![Token::MarkOpen, Token::At, Token::RParen],
@@ -365,7 +368,9 @@ fn after_push_dot(chars: &[char], i: usize) -> bool {
 /// the context in which a following `,digit` is the decimal comma.
 fn is_digit_run(text: &str) -> bool {
     text.starts_with(|c: char| c.is_ascii_digit())
-        && text.chars().all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | ','))
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | ','))
         && !text.ends_with(['_', '.', ','])
 }
 
@@ -377,8 +382,8 @@ fn after_axis(tokens: &[Token]) -> bool {
                 | Token::SlashSlash
                 | Token::Backslash
                 | Token::BackslashBackslash
-                | Token::Gt
-                | Token::Lt
+                | Token::Gt { .. }
+                | Token::Lt { .. }
                 | Token::NextSibling
                 | Token::PrevSibling
                 | Token::FollowingSiblings(_)
@@ -616,7 +621,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             '@' if at(i + 1) == Some('(') => {
                 // The node-id anchor's opener glues to its list
                 // (`((!@(2; 3)))`), as whitespace would.
-                if !after_whitespace(&chars, i) && !matches!(tokens.last(), Some(Token::IdAnchorOpen)) {
+                if !after_whitespace(&chars, i)
+                    && !matches!(tokens.last(), Some(Token::IdAnchorOpen))
+                {
                     return Err(QuarbError::Parse(
                         "a list literal follows whitespace: write ' @(…)'".into(),
                     ));
@@ -628,7 +635,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // or the push dot (`.%(…)`, `.name%(…)`); glued to anything
             // else it is refused (ruling #53). The paren lexes on its
             // own, as for any call.
-            '%' if matches!((at(i + 1), at(i + 2)), (Some('('), _) | (Some('%'), Some('('))) => {
+            '%' if matches!(
+                (at(i + 1), at(i + 2)),
+                (Some('('), _) | (Some('%'), Some('('))
+            ) =>
+            {
                 if !after_whitespace(&chars, i) && !after_push_dot(&chars, i) {
                     return Err(QuarbError::Parse(
                         "a record sigil follows whitespace or a push dot: write ' %(…)' or '.name%(…)'".into(),
@@ -749,7 +760,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '<' => {
-                tokens.push(Token::Lt);
+                let spaced = at(i + 1).is_none_or(char::is_whitespace);
+                tokens.push(Token::Lt { spaced });
                 i += 1;
             }
             '>' if at(i + 1) == Some('>') => {
@@ -773,7 +785,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         "a '(:' trait closes with ')', not '>'".into(),
                     ));
                 }
-                tokens.push(Token::Gt);
+                let spaced = at(i + 1).is_none_or(char::is_whitespace);
+                tokens.push(Token::Gt { spaced });
                 i += 1;
             }
             '?' => {
@@ -849,7 +862,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     k += 1;
                 }
                 let spec: String = chars[i + 3..k].iter().collect();
-                let body = if spec.is_empty() { ".".to_string() } else { spec };
+                let body = if spec.is_empty() {
+                    ".".to_string()
+                } else {
+                    spec
+                };
                 tokens.push(Token::MarkOpen);
                 tokens.push(Token::Name {
                     text: body,
@@ -894,7 +911,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // accessor with a sigil to round (`(*.)` for `@.`); the
             // others carry no `$` and are rounded already.
             ':' if i > 0
-                && (is_name_char(chars[i - 1]) || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
+                && (is_name_char(chars[i - 1])
+                    || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
                 && at(i + 1) == Some('(')
                 && at(i + 2) == Some('*')
                 && at(i + 3) == Some('.')
@@ -909,11 +927,13 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // `%%.`). Spaced on the left it stays the conditional's
             // else (`? 1 : .5`).
             ':' if i > 0
-                && (is_name_char(chars[i - 1]) || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
+                && (is_name_char(chars[i - 1])
+                    || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\'' | '\\'))
                 && (at(i + 1) == Some('.')
                     || (at(i + 1) == Some('@') && at(i + 2) == Some('.'))
                     || (at(i + 1) == Some('%')
-                        && (at(i + 2) == Some('.') || (at(i + 2) == Some('%') && at(i + 3) == Some('.'))))) =>
+                        && (at(i + 2) == Some('.')
+                            || (at(i + 2) == Some('%') && at(i + 3) == Some('.'))))) =>
             {
                 let start = i + 1;
                 let mut j = start;
@@ -956,7 +976,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         {
                             let start = i;
                             i += 1;
-                            while at(i).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                            while at(i).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                            {
                                 i += 1;
                             }
                             tokens.push(Token::Name {
@@ -1078,9 +1099,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 && at(i + 2) == Some('_')
                 && (at(i + 3) == Some(')')
                     || (at(i + 3).is_some_and(|c| c.is_ascii_digit())
-                        && chars[i + 3..].iter().take_while(|c| c.is_ascii_digit()).count() > 0
+                        && chars[i + 3..]
+                            .iter()
+                            .take_while(|c| c.is_ascii_digit())
+                            .count()
+                            > 0
                         && {
-                            let k = i + 3 + chars[i + 3..].iter().take_while(|c| c.is_ascii_digit()).count();
+                            let k = i
+                                + 3
+                                + chars[i + 3..]
+                                    .iter()
+                                    .take_while(|c| c.is_ascii_digit())
+                                    .count();
                             at(k) == Some(')') && at(k + 1) == Some(')')
                         })) =>
             {
@@ -1140,10 +1170,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // field of the topic record.
             '(' if at(i + 1) == Some(':')
                 && !matches!(at(i + 2), Some(':' | '-'))
-                && !(after_call_head(&tokens, glued) && !after_axis(&tokens[..tokens.len() - 1])) =>
+                && !(after_call_head(&tokens, glued)
+                    && !after_axis(&tokens[..tokens.len() - 1])) =>
             {
                 openers.push(Opener::RoundedTrait);
-                tokens.push(Token::Lt);
+                tokens.push(Token::Lt { spaced: false });
                 i += 2;
             }
             // `(+m;n)` — the rounded quantifier, `{m;n}`'s alias:
@@ -1192,7 +1223,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     }
                     Some(Opener::RoundedTrait) => {
                         openers.pop();
-                        tokens.push(Token::Gt);
+                        tokens.push(Token::Gt { spaced: false });
                     }
                     Some(Opener::Paren) => {
                         openers.pop();
@@ -1303,7 +1334,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             '~' => {
                 return Err(QuarbError::Lex(
-                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'".into(),
+                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'"
+                        .into(),
                 ));
             }
             '\'' => {
@@ -1409,7 +1441,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     // which is therefore written with a space after
                     // it. A second one is a thousands separator, and
                     // those are spelled `_` (`1_000_000`).
-                    if ch == ',' && is_digit_run(&text) && at(i + 1).is_some_and(|c| c.is_ascii_digit())
+                    if ch == ','
+                        && is_digit_run(&text)
+                        && at(i + 1).is_some_and(|c| c.is_ascii_digit())
                     {
                         if text.contains(['.', ',']) {
                             return Err(QuarbError::Parse(format!(
@@ -1766,7 +1800,6 @@ fn read_quoted(chars: &[char], start: usize, quote: char) -> Result<(String, usi
     )))
 }
 
-
 #[cfg(test)]
 mod quant_tests {
     use super::*;
@@ -1866,7 +1899,7 @@ mod glued_operator_tests {
                     Token::LBracket,
                     Token::ColonColon,
                     Token::Name { text: a, .. },
-                    Token::Lt,
+                    Token::Lt { .. },
                     Token::Name { text: n, .. },
                     Token::RBracket,
                 ] if a == "a" && n == "-3"
@@ -1983,13 +2016,27 @@ mod glued_operator_tests {
         // sibling hops and reaches
         assert!(lex("/a;-b").unwrap().contains(&Token::NextSibling));
         assert!(lex("/a-;b").unwrap().contains(&Token::PrevSibling));
-        assert!(lex("/a;;-?b").unwrap().contains(&Token::FollowingSiblings('?')));
-        assert!(lex("/a-;;!b").unwrap().contains(&Token::PrecedingSiblings('!')));
+        assert!(
+            lex("/a;;-?b")
+                .unwrap()
+                .contains(&Token::FollowingSiblings('?'))
+        );
+        assert!(
+            lex("/a-;;!b")
+                .unwrap()
+                .contains(&Token::PrecedingSiblings('!'))
+        );
         // ascent
-        assert_eq!(lex("/../x").unwrap(), vec![Token::Backslash, Token::Slash, name("x")]);
+        assert_eq!(
+            lex("/../x").unwrap(),
+            vec![Token::Backslash, Token::Slash, name("x")]
+        );
         assert_eq!(lex("/..").unwrap(), vec![Token::Backslash]);
         assert_eq!(lex("/...").unwrap(), vec![Token::BackslashBackslash]);
-        assert_eq!(lex("/..->lbl").unwrap(), vec![Token::Backslash, Token::ArrowOut, name("lbl")]);
+        assert_eq!(
+            lex("/..->lbl").unwrap(),
+            vec![Token::Backslash, Token::ArrowOut, name("lbl")]
+        );
         assert_eq!(lex("/..x").unwrap(), vec![Token::Slash, name("..x")]);
         assert_eq!(
             lex("/a/b/...?c").unwrap(),
@@ -2004,28 +2051,50 @@ mod glued_operator_tests {
             ]
         );
         // dot runs that are not the hop
-        assert_eq!(lex("| ...").unwrap(), vec![Token::Pipe, Token::Name { text: "...".into(), quoted: false, glued: false }]);
-        assert_eq!(lex("[2..3]").unwrap(), vec![Token::LBracket, name("2..3"), Token::RBracket]);
+        assert_eq!(
+            lex("| ...").unwrap(),
+            vec![
+                Token::Pipe,
+                Token::Name {
+                    text: "...".into(),
+                    quoted: false,
+                    glued: false
+                }
+            ]
+        );
+        assert_eq!(
+            lex("[2..3]").unwrap(),
+            vec![Token::LBracket, name("2..3"), Token::RBracket]
+        );
         // traits: `(:` opens as `<`, the balancing `)` closes as `>`
         assert_eq!(
             lex("/x(:admin && !banned)").unwrap(),
             vec![
                 Token::Slash,
                 name("x"),
-                Token::Lt,
+                Token::Lt { spaced: false },
                 name("admin"),
                 Token::AmpAmp,
                 Token::Bang,
                 name("banned"),
-                Token::Gt
+                Token::Gt { spaced: false }
             ]
         );
-        assert!(matches!(lex("(::a = 1)").unwrap().as_slice(), [Token::LParen, Token::ColonColon, ..]));
-        assert!(matches!(lex("(:-p)").unwrap().as_slice(), [Token::LParen, Token::ArrowOut, ..]));
+        assert!(matches!(
+            lex("(::a = 1)").unwrap().as_slice(),
+            [Token::LParen, Token::ColonColon, ..]
+        ));
+        assert!(matches!(
+            lex("(:-p)").unwrap().as_slice(),
+            [Token::LParen, Token::ArrowOut, ..]
+        ));
         assert!(lex("(:a>").is_err());
         assert!(lex("(:a]").is_err());
         // root anchor: `(())` is `^`; a glued `()` stays a call's parens
-        assert_eq!(lex("(())/x").unwrap(), vec![Token::Caret, Token::Slash, name("x")]);
+        assert_eq!(
+            lex("(())/x").unwrap(),
+            vec![Token::Caret, Token::Slash, name("x")]
+        );
         assert_eq!(lex("| (())").unwrap(), vec![Token::Pipe, Token::Caret]);
         assert_eq!(
             lex("now()").unwrap(),
@@ -2039,21 +2108,51 @@ mod glued_operator_tests {
                 Token::RParen
             ]
         );
-        assert_eq!(lex("%()").unwrap(), vec![Token::Percent, Token::LParen, Token::RParen]);
+        assert_eq!(
+            lex("%()").unwrap(),
+            vec![Token::Percent, Token::LParen, Token::RParen]
+        );
         // quantifier
-        assert_eq!(lex("(+2;3)").unwrap(), vec![Token::Quant { min: 2, max: Some(3) }]);
-        assert_eq!(lex("(+2;2)").unwrap(), vec![Token::Quant { min: 2, max: Some(2) }]);
-        assert_eq!(lex("(+2;)").unwrap(), vec![Token::Quant { min: 2, max: None }]);
+        assert_eq!(
+            lex("(+2;3)").unwrap(),
+            vec![Token::Quant {
+                min: 2,
+                max: Some(3)
+            }]
+        );
+        assert_eq!(
+            lex("(+2;2)").unwrap(),
+            vec![Token::Quant {
+                min: 2,
+                max: Some(2)
+            }]
+        );
+        assert_eq!(
+            lex("(+2;)").unwrap(),
+            vec![Token::Quant { min: 2, max: None }]
+        );
         assert!(lex("(+2;3}").is_err());
         // the old `(;…)` quantifier is the shell literal now
         let e = lex("(;2;3)").unwrap_err().to_string();
         assert!(e.contains("(+m;n)"), "{e}");
         // `(+2)` is unary plus — not a quantifier in any position
-        assert!(matches!(lex("(+2)").unwrap().as_slice(), [Token::LParen, ..]));
+        assert!(matches!(
+            lex("(+2)").unwrap().as_slice(),
+            [Token::LParen, ..]
+        ));
         // the shell literal: to the balancing paren, quotes protect
-        assert!(matches!(lex("| (;wc -l)").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
-        assert!(matches!(lex("| (;echo \"(\" $(date))").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
-        assert!(matches!(lex("| (;echo \\))").unwrap().as_slice(), [Token::Pipe, Token::Shell(_)]));
+        assert!(matches!(
+            lex("| (;wc -l)").unwrap().as_slice(),
+            [Token::Pipe, Token::Shell(_)]
+        ));
+        assert!(matches!(
+            lex("| (;echo \"(\" $(date))").unwrap().as_slice(),
+            [Token::Pipe, Token::Shell(_)]
+        ));
+        assert!(matches!(
+            lex("| (;echo \\))").unwrap().as_slice(),
+            [Token::Pipe, Token::Shell(_)]
+        ));
     }
 
     #[test]
@@ -2073,12 +2172,23 @@ mod glued_operator_tests {
         ] {
             let toks = lex(q).unwrap();
             assert!(
-                toks.iter().any(|t| matches!(t, Token::Capsa(b) if b == body)),
+                toks.iter()
+                    .any(|t| matches!(t, Token::Capsa(b) if b == body)),
                 "{q}: {toks:?}"
             );
         }
-        assert!(!lex("(::x ? 1 : .5)").unwrap().iter().any(|t| matches!(t, Token::Capsa(_))));
-        assert!(!lex("? 1 :.5").unwrap().iter().any(|t| matches!(t, Token::Capsa(_))));
+        assert!(
+            !lex("(::x ? 1 : .5)")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::Capsa(_)))
+        );
+        assert!(
+            !lex("? 1 :.5")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::Capsa(_)))
+        );
     }
 
     #[test]
@@ -2126,11 +2236,23 @@ mod glued_operator_tests {
         // `$$.` is the most recent mark — `(.)` itself is now `$.`
         assert_eq!(
             lex("$$./d").unwrap(),
-            vec![Token::MarkOpen, name("."), Token::RParen, Token::Slash, name("d")]
+            vec![
+                Token::MarkOpen,
+                name("."),
+                Token::RParen,
+                Token::Slash,
+                name("d")
+            ]
         );
         // ordinary parens are untouched
-        assert!(matches!(lex("((::a = 1 || ::b = 2) && ::c)").unwrap().as_slice(), [Token::LParen, Token::LParen, Token::ColonColon, ..]));
-        assert!(matches!(lex("(-3)").unwrap().as_slice(), [Token::LParen, Token::Name { .. }, Token::RParen]));
+        assert!(matches!(
+            lex("((::a = 1 || ::b = 2) && ::c)").unwrap().as_slice(),
+            [Token::LParen, Token::LParen, Token::ColonColon, ..]
+        ));
+        assert!(matches!(
+            lex("(-3)").unwrap().as_slice(),
+            [Token::LParen, Token::Name { .. }, Token::RParen]
+        ));
         assert_eq!(lex("(.5)").unwrap(), lex("$.5").unwrap());
         assert!(lex("f(_)").unwrap().contains(&Token::Driver));
         // pipes: standalone `__`, `*__`, `,__`
@@ -2138,11 +2260,47 @@ mod glued_operator_tests {
         assert_eq!(lex("/a *__ max").unwrap(), lex("/a @| max").unwrap());
         assert_eq!(lex("/a ,__ upper").unwrap(), lex("/a $| upper").unwrap());
         assert_eq!(lex("__ ...").unwrap(), lex("| ...").unwrap());
-        assert!(matches!(lex("x__y").unwrap().as_slice(), [Token::Name { text, .. }] if text == "x__y"));
-        assert!(matches!(lex("__init__").unwrap().as_slice(), [Token::Name { text, .. }] if text == "__init__"));
+        assert!(
+            matches!(lex("x__y").unwrap().as_slice(), [Token::Name { text, .. }] if text == "x__y")
+        );
+        assert!(
+            matches!(lex("__init__").unwrap().as_slice(), [Token::Name { text, .. }] if text == "__init__")
+        );
         // correlation
         assert_eq!(lex("/a :=: /b").unwrap(), lex("/a <=> /b").unwrap());
         assert_eq!(lex("/a :=:? /b").unwrap(), lex("/a <=>? /b").unwrap());
+    }
+
+    #[test]
+    fn angle_brackets_carry_their_spacing() {
+        // `>` spaced is the comparison, glued the hop: the lexer
+        // records which, the parser decides nothing.
+        assert!(
+            lex("[::n > 3]")
+                .unwrap()
+                .contains(&Token::Gt { spaced: true })
+        );
+        assert!(
+            lex("//h2>p")
+                .unwrap()
+                .contains(&Token::Gt { spaced: false })
+        );
+        assert!(
+            lex("[::n>3]")
+                .unwrap()
+                .contains(&Token::Gt { spaced: false })
+        );
+        assert!(lex("//a<b").unwrap().contains(&Token::Lt { spaced: false }));
+        assert!(
+            lex("[::n < 3]")
+                .unwrap()
+                .contains(&Token::Lt { spaced: true })
+        );
+        assert!(
+            lex("/*<function>")
+                .unwrap()
+                .contains(&Token::Lt { spaced: false })
+        );
     }
 
     #[test]
@@ -2151,60 +2309,151 @@ mod glued_operator_tests {
         // later must not become its closer (the session re-parses
         // its defs table before every line).
         let toks = lex("def &1: //dir | %(n = (//page @| count)) ;\n//p[:: == (/a.*b/i)]").unwrap();
-        let regexes: Vec<&Token> = toks.iter().filter(|t| matches!(t, Token::Regex(_))).collect();
-        assert!(matches!(regexes.as_slice(), [Token::Regex(r)] if r == "(?i)a.*b"), "{toks:?}");
+        let regexes: Vec<&Token> = toks
+            .iter()
+            .filter(|t| matches!(t, Token::Regex(_)))
+            .collect();
+        assert!(
+            matches!(regexes.as_slice(), [Token::Regex(r)] if r == "(?i)a.*b"),
+            "{toks:?}"
+        );
         // and a regex literal never spans a line break
-        assert!(matches!(lex("(/a\nb/)").unwrap().as_slice(), [Token::LParen, ..]));
+        assert!(matches!(
+            lex("(/a\nb/)").unwrap().as_slice(),
+            [Token::LParen, ..]
+        ));
     }
 
     #[test]
     fn regex_literal_in_parens_lexes() {
         // name position: strict `/)` closer, flags inline
         assert_eq!(lex("//(/^foo/)").unwrap(), lex("//(/^foo/)").unwrap());
-        assert!(lex("//~((?i)^foo)").unwrap_err().to_string().contains("retired"));
+        assert!(
+            lex("//~((?i)^foo)")
+                .unwrap_err()
+                .to_string()
+                .contains("retired")
+        );
         // a group ending in a hop named x stays a group
         assert!(matches!(
             lex("/a(/src/x)+").unwrap().as_slice(),
-            [Token::Slash, Token::Name { .. }, Token::LParen, Token::Slash, Token::Name { .. }, Token::Slash, Token::Name { .. }, Token::RParen, ..]
+            [
+                Token::Slash,
+                Token::Name { .. },
+                Token::LParen,
+                Token::Slash,
+                Token::Name { .. },
+                Token::Slash,
+                Token::Name { .. },
+                Token::RParen,
+                ..
+            ]
         ));
-        assert!(matches!(lex("/(/a|/b)").unwrap().as_slice(), [Token::Slash, Token::LParen, ..]));
+        assert!(matches!(
+            lex("/(/a|/b)").unwrap().as_slice(),
+            [Token::Slash, Token::LParen, ..]
+        ));
         // operand position: Perl modifiers, same token as the sugar
-        assert_eq!(lex("[::a == (/^bob/i)]").unwrap(), lex("[::a == (/^bob/i)]").unwrap());
-        assert!(matches!(lex("[::a == (/x/)]").unwrap().as_slice(), [Token::LBracket, Token::ColonColon, Token::Name { .. }, Token::MatchEq, Token::Regex(r), Token::RBracket] if r == "x"));
+        assert_eq!(
+            lex("[::a == (/^bob/i)]").unwrap(),
+            lex("[::a == (/^bob/i)]").unwrap()
+        );
+        assert!(
+            matches!(lex("[::a == (/x/)]").unwrap().as_slice(), [Token::LBracket, Token::ColonColon, Token::Name { .. }, Token::MatchEq, Token::Regex(r), Token::RBracket] if r == "x")
+        );
         // an escaped slash is literal; an unescaped one before non-closer text too
-        assert!(matches!(lex("//(/a\\/b/)").unwrap().as_slice(), [Token::SlashSlash, Token::Regex(r)] if r == "a/b"));
-        assert!(matches!(lex("[::p == (/a/b/)]").unwrap().as_slice(), [.., Token::Regex(r), Token::RBracket] if r == "a/b"));
+        assert!(
+            matches!(lex("//(/a\\/b/)").unwrap().as_slice(), [Token::SlashSlash, Token::Regex(r)] if r == "a/b")
+        );
+        assert!(
+            matches!(lex("[::p == (/a/b/)]").unwrap().as_slice(), [.., Token::Regex(r), Token::RBracket] if r == "a/b")
+        );
         // glued to a call head the paren is the call's
-        assert!(matches!(lex("f(/x/)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Slash, ..]));
+        assert!(matches!(
+            lex("f(/x/)").unwrap().as_slice(),
+            [Token::Name { .. }, Token::LParen, Token::Slash, ..]
+        ));
     }
 
     #[test]
     fn push_dot_stands_after_whitespace() {
         // glued, a dot is a name character
-        assert!(matches!(lex("/x.rs(?::n = 1)").unwrap().as_slice(), [Token::Slash, Token::Name { text, .. }, Token::LBracket, ..] if text == "x.rs"));
-        assert!(matches!(lex("/a/b.m").unwrap().as_slice(), [.., Token::Name { text, .. }] if text == "b.m"));
-        assert!(matches!(lex("/e.q(::x)").unwrap().as_slice(), [Token::Slash, Token::Name { text, .. }, Token::LParen, ..] if text == "e.q"));
+        assert!(
+            matches!(lex("/x.rs(?::n = 1)").unwrap().as_slice(), [Token::Slash, Token::Name { text, .. }, Token::LBracket, ..] if text == "x.rs")
+        );
+        assert!(
+            matches!(lex("/a/b.m").unwrap().as_slice(), [.., Token::Name { text, .. }] if text == "b.m")
+        );
+        assert!(
+            matches!(lex("/e.q(::x)").unwrap().as_slice(), [Token::Slash, Token::Name { text, .. }, Token::LParen, ..] if text == "e.q")
+        );
         // spaced, it is the push / mark / subcontext
-        assert!(matches!(lex("/a/b .m").unwrap().as_slice(), [.., Token::Name { text, glued: false, .. }] if text == ".m"));
-        assert!(matches!(lex("/x .(::y)").unwrap().as_slice(), [Token::Slash, Token::Name { .. }, Token::Name { text, .. }, Token::LParen, ..] if text == "."));
+        assert!(
+            matches!(lex("/a/b .m").unwrap().as_slice(), [.., Token::Name { text, glued: false, .. }] if text == ".m")
+        );
+        assert!(
+            matches!(lex("/x .(::y)").unwrap().as_slice(), [Token::Slash, Token::Name { .. }, Token::Name { text, .. }, Token::LParen, ..] if text == ".")
+        );
         // a name ending in a dot before a paren is refused, with the fix
         for q in ["CONTAINS.(::qty)", "/a(->e.($-::qty))+"] {
-            assert!(lex(q).unwrap_err().to_string().contains("never glued"), "{q}");
+            assert!(
+                lex(q).unwrap_err().to_string().contains("never glued"),
+                "{q}"
+            );
         }
         // after a bracket, paren, or pipe there is nothing to glue to
-        for q in ["/a[1].m", "(.(::q))+", "/a | .m", "$.name", "@.", "%.", "::.hidden", "/.git", "//?.git", "[::x = .5]", "[..3]", "| ...", "/a/b../c"] {
+        for q in [
+            "/a[1].m",
+            "(.(::q))+",
+            "/a | .m",
+            "$.name",
+            "@.",
+            "%.",
+            "::.hidden",
+            "/.git",
+            "//?.git",
+            "[::x = .5]",
+            "[..3]",
+            "| ...",
+            "/a/b../c",
+        ] {
             assert!(lex(q).is_ok(), "{q}: {:?}", lex(q));
         }
     }
 
     #[test]
     fn field_colon_and_named_captures_lex() {
-        assert!(matches!(lex("$.r:a").unwrap().as_slice(), [Token::Dollar, Token::Name { .. }, Token::Field, Token::Name { text, .. }] if text == "a"));
-        assert!(matches!(lex("| :a").unwrap().as_slice(), [Token::Pipe, Token::Field, Token::Name { .. }]));
-        assert!(matches!(lex("%+:year").unwrap().as_slice(), [Token::PercentPlus, Token::Field, Token::Name { .. }]));
+        assert!(
+            matches!(lex("$.r:a").unwrap().as_slice(), [Token::Dollar, Token::Name { .. }, Token::Field, Token::Name { text, .. }] if text == "a")
+        );
+        assert!(matches!(
+            lex("| :a").unwrap().as_slice(),
+            [Token::Pipe, Token::Field, Token::Name { .. }]
+        ));
+        assert!(matches!(
+            lex("%+:year").unwrap().as_slice(),
+            [Token::PercentPlus, Token::Field, Token::Name { .. }]
+        ));
         // spaced on the right, a colon is the else / the separator
-        assert!(matches!(lex("? 2 : 0").unwrap().as_slice(), [Token::Question, Token::Name { .. }, Token::Colon, Token::Name { .. }]));
-        assert!(matches!(lex("def &f: /x").unwrap().as_slice(), [Token::Name { .. }, Token::Amp, Token::Name { .. }, Token::Colon, ..]));
+        assert!(matches!(
+            lex("? 2 : 0").unwrap().as_slice(),
+            [
+                Token::Question,
+                Token::Name { .. },
+                Token::Colon,
+                Token::Name { .. }
+            ]
+        ));
+        assert!(matches!(
+            lex("def &f: /x").unwrap().as_slice(),
+            [
+                Token::Name { .. },
+                Token::Amp,
+                Token::Name { .. },
+                Token::Colon,
+                ..
+            ]
+        ));
         // the ladder and the tail-colon arrows are untouched
         assert!(lex("::a").unwrap().contains(&Token::ColonColon));
         assert!(lex("/a:-b").unwrap().contains(&Token::ArrowOut));
@@ -2218,9 +2467,19 @@ mod glued_operator_tests {
         assert!(lex("/a | %(::x)").is_ok());
         assert!(lex("/a | .r%(::x)").is_ok());
         assert!(lex("/a | .%%(::x)").is_ok());
-        assert!(lex("/a | f(%(::x))").unwrap_err().to_string().contains("whitespace"));
+        assert!(
+            lex("/a | f(%(::x))")
+                .unwrap_err()
+                .to_string()
+                .contains("whitespace")
+        );
         assert!(lex("/a | @(1; 2)").is_ok());
-        assert!(lex("/a | f(@(1))").unwrap_err().to_string().contains("whitespace"));
+        assert!(
+            lex("/a | f(@(1))")
+                .unwrap_err()
+                .to_string()
+                .contains("whitespace")
+        );
         assert!(lex("/a | *(1; 2)").unwrap().contains(&Token::At));
         // char-indexed: a non-ASCII character earlier in the text
         // must not shift the whitespace check (article 18's `·`)
@@ -2228,17 +2487,28 @@ mod glued_operator_tests {
         assert!(lex("/a[:: = 'é'] | @(1)").is_ok());
         // glued after an axis: the wildcard, then a rounded predicate
         let toks = lex("/*(?::x = 1)").unwrap();
-        assert!(!toks.contains(&Token::At) && toks.contains(&Token::LBracket), "{toks:?}");
+        assert!(
+            !toks.contains(&Token::At) && toks.contains(&Token::LBracket),
+            "{toks:?}"
+        );
     }
 
     #[test]
     fn rounded_hole_in_a_string() {
         // `(,expr)` is `${expr}` inside a double-quoted string; nested
         // parens and quotes ride along; `\(` escapes a literal.
-        assert_eq!(lex(r#""a (,::n) b""#).unwrap(), lex(r#""a ${::n} b""#).unwrap());
-        assert_eq!(lex(r#""(,(::n | upper)) x""#).unwrap(), lex(r#""${(::n | upper)} x""#).unwrap());
+        assert_eq!(
+            lex(r#""a (,::n) b""#).unwrap(),
+            lex(r#""a ${::n} b""#).unwrap()
+        );
+        assert_eq!(
+            lex(r#""(,(::n | upper)) x""#).unwrap(),
+            lex(r#""${(::n | upper)} x""#).unwrap()
+        );
         // the hole's text is kept verbatim and re-lexed at parse time
-        assert!(matches!(lex(r#""(,(.n))""#).unwrap().as_slice(), [Token::Interp(parts)] if matches!(parts.as_slice(), [InterpPart::Hole(h)] if h == "(.n)")));
+        assert!(
+            matches!(lex(r#""(,(.n))""#).unwrap().as_slice(), [Token::Interp(parts)] if matches!(parts.as_slice(), [InterpPart::Hole(h)] if h == "(.n)"))
+        );
         // escaped, no hole opens: an ordinary (hole-less) literal
         let t = lex(r#""\(,see""#).unwrap();
         assert!(t.len() == 1 && !matches!(t[0], Token::Interp(_)), "{t:?}");
@@ -2249,16 +2519,32 @@ mod glued_operator_tests {
     fn decimal_comma_and_group_underscores() {
         // `1,5` is one number; `1, 5` two; `1,000,000` refuses at the
         // second comma with the `_` pointer.
-        assert!(matches!(lex("1,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1,5"));
-        assert!(matches!(lex("f(1, 5)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Name { text, .. }, Token::Comma, Token::Name { .. }, Token::RParen] if text == "1"));
-        assert!(matches!(lex("1_000,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1_000,5"));
+        assert!(
+            matches!(lex("1,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1,5")
+        );
+        assert!(
+            matches!(lex("f(1, 5)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Name { text, .. }, Token::Comma, Token::Name { .. }, Token::RParen] if text == "1")
+        );
+        assert!(
+            matches!(lex("1_000,5").unwrap().as_slice(), [Token::Name { text, .. }] if text == "1_000,5")
+        );
         let e = lex("1,000,000").unwrap_err().to_string();
         assert!(e.contains("1_000_000"), "{e}");
         // a comma after a name or a decimal-less non-number stays a comma
         // a glued comma is never a separator (`f(a, b)` or `f(a; b)`)
         assert!(lex("x,1").is_err());
         assert!(lex("x, 1").unwrap().contains(&Token::Comma));
-        assert!(matches!(lex("f(a; b)").unwrap().as_slice(), [Token::Name { .. }, Token::LParen, Token::Name { .. }, Token::Semi, Token::Name { .. }, Token::RParen]));
+        assert!(matches!(
+            lex("f(a; b)").unwrap().as_slice(),
+            [
+                Token::Name { .. },
+                Token::LParen,
+                Token::Name { .. },
+                Token::Semi,
+                Token::Name { .. },
+                Token::RParen
+            ]
+        ));
         assert!(lex("(+2;5)").is_ok());
     }
 
@@ -2266,10 +2552,26 @@ mod glued_operator_tests {
     fn fragment_and_parameter_units() {
         // `(=name)` is `&name`, `(=name!)` the macro marker, `(=3)` a
         // history line, `(,col)` a definition's parameter.
-        assert!(matches!(lex("| (=load)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "load"));
-        assert!(matches!(lex("| (=tok!)(1)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { .. }, Token::Bang, Token::LParen, ..]));
-        assert!(matches!(lex("| (=3)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "3"));
-        assert!(matches!(lex("| (,col)").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == "col"));
+        assert!(
+            matches!(lex("| (=load)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "load")
+        );
+        assert!(matches!(
+            lex("| (=tok!)(1)").unwrap().as_slice(),
+            [
+                Token::Pipe,
+                Token::Amp,
+                Token::Name { .. },
+                Token::Bang,
+                Token::LParen,
+                ..
+            ]
+        ));
+        assert!(
+            matches!(lex("| (=3)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "3")
+        );
+        assert!(
+            matches!(lex("| (,col)").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == "col")
+        );
         // the node anchors open with their own token; a single-paren
         // name is a plain group
         assert!(lex("$$.m/x").unwrap().starts_with(&[Token::MarkOpen]));
@@ -2282,13 +2584,44 @@ mod glued_operator_tests {
         // topic record; the trait opener needs a hop name.
         assert!(matches!(
             lex("| sort_by(:size)").unwrap().as_slice(),
-            [Token::Pipe, Token::Name { .. }, Token::LParen, Token::Field, Token::Name { .. }, Token::RParen]
+            [
+                Token::Pipe,
+                Token::Name { .. },
+                Token::LParen,
+                Token::Field,
+                Token::Name { .. },
+                Token::RParen
+            ]
         ));
-        assert!(matches!(lex("@| group(:name)").unwrap().as_slice(), [Token::At, Token::Pipe, Token::Name { .. }, Token::LParen, Token::Field, ..]));
-        assert!(matches!(lex("| %(:name, 'x')").unwrap().as_slice(), [Token::Pipe, Token::Percent, Token::LParen, Token::Field, ..]));
+        assert!(matches!(
+            lex("@| group(:name)").unwrap().as_slice(),
+            [
+                Token::At,
+                Token::Pipe,
+                Token::Name { .. },
+                Token::LParen,
+                Token::Field,
+                ..
+            ]
+        ));
+        assert!(matches!(
+            lex("| %(:name, 'x')").unwrap().as_slice(),
+            [Token::Pipe, Token::Percent, Token::LParen, Token::Field, ..]
+        ));
         // a hop name keeps its trait, on every axis
-        for q in ["//user(:admin)", "/*(:admin)", "//?user(:admin)", "/a/'my node'(:t)"] {
-            assert!(lex(q).unwrap().contains(&Token::Lt), "{q}");
+        for q in [
+            "//user(:admin)",
+            "/*(:admin)",
+            "//?user(:admin)",
+            "/a/'my node'(:t)",
+        ] {
+            assert!(
+                lex(q)
+                    .unwrap()
+                    .iter()
+                    .any(|t| matches!(t, Token::Lt { .. })),
+                "{q}"
+            );
         }
     }
 
@@ -2375,7 +2708,12 @@ mod iso_instant_tests {
         let toks = lex("/x[::born > 2026-01-01]::name").unwrap();
         assert!(toks.iter().any(|t| matches!(
             t, Token::Name { text, .. } if text == "2026-01-01")));
-        assert!(toks.iter().filter(|t| matches!(t, Token::ColonColon)).count() >= 2);
+        assert!(
+            toks.iter()
+                .filter(|t| matches!(t, Token::ColonColon))
+                .count()
+                >= 2
+        );
         // A name that merely starts with digits keeps ending at ':'.
         assert!(lex("/entry[::k = 'a:b']").is_ok());
     }

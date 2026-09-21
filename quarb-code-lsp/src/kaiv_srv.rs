@@ -83,8 +83,7 @@ struct HoverRows {
 
 pub fn serve(socket: &str) -> Result<()> {
     let _ = std::fs::remove_file(socket);
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("binding {socket}"))?;
+    let listener = UnixListener::bind(socket).with_context(|| format!("binding {socket}"))?;
     eprintln!("quarb-code-lsp: kaivrpc on {socket}");
     for conn in listener.incoming() {
         let mut conn = conn?;
@@ -147,10 +146,8 @@ pub fn answer(body: &[u8]) -> String {
                             uri
                         }
                         (None, Some(t)) => {
-                            let uri = format!(
-                                "file://untitled.{}",
-                                p.lang.as_deref().unwrap_or("")
-                            );
+                            let uri =
+                                format!("file://untitled.{}", p.lang.as_deref().unwrap_or(""));
                             ws.open(&uri, t);
                             uri
                         }

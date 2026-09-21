@@ -222,7 +222,10 @@ impl CodeModel {
             if matches!(n.construct, "function" | "type")
                 && let Some(name) = &n.name
             {
-                by_name.entry(name.as_str()).or_default().push(NodeId(i as u64));
+                by_name
+                    .entry(name.as_str())
+                    .or_default()
+                    .push(NodeId(i as u64));
             }
         }
         let mut links: Vec<(NodeId, Vec<NodeId>)> = Vec::new();

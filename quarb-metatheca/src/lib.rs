@@ -44,7 +44,7 @@
 //! pinned at [`open`](MetathecaAdapter::open), so a query sees one
 //! consistent coordinate system.
 
-use metatheca::{parse_entry_id, Fact, Hash, State, Uuid, Vault};
+use metatheca::{Fact, Hash, State, Uuid, Vault, parse_entry_id};
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -664,13 +664,12 @@ impl AstAdapter for MetathecaAdapter {
                 let known = if at == self.head {
                     self.vault.resolve_entry(name).is_ok()
                 } else {
-                    self.sweep()
-                        .timelines
-                        .get(&id)
-                        .is_some_and(|tl| match self.chain().pos.get(&at) {
+                    self.sweep().timelines.get(&id).is_some_and(|tl| {
+                        match self.chain().pos.get(&at) {
                             Some(&cutoff) => tl.iter().any(|ev| ev.state_idx >= cutoff),
                             None => false,
-                        })
+                        }
+                    })
                 };
                 if known {
                     vec![self.entry_node(&at, id)]
@@ -694,9 +693,7 @@ impl AstAdapter for MetathecaAdapter {
             Kind::State { hash } => Some(hash.to_hex()),
             Kind::EntriesDir { .. } => Some("entries".to_string()),
             Kind::PathsDir { .. } => Some("paths".to_string()),
-            Kind::Dir { path, .. } => {
-                Some(path.rsplit('/').next().unwrap_or(path).to_string())
-            }
+            Kind::Dir { path, .. } => Some(path.rsplit('/').next().unwrap_or(path).to_string()),
             Kind::Entry { label, .. } => Some(label.clone()),
             Kind::FactEvent { entry, seq } => {
                 let sweep = self.sweep();
@@ -792,9 +789,7 @@ impl AstAdapter for MetathecaAdapter {
                     if fact.body.len() == 1 {
                         return Some(body_value(fact.body.values().next()?));
                     }
-                    return Some(Value::Str(
-                        serde_json::Value::Object(fact.body).to_string(),
-                    ));
+                    return Some(Value::Str(serde_json::Value::Object(fact.body).to_string()));
                 }
                 match name {
                     "id" => Some(Value::Str(id.hyphenated().to_string())),
@@ -856,9 +851,12 @@ impl AstAdapter for MetathecaAdapter {
                     )),
                     // `size` on a blob-ref stays a byte quantity,
                     // matching the entry-level projection.
-                    "size" if ev.fact.kind == "core/blob-ref" => {
-                        ev.fact.body.get("size").and_then(|v| v.as_i64()).map(Value::bytes)
-                    }
+                    "size" if ev.fact.kind == "core/blob-ref" => ev
+                        .fact
+                        .body
+                        .get("size")
+                        .and_then(|v| v.as_i64())
+                        .map(Value::bytes),
                     _ => ev.fact.body.get(name).map(body_value),
                 }
             }
@@ -1010,7 +1008,10 @@ impl AstAdapter for MetathecaAdapter {
         if let Some(n) = self.resolve(node, "state", None) {
             out.push(("state".to_string(), n));
         }
-        out.push(("entry".to_string(), self.entry_node(&self.head.clone(), entry)));
+        out.push((
+            "entry".to_string(),
+            self.entry_node(&self.head.clone(), entry),
+        ));
         out
     }
 

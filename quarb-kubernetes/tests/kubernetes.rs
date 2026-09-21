@@ -42,7 +42,13 @@ fn mock_cluster() {
     // listings sorted.
     assert_eq!(
         v("/*"),
-        ["/deployments", "/namespaces", "/nodes", "/pods", "/replicasets"]
+        [
+            "/deployments",
+            "/namespaces",
+            "/nodes",
+            "/pods",
+            "/replicasets"
+        ]
     );
 
     // The all-namespaces view beside the scoped one.

@@ -52,7 +52,11 @@ fn local_name(iri: &str) -> String {
         .map(|(_, t)| t)
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| iri.trim_end_matches('/').rsplit('/').next().unwrap_or(iri));
-    if tail.is_empty() { iri.to_string() } else { tail.to_string() }
+    if tail.is_empty() {
+        iri.to_string()
+    } else {
+        tail.to_string()
+    }
 }
 
 /// Expand a `prefix:name` CURIE from the well-known table, or
@@ -214,7 +218,10 @@ impl SparqlAdapter {
         ))?;
         let classes: Vec<String> = rows
             .iter()
-            .filter_map(|b| b.pointer("/t/value").and_then(|v| v.as_str().map(str::to_string)))
+            .filter_map(|b| {
+                b.pointer("/t/value")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
             .collect();
         let mut adapter = adapter;
         for c in &classes {

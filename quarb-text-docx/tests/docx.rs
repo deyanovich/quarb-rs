@@ -191,7 +191,9 @@ fn body_level_nine_is_not_a_heading() {
     assert_eq!(values(&m, "/paragraph::"), ["Body text"]);
 }
 
-fn expect_err(r: Result<quarb_text::TextModel, quarb_text_docx::DocxError>) -> quarb_text_docx::DocxError {
+fn expect_err(
+    r: Result<quarb_text::TextModel, quarb_text_docx::DocxError>,
+) -> quarb_text_docx::DocxError {
     match r {
         Err(e) => e,
         Ok(_) => panic!("expected an error"),
@@ -235,10 +237,7 @@ fn footnotes_are_the_apparatus() {
         ["Twenty thousand of them."]
     );
     assert_eq!(values(&m, "//*<note>::onym"), ["2"]);
-    assert_eq!(
-        values(&m, r"//*<note><-footnote\*::"),
-        ["Emus advanced."]
-    );
+    assert_eq!(values(&m, r"//*<note><-footnote\*::"), ["Emus advanced."]);
     assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
 }
 
@@ -266,7 +265,10 @@ fn blocks_stream_shape() {
     assert_eq!(
         b,
         vec![
-            Block::Heading { level: 1, lemma: "T".into() },
+            Block::Heading {
+                level: 1,
+                lemma: "T".into()
+            },
             Block::Paragraph { text: "x".into() },
         ]
     );

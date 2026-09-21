@@ -177,7 +177,9 @@ fn own_text(a: &dyn AstAdapter, node: NodeId) -> String {
 }
 
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Prefix every line of `body` with `first` (first line) and `rest`
@@ -205,7 +207,11 @@ impl Ctx<'_> {
     fn blocks(&mut self, node: NodeId, level: usize, depth: usize) -> Vec<String> {
         if depth > MAX_DEPTH {
             let p = prose(self.a, node);
-            return if p.is_empty() { vec![] } else { vec![self.para(&p)] };
+            return if p.is_empty() {
+                vec![]
+            } else {
+                vec![self.para(&p)]
+            };
         }
         let name = self.a.name(node);
         match name.as_deref() {
@@ -213,7 +219,11 @@ impl Ctx<'_> {
             Some("section") => self.section(node, level, depth),
             Some("paragraph") => {
                 let p = prose(self.a, node);
-                if p.is_empty() { vec![] } else { vec![self.para(&p)] }
+                if p.is_empty() {
+                    vec![]
+                } else {
+                    vec![self.para(&p)]
+                }
             }
             Some("blockquote") => vec![self.blockquote(node, depth)],
             // A list's lemma (a denormalized table's caption) has no
@@ -237,7 +247,11 @@ impl Ctx<'_> {
             // Outside the vocabulary: a paragraph of its prose.
             Some(_) => {
                 let p = prose(self.a, node);
-                if p.is_empty() { vec![] } else { vec![self.para(&p)] }
+                if p.is_empty() {
+                    vec![]
+                } else {
+                    vec![self.para(&p)]
+                }
             }
         }
     }

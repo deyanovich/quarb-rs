@@ -87,10 +87,7 @@ pub fn region(explicit: Option<&str>) -> String {
     "us-east-1".to_string()
 }
 
-fn ini_section(
-    ini: &str,
-    name: &str,
-) -> Option<std::collections::HashMap<String, String>> {
+fn ini_section(ini: &str, name: &str) -> Option<std::collections::HashMap<String, String>> {
     let mut current = None::<String>;
     let mut out = std::collections::HashMap::new();
     let mut hit = false;
@@ -306,7 +303,10 @@ fn sign_at(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
         sha256_hex(canonical_request.as_bytes())
     );
-    let k_date = hmac(format!("AWS4{}", creds.secret_key).as_bytes(), date.as_bytes());
+    let k_date = hmac(
+        format!("AWS4{}", creds.secret_key).as_bytes(),
+        date.as_bytes(),
+    );
     let k_region = hmac(&k_date, region.as_bytes());
     let k_service = hmac(&k_region, service.as_bytes());
     let k_signing = hmac(&k_service, b"aws4_request");
@@ -352,7 +352,11 @@ mod tests {
             "20150830T123600Z",
             "20150830",
         );
-        let auth = &headers.iter().find(|(k, _)| k == "authorization").unwrap().1;
+        let auth = &headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .unwrap()
+            .1;
         assert!(
             auth.ends_with(
                 "Signature=65f031d93b4631aedf16a8f7f830cdc8ce2bc5276c307b5a2cc2143d4b68e323"

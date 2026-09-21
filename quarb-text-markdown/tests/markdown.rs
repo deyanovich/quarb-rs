@@ -143,9 +143,7 @@ fn markdown_round_trips() {
         let a = quarb::run(q, &m).unwrap();
         let b = quarb::run(q, &m2).unwrap();
         let show = |r: quarb::QueryResult| match r {
-            quarb::QueryResult::Values(vs) => {
-                vs.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-            }
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
             quarb::QueryResult::Nodes(_) => panic!("expected values"),
         };
         assert_eq!(show(a), show(b), "round trip diverged on {q}");
@@ -174,7 +172,10 @@ fn footnotes_join_the_apparatus() {
         q("//section/paragraph::"),
         ["The emus advanced. They kept coming."]
     );
-    assert_eq!(q(r"//*<note><-footnote\*::"), ["The emus advanced. They kept coming."]);
+    assert_eq!(
+        q(r"//*<note><-footnote\*::"),
+        ["The emus advanced. They kept coming."]
+    );
     assert_eq!(q("//*<dangling> @| count"), ["0"]);
 }
 

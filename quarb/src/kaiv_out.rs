@@ -6,8 +6,8 @@
 //! placement rules (records open namespaces, lists open arrays,
 //! typed leaves keep their units).
 
-use crate::exec::{Origins, Prov};
 use crate::Value;
+use crate::exec::{Origins, Prov};
 use std::collections::HashSet;
 
 /// Where a value's provenance comes from while it is placed: the
@@ -263,7 +263,10 @@ mod tests {
         let items = vec![
             Value::Record(vec![
                 ("name".into(), Value::Str("Ada".into())),
-                ("tags".into(), Value::List(vec![Value::Int(1), Value::Int(2)])),
+                (
+                    "tags".into(),
+                    Value::List(vec![Value::Int(1), Value::Int(2)]),
+                ),
             ]),
             Value::Int(7),
         ];

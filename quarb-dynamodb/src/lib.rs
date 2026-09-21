@@ -50,7 +50,9 @@ pub enum DynamodbError {
     Api(String),
     #[error("dynamodb target: {0} (expected dynamodb://[REGION][?endpoint=URL])")]
     Target(String),
-    #[error("dynamodb: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)")]
+    #[error(
+        "dynamodb: no credentials in the chain (set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)"
+    )]
     NoCredentials,
 }
 
@@ -184,11 +186,7 @@ impl DynamodbAdapter {
         format!("/{}", parts.join("/"))
     }
 
-    fn call(
-        &self,
-        op: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value, DynamodbError> {
+    fn call(&self, op: &str, body: &serde_json::Value) -> Result<serde_json::Value, DynamodbError> {
         let payload = body.to_string();
         let target = format!("DynamoDB_20120810.{op}");
         let extra = [
@@ -227,9 +225,11 @@ impl DynamodbAdapter {
             }
             Err(e) => return Err(DynamodbError::Api(format!("{op}: {e}"))),
         };
-        serde_json::from_str(&resp.into_string().map_err(|e| {
-            DynamodbError::Api(format!("{op}: reading response: {e}"))
-        })?)
+        serde_json::from_str(
+            &resp
+                .into_string()
+                .map_err(|e| DynamodbError::Api(format!("{op}: reading response: {e}")))?,
+        )
         .map_err(|e| DynamodbError::Api(format!("{op}: parsing response: {e}")))
     }
 
@@ -238,16 +238,10 @@ impl DynamodbAdapter {
         if let Some(k) = self.schema.borrow().get(table) {
             return Ok(k.clone());
         }
-        let resp = self.call(
-            "DescribeTable",
-            &serde_json::json!({ "TableName": table }),
-        )?;
+        let resp = self.call("DescribeTable", &serde_json::json!({ "TableName": table }))?;
         let mut hash = String::new();
         let mut range = None;
-        if let Some(ks) = resp
-            .pointer("/Table/KeySchema")
-            .and_then(|v| v.as_array())
-        {
+        if let Some(ks) = resp.pointer("/Table/KeySchema").and_then(|v| v.as_array()) {
             for k in ks {
                 let name = k
                     .pointer("/AttributeName")
@@ -355,9 +349,10 @@ impl DynamodbAdapter {
             if let Some(items) = resp.pointer("/Items").and_then(|v| v.as_array()) {
                 raw.extend(items.iter().cloned());
             }
-            start = resp.pointer("/LastEvaluatedKey").cloned().filter(|v| {
-                v.as_object().map(|o| !o.is_empty()).unwrap_or(false)
-            });
+            start = resp
+                .pointer("/LastEvaluatedKey")
+                .cloned()
+                .filter(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false));
             if start.is_none() {
                 break;
             }
@@ -471,11 +466,7 @@ fn decode(av: &serde_json::Value) -> Field {
                 .as_array()
                 .map(|a| {
                     a.iter()
-                        .map(|s| {
-                            Field::Scalar(Value::Str(
-                                s.as_str().unwrap_or_default().into(),
-                            ))
-                        })
+                        .map(|s| Field::Scalar(Value::Str(s.as_str().unwrap_or_default().into())))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -573,7 +564,9 @@ impl AstAdapter for DynamodbAdapter {
                 .iter()
                 .find(|(k, _)| k == name)
                 .and_then(|(_, f)| f.scalar()),
-            Kind::Field { value: Field::Map(entries) } => entries
+            Kind::Field {
+                value: Field::Map(entries),
+            } => entries
                 .iter()
                 .find(|(k, _)| k == name)
                 .and_then(|(_, f)| f.scalar()),
@@ -598,12 +591,8 @@ impl AstAdapter for DynamodbAdapter {
             }
         };
         match (table_name, item_table, key) {
-            (Some(t), _, "hash-key") => {
-                self.keys_of(&t).ok().map(|(h, _)| Value::Str(h))
-            }
-            (Some(t), _, "range-key") => {
-                self.keys_of(&t).ok().and_then(|(_, r)| r.map(Value::Str))
-            }
+            (Some(t), _, "hash-key") => self.keys_of(&t).ok().map(|(h, _)| Value::Str(h)),
+            (Some(t), _, "range-key") => self.keys_of(&t).ok().and_then(|(_, r)| r.map(Value::Str)),
             (_, Some(t), "table") => Some(Value::Str(t)),
             _ => None,
         }

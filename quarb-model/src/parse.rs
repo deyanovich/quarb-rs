@@ -100,9 +100,9 @@ fn parse_alias(body: &str, stmt: &str) -> Result<AliasDecl, String> {
     let (kind, body) = match body.strip_prefix('<') {
         Some(inner) => {
             let inner = inner.trim_end();
-            let inner = inner.strip_suffix('>').ok_or_else(|| {
-                format!("a trait alias closes its angle bracket: '{stmt}'")
-            })?;
+            let inner = inner
+                .strip_suffix('>')
+                .ok_or_else(|| format!("a trait alias closes its angle bracket: '{stmt}'"))?;
             // `<chunk> <block>` — two bracketed spellings.
             let inner = inner.trim();
             let inner = match inner.split_once("> <") {
@@ -156,7 +156,12 @@ fn parse_alias(body: &str, stmt: &str) -> Result<AliasDecl, String> {
     let (alias, original) = body.split_once(char::is_whitespace).ok_or_else(|| {
         format!("alias needs 'NEW ORIGINAL' or 's/pattern/replacement/': '{stmt}'")
     })?;
-    let strip = |t: &str| t.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+    let strip = |t: &str| {
+        t.trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_string()
+    };
     Ok(AliasDecl {
         kind,
         rule: AliasRule::Exact {
@@ -457,15 +462,16 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
         };
         match head {
             "node" => {
-                let (head, query) = rest.split_once(':').ok_or_else(|| {
-                    format!("node needs '/container/role: query': '{stmt}'")
-                })?;
+                let (head, query) = rest
+                    .split_once(':')
+                    .ok_or_else(|| format!("node needs '/container/role: query': '{stmt}'"))?;
                 let (path, trait_name) = split_trait(head.trim());
-                let (name, role) = split_container_role(&path)
-                    .ok_or_else(|| format!(
+                let (name, role) = split_container_role(&path).ok_or_else(|| {
+                    format!(
                         "node needs '/container/role', so a hop can be \
                          labelled by the role it lands on: '{stmt}'"
-                    ))?;
+                    )
+                })?;
                 let trait_name = trait_name.unwrap_or_else(|| role.clone());
                 model.nodes.push(NodeDecl {
                     name,
@@ -475,18 +481,18 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
                 });
             }
             "mount" => {
-                let (name, target) = rest.split_once(':').ok_or_else(|| {
-                    format!("mount needs 'NAME: target': '{stmt}'")
-                })?;
+                let (name, target) = rest
+                    .split_once(':')
+                    .ok_or_else(|| format!("mount needs 'NAME: target': '{stmt}'"))?;
                 model.mounts.push(Mount {
                     name: name.trim().to_string(),
                     target: target.trim().to_string(),
                 });
             }
             "ref" => {
-                let (left, container) = rest.split_once("-->").ok_or_else(|| {
-                    format!("ref needs 'PATH::field --> container': '{stmt}'")
-                })?;
+                let (left, container) = rest
+                    .split_once("-->")
+                    .ok_or_else(|| format!("ref needs 'PATH::field --> container': '{stmt}'"))?;
                 let (scope, field) = split_field(left)?;
                 let (container, key_field) = parse_ref_target(container)?;
                 model.refs.push(RefDecl {
@@ -497,9 +503,8 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
                 });
             }
             "rel" => {
-                let (source, target) = split_arrow(rest).ok_or_else(|| {
-                    format!("rel needs 'SOURCE -> TARGET[cond]': '{stmt}'")
-                })?;
+                let (source, target) = split_arrow(rest)
+                    .ok_or_else(|| format!("rel needs 'SOURCE -> TARGET[cond]': '{stmt}'"))?;
                 let (target, cond) = split_trailing_group(&target).ok_or_else(|| {
                     format!(
                         "rel needs a condition — two node sets joined by \
@@ -516,12 +521,12 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
                 });
             }
             "edge" => {
-                let (scope_head, pair) = rest.split_once(':').ok_or_else(|| {
-                    format!("edge needs 'PATH: ::a -- ::b': '{stmt}'")
-                })?;
-                let (a, b) = pair.split_once("--").ok_or_else(|| {
-                    format!("edge needs two fields 'a -- b': '{stmt}'")
-                })?;
+                let (scope_head, pair) = rest
+                    .split_once(':')
+                    .ok_or_else(|| format!("edge needs 'PATH: ::a -- ::b': '{stmt}'"))?;
+                let (a, b) = pair
+                    .split_once("--")
+                    .ok_or_else(|| format!("edge needs two fields 'a -- b': '{stmt}'"))?;
                 let field_a = a.trim().trim_start_matches("::").trim().to_string();
                 let field_b = b.trim().trim_start_matches("::").trim().to_string();
                 model.edges.push(EdgeDecl {
@@ -618,10 +623,8 @@ mod tests {
 
     #[test]
     fn collects_defs_and_comments() {
-        let m = parse_model(
-            "def &recent: [::ts > '2026-01-01'];\nnode /who/user: /log/*::user;",
-        )
-        .unwrap();
+        let m = parse_model("def &recent: [::ts > '2026-01-01'];\nnode /who/user: /log/*::user;")
+            .unwrap();
         assert_eq!(m.nodes.len(), 1);
         assert!(m.defs_text.contains("def &recent"));
     }

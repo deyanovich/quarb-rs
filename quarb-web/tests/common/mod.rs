@@ -21,7 +21,11 @@ pub fn files() -> Vec<PageFile> {
         },
         PageFile {
             path: "about.html".into(),
-            html: page("About", "<meta property=\"article:section\" content=\"Start\">", "<p>Nothing links here but the <a href=\"/\">home page</a>.</p>"),
+            html: page(
+                "About",
+                "<meta property=\"article:section\" content=\"Start\">",
+                "<p>Nothing links here but the <a href=\"/\">home page</a>.</p>",
+            ),
         },
         PageFile {
             path: "guides/jq.html".into(),
@@ -41,16 +45,25 @@ pub fn files() -> Vec<PageFile> {
         },
         PageFile {
             path: "guides/notes.html".into(),
-            html: page("Notes", "<meta property=\"article:section\" content=\"Guides\">", "<p>No page links here.</p>"),
+            html: page(
+                "Notes",
+                "<meta property=\"article:section\" content=\"Guides\">",
+                "<p>No page links here.</p>",
+            ),
         },
-        PageFile { path: "style.css".into(), html: "body{}".into() },
+        PageFile {
+            path: "style.css".into(),
+            html: "body{}".into(),
+        },
     ]
 }
 
 pub fn site() -> WebAdapter<MemoryStore> {
     WebAdapter::new(MemoryStore::build(
-        SiteInput { base_url: "https://example.org/".into(), snapshot: None },
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
         files(),
     ))
 }
-

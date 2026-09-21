@@ -48,7 +48,9 @@ impl FileStore {
         std::fs::create_dir_all(&dir)?;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for p in sources {
-            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).hash(&mut h);
+            std::fs::canonicalize(p)
+                .unwrap_or_else(|_| p.clone())
+                .hash(&mut h);
         }
         Ok(FileStore {
             path: dir.join(format!("{:016x}.session", h.finish())),
@@ -82,7 +84,10 @@ impl Store for FileStore {
         })
     }
     fn save(&self, state: &SessionState) -> anyhow::Result<()> {
-        std::fs::write(&self.path, format!("{}\n{}", state.line_no, state.defs_text))?;
+        std::fs::write(
+            &self.path,
+            format!("{}\n{}", state.line_no, state.defs_text),
+        )?;
         Ok(())
     }
 }

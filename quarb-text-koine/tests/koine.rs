@@ -90,7 +90,6 @@ fn the_apparatus_is_shared() {
     assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
 }
 
-
 #[test]
 fn quotes_and_lists_map() {
     let m = mount();
@@ -153,7 +152,10 @@ fn rst_footnotes_join_the_apparatus() {
         values(&m, "//*<deixis>->footnote::"),
         ["Twenty thousand of them."]
     );
-    assert_eq!(values(&m, "//section/paragraph[1]::"), ["The emus advanced."]);
+    assert_eq!(
+        values(&m, "//section/paragraph[1]::"),
+        ["The emus advanced."]
+    );
     assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
 }
 
@@ -177,8 +179,14 @@ fn refs_resolve_against_section_onyms() {
 #[test]
 fn xml_identity_from_declarations() {
     use quarb_text_koine::detect_xml_kind as d;
-    assert_eq!(d(r#"<TEI xmlns="http://www.tei-c.org/ns/1.0"/>"#), Some("tei"));
-    assert_eq!(d(r#"<book xmlns="http://docbook.org/ns/docbook"/>"#), Some("docbook"));
+    assert_eq!(
+        d(r#"<TEI xmlns="http://www.tei-c.org/ns/1.0"/>"#),
+        Some("tei")
+    );
+    assert_eq!(
+        d(r#"<book xmlns="http://docbook.org/ns/docbook"/>"#),
+        Some("docbook")
+    );
     assert_eq!(
         d(r#"<osis xmlns="http://www.bibletechnologies.net/2003/OSIS/namespace"/>"#),
         Some("osis")
@@ -247,13 +255,13 @@ fn bibtex_mounts_as_bib_entries() {
     )
     .unwrap();
     assert_eq!(values(&m, "//bib::onym"), ["knuth84", "lamport94"]);
-    assert_eq!(values(&m, "//bib::auctor"), ["Donald E. Knuth", "Leslie Lamport"]);
+    assert_eq!(
+        values(&m, "//bib::auctor"),
+        ["Donald E. Knuth", "Leslie Lamport"]
+    );
     assert_eq!(values(&m, "//bib<liber>::onym"), ["knuth84"]);
     assert_eq!(values(&m, "//bib[::ephemeris]::onym"), ["lamport94"]);
-    assert_eq!(
-        values(&m, "//bib::::genus"),
-        ["liber", "commentarius"]
-    );
+    assert_eq!(values(&m, "//bib::::genus"), ["liber", "commentarius"]);
     // The plain form: the full data, values in source order.
     assert_eq!(
         values(&m, r#"//bib[::onym = "knuth84"]::"#),
@@ -263,7 +271,10 @@ fn bibtex_mounts_as_bib_entries() {
     // field names — and any covered language, case-insensitively
     // — answer beside the Latin canon. On a bib node the fields
     // outrank the general vocabulary, so ::title is titulus.
-    assert_eq!(values(&m, "//bib::author"), ["Donald E. Knuth", "Leslie Lamport"]);
+    assert_eq!(
+        values(&m, "//bib::author"),
+        ["Donald E. Knuth", "Leslie Lamport"]
+    );
     assert_eq!(
         values(&m, "//bib::title"),
         ["The {TeX}book", "How to Write a Long Formula"]
@@ -319,5 +330,8 @@ fn markdown_route_links_and_footnotes() {
         values(&m, "//paragraph[1]::"),
         ["See the spec (https://quarb.org/spec) and https://quarb.org."]
     );
-    assert_eq!(values(&m, "//*<deixis>->footnote::"), ["The footnote body."]);
+    assert_eq!(
+        values(&m, "//*<deixis>->footnote::"),
+        ["The footnote body."]
+    );
 }

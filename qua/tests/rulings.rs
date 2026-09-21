@@ -66,12 +66,18 @@ fn default_hole_coalesces() {
         values(r#"= "got ${/items/0::missing:-/items/1::name}""#),
         ["got data.gz"]
     );
-    assert_eq!(values(r#"= "got ${/items/0::name:-"n/a"}""#), ["got app-web"]);
+    assert_eq!(
+        values(r#"= "got ${/items/0::name:-"n/a"}""#),
+        ["got app-web"]
+    );
 }
 
 #[test]
 fn pipe_tails_in_holes() {
-    assert_eq!(values(r#"= "got ${/items/0::name | upper}""#), ["got APP-WEB"]);
+    assert_eq!(
+        values(r#"= "got ${/items/0::name | upper}""#),
+        ["got APP-WEB"]
+    );
     assert_eq!(
         values(r#"= "got ${/items/0::name | s/app/svc/ | upper}""#),
         ["got SVC-WEB"]

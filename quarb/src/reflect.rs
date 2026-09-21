@@ -38,8 +38,8 @@ use std::cell::RefCell;
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Anchor, Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
-    Projection, PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
+    Anchor, Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate, Projection,
+    PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
 };
 use crate::error::Result;
 use crate::value::Value;
@@ -539,10 +539,7 @@ impl QueryArbor {
                         crate::ast::InterpSeg::Strict(e, msg) => {
                             let mut props = Vec::new();
                             if let Some(m) = msg {
-                                props.push((
-                                    "message".to_string(),
-                                    Value::Str(m.clone()),
-                                ));
+                                props.push(("message".to_string(), Value::Str(m.clone())));
                             }
                             let hid = self.intern(Some("strict"), props, Some(id));
                             self.walk_operand(e, hid);

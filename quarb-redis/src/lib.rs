@@ -127,11 +127,18 @@ enum Kind {
         loaded: RefCell<bool>,
     },
     /// A hash field / stream field / JSON object entry.
-    Named { value: Field },
+    Named {
+        value: Field,
+    },
     /// A list item / set member / JSON array element.
-    Item { value: Field },
+    Item {
+        value: Field,
+    },
     /// A zset member.
-    Scored { member: String, score: f64 },
+    Scored {
+        member: String,
+        score: f64,
+    },
     /// A stream entry: its clock and fields.
     Entry {
         ms: i64,
@@ -253,7 +260,9 @@ impl RedisAdapter {
                 let nodes = adapter.nodes.borrow();
                 list.sort_by(|a, b| nodes[a.0 as usize].name.cmp(&nodes[b.0 as usize].name));
             }
-            *adapter.nodes.borrow()[parent.0 as usize].children.borrow_mut() = Some(list);
+            *adapter.nodes.borrow()[parent.0 as usize]
+                .children
+                .borrow_mut() = Some(list);
         }
         Ok(adapter)
     }
@@ -422,7 +431,10 @@ impl RedisAdapter {
                 .map(|(m, s)| {
                     self.push(Node {
                         name: Some(m.clone()),
-                        kind: Kind::Scored { member: m, score: s },
+                        kind: Kind::Scored {
+                            member: m,
+                            score: s,
+                        },
                         parent: Some(parent),
                         children: RefCell::new(None),
                     })
@@ -459,7 +471,9 @@ fn parse_stream(v: &redis::Value) -> Vec<(String, i64, Vec<(String, Field)>)> {
     entries
         .iter()
         .filter_map(|e| {
-            let redis::Value::Array(pair) = e else { return None };
+            let redis::Value::Array(pair) = e else {
+                return None;
+            };
             let id = text(pair.first()?)?;
             let ms: i64 = id.split('-').next()?.parse().ok()?;
             let redis::Value::Array(kv) = pair.get(1)? else {
@@ -500,8 +514,7 @@ impl AstAdapter for RedisAdapter {
                     *loaded.borrow(),
                     n.children.borrow().clone().unwrap_or_default(),
                 ),
-                Kind::Named { value } | Kind::Item { value } => match n.children.borrow().clone()
-                {
+                Kind::Named { value } | Kind::Item { value } => match n.children.borrow().clone() {
                     Some(c) => Plan::Done(c),
                     None => Plan::Field(value.clone()),
                 },
@@ -509,7 +522,9 @@ impl AstAdapter for RedisAdapter {
                     Some(c) => Plan::Done(c),
                     None => Plan::Entry(fields.clone()),
                 },
-                Kind::Root => Plan::Path(None, true, n.children.borrow().clone().unwrap_or_default()),
+                Kind::Root => {
+                    Plan::Path(None, true, n.children.borrow().clone().unwrap_or_default())
+                }
                 _ => Plan::Leaf,
             }
         };
@@ -518,8 +533,7 @@ impl AstAdapter for RedisAdapter {
             Plan::Leaf => Vec::new(),
             Plan::Field(f) => {
                 let made = self.field_children(&f, node);
-                *self.nodes.borrow()[node.0 as usize].children.borrow_mut() =
-                    Some(made.clone());
+                *self.nodes.borrow()[node.0 as usize].children.borrow_mut() = Some(made.clone());
                 made
             }
             Plan::Entry(fields) => {
@@ -534,8 +548,7 @@ impl AstAdapter for RedisAdapter {
                         })
                     })
                     .collect();
-                *self.nodes.borrow()[node.0 as usize].children.borrow_mut() =
-                    Some(made.clone());
+                *self.nodes.borrow()[node.0 as usize].children.borrow_mut() = Some(made.clone());
                 made
             }
             Plan::Path(key, loaded, mut existing) => {
@@ -647,7 +660,10 @@ impl AstAdapter for RedisAdapter {
                     .arg(&k)
                     .query(&mut self.conn.borrow_mut())
                     .ok()?;
-                (ttl >= 0).then_some(Value::Duration { secs: ttl, nanos: 0 })
+                (ttl >= 0).then_some(Value::Duration {
+                    secs: ttl,
+                    nanos: 0,
+                })
             }
             (Kind::Scored { score, .. }, "score") => Some(Value::Float(*score)),
             (Kind::Entry { ms, .. }, "ts") => Some(Value::Instant {

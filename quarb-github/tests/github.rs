@@ -61,10 +61,7 @@ fn mock_github() {
     // The file tree; content is the value.
     assert_eq!(v("/ada/boiler/files/*<dir>"), ["/ada/boiler/files/src"]);
     assert_eq!(v("/ada/boiler/files/README.md::"), ["boil the ocean\n"]);
-    assert_eq!(
-        v("/ada/boiler/files/src/main.rs::size"),
-        ["20"]
-    );
+    assert_eq!(v("/ada/boiler/files/src/main.rs::size"), ["20"]);
 
     // The social fabric, both directions.
     assert_eq!(v("/ada->follows::login"), ["grace"]);
@@ -76,7 +73,10 @@ fn mock_github() {
     assert_eq!(v("/tesslab<org>::name"), ["Tesla Lab"]);
     assert_eq!(v("/tesslab<group>::name"), ["Tesla Lab"]);
     assert_eq!(v("/ada->starred::name"), ["kettle"]);
-    assert_eq!(v("/tesslab/kettle<-parent::full-name"), ["ada/fork-of-kettle"]);
+    assert_eq!(
+        v("/tesslab/kettle<-parent::full-name"),
+        ["ada/fork-of-kettle"]
+    );
 
     // A fork's upstream resolves (the listing object lacks
     // `parent`; the adapter refetches the full repo) — as a
@@ -93,7 +93,10 @@ fn mock_github() {
     // Issue references: author and assignee edges.
     assert_eq!(v("/ada/boiler/issues/1->author::login"), ["grace"]);
     assert_eq!(v("/ada/boiler/issues/1->assignee::login"), ["ada"]);
-    assert_eq!(v("/ada/boiler/issues/1::author-->::bio"), ["compiler pioneer"]);
+    assert_eq!(
+        v("/ada/boiler/issues/1::author-->::bio"),
+        ["compiler pioneer"]
+    );
 
     // Instants and bodies.
     assert_eq!(v("/ada/*[::created > 2015-01-01] @| count"), ["2"]);

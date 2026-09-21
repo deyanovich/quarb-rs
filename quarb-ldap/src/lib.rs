@@ -189,12 +189,15 @@ impl LdapAdapter {
         };
         // The base entry is the root; a base-scope read both
         // fetches its attributes and proves the bind/base valid.
-        let root_entry = adapter.read_entry(&base)?.ok_or_else(|| {
-            LdapError::Bind(format!("base DN not found or not readable: {base}"))
-        })?;
+        let root_entry = adapter
+            .read_entry(&base)?
+            .ok_or_else(|| LdapError::Bind(format!("base DN not found or not readable: {base}")))?;
         let idx = adapter.push_entry(root_entry);
         let root = adapter.push_node(idx, None);
-        adapter.by_dn.borrow_mut().insert(base.to_ascii_lowercase(), root);
+        adapter
+            .by_dn
+            .borrow_mut()
+            .insert(base.to_ascii_lowercase(), root);
         Ok(adapter)
     }
 
@@ -233,7 +236,10 @@ impl LdapAdapter {
         for (k, v) in se.bin_attrs {
             let k = k.to_ascii_lowercase();
             if !attrs.iter().any(|(ek, _)| *ek == k) {
-                attrs.push((k, vec![format!("<{} bytes>", v.first().map_or(0, |b| b.len()))]));
+                attrs.push((
+                    k,
+                    vec![format!("<{} bytes>", v.first().map_or(0, |b| b.len()))],
+                ));
             }
         }
         Entry {
@@ -470,8 +476,7 @@ mod tests {
 
     #[test]
     fn targets_parse() {
-        let (url, creds, base) =
-            parse_target("ldap://localhost/dc=tesslab,dc=org").unwrap();
+        let (url, creds, base) = parse_target("ldap://localhost/dc=tesslab,dc=org").unwrap();
         assert_eq!(url, "ldap://localhost:389");
         assert!(creds.is_none());
         assert_eq!(base, "dc=tesslab,dc=org");

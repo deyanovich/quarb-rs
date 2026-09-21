@@ -3,7 +3,7 @@
 //! database imports.
 
 use super::*;
-use rusqlite::{params_from_iter, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use std::cell::RefCell;
 use std::path::Path;
 
@@ -59,7 +59,10 @@ impl SqliteStore {
     pub fn open(path: &Path) -> Result<SqliteStore, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         let catalog = Self::read_catalog(&conn)?;
-        Ok(SqliteStore { conn: RefCell::new(conn), catalog })
+        Ok(SqliteStore {
+            conn: RefCell::new(conn),
+            catalog,
+        })
     }
 
     /// Create a store at `path` (replacing any file there) and fill
@@ -72,14 +75,18 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;")
             .map_err(|e| e.to_string())?;
         for stmt in ddl(Dialect::Sqlite) {
-            conn.execute(&stmt, []).map_err(|e| format!("{e}: {stmt}"))?;
+            conn.execute(&stmt, [])
+                .map_err(|e| format!("{e}: {stmt}"))?;
         }
         {
             let mut w = Writer { conn: &mut conn };
             export(store, &mut w)?;
         }
         let catalog = Self::read_catalog(&conn)?;
-        Ok(SqliteStore { conn: RefCell::new(conn), catalog })
+        Ok(SqliteStore {
+            conn: RefCell::new(conn),
+            catalog,
+        })
     }
 
     /// An empty store with the schema, for an ingest to fill
@@ -92,15 +99,24 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;")
             .map_err(|e| e.to_string())?;
         for stmt in ddl(Dialect::Sqlite) {
-            conn.execute(&stmt, []).map_err(|e| format!("{e}: {stmt}"))?;
+            conn.execute(&stmt, [])
+                .map_err(|e| format!("{e}: {stmt}"))?;
         }
-        Ok(SqliteStore { conn: RefCell::new(conn), catalog: Catalog { sites: Vec::new(), lowering: String::new() } })
+        Ok(SqliteStore {
+            conn: RefCell::new(conn),
+            catalog: Catalog {
+                sites: Vec::new(),
+                lowering: String::new(),
+            },
+        })
     }
 
     /// Write rows into this store (one transaction from `begin` to
     /// `finish`).
     pub fn sink(&mut self) -> impl Sink + '_ {
-        Writer { conn: self.conn.get_mut() }
+        Writer {
+            conn: self.conn.get_mut(),
+        }
     }
 
     fn read_catalog(conn: &Connection) -> Result<Catalog, String> {
@@ -129,10 +145,18 @@ impl SqliteStore {
 
     fn keys(&self, sql: &str, params: &[Param]) -> Vec<PageKey> {
         let conn = self.conn.borrow();
-        let Ok(mut st) = conn.prepare_cached(sql) else { return Vec::new() };
-        st.query_map(params_from_iter(params.iter().map(to_sql)), |r| r.get::<_, i64>(0))
-            .map(|rows| rows.filter_map(|r| r.ok()).map(|i| PageKey(i as u64)).collect())
-            .unwrap_or_default()
+        let Ok(mut st) = conn.prepare_cached(sql) else {
+            return Vec::new();
+        };
+        st.query_map(params_from_iter(params.iter().map(to_sql)), |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .map(|i| PageKey(i as u64))
+                .collect()
+        })
+        .unwrap_or_default()
     }
 }
 
@@ -143,11 +167,21 @@ impl WebStore for SqliteStore {
 
     fn row(&self, key: PageKey) -> Option<LightRow> {
         let conn = self.conn.borrow();
-        let mut st = conn.prepare_cached(&format!("SELECT {ROW_COLS} FROM pages WHERE id = ?1")).ok()?;
-        st.query_row([key.0 as i64], row_from).optional().ok().flatten()
+        let mut st = conn
+            .prepare_cached(&format!("SELECT {ROW_COLS} FROM pages WHERE id = ?1"))
+            .ok()?;
+        st.query_row([key.0 as i64], row_from)
+            .optional()
+            .ok()
+            .flatten()
     }
 
-    fn children(&self, site: SiteId, container: Container, parent: Option<PageKey>) -> Vec<PageKey> {
+    fn children(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+    ) -> Vec<PageKey> {
         match parent {
             Some(p) => self.keys(
                 "SELECT id FROM pages WHERE site_id = ?1 AND container = ?2 AND parent_id = ?3 ORDER BY tree_rank",
@@ -160,7 +194,13 @@ impl WebStore for SqliteStore {
         }
     }
 
-    fn children_named(&self, site: SiteId, container: Container, parent: Option<PageKey>, name: &str) -> Vec<PageKey> {
+    fn children_named(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        name: &str,
+    ) -> Vec<PageKey> {
         match parent {
             Some(p) => self.keys(
                 "SELECT id FROM pages WHERE site_id = ?1 AND container = ?2 AND parent_id = ?3 AND name = ?4 ORDER BY tree_rank",
@@ -222,15 +262,25 @@ impl WebStore for SqliteStore {
 
     fn html(&self, key: PageKey) -> Option<String> {
         let conn = self.conn.borrow();
-        let mut st = conn.prepare_cached("SELECT html FROM page_html WHERE page_id = ?1").ok()?;
-        st.query_row([key.0 as i64], |r| r.get(0)).optional().ok().flatten()
+        let mut st = conn
+            .prepare_cached("SELECT html FROM page_html WHERE page_id = ?1")
+            .ok()?;
+        st.query_row([key.0 as i64], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
     }
 
     fn page_by_url(&self, url: &str) -> Option<PageKey> {
         let u = url.split('#').next().unwrap_or(url);
         let conn = self.conn.borrow();
         let mut st = conn.prepare_cached("SELECT id FROM pages WHERE url = ?1 AND kind IN ('page', 'redirect', 'category') ORDER BY tree_rank LIMIT 1").ok()?;
-        if let Some(id) = st.query_row([u], |r| r.get::<_, i64>(0)).optional().ok().flatten() {
+        if let Some(id) = st
+            .query_row([u], |r| r.get::<_, i64>(0))
+            .optional()
+            .ok()
+            .flatten()
+        {
             return Some(PageKey(id as u64));
         }
         // A directory URL lands on its index page: the path form.
@@ -241,11 +291,13 @@ impl WebStore for SqliteStore {
         let mut st = conn
             .prepare_cached("SELECT id FROM pages WHERE site_id = ?1 AND container = 'pages' AND kind = 'page' AND path = ?2")
             .ok()?;
-        st.query_row(rusqlite::params![site.id.0 as i64, path], |r| r.get::<_, i64>(0))
-            .optional()
-            .ok()
-            .flatten()
-            .map(|i| PageKey(i as u64))
+        st.query_row(rusqlite::params![site.id.0 as i64, path], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+        .map(|i| PageKey(i as u64))
     }
 
     fn documented(&self, site: SiteId, kind: PageKind) -> Vec<PageKey> {
@@ -261,7 +313,9 @@ impl WebStore for SqliteStore {
         }
         let conn = self.conn.borrow();
         let marks = vec!["?"; keys.len()].join(", ");
-        let Ok(mut st) = conn.prepare(&format!("SELECT {ROW_COLS} FROM pages WHERE id IN ({marks})")) else {
+        let Ok(mut st) = conn.prepare(&format!(
+            "SELECT {ROW_COLS} FROM pages WHERE id IN ({marks})"
+        )) else {
             return Vec::new();
         };
         st.query_map(params_from_iter(keys.iter().map(|k| k.0 as i64)), row_from)
@@ -271,11 +325,21 @@ impl WebStore for SqliteStore {
 
     /// One statement: the subtree is the rank range after the
     /// parent up to the next row at its depth or above.
-    fn descendants_of_kind(&self, site: SiteId, container: Container, parent: Option<PageKey>, kind: PageKind) -> Vec<(PageKey, u32)> {
+    fn descendants_of_kind(
+        &self,
+        site: SiteId,
+        container: Container,
+        parent: Option<PageKey>,
+        kind: PageKind,
+    ) -> Vec<(PageKey, u32)> {
         let conn = self.conn.borrow();
         let (from_rank, base_depth): (i64, i64) = match parent {
             Some(p) => {
-                let Ok(v) = conn.query_row("SELECT tree_rank, depth FROM pages WHERE id = ?1", [p.0 as i64], |r| Ok((r.get(0)?, r.get(1)?))) else {
+                let Ok(v) = conn.query_row(
+                    "SELECT tree_rank, depth FROM pages WHERE id = ?1",
+                    [p.0 as i64],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ) else {
                     return Vec::new();
                 };
                 v
@@ -299,9 +363,15 @@ impl WebStore for SqliteStore {
         ) else {
             return Vec::new();
         };
-        st.query_map(rusqlite::params![site.0 as i64, container.name(), kind.name(), from_rank, end], |r| {
-            Ok((PageKey(r.get::<_, i64>(0)? as u64), (r.get::<_, i64>(1)? - base_depth) as u32))
-        })
+        st.query_map(
+            rusqlite::params![site.0 as i64, container.name(), kind.name(), from_rank, end],
+            |r| {
+                Ok((
+                    PageKey(r.get::<_, i64>(0)? as u64),
+                    (r.get::<_, i64>(1)? - base_depth) as u32,
+                ))
+            },
+        )
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     }
@@ -312,9 +382,19 @@ impl SqlStore for SqliteStore {
         Dialect::Sqlite
     }
     fn keys_where(&self, where_sql: &str, params: &[Param]) -> Vec<PageKey> {
-        self.keys(&format!("SELECT p.id FROM pages p WHERE {where_sql} ORDER BY p.tree_rank"), params)
+        self.keys(
+            &format!("SELECT p.id FROM pages p WHERE {where_sql} ORDER BY p.tree_rank"),
+            params,
+        )
     }
-    fn keys_where_top(&self, where_sql: &str, params: &[Param], column: &str, descending: bool, n: i64) -> Vec<PageKey> {
+    fn keys_where_top(
+        &self,
+        where_sql: &str,
+        params: &[Param],
+        column: &str,
+        descending: bool,
+        n: i64,
+    ) -> Vec<PageKey> {
         self.keys(
             &format!(
                 "SELECT p.id FROM pages p WHERE {where_sql} ORDER BY {column} {}, p.tree_rank LIMIT {n}",
@@ -333,7 +413,11 @@ impl SqlStore for SqliteStore {
         .unwrap_or(0)
     }
     fn execute(&self, sql: &str) -> Result<u64, String> {
-        self.conn.borrow().execute(sql, []).map(|n| n as u64).map_err(|e| format!("{e}: {sql}"))
+        self.conn
+            .borrow()
+            .execute(sql, [])
+            .map(|n| n as u64)
+            .map_err(|e| format!("{e}: {sql}"))
     }
     fn tree_nodes(&self, site: SiteId, container: Container) -> Vec<TreeNode> {
         let conn = self.conn.borrow();
@@ -341,20 +425,29 @@ impl SqlStore for SqliteStore {
             return Vec::new();
         };
         st.query_map(rusqlite::params![site.0 as i64, container.name()], |r| {
-            Ok(TreeNode { id: r.get(0)?, parent: r.get(1)?, name: r.get(2)?, kind: r.get(3)?, redirect_to: r.get(4)? })
+            Ok(TreeNode {
+                id: r.get(0)?,
+                parent: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+                redirect_to: r.get(4)?,
+            })
         })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
     fn set_tree(&self, rows: &[(i64, Option<i64>, i64, i64)]) -> Result<(), String> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         {
             let mut st = tx
-                .prepare("UPDATE pages SET parent_id = ?2, depth = ?3, tree_rank = ?4 WHERE id = ?1")
+                .prepare(
+                    "UPDATE pages SET parent_id = ?2, depth = ?3, tree_rank = ?4 WHERE id = ?1",
+                )
                 .map_err(|e| e.to_string())?;
             for (id, parent, depth, rank) in rows {
-                st.execute(rusqlite::params![id, parent, depth, rank]).map_err(|e| e.to_string())?;
+                st.execute(rusqlite::params![id, parent, depth, rank])
+                    .map_err(|e| e.to_string())?;
             }
         }
         tx.commit().map_err(|e| e.to_string())
@@ -367,21 +460,37 @@ impl SqlStore for SqliteStore {
         let conn = self.conn.borrow();
         let sql = format!(
             "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = ?1 AND l.to_id IS NOT NULL{}",
-            if exclude_templates { " AND l.via_template = 0" } else { "" }
+            if exclude_templates {
+                " AND l.via_template = 0"
+            } else {
+                ""
+            }
         );
-        let Ok(mut st) = conn.prepare(&sql) else { return Vec::new() };
-        st.query_map([site.0 as i64], |r| Ok((PageKey(r.get::<_, i64>(0)? as u64), PageKey(r.get::<_, i64>(1)? as u64))))
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+        let Ok(mut st) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        st.query_map([site.0 as i64], |r| {
+            Ok((
+                PageKey(r.get::<_, i64>(0)? as u64),
+                PageKey(r.get::<_, i64>(1)? as u64),
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
     fn red_counts(&self, site: SiteId) -> Vec<(PageKey, u32)> {
         let conn = self.conn.borrow();
         let Ok(mut st) = conn.prepare("SELECT l.from_id, count(*) FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = ?1 AND l.kind = 'red' GROUP BY l.from_id") else {
             return Vec::new();
         };
-        st.query_map([site.0 as i64], |r| Ok((PageKey(r.get::<_, i64>(0)? as u64), r.get::<_, i64>(1)? as u32)))
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+        st.query_map([site.0 as i64], |r| {
+            Ok((
+                PageKey(r.get::<_, i64>(0)? as u64),
+                r.get::<_, i64>(1)? as u32,
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
     fn set_analytics(&self, rows: &[(PageKey, Analytics)]) -> Result<(), String> {
         let mut conn = self.conn.borrow_mut();
@@ -391,8 +500,15 @@ impl SqlStore for SqliteStore {
                 .prepare("UPDATE pages SET in_degree = ?2, out_degree = ?3, mutual_degree = ?4, pagerank = ?5, redlinks = ?6 WHERE id = ?1")
                 .map_err(|e| e.to_string())?;
             for (k, a) in rows {
-                st.execute(rusqlite::params![k.0 as i64, a.in_degree as i64, a.out_degree as i64, a.mutual_degree as i64, a.pagerank, a.redlinks as i64])
-                    .map_err(|e| e.to_string())?;
+                st.execute(rusqlite::params![
+                    k.0 as i64,
+                    a.in_degree as i64,
+                    a.out_degree as i64,
+                    a.mutual_degree as i64,
+                    a.pagerank,
+                    a.redlinks as i64
+                ])
+                .map_err(|e| e.to_string())?;
             }
         }
         tx.commit().map_err(|e| e.to_string())
@@ -408,9 +524,15 @@ impl SqlStore for SqliteStore {
     }
     fn estimate_where(&self, where_sql: &str, params: &[Param]) -> Option<String> {
         let conn = self.conn.borrow();
-        let mut st = conn.prepare(&format!("EXPLAIN QUERY PLAN SELECT p.id FROM pages p WHERE {where_sql}")).ok()?;
+        let mut st = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT p.id FROM pages p WHERE {where_sql}"
+            ))
+            .ok()?;
         let lines: Vec<String> = st
-            .query_map(params_from_iter(params.iter().map(to_sql)), |r| r.get::<_, String>(3))
+            .query_map(params_from_iter(params.iter().map(to_sql)), |r| {
+                r.get::<_, String>(3)
+            })
             .ok()?
             .filter_map(|r| r.ok())
             .collect();
@@ -474,12 +596,18 @@ impl Sink for Writer<'_> {
             .map_err(|e| e.to_string())?;
         if let Some(h) = rec.html {
             self.conn
-                .execute("INSERT INTO page_html (page_id, html) VALUES (?1, ?2)", rusqlite::params![r.key.0 as i64, h])
+                .execute(
+                    "INSERT INTO page_html (page_id, html) VALUES (?1, ?2)",
+                    rusqlite::params![r.key.0 as i64, h],
+                )
                 .map_err(|e| e.to_string())?;
         }
         if let Some(t) = rec.plain {
             self.conn
-                .execute("INSERT INTO page_text (page_id, plain) VALUES (?1, ?2)", rusqlite::params![r.key.0 as i64, t])
+                .execute(
+                    "INSERT INTO page_text (page_id, plain) VALUES (?1, ?2)",
+                    rusqlite::params![r.key.0 as i64, t],
+                )
                 .map_err(|e| e.to_string())?;
         }
         Ok(())

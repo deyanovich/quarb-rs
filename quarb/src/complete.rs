@@ -54,7 +54,10 @@ pub enum Kind {
 fn push_all(out: &mut Vec<Candidate>, names: &[&str], kind: Kind, prefix: &str) {
     for n in names {
         if n.starts_with(prefix) {
-            out.push(Candidate { text: (*n).to_string(), kind });
+            out.push(Candidate {
+                text: (*n).to_string(),
+                kind,
+            });
         }
     }
 }
@@ -142,7 +145,10 @@ pub fn complete(text: &str, cursor: usize) -> Vec<Candidate> {
         Cx::Register => {
             // The `$` is already typed; offer the full spellings.
             for r in REGISTERS {
-                out.push(Candidate { text: (*r).to_string(), kind: Kind::Register });
+                out.push(Candidate {
+                    text: (*r).to_string(),
+                    kind: Kind::Register,
+                });
             }
         }
         _ => {}
@@ -163,7 +169,10 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
                 for child in adapter.children(node) {
                     if let Some(name) = adapter.name(child) {
                         if name.starts_with(word) && seen.insert(name.clone()) {
-                            out.push(Candidate { text: name, kind: Kind::Child });
+                            out.push(Candidate {
+                                text: name,
+                                kind: Kind::Child,
+                            });
                         }
                     }
                 }
@@ -175,7 +184,10 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
             for node in at {
                 for key in adapter.aliased_metadata(node) {
                     if key.starts_with(word) && seen.insert(*key) {
-                        out.push(Candidate { text: (*key).to_string(), kind: Kind::Property });
+                        out.push(Candidate {
+                            text: (*key).to_string(),
+                            kind: Kind::Property,
+                        });
                     }
                 }
             }
@@ -186,7 +198,10 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
             for node in at {
                 for t in adapter.traits(node) {
                     if t.starts_with(word) && seen.insert(t.clone()) {
-                        out.push(Candidate { text: t, kind: Kind::Trait });
+                        out.push(Candidate {
+                            text: t,
+                            kind: Kind::Trait,
+                        });
                     }
                 }
             }
@@ -203,14 +218,20 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
 fn resolve_prefix(text: &str, word_start: usize, adapter: &dyn AstAdapter) -> Vec<NodeId> {
     let head = &text[..word_start];
     // The last whitespace-delimited token holds the path.
-    let path = head.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
+    let path = head
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("");
     let mut nodes = vec![adapter.root()];
     for seg in path.split('/').filter(|s| !s.is_empty()) {
         if seg == "*" {
             nodes = nodes.iter().flat_map(|n| adapter.children(*n)).collect();
             continue;
         }
-        if !seg.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        if !seg
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             break;
         }
         nodes = nodes
@@ -271,8 +292,7 @@ mod tests {
     fn data_tier_enumerates_children() {
         // The reflection arbor is itself an adapter — complete
         // against a reflected query (Quarb completing Quarb).
-        let arbor =
-            crate::reflect::QueryArbor::parse("/books/*[::price > 20]::title").unwrap();
+        let arbor = crate::reflect::QueryArbor::parse("/books/*[::price > 20]::title").unwrap();
         let text = "/query/";
         let c = complete_with(text, text.len(), &arbor);
         let names = texts(&c);

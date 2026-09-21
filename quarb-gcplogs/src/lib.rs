@@ -241,9 +241,10 @@ fn parse_target(target: &str) -> Result<Target, GclError> {
     }
     let limit = match param("limit") {
         None => None,
-        Some(l) => Some(l.parse::<u64>().map_err(|_| {
-            GclError::Target(format!("limit={l}: not a number"))
-        })?),
+        Some(l) => Some(
+            l.parse::<u64>()
+                .map_err(|_| GclError::Target(format!("limit={l}: not a number")))?,
+        ),
     };
     // The explicit-cost gate: an unbounded mount is refused, with
     // the fix in the message.
@@ -442,12 +443,14 @@ impl GclAdapter {
     /// deterministic core `open` wraps, and the test fixture's
     /// entry point.
     pub fn from_json(project: &str, docs: &[Json], ascending: bool) -> Self {
-        let mut entries: Vec<Entry> = docs.iter().filter_map(|o| decode_entry(o, project)).collect();
+        let mut entries: Vec<Entry> = docs
+            .iter()
+            .filter_map(|o| decode_entry(o, project))
+            .collect();
         // Chronological reading order regardless of fetch order;
         // insertId breaks timestamp ties deterministically.
-        entries.sort_by(|a, b| {
-            (a.secs, a.nanos, &a.insert_id).cmp(&(b.secs, b.nanos, &b.insert_id))
-        });
+        entries
+            .sort_by(|a, b| (a.secs, a.nanos, &a.insert_id).cmp(&(b.secs, b.nanos, &b.insert_id)));
         if !ascending {
             entries.reverse();
         }
@@ -656,7 +659,10 @@ impl AstAdapter for GclAdapter {
             // resource labels, then the http request — labels are
             // how logs name things.
             if let Some(Field::Map(fields)) = &e.payload
-                && let Some(v) = fields.iter().find(|(k, _)| k == name).and_then(|(_, f)| f.scalar())
+                && let Some(v) = fields
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .and_then(|(_, f)| f.scalar())
             {
                 return Some(v);
             }
@@ -706,9 +712,7 @@ impl AstAdapter for GclAdapter {
                     // synthesize the summary line the Logs Explorer
                     // shows — METHOD resource STATUS.
                     if let (Some(m), Some(r)) = (get("method"), get("resource")) {
-                        let status = get("status")
-                            .map(|s| format!(" {s}"))
-                            .unwrap_or_default();
+                        let status = get("status").map(|s| format!(" {s}")).unwrap_or_default();
                         return Some(Value::Str(format!("{m} {r}{status}")));
                     }
                 }
@@ -716,12 +720,13 @@ impl AstAdapter for GclAdapter {
                 // the same summary line from the HTTP envelope.
                 if !e.http.is_empty() {
                     let get = |k: &str| {
-                        e.http.iter().find(|(key, _)| key == k).and_then(|(_, f)| f.scalar())
+                        e.http
+                            .iter()
+                            .find(|(key, _)| key == k)
+                            .and_then(|(_, f)| f.scalar())
                     };
                     if let (Some(m), Some(u)) = (get("requestMethod"), get("requestUrl")) {
-                        let status = get("status")
-                            .map(|s| format!(" {s}"))
-                            .unwrap_or_default();
+                        let status = get("status").map(|s| format!(" {s}")).unwrap_or_default();
                         return Some(Value::Str(format!("{m} {u}{status}")));
                     }
                 }
@@ -791,7 +796,10 @@ mod tests {
             parse_target("gcl:demo?since=yesterday"),
             Err(GclError::Target(_))
         ));
-        assert!(matches!(parse_target("gcl:?since=1h"), Err(GclError::Target(_))));
+        assert!(matches!(
+            parse_target("gcl:?since=1h"),
+            Err(GclError::Target(_))
+        ));
     }
 
     #[test]
@@ -831,12 +839,18 @@ mod tests {
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
         // Short log ids, URL-decoded.
         assert_eq!(run("/entry[1]::logName"), vec!["app"]);
-        assert_eq!(run("/entry[-1]::logName"), vec!["run.googleapis.com/stderr"]);
+        assert_eq!(
+            run("/entry[-1]::logName"),
+            vec!["run.googleapis.com/stderr"]
+        );
         // Fallthrough: payload fields, labels, resource labels,
         // http request.
         assert_eq!(run("/entry[::key]::key"), vec!["user:9"]);
         assert_eq!(run("/entry[::service]::service"), vec!["gateway"]);
-        assert_eq!(run("/entry[::service_name]::service_name"), vec!["checkout"]);
+        assert_eq!(
+            run("/entry[::service_name]::service_name"),
+            vec!["checkout"]
+        );
         assert_eq!(run("/entry[::status = 200]::requestMethod"), vec!["POST"]);
         // Payload subtree navigation and shape discrimination.
         assert_eq!(run("/entry[/latency_ms:: > 1000]::order"), vec!["o-77"]);
