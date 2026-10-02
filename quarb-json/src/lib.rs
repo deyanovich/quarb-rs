@@ -225,9 +225,14 @@ impl AstAdapter for JsonAdapter {
     /// property too, so `::port` reads a flat field the way a CSV
     /// column or an XML attribute reads. The child spelling
     /// (`/port::`) always works and is the shape-stable one — a
-    /// field that holds a container in *this* document answers
-    /// only to navigation, never as a property. Array elements
-    /// are not properties (an index is a position, not a field).
+    /// field that holds an object in *this* document answers only
+    /// to navigation, never as a property. An array element is not
+    /// a property of its array (an index is a position, not a
+    /// field); an array whose elements are all scalars is one
+    /// *list-valued* property of the object — the shape a page's
+    /// tags have — read whole by `::marks`, spread by `| ...`, and
+    /// resolved per element by a declared ref. An array holding a
+    /// container answers only to navigation.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         if !matches!(n.kind, Kind::Object) {
@@ -239,7 +244,18 @@ impl AstAdapter for JsonAdapter {
             .find(|&&c| self.nodes[c.0 as usize].name.as_deref() == Some(name))?;
         let c = &self.nodes[child.0 as usize];
         match c.kind {
-            Kind::Object | Kind::Array => None,
+            Kind::Object => None,
+            Kind::Array => {
+                let items = c.children.iter().map(|&i| &self.nodes[i.0 as usize]);
+                if items
+                    .clone()
+                    .any(|e| matches!(e.kind, Kind::Object | Kind::Array))
+                {
+                    None
+                } else {
+                    Some(Value::list(items.map(|e| e.scalar.clone()).collect()))
+                }
+            }
             _ => Some(c.scalar.clone()),
         }
     }

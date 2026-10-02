@@ -33,6 +33,12 @@ pub struct Options {
     /// Declared references, `(field, container)` pairs — the parsed
     /// `--refs` document, consumed by the SQLite mounts.
     pub refs: Rc<Vec<(String, String)>>,
+    /// The shell gate (qua's --allow-shell): `corpus:…?annotate=CMD`
+    /// runs a command only under it.
+    pub allow_shell: bool,
+    /// The session's sentence bonds (a `.desm` set), for the corpus
+    /// reading; `?desm=FILE` on a mount adds to them.
+    pub bonds: Option<Rc<syndesmos::Syndesmos>>,
 }
 
 /// A materialized source: one variant per adapter family. JSON-model
@@ -250,6 +256,24 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" | "text-md" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
+            // A treebank (ruling #63): as a document, and as a corpus
+            // with its own tokens.
+            "conllu" => quarb_text::TextModel::parse_conllu_text(input)
+                .map(Doc::Text)
+                .map_err(|e| anyhow::anyhow!("reading CoNLL-U: {e}")),
+            "corpus-conllu" => quarb_text::TextModel::parse_conllu_corpus(input)
+                .map(Doc::Text)
+                .map_err(|e| anyhow::anyhow!("reading CoNLL-U: {e}")),
+            // The corpus reading: the same three, tokenized.
+            "corpus-html" | "corpus-markdown" | "corpus" => {
+                let mut model = match format {
+                    "corpus-html" => quarb_text_html::parse(input),
+                    "corpus-markdown" => quarb_text_markdown::parse(input),
+                    _ => quarb_text::TextModel::parse_plain(input),
+                };
+                model.tokenize();
+                Ok(Doc::Text(model))
+            }
             // BibTeX / BibLaTeX, imported through atrep's
             // bibliogramma: a document of bib entries.
             #[cfg(feature = "koine")]
@@ -716,9 +740,8 @@ impl Doc {
                     "rst" => quarb_text_koine::parse_rst(&read()?),
                     "org" => quarb_text_koine::parse_org(&read()?),
                     "dj" | "djot" => quarb_text_koine::parse_djot(&read()?),
-                    "tei" | "docbook" | "jats" | "usx" | "osis" => {
-                        quarb_text_koine::parse_xml_as(&read()?, &fmt)
-                    }
+                    "tei" | "docbook" | "jats" | "usx" | "osis" | "rnc" | "opencorpora"
+                    | "proiel" => quarb_text_koine::parse_xml_as(&read()?, &fmt),
                     other => {
                         return Err(anyhow::anyhow!(
                             "unknown koine format {other:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, atd"
@@ -736,6 +759,7 @@ impl Doc {
                     })?;
                     return Ok(Doc::Text(model));
                 }
+                Some("usfm" | "sfm") => quarb_text_koine::parse_xml_as(&read()?, "usfm"),
                 Some("bib") => quarb_text_koine::parse_bibtex(&read()?),
                 Some("md" | "markdown") => quarb_text_koine::parse_markdown(&read()?),
                 Some("html" | "htm") => quarb_text_koine::parse_html(&read()?),
@@ -748,7 +772,7 @@ impl Doc {
                         Some(kind) => quarb_text_koine::parse_xml_as(&text, kind),
                         None => {
                             return Err(anyhow::anyhow!(
-                                "{} declares no XML identity this route knows — force one with koine:{}?format=tei|docbook|jats|usx|osis",
+                                "{} declares no XML identity this route knows — force one with koine:{}?format=tei|docbook|jats|usx|osis|rnc|opencorpora|proiel",
                                 target.display(),
                                 target.display()
                             ));
@@ -772,6 +796,198 @@ impl Doc {
                 .map(Doc::Text)
                 .with_context(|| format!("importing {} through atrep", target.display()));
         }
+        // The literary reading: the corpus reading with the inline
+        // simmeres kept — litogramma, TEI, USX and OSIS through
+        // atrep's importers; the unseen metadata as properties.
+        if let Some(rest) = s.strip_prefix("lit:")
+            && !rest.is_empty()
+        {
+            let (rest, conllu, annotate, desm, format, cast, places, modernize) = match rest
+                .split_once('?')
+            {
+                Some((p, q)) => {
+                    let (
+                        mut conllu,
+                        mut annotate,
+                        mut desm,
+                        mut format,
+                        mut cast,
+                        mut places,
+                        mut modernize,
+                    ) = (None, None, Vec::new(), None, None, None, None);
+                    for pair in q.split('&') {
+                        match pair.split_once('=') {
+                            Some(("conllu", v)) => conllu = Some(v.to_string()),
+                            Some(("annotate", v)) => annotate = Some(v.to_string()),
+                            Some(("desm", v)) => desm.push(v.to_string()),
+                            Some(("cast", v)) => cast = Some(v.to_string()),
+                            Some(("places", v)) => places = Some(v.to_string()),
+                            Some(("modernize", v)) => modernize = Some(v.to_string()),
+                            Some(("format", v)) => format = Some(v.to_string()),
+                            _ => bail!(
+                                "unknown lit option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, format="
+                            ),
+                        }
+                    }
+                    (p, conllu, annotate, desm, format, cast, places, modernize)
+                }
+                None => (rest, None, None, Vec::new(), None, None, None, None),
+            };
+            let target = Path::new(rest);
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            let read = || -> Result<String> {
+                let text = std::fs::read_to_string(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                Ok(text
+                    .strip_prefix('\u{feff}')
+                    .map(str::to_owned)
+                    .unwrap_or(text))
+            };
+            let kind = match format {
+                Some(k) => k,
+                None => match ext.as_deref() {
+                    Some("atd" | "atk") => "atd".to_string(),
+                    Some("usx") => "usx".to_string(),
+                    _ => match quarb_text_koine::detect_xml_kind(&read()?) {
+                        Some(k) => k.to_string(),
+                        None => bail!(
+                            "lit: reads TEI, USX, OSIS, RNC, OpenCorpora, PROIEL and litogramma — {rest} declares none of them (koine:{rest} reads the other XML vocabularies, corpus:{rest} plain prose)"
+                        ),
+                    },
+                },
+            };
+            let mut model = match kind.as_str() {
+                "atd" | "atk" => quarb_text_koine::parse_lit_file(target).with_context(|| {
+                    format!("reading {} as an atrep document", target.display())
+                })?,
+                "tei" | "usx" | "osis" | "rnc" | "opencorpora" | "proiel" => {
+                    quarb_text_koine::parse_lit_xml_as(&read()?, &kind).with_context(|| {
+                        format!("reading {} as {}", target.display(), kind.to_uppercase())
+                    })?
+                }
+                other => bail!(
+                    "lit: reads TEI, USX, OSIS, RNC, OpenCorpora, PROIEL and litogramma — not {other} (koine:{rest} reads the other XML vocabularies)"
+                ),
+            };
+            model.set_document_path(rest);
+            return finish_corpus(
+                model, conllu, annotate, &desm, cast, places, modernize, opts, "lit",
+            );
+        }
+        // The corpus reading (ruling #62): the text-level reading
+        // with every prose block's tokens as children, the
+        // tokenizer decided once, at mount — where the resident
+        // session keeps it. An XML source takes the koine route
+        // (TEI and the other dialects); everything else the text:
+        // route; a PDF is refused, its reading being line geometry.
+        if let Some(rest) = s.strip_prefix("corpus:")
+            && !rest.is_empty()
+        {
+            // `?conllu=FILE` / `?annotate=CMD`, as in qua.
+            let (rest, conllu, annotate, desm, format, cast, places, modernize) = match rest
+                .split_once('?')
+            {
+                Some((p, q)) => {
+                    let (
+                        mut conllu,
+                        mut annotate,
+                        mut desm,
+                        mut format,
+                        mut cast,
+                        mut places,
+                        mut modernize,
+                    ) = (None, None, Vec::new(), None, None, None, None);
+                    for pair in q.split('&') {
+                        match pair.split_once('=') {
+                            Some(("conllu", v)) => conllu = Some(v.to_string()),
+                            Some(("annotate", v)) => annotate = Some(v.to_string()),
+                            Some(("desm", v)) => desm.push(v.to_string()),
+                            Some(("cast", v)) => cast = Some(v.to_string()),
+                            Some(("places", v)) => places = Some(v.to_string()),
+                            Some(("modernize", v)) => modernize = Some(v.to_string()),
+                            Some(("format", "conllu")) => format = Some("conllu"),
+                            Some(("format", v)) => bail!(
+                                "corpus: format={v} is not a treebank format — format= takes conllu"
+                            ),
+                            _ => bail!(
+                                "unknown corpus option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, format="
+                            ),
+                        }
+                    }
+                    (p, conllu, annotate, desm, format, cast, places, modernize)
+                }
+                None => (rest, None, None, Vec::new(), None, None, None, None),
+            };
+            let target = Path::new(rest);
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            if ext.as_deref() == Some("pdf") {
+                bail!(
+                    "corpus: needs a prose reading, and a PDF's is line geometry — text:{rest} reads its lines"
+                );
+            }
+            // A treebank is its own annotation (ruling #63): by
+            // extension, by `?format=conllu`, or sniffed on an
+            // extensionless file; a directory of treebank files is
+            // one corpus, a section per file.
+            let own_annotation = || {
+                if conllu.is_some() || annotate.is_some() {
+                    bail!(
+                        "corpus: {rest} is its own annotation — conllu= and annotate= apply to prose"
+                    );
+                }
+                Ok(())
+            };
+            if target.is_dir() {
+                own_annotation()?;
+                let files = quarb_text::read_conllu_dir(target).map_err(|e| {
+                    anyhow::anyhow!("corpus: over a directory reads its treebank — {e}")
+                })?;
+                let refs: Vec<(&str, &str)> = files
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.as_str()))
+                    .collect();
+                let mut model = quarb_text::TextModel::parse_conllu_corpus_set(&refs)
+                    .map_err(|e| anyhow::anyhow!("reading {rest} as CoNLL-U: {e}"))?;
+                model.set_document_path(rest);
+                return treebank_options(model, &cast, &places, &modernize);
+            }
+            let treebank = matches!(ext.as_deref(), Some("conllu" | "conllup"))
+                || format == Some("conllu")
+                || (ext.is_none()
+                    && std::fs::read_to_string(target)
+                        .is_ok_and(|t| quarb_text::looks_like_conllu(&t)));
+            if treebank {
+                own_annotation()?;
+                let text = std::fs::read_to_string(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = text
+                    .strip_prefix('\u{feff}')
+                    .map(str::to_owned)
+                    .unwrap_or(text);
+                let Doc::Text(mut model) = Doc::parse(&text, "corpus-conllu")? else {
+                    bail!("corpus: needs a prose reading of {rest}")
+                };
+                model.set_document_path(rest);
+                return treebank_options(model, &cast, &places, &modernize);
+            }
+            let route = if matches!(ext.as_deref(), Some("xml" | "tei")) {
+                format!("koine:{rest}")
+            } else {
+                format!("text:{rest}")
+            };
+            let Doc::Text(model) = Doc::open(Path::new(&route), opts)? else {
+                bail!("corpus: needs a prose reading of {rest}")
+            };
+            return finish_corpus(
+                model, conllu, annotate, &desm, cast, places, modernize, opts, "corpus",
+            );
+        }
         // A `text:` prefix forces the text-level reading, matching
         // qua's dispatch: producer by extension, `<` sniffing
         // markup, plain paragraphs as the fallback.
@@ -779,6 +995,21 @@ impl Doc {
             && !rest.is_empty()
         {
             let target = Path::new(rest);
+            // A directory of treebank files reads as one document,
+            // a section per file (`corpus:` adds the tokens).
+            if target.is_dir() {
+                let files = quarb_text::read_conllu_dir(target).map_err(|e| {
+                    anyhow::anyhow!("text: over a directory reads its treebank — {e}")
+                })?;
+                let refs: Vec<(&str, &str)> = files
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.as_str()))
+                    .collect();
+                let mut model = quarb_text::TextModel::parse_conllu_text_set(&refs)
+                    .map_err(|e| anyhow::anyhow!("reading {rest} as CoNLL-U: {e}"))?;
+                model.set_document_path(rest);
+                return Ok(Doc::Text(model));
+            }
             // The binary producers dispatch before the text read:
             // a .docx or .epub is a zip, a .pdf its own format.
             let ext = target
@@ -786,6 +1017,17 @@ impl Doc {
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase());
             // Native atrep files converge on the koine route.
+            if let Some("usfm" | "sfm") = ext.as_deref() {
+                let text = std::fs::read_to_string(target)
+                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = text
+                    .strip_prefix('\u{feff}')
+                    .map(str::to_owned)
+                    .unwrap_or(text);
+                let model = quarb_text_koine::parse_xml_as(&text, "usfm")
+                    .with_context(|| format!("reading {} as USFM", target.display()))?;
+                return Ok(Doc::Text(model));
+            }
             if let Some("atd" | "atk") = ext.as_deref() {
                 let model = quarb_text_koine::parse_file(target).with_context(|| {
                     format!("reading {} as an atrep document", target.display())
@@ -832,9 +1074,11 @@ impl Doc {
                 Some("md" | "markdown") => "text-markdown",
                 Some("tex" | "latex") => "tex",
                 Some("txt") => "text",
+                Some("conllu" | "conllup") => "conllu",
                 #[cfg(feature = "koine")]
                 Some("bib") => "text-bibtex",
                 _ if text.trim_start().starts_with('<') => "text-html",
+                None if quarb_text::looks_like_conllu(&text) => "conllu",
                 _ => "text",
             };
             return Doc::parse(&text, format);
@@ -925,6 +1169,7 @@ impl Doc {
             Some("toml") => Doc::parse(&text, "toml"),
             Some("md" | "markdown") => Doc::parse(&text, "markdown"),
             Some("txt") => Doc::parse(&text, "text"),
+            Some("conllu" | "conllup") => Doc::parse(&text, "conllu"),
             Some("jsonl" | "ndjson") => Doc::parse(&text, "jsonl"),
             _ => {
                 if is_xml(path, &text) {
@@ -1053,4 +1298,110 @@ fn is_html(path: &Path, text: &str) -> bool {
         .and_then(|e| e.to_str())
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "html" | "htm"))
         || text.trim_start().starts_with('<')
+}
+
+/// The corpus reading's second half, shared with `lit:`: the
+/// sidecar or command annotation, else the tokenizer with the
+/// session's and the mount's sentence bonds.
+/// A treebank is its own tokens; the cast table and the spelling
+/// table of the mount still apply.
+fn treebank_options(
+    mut model: quarb_text::TextModel,
+    cast: &Option<String>,
+    places: &Option<String>,
+    modernize: &Option<String>,
+) -> Result<Doc> {
+    if let Some(t) = modernize {
+        model
+            .set_orthography(t)
+            .map_err(|e| anyhow::anyhow!("corpus: {e}"))?;
+    }
+    if let Some(f) = cast {
+        let rows = quarb_text::CastRow::read_csv(f)
+            .map_err(|e| anyhow::anyhow!("corpus: reading the cast table {f}: {e}"))?;
+        model.apply_cast(&rows);
+    }
+    if let Some(f) = places {
+        let rows = quarb_text::CastRow::read_csv(f)
+            .map_err(|e| anyhow::anyhow!("corpus: reading the places table {f}: {e}"))?;
+        model.apply_places(&rows);
+    }
+    Ok(Doc::Text(model))
+}
+
+fn finish_corpus(
+    mut model: quarb_text::TextModel,
+    conllu: Option<String>,
+    annotate: Option<String>,
+    desm: &[String],
+    cast: Option<String>,
+    places: Option<String>,
+    modernize: Option<String>,
+    opts: &Options,
+    level: &str,
+) -> Result<Doc> {
+    if let Some(table) = &modernize {
+        model
+            .set_orthography(table)
+            .map_err(|e| anyhow::anyhow!("{level}: {e}"))?;
+    }
+    let conllu_text = match (conllu, annotate) {
+        (Some(_), Some(_)) => bail!("{level}: takes conllu= or annotate=, not both"),
+        (Some(file), None) => Some(
+            std::fs::read_to_string(&file).with_context(|| format!("reading {file} as CoNLL-U"))?,
+        ),
+        (None, Some(cmd)) => {
+            if !opts.allow_shell {
+                bail!("{level}: annotate= runs a command; the shell gate is closed");
+            }
+            use std::io::Write;
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .with_context(|| format!("running annotator {cmd:?}"))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(model.corpus_text().as_bytes())
+                    .context("feeding the annotator")?;
+            }
+            let out = child
+                .wait_with_output()
+                .context("waiting for the annotator")?;
+            if !out.status.success() {
+                bail!("annotator {cmd:?} failed: {}", out.status);
+            }
+            Some(String::from_utf8(out.stdout).context("annotator output is not UTF-8")?)
+        }
+        (None, None) => None,
+    };
+    match conllu_text {
+        Some(text) => model
+            .annotate_conllu(&text)
+            .map_err(|e| anyhow::anyhow!("{level}: {e}"))?,
+        None => {
+            let mut bonds = opts.bonds.as_ref().map(|b| (**b).clone());
+            for f in desm {
+                let more = syndesmos::Syndesmos::load(f)
+                    .map_err(|e| anyhow::anyhow!("reading {f}: {e}"))?;
+                bonds
+                    .get_or_insert_with(syndesmos::Syndesmos::empty)
+                    .extend(more);
+            }
+            model.tokenize_with(bonds.as_ref())
+        }
+    }
+    if let Some(file) = cast {
+        let rows = quarb_text::CastRow::read_csv(&file)
+            .map_err(|e| anyhow::anyhow!("{level}: reading the cast table {file}: {e}"))?;
+        model.apply_cast(&rows);
+    }
+    if let Some(file) = places {
+        let rows = quarb_text::CastRow::read_csv(&file)
+            .map_err(|e| anyhow::anyhow!("{level}: reading the places table {file}: {e}"))?;
+        model.apply_places(&rows);
+    }
+    Ok(Doc::Text(model))
 }

@@ -506,7 +506,9 @@ fn regex_literal_canonicalizes() {
     assert_eq!(canon("/u(?::name == (/^bob/i))"), "/u[::name == (/^bob/i)]");
     assert_eq!(canon("/u[::name !== (/x/)]"), "/u[::name !== (/x/)]");
     assert_eq!(canon("/u[::name !== (/x/)]"), "/u[::name !== (/x/)]");
-    assert_eq!(canon("/u[::name == \"x\"]"), "/u[::name == (/x/)]");
+    // a quoted string after `==` is the pattern without a star —
+    // literal and anchored, never an implicit regex (ruling #91)
+    assert_eq!(canon("/u[::name == \"x\"]"), "/u[::name == \"x\"]");
     assert!(refuse("/u[::name = (/x/)]").contains("retired"));
     // a slash in the body escapes on the way out
     assert_eq!(canon("//(/a\\/b/)"), "//(/a\\/b/)");

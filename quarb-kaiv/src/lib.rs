@@ -589,7 +589,7 @@ impl AstAdapter for KaivAdapter {
                     .find(|(i, _)| i == id)
                     .map(|(_, uri)| Value::Str(uri.clone()))
             }
-            "sources" => Some(Value::List(
+            "sources" => Some(Value::list(
                 l.prov
                     .iter()
                     .filter(|e| !e.source.is_empty())

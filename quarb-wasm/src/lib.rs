@@ -36,7 +36,7 @@ pub fn version() -> String {
 
 /// Execute `query` against `input` parsed as `format`
 /// (json | yaml | toml | csv | tsv | xml | html | markdown |
-/// text-html | text-markdown | text).
+/// text-html | text-markdown | text | corpus-html | corpus-markdown | corpus).
 /// `now_millis` is the invocation instant for `now()`, as from
 /// `Date.now()`. Returns a JSON envelope; never throws.
 #[wasm_bindgen]
@@ -85,6 +85,29 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             let a = quarb_text::TextModel::parse_plain(input);
             go(query, &a, |n| a.locator(n), secs, nanos)
         }
+        // A treebank: as a document, and as a corpus with its own
+        // tokens.
+        "conllu" | "corpus-conllu" => {
+            let parsed = if format == "conllu" {
+                quarb_text::TextModel::parse_conllu_text(input)
+            } else {
+                quarb_text::TextModel::parse_conllu_corpus(input)
+            };
+            match parsed {
+                Ok(a) => go(query, &a, |n| a.locator(n), secs, nanos),
+                Err(e) => Err(format!("reading CoNLL-U: {e}")),
+            }
+        }
+        // The corpus reading: the same three, tokenized.
+        "corpus-html" | "corpus-markdown" | "corpus" => {
+            let mut a = match format {
+                "corpus-html" => quarb_text_html::parse(input),
+                "corpus-markdown" => quarb_text_markdown::parse(input),
+                _ => quarb_text::TextModel::parse_plain(input),
+            };
+            a.tokenize();
+            go(query, &a, |n| a.locator(n), secs, nanos)
+        }
         other => Err(format!("unknown format: {other}")),
     };
     match outcome {
@@ -123,6 +146,9 @@ fn go<A: AstAdapter>(
 #[wasm_bindgen]
 pub struct Site {
     inner: quarb_model::ModelAdapter<quarb_web::WebAdapter<quarb_web::MemoryStore>>,
+    /// The model's own `def`/`macro` statements, in scope for every
+    /// query over the site.
+    defs: String,
 }
 
 #[wasm_bindgen]
@@ -190,8 +216,10 @@ impl Site {
     ) -> Result<Site, JsError> {
         let model = quarb_model::parse_model(model)
             .map_err(|e| JsError::new(&format!("reading the model: {e}")))?;
+        let defs = model.defs_text.clone();
         Ok(Site {
             inner: quarb_model::ModelAdapter::new(site, model),
+            defs,
         })
     }
 
@@ -204,7 +232,12 @@ impl Site {
         let nanos = ((now_millis / 1000.0).fract() * 1e9) as u32;
         let a = &self.inner;
         let render = |n: NodeId| a.locator(n, |b| a.base().locator(b));
-        let outcome = go(query, a, render, secs, nanos);
+        let query = if self.defs.trim().is_empty() {
+            query.to_string()
+        } else {
+            format!("{}\n{}", self.defs, query)
+        };
+        let outcome = go(&query, a, render, secs, nanos);
         match outcome {
             Ok(lines) => serde_json::json!({ "ok": true, "lines": lines }).to_string(),
             Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),

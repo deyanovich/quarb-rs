@@ -11,7 +11,7 @@ use crate::ast::{
     PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
 };
 use crate::stdlib;
-use crate::value::Value;
+use crate::value::{SortKey, Value};
 use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -193,6 +193,24 @@ pub(crate) struct Mark {
 /// the plural forms yield every match in push order (the caller
 /// forks one thread per node); a miss yields nothing, never an
 /// error.
+
+/// The nodes a relative operand starts from (ruling #84): a
+/// group's members when the capsa is a group and the anchor is
+/// the current node, else the anchor's own resolution.
+fn operand_from(
+    adapter: &impl AstAdapter,
+    anchor: &Anchor,
+    current: NodeId,
+    trace: &Trace,
+    bound: &[Option<NodeId>],
+    scope: Scope<'_>,
+) -> Vec<NodeId> {
+    if matches!(anchor, Anchor::Current) && !scope.members.is_empty() {
+        return scope.members.iter().map(|m| m.node).collect();
+    }
+    anchor_nodes(adapter, anchor, current, trace, bound, scope)
+}
+
 fn anchor_nodes(
     adapter: &impl AstAdapter,
     anchor: &Anchor,
@@ -373,6 +391,11 @@ pub(crate) struct Scope<'a> {
     /// per trace context; null for an unmatched outer context),
     /// read back by `$*k` in pipeline stages.
     bindings: &'a [Option<NodeId>],
+    /// A group's members (ruling #84): the rows the capsa stands
+    /// for. A relative operand from a group reads every member's
+    /// node, as `:field` reads every member's record; empty on an
+    /// ordinary capsa.
+    members: &'a [Capsa],
     /// The arrived-by edge (`$-`), where one is defined.
     edge: Option<&'a EdgeCtx>,
     /// All final-hop crossings (`@-`), for pipeline scopes.
@@ -393,6 +416,7 @@ pub(crate) struct Scope<'a> {
 const NO_SCOPE: Scope<'static> = Scope {
     prov: None,
     register: &[],
+    members: &[],
     topic: None,
     ordinal: None,
     captures: &[],
@@ -797,21 +821,11 @@ fn eval_query_caps_outer(
     // The stage ordinal is the origin coordinate: set at the top
     // level only (a body's stages inherit the stage that runs it).
     let top = outer.is_none();
-    for (i, stage) in query.pipeline[..at].iter().enumerate() {
-        if top {
-            STAGE.with(|s| s.set(i as u32 + 1));
-        }
-        caps = apply_stage(stage, caps, adapter, &trace, outer);
-    }
+    caps = apply_stages(&query.pipeline[..at], 0, top, caps, adapter, &trace, outer);
     if !query.correlations.is_empty() {
         caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
     }
-    for (i, stage) in query.pipeline[at..].iter().enumerate() {
-        if top {
-            STAGE.with(|s| s.set((at + i) as u32 + 1));
-        }
-        caps = apply_stage(stage, caps, adapter, &trace, outer);
-    }
+    caps = apply_stages(&query.pipeline[at..], at, top, caps, adapter, &trace, outer);
     (caps, pipeline_projected(query))
 }
 
@@ -861,6 +875,7 @@ fn correlate_gate(
                 let driver = Scope {
                     prov: Some(&c.prov),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: None,
                     captures: &c.captures,
@@ -1176,6 +1191,45 @@ fn stage_reads_context(stage: &Stage) -> bool {
     }
 }
 
+/// One field of a record — or of every record in a list, so a
+/// group's member list reads elementwise (ruling #66); anything
+/// else is null.
+fn record_field(v: Value, name: &str) -> Value {
+    match v {
+        Value::Record(fields) => fields
+            .into_iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+            .unwrap_or(Value::Null),
+        Value::List(items) => Value::list(
+            items
+                .iter()
+                .cloned()
+                .map(|item| record_field(item, name))
+                .collect(),
+        ),
+        _ => Value::Null,
+    }
+}
+
+/// The field chain of a bare topic-field operand — `:n` is
+/// `["n"]`, `:a:b` is `["a", "b"]` — or none when the operand
+/// reads anything else.
+fn topic_field(op: &Operand) -> Option<Vec<String>> {
+    fn chain(op: &Operand) -> Option<Vec<String>> {
+        match op {
+            Operand::Topic => Some(Vec::new()),
+            Operand::Field { base, name } => {
+                let mut names = chain(base)?;
+                names.push(name.clone());
+                Some(names)
+            }
+            _ => None,
+        }
+    }
+    chain(op).filter(|names| !names.is_empty())
+}
+
 /// Turn the final capsa context into a query result. `projected` is
 /// the query's static value-vs-node typing (see [`eval_query`]); it
 /// decides the empty case, where no capsa is left to inspect.
@@ -1192,6 +1246,40 @@ fn to_result(caps: Vec<Capsa>, projected: bool) -> QueryResult {
 }
 
 /// Apply one pipeline stage to the capsa context.
+/// Run `stages` in order. `@| group(…)` directly followed by
+/// `| count` is one fused step: the groups are tallied as they
+/// form, and no group materializes its member list, its
+/// provenance list, or its topic list only for `count` to take
+/// the length. The result — topic, register, provenance — is the
+/// one the two stages produce; a word count over a novel spends
+/// its time on the words instead of on lists it then discards.
+fn apply_stages(
+    stages: &[Stage],
+    offset: usize,
+    top: bool,
+    mut caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+) -> Vec<Capsa> {
+    let mut i = 0;
+    while i < stages.len() {
+        if top {
+            STAGE.with(|s| s.set((offset + i) as u32 + 1));
+        }
+        if let (Stage::Agg(call), Some(Stage::Func(next))) = (&stages[i], stages.get(i + 1)) {
+            if call.name == "group" && next.name == "count" && next.args.is_empty() {
+                caps = keyed_agg(call, caps, adapter, trace, outer, None, true);
+                i += 2;
+                continue;
+            }
+        }
+        caps = apply_stage(&stages[i], caps, adapter, trace, outer);
+        i += 1;
+    }
+    caps
+}
+
 pub(crate) fn apply_stage(
     stage: &Stage,
     caps: Vec<Capsa>,
@@ -1222,7 +1310,9 @@ pub(crate) fn apply_stage(
         // quotes, lists, verbatim — whatever vocabulary the
         // adapter speaks); a topic value renders as text. The
         // export button and the pipe are the same verb.
-        Stage::Func(call) if matches!(call.name.as_str(), "markdown" | "html" | "atrep") => {
+        Stage::Func(call)
+            if matches!(call.name.as_str(), "markdown" | "html" | "atrep" | "conllu") =>
+        {
             let kind = crate::koine::Render::from_name(&call.name)
                 .expect("stage names are valid render names");
             caps.into_iter()
@@ -1305,6 +1395,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1361,6 +1452,7 @@ pub(crate) fn apply_stage(
                                     prov: None,
                                     node: Some(c.node),
                                     register: &c.register,
+                                    members: &c.members,
                                     topic: None,
                                     ordinal: None,
                                     captures: &c.captures,
@@ -1395,6 +1487,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1426,6 +1519,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1473,8 +1567,9 @@ pub(crate) fn apply_stage(
                     trace,
                     outer,
                     peers,
+                    false,
                 );
-                c.topic = Some(Value::List(
+                c.topic = Some(Value::list(
                     members
                         .iter()
                         .map(|m| {
@@ -1489,6 +1584,23 @@ pub(crate) fn apply_stage(
                 c
             })
             .collect(),
+        // An association aggregate on the plain pipe reads its two
+        // expressions off each capsa's *members* (a group's rows) —
+        // `@| group(::k) | corr(:x; :y)`. A memberless capsa has no
+        // pairs to associate: null.
+        Stage::Func(call) if stdlib::association(&call.name) => caps
+            .into_iter()
+            .map(|mut c| {
+                let members = std::mem::take(&mut c.members);
+                c.topic = Some(if members.is_empty() {
+                    Value::Null
+                } else {
+                    associate_caps(call, &members, adapter, trace, outer, peers)
+                });
+                c.prov = c.prov.flat();
+                c
+            })
+            .collect(),
         // A reducing aggregate on the plain pipe reduces each capsa's
         // *list* topic (a group's members) — per-capsa work, so it
         // rides `|`. A non-list topic reduces as a singleton. The
@@ -1497,15 +1609,35 @@ pub(crate) fn apply_stage(
         Stage::Func(call) if stdlib::known_agg(&call.name) => caps
             .into_iter()
             .map(|mut c| {
-                let items = match c.topic.take() {
-                    Some(Value::List(items)) => items,
+                let mut items = match c.topic.take() {
+                    Some(l @ Value::List(_)) => l.into_items().unwrap_or_default(),
                     Some(other) => vec![other],
                     None => vec![node_scalar(adapter, c.node)],
+                };
+                // `sum(:n)` over a group of records (ruling #66): a
+                // leading topic-field argument projects the members
+                // before the reduction — `top(3; :n)`'s spelling on
+                // the reducing side.
+                let projected;
+                let call = match call.args.first() {
+                    Some(Arg::Expr(op)) if topic_field(op).is_some() => {
+                        let names = topic_field(op).expect("checked");
+                        items = items
+                            .into_iter()
+                            .map(|v| names.iter().fold(v, |v, n| record_field(v, n)))
+                            .collect();
+                        projected = FnCall {
+                            name: call.name.clone(),
+                            args: call.args[1..].to_vec(),
+                        };
+                        &projected
+                    }
+                    _ => call,
                 };
                 let mut out = stdlib::apply(call, items, &|e| adapter.unit_scale(e));
                 c.topic = Some(match out.len() {
                     1 => out.pop().expect("len checked"),
-                    _ => Value::List(out),
+                    _ => Value::list(out),
                 });
                 c.prov = c.prov.flat();
                 c.members = Vec::new();
@@ -1519,6 +1651,47 @@ pub(crate) fn apply_stage(
             .flat_map(|c| {
                 let topic = c.topic.clone().unwrap_or(Value::Null);
                 let prov = c.prov.flat();
+                // Expression arguments evaluate per capsa, against
+                // its node and register (the spec's Expression
+                // Arguments): `levenshtein(::alt)`, `lpad(::width)`.
+                let resolved;
+                let call = if call.args.iter().any(|a| matches!(a, Arg::Expr(_))) {
+                    resolved = FnCall {
+                        name: call.name.clone(),
+                        args: call
+                            .args
+                            .iter()
+                            .map(|a| match a {
+                                Arg::Expr(e) => Arg::Lit(operand_scalar(
+                                    adapter,
+                                    c.node,
+                                    e,
+                                    trace,
+                                    Scope {
+                                        prov: Some(&c.prov),
+                                        node: Some(c.node),
+                                        register: &c.register,
+                                        members: &c.members,
+                                        topic: c.topic.as_ref(),
+                                        ordinal: None,
+                                        captures: &c.captures,
+                                        named: &c.named,
+                                        marks: &c.marks,
+                                        bindings: &c.bindings,
+                                        edge: None,
+                                        arrived: &c.arrived,
+                                        peers,
+                                        outer,
+                                    },
+                                )),
+                                other => other.clone(),
+                            })
+                            .collect(),
+                    };
+                    &resolved
+                } else {
+                    call
+                };
                 stdlib::apply_scalar(call, topic, &|e| adapter.unit_scale(e))
                     .into_iter()
                     .map(move |v| Capsa {
@@ -1579,7 +1752,7 @@ pub(crate) fn apply_stage(
             .into_iter()
             .map(|mut c| {
                 let (items, was_list) = match c.topic.take() {
-                    Some(Value::List(items)) => (items, true),
+                    Some(l @ Value::List(_)) => (l.into_items().unwrap_or_default(), true),
                     Some(Value::Null) | None => {
                         // Null maps to null: nothing to map over.
                         c.topic = Some(Value::Null);
@@ -1619,7 +1792,7 @@ pub(crate) fn apply_stage(
                         .unzip();
                 if was_list || out.len() != 1 {
                     c.prov = Prov::list(provs);
-                    c.topic = Some(Value::List(out));
+                    c.topic = Some(Value::list(out));
                 } else {
                     c.prov = provs.pop().unwrap_or_default();
                     c.topic = Some(out.pop().expect("len checked"));
@@ -1637,7 +1810,7 @@ pub(crate) fn apply_stage(
             .into_iter()
             .flat_map(|c| {
                 let mut values = match c.topic.clone() {
-                    Some(Value::List(items)) => items,
+                    Some(l @ Value::List(_)) => l.into_items().unwrap_or_default(),
                     Some(Value::Null) | None => Vec::new(),
                     Some(other) => vec![other],
                 };
@@ -1687,6 +1860,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: None,
                     captures: &c.captures,
@@ -1776,6 +1950,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1809,11 +1984,12 @@ pub(crate) fn apply_stage(
         Stage::Expr(expr) => caps
             .into_iter()
             .enumerate()
-            .map(|(i, mut c)| {
+            .flat_map(|(i, mut c)| {
                 let scope = Scope {
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1825,10 +2001,28 @@ pub(crate) fn apply_stage(
                     peers,
                     outer,
                 };
-                let (value, o) = capture(|| operand_scalar(adapter, c.node, expr, trace, scope));
+                // An operand that yields several values is a hop in
+                // value position: each value is its own row, as each
+                // target of a navigation is.
+                if c.members.is_empty() {
+                    let (values, o) =
+                        capture(|| eval_operand(adapter, c.node, expr, trace, &[], scope));
+                    if values.len() > 1 {
+                        return values
+                            .into_iter()
+                            .map(|v| {
+                                let mut k = c.clone();
+                                k.topic = Some(v);
+                                k.prov = Prov::leaf(o.clone());
+                                k
+                            })
+                            .collect::<Vec<_>>();
+                    }
+                }
+                let (value, o) = capture(|| group_value(adapter, c.node, expr, trace, scope));
                 c.topic = Some(value);
                 c.prov = Prov::leaf(o);
-                c
+                vec![c]
             })
             .collect(),
         // ... and a pushed one is a computed column.
@@ -1840,6 +2034,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1851,7 +2046,8 @@ pub(crate) fn apply_stage(
                     peers,
                     outer,
                 };
-                let (value, o) = capture(|| operand_scalar(adapter, c.node, expr, trace, scope));
+                let (value, o) =
+                    capture(|| operand_value(adapter, c.node, expr, trace, &[], scope));
                 c.prov = Prov::leaf(o);
                 c.register.push(Reg {
                     prov: c.prov.clone(),
@@ -1907,6 +2103,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -1990,10 +2187,28 @@ pub(crate) fn apply_stage(
         Stage::Agg(call) if call.name == "shift" => {
             shift_stage(call, caps, adapter, trace, outer, peers)
         }
+        // `@| zscore([sample][, key])` — each capsa's topic becomes
+        // its standard score over the context, or over its
+        // partition. Row-aligned like `shift`.
+        Stage::Agg(call) if call.name == "zscore" => {
+            zscore_stage(call, caps, adapter, trace, outer, peers)
+        }
+        // `@| number[(level)]` and `@| outline[(level; text[; "1."])]`
+        // — each capsa's topic becomes its dotted number in the
+        // stream of levels, or its line of the outline. Row-aligned
+        // like `shift`.
+        Stage::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
+            outline_stage(call, caps, adapter, trace, outer, peers)
+        }
+        // `@| corr(:a; :b)` and its kin reduce two per-capsa
+        // expressions to one number over the whole context.
+        Stage::Agg(call) if stdlib::association(&call.name) => {
+            association_stage(call, caps, adapter, trace, outer, peers)
+        }
         // Keyed aggregates reorder or filter the capsae themselves,
         // preserving nodes, registers, and topics.
         Stage::Agg(call) if stdlib::known_keyed(&call.name) => {
-            keyed_agg(call, caps, adapter, trace, outer, peers)
+            keyed_agg(call, caps, adapter, trace, outer, peers, false)
         }
         // The order/selection family is capsa-preserving too: it
         // reorders or picks, never reduces, so nodes and registers
@@ -2006,6 +2221,9 @@ pub(crate) fn apply_stage(
                 "sort" | "unique" | "reverse" | "first" | "last"
             ) =>
         {
+            // Which capsae are still nodes (no topic yet): `unique`
+            // tells nodes apart by identity, values by value.
+            let is_node: Vec<bool> = caps.iter().map(|c| c.topic.is_none()).collect();
             let mut caps: Vec<Capsa> = caps
                 .into_iter()
                 .map(|mut c| {
@@ -2024,11 +2242,12 @@ pub(crate) fn apply_stage(
             match call.name.as_str() {
                 // With a locale argument, topics sort by their text
                 // under that locale's collation (colligo; codepoint
-                // fallback when the feature is compiled out).
-                "sort" => match stdlib::collator_for(call) {
-                    Some(coll) => caps.sort_by(|a, b| {
-                        coll.compare(&topic_of(a).to_string(), &topic_of(b).to_string())
-                    }),
+                // fallback when the feature is compiled out); with
+                // `atergo`, in the a tergo order.
+                "sort" => match stdlib::text_order(call) {
+                    Some(cmp) => {
+                        caps.sort_by(|a, b| cmp(&topic_of(a).to_string(), &topic_of(b).to_string()))
+                    }
                     None => caps.sort_by(|a, b| {
                         topic_of(a).compare_with(&topic_of(b), &|e| adapter.unit_scale(e))
                     }),
@@ -2039,8 +2258,15 @@ pub(crate) fn apply_stage(
                     // survivor: the value was read there too.
                     let mut kept: Vec<Capsa> = Vec::new();
                     let mut index: HashMap<String, usize> = HashMap::new();
-                    for c in caps.drain(..) {
-                        let key = topic_of(&c).to_string();
+                    // A node is itself, whatever it reads as: two
+                    // characters with the same (or no) text are two.
+                    // A value is one with every equal value.
+                    for (c, node) in caps.drain(..).zip(is_node.iter()) {
+                        let key = if *node {
+                            format!("\u{0}node:{}", c.node.0)
+                        } else {
+                            topic_of(&c).to_string()
+                        };
                         match index.get(&key) {
                             Some(&i) => kept[i].prov.origins.union(&c.prov.origins),
                             None => {
@@ -2083,6 +2309,7 @@ pub(crate) fn apply_stage(
                     prov: Some(&c.prov),
                     node: Some(c.node),
                     register: &c.register,
+                    members: &c.members,
                     topic: c.topic.as_ref(),
                     ordinal: Some(i + 1),
                     captures: &c.captures,
@@ -2214,6 +2441,9 @@ pub(crate) fn apply_stage(
 /// registers, and topics. Sorting is stable; a composite key
 /// compares lexicographically; a null key sorts like empty text
 /// (consistent with `Value::compare` everywhere else).
+/// `counting`: the fused `group | count` (see [`apply_stages`]) —
+/// each group's topic is its member count, its provenance the
+/// members' origins, and no member is kept.
 fn keyed_agg(
     call: &FnCall,
     caps: Vec<Capsa>,
@@ -2221,6 +2451,7 @@ fn keyed_agg(
     trace: &Trace,
     outer: Option<&Scope<'_>>,
     peers: Option<&Peers>,
+    counting: bool,
 ) -> Vec<Capsa> {
     // `top` / `bottom` carry their count as a leading literal.
     let (count, key_args): (Option<usize>, &[Arg]) = match call.args.split_first() {
@@ -2242,6 +2473,7 @@ fn keyed_agg(
                         prov: Some(&c.prov),
                         node: Some(c.node),
                         register: &c.register,
+                        members: &c.members,
                         topic: c.topic.as_ref(),
                         ordinal: Some(i + 1),
                         captures: &c.captures,
@@ -2277,14 +2509,26 @@ fn keyed_agg(
     // pandas' dropna), topic = the list of member topics, the key
     // fields pushed as named regs for later recall ($.city).
     if call.name == "group" {
-        // (key, key fields, members) per group.
+        // (key, key fields, members) per group; when counting, the
+        // members stay empty and `tally` holds (count, origins,
+        // first node) instead.
         type Group = (Vec<Value>, Vec<(String, Value, Prov)>, Vec<Capsa>);
         let mut groups: Vec<Group> = Vec::new();
+        let mut tally: Vec<(i64, Origins, NodeId)> = Vec::new();
+        let member_origins = |c: &Capsa| match &c.topic {
+            Some(_) => c.prov.origins.clone(),
+            None => Origins::at(c.node, stage_now()),
+        };
+        // Key → position in `groups`: one probe per capsa, where a
+        // scan over the groups formed so far made a word count over
+        // a novel quadratic in its vocabulary.
+        let mut index: HashMap<Vec<SortKey>, usize> = HashMap::new();
         for (i, c) in caps.into_iter().enumerate() {
             let scope = Scope {
                 prov: Some(&c.prov),
                 node: Some(c.node),
                 register: &c.register,
+                members: &c.members,
                 topic: c.topic.as_ref(),
                 ordinal: Some(i + 1),
                 captures: &c.captures,
@@ -2301,21 +2545,67 @@ fn keyed_agg(
             if key.iter().any(|v| matches!(v, Value::Null)) {
                 continue;
             }
-            match groups.iter_mut().find(|(k, _, _)| {
-                k.len() == key.len()
-                    && k.iter().zip(&key).all(|(a, b)| {
-                        a.compare_with(b, &|e| adapter.unit_scale(e)) == Ordering::Equal
-                    })
-            }) {
-                Some((_, kf, members)) => {
+            let hashed: Vec<SortKey> = key
+                .iter()
+                .map(|v| v.sort_key_with(&|e| adapter.unit_scale(e)))
+                .collect();
+            match index.get(&hashed) {
+                Some(&at) => {
+                    let (_, kf, members) = &mut groups[at];
                     // The key was read from this member too.
                     for ((_, _, p), (_, _, q)) in kf.iter_mut().zip(&fields) {
                         p.origins.union(&q.origins);
                     }
-                    members.push(c)
+                    if counting {
+                        let (n, acc, _) = &mut tally[at];
+                        *n += 1;
+                        acc.union(&member_origins(&c));
+                    } else {
+                        members.push(c)
+                    }
                 }
-                None => groups.push((key, fields, vec![c])),
+                None => {
+                    index.insert(hashed, groups.len());
+                    if counting {
+                        tally.push((1, member_origins(&c), c.node));
+                        groups.push((key, fields, Vec::new()))
+                    } else {
+                        groups.push((key, fields, vec![c]))
+                    }
+                }
             }
+        }
+        if counting {
+            return groups
+                .into_iter()
+                .zip(tally)
+                .map(|((_, fields, _), (n, origins, node))| {
+                    let register = fields
+                        .into_iter()
+                        .map(|(name, value, prov)| Reg {
+                            prov,
+                            site: Origin {
+                                node,
+                                stage: stage_now(),
+                            },
+                            name: Some(name),
+                            value,
+                        })
+                        .collect();
+                    Capsa {
+                        prov: Prov::leaf(origins),
+                        node,
+                        register,
+                        topic: Some(Value::Int(n)),
+                        members: Vec::new(),
+                        captures: Vec::new(),
+                        named: Vec::new(),
+                        marks: Vec::new(),
+                        bindings: Vec::new(),
+                        arrived: Vec::new(),
+                    }
+                })
+                .collect();
         }
         return groups
             .into_iter()
@@ -2354,7 +2644,7 @@ fn keyed_agg(
                     prov,
                     node,
                     register,
-                    topic: Some(Value::List(topics)),
+                    topic: Some(Value::list(topics)),
                     members,
                     captures: Vec::new(),
                     named: Vec::new(),
@@ -2392,14 +2682,13 @@ fn keyed_agg(
         }
         // First capsa per distinct key, in original order.
         "unique_by" => {
-            let mut seen: Vec<Vec<Value>> = Vec::new();
+            let mut seen: HashSet<Vec<SortKey>> = HashSet::new();
             keyed.retain(|(k, _)| {
-                if seen.iter().any(|s| compare_keys(s, k) == Ordering::Equal) {
-                    false
-                } else {
-                    seen.push(k.clone());
-                    true
-                }
+                let hashed: Vec<SortKey> = k
+                    .iter()
+                    .map(|v| v.sort_key_with(&|e| adapter.unit_scale(e)))
+                    .collect();
+                seen.insert(hashed)
             });
         }
         // Every capsa achieving the extreme key (ties included).
@@ -2467,6 +2756,7 @@ fn peer_lists(
             prov: Some(&c.prov),
             node: Some(c.node),
             register: &c.register,
+            members: &c.members,
             topic: c.topic.as_ref(),
             ordinal: Some(i + 1),
             captures: &c.captures,
@@ -2558,7 +2848,7 @@ fn window_stage(
     caps.into_iter()
         .zip(members)
         .map(|(mut c, members)| {
-            c.topic = Some(Value::List(
+            c.topic = Some(Value::list(
                 members
                     .iter()
                     .map(|m| effective_topic(m, adapter))
@@ -2619,8 +2909,320 @@ fn shift_stage(
         .collect()
 }
 
+/// `@| number[(level)]`: each capsa's topic becomes its dotted number
+/// (`1`, `1.1`, `1.2`, `2`) in the stream of levels — the level
+/// expression read per capsa, or the value at hand without one.
+/// `@| outline(level; text)` prints the line instead: the text
+/// indented by its depth below the shallowest level, and behind its
+/// number when the style `"1."` is given. Bare `outline` reads the
+/// fields `depth` and `title` of a record stream. Consumes any
+/// members.
+fn outline_stage(
+    call: &FnCall,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<Capsa> {
+    let exprs: Vec<&Operand> = call
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Expr(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let lines = call.name == "outline";
+    let numbered = !lines || call.args.iter().any(|a| matches!(a, Arg::Lit(_)));
+    let field = |c: &Capsa, key: &str| match effective_topic(c, adapter) {
+        Value::Record(o) => o
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or(Value::Null, |(_, v)| v.clone()),
+        _ => Value::Null,
+    };
+    let rows: Vec<(Option<i64>, String)> = caps
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let read = |e: &Operand| {
+                operand_scalar(
+                    adapter,
+                    c.node,
+                    e,
+                    trace,
+                    Scope {
+                        prov: Some(&c.prov),
+                        node: Some(c.node),
+                        register: &c.register,
+                        members: &c.members,
+                        topic: c.topic.as_ref(),
+                        ordinal: Some(i + 1),
+                        captures: &c.captures,
+                        named: &c.named,
+                        marks: &c.marks,
+                        bindings: &c.bindings,
+                        edge: None,
+                        arrived: &c.arrived,
+                        peers,
+                        outer,
+                    },
+                )
+            };
+            let level = match exprs.first() {
+                Some(e) => read(e),
+                None if lines => field(c, "depth"),
+                None => effective_topic(c, adapter),
+            };
+            let text = match exprs.get(1) {
+                Some(e) => read(e),
+                None if lines => field(c, "title"),
+                None => Value::Null,
+            };
+            let text = match text {
+                Value::Null => String::new(),
+                v => v.to_string(),
+            };
+            (level.numeric().map(|f| f as i64), text)
+        })
+        .collect();
+    let levels: Vec<Option<i64>> = rows.iter().map(|(l, _)| *l).collect();
+    let numbers = stdlib::outline_numbers(&levels);
+    caps.into_iter()
+        .zip(rows)
+        .zip(numbers)
+        .map(|((mut c, (_, text)), (depth, number))| {
+            if c.topic.is_none() {
+                c.prov = Prov::at(c.node, stage_now());
+            }
+            let line = if !lines {
+                number
+            } else if numbered {
+                format!("{}{number} {text}", "  ".repeat(depth))
+            } else {
+                format!("{}{text}", "  ".repeat(depth))
+            };
+            c.topic = Some(Value::Str(line));
+            c.members = Vec::new();
+            c
+        })
+        .collect()
+}
+
+/// `@| zscore([sample][, key])`: each capsa's topic becomes the
+/// standard score of its numeric reading over its partition (the
+/// whole context without a key); a capsa with no reading, or a
+/// partition with no spread, scores null. Consumes any members.
+fn zscore_stage(
+    call: &FnCall,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<Capsa> {
+    let sample = stdlib::sample_flag(call);
+    let key = call.args.iter().find_map(|a| match a {
+        Arg::Expr(e) => Some(e),
+        _ => None,
+    });
+    let (lists, _) = peer_lists(&caps, key, adapter, trace, outer, peers);
+    let readings: Vec<Option<f64>> = caps
+        .iter()
+        .map(|c| effective_topic(c, adapter).numeric())
+        .collect();
+    let mut scores = vec![Value::Null; caps.len()];
+    for list in &lists {
+        let xs: Vec<Option<f64>> = list.iter().map(|&i| readings[i]).collect();
+        for (&i, z) in list.iter().zip(stdlib::zscores(&xs, sample)) {
+            scores[i] = z;
+        }
+    }
+    caps.into_iter()
+        .zip(scores)
+        .map(|(mut c, z)| {
+            c.prov = effective_prov(&c);
+            c.topic = Some(z);
+            c.members = Vec::new();
+            c
+        })
+        .collect()
+}
+
+/// The paired numeric readings of an association call's two
+/// expressions, one pair per capsa that reads on both sides.
+fn pair_readings(
+    call: &FnCall,
+    caps: &[Capsa],
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<(f64, f64)> {
+    let exprs: Vec<&Operand> = call
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Expr(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    if exprs.len() != 2 {
+        return Vec::new();
+    }
+    caps.iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let read = |e: &Operand| {
+                operand_scalar(
+                    adapter,
+                    c.node,
+                    e,
+                    trace,
+                    Scope {
+                        prov: Some(&c.prov),
+                        node: Some(c.node),
+                        register: &c.register,
+                        members: &c.members,
+                        topic: c.topic.as_ref(),
+                        ordinal: Some(i + 1),
+                        captures: &c.captures,
+                        named: &c.named,
+                        marks: &c.marks,
+                        bindings: &c.bindings,
+                        edge: None,
+                        arrived: &c.arrived,
+                        peers,
+                        outer,
+                    },
+                )
+                .numeric()
+            };
+            Some((read(exprs[0])?, read(exprs[1])?))
+        })
+        .collect()
+}
+
+/// The paired values of an agreement call's two expressions, one
+/// pair per capsa that reads on both sides (a label may be any
+/// value; only a null drops the pair).
+fn pair_values(
+    call: &FnCall,
+    caps: &[Capsa],
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<(Value, Value)> {
+    let exprs: Vec<&Operand> = call
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Expr(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    if exprs.len() != 2 {
+        return Vec::new();
+    }
+    caps.iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let read = |e: &Operand| {
+                let v = operand_scalar(
+                    adapter,
+                    c.node,
+                    e,
+                    trace,
+                    Scope {
+                        prov: Some(&c.prov),
+                        node: Some(c.node),
+                        register: &c.register,
+                        members: &c.members,
+                        topic: c.topic.as_ref(),
+                        ordinal: Some(i + 1),
+                        captures: &c.captures,
+                        named: &c.named,
+                        marks: &c.marks,
+                        bindings: &c.bindings,
+                        edge: None,
+                        arrived: &c.arrived,
+                        peers,
+                        outer,
+                    },
+                );
+                (!matches!(v, Value::Null)).then_some(v)
+            };
+            Some((read(exprs[0])?, read(exprs[1])?))
+        })
+        .collect()
+}
+
+/// An association or agreement call reduced over a set of capsae.
+fn associate_caps(
+    call: &FnCall,
+    caps: &[Capsa],
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Value {
+    if stdlib::agreement(&call.name) {
+        stdlib::agree(
+            &call.name,
+            &pair_values(call, caps, adapter, trace, outer, peers),
+        )
+    } else {
+        stdlib::associate(
+            &call.name,
+            &pair_readings(call, caps, adapter, trace, outer, peers),
+        )
+    }
+}
+
+/// `@| corr(:a; :b)` over the whole context: one capsa whose topic
+/// is the association and whose origins are every input's.
+fn association_stage(
+    call: &FnCall,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<Capsa> {
+    let value = associate_caps(call, &caps, adapter, trace, outer, peers);
+    let mut origins = Origins::default();
+    for c in &caps {
+        match &c.topic {
+            Some(_) => origins.union(&c.prov.origins),
+            None => origins.insert(Origin {
+                node: c.node,
+                stage: stage_now(),
+            }),
+        }
+    }
+    let node = caps.first().map_or(adapter.root(), |c| c.node);
+    vec![Capsa {
+        prov: Prov::leaf(origins),
+        node,
+        register: Vec::new(),
+        topic: Some(value),
+        members: Vec::new(),
+        captures: Vec::new(),
+        named: Vec::new(),
+        marks: Vec::new(),
+        bindings: Vec::new(),
+        arrived: Vec::new(),
+    }]
+}
+
 /// Record-convention arguments with each field's provenance: every
 /// field expression is evaluated under its own read frame.
+/// A field's value is what its operand yields (ruling #85, as for
+/// a computed push): one value itself, several as a list, none as
+/// null — so `%(where = (//token->place::lemma @| unique))` holds
+/// the list and an aggregate is not needed to keep it.
 fn record_fields_prov(
     args: &[Arg],
     adapter: &impl AstAdapter,
@@ -2635,8 +3237,7 @@ fn record_fields_prov(
             Arg::Lit(Value::Str(name)) => {
                 let (value, prov) = match args.next() {
                     Some(Arg::Expr(e)) => {
-                        let (v, o) =
-                            capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
+                        let (v, o) = capture(|| operand_value(adapter, node, e, trace, &[], scope));
                         (v, Prov::leaf(o))
                     }
                     Some(Arg::Lit(v)) => (v.clone(), Prov::default()),
@@ -2648,7 +3249,7 @@ fn record_fields_prov(
                 let name = crate::ast::auto_field_name(e)
                     .unwrap_or_default()
                     .to_string();
-                let (v, o) = capture(|| operand_scalar_bound(adapter, node, e, trace, &[], scope));
+                let (v, o) = capture(|| operand_value(adapter, node, e, trace, &[], scope));
                 fields.push((name, v, Prov::leaf(o)));
             }
             Arg::Lit(v) => fields.push((String::new(), v.clone(), Prov::default())),
@@ -2690,7 +3291,7 @@ fn subcontext_traced(
             1 => vs.pop().unwrap(),
             _ => {
                 let (values, provs): (Vec<Value>, Vec<Prov>) = vs.into_iter().unzip();
-                (Value::List(values), Prov::list(provs))
+                (Value::list(values), Prov::list(provs))
             }
         }
     } else {
@@ -3087,7 +3688,7 @@ fn recall(register: &[Reg], r: &RegRef) -> Value {
             .find(|r| r.name.as_deref() == Some(name.as_str()))
             .map(|r| r.value.clone())
             .unwrap_or(Value::Null),
-        RegRef::Whole => Value::List(register.iter().map(|r| r.value.clone()).collect()),
+        RegRef::Whole => Value::list(register.iter().map(|r| r.value.clone()).collect()),
         // The named view: one field per name, in first-push order,
         // carrying the latest value pushed under that name — so a
         // repointed column keeps its place in the row. Unnamed
@@ -3319,6 +3920,61 @@ fn mark_key(marks: &[Mark]) -> Vec<(Option<String>, u64)> {
 /// The node-only view of [`navigate_paths`], for operand-position
 /// paths: their pattern registers have no result capsa to land on
 /// and are discarded.
+/// The scope a nested path's predicates see one scope out. Inside a
+/// capsa (a pipeline stage's operand, `%(n = (^//p[:: < $.v]))`)
+/// the path forks from that capsa — its register is seeded from it
+/// and `_::x` / `$$…` read the capsa itself; in a navigation
+/// predicate (no capsa of its own) the invoking scope stays what it
+/// was.
+/// An expression's value on a capsa: its first value, or on a
+/// group every member's value as a list (ruling #84) — one row's
+/// worth per member, so `| ::lower` after a group is the members'
+/// forms.
+fn group_value(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    expr: &Operand,
+    trace: &Trace,
+    scope: Scope<'_>,
+) -> Value {
+    if scope.members.is_empty() {
+        return operand_scalar(adapter, node, expr, trace, scope);
+    }
+    let values = eval_operand(adapter, node, expr, trace, &[], scope);
+    match values.len() {
+        0 => Value::Null,
+        1 => values.into_iter().next().unwrap(),
+        _ => Value::list(values),
+    }
+}
+
+/// An expression's value for a push (the computed push lands a
+/// list when the expression yields several values, the spec's
+/// `.r(@-::prop)` rule): null, the one value, or the list.
+fn operand_value(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    expr: &Operand,
+    trace: &Trace,
+    bound: &[Option<NodeId>],
+    scope: Scope<'_>,
+) -> Value {
+    let values = eval_operand(adapter, node, expr, trace, bound, scope);
+    match values.len() {
+        0 => Value::Null,
+        1 => values.into_iter().next().unwrap(),
+        _ => Value::list(values),
+    }
+}
+
+fn nested_outer<'a>(scope: &'a Scope<'a>) -> Option<&'a Scope<'a>> {
+    if scope.node.is_some() {
+        Some(scope)
+    } else {
+        scope.outer
+    }
+}
+
 fn navigate_from(
     elems: &[PathElem],
     adapter: &impl AstAdapter,
@@ -3327,6 +3983,7 @@ fn navigate_from(
     outer: Option<&Scope<'_>>,
     witness: &[Option<NodeId>],
     seed_marks: &[Mark],
+    seed_register: &[Reg],
 ) -> Vec<NodeId> {
     dedup(
         navigate_paths(
@@ -3337,7 +3994,7 @@ fn navigate_from(
             outer,
             witness,
             seed_marks,
-            &[],
+            seed_register,
         )
         .into_iter()
         .map(|(n, _, _, _)| n)
@@ -3675,6 +4332,9 @@ fn group_admits(
     outer: Option<&Scope<'_>>,
     witness: &[Option<NodeId>],
 ) -> bool {
+    if !group.traits.is_empty() && !trait_clauses_ok(adapter, path.node, &group.traits) {
+        return false;
+    }
     if group.predicates.is_empty() {
         return true;
     }
@@ -3780,7 +4440,7 @@ fn expand_elems(
                         }
                         PushBody::Expr(e) => {
                             let (v, o) = capture(|| {
-                                operand_scalar_bound(adapter, path.node, e, trace, witness, scope)
+                                operand_value(adapter, path.node, e, trace, witness, scope)
                             });
                             (v, Prov::leaf(o))
                         }
@@ -3968,7 +4628,7 @@ fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Val
                 dpid: entries.first().and_then(|p| p.dpid.clone()),
             }))
         }
-        "@provenance" => Some(Value::List(entries.iter().map(prov_record).collect())),
+        "@provenance" => Some(Value::list(entries.iter().map(prov_record).collect())),
         // The coordinates: the first origin's id, its record, all.
         "origin" => Some(
             o.known
@@ -3976,7 +4636,7 @@ fn origins_meta(adapter: &impl AstAdapter, o: &Origins, key: &str) -> Option<Val
                 .map_or(Value::Null, |x| Value::Int(x.node.0 as i64)),
         ),
         "%origin" => Some(o.known.first().map_or(Value::Null, |x| origin_record(*x))),
-        "@origin" => Some(Value::List(
+        "@origin" => Some(Value::list(
             o.known.iter().map(|x| origin_record(*x)).collect(),
         )),
         "elided" => Some(Value::Int(elided as i64)),
@@ -4078,15 +4738,20 @@ fn operand_nodes(
                 bound
             };
             let mut nodes = Vec::new();
-            for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
+            let inner = Scope {
+                members: &[],
+                ..scope
+            };
+            for from in operand_from(adapter, anchor, node, trace, bound, scope) {
                 nodes.extend(navigate_from(
                     steps,
                     adapter,
                     from,
                     trace,
-                    scope.outer,
+                    nested_outer(&inner),
                     witness,
-                    scope.marks,
+                    inner.marks,
+                    inner.register,
                 ));
             }
             dedup(nodes)
@@ -4112,9 +4777,10 @@ fn operand_nodes(
                     adapter,
                     base,
                     trace,
-                    scope.outer,
+                    nested_outer(&scope),
                     bound,
                     scope.marks,
+                    scope.register,
                 ))
             }
         }
@@ -4160,7 +4826,7 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         "n-children" => Some(Value::Int(adapter.children(node).len() as i64)),
         "n-descendants" => Some(Value::Int(n_descendants(adapter, node) as i64)),
         "n-siblings" => Some(n_siblings().map_or(Value::Null, |n| Value::Int(n as i64))),
-        "traits" => Some(Value::List(
+        "traits" => Some(Value::list(
             adapter.traits(node).into_iter().map(Value::Str).collect(),
         )),
         "is-leaf" => Some(Value::Bool(adapter.children(node).is_empty())),
@@ -4222,7 +4888,7 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         // list — of the provenance entries, and of the origin
         // coordinates. A node's origin is itself, at stage 0.
         "%provenance" => Some(prov_record(&resolved_provenance(adapter, node).first())),
-        "@provenance" => Some(Value::List(
+        "@provenance" => Some(Value::list(
             resolved_provenance(adapter, node)
                 .entries
                 .iter()
@@ -4231,7 +4897,7 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         )),
         "origin" => Some(Value::Int(node.0 as i64)),
         "%origin" => Some(origin_record(Origin { node, stage: 0 })),
-        "@origin" => Some(Value::List(vec![origin_record(Origin { node, stage: 0 })])),
+        "@origin" => Some(Value::list(vec![origin_record(Origin { node, stage: 0 })])),
         "elided" => Some(Value::Int(resolved_provenance(adapter, node).elided as i64)),
         _ => None,
     }
@@ -4347,14 +5013,38 @@ fn apply_step(
             // call (its answer is the walk's, by contract); the
             // nameless tests still run here.
             let mut found = Vec::new();
-            let indexed = match &step.matcher {
-                Matcher::Name(n) => adapter.descendants_named(node, n),
+            // An adapter that indexes a property answers
+            // `//name[::prop = "lit"]` in one call too (the corpus
+            // reading's positional index); the leading equality is
+            // then already applied and the rest of the step's
+            // predicates run as usual.
+            let mut consumed_first = false;
+            let indexed = match (&step.matcher, step.predicates.first()) {
+                (Matcher::Name(n), Some(Predicate::Expr(e))) => match indexable_equality(e) {
+                    Some((prop, value)) => {
+                        let hit = adapter.descendants_where(node, n, prop, value);
+                        consumed_first = hit.is_some();
+                        hit.or_else(|| adapter.descendants_named(node, n))
+                    }
+                    None => adapter.descendants_named(node, n),
+                },
+                (Matcher::Name(n), _) => adapter.descendants_named(node, n),
                 _ => None,
             };
             match indexed {
                 Some(v) => found.extend(v.into_iter().filter(|&(n, _)| tests_ok(adapter, n, step))),
                 None => descendants(adapter, node, 1, step, &mut found),
             }
+            let rest;
+            let step = if consumed_first {
+                rest = Step {
+                    predicates: step.predicates[1..].to_vec(),
+                    ..step.clone()
+                };
+                &rest
+            } else {
+                step
+            };
             let found = apply_predicates(
                 adapter,
                 found,
@@ -4806,6 +5496,30 @@ fn descendants(
 /// Whether `node` passes `step`'s tests: the name matcher, the trait
 /// filters, and the leaf anchor. Predicates are *not* checked here —
 /// they apply to the hop's collected result list (`apply_predicates`).
+/// `[::prop = "text"]` — the one predicate shape an adapter's
+/// property index can answer (a named property of the node itself
+/// against a text literal); anything else keeps the walk.
+fn indexable_equality(e: &PredExpr) -> Option<(&str, &Value)> {
+    let PredExpr::Compare(l, CmpOp::Eq, r) = e else {
+        return None;
+    };
+    let Operand::Rel {
+        steps,
+        projection: Some(Projection::Property(Some(prop))),
+        anchor: Anchor::Current,
+    } = l
+    else {
+        return None;
+    };
+    if !steps.is_empty() {
+        return None;
+    }
+    match r {
+        Operand::Lit(v @ Value::Str(_)) => Some((prop.as_str(), v)),
+        _ => None,
+    }
+}
+
 fn matches_step(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
     matches_name(adapter, node, &step.matcher) && tests_ok(adapter, node, step)
 }
@@ -5100,11 +5814,21 @@ fn matches_label(matcher: &Matcher, label: &str) -> bool {
 
 /// Whether `node` satisfies all of `step`'s `<...>` trait clauses.
 fn traits_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
-    if step.traits.is_empty() {
+    trait_clauses_ok(adapter, node, &step.traits)
+}
+
+/// Every `<...>` clause holds on `node` (a step's, or a quantified
+/// group's).
+fn trait_clauses_ok(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    clauses: &[crate::ast::TraitClause],
+) -> bool {
+    if clauses.is_empty() {
         return true;
     }
     let any = !adapter.traits(node).is_empty();
-    step.traits
+    clauses
         .iter()
         .all(|c| c.matches_with(any, |name| adapter.has_trait(node, name)))
 }
@@ -5305,19 +6029,15 @@ fn eval_operand(
             note_all(&o);
             vec![origins_meta(adapter, &o, key).unwrap_or(Value::Null)]
         }
+        // A field read on a list of records reads each (ruling #66):
+        // a group's member list projects to the members' values, so
+        // `@| group(...) | :n | sum` sums a field per group.
         Operand::Field { base, name } => eval_operand(adapter, node, base, trace, bound, scope)
             .into_iter()
-            .map(|v| match v {
-                Value::Record(fields) => fields
-                    .into_iter()
-                    .find(|(k, _)| k == name)
-                    .map(|(_, v)| v)
-                    .unwrap_or(Value::Null),
-                _ => Value::Null,
-            })
+            .map(|v| record_field(v, name))
             .collect(),
         // `@(a; b)` — the list literal: every value of every item.
-        Operand::List(items) => vec![Value::List(
+        Operand::List(items) => vec![Value::list(
             items
                 .iter()
                 .flat_map(|item| eval_operand(adapter, node, item, trace, bound, scope))
@@ -5396,7 +6116,7 @@ fn eval_operand(
                     }
                 })
                 .collect();
-            vec![Value::List(vs)]
+            vec![Value::list(vs)]
         }
         // `(expr | f @| g)` — the pipe tail: each value rides a
         // pseudo-capsa (this node and register, the value as topic)
@@ -5413,6 +6133,12 @@ fn eval_operand(
             // stages; what the tail finally yields is noted into the
             // enclosing frame at the end.
             let mut provs: Vec<Prov>;
+            // Rows that are still nodes — a path head without a
+            // projection, and whatever a stage hands on as a node.
+            // Their value is existence, but a stage meets them as
+            // the pipeline would: as nodes (`@| unique` tells two
+            // nodes apart whatever they read as).
+            let mut bare: Vec<bool> = Vec::new();
             let mut state = match expr.as_ref() {
                 Operand::Rel {
                     steps,
@@ -5425,25 +6151,56 @@ fn eval_operand(
                         bound
                     };
                     let mut nodes = Vec::new();
-                    for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
+                    let inner = Scope {
+                        members: &[],
+                        ..scope
+                    };
+                    for from in operand_from(adapter, anchor, node, trace, bound, scope) {
                         nodes.extend(navigate_from(
                             steps,
                             adapter,
                             from,
                             trace,
-                            scope.outer,
+                            nested_outer(&inner),
                             witness,
-                            scope.marks,
+                            inner.marks,
+                            inner.register,
                         ));
                     }
                     let nodes = dedup(nodes);
                     let values: Vec<Value> = match projection {
                         Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
-                        None => vec![Value::Bool(true); nodes.len()],
+                        None => {
+                            bare = vec![true; nodes.len()];
+                            vec![Value::Bool(true); nodes.len()]
+                        }
                     };
                     provs = nodes.iter().map(|&n| Prov::at(n, stage_now())).collect();
                     node_of = nodes;
                     values
+                }
+                // The topic of a group is its members (ruling #84):
+                // `($_ | ::lower @| join)` runs the stages over the
+                // rows, each on its own node.
+                Operand::Topic if !scope.members.is_empty() => {
+                    node_of = scope.members.iter().map(|m| m.node).collect();
+                    provs = scope
+                        .members
+                        .iter()
+                        .map(|m| match &m.topic {
+                            Some(_) => m.prov.clone(),
+                            None => Prov::at(m.node, stage_now()),
+                        })
+                        .collect();
+                    scope
+                        .members
+                        .iter()
+                        .map(|m| {
+                            m.topic
+                                .clone()
+                                .unwrap_or_else(|| node_scalar(adapter, m.node))
+                        })
+                        .collect()
                 }
                 _ => {
                     let (values, o) =
@@ -5452,6 +6209,12 @@ fn eval_operand(
                     values
                 }
             };
+            // A stage's output capsae keep their registers and
+            // members for the next stage (a group's keys, a push
+            // inside the tail), as the pipeline keeps them; a value
+            // without one rides the enclosing register.
+            let mut regs: Vec<Vec<Reg>> = Vec::new();
+            let mut mems: Vec<Vec<Capsa>> = Vec::new();
             for stage in stages.iter() {
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
@@ -5468,12 +6231,13 @@ fn eval_operand(
                     && state.len() == 1
                     && matches!(state[0], Value::List(_))
                 {
-                    let Some(Value::List(items)) = state.pop() else {
-                        unreachable!("matched above");
-                    };
+                    let items = state.pop().and_then(Value::into_items).unwrap_or_default();
                     let whole = provs.pop().unwrap_or_default();
                     provs = (0..items.len()).map(|i| whole.item(i)).collect();
                     state = items;
+                    regs.clear();
+                    mems.clear();
+                    bare.clear();
                 }
                 let caps: Vec<Capsa> = state
                     .into_iter()
@@ -5481,9 +6245,12 @@ fn eval_operand(
                     .map(|(i, v)| Capsa {
                         prov: provs.get(i).cloned().unwrap_or_default(),
                         node: node_of.get(i).copied().unwrap_or(node),
-                        register: scope.register.to_vec(),
-                        topic: Some(v),
-                        members: Vec::new(),
+                        register: regs
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| scope.register.to_vec()),
+                        topic: (!bare.get(i).copied().unwrap_or(false)).then_some(v),
+                        members: mems.get(i).cloned().unwrap_or_default(),
                         captures: scope.captures.to_vec(),
                         named: scope.named.to_vec(),
                         marks: scope.marks.to_vec(),
@@ -5491,17 +6258,62 @@ fn eval_operand(
                         arrived: scope.arrived.to_vec(),
                     })
                     .collect();
-                let out = apply_stage(stage, caps, adapter, trace, Some(&scope));
-                // The nodes ride along while the stage keeps capsae
-                // one for one; an aggregate leaves the path behind.
-                node_of = if matches!(stage, Stage::Agg(_)) {
-                    Vec::new()
-                } else {
-                    out.iter().map(|c| c.node).collect()
+                // A scalar stage's expression arguments read the
+                // enclosing capsa, not the piped value: in
+                // `%(g = loglik(:a; :na; :b; :nb))` the fields are
+                // the record's, as `::alt` in `levenshtein(::name;
+                // ::alt)` is the node's (the call form desugars to
+                // this pipe, and the inner capsa is not visible to
+                // the query).
+                let resolved;
+                let stage = match stage {
+                    Stage::Func(call)
+                        if stdlib::known_scalar(&call.name)
+                            && !matches!(call.name.as_str(), "rec" | "record")
+                            && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
+                    {
+                        resolved = Stage::Func(FnCall {
+                            name: call.name.clone(),
+                            args: call
+                                .args
+                                .iter()
+                                .map(|a| match a {
+                                    Arg::Expr(e) => {
+                                        Arg::Lit(operand_scalar(adapter, node, e, trace, scope))
+                                    }
+                                    other => other.clone(),
+                                })
+                                .collect(),
+                        });
+                        &resolved
+                    }
+                    other => other,
                 };
+                let out = apply_stage(stage, caps, adapter, trace, Some(&scope));
+                // The nodes ride along exactly as in the pipeline: a
+                // permuting or selecting aggregate (`@| reverse`,
+                // `@| top`) keeps each capsa's node, a reducing one
+                // leaves its capsa on the node the pipeline would.
+                // (Clearing them after every aggregate made
+                // `((<p){1;3} @| reverse | ::)` re-read the operand's
+                // own node three times.)
+                node_of = out.iter().map(|c| c.node).collect();
+                regs = out.iter().map(|c| c.register.clone()).collect();
+                mems = out.iter().map(|c| c.members.clone()).collect();
+                // only a row that came in as a node can leave as one
+                let had_nodes = bare.iter().any(|b| *b);
+                bare = out.iter().map(|c| had_nodes && c.topic.is_none()).collect();
                 let (values, ps): (Vec<Value>, Vec<Prov>) = out
                     .into_iter()
-                    .map(|c| (c.topic.unwrap_or(Value::Null), c.prov))
+                    .zip(bare.iter())
+                    .map(|(c, node)| {
+                        let v = match c.topic {
+                            Some(v) => v,
+                            None if *node => Value::Bool(true),
+                            None => Value::Null,
+                        };
+                        (v, c.prov)
+                    })
                     .unzip();
                 state = values;
                 provs = ps;
@@ -5525,7 +6337,7 @@ fn eval_operand(
                     Some(_) => Value::Null,
                 })
                 .collect();
-            vec![Value::List(vs)]
+            vec![Value::list(vs)]
         }
         // `$-` — the arrived-by edge: its label bare, an edge
         // property projected. Null where no edge is in scope.
@@ -5626,15 +6438,20 @@ fn eval_operand(
                 bound
             };
             let mut nodes = Vec::new();
-            for from in anchor_nodes(adapter, anchor, node, trace, bound, scope) {
+            let inner = Scope {
+                members: &[],
+                ..scope
+            };
+            for from in operand_from(adapter, anchor, node, trace, bound, scope) {
                 nodes.extend(navigate_from(
                     steps,
                     adapter,
                     from,
                     trace,
-                    scope.outer,
+                    nested_outer(&inner),
                     witness,
-                    scope.marks,
+                    inner.marks,
+                    inner.register,
                 ));
             }
             let nodes = dedup(nodes);
@@ -5711,7 +6528,16 @@ fn eval_operand(
             let nodes = if steps.is_empty() {
                 vec![base]
             } else {
-                navigate_from(steps, adapter, base, trace, scope.outer, bound, scope.marks)
+                navigate_from(
+                    steps,
+                    adapter,
+                    base,
+                    trace,
+                    nested_outer(&scope),
+                    bound,
+                    scope.marks,
+                    scope.register,
+                )
             };
             for &n in &nodes {
                 note(n);
@@ -5775,8 +6601,80 @@ fn durational_with(v: &Value, scale: UnitScale) -> Option<(i64, u32)> {
     })
 }
 
-/// Compare two scalar values under `op`.
+/// Compare two values under `op`. A list operand reads as a set:
+/// `=` asks whether any element equals the other side (membership),
+/// `!=` whether none does (its complement), and the ordering,
+/// pattern and substring operators whether any element satisfies
+/// them; two lists are equal when they match element by element.
+/// The set behind a large list of strings used as a membership
+/// operand: built once per list and kept while the list lives
+/// (`Arc` identity), so `[$_ = $.set]` over thousands of rows
+/// probes rather than scans. None when the list is small or not all
+/// strings (the scan handles it).
+fn set_probe(ys: &std::sync::Arc<Vec<Value>>, needle: &str) -> Option<bool> {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    thread_local! {
+        static SET: RefCell<Option<(std::sync::Weak<Vec<Value>>, HashSet<String>)>> =
+            const { RefCell::new(None) };
+    }
+    if ys.len() < 64 {
+        return None;
+    }
+    SET.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let fresh = match slot.as_ref() {
+            // A dead weak may share the address of a newer list:
+            // only a live one that is this list counts.
+            Some((w, _)) => w.upgrade().is_none_or(|a| !std::sync::Arc::ptr_eq(&a, ys)),
+            None => true,
+        };
+        if fresh {
+            let mut set = HashSet::with_capacity(ys.len());
+            for y in ys.iter() {
+                match y {
+                    Value::Str(s) => {
+                        set.insert(s.clone());
+                    }
+                    _ => return None,
+                }
+            }
+            *slot = Some((std::sync::Arc::downgrade(ys), set));
+        }
+        slot.as_ref().map(|(_, set)| set.contains(needle))
+    })
+}
+
 fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
+    match (a, b) {
+        (Value::List(xs), Value::List(ys)) if matches!(op, CmpOp::Eq | CmpOp::Ne) => {
+            let same = xs.len() == ys.len()
+                && xs.iter().zip(ys.iter()).all(|(x, y)| value_eq(x, y, scale));
+            return if op == CmpOp::Eq { same } else { !same };
+        }
+        (Value::List(xs), _) => {
+            return match op {
+                CmpOp::Ne => !xs.iter().any(|x| value_eq(x, b, scale)),
+                _ => xs.iter().any(|x| compare(x, op, b, scale)),
+            };
+        }
+        (_, Value::List(ys)) => {
+            // Membership in a large list of strings probes a set
+            // built once per list (the list is shared, so its
+            // address identifies it across reads).
+            if matches!(op, CmpOp::Eq | CmpOp::Ne)
+                && let Value::Str(needle) = a
+                && let Some(hit) = set_probe(ys, needle)
+            {
+                return if op == CmpOp::Eq { hit } else { !hit };
+            }
+            return match op {
+                CmpOp::Ne => !ys.iter().any(|y| value_eq(a, y, scale)),
+                _ => ys.iter().any(|y| compare(a, op, y, scale)),
+            };
+        }
+        _ => {}
+    }
     match op {
         CmpOp::Eq => value_eq(a, b, scale),
         CmpOp::Ne => !value_eq(a, b, scale),
@@ -5928,7 +6826,7 @@ fn node_to_json(adapter: &impl AstAdapter, node: NodeId) -> Value {
         .enumerate()
         .all(|(i, n)| n.as_deref() == Some(i.to_string().as_str()));
     if is_array {
-        Value::List(children.iter().map(|&c| node_to_json(adapter, c)).collect())
+        Value::list(children.iter().map(|&c| node_to_json(adapter, c)).collect())
     } else {
         Value::Record(
             children
@@ -5955,7 +6853,7 @@ fn value_to_xml(v: &Value, tag: &str) -> String {
                 } else if k == "#text" {
                     body.push_str(&xml_escape(&val.to_string()));
                 } else if let Value::List(items) = val {
-                    for it in items {
+                    for it in items.iter() {
                         body.push_str(&value_to_xml(it, &xml_tag(k)));
                     }
                 } else {
@@ -6084,7 +6982,10 @@ thread_local! {
     /// Compiled-pattern memo. `=~` predicates evaluate per node,
     /// and recompiling one pattern for every candidate made a
     /// workspace-wide regex filter ~10x its equality twin; a
-    /// query's patterns are few, so the memo stays tiny. `None`
+    /// query's patterns are few, so the memo stays tiny. The
+    /// `s///` stage shares it: a Unicode class such as `\p{L}`
+    /// compiles in about a millisecond, which over the seventy
+    /// thousand words of a novel was a hundred seconds. `None`
     /// remembers a bad pattern (it never matches — no point
     /// re-failing per node).
     static REGEX_MEMO: std::cell::RefCell<HashMap<String, Option<Regex>>> =
@@ -6093,7 +6994,7 @@ thread_local! {
 
 /// The compiled form of `pattern`, memoized; `None` for a bad
 /// pattern. (`Regex` clones share the compiled program.)
-fn compiled_regex(pattern: &str) -> Option<Regex> {
+pub(crate) fn compiled_regex(pattern: &str) -> Option<Regex> {
     REGEX_MEMO.with(|m| {
         m.borrow_mut()
             .entry(pattern.to_string())
@@ -6895,12 +7796,12 @@ mod tests {
         // deep is reached by two crossings; one capsa, both edges.
         assert_eq!(
             vals("//a->e->e | .(@-::qty)", &t),
-            vec![Value::List(vec![Value::Int(12), Value::Int(5)])]
+            vec![Value::list(vec![Value::Int(12), Value::Int(5)])]
         );
         // bare @- reads the labels
         assert_eq!(
             vals("//a->e->e | .(@-)", &t),
-            vec![Value::List(vec![
+            vec![Value::list(vec![
                 Value::Str("e".into()),
                 Value::Str("e".into())
             ])]
@@ -6908,7 +7809,7 @@ mod tests {
         // tree walks arrive by [child] edges
         assert_eq!(
             vals("/a | .(@-)", &t),
-            vec![Value::List(vec![Value::Str("[child]".into())])]
+            vec![Value::list(vec![Value::Str("[child]".into())])]
         );
         // per-path capsae stay distinct when their breadcrumbs
         // differ — one final crossing each; identical breadcrumbs
@@ -6919,7 +7820,7 @@ mod tests {
         );
         assert_eq!(
             vals("//a(->e .(1))->e | .(@-::qty)", &t),
-            vec![Value::List(vec![Value::Int(12), Value::Int(5)])]
+            vec![Value::list(vec![Value::Int(12), Value::Int(5)])]
         );
         // stage form: `| @-::prop` sets the topic directly, and
         // `each` forks it
@@ -7377,6 +8278,43 @@ mod tests {
 
     /// Keyed aggregates reorder or filter capsae by per-capsa keys,
     /// preserving node identity so later stages keep working.
+    /// `@| group(k) | count` runs fused (no member lists built);
+    /// it must answer exactly as the two stages do — same counts,
+    /// same key fields for recall, same order — whether the count
+    /// is the result or feeds a later stage.
+    #[test]
+    fn fused_group_count_matches_the_two_stages() {
+        let t = MockTree::sample();
+        let fused = vals("//* @| group(d = :::depth) | count", &t);
+        // The unfused route: the group's list topic, counted inside
+        // an operand, so no `| count` stage follows the group.
+        let unfused = vals("//* @| group(d = :::depth) | %(n = ($_ @| count)) | :n", &t);
+        assert_eq!(fused, unfused);
+        assert!(fused.len() > 1);
+        assert_eq!(
+            fused
+                .iter()
+                .map(|v| v.to_string().parse::<i64>().unwrap())
+                .sum::<i64>(),
+            vals("//* @| count", &t)[0]
+                .to_string()
+                .parse::<i64>()
+                .unwrap()
+        );
+        // The count then feeding a record with the recalled key.
+        let recs = vals("//* @| group(d = :::depth) | count | %($.d; n = $_)", &t);
+        let refs = vals("//* @| group(d = :::depth) | %($.d; n = ($_ @| count))", &t);
+        assert_eq!(recs, refs);
+        // A filter on the count keeps the fused capsae's registers.
+        assert_eq!(
+            vals("//* @| group(d = :::depth) | count | [$_ > 1] | $.d", &t),
+            vals(
+                "//* @| group(d = :::depth) | %(d = $.d; n = ($_ @| count)) | [:n > 1] | :d",
+                &t
+            )
+        );
+    }
+
     #[test]
     fn keyed_aggregates() {
         let t = MockTree::sample();
@@ -8082,7 +9020,7 @@ mod tests {
         let t = MockTree::sample();
         assert_eq!(
             vals("/a | @(1; \"x\"; 2 + 1)", &t),
-            vec![Value::List(vec![
+            vec![Value::list(vec![
                 Value::Int(1),
                 Value::Str("x".into()),
                 Value::Int(3)
@@ -8093,7 +9031,7 @@ mod tests {
             matches!(&gathered[0], Value::List(items) if items.len() > 1),
             "{gathered:?}"
         );
-        assert_eq!(vals("/a | @()", &t), vec![Value::List(Vec::new())]);
+        assert_eq!(vals("/a | @()", &t), vec![Value::list(Vec::new())]);
         assert_eq!(vals("/a | *(1; 2)", &t), vals("/a | @(1; 2)", &t));
         // display: the Quarb form, bare scalars, quoted strings
         assert_eq!(
@@ -8415,6 +9353,33 @@ mod tests {
     }
 
     #[test]
+    fn a_group_sums_a_record_field() {
+        // Ruling #66: a reducing aggregate over a group of records
+        // takes the field to reduce — `sum(:n)` — and a field read
+        // on the group's list projects each member, so `:n | sum`
+        // says the same. Both agree with grouping the values.
+        let t = MockTree::sample();
+        let by_value = traced(
+            "/*/* | .d(\\:::name) | :::index @| group(d = $.d) | sum",
+            &t,
+        );
+        let keyed = traced(
+            "/*/* | .d(\\:::name) | %(n = :::index) @| group(d = $.d) | sum(:n)",
+            &t,
+        );
+        let read = traced(
+            "/*/* | .d(\\:::name) | %(n = :::index) @| group(d = $.d) | :n | sum",
+            &t,
+        );
+        assert_eq!(by_value.len(), 2);
+        for i in 0..2 {
+            assert!(by_value[i].topic.is_some());
+            assert_eq!(keyed[i].topic, by_value[i].topic);
+            assert_eq!(read[i].topic, by_value[i].topic);
+        }
+    }
+
+    #[test]
     fn piped_operand_reads_its_path() {
         let t = MockTree::sample();
         let rows = traced("/a/x.rs | .n(->ref @| count)", &t);
@@ -8494,7 +9459,7 @@ mod tests {
         };
         assert_eq!(
             vals(&format!("{q} | $_:::@provenance"), &t),
-            vec![Value::List(vec![
+            vec![Value::list(vec![
                 rec("api-gateway", "/a/x.rs", (s2, n2, o2), "request-42"),
                 rec("crm", "/b/deep/w.rs", (s7, n7, o7), "row-7"),
             ])]
@@ -8525,7 +9490,7 @@ mod tests {
         assert_eq!(vals(&format!("{q} | $_:::%origin"), &t), vec![coord(2, 1)]);
         assert_eq!(
             vals(&format!("{q} | $_:::@origin"), &t),
-            vec![Value::List(vec![coord(2, 1), coord(7, 3)])]
+            vec![Value::list(vec![coord(2, 1), coord(7, 3)])]
         );
         // The coordinate stood on again: the node-id anchor.
         assert_eq!(

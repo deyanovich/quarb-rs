@@ -358,7 +358,7 @@ impl AstAdapter for LdapAdapter {
         match vals {
             [] => None,
             [one] => Some(Value::Str(one.clone())),
-            many => Some(Value::List(
+            many => Some(Value::list(
                 many.iter().map(|v| Value::Str(v.clone())).collect(),
             )),
         }

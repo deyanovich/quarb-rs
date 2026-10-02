@@ -435,7 +435,7 @@ impl AstAdapter for SparqlAdapter {
         match vs.len() {
             0 => None,
             1 => Some(vs[0].clone()),
-            _ => Some(Value::List(vs.clone())),
+            _ => Some(Value::list(vs.clone())),
         }
     }
 

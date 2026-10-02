@@ -64,6 +64,84 @@ pub enum Block {
     Heading { level: u8, lemma: String },
     /// A plain paragraph — the implicit, lemma-less block.
     Paragraph { text: String },
+    /// A speech: a paragraph whose lemma names the speaker (TEI's
+    /// `<said who>` / `<sp><speaker>`, litogramma's dialogue sim).
+    /// The reader sees a paragraph; `::lemma` answers the speaker
+    /// and the text stays the words spoken.
+    Dialogue {
+        lemma: String,
+        text: String,
+        /// The literary reading names the block `dialogue`
+        /// (litogramma's sim); the text level reads it as a
+        /// paragraph with a lemma.
+        lit: bool,
+    },
+    /// The literary reading (`lit:`): a prose block that is a
+    /// speech — litogramma's `dialogue-line` (at-drama `@:-`),
+    /// TEI's whole-paragraph `<said>` — with the unseen metadata
+    /// its aphanes monosims carry (`prosopon`, the speaker) as
+    /// fields and its genoses as traits.
+    Speech {
+        text: String,
+        genoses: Vec<String>,
+        fields: Vec<(String, String)>,
+    },
+    /// The literary reading: an inline span of the preceding flow
+    /// block — a quotation, an annotation (a name), an emphasis, a
+    /// stage direction — named by its litogramma sim, at byte
+    /// offsets into the block's normalized text, with its genoses
+    /// as traits and its aphanes monosims as fields. Spans nest by
+    /// containment of offsets: a name inside a speech is the
+    /// speech's child.
+    Span {
+        kind: String,
+        lo: u32,
+        hi: u32,
+        genoses: Vec<String>,
+        fields: Vec<(String, String)>,
+    },
+    /// The literary reading: a milestone (`@("page:12")`) at an
+    /// offset into the preceding flow block — `::scheme`,
+    /// `::value`.
+    Milestone {
+        scheme: String,
+        value: String,
+        at: u32,
+    },
+    /// The literary reading: unseen metadata on the preceding
+    /// block itself (a paragraph's `eidos`).
+    Annotate { fields: Vec<(String, String)> },
+    /// The parsing pack (ruling #80): a token the source itself
+    /// parsed — litogramma's at-epimerismos diaphane, which TEI's
+    /// `w`/`pc`, the Russian National Corpus, OpenCorpora and
+    /// PROIEL import to — at byte offsets into the preceding flow
+    /// block, with its parsings (the first is the reading's; the
+    /// rest are alternatives) and the onym a head may point at.
+    Parsed {
+        lo: u32,
+        hi: u32,
+        onym: Option<String>,
+        parsings: Vec<Parsing>,
+    },
+    /// The parsing pack: a sentence the source declared (the
+    /// periodos diaphane, TEI's `s`), at byte offsets into the
+    /// preceding flow block, with the source's id.
+    Periodos { lo: u32, hi: u32, id: String },
+    /// The literary reading: a cast entry the source declares
+    /// (at-drama's `@:!! name … !!:@(id)`, a dramatis-persona
+    /// line, TEI's cast list) — the name, the id when the source
+    /// gives one, the description as the node's text.
+    Character {
+        lemma: String,
+        onym: Option<String>,
+        text: String,
+        genoses: Vec<String>,
+    },
+    /// The literary reading: genoses the preceding block wears as
+    /// traits — the sim of a paragraph-level simmere that has no
+    /// reading of its own (a block stage direction's paragraphs
+    /// read `paragraph<stage-direction>`).
+    Wear { genoses: Vec<String> },
     /// Inline content belonging directly to the open container (a
     /// list item's own text, a bare-text blockquote). With no open
     /// container it is read as a paragraph.
@@ -95,6 +173,10 @@ pub enum Block {
         /// "margin"` on both ends — the family stays footnote,
         /// placement is presentation.
         margin: bool,
+        /// The callout's byte offset in the flow block's text,
+        /// when the producer knows it (the literary reading's
+        /// inline notes): the citation in force at the note.
+        at: Option<u32>,
     },
     /// An index mark (ruling #36): an invisible anchor declaring
     /// this place concerns `term`. The back-of-book index is a
@@ -234,11 +316,124 @@ impl NoteFamily {
     }
 }
 
+/// One parsing of a source-parsed token (ruling #80), in the
+/// pack's own vocabulary: the lexeme's lemma, the part of speech
+/// (`UPOS` or `UPOS/XPOS`), the accidents (features, in the
+/// source's spelling), a semantic class, the head's onym and the
+/// dependency relation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parsing {
+    pub lexema: Option<String>,
+    pub meros: Option<String>,
+    pub parepomena: Option<String>,
+    pub semasia: Option<String>,
+    pub kephale: Option<String>,
+    pub schesis: Option<String>,
+}
+
+/// A source-parsed token waiting for the tokenizer: its byte
+/// range in the block's prose, its onym, its parsings.
+#[derive(Debug, Clone)]
+struct DeclaredToken {
+    lo: u32,
+    hi: u32,
+    onym: Option<String>,
+    parsings: Vec<Parsing>,
+}
+
+/// A row of a cast table (ruling #79): the character's id (the
+/// `prosopon` a mention answers), its name, the pattern a word
+/// token must match to be its mention, and the table's other
+/// columns as the character's fields.
+#[derive(Debug, Clone)]
+pub struct CastRow {
+    pub id: String,
+    pub name: String,
+    pub pattern: Option<regex::Regex>,
+    /// How many word tokens the pattern spans (a `mention` or
+    /// `stem` of several words matches a run of tokens).
+    pub words: usize,
+    pub fields: Vec<(String, String)>,
+}
+
+impl CastRow {
+    /// Read a cast table from a CSV file: an `id` column (required),
+    /// a `name`, and the pattern a word token must match to be the
+    /// character's mention — `pattern` as a regex, `stem` (or
+    /// `prefix`) as a prefix, or `mention` / `form` as the whole
+    /// word — with every
+    /// other column kept as the character's fields.
+    pub fn read_csv(path: &str) -> Result<Vec<CastRow>, String> {
+        let mut reader = csv::Reader::from_path(path).map_err(|e| e.to_string())?;
+        let headers: Vec<String> = reader
+            .headers()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(str::to_string)
+            .collect();
+        if !headers.iter().any(|h| h == "id") {
+            return Err(format!(
+                "a cast table needs an id column (found: {})",
+                headers.join(", ")
+            ));
+        }
+        let mut rows = Vec::new();
+        for record in reader.records() {
+            let record = record.map_err(|e| e.to_string())?;
+            let get = |k: &str| {
+                headers
+                    .iter()
+                    .position(|h| h == k)
+                    .and_then(|i| record.get(i))
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            };
+            let Some(id) = get("id") else { continue };
+            let (pattern, words) = if let Some(p) = get("pattern") {
+                let re = regex::Regex::new(p).map_err(|e| format!("cast pattern for {id}: {e}"))?;
+                // A pattern of several words matches a run of that
+                // many tokens, as a stem or a mention does.
+                (Some(re), p.split_whitespace().count().max(1))
+            } else if let Some(stem) = get("stem").or_else(|| get("prefix")) {
+                let re = regex::Regex::new(&format!("^{}", regex::escape(stem))).unwrap();
+                (Some(re), stem.split_whitespace().count())
+            } else if let Some(form) = get("mention").or_else(|| get("form")) {
+                let re = regex::Regex::new(&format!("^{}$", regex::escape(form))).unwrap();
+                (Some(re), form.split_whitespace().count())
+            } else {
+                (None, 0)
+            };
+            let fields: Vec<(String, String)> = headers
+                .iter()
+                .zip(record.iter())
+                .filter(|(h, v)| h.as_str() != "id" && !v.trim().is_empty())
+                .map(|(h, v)| (h.clone(), v.trim().to_string()))
+                .collect();
+            rows.push(CastRow {
+                id: id.to_string(),
+                name: get("name").unwrap_or(id).to_string(),
+                pattern,
+                words,
+                fields,
+            });
+        }
+        Ok(rows)
+    }
+}
+
 /// The structural kind of a node — also its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
     Document,
     Section,
+    /// The literary reading's cast entry (ruling #79): a character
+    /// declared by the source or by a cast table, `::lemma` its
+    /// name, `::onym` its id, `<-character` its mentions.
+    Character,
+    /// The literary reading's gazetteer entry (ruling #87): a place
+    /// declared by a places table, `::lemma` its name, `::onym` its
+    /// id, `<-place` its mentions.
+    Place,
     Paragraph,
     Blockquote,
     UnorderedList,
@@ -274,6 +469,35 @@ enum Kind {
     Strophe,
     /// …and its lines, `::taxis` the citation coordinate.
     Stichos,
+    /// The corpus reading (ruling #62): one token of a prose
+    /// block — a UAX #29 word segment — with `::` its form,
+    /// `::lower` the case-folded form, `<word>` / `<number>` /
+    /// `<punct>` its class, `::::n` its position in the document
+    /// and `::::sentence` the UAX #29 sentence it falls in. Flat
+    /// under the block: a sentence is an annotation on the token,
+    /// never a container, so sibling hops run across a false
+    /// sentence break ("Dr. Smith") as they do across a true one.
+    Token,
+    /// A treebank's sentence (ruling #63): in a standalone CoNLL-U
+    /// document the file's blank-line blocks are declared
+    /// structure that nothing re-segments, so each is a prose
+    /// block — `::` its text (`# text`, else the forms joined per
+    /// `SpaceAfter`), `::id` its `# sent_id`, every other `# key =
+    /// value` comment a property — and under `corpus:` its tokens
+    /// are its children. Over prose, a sidecar's sentence stays an
+    /// annotation on the token.
+    Sentence,
+    /// The literary reading's speech block: litogramma's
+    /// `dialogue-line`.
+    Speech,
+    /// The literary reading's drama speech (`@: Speaker`): the
+    /// lemma is the printed speech prefix.
+    Dialogue,
+    /// The literary reading's inline span, named by its sim
+    /// (`quotation`, `annotation`, `emphasis`, …).
+    Span,
+    /// The literary reading's milestone, a point in the prose.
+    Milestone,
 }
 
 impl Kind {
@@ -299,6 +523,15 @@ impl Kind {
             Kind::UnorderedItem => "unordered-item",
             Kind::OrderedItem => "ordered-item",
             Kind::Verbatim => "verbatim",
+            Kind::Token => "token",
+            Kind::Sentence => "sentence",
+            Kind::Speech => "dialogue-line",
+            Kind::Character => "character",
+            Kind::Place => "place",
+            Kind::Dialogue => "dialogue",
+            // The adapter answers the sim name kept on the node.
+            Kind::Span => "span",
+            Kind::Milestone => "milestone",
         })
     }
 }
@@ -355,12 +588,513 @@ struct Node {
     ref_cites: Vec<NodeId>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+    /// The corpus reading's annotation, on token nodes.
+    token: Option<TokenInfo>,
+    /// A sentence the corpus reading derived at mount (ruling
+    /// #64) — from the segmentation in force, never declared by
+    /// the source — as against a treebank's declared one.
+    derived: bool,
+    /// The literary reading: the genoses a simmere wore (its
+    /// traits), the sim name of a span, its byte range in the
+    /// flow block's text, and the tokens it covers.
+    genoses: Vec<String>,
+    span_kind: Option<String>,
+    at: Option<(u32, u32)>,
+    span_tokens: Vec<NodeId>,
+    /// The character a mention resolves to (`->character`), and on
+    /// a character the mentions that resolve to it (`<-character`).
+    character: Option<NodeId>,
+    mentions: Vec<NodeId>,
+    /// The place a mention resolves to (`->place`); a place keeps
+    /// its mentions in `mentions` too.
+    place: Option<NodeId>,
+    /// The parsing pack's tokens and sentences declared on this
+    /// flow block, consumed by the tokenizer (ruling #80).
+    declared_tokens: Vec<DeclaredToken>,
+    declared_sentences: Vec<(u32, u32, String)>,
+}
+
+/// A token's class — the trait it wears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenClass {
+    /// Carries a letter.
+    Word,
+    /// Carries a digit and no letter.
+    Number,
+    /// Everything else that is not whitespace.
+    Punct,
+}
+
+impl TokenClass {
+    fn name(self) -> &'static str {
+        match self {
+            TokenClass::Word => "word",
+            TokenClass::Number => "number",
+            TokenClass::Punct => "punct",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TokenInfo {
+    class: TokenClass,
+    /// 1-based position among the document's tokens; 0 for an
+    /// empty node, which is not in the text (`::::n` null).
+    n: u32,
+    /// 1-based ordinal of the sentence, document-wide.
+    sentence: u32,
+    /// The sentence's byte range in the block's prose — `::sentence`
+    /// is that substring.
+    span: (u32, u32),
+    /// The annotation a CoNLL-U source supplied, when one did.
+    annot: Option<Box<Annot>>,
+    /// The token's own byte offset in the block's prose, and the
+    /// literary reading's spans that cover it, outermost first.
+    at: u32,
+    spans: Vec<NodeId>,
+}
+
+/// A token's linguistic annotation from a CoNLL-U source (ruling
+/// #63): its in-sentence id, the lemma, the universal and
+/// language-specific parts of speech, the raw feature, enhanced
+/// dependency and miscellany columns, the dependency relation, the
+/// basic head (`->head`; `<-head` the dependents) and the enhanced
+/// heads with their relations (`->ehead`, `$-::rel`). Every
+/// `Key=Value` of FEATS, MISC and a CoNLL-U Plus column answers as
+/// a property under its key, in the annotation's own spelling and
+/// case-folded.
+#[derive(Debug, Clone, Default)]
+struct Annot {
+    id: String,
+    lemma: Option<String>,
+    upos: Option<String>,
+    xpos: Option<String>,
+    feats: Option<String>,
+    deprel: Option<String>,
+    deps: Option<String>,
+    misc: Option<String>,
+    /// FEATS, MISC and extra-column pairs, in source order.
+    keys: Vec<(String, String)>,
+    /// The multiword range this word belongs to: its id (`1-2`)
+    /// and surface form (`don't`).
+    mwt: Option<(String, String)>,
+    /// An empty node (`8.1`): present in the enhanced graph only.
+    empty: bool,
+    head: Option<NodeId>,
+    dependents: Vec<NodeId>,
+    eheads: Vec<(NodeId, String)>,
+    edependents: Vec<(NodeId, String)>,
+    /// The mentions this token falls in, as 1-based ordinals into
+    /// the model's mention list (several where mentions nest).
+    mentions: Vec<u32>,
+}
+
+/// A mention (ruling #63): a span of tokens an annotation marks as
+/// a named entity or a coreference mention — the sentence pattern
+/// again, an annotation on the tokens, never a container. Decoded
+/// at mount from a `ner` key in MISC (BIO and BIOES tags) and from
+/// CorefUD's `Entity=` bracket notation.
+#[derive(Debug, Clone)]
+struct Mention {
+    tokens: Vec<NodeId>,
+    /// The entity type (PERSON, GPE, …), when the source names one.
+    etype: Option<String>,
+    /// The coreference cluster id, when the source declares one.
+    cluster: Option<String>,
+}
+
+impl Annot {
+    /// A `Key=Value` pair's value: the key as the annotation spells
+    /// it first, then case-folded.
+    fn key(&self, name: &str) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|(k, _)| k == name)
+            .or_else(|| self.keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The bracket entries of a CorefUD `Entity=` value, which may
+/// run together (`(e4-object-5-(e3-person-3-`, `e3)(e5-x-1)`) or
+/// be `|`-separated: an opening entry runs from its `(` to the
+/// next bracket, a closing one ends at its `)`.
+fn entity_entries(spec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for piece in spec.split('|') {
+        let mut cur = String::new();
+        for ch in piece.chars() {
+            if ch == '(' && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.push(ch);
+            if ch == ')' {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+    }
+    out
+}
+
+/// `Key=Value|Key=Value` (FEATS, MISC) as pairs; an entry without
+/// `=` keeps its text as the key with an empty value; `_` is none.
+fn key_values(column: &str) -> Vec<(String, String)> {
+    if column == "_" || column.is_empty() {
+        return Vec::new();
+    }
+    column
+        .split('|')
+        .filter(|e| !e.is_empty())
+        .map(|e| match e.split_once('=') {
+            Some((k, v)) => (k.to_string(), v.to_string()),
+            None => (e.to_string(), String::new()),
+        })
+        .collect()
+}
+
+/// The UAX #29 sentence spans of a block's prose — with the
+/// sentence bonds applied when a `.desm` set is in force (the
+/// `syndesmos` crate: abbreviations a sentence may end in without
+/// ending, and patterns whose match straddles a break).
+fn sentence_spans(prose: &str, bonds: Option<&syndesmos::Syndesmos>) -> Vec<(usize, usize)> {
+    let raw: Vec<(usize, &str)> = match bonds {
+        Some(b) => b.split_sentence_bound_indices(prose),
+        None => {
+            use unicode_segmentation::UnicodeSegmentation;
+            prose.split_sentence_bound_indices().collect()
+        }
+    };
+    raw.into_iter()
+        .filter(|(_, seg)| !seg.trim().is_empty())
+        .map(|(at, seg)| (at, at + seg.len()))
+        .collect()
+}
+
+/// The ten standard CoNLL-U columns, in order.
+const CONLLU_COLUMNS: [&str; 10] = [
+    "ID", "FORM", "LEMMA", "UPOS", "XPOS", "FEATS", "HEAD", "DEPREL", "DEPS", "MISC",
+];
+
+/// One token line of a CoNLL-U sentence, as read.
+#[derive(Debug, Clone, Default)]
+struct ConlluToken {
+    id: String,
+    /// A multiword range `a-b`, parsed.
+    range: Option<(u32, u32)>,
+    /// The numeric id of a word, or an empty node's integer part.
+    ord: u32,
+    /// An empty node (`8.1`).
+    empty: bool,
+    form: String,
+    lemma: String,
+    upos: String,
+    xpos: String,
+    feats: String,
+    head: String,
+    deprel: String,
+    deps: String,
+    misc: String,
+    /// CoNLL-U Plus columns beyond the ten, under their declared
+    /// names with `:` read as `-`.
+    extra: Vec<(String, String)>,
+}
+
+/// One sentence block of a CoNLL-U file.
+#[derive(Debug, Clone, Default)]
+struct ConlluSentence {
+    /// `# key = value` comments, in order (`sent_id`, `text`, …).
+    comments: Vec<(String, String)>,
+    /// `# newdoc [id = X]` opened a document before this sentence.
+    newdoc: Option<Option<String>>,
+    /// `# newpar [id = X]` opened a paragraph before this sentence.
+    newpar: Option<Option<String>>,
+    tokens: Vec<ConlluToken>,
+}
+
+/// A CoNLL-U file: its sentences and its file-level declarations
+/// (`# global.columns`, `# global.Entity`).
+#[derive(Debug, Clone, Default)]
+struct ConlluDoc {
+    sentences: Vec<ConlluSentence>,
+    globals: Vec<(String, String)>,
+}
+
+/// Whether `text` reads as CoNLL-U: its first line that is neither
+/// blank nor a `#` comment is a tab-separated token line whose id
+/// is a word (`3`), a range (`3-4`) or an empty node (`3.1`), with
+/// the ten columns (or, under a `# global.columns` header, that
+/// header's count). The sniff for an extensionless input or a
+/// pipe, where no `.conllu` names the reading.
+pub fn looks_like_conllu(text: &str) -> bool {
+    let mut columns = CONLLU_COLUMNS.len();
+    for line in text.lines().take(200) {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(c) = line.strip_prefix('#') {
+            if let Some((k, v)) = c.split_once('=')
+                && k.trim() == "global.columns"
+            {
+                columns = v.split_whitespace().count().max(2);
+            }
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != columns {
+            return false;
+        }
+        let id = fields[0];
+        let (a, b) = match id.split_once(['-', '.']) {
+            Some((a, b)) => (a, Some(b)),
+            None => (id, None),
+        };
+        return a.parse::<u32>().is_ok() && b.is_none_or(|b| b.parse::<u32>().is_ok());
+    }
+    false
+}
+
+/// The treebank files of a directory, for the set readings: every
+/// `.conllu` / `.conllup` beneath `dir` (a UD treebank's train /
+/// dev / test, a release's languages), named by their path
+/// relative to `dir`, in path order. Hidden entries are skipped.
+/// An empty set is an error: the directory holds no treebank.
+pub fn read_conllu_dir(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    fn walk(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        out: &mut Vec<(String, String)>,
+    ) -> Result<(), String> {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| format!("reading {}: {e}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                !p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+            })
+            .collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                walk(&p, base, out)?;
+            } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                e.eq_ignore_ascii_case("conllu") || e.eq_ignore_ascii_case("conllup")
+            }) {
+                let text = std::fs::read_to_string(&p)
+                    .map_err(|e| format!("reading {}: {e}", p.display()))?;
+                let text = text
+                    .strip_prefix('\u{feff}')
+                    .map(str::to_owned)
+                    .unwrap_or(text);
+                let name = p
+                    .strip_prefix(base)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .into_owned();
+                out.push((name, text));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out)?;
+    if out.is_empty() {
+        return Err(format!("{} holds no .conllu file", dir.display()));
+    }
+    Ok(out)
+}
+
+/// The sentences of a CoNLL-U text: token lines split on tabs,
+/// sentences separated by blank lines, comments read (`# key =
+/// value` kept on the sentence, `# newdoc` / `# newpar` as
+/// structure, `# global.*` on the file), empty nodes (`1.1`) kept,
+/// multiword ranges (`1-2`) kept as the unit that aligns to the
+/// text. A `# global.columns` line (CoNLL-U Plus) reorders the
+/// columns and names extra ones.
+fn parse_conllu(text: &str) -> Result<ConlluDoc, String> {
+    let mut doc = ConlluDoc::default();
+    let mut current = ConlluSentence::default();
+    let mut columns: Vec<String> = CONLLU_COLUMNS.iter().map(|c| c.to_string()).collect();
+    let trimmed = |s: &str| s.trim().to_string();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            if !current.tokens.is_empty() {
+                doc.sentences.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if let Some(comment) = line.strip_prefix('#') {
+            let comment = comment.trim();
+            if let Some(rest) = comment.strip_prefix("newdoc") {
+                let id = rest
+                    .trim()
+                    .strip_prefix("id")
+                    .and_then(|r| r.trim().strip_prefix('='));
+                current.newdoc = Some(id.map(trimmed));
+            } else if let Some(rest) = comment.strip_prefix("newpar") {
+                let id = rest
+                    .trim()
+                    .strip_prefix("id")
+                    .and_then(|r| r.trim().strip_prefix('='));
+                current.newpar = Some(id.map(trimmed));
+            } else if let Some((k, v)) = comment.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if let Some(g) = k.strip_prefix("global.") {
+                    if g == "columns" {
+                        columns = v.split_whitespace().map(|c| c.to_string()).collect();
+                    }
+                    doc.globals.push((g.to_string(), v.to_string()));
+                } else {
+                    current.comments.push((k.to_string(), v.to_string()));
+                }
+            }
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 2 {
+            return Err(format!(
+                "CoNLL-U line {}: expected tab-separated columns",
+                i + 1
+            ));
+        }
+        let mut tok = ConlluToken::default();
+        for (k, name) in columns.iter().enumerate() {
+            let v = f.get(k).copied().unwrap_or("_");
+            match name.to_ascii_uppercase().as_str() {
+                "ID" => tok.id = v.to_string(),
+                "FORM" => tok.form = v.to_string(),
+                "LEMMA" => tok.lemma = v.to_string(),
+                "UPOS" => tok.upos = v.to_string(),
+                "XPOS" => tok.xpos = v.to_string(),
+                "FEATS" => tok.feats = v.to_string(),
+                "HEAD" => tok.head = v.to_string(),
+                "DEPREL" => tok.deprel = v.to_string(),
+                "DEPS" => tok.deps = v.to_string(),
+                "MISC" => tok.misc = v.to_string(),
+                _ => {
+                    if v != "_" && !v.is_empty() {
+                        tok.extra.push((name.replace(':', "-"), v.to_string()));
+                    }
+                }
+            }
+        }
+        if tok.id.is_empty() {
+            return Err(format!("CoNLL-U line {}: no token id", i + 1));
+        }
+        if let Some((a, b)) = tok.id.split_once('-') {
+            match (a.parse::<u32>(), b.parse::<u32>()) {
+                (Ok(a), Ok(b)) if a <= b => {
+                    tok.range = Some((a, b));
+                    tok.ord = a;
+                }
+                _ => {
+                    return Err(format!(
+                        "CoNLL-U line {}: malformed multiword range {:?}",
+                        i + 1,
+                        tok.id
+                    ));
+                }
+            }
+        } else if let Some((a, _)) = tok.id.split_once('.') {
+            tok.empty = true;
+            tok.ord = a.parse().map_err(|_| {
+                format!(
+                    "CoNLL-U line {}: malformed empty-node id {:?}",
+                    i + 1,
+                    tok.id
+                )
+            })?;
+        } else {
+            tok.ord = tok
+                .id
+                .parse()
+                .map_err(|_| format!("CoNLL-U line {}: malformed token id {:?}", i + 1, tok.id))?;
+        }
+        current.tokens.push(tok);
+    }
+    if !current.tokens.is_empty() {
+        doc.sentences.push(current);
+    }
+    Ok(doc)
+}
+
+/// The sentence's surface text from its tokens: forms in order, a
+/// multiword range standing for its words, a space after each
+/// unless `SpaceAfter=No`; empty nodes are not in the text.
+fn conllu_surface(tokens: &[ConlluToken]) -> String {
+    let mut out = String::new();
+    let mut covered: u32 = 0; // the last word id a range covers
+    for t in tokens {
+        if t.empty || (t.range.is_none() && t.ord <= covered) {
+            continue;
+        }
+        if let Some((_, b)) = t.range {
+            covered = b;
+        }
+        out.push_str(&t.form);
+        let no_space = key_values(&t.misc)
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("SpaceAfter") && v == "No");
+        if !no_space {
+            out.push(' ');
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn class_of(seg: &str) -> TokenClass {
+    if seg.chars().any(char::is_alphabetic) {
+        TokenClass::Word
+    } else if seg.chars().any(char::is_numeric) {
+        TokenClass::Number
+    } else {
+        TokenClass::Punct
+    }
+}
+
+/// The class an annotation declares (ruling #65): UPOS `PUNCT` is
+/// punctuation and `NUM` a number whatever the form's letters say
+/// (`3rd`, a tagger's `PUNCT` on a lettered token); every other
+/// tag, or none, leaves the form to decide.
+fn class_of_annotated(form: &str, upos: &str) -> TokenClass {
+    match upos {
+        "PUNCT" => TokenClass::Punct,
+        "NUM" => TokenClass::Number,
+        _ => class_of(form),
+    }
+}
+
+/// Whether a token's form is a quotation mark (ruling #65): every
+/// character one of Unicode's initial and final quotation
+/// punctuation, the ASCII quotes, the guillemets, or the CJK
+/// corner brackets. Such a token wears `<quote>` beside `<punct>`.
+fn is_quote(form: &str) -> bool {
+    !form.is_empty()
+        && form.chars().all(|c| {
+            matches!(
+                c,
+                '"' | '\'' | '`'
+                    | '\u{AB}' | '\u{BB}'
+                    | '\u{2018}'..='\u{201F}'
+                    | '\u{2039}' | '\u{203A}'
+                    | '\u{300C}'..='\u{300F}'
+                    | '\u{301D}'..='\u{301F}'
+                    | '\u{FF02}' | '\u{FF07}'
+            )
+        })
 }
 
 impl Node {
     fn new(kind: Kind, parent: Option<NodeId>) -> Self {
         Node {
             kind,
+            token: None,
+            derived: false,
             lemma: None,
             hypograph: None,
             taxis: None,
@@ -387,6 +1121,15 @@ impl Node {
             ref_cites: Vec::new(),
             parent,
             children: Vec::new(),
+            genoses: Vec::new(),
+            span_kind: None,
+            at: None,
+            span_tokens: Vec::new(),
+            character: None,
+            place: None,
+            mentions: Vec::new(),
+            declared_tokens: Vec::new(),
+            declared_sentences: Vec::new(),
         }
     }
 }
@@ -511,7 +1254,7 @@ impl HeadMeta {
         let (_, vs) = self.declared.iter().find(|(k, _)| k == name)?;
         Some(match vs.as_slice() {
             [one] => Value::Str(one.clone()),
-            many => Value::List(many.iter().cloned().map(Value::Str).collect()),
+            many => Value::list(many.iter().cloned().map(Value::Str).collect()),
         })
     }
 
@@ -557,6 +1300,15 @@ pub struct TextModel {
     /// known — the mount's path, an archive member's path — the
     /// base `::href` links against.
     document_path: Option<String>,
+    /// The citation scheme `::cite` answers under when the
+    /// document carries several (`?scheme=`); else the first
+    /// milestone's (ruling #81).
+    cite_scheme: Option<String>,
+    /// The spelling table the corpus reading folds through
+    /// (`?modernize=`, ruling #82): `::lower` and `::modern` read
+    /// the modern spelling of a historical edition's tokens; `::`
+    /// stays the edition's own.
+    orthography: Option<String>,
     /// Alias → canonical campus, for bib field lookup: the
     /// bibliogramma vocabulary's census (BibLaTeX's field names
     /// are its English rows), so `::author` answers as
@@ -566,6 +1318,14 @@ pub struct TextModel {
     /// What the document declares about itself (see [`HeadMeta`]);
     /// answered on the document node.
     head: HeadMeta,
+    /// The corpus reading's positional index: case-folded form →
+    /// the tokens bearing it, in document order. Built on first
+    /// use, once the tokens exist; answers `//token[::lower = "x"]`
+    /// through `descendants_where` without a walk.
+    token_index: std::sync::OnceLock<std::collections::HashMap<String, Vec<NodeId>>>,
+    /// The mentions an annotation marked (ruling #63), in document
+    /// order of their first token; tokens point in by ordinal.
+    mentions: Vec<Mention>,
 }
 
 impl TextModel {
@@ -631,6 +1391,128 @@ impl TextModel {
                     nodes[id.0 as usize].text = text;
                     last_flow = Some(id);
                     last_block = Some(id);
+                }
+                // A speech is a paragraph that knows its speaker.
+                Block::Dialogue { lemma, text, lit } => {
+                    let text = normalize_ws(&text);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let parent = cursor(&sections, &containers, root);
+                    let kind = if lit { Kind::Dialogue } else { Kind::Paragraph };
+                    let id = push(&mut nodes, kind, parent);
+                    let n = &mut nodes[id.0 as usize];
+                    n.text = text;
+                    n.lemma = Some(normalize_ws(&lemma)).filter(|l| !l.is_empty());
+                    last_flow = Some(id);
+                    last_block = Some(id);
+                }
+                // The literary reading's speech block.
+                Block::Speech {
+                    text,
+                    genoses,
+                    fields,
+                } => {
+                    let text = normalize_ws(&text);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let parent = cursor(&sections, &containers, root);
+                    let id = push(&mut nodes, Kind::Speech, parent);
+                    let n = &mut nodes[id.0 as usize];
+                    n.text = text;
+                    n.genoses = genoses;
+                    n.fields = fields;
+                    last_flow = Some(id);
+                    last_block = Some(id);
+                }
+                // An inline span of the last flow block, nested
+                // under the innermost earlier span that contains it.
+                Block::Span {
+                    kind,
+                    lo,
+                    hi,
+                    genoses,
+                    fields,
+                } => {
+                    let Some(flow) = last_flow else { continue };
+                    let text = nodes[flow.0 as usize]
+                        .text
+                        .get(lo as usize..hi as usize)
+                        .unwrap_or("")
+                        .to_string();
+                    let parent = enclosing_span(&nodes, flow, lo, hi).unwrap_or(flow);
+                    let id = push(&mut nodes, Kind::Span, parent);
+                    let n = &mut nodes[id.0 as usize];
+                    n.span_kind = Some(kind);
+                    n.at = Some((lo, hi));
+                    n.text = text;
+                    n.genoses = genoses;
+                    n.fields = fields;
+                }
+                Block::Character {
+                    lemma,
+                    onym,
+                    text,
+                    genoses,
+                } => {
+                    let parent = cursor(&sections, &containers, root);
+                    let id = push(&mut nodes, Kind::Character, parent);
+                    let n = &mut nodes[id.0 as usize];
+                    n.lemma = Some(normalize_ws(&lemma)).filter(|l| !l.is_empty());
+                    n.onym = onym;
+                    n.text = normalize_ws(&text);
+                    n.genoses = genoses;
+                    last_block = Some(id);
+                }
+                Block::Parsed {
+                    lo,
+                    hi,
+                    onym,
+                    parsings,
+                } => {
+                    let Some(flow) = last_flow else { continue };
+                    nodes[flow.0 as usize].declared_tokens.push(DeclaredToken {
+                        lo,
+                        hi,
+                        onym,
+                        parsings,
+                    });
+                }
+                Block::Periodos { lo, hi, id } => {
+                    let Some(flow) = last_flow else { continue };
+                    nodes[flow.0 as usize].declared_sentences.push((lo, hi, id));
+                }
+                Block::Milestone { scheme, value, at } => {
+                    let Some(flow) = last_flow else { continue };
+                    // `u32::MAX`: the milestone stood in a block with
+                    // no prose of its own — the end of the flow
+                    // block before it.
+                    let at = if at == u32::MAX {
+                        nodes[flow.0 as usize].text.len() as u32
+                    } else {
+                        at
+                    };
+                    let parent = enclosing_span(&nodes, flow, at, at).unwrap_or(flow);
+                    let id = push(&mut nodes, Kind::Milestone, parent);
+                    let n = &mut nodes[id.0 as usize];
+                    n.at = Some((at, at));
+                    n.fields = vec![("scheme".to_string(), scheme), ("value".to_string(), value)];
+                }
+                Block::Annotate { fields } => {
+                    if let Some(b) = last_block {
+                        nodes[b.0 as usize].fields.extend(fields);
+                    }
+                }
+                Block::Wear { genoses } => {
+                    if let Some(b) = last_block {
+                        let own = &mut nodes[b.0 as usize].genoses;
+                        for g in genoses {
+                            if !own.contains(&g) {
+                                own.push(g);
+                            }
+                        }
+                    }
                 }
                 Block::Text { text } => {
                     let text = normalize_ws(&text);
@@ -722,6 +1604,7 @@ impl TextModel {
                     onym,
                     family,
                     margin,
+                    at,
                 } => {
                     let parent = last_flow.unwrap_or(root);
                     // A declared family names the callout now; an
@@ -733,6 +1616,7 @@ impl TextModel {
                     n.deixis = true;
                     n.family_open = family.is_none();
                     n.margin = margin;
+                    n.at = at.map(|a| (a, a));
                     n.onym = Some(onym.trim().to_string()).filter(|o| !o.is_empty());
                 }
                 Block::Ref {
@@ -842,16 +1726,22 @@ impl TextModel {
         resolve_notes(&mut nodes);
         let onyms = resolve_refs(&mut nodes);
         flatten_prose(&mut nodes);
-        TextModel {
+        let mut model = TextModel {
             nodes,
             root,
             onyms,
             document_url: None,
             link_base: None,
             document_path: None,
+            cite_scheme: None,
+            orthography: None,
             bib_aliases: Default::default(),
             head: HeadMeta::default(),
-        }
+            token_index: Default::default(),
+            mentions: Vec::new(),
+        };
+        model.link_characters();
+        model
     }
 
     /// Register the bib-field alias census (alias → canonical
@@ -879,6 +1769,198 @@ impl TextModel {
     /// (a mount path, an archive member's path).
     pub fn set_document_path(&mut self, path: &str) {
         self.document_path = Some(path.to_string());
+    }
+
+    /// The scheme `::cite` reads (ruling #81): the mount's
+    /// `?scheme=`.
+    pub fn set_cite_scheme(&mut self, scheme: &str) {
+        self.cite_scheme = Some(scheme.to_string());
+    }
+
+    /// The spelling table the tokens fold through (ruling #82):
+    /// the mount's `?modernize=`. An unknown table is an error.
+    pub fn set_orthography(&mut self, table: &str) -> Result<(), String> {
+        quarb::translit::modernize("", table)?;
+        self.orthography = Some(table.to_string());
+        Ok(())
+    }
+
+    /// A token's modern spelling: the form through the mount's
+    /// spelling table, else the form itself.
+    fn modern(&self, form: &str) -> String {
+        match &self.orthography {
+            Some(t) => quarb::translit::modernize(form, t).unwrap_or_else(|_| form.to_string()),
+            None => form.to_string(),
+        }
+    }
+
+    /// A token's `::lower`: the modern spelling, case-folded.
+    fn lower(&self, form: &str) -> String {
+        self.modern(form).to_lowercase()
+    }
+
+    /// The document's milestones under the citation scheme, in
+    /// document order: (flow block, offset, milestone).
+    fn cite_table(&self) -> Vec<(NodeId, u32, NodeId)> {
+        let mut scheme = self.cite_scheme.clone();
+        let mut out = Vec::new();
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.kind != Kind::Milestone {
+                continue;
+            }
+            let this = n
+                .fields
+                .iter()
+                .find(|(k, _)| k == "scheme")
+                .map(|(_, v)| v.clone());
+            let Some(this) = this else { continue };
+            match &scheme {
+                None => scheme = Some(this),
+                Some(s) if *s != this => continue,
+                _ => {}
+            }
+            let at = n.at.map(|(a, _)| a).unwrap_or(0);
+            let mut block = NodeId(i as u64);
+            while self.nodes[block.0 as usize].kind == Kind::Span
+                || self.nodes[block.0 as usize].kind == Kind::Milestone
+            {
+                match self.nodes[block.0 as usize].parent {
+                    Some(p) => block = p,
+                    None => break,
+                }
+            }
+            out.push((block, at, NodeId(i as u64)));
+        }
+        out.sort_by_key(|(b, at, _)| (b.0, *at));
+        out
+    }
+
+    /// The citation in force at a node (ruling #81): the value of
+    /// the last milestone under the citation scheme at or before
+    /// the node's point in the document — a token's or a span's
+    /// offset in its block, a sentence's first token, a flow
+    /// block's start; a container (a section, the document) cites
+    /// as the first milestone inside it. Null where no milestone
+    /// governs.
+    fn cite(&self, node: NodeId) -> Option<String> {
+        let table = self.cite_table();
+        if table.is_empty() {
+            return self.structural_cite(node);
+        }
+        let n = &self.nodes[node.0 as usize];
+        let value = |m: NodeId| {
+            self.nodes[m.0 as usize]
+                .fields
+                .iter()
+                .find(|(k, _)| k == "value")
+                .map(|(_, v)| v.clone())
+        };
+        // Containers: the first milestone beneath.
+        let container = matches!(n.kind, Kind::Document | Kind::Section)
+            || (n.kind != Kind::Span
+                && n.kind != Kind::Milestone
+                && n.token.is_none()
+                && n.kind != Kind::Sentence
+                && !self.prose_blocks().contains(&node)
+                && !n.children.is_empty()
+                && n.prose.is_empty());
+        if container {
+            let inside = |mut b: NodeId| {
+                loop {
+                    if b == node {
+                        return true;
+                    }
+                    match self.nodes[b.0 as usize].parent {
+                        Some(p) => b = p,
+                        None => return false,
+                    }
+                }
+            };
+            return table
+                .iter()
+                .find(|(b, _, _)| inside(*b))
+                .and_then(|(_, _, m)| value(*m));
+        }
+        // A note body, and everything in it, cites as its callout.
+        let body = if matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) && !n.deixis {
+            Some(node)
+        } else {
+            self.note_body_of(node)
+        };
+        if let Some(body) = body {
+            let callout = (0..self.nodes.len())
+                .find(|&i| self.nodes[i].deixis && self.nodes[i].note_edge == Some(body))
+                .map(|i| NodeId(i as u64));
+            return callout.and_then(|c| self.cite(c));
+        }
+        // Everything else: its point in the document.
+        let (block, at) = match n.kind {
+            _ if n.deixis && n.at.is_some() => {
+                (n.parent.unwrap_or(node), n.at.map(|(a, _)| a).unwrap_or(0))
+            }
+            Kind::Milestone | Kind::Span => {
+                let mut b = node;
+                while matches!(self.nodes[b.0 as usize].kind, Kind::Span | Kind::Milestone) {
+                    match self.nodes[b.0 as usize].parent {
+                        Some(p) => b = p,
+                        None => break,
+                    }
+                }
+                (b, n.at.map(|(a, _)| a).unwrap_or(0))
+            }
+            _ if n.token.is_some() => {
+                let mut b = node;
+                while self.nodes[b.0 as usize].token.is_some()
+                    || self.nodes[b.0 as usize].kind == Kind::Sentence
+                {
+                    match self.nodes[b.0 as usize].parent {
+                        Some(p) => b = p,
+                        None => break,
+                    }
+                }
+                (b, n.token.as_ref().map(|t| t.at).unwrap_or(0))
+            }
+            Kind::Sentence if n.derived => {
+                let mut toks = Vec::new();
+                self.collect_tokens(node, &mut toks);
+                let at = toks
+                    .first()
+                    .and_then(|t| self.nodes[t.0 as usize].token.as_ref().map(|t| t.at))
+                    .unwrap_or(0);
+                (n.parent.unwrap_or(node), at)
+            }
+            _ => (node, 0),
+        };
+        table
+            .iter()
+            .rev()
+            .find(|(b, a, _)| (b.0, *a) <= (block.0, at))
+            .and_then(|(_, _, m)| value(*m))
+            .or_else(|| self.structural_cite(node))
+    }
+
+    /// The citation a text without milestones still has: the
+    /// enclosing sections' names from the outermost in, joined by
+    /// " / " — a chapter, an act and its scene. Null at the root.
+    fn structural_cite(&self, node: NodeId) -> Option<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            let node = &self.nodes[n.0 as usize];
+            if node.kind == Kind::Section
+                && let Some(l) = &node.lemma
+                && !l.is_empty()
+            {
+                names.push(l.clone());
+            }
+            cur = node.parent;
+        }
+        if names.is_empty() {
+            return None;
+        }
+        names.reverse();
+        Some(names.join(" / "))
     }
 
     /// The base `::href` links against: the document's URL, else
@@ -1159,6 +2241,1308 @@ fn cursor(sections: &[NodeId], containers: &[NodeId], root: NodeId) -> NodeId {
         .unwrap_or(root)
 }
 
+impl TextModel {
+    /// The corpus reading (ruling #62): give every prose block its
+    /// tokens as children. Segmentation is UAX #29 word boundaries
+    /// (the standard `sentences` already follows): `don’t`, `Tom’s`
+    /// and `3,000` are one token each, an em dash is its own, and
+    /// whitespace is none. Positions and sentence ordinals count
+    /// through the document in reading order. The block's own
+    /// `::` is unchanged; the tokens sit after any children it
+    /// already had (an inline ref, a callout).
+    /// The literary reading's cast layer (ruling #79): declare the
+    /// characters a cast table names (those the source did not),
+    /// annotate every word token a row's pattern matches with the
+    /// row's id as its `prosopon`, then resolve every mention to
+    /// its character.
+    pub fn apply_cast(&mut self, rows: &[CastRow]) {
+        for row in rows {
+            let known = self
+                .nodes
+                .iter()
+                .any(|n| n.kind == Kind::Character && n.onym.as_deref() == Some(row.id.as_str()));
+            if known {
+                continue;
+            }
+            let root = NodeId(0);
+            let id = push(&mut self.nodes, Kind::Character, root);
+            let n = &mut self.nodes[id.0 as usize];
+            n.lemma = Some(row.name.clone()).filter(|l| !l.is_empty());
+            n.onym = Some(row.id.clone());
+            n.fields = row.fields.clone();
+        }
+        // A pattern of several words ("Aunt Polly") matches a run
+        // of word tokens under one parent, joined by a space; the
+        // run's first token carries the mention.
+        let patterns: Vec<(&CastRow, &regex::Regex, usize)> = rows
+            .iter()
+            .filter_map(|r| r.pattern.as_ref().map(|p| (r, p, r.words.max(1))))
+            .collect();
+        let widest = patterns.iter().map(|(_, _, w)| *w).max().unwrap_or(0);
+        if widest > 0 {
+            let words: Vec<usize> = (0..self.nodes.len())
+                .filter(|&i| {
+                    self.nodes[i]
+                        .token
+                        .as_ref()
+                        .is_some_and(|t| t.class == TokenClass::Word)
+                })
+                .collect();
+            for (k, &i) in words.iter().enumerate() {
+                if self.nodes[i].fields.iter().any(|(k, _)| k == "prosopon") {
+                    continue;
+                }
+                let mut run = vec![self.nodes[i].text.as_str()];
+                for &j in words.iter().skip(k + 1).take(widest - 1) {
+                    if self.nodes[j].parent != self.nodes[i].parent {
+                        break;
+                    }
+                    run.push(self.nodes[j].text.as_str());
+                }
+                // A pattern whose alternatives differ in length
+                // ("Tom|Tom Sawyer") is tried from its widest run
+                // down to one token.
+                let hit = patterns.iter().find(|(_, p, w)| {
+                    (1..=(*w).min(run.len()))
+                        .rev()
+                        .any(|n| p.is_match(&run[..n].join(" ")))
+                });
+                if let Some((row, _, _)) = hit {
+                    self.nodes[i]
+                        .fields
+                        .push(("prosopon".to_string(), row.id.clone()));
+                }
+            }
+        }
+        // A coreference chain (a `cluster` column, the source's
+        // chain id): every mention of the chain is the character's,
+        // its first token carrying the mention.
+        let chains: Vec<(&CastRow, &str)> = rows
+            .iter()
+            .filter_map(|r| {
+                r.fields
+                    .iter()
+                    .find(|(k, _)| k == "cluster" || k == "chain")
+                    .map(|(_, v)| (r, v.as_str()))
+            })
+            .collect();
+        if !chains.is_empty() {
+            let firsts: Vec<(NodeId, String)> = self
+                .mentions
+                .iter()
+                .filter_map(|m| {
+                    let c = m.cluster.as_deref()?;
+                    let (row, _) = chains.iter().find(|(_, id)| *id == c)?;
+                    Some((*m.tokens.first()?, row.id.clone()))
+                })
+                .collect();
+            for (t, id) in firsts {
+                let f = &mut self.nodes[t.0 as usize].fields;
+                if !f.iter().any(|(k, _)| k == "prosopon") {
+                    f.push(("prosopon".to_string(), id));
+                }
+            }
+        }
+        // A play's speech names its speaker by the label the source
+        // printed (its lemma): a label a pattern matches is that
+        // character's speech.
+        if !patterns.is_empty() {
+            for i in 0..self.nodes.len() {
+                let n = &self.nodes[i];
+                if n.kind != Kind::Dialogue || n.fields.iter().any(|(k, _)| k == "prosopon") {
+                    continue;
+                }
+                let Some(label) = n.lemma.clone() else {
+                    continue;
+                };
+                if let Some((row, _, _)) = patterns.iter().find(|(_, p, _)| p.is_match(&label)) {
+                    self.nodes[i]
+                        .fields
+                        .push(("prosopon".to_string(), row.id.clone()));
+                }
+            }
+        }
+        self.link_characters();
+    }
+
+    /// Resolve `->character`: every node whose own `prosopon`
+    /// names a declared character links to it, and the character
+    /// lists it among its mentions.
+    fn link_characters(&mut self) {
+        let mut by_onym: std::collections::HashMap<String, NodeId> =
+            std::collections::HashMap::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.kind == Kind::Character
+                && let Some(o) = &n.onym
+            {
+                by_onym.entry(o.clone()).or_insert(NodeId(i as u64));
+            }
+        }
+        for n in &mut self.nodes {
+            n.mentions.clear();
+        }
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].kind == Kind::Character {
+                continue;
+            }
+            let target = self.nodes[i]
+                .fields
+                .iter()
+                .find(|(k, _)| k == "prosopon")
+                .and_then(|(_, v)| by_onym.get(v).copied());
+            self.nodes[i].character = target;
+            if let Some(c) = target {
+                self.nodes[c.0 as usize].mentions.push(NodeId(i as u64));
+            }
+        }
+    }
+
+    /// The literary reading's gazetteer (ruling #87): a places
+    /// table declares the places a source names, as a cast table
+    /// declares its people. Each row is a `place` node under the
+    /// root (`::lemma` its name, `::onym` its id, every other
+    /// column a field — `::lat`, `::lon`, `::kind`); a word token a
+    /// row's pattern matches answers the row's id as `::chora` and
+    /// reaches the place as `->place`, and the place reaches its
+    /// mentions back as `<-place`.
+    pub fn apply_places(&mut self, rows: &[CastRow]) {
+        for row in rows {
+            let known = self
+                .nodes
+                .iter()
+                .any(|n| n.kind == Kind::Place && n.onym.as_deref() == Some(row.id.as_str()));
+            if known {
+                continue;
+            }
+            let root = NodeId(0);
+            let id = push(&mut self.nodes, Kind::Place, root);
+            let n = &mut self.nodes[id.0 as usize];
+            n.lemma = Some(row.name.clone()).filter(|l| !l.is_empty());
+            n.onym = Some(row.id.clone());
+            n.fields = row.fields.clone();
+        }
+        let patterns: Vec<(&CastRow, &regex::Regex, usize)> = rows
+            .iter()
+            .filter_map(|r| r.pattern.as_ref().map(|p| (r, p, r.words.max(1))))
+            .collect();
+        let widest = patterns.iter().map(|(_, _, w)| *w).max().unwrap_or(0);
+        if widest > 0 {
+            let words: Vec<usize> = (0..self.nodes.len())
+                .filter(|&i| {
+                    self.nodes[i]
+                        .token
+                        .as_ref()
+                        .is_some_and(|t| t.class == TokenClass::Word)
+                })
+                .collect();
+            for (k, &i) in words.iter().enumerate() {
+                if self.nodes[i].fields.iter().any(|(k, _)| k == "chora") {
+                    continue;
+                }
+                let mut run = vec![self.nodes[i].text.as_str()];
+                for &j in words.iter().skip(k + 1).take(widest - 1) {
+                    if self.nodes[j].parent != self.nodes[i].parent {
+                        break;
+                    }
+                    run.push(self.nodes[j].text.as_str());
+                }
+                // A pattern whose alternatives differ in length
+                // ("Tom|Tom Sawyer") is tried from its widest run
+                // down to one token.
+                let hit = patterns.iter().find(|(_, p, w)| {
+                    (1..=(*w).min(run.len()))
+                        .rev()
+                        .any(|n| p.is_match(&run[..n].join(" ")))
+                });
+                if let Some((row, _, _)) = hit {
+                    self.nodes[i]
+                        .fields
+                        .push(("chora".to_string(), row.id.clone()));
+                }
+            }
+        }
+        self.link_places();
+    }
+
+    /// Resolve `->place`: every node whose own `chora` names a
+    /// declared place links to it, and the place lists it among
+    /// its mentions.
+    fn link_places(&mut self) {
+        let mut by_onym: std::collections::HashMap<String, NodeId> =
+            std::collections::HashMap::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.kind == Kind::Place
+                && let Some(o) = &n.onym
+            {
+                by_onym.entry(o.clone()).or_insert(NodeId(i as u64));
+            }
+        }
+        for n in &mut self.nodes {
+            if n.kind == Kind::Place {
+                n.mentions.clear();
+            }
+        }
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].kind == Kind::Place {
+                continue;
+            }
+            let target = self.nodes[i]
+                .fields
+                .iter()
+                .find(|(k, _)| k == "chora")
+                .and_then(|(_, v)| by_onym.get(v).copied());
+            self.nodes[i].place = target;
+            if let Some(c) = target {
+                self.nodes[c.0 as usize].mentions.push(NodeId(i as u64));
+            }
+        }
+    }
+
+    pub fn tokenize(&mut self) {
+        self.tokenize_with(None)
+    }
+
+    /// The prose blocks the corpus reading tokenizes, in reading
+    /// order.
+    fn prose_blocks(&self) -> Vec<NodeId> {
+        (0..self.nodes.len())
+            .filter(|&id| {
+                let node = &self.nodes[id];
+                let prose_block = match node.kind {
+                    // A treebank paragraph delegates to its declared
+                    // sentences (ruling #63); the sentences the
+                    // corpus reading derives beneath a block (ruling
+                    // #64) are annotation, not blocks.
+                    Kind::Paragraph => !node.children.iter().any(|c| {
+                        let c = &self.nodes[c.0 as usize];
+                        c.kind == Kind::Sentence && !c.derived
+                    }),
+                    Kind::Sentence => !node.derived,
+                    Kind::UnorderedItem | Kind::OrderedItem | Kind::Stichos => true,
+                    Kind::Speech | Kind::Dialogue => true,
+                    Kind::Footnote | Kind::Endnote | Kind::Aside => !node.deixis,
+                    _ => false,
+                };
+                prose_block && !node.prose.is_empty() && !self.in_apparatus(NodeId(id as u64))
+            })
+            .map(|id| NodeId(id as u64))
+            .collect()
+    }
+
+    /// The note body a node stands in, if any: the nearest
+    /// ancestor that is a footnote, endnote or aside body (not the
+    /// callout). The corpus reading tokenizes the text, not the
+    /// apparatus; a node in a body cites as the body's callout.
+    fn note_body_of(&self, node: NodeId) -> Option<NodeId> {
+        let mut cur = self.nodes[node.0 as usize].parent;
+        while let Some(p) = cur {
+            let n = &self.nodes[p.0 as usize];
+            if matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) && !n.deixis {
+                return Some(p);
+            }
+            cur = n.parent;
+        }
+        None
+    }
+
+    fn in_apparatus(&self, node: NodeId) -> bool {
+        let n = &self.nodes[node.0 as usize];
+        (matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) && !n.deixis)
+            || self.note_body_of(node).is_some()
+    }
+
+    /// The document's prose as one text — every prose block's `::`,
+    /// blank-line separated, in reading order — the text an
+    /// external annotator reads and a CoNLL-U source aligns to.
+    pub fn corpus_text(&self) -> String {
+        self.prose_blocks()
+            .iter()
+            .map(|&b| self.nodes[b.0 as usize].prose.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Whether the corpus reading's tokens are already in place.
+    pub fn is_tokenized(&self) -> bool {
+        self.nodes.iter().any(|n| n.kind == Kind::Token)
+    }
+
+    /// [`tokenize`](Self::tokenize) with sentence bonds: a `.desm`
+    /// set (the `syndesmos` crate) whose abbreviations and patterns
+    /// undo UAX #29 breaks.
+    pub fn tokenize_with(&mut self, bonds: Option<&syndesmos::Syndesmos>) {
+        use unicode_segmentation::UnicodeSegmentation;
+        self.token_index = Default::default();
+        let mut n: u32 = 0;
+        let mut sentence: u32 = 0;
+        for block in self.prose_blocks() {
+            let id = block.0 as usize;
+            let prose = self.nodes[id].prose.clone();
+            // The sentence tier (ruling #64): one derived sentence
+            // node per span, under the block; a block the
+            // segmenter leaves whole is one sentence.
+            // The parsing pack (ruling #80): the source's own
+            // sentences and tokens stand in for the segmenter's
+            // where the source declared them.
+            let declared_sentences = std::mem::take(&mut self.nodes[id].declared_sentences);
+            let mut declared_tokens = std::mem::take(&mut self.nodes[id].declared_tokens);
+            declared_tokens.sort_by_key(|t| t.lo);
+            let mut spans = if declared_sentences.is_empty() {
+                sentence_spans(&prose, bonds)
+            } else {
+                declared_sentences
+                    .iter()
+                    .map(|(lo, hi, _)| (*lo as usize, *hi as usize))
+                    .filter(|(lo, hi)| lo < hi && *hi <= prose.len())
+                    .collect()
+            };
+            if spans.is_empty() {
+                spans.push((0, prose.len()));
+            }
+            let sentence_ids: Vec<Option<String>> = if declared_sentences.is_empty() {
+                Vec::new()
+            } else {
+                declared_sentences
+                    .iter()
+                    .map(|(_, _, sid)| Some(sid.clone()))
+                    .collect()
+            };
+            let sentences: Vec<(usize, usize, u32, NodeId)> = spans
+                .into_iter()
+                .enumerate()
+                .map(|(k, (lo, hi))| {
+                    sentence += 1;
+                    let node = self.push_derived_sentence(block, &prose[lo..hi], sentence);
+                    if let Some(Some(sid)) = sentence_ids.get(k) {
+                        self.nodes[node.0 as usize]
+                            .fields
+                            .push(("sent_id".to_string(), sid.clone()));
+                    }
+                    (lo, hi, sentence, node)
+                })
+                .collect();
+            // Declared tokens by onym, for the heads.
+            let mut by_onym: Vec<(String, NodeId)> = Vec::new();
+            let mut heads: Vec<(NodeId, String)> = Vec::new();
+            let mut next_declared = 0usize;
+            let mut skip_until = 0usize;
+            for (at, seg) in prose.split_word_bound_indices() {
+                if at < skip_until {
+                    continue;
+                }
+                // A declared token starting here takes the place
+                // of the segmenter's, however many word bounds
+                // it spans.
+                while next_declared < declared_tokens.len()
+                    && (declared_tokens[next_declared].lo as usize) < at
+                {
+                    next_declared += 1;
+                }
+                if let Some(d) = declared_tokens.get(next_declared)
+                    && d.lo as usize == at
+                    && (d.hi as usize) > at
+                    && (d.hi as usize) <= prose.len()
+                {
+                    let d = d.clone();
+                    next_declared += 1;
+                    skip_until = d.hi as usize;
+                    let form = &prose[d.lo as usize..d.hi as usize];
+                    n += 1;
+                    let (in_sentence, span, parent) = sentences
+                        .iter()
+                        .find(|(lo, hi, _, _)| *lo <= at && at < *hi)
+                        .or_else(|| sentences.last())
+                        .map(|(lo, hi, s, node)| (*s, (*lo as u32, *hi as u32), *node))
+                        .expect("a block has at least one sentence");
+                    let tok = self.push_parsed(parent, form, &d, n, in_sentence);
+                    if let Some(t) = self.nodes[tok.0 as usize].token.as_mut() {
+                        t.span = span;
+                        t.at = at as u32;
+                    }
+                    if let Some(o) = &d.onym {
+                        by_onym.push((o.clone(), tok));
+                    }
+                    if let Some(h) = d.parsings.first().and_then(|p| p.kephale.clone()) {
+                        heads.push((tok, h));
+                    }
+                    continue;
+                }
+                if seg.chars().all(char::is_whitespace) {
+                    continue;
+                }
+                let class = class_of(seg);
+                n += 1;
+                let (in_sentence, span, parent) = sentences
+                    .iter()
+                    .find(|(lo, hi, _, _)| *lo <= at && at < *hi)
+                    .or_else(|| sentences.last())
+                    .map(|(lo, hi, s, node)| (*s, (*lo as u32, *hi as u32), *node))
+                    .expect("a block has at least one sentence");
+                let tok = push(&mut self.nodes, Kind::Token, parent);
+                let t = &mut self.nodes[tok.0 as usize];
+                t.text = seg.to_string();
+                t.prose = seg.to_string();
+                t.token = Some(TokenInfo {
+                    class,
+                    n,
+                    sentence: in_sentence,
+                    span,
+                    annot: None,
+                    at: at as u32,
+                    spans: Vec::new(),
+                });
+            }
+            // The declared heads (`->head`, `<-head`), by onym.
+            for (tok, h) in heads {
+                let Some((_, head)) = by_onym.iter().find(|(o, _)| *o == h) else {
+                    continue;
+                };
+                let head = *head;
+                if let Some(a) = self.nodes[tok.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.head = Some(head);
+                }
+                if let Some(a) = self.nodes[head.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.dependents.push(tok);
+                }
+            }
+        }
+        self.attribute_spans();
+    }
+
+    /// A token the source parsed (ruling #80): the annotation the
+    /// CoNLL-U reading would carry, from the first parsing —
+    /// `::lemma` the lexema, `::upos`/`::xpos` the meros (split on
+    /// `/`), `::feats` the parepomena with every `Key=Value` a
+    /// property, `::deprel` the schesis, `::sem` the semasia; the
+    /// alternative parsings answer as `::alt`, lemma and meros
+    /// joined, one per parsing.
+    fn push_parsed(
+        &mut self,
+        sentence_node: NodeId,
+        form: &str,
+        d: &DeclaredToken,
+        n: u32,
+        sentence: u32,
+    ) -> NodeId {
+        let node = push(&mut self.nodes, Kind::Token, sentence_node);
+        let t = &mut self.nodes[node.0 as usize];
+        t.text = form.to_string();
+        t.prose = form.to_string();
+        let first = d.parsings.first().cloned().unwrap_or_default();
+        let (upos, xpos) = match first.meros.as_deref() {
+            Some(m) => match m.split_once('/') {
+                Some((u, x)) => (Some(u.to_string()), Some(x.to_string())),
+                None => (Some(m.to_string()), None),
+            },
+            None => (None, None),
+        };
+        let feats = first.parepomena.clone();
+        // `Key=Value` features (TEI's msd, UD) answer under their
+        // keys; a tagset's bare grammemes (RNC's `m,anim=sg,nom`)
+        // stay the raw `::feats`.
+        let mut keys = match feats.as_deref() {
+            Some(f) if f.split([',', '|']).all(|p| p.contains('=')) => {
+                key_values(&f.replace(',', "|"))
+            }
+            _ => Vec::new(),
+        };
+        if let Some(sem) = &first.semasia {
+            keys.push(("sem".to_string(), sem.clone()));
+        }
+        for alt in d.parsings.iter().skip(1) {
+            let mut v = alt.lexema.clone().unwrap_or_default();
+            if let Some(m) = &alt.meros {
+                v.push(' ');
+                v.push_str(m);
+            }
+            if let Some(f) = &alt.parepomena {
+                v.push(' ');
+                v.push_str(f);
+            }
+            keys.push(("alt".to_string(), v.trim().to_string()));
+        }
+        t.token = Some(TokenInfo {
+            class: class_of_annotated(form, upos.as_deref().unwrap_or("")),
+            n,
+            sentence,
+            span: (0, 0),
+            at: 0,
+            spans: Vec::new(),
+            annot: Some(Box::new(Annot {
+                id: d.onym.clone().unwrap_or_else(|| n.to_string()),
+                lemma: first.lexema.clone(),
+                upos,
+                xpos,
+                feats,
+                deprel: first.schesis.clone(),
+                deps: None,
+                misc: None,
+                keys,
+                mwt: None,
+                empty: false,
+                head: None,
+                dependents: Vec::new(),
+                eheads: Vec::new(),
+                edependents: Vec::new(),
+                mentions: Vec::new(),
+            })),
+        });
+        node
+    }
+
+    /// The literary reading: give every span the tokens its byte
+    /// range covers (`->token`), and every token its spans,
+    /// outermost first — after the tokens exist.
+    fn attribute_spans(&mut self) {
+        let spans: Vec<NodeId> = (0..self.nodes.len())
+            .filter(|&i| self.nodes[i].kind == Kind::Span && self.nodes[i].at.is_some())
+            .map(|i| NodeId(i as u64))
+            .collect();
+        if spans.is_empty() {
+            return;
+        }
+        for span in spans {
+            let (lo, hi) = self.nodes[span.0 as usize].at.expect("filtered");
+            // The flow block the span belongs to: up past the
+            // enclosing spans.
+            let mut block = span;
+            while self.nodes[block.0 as usize].kind == Kind::Span
+                && let Some(p) = self.nodes[block.0 as usize].parent
+            {
+                block = p;
+            }
+            let mut tokens = Vec::new();
+            self.collect_tokens(block, &mut tokens);
+            let covered: Vec<NodeId> = tokens
+                .into_iter()
+                .filter(|t| {
+                    let at = self.nodes[t.0 as usize].token.as_ref().map(|t| t.at);
+                    at.is_some_and(|at| lo <= at && at < hi)
+                })
+                .collect();
+            for &t in &covered {
+                if let Some(info) = self.nodes[t.0 as usize].token.as_mut()
+                    && !info.spans.contains(&span)
+                {
+                    info.spans.push(span);
+                }
+            }
+            self.nodes[span.0 as usize].span_tokens = covered;
+        }
+        // Spans are pushed in pre-order, so node order is outermost
+        // first.
+        for n in self.nodes.iter_mut() {
+            if let Some(t) = n.token.as_mut() {
+                t.spans.sort();
+            }
+        }
+    }
+
+    fn collect_tokens(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        for &c in &self.nodes[node.0 as usize].children {
+            let n = &self.nodes[c.0 as usize];
+            if n.token.is_some() {
+                out.push(c);
+            } else if n.kind == Kind::Sentence {
+                self.collect_tokens(c, out);
+            }
+        }
+    }
+
+    /// One sentence of the corpus reading's sentence tier (ruling
+    /// #64), under `block`: a `sentence` node the segmentation in
+    /// force derived, its `::` the span's text, its ordinal the
+    /// document-wide sentence count. Annotation, never a block:
+    /// the block's own prose is unchanged and the renderers never
+    /// see it.
+    fn push_derived_sentence(&mut self, block: NodeId, text: &str, ordinal: u32) -> NodeId {
+        let node = push(&mut self.nodes, Kind::Sentence, block);
+        let s = &mut self.nodes[node.0 as usize];
+        s.text = text.trim().to_string();
+        s.prose = s.text.clone();
+        s.taxis = Some(ordinal as i64);
+        s.derived = true;
+        node
+    }
+
+    /// The corpus reading from a CoNLL-U annotation (ruling #62's
+    /// second layer; ruling #63 carries every column): the
+    /// source's sentences and tokens replace the built-in
+    /// segmentation wholesale, aligned to the document's prose by
+    /// character offset — each token's form is found at the
+    /// cursor, whitespace skipped — and every token carries the
+    /// source's lemma, parts of speech, features, dependency
+    /// relation, head edge, enhanced heads and miscellany. A form
+    /// that does not align is an error naming the offset: the
+    /// annotation must be of this text. A multiword range (`1-2
+    /// don't`) aligns as the unit and its syntactic words share its
+    /// span; an empty node (`8.1`) is not in the text and consumes
+    /// none of it.
+    pub fn annotate_conllu(&mut self, conllu: &str) -> Result<(), String> {
+        if self.is_tokenized() {
+            return Err("the document is already tokenized".into());
+        }
+        self.token_index = Default::default();
+        let blocks = self.prose_blocks();
+        // The document text and each block's range in it.
+        let mut doc = String::new();
+        let mut ranges: Vec<(usize, usize, NodeId)> = Vec::new();
+        for (i, &b) in blocks.iter().enumerate() {
+            if i > 0 {
+                doc.push_str("\n\n");
+            }
+            let lo = doc.len();
+            doc.push_str(&self.nodes[b.0 as usize].prose);
+            ranges.push((lo, doc.len(), b));
+        }
+        if ranges.is_empty() {
+            return Err("the document has no prose to annotate".into());
+        }
+        let parsed = parse_conllu(conllu)?;
+        let mut cursor = 0usize;
+        let mut block_at = 0usize;
+        let mut n: u32 = 0;
+        for (si, sent) in parsed.sentences.iter().enumerate() {
+            let ordinal = si as u32 + 1;
+            let mut made: Vec<(NodeId, &ConlluToken)> = Vec::new();
+            // The (block, lo, hi) extents the sentence covers — and
+            // the sentence node under each block (ruling #64): a
+            // sentence the annotator runs across a block boundary
+            // is one node per block, sharing the ordinal.
+            let mut extents: Vec<(NodeId, usize, usize)> = Vec::new();
+            let mut nodes_by_block: Vec<(NodeId, NodeId)> = Vec::new();
+            // A multiword range in force: its span, last word id,
+            // id and surface form.
+            let mut range: Option<(usize, usize, u32, String, String)> = None;
+            for tok in &sent.tokens {
+                // A whitespace-only form (a tool's SPACE token) is
+                // no token of the text.
+                if !tok.empty && tok.form.trim().is_empty() {
+                    continue;
+                }
+                let (lo, hi, mwt) = if tok.empty {
+                    (cursor, cursor, None)
+                } else if let Some((lo, hi, until, id, form)) = &range
+                    && tok.range.is_none()
+                    && tok.ord <= *until
+                {
+                    (*lo, *hi, Some((id.clone(), form.clone())))
+                } else {
+                    range = None;
+                    while doc[cursor..].starts_with(char::is_whitespace) {
+                        cursor += doc[cursor..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    if !doc[cursor..].starts_with(tok.form.as_str()) {
+                        let seen: String = doc[cursor..].chars().take(24).collect();
+                        return Err(format!(
+                            "CoNLL-U sentence {ordinal}, token {}: {:?} does not align with the text at offset {cursor} ({seen:?})",
+                            tok.id, tok.form
+                        ));
+                    }
+                    let lo = cursor;
+                    cursor += tok.form.len();
+                    if let Some((_, b)) = tok.range {
+                        range = Some((lo, cursor, b, tok.id.clone(), tok.form.clone()));
+                        continue;
+                    }
+                    (lo, cursor, None)
+                };
+                if !tok.empty {
+                    while block_at + 1 < ranges.len() && lo >= ranges[block_at].1 {
+                        block_at += 1;
+                    }
+                }
+                let (blo, _, block) = ranges[block_at];
+                if !tok.empty {
+                    n += 1;
+                }
+                let sentence_node = match nodes_by_block.iter().find(|(b, _)| *b == block) {
+                    Some((_, s)) => *s,
+                    None => {
+                        let s = self.push_derived_sentence(block, "", ordinal);
+                        nodes_by_block.push((block, s));
+                        s
+                    }
+                };
+                let node = self.push_annotated(
+                    sentence_node,
+                    tok,
+                    if tok.empty { 0 } else { n },
+                    ordinal,
+                    mwt,
+                );
+                if !tok.empty {
+                    match extents.iter_mut().find(|(b, _, _)| *b == block) {
+                        Some(e) => {
+                            e.1 = e.1.min(lo - blo);
+                            e.2 = e.2.max(hi - blo);
+                        }
+                        None => extents.push((block, lo - blo, hi - blo)),
+                    }
+                    if let Some(t) = self.nodes[node.0 as usize].token.as_mut() {
+                        t.at = (lo - blo) as u32;
+                    }
+                }
+                made.push((node, tok));
+            }
+            // The sentence's span per block — on its node's text
+            // and on each token — then the edges.
+            for (block, s) in &nodes_by_block {
+                if let Some((_, lo, hi)) = extents.iter().find(|(b, _, _)| b == block) {
+                    let text = self.nodes[block.0 as usize].prose[*lo..*hi]
+                        .trim()
+                        .to_string();
+                    let sn = &mut self.nodes[s.0 as usize];
+                    sn.text = text.clone();
+                    sn.prose = text;
+                }
+            }
+            for (node, _) in &made {
+                let sentence_node = self.nodes[node.0 as usize]
+                    .parent
+                    .expect("token has a sentence");
+                let block = self.nodes[sentence_node.0 as usize]
+                    .parent
+                    .expect("sentence has a block");
+                if let Some((_, lo, hi)) = extents.iter().find(|(b, _, _)| *b == block)
+                    && let Some(t) = self.nodes[node.0 as usize].token.as_mut()
+                {
+                    t.span = (*lo as u32, *hi as u32);
+                }
+            }
+            self.link_sentence(&made);
+        }
+        let header = parsed
+            .globals
+            .iter()
+            .find(|(k, _)| k == "Entity")
+            .map(|(_, v)| v.as_str());
+        self.decode_mentions(header);
+        Ok(())
+    }
+
+    /// A treebank read as a document (ruling #63): the file is the
+    /// root; `# newdoc` opens a section, `# newpar` a paragraph,
+    /// each sentence block a `sentence` node whose `::` is its
+    /// `# text` (else the forms joined per `SpaceAfter`) and whose
+    /// comments answer as properties. No tokens: the reading a
+    /// bare `.conllu` or `text:` takes.
+    pub fn parse_conllu_text(text: &str) -> Result<Self, String> {
+        Self::from_conllu_set(&[(None, text)], false)
+    }
+
+    /// A treebank read as a corpus: [`parse_conllu_text`]'s
+    /// document with the file's own tokens as each sentence's
+    /// children, in id order, every column carried — the reading
+    /// `corpus:` takes on a `.conllu`.
+    ///
+    /// [`parse_conllu_text`]: Self::parse_conllu_text
+    pub fn parse_conllu_corpus(text: &str) -> Result<Self, String> {
+        Self::from_conllu_set(&[(None, text)], true)
+    }
+
+    /// A set of treebank files read as one document — a UD
+    /// treebank's train / dev / test files, a release directory:
+    /// each file a level-1 `section` under the root whose
+    /// `::lemma` is the name given, the file's own `# newdoc`
+    /// sections nested beneath it. No tokens, as
+    /// [`parse_conllu_text`](Self::parse_conllu_text).
+    pub fn parse_conllu_text_set(files: &[(&str, &str)]) -> Result<Self, String> {
+        let named: Vec<(Option<&str>, &str)> = files.iter().map(|(n, t)| (Some(*n), *t)).collect();
+        Self::from_conllu_set(&named, false)
+    }
+
+    /// [`parse_conllu_text_set`](Self::parse_conllu_text_set) with
+    /// every file's tokens under its sentences: token positions,
+    /// sentence ordinals and mention ordinals run across the whole
+    /// set, as they do across one file.
+    pub fn parse_conllu_corpus_set(files: &[(&str, &str)]) -> Result<Self, String> {
+        let named: Vec<(Option<&str>, &str)> = files.iter().map(|(n, t)| (Some(*n), *t)).collect();
+        Self::from_conllu_set(&named, true)
+    }
+
+    fn from_conllu_set(files: &[(Option<&str>, &str)], tokens: bool) -> Result<Self, String> {
+        let mut parsed: Vec<(Option<&str>, ConlluDoc)> = Vec::with_capacity(files.len());
+        for (name, text) in files {
+            let doc = parse_conllu(text).map_err(|e| match name {
+                Some(n) => format!("{n}: {e}"),
+                None => e,
+            })?;
+            parsed.push((*name, doc));
+        }
+        let mut nodes = vec![Node::new(Kind::Document, None)];
+        let root = NodeId(0);
+        // Every sentence node, with the file and sentence it came from.
+        let mut sentences: Vec<(NodeId, usize, usize)> = Vec::new();
+        for (fi, (name, doc)) in parsed.iter().enumerate() {
+            let (base, doc_level) = match name {
+                Some(n) => {
+                    let sec = push(&mut nodes, Kind::Section, root);
+                    nodes[sec.0 as usize].lemma = Some(n.to_string());
+                    nodes[sec.0 as usize].level = Some(1);
+                    (sec, 2)
+                }
+                None => (root, 1),
+            };
+            let mut section: Option<NodeId> = None;
+            let mut para: Option<NodeId> = None;
+            for (si, s) in doc.sentences.iter().enumerate() {
+                if let Some(id) = &s.newdoc {
+                    let sec = push(&mut nodes, Kind::Section, base);
+                    nodes[sec.0 as usize].lemma = id.clone();
+                    nodes[sec.0 as usize].level = Some(doc_level);
+                    section = Some(sec);
+                    para = None;
+                }
+                if s.newpar.is_some() {
+                    let p = push(&mut nodes, Kind::Paragraph, section.unwrap_or(base));
+                    para = Some(p);
+                }
+                let parent = para.or(section).unwrap_or(base);
+                let sent = push(&mut nodes, Kind::Sentence, parent);
+                nodes[sent.0 as usize].taxis = Some(sentences.len() as i64 + 1);
+                let text = s
+                    .comments
+                    .iter()
+                    .find(|(k, _)| k == "text")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| conllu_surface(&s.tokens));
+                nodes[sent.0 as usize].text = text;
+                nodes[sent.0 as usize].fields = s.comments.clone();
+                sentences.push((sent, fi, si));
+            }
+        }
+        flatten_prose(&mut nodes);
+        let mut model = TextModel {
+            nodes,
+            root,
+            onyms: Default::default(),
+            document_url: None,
+            link_base: None,
+            document_path: None,
+            cite_scheme: None,
+            orthography: None,
+            bib_aliases: Default::default(),
+            head: HeadMeta::default(),
+            token_index: Default::default(),
+            mentions: Vec::new(),
+        };
+        if tokens {
+            let mut n: u32 = 0;
+            for (i, (sent, fi, si)) in sentences.into_iter().enumerate() {
+                let s = &parsed[fi].1.sentences[si];
+                let ordinal = i as u32 + 1;
+                let len = model.nodes[sent.0 as usize].prose.len() as u32;
+                let mut made: Vec<(NodeId, &ConlluToken)> = Vec::new();
+                // A multiword range in force: last word id, id, form.
+                let mut range: Option<(u32, String, String)> = None;
+                for tok in &s.tokens {
+                    if let Some((_, b)) = tok.range {
+                        range = Some((b, tok.id.clone(), tok.form.clone()));
+                        continue;
+                    }
+                    let mwt = match &range {
+                        Some((until, id, form)) if !tok.empty && tok.ord <= *until => {
+                            Some((id.clone(), form.clone()))
+                        }
+                        _ => {
+                            range = None;
+                            None
+                        }
+                    };
+                    if !tok.empty {
+                        n += 1;
+                    }
+                    let node = model.push_annotated(
+                        sent,
+                        tok,
+                        if tok.empty { 0 } else { n },
+                        ordinal,
+                        mwt,
+                    );
+                    if let Some(t) = model.nodes[node.0 as usize].token.as_mut() {
+                        t.span = (0, len);
+                    }
+                    made.push((node, tok));
+                }
+                model.link_sentence(&made);
+            }
+            // One `# global.Entity` header serves the set: a
+            // release declares it identically in every file.
+            let header = parsed
+                .iter()
+                .flat_map(|(_, d)| d.globals.iter())
+                .find(|(k, _)| k == "Entity")
+                .map(|(_, v)| v.as_str());
+            model.decode_mentions(header);
+        }
+        Ok(model)
+    }
+
+    /// One annotated token under `block`, from a CoNLL-U line.
+    fn push_annotated(
+        &mut self,
+        block: NodeId,
+        tok: &ConlluToken,
+        n: u32,
+        sentence: u32,
+        mwt: Option<(String, String)>,
+    ) -> NodeId {
+        let node = push(&mut self.nodes, Kind::Token, block);
+        let t = &mut self.nodes[node.0 as usize];
+        t.text = tok.form.clone();
+        t.prose = tok.form.clone();
+        let opt = |v: &str| (v != "_" && !v.is_empty()).then(|| v.to_string());
+        let mut keys = key_values(&tok.feats);
+        keys.extend(key_values(&tok.misc));
+        keys.extend(tok.extra.iter().cloned());
+        t.token = Some(TokenInfo {
+            class: class_of_annotated(&tok.form, &tok.upos),
+            n,
+            sentence,
+            span: (0, 0),
+            at: 0,
+            spans: Vec::new(),
+            annot: Some(Box::new(Annot {
+                id: tok.id.clone(),
+                lemma: opt(&tok.lemma),
+                upos: opt(&tok.upos),
+                xpos: opt(&tok.xpos),
+                feats: opt(&tok.feats),
+                deprel: opt(&tok.deprel),
+                deps: opt(&tok.deps),
+                misc: opt(&tok.misc),
+                keys,
+                mwt,
+                empty: tok.empty,
+                head: None,
+                dependents: Vec::new(),
+                eheads: Vec::new(),
+                edependents: Vec::new(),
+                mentions: Vec::new(),
+            })),
+        });
+        node
+    }
+
+    /// The edges of one sentence: the basic head (`->head`,
+    /// `<-head`) and the enhanced graph (`->ehead`, `<-ehead`,
+    /// the relation as edge data), resolved by CoNLL-U id.
+    fn link_sentence(&mut self, made: &[(NodeId, &ConlluToken)]) {
+        let find = |id: &str| made.iter().find(|(_, t)| t.id == id).map(|(n, _)| *n);
+        for (node, tok) in made {
+            if !tok.empty
+                && tok.head != "0"
+                && tok.head != "_"
+                && !tok.head.is_empty()
+                && let Some(h) = find(&tok.head)
+            {
+                if let Some(a) = self.nodes[node.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.head = Some(h);
+                }
+                if let Some(a) = self.nodes[h.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.dependents.push(*node);
+                }
+            }
+            if tok.deps == "_" || tok.deps.is_empty() {
+                continue;
+            }
+            for entry in tok.deps.split('|') {
+                let Some((h, rel)) = entry.split_once(':') else {
+                    continue;
+                };
+                if h == "0" {
+                    continue;
+                }
+                let Some(target) = find(h) else {
+                    continue;
+                };
+                if let Some(a) = self.nodes[node.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.eheads.push((target, rel.to_string()));
+                }
+                if let Some(a) = self.nodes[target.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.edependents.push((*node, rel.to_string()));
+                }
+            }
+        }
+    }
+    /// The mentions of the annotation (ruling #63), decoded once
+    /// the tokens carry their keys: a `ner` key's BIO / BIOES tags
+    /// (Stanza, spacy-conll — `B-PERSON` opens, `I-`/`E-` continue
+    /// within the sentence, `S-` stands alone, `O` closes) and
+    /// CorefUD's `Entity=` brackets (`(e1-person-1-` opens, `e1)`
+    /// closes, `(e1-person-1)` is one token; attributes in the
+    /// `# global.Entity` header's order, `eid` first; nesting and
+    /// crossing allowed, so a token may fall in several). Each
+    /// token records the mentions it falls in.
+    fn decode_mentions(&mut self, entity_header: Option<&str>) {
+        self.mentions.clear();
+        let tokens: Vec<NodeId> = (0..self.nodes.len())
+            .filter(|&i| {
+                self.nodes[i]
+                    .token
+                    .as_ref()
+                    .is_some_and(|t| t.annot.is_some())
+            })
+            .map(|i| NodeId(i as u64))
+            .collect();
+        let key = |nodes: &[Node], t: NodeId, name: &str| -> Option<String> {
+            nodes[t.0 as usize]
+                .token
+                .as_ref()?
+                .annot
+                .as_ref()?
+                .key(name)
+                .map(str::to_string)
+        };
+        let sentence_of = |nodes: &[Node], t: NodeId| -> u32 {
+            nodes[t.0 as usize].token.as_ref().map_or(0, |t| t.sentence)
+        };
+        // Named entities: BIO / BIOES.
+        let mut open: Option<(usize, Option<String>, u32)> = None;
+        for &t in &tokens {
+            let Some(tag) = key(&self.nodes, t, "ner") else {
+                open = None;
+                continue;
+            };
+            let (prefix, etype) = match tag.split_once('-') {
+                Some((p, e)) => (p.to_string(), Some(e.to_string())),
+                None => (tag.clone(), None),
+            };
+            let sentence = sentence_of(&self.nodes, t);
+            let continues = matches!(prefix.as_str(), "I" | "E")
+                && open
+                    .as_ref()
+                    .is_some_and(|(_, ty, s)| *ty == etype && *s == sentence);
+            match prefix.as_str() {
+                "B" | "S" | "I" | "E" => {
+                    if continues {
+                        let (idx, _, _) = open.as_ref().unwrap();
+                        self.mentions[*idx].tokens.push(t);
+                    } else {
+                        self.mentions.push(Mention {
+                            tokens: vec![t],
+                            etype: etype.clone(),
+                            cluster: None,
+                        });
+                    }
+                    let idx = if continues {
+                        open.as_ref().unwrap().0
+                    } else {
+                        self.mentions.len() - 1
+                    };
+                    open = if matches!(prefix.as_str(), "B" | "I") {
+                        Some((idx, etype, sentence))
+                    } else {
+                        None
+                    };
+                }
+                _ => open = None,
+            }
+        }
+        // Coreference: CorefUD brackets.
+        let order: Vec<String> = entity_header
+            .unwrap_or("eid-etype-head-other")
+            .split('-')
+            .map(str::to_string)
+            .collect();
+        let mut stack: Vec<(String, usize)> = Vec::new();
+        for &t in &tokens {
+            let Some(spec) = key(&self.nodes, t, "Entity") else {
+                for (_, idx) in &stack {
+                    if self.mentions[*idx].tokens.last() != Some(&t) {
+                        self.mentions[*idx].tokens.push(t);
+                    }
+                }
+                continue;
+            };
+            let mut closings: Vec<String> = Vec::new();
+            for entry in entity_entries(&spec) {
+                let entry = entry.as_str();
+                let opening = entry.starts_with('(');
+                let closing = entry.ends_with(')');
+                let body = entry.trim_start_matches('(').trim_end_matches(')');
+                if opening {
+                    let mut attrs = body.splitn(order.len(), '-');
+                    let eid = attrs.next().unwrap_or("").to_string();
+                    let mut etype = None;
+                    for (name, val) in order.iter().skip(1).zip(attrs) {
+                        if name == "etype" && !val.is_empty() {
+                            etype = Some(val.to_string());
+                        }
+                    }
+                    // A discontinuous mention's parts (`e1[1/2]`)
+                    // share the cluster.
+                    let cluster = eid.split('[').next().unwrap_or(&eid).to_string();
+                    let idx = self.mentions.len();
+                    self.mentions.push(Mention {
+                        tokens: vec![t],
+                        etype,
+                        cluster: Some(cluster),
+                    });
+                    if !closing {
+                        stack.push((eid, idx));
+                    }
+                } else if closing {
+                    closings.push(body.to_string());
+                }
+            }
+            for (_, idx) in &stack {
+                if self.mentions[*idx].tokens.last() != Some(&t) {
+                    self.mentions[*idx].tokens.push(t);
+                }
+            }
+            for eid in closings {
+                if let Some(pos) = stack.iter().rposition(|(e, _)| *e == eid) {
+                    stack.remove(pos);
+                }
+            }
+        }
+        // Each token's membership, by ordinal.
+        for (i, m) in self.mentions.iter().enumerate() {
+            for &t in &m.tokens {
+                if let Some(a) = self.nodes[t.0 as usize]
+                    .token
+                    .as_mut()
+                    .and_then(|t| t.annot.as_mut())
+                {
+                    a.mentions.push(i as u32 + 1);
+                }
+            }
+        }
+    }
+
+    /// A mention's text: its tokens' forms, a space between them
+    /// unless the annotation says `SpaceAfter=No`.
+    fn mention_text(&self, m: &Mention) -> String {
+        let mut out = String::new();
+        for (i, &t) in m.tokens.iter().enumerate() {
+            let n = &self.nodes[t.0 as usize];
+            if i > 0 {
+                let prev = &self.nodes[m.tokens[i - 1].0 as usize];
+                let glued = prev
+                    .token
+                    .as_ref()
+                    .and_then(|t| t.annot.as_ref())
+                    .and_then(|a| a.key("SpaceAfter"))
+                    == Some("No");
+                if !glued {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&n.prose);
+        }
+        out
+    }
+
+    /// The nearest literary-reading field over a token: its spans
+    /// innermost first, then the block the token belongs to.
+    fn token_field(&self, node: NodeId, name: &str) -> Option<Value> {
+        let t = self.nodes[node.0 as usize].token.as_ref()?;
+        // A cast table's own annotation on the token comes first.
+        if let Some(v) = field_values(&self.nodes[node.0 as usize].fields, name) {
+            return Some(v);
+        }
+        for &s in t.spans.iter().rev() {
+            if let Some(v) = field_values(&self.nodes[s.0 as usize].fields, name) {
+                return Some(v);
+            }
+        }
+        let mut at = self.nodes[node.0 as usize].parent;
+        while let Some(p) = at {
+            let n = &self.nodes[p.0 as usize];
+            if !(n.kind == Kind::Sentence && n.derived) {
+                return field_values(&n.fields, name);
+            }
+            at = n.parent;
+        }
+        None
+    }
+
+    /// One value or a list, for a token in one or several mentions.
+    fn mention_values(&self, node: NodeId, f: impl Fn(&Mention) -> Option<Value>) -> Option<Value> {
+        let a = self.nodes[node.0 as usize].token.as_ref()?.annot.as_ref()?;
+        let vs: Vec<Value> = a
+            .mentions
+            .iter()
+            .filter_map(|&i| f(&self.mentions[i as usize - 1]))
+            .collect();
+        match vs.len() {
+            0 => None,
+            1 => vs.into_iter().next(),
+            _ => Some(Value::list(vs)),
+        }
+    }
+}
+
+/// The innermost span under `flow` whose byte range contains
+/// `lo..hi` — the parent a nested span (a name inside a speech)
+/// lands under. Spans arrive in pre-order, so the deepest match
+/// is the right one.
+fn enclosing_span(nodes: &[Node], flow: NodeId, lo: u32, hi: u32) -> Option<NodeId> {
+    let mut best: Option<NodeId> = None;
+    let mut at = flow;
+    loop {
+        let next = nodes[at.0 as usize].children.iter().rev().find_map(|&c| {
+            let n = &nodes[c.0 as usize];
+            match (n.kind, n.at) {
+                (Kind::Span, Some((slo, shi)))
+                    if slo <= lo && hi <= shi && (slo, shi) != (lo, hi) =>
+                {
+                    Some(c)
+                }
+                _ => None,
+            }
+        });
+        match next {
+            Some(c) => {
+                best = Some(c);
+                at = c;
+            }
+            None => return best,
+        }
+    }
+}
+
+/// Every value under `name` among a node's fields: one value, a
+/// list where the key repeats, nothing where it is absent.
+fn field_values(fields: &[(String, String)], name: &str) -> Option<Value> {
+    let vs: Vec<Value> = fields
+        .iter()
+        .filter(|(k, _)| k == name)
+        .map(|(_, v)| Value::Str(v.clone()))
+        .collect();
+    match vs.len() {
+        0 => None,
+        1 => vs.into_iter().next(),
+        _ => Some(Value::list(vs)),
+    }
+}
+
 fn push(nodes: &mut Vec<Node>, kind: Kind, parent: NodeId) -> NodeId {
     let id = NodeId(nodes.len() as u64);
     nodes.push(Node::new(kind, Some(parent)));
@@ -1267,6 +3651,10 @@ fn flatten_prose(nodes: &mut [Node]) {
         {
             if inline_lemma {
                 lemma_part = Some(lemma.clone());
+            } else if matches!(nodes[i].kind, Kind::Paragraph | Kind::Dialogue) {
+                // A speech's lemma is its speaker — who said it,
+                // not what was said: `::lemma`, never prose, so
+                // the words alone are read, tokenized, counted.
             } else {
                 parts.push(lemma.clone());
             }
@@ -1281,7 +3669,7 @@ fn flatten_prose(nodes: &mut [Node]) {
             // adds prose (the deixis/index-mark rule).
             if matches!(
                 nodes[child.0 as usize].kind,
-                Kind::Ref | Kind::Cit | Kind::Anchor
+                Kind::Ref | Kind::Cit | Kind::Anchor | Kind::Span | Kind::Milestone
             ) {
                 continue;
             }
@@ -1298,6 +3686,16 @@ fn flatten_prose(nodes: &mut [Node]) {
             if !joined.is_empty() {
                 parts.push(joined);
             }
+        } else if nodes[i].kind == Kind::Paragraph
+            && !child_parts.is_empty()
+            && nodes[i]
+                .children
+                .iter()
+                .all(|c| nodes[c.0 as usize].kind == Kind::Sentence)
+        {
+            // Ruling #63: a treebank paragraph is its sentences
+            // run together, as the prose would read.
+            parts.push(child_parts.join(" "));
         } else {
             parts.extend(child_parts);
         }
@@ -1356,11 +3754,68 @@ impl AstAdapter for TextModel {
     }
 
     fn name(&self, node: NodeId) -> Option<String> {
-        self.nodes[node.0 as usize].kind.name().map(str::to_string)
+        let n = &self.nodes[node.0 as usize];
+        if n.kind == Kind::Span {
+            return n.span_kind.clone();
+        }
+        n.kind.name().map(str::to_string)
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.nodes[node.0 as usize].parent
+    }
+
+    /// The positional index (ruling #62, phase 2): `//token[::lower
+    /// = "word"]` below any node answers from the form → tokens
+    /// map, scoped to the node's subtree. Only a plain word is
+    /// answered — a literal with a numeric, temporal, durational or
+    /// unital reading is left to the walk, whose equality reads it.
+    fn descendants_where(
+        &self,
+        node: NodeId,
+        name: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<(NodeId, usize)>> {
+        if name != "token" || property != "lower" {
+            return None;
+        }
+        let Value::Str(word) = value else {
+            return None;
+        };
+        if word.is_empty() || !word.chars().all(|c| c.is_alphabetic() || "’'-".contains(c)) {
+            return None;
+        }
+        let index = self.token_index.get_or_init(|| {
+            let mut map: std::collections::HashMap<String, Vec<NodeId>> =
+                std::collections::HashMap::new();
+            for (i, n) in self.nodes.iter().enumerate() {
+                if n.token.is_some() {
+                    map.entry(self.lower(&n.prose))
+                        .or_default()
+                        .push(NodeId(i as u64));
+                }
+            }
+            map
+        });
+        let Some(hits) = index.get(word.as_str()) else {
+            return Some(Vec::new());
+        };
+        let mut out = Vec::new();
+        for &t in hits {
+            // The depth below `node`, if `t` is in its subtree.
+            let mut depth = 0usize;
+            let mut cur = t;
+            while let Some(p) = self.nodes[cur.0 as usize].parent {
+                depth += 1;
+                if p == node {
+                    out.push((t, depth));
+                    break;
+                }
+                cur = p;
+            }
+        }
+        Some(out)
     }
 
     /// The `<block>` family on every block node, plus `<table>` on
@@ -1398,8 +3853,23 @@ impl AstAdapter for TextModel {
         // so is an index mark (ruling #36). Strophes and stichos
         // lines are sub-block structure (ruling #37, litogramma's
         // own family rule) — the verse block carries the trait.
+        if let Some(t) = &n.token {
+            // An empty node (`8.1`) is in the enhanced graph, not
+            // in the text: `<empty>` in place of a class.
+            if t.annot.as_ref().is_some_and(|a| a.empty) {
+                out.push("empty".to_string());
+            } else {
+                out.push(t.class.name().to_string());
+                // A quotation mark wears `<quote>` beside `<punct>`
+                // (ruling #65), so the punctuation counts stand.
+                if t.class == TokenClass::Punct && is_quote(&n.prose) {
+                    out.push("quote".to_string());
+                }
+            }
+        }
         if n.kind != Kind::Document
             && !n.deixis
+            && !n.derived
             && !matches!(
                 n.kind,
                 Kind::IndexMark
@@ -1408,9 +3878,27 @@ impl AstAdapter for TextModel {
                     | Kind::Anchor
                     | Kind::Strophe
                     | Kind::Stichos
+                    | Kind::Token
+                    | Kind::Span
+                    | Kind::Milestone
+                    | Kind::Character
+                    | Kind::Place
             )
         {
             out.push("block".to_string());
+        }
+        // The literary reading: a simmere's genoses are its
+        // traits (`//quotation<said>`, `//annotation<persname>`).
+        for g in &n.genoses {
+            if !out.contains(g) {
+                out.push(g.clone());
+            }
+        }
+        // The corpus reading's sentence tier (ruling #64): a
+        // sentence the segmentation derived, as against a
+        // treebank's declared one.
+        if n.derived {
+            out.push("derived".to_string());
         }
         // The reference vocabulary (atrep's semantic traits): a
         // dangling mention keeps its node and the linter finds it;
@@ -1439,6 +3927,8 @@ impl AstAdapter for TextModel {
                         | Kind::Ref
                         | Kind::Cit
                         | Kind::Bib
+                        | Kind::Span
+                        | Kind::Milestone
                 ))
         {
             out.push("target".to_string());
@@ -1483,6 +3973,10 @@ impl AstAdapter for TextModel {
     /// spelling was written.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
+        // The citation in force at any node (ruling #81).
+        if name == "cite" {
+            return self.cite(node).map(Value::Str);
+        }
         // The document node answers its declared identity: the
         // curated core of what the head says.
         if n.kind == Kind::Document {
@@ -1494,7 +3988,7 @@ impl AstAdapter for TextModel {
                 "category" => return h.category.clone().map(Value::Str),
                 "tags" => {
                     return (!h.tags.is_empty())
-                        .then(|| Value::List(h.tags.iter().cloned().map(Value::Str).collect()));
+                        .then(|| Value::list(h.tags.iter().cloned().map(Value::Str).collect()));
                 }
                 "published" => return h.published.clone(),
                 "modified" => return h.modified.clone(),
@@ -1540,6 +4034,32 @@ impl AstAdapter for TextModel {
             _ => {}
         }
         match name {
+            // The corpus reading's token properties; the linguistic
+            // ones answer only under a CoNLL-U annotation.
+            "lemma" | "upos" | "xpos" | "feats" | "deprel" | "deps" | "misc" | "id" | "mwt"
+                if n.token.as_ref().is_some_and(|t| t.annot.is_some()) =>
+            {
+                let a = n.token.as_ref()?.annot.as_ref()?;
+                match name {
+                    "lemma" => a.lemma.clone(),
+                    "upos" => a.upos.clone(),
+                    "xpos" => a.xpos.clone(),
+                    "feats" => a.feats.clone(),
+                    "deprel" => a.deprel.clone(),
+                    "deps" => a.deps.clone(),
+                    "misc" => a.misc.clone(),
+                    "id" => Some(a.id.clone()),
+                    _ => a.mwt.as_ref().map(|(_, form)| form.clone()),
+                }
+                .map(Value::Str)
+            }
+            // A treebank sentence: `::id` its sent_id, every other
+            // comment under its key (ruling #63).
+            "id" if n.kind == Kind::Sentence => n
+                .fields
+                .iter()
+                .find(|(k, _)| k == "sent_id")
+                .map(|(_, v)| Value::Str(v.clone())),
             "lemma" | "title" => n.lemma.clone().map(Value::Str),
             "onym" => n.onym.clone().map(Value::Str),
             // On an index mark the onym IS the term (ruling #36).
@@ -1572,6 +4092,76 @@ impl AstAdapter for TextModel {
                 }
             }
             "text" => Some(Value::Str(n.prose.clone())),
+            "lower" if n.token.is_some() => Some(Value::Str(self.lower(&n.prose))),
+            "modern" if n.token.is_some() => Some(Value::Str(self.modern(&n.prose))),
+            "class" if n.token.is_some() => n
+                .token
+                .as_ref()
+                .map(|t| Value::Str(t.class.name().to_string())),
+            // The text of the token's sentence (its ordinal is
+            // `::::sentence`): the block's prose over the span.
+            "sentence" if n.token.is_some() => {
+                let parent = &self.nodes[n.parent?.0 as usize];
+                if parent.kind == Kind::Sentence {
+                    return Some(Value::Str(parent.prose.clone()));
+                }
+                let t = n.token.as_ref()?;
+                let (lo, hi) = (t.span.0 as usize, t.span.1 as usize);
+                parent
+                    .prose
+                    .get(lo..hi)
+                    .map(|s| Value::Str(s.trim().to_string()))
+            }
+            // A mention's text and entity type (ruling #63); a list
+            // where mentions nest.
+            "mention" if n.token.is_some() => {
+                self.mention_values(node, |m| Some(Value::Str(self.mention_text(m))))
+            }
+            "entity" if n.token.is_some() => {
+                self.mention_values(node, |m| m.etype.clone().map(Value::Str))
+            }
+            // Every `Key=Value` of FEATS, MISC and a CoNLL-U Plus
+            // column, as the annotation spells it or case-folded.
+            // A cast table's own annotation on the token (its
+            // `prosopon`) answers when the annotation has no such
+            // key.
+            _ if n.token.as_ref().is_some_and(|t| t.annot.is_some()) => n
+                .token
+                .as_ref()?
+                .annot
+                .as_ref()?
+                .key(name)
+                .map(|v| Value::Str(v.to_string()))
+                .or_else(|| self.token_field(node, name)),
+            // A treebank sentence's `# key = value` comments, the
+            // same two spellings.
+            _ if n.kind == Kind::Sentence => n
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .or_else(|| n.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
+                .map(|(_, v)| Value::Str(v.clone())),
+            // The literary reading: a span's, a speech's, a
+            // paragraph's unseen metadata under the sim name of the
+            // monosim that carried it (`::prosopon`), a list where
+            // it repeats (`eidos`); a milestone's scheme and value.
+            _ if matches!(
+                n.kind,
+                Kind::Span
+                    | Kind::Speech
+                    | Kind::Dialogue
+                    | Kind::Paragraph
+                    | Kind::Milestone
+                    | Kind::Character
+                    | Kind::Place
+            ) && !n.fields.is_empty() =>
+            {
+                field_values(&n.fields, name)
+            }
+            // A token answers the metadata of the innermost span
+            // covering it, else of its block: `//token[::prosopon
+            // = "tom"]` is every word Tom speaks.
+            _ if n.token.is_some() => self.token_field(node, name),
             _ => None,
         }
     }
@@ -1640,11 +4230,45 @@ impl AstAdapter for TextModel {
     /// resolution re-kinds an open-family callout to its body.
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let n = &self.nodes[node.0 as usize];
+        // The literary reading: a mention reaches its character.
+        let character: Vec<(String, NodeId)> = n
+            .character
+            .map(|c| ("character".to_string(), c))
+            .into_iter()
+            .chain(n.place.map(|p| ("place".to_string(), p)))
+            .collect();
+        // A token's dependency head (`->head`) and its enhanced
+        // heads (`->ehead`, the relation at `$-::rel`), under a
+        // CoNLL-U annotation.
+        if let Some(a) = n.token.as_ref().and_then(|t| t.annot.as_ref()) {
+            let mut out = Vec::new();
+            if let Some(h) = a.head {
+                out.push(("head".to_string(), h));
+            }
+            for (t, _) in &a.eheads {
+                out.push(("ehead".to_string(), *t));
+            }
+            out.extend(character);
+            return out;
+        }
+        if !character.is_empty() && n.kind != Kind::Span {
+            return character;
+        }
         if let Some(t) = n.ref_edge {
             // The atrep rule: a resolved mention emits its typed
             // crosslink — `->ref`, or `->cit` for a citation.
             let label = if n.kind == Kind::Cit { "cit" } else { "ref" };
             return vec![(label.to_string(), t)];
+        }
+        // The literary reading: a span reaches the tokens it
+        // covers (`//quotation<said>->token<word>`).
+        if n.kind == Kind::Span && !(n.span_tokens.is_empty() && character.is_empty()) {
+            return n
+                .span_tokens
+                .iter()
+                .map(|&t| ("token".to_string(), t))
+                .chain(character)
+                .collect();
         }
         match n.note_edge {
             Some(body) => vec![(n.kind.name().unwrap_or("footnote").to_string(), body)],
@@ -1652,8 +4276,45 @@ impl AstAdapter for TextModel {
         }
     }
 
+    /// `$-::rel` on a dependency edge: the relation — `->head`'s
+    /// is the dependent's `::deprel`, `->ehead`'s the enhanced
+    /// relation to that head.
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<Value> {
+        if name != "rel" {
+            return None;
+        }
+        let a = self.nodes[source.0 as usize]
+            .token
+            .as_ref()?
+            .annot
+            .as_ref()?;
+        match label {
+            "head" if a.head == Some(target) => a.deprel.clone().map(Value::Str),
+            "ehead" => a
+                .eheads
+                .iter()
+                .find(|(t, _)| *t == target)
+                .map(|(_, r)| Value::Str(r.clone())),
+            _ => None,
+        }
+    }
+
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let n = &self.nodes[node.0 as usize];
+        if let Some(a) = n.token.as_ref().and_then(|t| t.annot.as_ref()) {
+            return a
+                .dependents
+                .iter()
+                .map(|&d| ("head".to_string(), d))
+                .chain(a.edependents.iter().map(|(d, _)| ("ehead".to_string(), *d)))
+                .collect();
+        }
         let mut out: Vec<(String, NodeId)> = n
             .ref_cites
             .iter()
@@ -1668,6 +4329,12 @@ impl AstAdapter for TextModel {
             .collect();
         let label = n.kind.name().unwrap_or("footnote");
         out.extend(n.cites.iter().map(|&c| (label.to_string(), c)));
+        let mention_label = if n.kind == Kind::Place {
+            "place"
+        } else {
+            "character"
+        };
+        out.extend(n.mentions.iter().map(|&m| (mention_label.to_string(), m)));
         out
     }
 
@@ -1754,7 +4421,7 @@ impl AstAdapter for TextModel {
     /// itself — no document can introduce a property name — so
     /// its two annotations answer at `::` as well.
     fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
-        &["level", "lang", "form"]
+        &["level", "lang", "form", "n"]
     }
 
     /// `::::level` on sections (the source heading level) and
@@ -1770,7 +4437,55 @@ impl AstAdapter for TextModel {
         }
         match key {
             "level" => n.level.map(|l| Value::Int(l as i64)),
-            "lang" => n.lang.clone().map(Value::Str),
+            // A verbatim block's declared language; on the
+            // literary reading, the genos after `foreign`
+            // (`@/…/@.foreign.la`).
+            "lang" => n
+                .lang
+                .clone()
+                .or_else(|| {
+                    let i = n.genoses.iter().position(|g| g == "foreign")?;
+                    n.genoses.get(i + 1).cloned()
+                })
+                .map(Value::Str),
+            "at" if n.at.is_some() => n.at.map(|(lo, _)| Value::Int(lo as i64)),
+            // The corpus reading: a token's position and sentence.
+            // A sentence node's document-wide ordinal, under both
+            // spellings, so `/paragraph[7]/sentence[3]::::n` and a
+            // token's `::::sentence` agree (ruling #64).
+            "n" | "sentence" if n.kind == Kind::Sentence => n.taxis.map(Value::Int),
+            "n" => n
+                .token
+                .as_ref()
+                .filter(|t| t.n > 0)
+                .map(|t| Value::Int(t.n as i64)),
+            "sentence" => n.token.as_ref().map(|t| Value::Int(t.sentence as i64)),
+            // A mention's ordinal and coreference cluster (ruling
+            // #63); a list where mentions nest.
+            "mention" if n.token.is_some() => {
+                let ords: Vec<Value> = n
+                    .token
+                    .as_ref()
+                    .and_then(|t| t.annot.as_ref())
+                    .map(|a| a.mentions.iter().map(|&i| Value::Int(i as i64)).collect())
+                    .unwrap_or_default();
+                match ords.len() {
+                    0 => None,
+                    1 => ords.into_iter().next(),
+                    _ => Some(Value::list(ords)),
+                }
+            }
+            "entity" if n.token.is_some() => {
+                self.mention_values(node, |m| m.cluster.clone().map(Value::Str))
+            }
+            // The multiword range a word belongs to (`1-2`); its
+            // surface form is `::mwt`.
+            "mwt" => n
+                .token
+                .as_ref()
+                .and_then(|t| t.annot.as_ref())
+                .and_then(|a| a.mwt.as_ref())
+                .map(|(id, _)| Value::Str(id.clone())),
             // `::::resolved` on a callout: the broken-apparatus
             // linter's fact (ruling #35).
             "resolved" if n.deixis => Some(Value::Bool(!n.dangling)),

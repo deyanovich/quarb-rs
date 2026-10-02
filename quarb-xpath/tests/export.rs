@@ -9,8 +9,8 @@ use std::process::Command;
 const DOC: &str = r#"<?xml version="1.0"?>
 <library>
   <shelf label="history">
-    <book id="b1" pages="512"><title>Sapiens</title></book>
-    <book id="b2" pages="606"><title>SPQR</title></book>
+    <book id="b1" pages="512"><title>The Histories</title></book>
+    <book id="b2" pages="606"><title>The Peloponnesian War</title></book>
   </shelf>
   <shelf label="scifi">
     <book id="b3" pages="412"><title>Dune</title></book>

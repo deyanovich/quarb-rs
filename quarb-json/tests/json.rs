@@ -243,3 +243,44 @@ fn join_projection() {
         ]
     );
 }
+
+/// An array of scalars is one list-valued property of its object
+/// (the shape a page's tags have): read whole, spread by `| ...`,
+/// resolved per element by a declared ref. An array holding a
+/// container stays navigation-only, and the child spelling is
+/// unchanged either way.
+#[test]
+fn scalar_arrays_are_list_properties() {
+    let doc = r#"{"entries": [
+        {"w": "дом",  "marks": ["①", "②"]},
+        {"w": "стол", "marks": []},
+        {"w": "еда",  "marks": [{"x": 1}]},
+        {"w": "нож",  "marks": ["①", {"x": 1}]}
+    ]}"#;
+    let a = JsonAdapter::parse(doc).unwrap();
+    let vals = |q: &str| -> Vec<String> {
+        match quarb::run(q, &a).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_quarb()).collect(),
+            quarb::QueryResult::Nodes(_) => panic!("expected values"),
+        }
+    };
+    assert_eq!(
+        vals(r#"/entries/*[::w = "дом"]::marks"#),
+        vec![r#"@("①"; "②")"#]
+    );
+    assert_eq!(vals(r#"/entries/*[::w = "стол"]::marks"#), vec!["@()"]);
+    assert_eq!(vals(r#"/entries/*[::w = "еда"]::marks"#), vec!["null"]);
+    assert_eq!(vals(r#"/entries/*[::w = "нож"]::marks"#), vec!["null"]);
+    // spread to one value per element
+    assert_eq!(
+        vals(r#"/entries/*[::w = "дом"]::marks | ..."#),
+        vec![r#""①""#, r#""②""#]
+    );
+    // the child spelling reads the same elements
+    assert_eq!(
+        vals(r#"/entries/*[::w = "дом"]/marks/*::"#),
+        vec![r#""①""#, r#""②""#]
+    );
+    // an empty list is falsy
+    assert_eq!(vals(r#"/entries/*[::marks]::w"#), vec![r#""дом""#]);
+}

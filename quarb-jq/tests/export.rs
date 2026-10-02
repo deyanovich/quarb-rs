@@ -8,10 +8,10 @@ use std::process::Command;
 
 const DOC: &str = r#"{
   "books": [
-    {"title": "Sapiens", "author": "Harari", "price": 22.5, "genre": "history"},
+    {"title": "The Histories", "author": "Herodotus", "price": 22.5, "genre": "history"},
     {"title": "Dune", "author": "Herbert", "price": 9.99, "genre": "scifi"},
     {"title": "Emma", "author": "Austen", "price": 7.5, "genre": "classic"},
-    {"title": "SPQR", "author": "Beard", "price": 18.0, "genre": "history"}
+    {"title": "The Peloponnesian War", "author": "Thucydides", "price": 18.0, "genre": "history"}
   ],
   "clerk": {"name": "Ines"}
 }"#;

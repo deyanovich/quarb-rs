@@ -52,7 +52,9 @@ pub mod complete;
 pub mod highlight;
 pub mod quantity;
 mod stdlib;
+pub use stdlib::tabulate;
 pub mod temporal;
+pub mod translit;
 mod unparse;
 mod value;
 
@@ -81,6 +83,24 @@ mod pinned {
 /// since the epoch). Called once, by the tool, before mounting.
 pub fn set_invocation_instant(secs: i64, nanos: u32) {
     pinned::NOW.with(|c| c.set(Some((secs, nanos))));
+}
+
+thread_local! {
+    /// The session's sentence bonds (a `.desm` set, ruling #62):
+    /// what `sentences`, `sc` and the corpus reading segment with,
+    /// so a pipeline and a `corpus:` mount agree on "Dr. Smith".
+    static SENTENCE_BONDS: std::cell::RefCell<Option<std::rc::Rc<syndesmos::Syndesmos>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the session's sentence bonds (`qua --desm`, quai's).
+pub fn set_sentence_bonds(bonds: Option<std::rc::Rc<syndesmos::Syndesmos>>) {
+    SENTENCE_BONDS.with(|b| *b.borrow_mut() = bonds);
+}
+
+/// The session's sentence bonds, if any were loaded.
+pub fn sentence_bonds() -> Option<std::rc::Rc<syndesmos::Syndesmos>> {
+    SENTENCE_BONDS.with(|b| b.borrow().clone())
 }
 
 /// The pinned invocation instant, if the tool layer set one.

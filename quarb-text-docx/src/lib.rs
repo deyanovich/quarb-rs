@@ -562,6 +562,7 @@ fn emit_callouts(para: &Para, out: &mut Vec<Block>) {
                 onym: onym.clone(),
                 family: Some(*family),
                 margin: false,
+                at: None,
             }),
             Apparatus::Mark(term) => out.push(Block::IndexMark { term: term.clone() }),
             Apparatus::Ref(target, text, internal) => out.push(Block::Ref {

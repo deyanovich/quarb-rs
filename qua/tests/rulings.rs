@@ -25,6 +25,28 @@ fn values(q: &str) -> Vec<String> {
     }
 }
 
+/// Ruling #91: a quoted string after `==` is the glob without a
+/// wildcard — literal text, anchored at both ends, as in the shell.
+#[test]
+fn a_bare_string_after_the_pattern_comparison_is_anchored() {
+    assert_eq!(
+        values(r#"/items/*[::name == "app-web"]::name"#),
+        ["app-web"]
+    );
+    // no star, no slack: a part of the value does not match
+    assert!(values(r#"/items/*[::name == "app"]::name"#).is_empty());
+    assert!(values(r#"/items/*[::name == "web"]::name"#).is_empty());
+    // the text is literal: a dot is a dot, a star is a star
+    assert!(values(r#"/items/*[::name == "data.gz"]::name"#) == ["data.gz"]);
+    assert!(values(r#"/items/*[::name == "data-gz"]::name"#).is_empty());
+    assert!(values(r#"/items/*[::name == "a.b!"]::name"#).is_empty());
+    assert_eq!(values(r#"/items/*[::name == "a*b!"]::name"#), ["a*b!"]);
+    // `!==` keeps the rows without the property, as every `!=` does
+    assert_eq!(values(r#"/items/*[::name !== "app-web"] @| count"#), ["3"]);
+    // the regex and the dynamic pattern are still what they were
+    assert_eq!(values(r#"/items/*[::name == (/app/)]::name"#), ["app-web"]);
+}
+
 #[test]
 fn pattern_literals_match() {
     assert_eq!(values(r#"/items/*[::name == *"web"*]::name"#), ["app-web"]);

@@ -12,7 +12,12 @@ export type Format =
   | 'markdown'
   | 'text-html'
   | 'text-markdown'
-  | 'text';
+  | 'text'
+  | 'corpus-html'
+  | 'corpus-markdown'
+  | 'corpus'
+  | 'conllu'
+  | 'corpus-conllu';
 
 /**
  * Initialize the engine once; subsequent calls share the load.

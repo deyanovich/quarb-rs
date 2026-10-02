@@ -74,7 +74,7 @@ fn cell_value(v: &Json) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         Json::String(s) => Value::Str(s.clone()),
-        Json::Array(items) => Value::List(items.iter().map(cell_value).collect()),
+        Json::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         Json::Object(_) => Value::Str(v.to_string()),
     }
 }
@@ -506,13 +506,13 @@ impl AstAdapter for ArangoAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {
-            (Kind::Root, "collections") => Some(Value::List(
+            (Kind::Root, "collections") => Some(Value::list(
                 self.collections
                     .iter()
                     .map(|c| Value::Str(c.clone()))
                     .collect(),
             )),
-            (Kind::Root, "edge-collections") => Some(Value::List(
+            (Kind::Root, "edge-collections") => Some(Value::list(
                 self.edge_collections
                     .iter()
                     .map(|c| Value::Str(c.clone()))

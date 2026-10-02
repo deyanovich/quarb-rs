@@ -58,7 +58,21 @@ relational pattern for documents),
 [`quarb-text-markdown`](quarb-text-markdown/) (producers: the
 same substrates as quarb-html/quarb-markdown, read at the text
 level — `qua text:page.html` forces it; `.txt` mounts here by
-default).
+default; `qua corpus:book.txt` is the same reading with every
+prose block's sentences, and every sentence's tokens, as its
+children — paragraph, sentence, token — the segmentation and the
+tokenizer decided once, at mount — `--desm FILE` loads a
+sentence-bond file from
+[syndesmos](https://gitlab.com/syndesmos/syndesmos) for the
+session, `?conllu=FILE` takes a tagger's CoNLL-U instead, every
+column and key on the tokens: `::lemma`, `::upos`, `::Case`,
+`->head`, the enhanced graph as `->ehead`, named entities and
+coreference as `::mention` / `::entity`; a `.conllu` treebank
+reads on its own — `text:` as a document of sentences, `corpus:`
+with its tokens — a directory of them (a treebank's train / dev /
+test files) as one document with a section per file, CoNLL-U on a
+pipe is recognized as such (`?format=conllu` says so outright),
+and `| conllu` writes the tokens back out).
 
 **Relational adapters** —
 [`quarb-relational`](quarb-relational/) (the shared model),

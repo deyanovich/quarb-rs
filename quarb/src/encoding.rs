@@ -466,10 +466,10 @@ fn push_field(
 ) {
     if let Some((_, existing)) = fields.iter_mut().find(|(k, _)| *k == key) {
         match existing {
-            crate::value::Value::List(items) => items.push(value),
+            crate::value::Value::List(items) => std::sync::Arc::make_mut(items).push(value),
             other => {
                 let prev = std::mem::replace(other, crate::value::Value::Null);
-                *other = crate::value::Value::List(vec![prev, value]);
+                *other = crate::value::Value::list(vec![prev, value]);
             }
         }
     } else {
@@ -502,7 +502,7 @@ fn from_serde_with(v: &serde_json::Value, toml: bool) -> crate::value::Value {
             .unwrap_or(Value::Null),
         serde_json::Value::String(s) => Value::Str(s.clone()),
         serde_json::Value::Array(a) => {
-            Value::List(a.iter().map(|v| from_serde_with(v, toml)).collect())
+            Value::list(a.iter().map(|v| from_serde_with(v, toml)).collect())
         }
         serde_json::Value::Object(o) => {
             if toml
@@ -645,7 +645,7 @@ mod tests {
         use crate::value::Value;
         assert_eq!(
             json_to_value("[1,2]"),
-            Some(Value::List(vec![Value::Int(1), Value::Int(2)]))
+            Some(Value::list(vec![Value::Int(1), Value::Int(2)]))
         );
         assert!(matches!(yaml_to_value("a: 1"), Some(Value::Record(_))));
         assert!(matches!(toml_to_value("a = 1"), Some(Value::Record(_))));

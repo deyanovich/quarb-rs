@@ -25,20 +25,127 @@ pub enum Render {
     /// enforces real nesting); prose lines that would open a sim
     /// are a known escaping seam, recorded in the spec.
     Atrep,
+    /// CoNLL-U (ruling #63): the tokens of the rendered subtree as
+    /// sentence blocks — the corpus reading's round trip to the
+    /// treebank tools. Prose without tokens renders nothing.
+    Conllu,
 }
 
 impl Render {
     /// Parse a format name (`md`/`markdown`, `html`, `txt`/`text`/
-    /// `plain`).
+    /// `plain`, `atrep`, `conllu`).
     pub fn from_name(name: &str) -> Option<Render> {
         match name {
             "md" | "markdown" => Some(Render::Markdown),
             "html" => Some(Render::Html),
             "txt" | "text" | "plain" => Some(Render::Plain),
             "atrep" | "atd" => Some(Render::Atrep),
+            "conllu" => Some(Render::Conllu),
             _ => None,
         }
     }
+}
+
+/// The CoNLL-U rendering of the tokens under `roots`, in document
+/// order, one block per sentence (consecutive tokens sharing
+/// `::::sentence`): `# sent_id` from a sentence node's `::id`,
+/// `# text` from the tokens' `::sentence`, then the ten columns —
+/// `::id` (else the position), the form, `::lemma`, `::upos`,
+/// `::xpos`, `::feats`, the `->head` target's id (`0` for a root
+/// that carries a relation, `_` for an unannotated token),
+/// `::deprel`, `::deps`, `::misc` — with a multiword range line
+/// (`::::mwt`, `::mwt`) before the first of its words.
+/// Adapter-generic: any arbor speaking the corpus vocabulary.
+fn render_conllu(a: &dyn AstAdapter, roots: &[NodeId]) -> String {
+    fn collect(a: &dyn AstAdapter, node: NodeId, out: &mut Vec<NodeId>, depth: usize) {
+        if a.name(node).as_deref() == Some("token") {
+            out.push(node);
+            return;
+        }
+        if depth > MAX_DEPTH {
+            return;
+        }
+        for c in a.children(node) {
+            collect(a, c, out, depth + 1);
+        }
+    }
+    let mut tokens = Vec::new();
+    for &r in roots {
+        collect(a, r, &mut tokens, 0);
+    }
+    let col = |t: NodeId, name: &str| str_prop(a, t, name).unwrap_or_else(|| "_".to_string());
+    let mut out = String::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let s = int_meta(a, tokens[i], "sentence");
+        let mut j = i;
+        while j < tokens.len() && int_meta(a, tokens[j], "sentence") == s {
+            j += 1;
+        }
+        let group = &tokens[i..j];
+        i = j;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        if let Some(p) = a.parent(group[0])
+            && a.name(p).as_deref() == Some("sentence")
+            && let Some(id) = str_prop(a, p, "id")
+        {
+            out.push_str(&format!("# sent_id = {id}\n"));
+        }
+        if let Some(text) = str_prop(a, group[0], "sentence") {
+            out.push_str(&format!("# text = {text}\n"));
+        }
+        // A token's id: the annotation's, else its position among
+        // the sentence's tokens.
+        let id_of = |t: NodeId| -> String {
+            str_prop(a, t, "id").unwrap_or_else(|| {
+                let pos = group.iter().position(|&g| g == t).unwrap_or(0) + 1;
+                pos.to_string()
+            })
+        };
+        let mut last_range: Option<String> = None;
+        for &t in group {
+            match a.metadata(t, "mwt") {
+                Some(Value::Str(rid)) => {
+                    if last_range.as_deref() != Some(rid.as_str()) {
+                        let form = str_prop(a, t, "mwt").unwrap_or_default();
+                        out.push_str(&format!("{rid}\t{form}\t_\t_\t_\t_\t_\t_\t_\t_\n"));
+                        last_range = Some(rid);
+                    }
+                }
+                _ => last_range = None,
+            }
+            let form = prose(a, t);
+            let deprel = col(t, "deprel");
+            let head = a
+                .links(t)
+                .into_iter()
+                .find(|(label, _)| label == "head")
+                .map(|(_, h)| id_of(h))
+                .unwrap_or_else(|| {
+                    if deprel == "_" {
+                        "_".to_string()
+                    } else {
+                        "0".to_string()
+                    }
+                });
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                id_of(t),
+                form,
+                col(t, "lemma"),
+                col(t, "upos"),
+                col(t, "xpos"),
+                col(t, "feats"),
+                head,
+                deprel,
+                col(t, "deps"),
+                col(t, "misc"),
+            ));
+        }
+    }
+    out
 }
 
 /// Nesting deeper than this renders as flattened prose rather than
@@ -52,7 +159,7 @@ const MAX_DEPTH: usize = 128;
 pub fn render_values(values: &[Value], kind: Render) -> String {
     let lines: Vec<String> = values.iter().map(|v| v.to_string()).collect();
     let mut out = match kind {
-        Render::Plain => lines.join("\n"),
+        Render::Plain | Render::Conllu => lines.join("\n"),
         Render::Markdown => lines.join("\n\n"),
         Render::Atrep => {
             let body = lines.join("\n\n");
@@ -76,6 +183,9 @@ pub fn render_values(values: &[Value], kind: Render) -> String {
 
 /// Render each node's subtree in order, blank-line separated.
 pub fn render_nodes(a: &dyn AstAdapter, nodes: &[NodeId], kind: Render) -> String {
+    if kind == Render::Conllu {
+        return render_conllu(a, nodes);
+    }
     let mut blocks: Vec<String> = Vec::new();
     for &n in nodes {
         let s = render_node(a, n, kind);
@@ -94,6 +204,9 @@ pub fn render_nodes(a: &dyn AstAdapter, nodes: &[NodeId], kind: Render) -> Strin
 /// its dialektos declaration, so every rendered subtree is a
 /// valid `.atd` from byte one.
 pub fn render_node(a: &dyn AstAdapter, node: NodeId, kind: Render) -> String {
+    if kind == Render::Conllu {
+        return render_conllu(a, &[node]);
+    }
     let mut ctx = Ctx {
         a,
         kind,
@@ -244,6 +357,10 @@ impl Ctx<'_> {
                 self.item_blocks(node, depth)
             }
             Some("verbatim") => vec![self.verbatim(node)],
+            // The corpus reading's tokens are annotation, already
+            // in their block's prose: nothing of their own to
+            // render.
+            Some("token") => vec![],
             // Outside the vocabulary: a paragraph of its prose.
             Some(_) => {
                 let p = prose(self.a, node);
@@ -267,7 +384,7 @@ impl Ctx<'_> {
     fn para(&self, p: &str) -> String {
         match self.kind {
             Render::Html => format!("<p>{}</p>", escape_html(p)),
-            Render::Markdown | Render::Plain | Render::Atrep => p.to_string(),
+            Render::Markdown | Render::Plain | Render::Atrep | Render::Conllu => p.to_string(),
         }
     }
 
@@ -296,7 +413,7 @@ impl Ctx<'_> {
         let heading = match self.kind {
             Render::Markdown => format!("{} {}", "#".repeat(level), lemma),
             Render::Html => format!("<h{level}>{}</h{level}>", escape_html(&lemma)),
-            Render::Plain => lemma.clone(),
+            Render::Plain | Render::Conllu => lemma.clone(),
             Render::Atrep => unreachable!(),
         };
         let mut out = vec![heading];
@@ -341,7 +458,7 @@ impl Ctx<'_> {
                 out.push_str("</blockquote>");
                 out
             }
-            Render::Plain => {
+            Render::Plain | Render::Conllu => {
                 let mut body = inner.join("\n\n");
                 if let Some(h) = &hypograph {
                     if !body.is_empty() {
@@ -387,7 +504,7 @@ impl Ctx<'_> {
                 out.push_str(&format!("</{tag}>"));
                 out
             }
-            Render::Markdown | Render::Plain | Render::Atrep => {
+            Render::Markdown | Render::Plain | Render::Atrep | Render::Conllu => {
                 let mut lines = Vec::new();
                 for (i, &item) in items.iter().enumerate() {
                     let marker = if ordered {
@@ -513,7 +630,7 @@ impl Ctx<'_> {
                 };
                 format!("<pre><code{class}>{}</code></pre>", escape_html(&text))
             }
-            Render::Plain => text,
+            Render::Plain | Render::Conllu => text,
         }
     }
 }

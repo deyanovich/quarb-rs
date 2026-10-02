@@ -361,7 +361,7 @@ fn head_declarations_land_on_the_document() {
     }
     assert_eq!(
         m.property(root, "tags"),
-        Some(Value::List(
+        Some(Value::list(
             [
                 "capsa",
                 "register",

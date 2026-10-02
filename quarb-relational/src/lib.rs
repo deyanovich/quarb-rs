@@ -413,7 +413,7 @@ impl AstAdapter for RelationalModel {
         match self.entry(node) {
             Some((t, None)) => match key {
                 "n-rows" => Some(Value::Int(self.data(t).rows.len() as i64)),
-                "columns" => Some(Value::List(
+                "columns" => Some(Value::list(
                     self.tables[t]
                         .spec
                         .columns

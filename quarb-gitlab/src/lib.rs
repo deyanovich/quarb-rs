@@ -977,7 +977,7 @@ impl AstAdapter for GitlabAdapter {
                 match name {
                     "topics" => {
                         let ts = d.get("topics")?.as_array()?;
-                        Some(Value::List(
+                        Some(Value::list(
                             ts.iter()
                                 .filter_map(|t| Some(Value::Str(t.as_str()?.to_string())))
                                 .collect(),
@@ -1018,7 +1018,7 @@ impl AstAdapter for GitlabAdapter {
                 match name {
                     "labels" => {
                         let ls = d.get("labels")?.as_array()?;
-                        Some(Value::List(
+                        Some(Value::list(
                             ls.iter()
                                 .filter_map(|l| Some(Value::Str(l.as_str()?.to_string())))
                                 .collect(),

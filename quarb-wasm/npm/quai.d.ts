@@ -22,6 +22,11 @@ export interface Source {
     | 'text-html'
     | 'text-markdown'
     | 'text'
+    | 'corpus-html'
+    | 'corpus-markdown'
+    | 'corpus'
+    | 'conllu'
+    | 'corpus-conllu'
     | 'kaiv'
     | 'daiv'
     | 'sqlite';

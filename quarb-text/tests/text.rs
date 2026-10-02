@@ -557,16 +557,19 @@ fn open_family_callouts_take_their_bodys_family() {
             onym: "a".into(),
             family: None,
             margin: false,
+            at: None,
         },
         Block::NoteRef {
             onym: "b".into(),
             family: None,
             margin: false,
+            at: None,
         },
         Block::NoteRef {
             onym: "c".into(),
             family: None,
             margin: false,
+            at: None,
         },
         Block::Open {
             kind: Container::Note {
@@ -660,4 +663,332 @@ fn verse_lines_carry_the_citation_coordinate() {
     // sub-block structure: only the verse block carries <block>
     assert_eq!(values(&m, "//verse<block> @| count"), ["1"]);
     assert_eq!(values(&m, "//stichos<block> @| count"), ["0"]);
+}
+
+/// The corpus reading (ruling #62, the sentence tier of ruling
+/// #64): under every prose block its sentences, under each its
+/// tokens — UAX #29 word segments with their class as a trait,
+/// `::lower`, and document-wide `::::n` / `::::sentence`; the
+/// block's own prose and the renderers are unchanged, and a
+/// sibling hop stops at the sentence.
+#[test]
+fn corpus_reading_tokenizes_prose_blocks() {
+    let mut m = TextModel::parse_plain(
+        "CHAPTER I\n\nTom’s aunt said: “Dr. Smith owes 3,000 dollars.” No answer.\n\nSecond one.",
+    );
+    m.tokenize();
+    assert_eq!(values(&m, "//paragraph @| count"), ["3"]);
+    assert_eq!(
+        values(&m, "//paragraph[2]::"),
+        ["Tom’s aunt said: “Dr. Smith owes 3,000 dollars.” No answer."]
+    );
+    // don’t-style apostrophes and 3,000 stay whole; punctuation is its own token.
+    assert_eq!(
+        values(&m, "//paragraph[2]//token::"),
+        [
+            "Tom’s", "aunt", "said", ":", "“", "Dr", ".", "Smith", "owes", "3,000", "dollars", ".",
+            "”", "No", "answer", "."
+        ]
+    );
+    // The sentence tier: the paragraph's sentences are its
+    // children, the tokens theirs; a sentence answers its text and
+    // its document-wide ordinal, is derived, and is no block.
+    assert_eq!(values(&m, "//paragraph[2]/sentence @| count"), ["3"]);
+    assert_eq!(values(&m, "//paragraph[2]/sentence[3]::"), ["No answer."]);
+    assert_eq!(values(&m, "//paragraph[2]/sentence[3]::::n"), ["4"]);
+    assert_eq!(
+        values(&m, "//paragraph[2]/sentence[3]/token::"),
+        ["No", "answer", "."]
+    );
+    assert_eq!(values(&m, "//sentence<derived> @| count"), ["5"]);
+    assert_eq!(values(&m, "//sentence<block> @| count"), ["0"]);
+    assert_eq!(values(&m, "//paragraph[2]/* @| count"), ["3"]);
+    assert_eq!(
+        values(&m, "//paragraph[2]/sentence[2]>sentence::"),
+        ["No answer."]
+    );
+    assert_eq!(values(&m, "//token<word> @| count"), ["13"]);
+    assert_eq!(values(&m, "//token<number>::"), ["3,000"]);
+    assert_eq!(values(&m, "//token<punct> @| count"), ["7"]);
+    assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::lower"), ["tom’s"]);
+    assert_eq!(values(&m, "//token[:: = \"Smith\"]::class"), ["word"]);
+    // Positions count through the document; the heading's tokens come first.
+    assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::::n"), ["3"]);
+    assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::n"), ["3"]);
+    // UAX #29 breaks after "Dr." — the sentence ordinal shows it,
+    // and the sibling hop stops there (ruling #64): the sentence
+    // is the token's parent.
+    assert_eq!(values(&m, "//token[:: = \"Dr\"]::::sentence"), ["2"]);
+    assert_eq!(values(&m, "//token[:: = \"Smith\"]::::sentence"), ["3"]);
+    assert_eq!(
+        values(&m, "//token[:: = \"Dr\"]>token>token @| count"),
+        ["0"]
+    );
+    assert_eq!(values(&m, "//token[:: = \"Dr\"]>token::"), ["."]);
+    // `::sentence` is the sentence's text; `::::sentence` its ordinal.
+    assert_eq!(
+        values(&m, "//token[:: = \"Smith\"]::sentence"),
+        ["Smith owes 3,000 dollars.”"]
+    );
+    assert_eq!(values(&m, "//token[:: = \"No\"]::sentence"), ["No answer."]);
+    // Quotation marks wear <quote> beside <punct> (ruling #65).
+    assert_eq!(values(&m, "//token<quote>::"), ["“", "”"]);
+    assert_eq!(values(&m, "//token<quote><punct> @| count"), ["2"]);
+    assert_eq!(values(&m, "//token<quote>::class"), ["punct", "punct"]);
+    // A token is not a block; the paragraph still is.
+    assert_eq!(values(&m, "//token<block> @| count"), ["0"]);
+    assert_eq!(values(&m, "//paragraph<block> @| count"), ["3"]);
+    // The renderers see prose, never tokens.
+    let md = quarb::koine::render_node(
+        &m,
+        quarb::adapter::NodeId(0),
+        quarb::koine::Render::Markdown,
+    );
+    assert!(!md.contains("Tom’s\n\naunt"), "{md}");
+    assert!(md.contains("Tom’s aunt said"), "{md}");
+}
+
+/// Sentence bonds (ruling #62): a `.desm` abbreviation undoes a
+/// UAX #29 break; the tokens and their positions are untouched,
+/// only `::::sentence` and `::sentence` change.
+#[test]
+fn sentence_tailoring_undoes_declared_breaks() {
+    let text = "Tom met Dr. Smith. He owed 3,000 dollars. so he said. Then Mrs. Polly came.";
+    let mut plain = TextModel::parse_plain(text);
+    plain.tokenize();
+    assert_eq!(values(&plain, "//token[:: = \"Smith\"]::::sentence"), ["2"]);
+    // UAX #29 itself keeps "dollars. so" together (no break before a
+    // lowercase letter): five sentences before the tailoring.
+    assert_eq!(
+        values(
+            &plain,
+            "//token @| group(s = ::::sentence) | count @| count"
+        ),
+        ["5"]
+    );
+    let tailoring = syndesmos::Syndesmos::parse("Dr.\nMrs.\n").unwrap();
+    let mut tailored = TextModel::parse_plain(text);
+    tailored.tokenize_with(Some(&tailoring));
+    assert_eq!(
+        values(&tailored, "//token[:: = \"Smith\"]::::sentence"),
+        ["1"]
+    );
+    assert_eq!(
+        values(&tailored, "//token[:: = \"Smith\"]::sentence"),
+        ["Tom met Dr. Smith."]
+    );
+    // "so he said." joins the sentence before it; "Then Mrs. Polly came." is one.
+    assert_eq!(
+        values(&tailored, "//token[:: = \"so\"]::sentence"),
+        ["He owed 3,000 dollars. so he said."]
+    );
+    assert_eq!(
+        values(&tailored, "//token[:: = \"Polly\"]::::sentence"),
+        ["3"]
+    );
+    assert_eq!(
+        values(
+            &tailored,
+            "//token @| group(s = ::::sentence) | count @| count"
+        ),
+        ["3"]
+    );
+    // Same tokens, same positions.
+    assert_eq!(
+        values(&tailored, "//token @| count"),
+        values(&plain, "//token @| count")
+    );
+    assert_eq!(
+        values(&tailored, "//token[:: = \"Polly\"]::::n"),
+        values(&plain, "//token[:: = \"Polly\"]::::n")
+    );
+    // An abbreviation is a whole word: "Undr." is not "Dr.".
+    let mut edge = TextModel::parse_plain("He said Undr. Then left.");
+    edge.tokenize_with(Some(&tailoring));
+    assert_eq!(values(&edge, "//token[:: = \"Then\"]::::sentence"), ["2"]);
+}
+
+/// A CoNLL-U annotation replaces the built-in tokens and sentences
+/// by offset alignment and adds lemma, parts of speech, relation
+/// and the head edge; a multiword range aligns as the unit; a form
+/// that does not align is an error naming the offset.
+#[test]
+fn conllu_annotation_replaces_the_token_layer() {
+    let mut m = TextModel::parse_plain("Tom said: “Dr. Smith owes it.”\n\nHe don't.");
+    let conllu = "\
+# text = Tom said: “Dr. Smith owes it.”
+1\tTom\tTom\tPROPN\tNNP\t_\t2\tnsubj\t_\t_
+2\tsaid\tsay\tVERB\tVBD\tTense=Past\t0\troot\t_\tSpaceAfter=No
+3\t:\t:\tPUNCT\t:\t_\t2\tpunct\t_\t_
+4\t“\t“\tPUNCT\t``\t_\t7\tpunct\t_\tSpaceAfter=No
+5\tDr.\tDr.\tPROPN\tNNP\t_\t6\tcompound\t_\t_
+6\tSmith\tSmith\tPROPN\tNNP\t_\t7\tnsubj\t_\t_
+7\towes\towe\tVERB\tVBZ\t_\t2\tccomp\t_\t_
+8\tit\tit\tPRON\tPRP\t_\t7\tobj\t_\tSpaceAfter=No
+9\t.\t.\tPUNCT\t.\t_\t2\tpunct\t_\tSpaceAfter=No
+10\t”\t”\tPUNCT\t''\t_\t2\tpunct\t_\t_
+
+# newpar
+# text = He don't.
+1\tHe\the\tPRON\tPRP\t_\t3\tnsubj\t_\t_
+2-3\tdon't\t_\t_\t_\t_\t_\t_\t_\tSpaceAfter=No
+2\tdo\tdo\tAUX\tVBP\t_\t3\taux\t_\t_
+3\tn't\tnot\tPART\tRB\tPolarity=Neg\t0\troot\t_\t_
+4\t.\t.\tPUNCT\t.\t_\t3\tpunct\t_\t_
+";
+    m.annotate_conllu(conllu).unwrap();
+    // The tool's tokens: "Dr." is one, and the sentence is the tool's.
+    assert_eq!(values(&m, "//token[:: = \"Dr.\"]::::sentence"), ["1"]);
+    assert_eq!(
+        values(&m, "//token[:: = \"Smith\"]::sentence"),
+        ["Tom said: “Dr. Smith owes it.”"]
+    );
+    assert_eq!(values(&m, "//token[:: = \"owes\"]::lemma"), ["owe"]);
+    assert_eq!(values(&m, "//token[:: = \"owes\"]::upos"), ["VERB"]);
+    assert_eq!(values(&m, "//token[:: = \"said\"]::feats"), ["Tense=Past"]);
+    assert_eq!(values(&m, "//token[:: = \"Smith\"]::deprel"), ["nsubj"]);
+    // The head edge and its reverse.
+    assert_eq!(values(&m, "//token[:: = \"Smith\"]->head::"), ["owes"]);
+    assert_eq!(
+        values(&m, "//token[:: = \"owes\"]<-head:: @| join(\" \")"),
+        ["“ Smith it"]
+    );
+    assert_eq!(values(&m, "//token[:: = \"said\"]->head @| count"), ["0"]);
+    // The multiword range: its words are tokens sharing the span.
+    assert_eq!(
+        values(&m, "//paragraph[2]/sentence/token::"),
+        ["He", "do", "n't", "."]
+    );
+    // The tool's sentences are the tier (ruling #64).
+    assert_eq!(values(&m, "//sentence @| count"), ["2"]);
+    assert_eq!(
+        values(&m, "//paragraph[1]/sentence[1]::"),
+        ["Tom said: “Dr. Smith owes it.”"]
+    );
+    assert_eq!(values(&m, "//token[:: = \"n't\"]::lemma"), ["not"]);
+    assert_eq!(values(&m, "//token[:: = \"do\"]::sentence"), ["He don't."]);
+    assert_eq!(values(&m, "//token[:: = \"n't\"]::::n"), ["13"]);
+    // Positions run through the document; the block's prose is untouched.
+    assert_eq!(
+        values(&m, "//paragraph[1]::"),
+        ["Tom said: “Dr. Smith owes it.”"]
+    );
+    // Misalignment is an error naming the offset.
+    let mut bad = TextModel::parse_plain("Tom said hello.");
+    let err = bad
+        .annotate_conllu("1\tTim\ttim\tPROPN\t_\t_\t0\troot\t_\t_\n")
+        .unwrap_err();
+    assert!(
+        err.contains("does not align") && err.contains("offset 0"),
+        "{err}"
+    );
+    // Tokenizing twice is refused.
+    assert!(m.annotate_conllu(conllu).is_err());
+}
+
+/// Under an annotation the class follows UPOS (ruling #65): a
+/// lettered `NUM` is a number, a tagger's `PUNCT` is punctuation,
+/// and a form the tags leave alone keeps the form rule.
+#[test]
+fn annotated_classes_follow_upos() {
+    let mut m = TextModel::parse_plain("It cost 3k or 5 %.");
+    let conllu = "\
+# text = It cost 3k or 5 %.
+1\tIt\tit\tPRON\tPRP\t_\t2\tnsubj\t_\t_
+2\tcost\tcost\tVERB\tVBD\t_\t0\troot\t_\t_
+3\t3k\t3k\tNUM\tCD\t_\t2\tobj\t_\t_
+4\tor\tor\tCCONJ\tCC\t_\t6\tcc\t_\t_
+5\t5\t5\tNUM\tCD\t_\t6\tnummod\t_\t_
+6\t%\t%\tSYM\tNN\t_\t3\tconj\t_\tSpaceAfter=No
+7\t.\t.\tPUNCT\t.\t_\t2\tpunct\t_\t_
+";
+    m.annotate_conllu(conllu).unwrap();
+    assert_eq!(values(&m, "//token<number>::"), ["3k", "5"]);
+    assert_eq!(values(&m, "//token<punct>::"), ["%", "."]);
+    assert_eq!(values(&m, "//token<word> @| count"), ["3"]);
+    assert_eq!(values(&m, "//token[:: = \"3k\"]::class"), ["number"]);
+}
+
+/// A cast row's `cluster` column names a coreference chain of the
+/// annotation: every mention of the chain is the character's, its
+/// first token carrying the mention (ruling #79 addendum).
+#[test]
+fn cast_table_resolves_coreference_chains() {
+    let conllu = "\
+# global.Entity = eid-etype-head-other
+# text = Tom ran. He laughed. The boy sat.
+1\tTom\tTom\tPROPN\tNNP\t_\t2\tnsubj\t_\tEntity=(e1-person-1)
+2\tran\trun\tVERB\tVBD\t_\t0\troot\t_\tSpaceAfter=No
+3\t.\t.\tPUNCT\t.\t_\t2\tpunct\t_\t_
+4\tHe\the\tPRON\tPRP\t_\t5\tnsubj\t_\tEntity=(e1-person-1)
+5\tlaughed\tlaugh\tVERB\tVBD\t_\t0\troot\t_\tSpaceAfter=No
+6\t.\t.\tPUNCT\t.\t_\t5\tpunct\t_\t_
+7\tThe\tthe\tDET\tDT\t_\t8\tdet\t_\tEntity=(e1-person-2
+8\tboy\tboy\tNOUN\tNN\t_\t9\tnsubj\t_\tEntity=e1)
+9\tsat\tsit\tVERB\tVBD\t_\t0\troot\t_\tSpaceAfter=No
+10\t.\t.\tPUNCT\t.\t_\t9\tpunct\t_\t_
+";
+    let mut m = TextModel::parse_conllu_corpus(conllu).unwrap();
+    let row = quarb_text::CastRow {
+        id: "tom".to_string(),
+        name: "Tom Sawyer".to_string(),
+        pattern: None,
+        words: 0,
+        fields: vec![("cluster".to_string(), "e1".to_string())],
+    };
+    m.apply_cast(&[row]);
+    assert_eq!(values(&m, "//character::lemma"), ["Tom Sawyer"]);
+    assert_eq!(
+        values(&m, "//character[::onym = \"tom\"]<-character @| count"),
+        ["3"]
+    );
+    assert_eq!(
+        values(&m, "//token[::prosopon = \"tom\"]::"),
+        ["Tom", "He", "The"]
+    );
+    assert_eq!(
+        values(&m, "//token[:: = \"He\"]->character::lemma"),
+        ["Tom Sawyer"]
+    );
+    assert_eq!(
+        values(
+            &m,
+            "//token[::prosopon = \"tom\"][::deprel = \"nsubj\"]->head::lemma"
+        ),
+        ["run", "laugh"]
+    );
+}
+
+/// A cast pattern whose alternatives differ in length ("Tom" or
+/// "Tom Sawyer") matches a run of one token as well as the widest
+/// run it declares; the run's first token carries the mention.
+#[test]
+fn cast_pattern_alternatives_of_different_length() {
+    let conllu = "\
+# text = Tom sat. Tom Sawyer ran.
+1\tTom\tTom\tPROPN\tNNP\t_\t2\tnsubj\t_\t_
+2\tsat\tsit\tVERB\tVBD\t_\t0\troot\t_\tSpaceAfter=No
+3\t.\t.\tPUNCT\t.\t_\t2\tpunct\t_\t_
+4\tTom\tTom\tPROPN\tNNP\t_\t6\tnsubj\t_\t_
+5\tSawyer\tSawyer\tPROPN\tNNP\t_\t4\tflat\t_\t_
+6\tran\trun\tVERB\tVBD\t_\t0\troot\t_\tSpaceAfter=No
+7\t.\t.\tPUNCT\t.\t_\t6\tpunct\t_\t_
+";
+    let mut m = TextModel::parse_conllu_corpus(conllu).unwrap();
+    let row = quarb_text::CastRow {
+        id: "tom".to_string(),
+        name: "Tom Sawyer".to_string(),
+        pattern: Some(regex::Regex::new("^(Tom|Tom Sawyer)$").unwrap()),
+        words: 2,
+        fields: vec![],
+    };
+    m.apply_cast(&[row]);
+    assert_eq!(
+        values(&m, "//token[::prosopon = \"tom\"]::"),
+        ["Tom", "Tom"]
+    );
+    assert_eq!(
+        values(&m, "//character[::onym = \"tom\"]<-character @| count"),
+        ["2"]
+    );
 }

@@ -375,6 +375,11 @@ pub struct Group {
     /// Positional predicates are refused (no ordering across
     /// tiers). Mirrors the axis rule: matcher before reach.
     pub predicates: Vec<Predicate>,
+    /// `<...>` trait filters on the group's matches, tested with
+    /// the predicates (before reach): `(>token){2}<word>` is the
+    /// second next token when it is a word. Multiple clauses are
+    /// ANDed together.
+    pub traits: Vec<TraitClause>,
     /// `?` / `!` after the quantifier: keep only the matches at the
     /// smallest / largest repetition count. Default keeps all.
     pub reach: Reach,

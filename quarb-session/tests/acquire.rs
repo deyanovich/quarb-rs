@@ -175,3 +175,61 @@ fn text_level_refs_cross_documents() {
     );
     assert_eq!(ex.refs(), vec!["https://other.example/faq.html"]);
 }
+
+/// The corpus reading through the session (ruling #62): `corpus:`
+/// opens as `text:` and tokenizes, so quai and the daemon keep
+/// the tokens with the arbor; the format-name route has the same
+/// three twins for the bindings.
+#[test]
+fn corpus_prefix_and_format_tokenize() {
+    use quarb_session::doc::{Doc, Options};
+    let dir = std::env::temp_dir().join(format!("quarb-session-corpus-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("book.txt");
+    std::fs::write(
+        &file,
+        "CHAPTER I\n\nTom said: “Dr. Smith owes 3,000 dollars.”\n",
+    )
+    .unwrap();
+    let spec = format!("corpus:{}", file.display());
+    let doc = Doc::open(std::path::Path::new(&spec), &Options::default()).unwrap();
+    let Doc::Text(model) = doc else {
+        panic!("corpus: opens a text model")
+    };
+    let count = |q: &str| match quarb::run(q, &model).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("values"),
+    };
+    assert_eq!(count("//token<word> @| count"), ["8"]);
+    // UAX #29 breaks after "Dr.", and the sentence tier (ruling
+    // #64) makes the break a parent boundary: the hop stops.
+    assert_eq!(count("//token[:: = \"Dr\"]>token>token @| count"), ["0"]);
+    assert_eq!(
+        count("//token[:: = \"Dr\"]\\\\?sentence>sentence/token[1]::"),
+        ["Smith"]
+    );
+    assert_eq!(
+        count("//token[:: = \"Smith\"]::sentence"),
+        ["Smith owes 3,000 dollars.”"]
+    );
+    // A PDF is refused with a pointer, not read as prose.
+    let pdf = dir.join("x.pdf");
+    std::fs::write(&pdf, b"%PDF-1.4\n").unwrap();
+    let err = Doc::open(
+        std::path::Path::new(&format!("corpus:{}", pdf.display())),
+        &Options::default(),
+    )
+    .err()
+    .map(|e| e.to_string())
+    .unwrap_or_default();
+    assert!(err.contains("line geometry"), "{err}");
+    // The format-name twins.
+    let Doc::Text(m) = Doc::parse("One two, three.\n\nFour.", "corpus").unwrap() else {
+        panic!()
+    };
+    match quarb::run("//token @| count", &m).unwrap() {
+        quarb::QueryResult::Values(vs) => assert_eq!(vs[0].to_string(), "7"),
+        _ => panic!(),
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

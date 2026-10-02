@@ -10,7 +10,7 @@
 
 use crate::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PatSeg, PathElem,
-    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
+    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
 };
 use crate::value::Value;
 
@@ -164,9 +164,10 @@ pub(crate) fn group(g: &Group) -> String {
     };
     let preds: String = g.predicates.iter().map(predicate).collect();
     format!(
-        "({}){}{}{}",
+        "({}){}{}{}{}",
         alts.join("|"),
         quant,
+        trait_suffix(&g.traits),
         preds,
         reach_mark(&g.reach)
     )
@@ -261,15 +262,14 @@ fn reach_mark(r: &Reach) -> &'static str {
     }
 }
 
-fn step_suffix(s: &Step) -> String {
+/// `<...>` trait clauses, CNF-shaped: clauses joined by `&&`,
+/// each a `||`-disjunction, parenthesized when both dimensions are
+/// in play. Empty for no traits.
+fn trait_suffix(traits: &[TraitClause]) -> String {
     let mut out = String::new();
-    if !s.traits.is_empty() {
-        // One bracket, CNF-shaped: clauses joined by `&&`, each a
-        // `||`-disjunction, parenthesized when both dimensions are
-        // in play.
-        let many = s.traits.len() > 1;
-        let clauses: Vec<String> = s
-            .traits
+    if !traits.is_empty() {
+        let many = traits.len() > 1;
+        let clauses: Vec<String> = traits
             .iter()
             .map(|t| {
                 let body = t
@@ -289,6 +289,11 @@ fn step_suffix(s: &Step) -> String {
         out.push_str(&clauses.join(" && "));
         out.push('>');
     }
+    out
+}
+
+fn step_suffix(s: &Step) -> String {
+    let mut out = trait_suffix(&s.traits);
     for p in &s.predicates {
         out.push_str(&predicate(p));
     }

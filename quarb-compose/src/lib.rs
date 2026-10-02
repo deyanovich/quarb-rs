@@ -201,6 +201,10 @@ struct Graft {
 const GRAFT_BIT: u64 = 1 << 55;
 
 /// Any adapter, with parseable leaf content grafted as subtrees.
+/// A host's reader for a document leaf: the path in, its text-level
+/// model out, or `None` to leave the leaf to the default grafting.
+pub type DocumentReader = std::rc::Rc<dyn Fn(&std::path::Path) -> Option<quarb_text::TextModel>>;
+
 pub struct ComposeAdapter<A: AstAdapter> {
     outer: A,
     grafts: RefCell<Vec<Graft>>,
@@ -224,6 +228,11 @@ pub struct ComposeAdapter<A: AstAdapter> {
     document_url: Option<fn(&A, NodeId) -> Option<String>>,
     /// URL → outer leaf, built on first `document_by_ref`.
     urls: RefCell<Option<HashMap<String, NodeId>>>,
+    /// The host's own reading of a document leaf, by path: when it
+    /// answers, its model is the graft (a corpus reading with its
+    /// tokens, a format this crate does not parse); when it
+    /// declines, the leaf grafts as it otherwise would.
+    document_reader: Option<DocumentReader>,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -239,7 +248,16 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             document_graft: DocumentGraft::default(),
             document_url: None,
             urls: RefCell::new(None),
+            document_reader: None,
         }
+    }
+
+    /// Hand document leaves to the host's reader first
+    /// (builder-style); needs the outer leaves' paths
+    /// ([`with_source_paths`](Self::with_source_paths)).
+    pub fn with_document_reader(mut self, reader: DocumentReader) -> Self {
+        self.document_reader = Some(reader);
+        self
     }
 
     /// Declare where each outer leaf's document is served from
@@ -379,6 +397,18 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 ));
                 let mut grafts = self.grafts.borrow_mut();
                 grafts.push(Graft { outer: node, inner });
+                return Some(grafts.len() - 1);
+            }
+            if let Some(read) = &self.document_reader
+                && let Some(path_of) = self.source_path
+                && let Some(path) = path_of(&self.outer, node)
+                && let Some(model) = read(&path)
+            {
+                let mut grafts = self.grafts.borrow_mut();
+                grafts.push(Graft {
+                    outer: node,
+                    inner: Inner::Text(model),
+                });
                 return Some(grafts.len() - 1);
             }
             let content = match self.outer.default_value(node)? {

@@ -461,6 +461,43 @@ fn regex_paren(chars: &[char], i: usize, mods: bool) -> Option<(String, usize)> 
 /// Whether an opening paren here belongs to what precedes it — a
 /// glued name (a call: `now()`, `sh()`) or a glued sigil (`%()`,
 /// `&f()`) — rather than opening something of its own.
+/// Whether `(:` opens a rounded trait. A trait body is the trait
+/// algebra alone — names, the boolean words and operators (`&&`,
+/// `||`, `!`), nested parens — up to the balancing `)`. A single
+/// pipe or a value operator in the body makes the paren a value
+/// group opening on the topic's field instead (`(:t | ngrams(3))`,
+/// `(:n * 2)`, `(:n > 3)`). With no balancing `)` at all the trait
+/// reading stays, so a mismatched closer is reported as such.
+fn trait_body_ahead(chars: &[char], from: usize) -> bool {
+    let mut depth = 0usize;
+    let mut end = None;
+    for (j, &c) in chars.iter().enumerate().skip(from) {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                end = Some(j);
+                break;
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    let Some(end) = end else { return true };
+    let mut j = from;
+    while j < end {
+        match chars[j] {
+            '|' if chars.get(j + 1) == Some(&'|') => j += 2,
+            // a spaced dash is subtraction; glued, it is part of a
+            // name (`stage-direction`)
+            '-' if j > from && chars[j - 1].is_whitespace() => return false,
+            '|' | '*' | '+' | '/' | '=' | '<' | '>' | '$' | '"' | '\'' | ',' | ';' | '[' | ']'
+            | '{' | '}' | '@' | '%' | '^' | '~' | '?' | '#' => return false,
+            _ => j += 1,
+        }
+    }
+    true
+}
+
 fn after_call_head(tokens: &[Token], glued: bool) -> bool {
     glued
         && (matches!(
@@ -1170,6 +1207,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // field of the topic record.
             '(' if at(i + 1) == Some(':')
                 && !matches!(at(i + 2), Some(':' | '-'))
+                && trait_body_ahead(&chars, i + 2)
                 && !(after_call_head(&tokens, glued)
                     && !after_axis(&tokens[..tokens.len() - 1])) =>
             {
@@ -2090,6 +2128,34 @@ mod glued_operator_tests {
         ));
         assert!(lex("(:a>").is_err());
         assert!(lex("(:a]").is_err());
+        // a pipe or an operator after the name: a value group on
+        // the topic's field, not a trait
+        assert!(matches!(
+            lex("(:t | ngrams(3))").unwrap().as_slice(),
+            [
+                Token::LParen,
+                Token::Field,
+                Token::Name { .. },
+                Token::Pipe,
+                ..
+            ]
+        ));
+        assert!(matches!(
+            lex("(:n * 2)").unwrap().as_slice(),
+            [Token::LParen, Token::Field, Token::Name { .. }, ..]
+        ));
+        assert!(matches!(
+            lex("(:n - :back)").unwrap().as_slice(),
+            [Token::LParen, Token::Field, Token::Name { .. }, ..]
+        ));
+        assert!(matches!(
+            lex("(:stage-direction)").unwrap().as_slice(),
+            [Token::Lt { spaced: false }, Token::Name { .. }, ..]
+        ));
+        assert!(matches!(
+            lex("(:word and not punct)").unwrap().as_slice(),
+            [Token::Lt { spaced: false }, Token::Name { .. }, ..]
+        ));
         // root anchor: `(())` is `^`; a glued `()` stays a call's parens
         assert_eq!(
             lex("(())/x").unwrap(),

@@ -69,7 +69,7 @@ fn cell_value(v: &R) -> Value {
             }
         }
         R::SimpleString(s) => Value::Str(s.clone()),
-        R::Array(items) => Value::List(items.iter().map(cell_value).collect()),
+        R::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         other => Value::Str(format!("{other:?}")),
     }
 }
@@ -410,10 +410,10 @@ impl AstAdapter for FalkorAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {
-            (Kind::Root, "labels") => Some(Value::List(
+            (Kind::Root, "labels") => Some(Value::list(
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
-            (Kind::Root, "rel-types") => Some(Value::List(
+            (Kind::Root, "rel-types") => Some(Value::list(
                 self.rel_types
                     .iter()
                     .map(|t| Value::Str(t.clone()))
@@ -426,7 +426,7 @@ impl AstAdapter for FalkorAdapter {
                 rows.first()?.first().map(cell_value)
             }
             (Kind::Entity { gid, .. }, "id") => Some(Value::Int(*gid)),
-            (Kind::Entity { labels, .. }, "labels") => Some(Value::List(
+            (Kind::Entity { labels, .. }, "labels") => Some(Value::list(
                 labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             _ => None,

@@ -22,12 +22,14 @@ default = ["colligo"]
 colligo = ["dep:colligo"]
 
 [dependencies]
-quarb-trace = { path = "../quarb-trace", version = "0.30.0" }
+quarb-trace = { path = "../quarb-trace", version = "0.31.0" }
 kaiv = { version = "0.14.0", default-features = false }
 thiserror.workspace = true
 globset.workspace = true
 regex = "1"
 unicode-segmentation = "1"
+unicode-normalization = "0.1"
+syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
 colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }
 serde_json.workspace = true
 serde_yaml_ng = "0.10.0"

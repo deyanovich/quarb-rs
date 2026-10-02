@@ -1076,7 +1076,7 @@ impl AstAdapter for AtrepAdapter {
             "sim" => n.name.clone().map(Value::Str),
             "param" => n.param.clone().map(Value::Str),
             "target" => n.reference.as_ref().map(|r| Value::Str(r.key.clone())),
-            "genoses" => Some(Value::List(
+            "genoses" => Some(Value::list(
                 n.genoses.iter().cloned().map(Value::Str).collect(),
             )),
             "dialect" => match n.kind {

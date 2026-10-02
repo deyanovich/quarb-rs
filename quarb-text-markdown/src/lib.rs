@@ -152,6 +152,8 @@ pub fn blocks(text: &str) -> Vec<Block> {
     let mut link_open: Option<(String, usize)> = None;
     // The heading's `{#id}` attribute — the section's label.
     let mut heading_id: Option<String> = None;
+    // The identifiers already given, for numbering a repeat.
+    let mut slugs: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for event in Parser::new_ext(text, opts) {
         match event {
@@ -240,13 +242,33 @@ pub fn blocks(text: &str) -> Vec<Block> {
                 TagEnd::Heading(level) => {
                     let lemma = cap.take().unwrap_or_default();
                     scan_citations(&lemma, &mut cites);
+                    // The heading is a link's landing place: by its
+                    // `{#id}` when it declares one, else by the
+                    // identifier pandoc derives from its text.
+                    let id = match heading_id.take() {
+                        Some(id) => {
+                            slugs.entry(id.clone()).or_insert(0);
+                            id
+                        }
+                        None => {
+                            let base = slug(&lemma);
+                            match slugs.get_mut(&base) {
+                                Some(n) => {
+                                    *n += 1;
+                                    format!("{base}-{n}")
+                                }
+                                None => {
+                                    slugs.insert(base.clone(), 0);
+                                    base
+                                }
+                            }
+                        }
+                    };
                     out.push(Block::Heading {
                         level: heading_level(level),
                         lemma,
                     });
-                    if let Some(id) = heading_id.take() {
-                        out.push(Block::Label { onym: id });
-                    }
+                    out.push(Block::Label { onym: id });
                     drain_callouts(&mut callouts, &mut out);
                     drain_refs(&mut refs, &mut out);
                     drain_cites(&mut cites, &mut out);
@@ -348,6 +370,32 @@ struct TableState {
     row: Vec<String>,
 }
 
+/// The identifier pandoc gives a heading without one
+/// (`auto_identifiers`): lowercase; letters, digits, `_`, `-` and
+/// `.` kept and everything else dropped; spaces to hyphens;
+/// everything before the first letter removed; `section` when
+/// nothing is left. A `[#the-river-books]` link lands on it.
+fn slug(lemma: &str) -> String {
+    let kept: String = lemma
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                Some(c.to_lowercase().to_string())
+            } else if c.is_whitespace() {
+                Some("-".to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let slug: String = kept.chars().skip_while(|c| !c.is_alphabetic()).collect();
+    if slug.is_empty() {
+        "section".to_string()
+    } else {
+        slug
+    }
+}
+
 fn heading_level(level: HeadingLevel) -> u8 {
     match level {
         HeadingLevel::H1 => 1,
@@ -374,6 +422,7 @@ fn drain_callouts(callouts: &mut Vec<String>, out: &mut Vec<Block>) {
             onym,
             family: Some(NoteFamily::Footnote),
             margin: false,
+            at: None,
         });
     }
 }

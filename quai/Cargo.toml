@@ -19,12 +19,13 @@ path = "src/main.rs"
 
 [dependencies]
 ureq.workspace = true
-quarb = { path = "../quarb", version = "0.30.0" }
-quarb-session = { path = "../quarb-session", version = "0.30.0" }
-quarb-model = { path = "../quarb-model", version = "0.30.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.30.0" }
+quarb = { path = "../quarb", version = "0.31.0" }
+quarb-session = { path = "../quarb-session", version = "0.31.0" }
+syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
+quarb-model = { path = "../quarb-model", version = "0.31.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.31.0" }
 # The full mounting dispatch — quai opens every target qua opens.
-qua = { path = "../qua", version = "0.30.0" }
+qua = { path = "../qua", version = "0.31.0" }
 clap.workspace = true
 anyhow.workspace = true
 rustyline = "14"

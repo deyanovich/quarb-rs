@@ -149,11 +149,15 @@ pub fn parse_djot(text: &str) -> Result<TextModel, KoineError> {
 /// `?format=`: `"tei"`, `"docbook"`, `"jats"`, `"usx"`, `"osis"`.
 pub fn parse_xml_as(text: &str, kind: &str) -> Result<TextModel, KoineError> {
     let doc = match kind {
+        "usfm" => atrep::endo::usfm_to_document(text)?,
         "tei" => atrep::endo::tei_to_document(text)?,
         "docbook" => atrep::endo::docbook_to_document(text)?,
         "jats" => atrep::endo::jats_to_document(text)?,
         "usx" => atrep::endo::usx_to_document(text)?,
         "osis" => atrep::endo::osis_to_document(text)?,
+        "rnc" => atrep::epimerismos::rnc_to_document(text)?,
+        "opencorpora" => atrep::epimerismos::opencorpora_to_document(text)?,
+        "proiel" => atrep::epimerismos::proiel_to_document(text)?,
         other => return Err(KoineError::UnknownFormat(other.to_string())),
     };
     import(doc)
@@ -210,6 +214,13 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
                     b"usx" => Some("usx"),
                     b"osis" => Some("osis"),
                     b"book" => Some("docbook"),
+                    // The parsed corpora (ruling #80): OpenCorpora's
+                    // `<annotation>`, PROIEL's `<proiel>`, and the
+                    // Russian National Corpus's XHTML-shaped export,
+                    // told from a web page by its `<ana` analyses.
+                    b"annotation" => Some("opencorpora"),
+                    b"proiel" => Some("proiel"),
+                    b"html" if text.contains("<ana ") => Some("rnc"),
                     // <article> alone: JATS or DocBook 4 — refuse.
                     _ => None,
                 };
@@ -224,19 +235,119 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
 /// Settle an imported mirror-dialect document and lower it: the
 /// endomorphosis did the format work in atrep; this crate reads
 /// the dialect vocabulary.
-fn import(mut doc: atrep::Document) -> Result<TextModel, KoineError> {
+fn import(doc: atrep::Document) -> Result<TextModel, KoineError> {
+    import_with(doc, false)
+}
+
+fn import_with(mut doc: atrep::Document, lit: bool) -> Result<TextModel, KoineError> {
     let dial = dialektos::resolve(Path::new("."), &doc.dialect_id)?;
     kanonizo::tasso(&mut doc, &dial, Path::new("."))?;
-    Ok(finish_model(blocks(&doc, &dial)))
+    Ok(finish_model(blocks_with(&doc, &dial, lit)))
+}
+
+/// The literary reading (`lit:`) of a document file: every inline
+/// simmere kept as a node named by its sim, its genoses as
+/// traits, the aphanes monosims as its properties.
+pub fn parse_lit_file(path: &Path) -> Result<TextModel, KoineError> {
+    parse_lit_file_with(path, None)
+}
+
+/// [`parse_lit_file`] under a citation scheme (ruling #81): the
+/// at-usfm chapter and verse markers become milestones with
+/// full-path values under `scheme` (`scheme:jhn.3.16`), and
+/// `::cite` answers under it.
+pub fn parse_lit_file_with(path: &Path, scheme: Option<&str>) -> Result<TextModel, KoineError> {
+    match atrep::check_any(path)? {
+        Checked::Dialektos(_) => Err(KoineError::NotADocument),
+        Checked::Document(mut doc) => {
+            let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let dial = dialektos::resolve(&base, &doc.dialect_id)?;
+            if let Some(s) = scheme {
+                atrep::endo::usfm_apply_scheme(&mut doc, s);
+            }
+            kanonizo::tasso(&mut doc, &dial, &base)?;
+            let mut model = finish_model(blocks_with(&doc, &dial, true));
+            if let Some(s) = scheme {
+                model.set_cite_scheme(s);
+            }
+            Ok(model)
+        }
+    }
+}
+
+/// The literary reading of document text; `dir` anchors dialektos
+/// resolution.
+pub fn parse_lit_str(source: &str, dir: &Path) -> Result<TextModel, KoineError> {
+    match atrep::check_source(source, &dir.join("<memory>.atd"))? {
+        Checked::Dialektos(_) => Err(KoineError::NotADocument),
+        Checked::Document(mut doc) => {
+            let dial = dialektos::resolve(dir, &doc.dialect_id)?;
+            kanonizo::tasso(&mut doc, &dial, dir)?;
+            Ok(finish_model(blocks_with(&doc, &dial, true)))
+        }
+    }
+}
+
+/// The literary reading of one of the literary XML vocabularies —
+/// `"tei"`, `"usx"`, `"osis"` — through atrep's importer, which
+/// emits the aphanes monosims from the source's attributes.
+pub fn parse_lit_xml_as(text: &str, kind: &str) -> Result<TextModel, KoineError> {
+    parse_lit_xml_as_with(text, kind, None)
+}
+
+/// [`parse_lit_xml_as`] under a citation scheme (ruling #81) —
+/// also the route for USFM (`"usfm"`), whose chapter and verse
+/// markers the scheme turns into milestones.
+pub fn parse_lit_xml_as_with(
+    text: &str,
+    kind: &str,
+    scheme: Option<&str>,
+) -> Result<TextModel, KoineError> {
+    let mut doc = match kind {
+        "usfm" => atrep::endo::usfm_to_document(text)?,
+        // Under a scheme a TEI verse text gets line milestones
+        // (`book.line` at every fifth `<l n>`) beside its own.
+        "tei" => atrep::endo::tei_to_document_lines(text, scheme)?,
+        "usx" => atrep::endo::usx_to_document(text)?,
+        "osis" => atrep::endo::osis_to_document(text)?,
+        "rnc" => atrep::epimerismos::rnc_to_document(text)?,
+        "opencorpora" => atrep::epimerismos::opencorpora_to_document(text)?,
+        "proiel" => atrep::epimerismos::proiel_to_document(text)?,
+        other => return Err(KoineError::UnknownFormat(other.to_string())),
+    };
+    if let Some(s) = scheme {
+        atrep::endo::usfm_apply_scheme(&mut doc, s);
+    }
+    let mut model = import_with(doc, true)?;
+    if let Some(s) = scheme {
+        model.set_cite_scheme(s);
+    }
+    Ok(model)
 }
 
 /// Lower a settled document into the block event stream —
 /// exposed for tests and tooling.
 pub fn blocks(doc: &atrep::Document, dial: &Dialektos) -> Vec<Block> {
+    blocks_with(doc, dial, false)
+}
+
+/// [`blocks`] in the literary reading when `lit` is set: inline
+/// simmeres become [`Block::Span`]s (byte offsets into the
+/// normalized text of their block, genoses, aphanes fields), a
+/// dialogue line a [`Block::Speech`], a milestone a
+/// [`Block::Milestone`], a paragraph's own aphanes monosims a
+/// [`Block::Annotate`]. The text level's flattening reading is
+/// `lit = false`.
+pub fn blocks_with(doc: &atrep::Document, dial: &Dialektos, lit: bool) -> Vec<Block> {
     let mut lower = Lower {
         out: Vec::new(),
         pending: Vec::new(),
         heading_depth: 0,
+        lit,
+        open_spans: Vec::new(),
+        para_fields: Vec::new(),
+        note_bodies: Vec::new(),
+        notes: 0,
     };
     lower.seq(&doc.blocks, dial);
     lower.out
@@ -372,7 +483,9 @@ pub fn parse_bibtex(source: &str) -> Result<TextModel, KoineError> {
 }
 
 enum Pending {
-    Note(String, NoteFamily),
+    /// A note callout: the body's onym, its family, and the
+    /// callout's offset in the block when the note was inline.
+    Note(String, NoteFamily, Option<u32>),
     Mark(String),
     /// A mention met in flow: (target, internal).
     Ref(String, bool),
@@ -380,12 +493,122 @@ enum Pending {
     Point(String),
     /// A citation mark: the authored key, the bib namespace.
     Cite(String),
+    /// The literary reading: an inline simmere as a span of the
+    /// block being flattened (pre-order: pushed at its start, the
+    /// end filled in after its content).
+    Span {
+        kind: String,
+        lo: u32,
+        hi: u32,
+        genoses: Vec<String>,
+        fields: Vec<(String, String)>,
+    },
+    /// The literary reading: a milestone at a byte offset.
+    Milestone {
+        scheme: String,
+        value: String,
+        at: u32,
+    },
+    /// The parsing pack (ruling #80): a token the source parsed,
+    /// at byte offsets, with its parsings and its onym.
+    Parsed {
+        lo: u32,
+        hi: u32,
+        onym: Option<String>,
+        parsings: Vec<quarb_text::Parsing>,
+    },
+    /// The parsing pack: a declared sentence at byte offsets.
+    Periodos {
+        lo: u32,
+        hi: u32,
+        id: String,
+    },
+}
+
+/// at-epimerismos, the parsing pack: its monosims by symbol.
+const PERIODOS: &str = "!.";
+const LEXEMA: &str = "!=";
+const MEROS: &str = "!/";
+const PAREPOMENA: &str = "!%";
+const SEMASIA: &str = "!&";
+const KEPHALE: &str = "!>";
+const SCHESIS: &str = "!-";
+
+fn is_pack(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        LEXEMA | MEROS | PAREPOMENA | SEMASIA | KEPHALE | SCHESIS
+    )
+}
+
+/// The parsings a token diaphane opens with: its leading pack
+/// monosims, a lexema opening each parsing.
+fn parsings_of(content: &[Inline]) -> Vec<quarb_text::Parsing> {
+    let mut out: Vec<quarb_text::Parsing> = Vec::new();
+    for inline in content {
+        let Inline::Monosim { symbol, param, .. } = inline else {
+            break;
+        };
+        if !is_pack(symbol) {
+            break;
+        }
+        if out.is_empty() || (symbol == LEXEMA && out.last().is_some_and(|p| p.lexema.is_some())) {
+            out.push(quarb_text::Parsing::default());
+        }
+        let p = out.last_mut().expect("opened");
+        let v = Some(param.clone());
+        match symbol.as_str() {
+            LEXEMA => p.lexema = v,
+            MEROS => p.meros = v,
+            PAREPOMENA => p.parepomena = v,
+            SEMASIA => p.semasia = v,
+            KEPHALE => p.kephale = v,
+            SCHESIS => p.schesis = v,
+            _ => {}
+        }
+    }
+    out
 }
 
 struct Lower {
     out: Vec<Block>,
     pending: Vec<Pending>,
     heading_depth: u8,
+    /// The literary reading is on: keep the inline simmeres.
+    lit: bool,
+    /// Indices into `pending` of the spans open around the text
+    /// being flattened (innermost last): an aphanes monosim
+    /// annotates the innermost open span.
+    open_spans: Vec<usize>,
+    /// Aphanes monosims met outside any span: the block's own.
+    para_fields: Vec<(String, String)>,
+    /// The bodies of the inline notes met while flattening the
+    /// current block (onym, family, text), emitted after it.
+    note_bodies: Vec<(String, NoteFamily, String)>,
+    /// A running number for the inline notes' onyms.
+    notes: u32,
+}
+
+/// Whether a monosim is an at-aphanes sim: the unseen pack's
+/// symbols all begin with `?`. Its sim name (`prosopon`, `chora`,
+/// `skopos`, …) is the property the value answers under.
+fn is_aphanes(symbol: &str) -> bool {
+    symbol.starts_with('?')
+}
+
+/// Push text with whitespace normalized as `normalize_ws` would:
+/// runs collapse to one space, none at the start. Offsets taken
+/// on the result survive the builder's own normalization.
+fn push_norm(out: &mut String, s: &str) {
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
 }
 
 impl Lower {
@@ -414,8 +637,73 @@ impl Lower {
                     self.drain_pending();
                     return;
                 }
+                // The literary reading: a dramatis-persona line
+                // (at-drama `@:! name !:@`, a TEI castItem) is a cast
+                // entry — the name its lemma, an onym its id.
+                if self.lit
+                    && let [
+                        Inline::Endo {
+                            symbol,
+                            content,
+                            ann,
+                            ..
+                        },
+                    ] = inlines.as_slice()
+                    && sim_name(dial, symbol) == "dramatis-persona"
+                {
+                    let lemma = self.flatten(content, dial);
+                    self.out.push(Block::Character {
+                        lemma,
+                        onym: ann.onym.clone(),
+                        text: String::new(),
+                        genoses: ann.genoses.clone(),
+                    });
+                    self.drain_pending();
+                    return;
+                }
+                // The literary reading: a paragraph that is one
+                // dialogue line (at-drama `@:-…-:@`, TEI's
+                // whole-paragraph `<said>`) is a speech block; the
+                // aphanes monosims first inside it are its fields.
+                if self.lit
+                    && let [
+                        Inline::Endo {
+                            symbol,
+                            content,
+                            ann,
+                            ..
+                        },
+                    ] = inlines.as_slice()
+                    && sim_name(dial, symbol) == "dialogue-line"
+                {
+                    let text = self.flatten(content, dial);
+                    let mut fields = std::mem::take(&mut self.para_fields);
+                    fields.retain(|(k, _)| !k.is_empty());
+                    self.out.push(Block::Speech {
+                        text,
+                        genoses: ann.genoses.clone(),
+                        fields,
+                    });
+                    self.drain_pending();
+                    return;
+                }
                 let text = self.flatten(inlines, dial);
+                // A paragraph that is only a milestone (a chapter
+                // marker between paragraphs) has no prose of its
+                // own: the milestone stands at the END of the flow
+                // block before it, not at offset 0 of it.
+                if text.is_empty() {
+                    for pending in &mut self.pending {
+                        if let Pending::Milestone { at, .. } = pending {
+                            *at = u32::MAX;
+                        }
+                    }
+                }
                 self.out.push(Block::Paragraph { text });
+                if self.lit && !self.para_fields.is_empty() {
+                    let fields = std::mem::take(&mut self.para_fields);
+                    self.out.push(Block::Annotate { fields });
+                }
                 self.drain_pending();
             }
             ABlock::Para {
@@ -506,10 +794,59 @@ impl Lower {
                     "definition" => {
                         self.seq(children, dial);
                     }
+                    // A `dialogue` (@:) — TEI's `<said who>` and
+                    // `<sp><speaker>` arrive as this sim — is one
+                    // paragraph whose lemma names the speaker, never
+                    // a label paragraph before the speech: the
+                    // first paragraph the speech lowers to takes the
+                    // speaker as its lemma, the rest of the body
+                    // flows after it.
+                    "dialogue" | ":" => {
+                        let speaker = self.flatten(lemma, dial);
+                        let at = self.out.len();
+                        self.seq(children, dial);
+                        if !speaker.is_empty()
+                            && let Some(Block::Paragraph { text }) = self.out.get(at)
+                        {
+                            let text = text.clone();
+                            self.out[at] = Block::Dialogue {
+                                lemma: speaker,
+                                text,
+                                lit: self.lit,
+                            };
+                        }
+                        let hypograph = self.flatten(hypograph, dial);
+                        if !hypograph.is_empty() {
+                            self.out.push(Block::Paragraph { text: hypograph });
+                            self.drain_pending();
+                        }
+                    }
+                    // The literary reading: a cast entry with a
+                    // description (at-drama `@:!! name … !!:@(id)`)
+                    // is a character node, the description its text.
+                    "character" if self.lit => {
+                        let lemma = self.flatten(lemma, dial);
+                        let text = children
+                            .iter()
+                            .filter_map(|c| match c {
+                                ABlock::Paragraph(inlines) => Some(self.flatten(inlines, dial)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        self.out.push(Block::Character {
+                            lemma,
+                            onym: ann.onym.clone(),
+                            text,
+                            genoses: ann.genoses.clone(),
+                        });
+                        self.drain_pending();
+                    }
                     _ => {
                         // Unknown para-simmere: transparent — the
                         // lemma opens as a paragraph, children
                         // flow, the hypograph closes as one.
+                        let at = self.out.len();
                         let lemma = self.flatten(lemma, dial);
                         if !lemma.is_empty() {
                             self.out.push(Block::Paragraph { text: lemma });
@@ -520,6 +857,28 @@ impl Lower {
                         if !hypograph.is_empty() {
                             self.out.push(Block::Paragraph { text: hypograph });
                             self.drain_pending();
+                        }
+                        // The literary reading: the paragraphs of a
+                        // named simmere with no reading of its own
+                        // wear its sim as a trait — the block form's
+                        // `-block` dropped, since the paragraph kind
+                        // already says block (at-drama's
+                        // `stage-direction-block`, TEI's block
+                        // `<stage>`: `paragraph<stage-direction>`) —
+                        // and its genoses with it.
+                        if self.lit && dial.sims.contains_key(symbol.as_str()) {
+                            let mut genoses = vec![name.trim_end_matches("-block").to_string()];
+                            genoses.extend(ann.genoses.iter().cloned());
+                            let tail: Vec<Block> = self.out.drain(at..).collect();
+                            for block in tail {
+                                let para = matches!(block, Block::Paragraph { .. });
+                                self.out.push(block);
+                                if para {
+                                    self.out.push(Block::Wear {
+                                        genoses: genoses.clone(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -661,15 +1020,23 @@ impl Lower {
     fn flatten(&mut self, inlines: &[Inline], dial: &Dialektos) -> String {
         let mut out = String::new();
         self.flatten_into(inlines, dial, &mut out);
-        quarb_text::normalize_ws(&out)
+        // `push_norm` left at most one trailing space; the result
+        // is what `normalize_ws` would give, so the literary
+        // reading's offsets hold.
+        let trimmed = out.trim_end().len();
+        out.truncate(trimmed);
+        out
     }
 
     fn flatten_into(&mut self, inlines: &[Inline], dial: &Dialektos, out: &mut String) {
         for inline in inlines {
             match inline {
-                Inline::Text(t) => out.push_str(t),
+                Inline::Text(t) => push_norm(out, t),
                 Inline::Endo {
-                    symbol, content, ..
+                    symbol,
+                    content,
+                    ann,
+                    ..
                 } => match sim_name(dial, symbol).as_str() {
                     "index" | "index-hidden" => {
                         let term = flat(content);
@@ -688,6 +1055,26 @@ impl Lower {
                     // authored text beside it) and the mention
                     // becomes a ref node; a `#fragment` target is
                     // internal.
+                    // An inline-bodied note (at-usfm's `\f`, a
+                    // `note` simmere): the body is a note of its
+                    // family, never the block's prose; the callout
+                    // stands at its offset.
+                    "note" => {
+                        let family = if ann.genoses.iter().any(|g| g == "fe") {
+                            NoteFamily::Endnote
+                        } else {
+                            NoteFamily::Footnote
+                        };
+                        self.notes += 1;
+                        let onym = format!("note-{}", self.notes);
+                        let text = flat(content);
+                        self.pending.push(Pending::Note(
+                            onym.clone(),
+                            family,
+                            Some(out.len() as u32),
+                        ));
+                        self.note_bodies.push((onym, family, text));
+                    }
                     name if name == "link" || symbol == "><" => {
                         let target = flat(content);
                         self.flatten_into(content, dial, out);
@@ -697,20 +1084,130 @@ impl Lower {
                             self.pending.push(Pending::Ref(t, internal));
                         }
                     }
+                    // The literary reading keeps every other
+                    // inline simmere as a span named by its sim,
+                    // in pre-order: its entry is pushed before its
+                    // content is flattened and closed after.
+                    name if self.lit => {
+                        let idx = self.pending.len();
+                        self.pending.push(Pending::Span {
+                            kind: name.to_string(),
+                            lo: out.len() as u32,
+                            hi: 0,
+                            genoses: ann.genoses.clone(),
+                            fields: Vec::new(),
+                        });
+                        self.open_spans.push(idx);
+                        self.flatten_into(content, dial, out);
+                        self.open_spans.pop();
+                        let hi = out.trim_end().len() as u32;
+                        if let Pending::Span { lo, hi: h, .. } = &mut self.pending[idx] {
+                            // A span never starts on the space
+                            // that separates it from the word before.
+                            while (*lo as usize) < hi as usize
+                                && out.as_bytes()[*lo as usize] == b' '
+                            {
+                                *lo += 1;
+                            }
+                            *h = hi.max(*lo);
+                        }
+                    }
                     _ => self.flatten_into(content, dial, out),
                 },
-                Inline::EndoDiaphane { content, .. } => self.flatten_into(content, dial, out),
-                Inline::VerbatimInline { content, .. } => out.push_str(content),
+                // The parsing pack (ruling #80): a diaphane opened
+                // by the periodos is a declared sentence, one
+                // opened by a token monosim a parsed token — both
+                // at their offsets in the prose, the monosims
+                // never in it.
+                Inline::EndoDiaphane { content, ann } => match content.first() {
+                    Some(Inline::Monosim { symbol, param, .. }) if symbol == PERIODOS => {
+                        let lo = out.len() as u32;
+                        self.flatten_into(content, dial, out);
+                        let hi = out.trim_end().len() as u32;
+                        self.pending.push(Pending::Periodos {
+                            lo,
+                            hi: hi.max(lo),
+                            id: param.clone(),
+                        });
+                    }
+                    // An editorial pair (TEI's `<choice>`, at-aphanes'
+                    // paradosis): the reading in the prose, the
+                    // original as the `choice` span's field under the
+                    // literary reading (atrep's parser has already
+                    // decoded the parameter's escaped spaces).
+                    Some(Inline::Monosim { symbol, param, .. })
+                        if is_aphanes(symbol) && self.lit =>
+                    {
+                        let key = sim_name(dial, symbol);
+                        let idx = self.pending.len();
+                        self.pending.push(Pending::Span {
+                            kind: "choice".to_string(),
+                            lo: out.len() as u32,
+                            hi: 0,
+                            genoses: ann.genoses.clone(),
+                            fields: vec![(key, param.clone())],
+                        });
+                        self.open_spans.push(idx);
+                        let rest: Vec<Inline> = content.iter().skip(1).cloned().collect();
+                        self.flatten_into(&rest, dial, out);
+                        self.open_spans.pop();
+                        let hi = out.trim_end().len() as u32;
+                        if let Pending::Span { lo, hi: h, .. } = &mut self.pending[idx] {
+                            while (*lo as usize) < hi as usize
+                                && out.as_bytes()[*lo as usize] == b' '
+                            {
+                                *lo += 1;
+                            }
+                            *h = hi.max(*lo);
+                        }
+                    }
+                    Some(Inline::Monosim { symbol, .. }) if is_pack(symbol) => {
+                        let lo = out.len() as u32;
+                        let parsings = parsings_of(content);
+                        self.flatten_into(content, dial, out);
+                        let hi = out.trim_end().len() as u32;
+                        self.pending.push(Pending::Parsed {
+                            lo,
+                            hi: hi.max(lo),
+                            onym: ann.onym.clone(),
+                            parsings,
+                        });
+                    }
+                    _ => self.flatten_into(content, dial, out),
+                },
+                // A pack monosim is analysis, never prose.
+                Inline::Monosim { symbol, .. } if symbol == PERIODOS || is_pack(symbol) => {}
+                Inline::VerbatimInline { content, .. } => push_norm(out, content),
+                // An aphanes monosim (`@?:(polly)`) is unseen
+                // metadata: never prose. On the literary reading
+                // it is a field of the innermost open span, else
+                // of the block itself.
+                Inline::Monosim { symbol, param, .. } if is_aphanes(symbol) => {
+                    if self.lit {
+                        let key = sim_name(dial, symbol);
+                        match self.open_spans.last() {
+                            Some(&idx) => {
+                                if let Pending::Span { fields, .. } = &mut self.pending[idx] {
+                                    fields.push((key, param.clone()));
+                                }
+                            }
+                            None => self.para_fields.push((key, param.clone())),
+                        }
+                    }
+                }
                 Inline::Monosim { symbol, param, .. } => {
                     // The ref family: the key stays in the prose
                     // (as before) and the mention becomes a ref
                     // node, internal by construction. `cite` keys
                     // are a namespace of their own (the
                     // bibliogramma) and stay prose until that
-                    // story lands.
-                    out.push_str(param);
+                    // story lands. Every other monosim is a marker
+                    // (a chapter or verse number, a milestone the
+                    // scheme option turns into a node): metadata,
+                    // never prose.
                     match sim_name(dial, symbol).as_str() {
                         "ref" | "heading-ref" | "page-ref" | "line-ref" => {
+                            push_norm(out, param);
                             self.pending.push(Pending::Ref(param.clone(), true));
                         }
                         // The citation namespace is its own: cite
@@ -718,6 +1215,7 @@ impl Lower {
                         // embedded bibliogramma's entries are the
                         // recorded follow-up).
                         "cite" => {
+                            push_norm(out, param);
                             self.pending.push(Pending::Cite(param.clone()));
                         }
                         _ => {}
@@ -731,13 +1229,22 @@ impl Lower {
                         _ => None,
                     };
                     if let Some(family) = family {
-                        self.pending.push(Pending::Note(onym.clone(), family));
+                        self.pending.push(Pending::Note(onym.clone(), family, None));
                     }
                 }
                 Inline::OnymAnchor(o) => {
                     // A standalone anchor bears its onym at this
                     // position — the point style.
                     self.pending.push(Pending::Point(o.clone()));
+                }
+                // The literary reading keeps a milestone as a
+                // point in the prose (`@("page:12")`).
+                Inline::Milestone { scheme, value, .. } if self.lit => {
+                    self.pending.push(Pending::Milestone {
+                        scheme: scheme.clone(),
+                        value: value.clone(),
+                        at: out.len() as u32,
+                    });
                 }
                 Inline::Milestone { .. } | Inline::EndoAxioma { .. } | Inline::AxiomaRef { .. } => {
                 }
@@ -780,12 +1287,29 @@ impl Lower {
     }
 
     fn drain_pending(&mut self) {
+        self.drain_pending_only();
+        for (onym, family, text) in std::mem::take(&mut self.note_bodies) {
+            self.out.push(Block::Open {
+                kind: Container::Note {
+                    onym,
+                    family,
+                    margin: false,
+                },
+                lemma: None,
+            });
+            self.out.push(Block::Paragraph { text });
+            self.out.push(Block::Close { hypograph: None });
+        }
+    }
+
+    fn drain_pending_only(&mut self) {
         for p in std::mem::take(&mut self.pending) {
             match p {
-                Pending::Note(onym, family) => self.out.push(Block::NoteRef {
+                Pending::Note(onym, family, at) => self.out.push(Block::NoteRef {
                     onym,
                     family: Some(family),
                     margin: false,
+                    at,
                 }),
                 Pending::Mark(term) => self.out.push(Block::IndexMark { term }),
                 Pending::Ref(target, internal) => self.out.push(Block::Ref {
@@ -795,6 +1319,34 @@ impl Lower {
                 }),
                 Pending::Point(onym) => self.out.push(Block::Anchor { onym }),
                 Pending::Cite(target) => self.out.push(Block::Cite { target }),
+                Pending::Span {
+                    kind,
+                    lo,
+                    hi,
+                    genoses,
+                    fields,
+                } => self.out.push(Block::Span {
+                    kind,
+                    lo,
+                    hi,
+                    genoses,
+                    fields,
+                }),
+                Pending::Milestone { scheme, value, at } => {
+                    self.out.push(Block::Milestone { scheme, value, at })
+                }
+                Pending::Parsed {
+                    lo,
+                    hi,
+                    onym,
+                    parsings,
+                } => self.out.push(Block::Parsed {
+                    lo,
+                    hi,
+                    onym,
+                    parsings,
+                }),
+                Pending::Periodos { lo, hi, id } => self.out.push(Block::Periodos { lo, hi, id }),
             }
         }
     }

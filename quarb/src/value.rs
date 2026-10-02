@@ -20,7 +20,10 @@ pub enum Value {
     /// A string (e.g. `:::name`, file content).
     Str(String),
     /// A list of values (produced by aggregating pipeline functions).
-    List(Vec<Value>),
+    /// Shared behind an `Arc`: a register read or a group's topic
+    /// copies a pointer, not the elements, so a large list used as a
+    /// set operand costs its construction once.
+    List(std::sync::Arc<Vec<Value>>),
     /// A record: insertion-ordered named fields (spec: The Record
     /// Scalar). Constructed by `record(...)`; field order is
     /// significant, matching kaiv namespaces and JSON key order.
@@ -55,6 +58,20 @@ pub enum Value {
 }
 
 impl Value {
+    /// A list value from its elements.
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(std::sync::Arc::new(items))
+    }
+
+    /// The elements of a list value, taken out of their sharing
+    /// (cloned only when another holder remains).
+    pub fn into_items(self) -> Option<Vec<Value>> {
+        match self {
+            Value::List(l) => Some(std::sync::Arc::try_unwrap(l).unwrap_or_else(|a| (*a).clone())),
+            _ => None,
+        }
+    }
+
     /// A byte count as a typed quantity on the information base —
     /// the mint for every adapter's `size` fact, so `[;;;size >
     /// 1GiB]`, `| convert(MB)`, and typed size totals work
@@ -275,13 +292,27 @@ impl Value {
     ) -> std::cmp::Ordering {
         sort_key(self, scale).cmp_key(&sort_key(other, scale))
     }
+
+    /// The value's sort key under an explicit unit resolver — the
+    /// hashable form of [`Value::compare_with`]'s equality, for the
+    /// aggregates that partition by key.
+    pub(crate) fn sort_key_with(&self, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey {
+        sort_key(self, scale)
+    }
 }
 
 /// The canonical sort key behind [`Value::compare`]: every value
 /// maps to exactly one class, so the order is total and transitive
 /// where the old pairwise fragment activation was not (`10 < "1z" <
 /// "9" < 10` cycled through the string fallback).
-enum SortKey {
+///
+/// Equality and hashing agree with `cmp_key` exactly (a magnitude
+/// hashes by its bit pattern, which is `total_cmp` equality), so
+/// a `HashMap` keyed on sort keys partitions the same way the
+/// pairwise comparison does — `group` and `unique_by` look a key
+/// up in one probe instead of scanning every group formed so far.
+#[derive(Debug, Clone)]
+pub(crate) enum SortKey {
     Null,
     Bool(bool),
     /// The magnitude line: everything with a numeric, temporal,
@@ -292,6 +323,26 @@ enum SortKey {
     /// Lists then records order after scalars, by display form.
     ListText(String),
     RecordText(String),
+}
+
+impl PartialEq for SortKey {
+    fn eq(&self, other: &SortKey) -> bool {
+        self.cmp_key(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for SortKey {}
+
+impl std::hash::Hash for SortKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rank().hash(state);
+        match self {
+            SortKey::Null => {}
+            SortKey::Bool(b) => b.hash(state),
+            SortKey::Line(f) => f.to_bits().hash(state),
+            SortKey::Text(s) | SortKey::ListText(s) | SortKey::RecordText(s) => s.hash(state),
+        }
+    }
 }
 
 impl SortKey {
@@ -479,6 +530,38 @@ impl From<&str> for Value {
 mod tests {
     use super::*;
 
+    /// The hashable sort key partitions exactly as `compare_with`
+    /// does: a numeric string, an integer and a float on the same
+    /// magnitude share one key (so `group` merges them), text with
+    /// no reading stays apart, and a quantity keys by its base
+    /// magnitude.
+    #[test]
+    fn sort_key_hashes_like_it_compares() {
+        use std::collections::HashSet;
+        let scale = |_: &str| None;
+        let keys: HashSet<SortKey> = [
+            Value::Str("1".into()),
+            Value::Int(1),
+            Value::Float(1.0),
+            Value::Str("x".into()),
+            Value::Str("X".into()),
+            Value::Null,
+            Value::Bool(true),
+        ]
+        .iter()
+        .map(|v| v.sort_key_with(&scale))
+        .collect();
+        assert_eq!(keys.len(), 5);
+        assert_eq!(
+            Value::Int(1).sort_key_with(&scale),
+            Value::Str(" 1.0 ".into()).sort_key_with(&scale)
+        );
+        assert_ne!(
+            Value::Str("x".into()).sort_key_with(&scale),
+            Value::Str("y".into()).sort_key_with(&scale)
+        );
+    }
+
     #[test]
     fn json_rendering() {
         let obj = Value::Record(vec![
@@ -489,7 +572,7 @@ mod tests {
             ("gone".into(), Value::Null),
             (
                 "tags".into(),
-                Value::List(vec![Value::Str("x".into()), Value::Int(1)]),
+                Value::list(vec![Value::Str("x".into()), Value::Int(1)]),
             ),
         ]);
         assert_eq!(
@@ -504,7 +587,7 @@ mod tests {
         );
         assert_eq!(obj.to_string(), obj.to_quarb());
         assert!(!Value::Record(Vec::new()).is_truthy());
-        assert_eq!(Value::List(Vec::new()).to_quarb(), "@()");
+        assert_eq!(Value::list(Vec::new()).to_quarb(), "@()");
         assert_eq!(Value::Record(Vec::new()).to_quarb(), "%()");
         // a key that is not an identifier quotes
         assert_eq!(
@@ -514,7 +597,7 @@ mod tests {
         // top-level list display (string coercion) is unchanged
         // (join, not the Quarb form — that is display_form's job)
         assert_eq!(
-            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]).to_string(),
+            Value::list(vec![Value::Str("a".into()), Value::Str("b".into())]).to_string(),
             "a, b"
         );
     }

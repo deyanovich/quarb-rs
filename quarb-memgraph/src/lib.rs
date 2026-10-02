@@ -45,7 +45,7 @@ fn cell_value(v: &serde_json::Value) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         serde_json::Value::String(s) => Value::Str(s.clone()),
-        serde_json::Value::Array(items) => Value::List(items.iter().map(cell_value).collect()),
+        serde_json::Value::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         serde_json::Value::Object(_) => Value::Str(v.to_string()),
     }
 }
@@ -373,7 +373,7 @@ impl AstAdapter for MemgraphAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {
-            (Kind::Root, "labels") => Some(Value::List(
+            (Kind::Root, "labels") => Some(Value::list(
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
@@ -383,7 +383,7 @@ impl AstAdapter for MemgraphAdapter {
                 rows.first()?.get::<i64>("c").ok().map(Value::Int)
             }
             (Kind::Entity { gid, .. }, "id") => Some(Value::Int(*gid)),
-            (Kind::Entity { labels, .. }, "labels") => Some(Value::List(
+            (Kind::Entity { labels, .. }, "labels") => Some(Value::list(
                 labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             _ => None,

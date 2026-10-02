@@ -810,7 +810,7 @@ impl AstAdapter for MetathecaAdapter {
                         .and_then(|v| v.as_i64())
                         .map(Value::bytes),
                     "path" => self.paths_of(&at, id).into_iter().next().map(Value::Str),
-                    "paths" => Some(Value::List(
+                    "paths" => Some(Value::list(
                         self.paths_of(&at, id).into_iter().map(Value::Str).collect(),
                     )),
                     "mtime" | "ctime" | "birthtime" => {

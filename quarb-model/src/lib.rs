@@ -18,7 +18,7 @@ mod parse;
 
 pub use parse::{
     AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl,
-    parse_model, resolve_mount_target,
+    parse_model, parse_model_file, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -33,49 +33,41 @@ const MODEL_TAG: u64 = 1 << 63;
 const CIDX_SHIFT: u64 = 44;
 const VAL_MASK: u64 = (1 << CIDX_SHIFT) - 1;
 
-/// What a container's children are: the two jobs a `node`
-/// constructor does, kept apart because they answer differently to
-/// "what does this node contain?".
-enum Members {
+/// One member of a container: the two jobs a `node` constructor
+/// does, kept apart because they answer differently to "what does
+/// this node contain?".
+#[derive(Clone)]
+enum Member {
     /// A constructor yielding *values* elevates them: each distinct
     /// scalar becomes a node whose default projection is that value.
-    Values(Vec<Value>),
+    Value(Value),
     /// A constructor yielding *nodes* aliases them: an existing node
-    /// set given a container and a role, creating nothing. Such a
-    /// node holds everything its source holds, because it *is* the
+    /// given a container and a role, creating nothing. Such a node
+    /// holds everything its source holds, because it *is* the
     /// source under a role.
-    Nodes(Vec<NodeId>),
+    Node(NodeId),
 }
 
-impl Members {
-    fn len(&self) -> usize {
-        match self {
-            Members::Values(v) => v.len(),
-            Members::Nodes(n) => n.len(),
-        }
-    }
-}
-
-/// A derived container's materialized member set.
+/// A derived container's materialized member set. A container
+/// declared by several `node` statements holds several roles: each
+/// statement appends its members under its own role, so
+/// `/tables/class` and `/tables/schema` share one container.
 struct Container {
     name: String,
-    /// The role each child plays: `ip` in `/ips/ip`. It names the
-    /// children *and* labels every hop that lands on one.
-    role: String,
-    /// The trait each child carries; the role unless declared.
-    trait_name: String,
-    /// The members, in first-appearance order (member index `v` is
-    /// member `v`, and its node carries slot `v+1`; slot `0` names
-    /// the container node itself).
-    members: Members,
-    /// member key string → member index (0-based).
+    /// The members, in first-appearance order across the statements
+    /// that fill the container (member index `i` is member `i`, and
+    /// its node carries slot `i+1`; slot `0` names the container
+    /// node itself).
+    members: Vec<Member>,
+    /// Per member: the role it plays — `ip` in `/ips/ip` — which
+    /// names the child *and* labels every hop that lands on it, and
+    /// the trait it carries, the role unless declared.
+    roles: Vec<(String, String)>,
+    /// member key string → member index, over the whole container;
+    /// on a collision across roles the earlier statement wins.
     by_str: HashMap<String, usize>,
-}
-
-/// One member of a container, addressed by node slot.
-enum Member {
-    Value(Value),
-    Node(NodeId),
+    /// role → (member key string → member index).
+    by_role: HashMap<String, HashMap<String, usize>>,
 }
 
 impl Container {
@@ -84,10 +76,37 @@ impl Container {
         if v == 0 {
             return None;
         }
-        match &self.members {
-            Members::Values(vs) => vs.get(v - 1).cloned().map(Member::Value),
-            Members::Nodes(ns) => ns.get(v - 1).copied().map(Member::Node),
-        }
+        self.members.get(v - 1).cloned()
+    }
+
+    /// The role of the member in slot `v` (`v >= 1`).
+    fn role_of(&self, v: usize) -> &str {
+        &self.roles[v - 1].0
+    }
+
+    /// The trait of the member in slot `v` (`v >= 1`).
+    fn trait_of(&self, v: usize) -> &str {
+        &self.roles[v - 1].1
+    }
+
+    /// The 1-based position of slot `v` among the members of its
+    /// own role, for locators.
+    fn ordinal_in_role(&self, v: usize) -> usize {
+        let role = &self.roles[v - 1].0;
+        self.roles[..v - 1]
+            .iter()
+            .filter(|(r, _)| r == role)
+            .count()
+            + 1
+    }
+
+    /// The member indexes of one role, in order.
+    fn of_role<'a>(&'a self, role: &'a str) -> impl Iterator<Item = usize> + 'a {
+        self.roles
+            .iter()
+            .enumerate()
+            .filter(move |(_, (r, _))| r == role)
+            .map(|(i, _)| i)
     }
 }
 
@@ -101,6 +120,10 @@ struct Fabric {
     alias: HashMap<NodeId, (NodeId, String)>,
     /// (base node, field) → derived value node it resolves to.
     resolve: HashMap<(NodeId, String), NodeId>,
+    /// The reverse of `resolve` and of every further element of a
+    /// list-valued field: per (target, field), the source nodes —
+    /// each once, the alias when a `node` gave the source a role.
+    sources: HashMap<(NodeId, String), Vec<NodeId>>,
     /// derived value node → base nodes pointing at it, with the
     /// field label (the backlink of a declared ref).
     ref_back: HashMap<NodeId, Vec<(String, NodeId)>>,
@@ -147,9 +170,14 @@ impl<A: AstAdapter> ModelAdapter<A> {
             Some((c, 0)) => format!("/{}", self.containers()[c].name),
             Some((c, v)) => {
                 // Children share a role name, so the locator carries
-                // a position, as a CSV row's does.
+                // a position within the role, as a CSV row's does.
                 let cont = &self.containers()[c];
-                format!("/{}/{}[{}]", cont.name, cont.role, v)
+                format!(
+                    "/{}/{}[{}]",
+                    cont.name,
+                    cont.role_of(v),
+                    cont.ordinal_in_role(v)
+                )
             }
         }
     }
@@ -168,28 +196,68 @@ impl<A: AstAdapter> ModelAdapter<A> {
             let mut built: Vec<Container> = Vec::new();
             for decl in &self.model.nodes {
                 let members = self.members(&decl.query, &defs, &built);
-                let by_str = match &members {
-                    Members::Values(vs) => vs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| (v.to_string(), i))
-                        .collect(),
-                    // An aliased node is keyed by what it projects,
-                    // so a `ref` into the container resolves against
-                    // the same thing `::` would show.
-                    Members::Nodes(ns) => ns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, n)| self.base_key(*n).map(|k| (k, i)))
-                        .collect(),
+                // A second statement naming an existing container
+                // fills it further under its own role.
+                let idx = match built.iter().position(|c| c.name == decl.name) {
+                    Some(i) => i,
+                    None => {
+                        built.push(Container {
+                            name: decl.name.clone(),
+                            members: Vec::new(),
+                            roles: Vec::new(),
+                            by_str: HashMap::new(),
+                            by_role: HashMap::new(),
+                        });
+                        built.len() - 1
+                    }
                 };
-                built.push(Container {
-                    name: decl.name.clone(),
-                    role: decl.role.clone(),
-                    trait_name: decl.trait_name.clone(),
-                    members,
-                    by_str,
-                });
+                // Keys: an elevated value by its rendering; an aliased
+                // node by what it projects, so a `ref` into the
+                // container resolves against the same thing `::`
+                // would show.
+                let keyed: Vec<(Member, Option<String>)> = members
+                    .into_iter()
+                    .map(|m| {
+                        let key = match &m {
+                            Member::Value(v) => Some(v.to_string()),
+                            Member::Node(n) => self.base_key(*n),
+                        };
+                        (m, key)
+                    })
+                    .collect();
+                let cont = &mut built[idx];
+                // a role declared twice adds only members it does not
+                // hold: an elevated value by its rendering, an aliased
+                // node by its identity (rows of a table share a name,
+                // so their key is no identity)
+                let held_nodes: std::collections::HashSet<NodeId> = cont
+                    .members
+                    .iter()
+                    .zip(&cont.roles)
+                    .filter(|(_, (r, _))| *r == decl.role)
+                    .filter_map(|(m, _)| match m {
+                        Member::Node(n) => Some(*n),
+                        Member::Value(_) => None,
+                    })
+                    .collect();
+                let by_role = cont.by_role.entry(decl.role.clone()).or_default();
+                for (m, key) in keyed {
+                    let held = match &m {
+                        Member::Node(n) => held_nodes.contains(n),
+                        Member::Value(_) => key.as_deref().is_some_and(|k| by_role.contains_key(k)),
+                    };
+                    if held {
+                        continue;
+                    }
+                    let i = cont.members.len();
+                    cont.members.push(m);
+                    cont.roles
+                        .push((decl.role.clone(), decl.trait_name.clone()));
+                    if let Some(k) = key {
+                        by_role.entry(k.clone()).or_insert(i);
+                        cont.by_str.entry(k).or_insert(i);
+                    }
+                }
             }
             built
         })
@@ -201,7 +269,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// already built (so a constructor may navigate an earlier
     /// derived container) — exposed by wrapping the base in a partial
     /// [`ModelAdapter`] over those.
-    fn members(&self, query: &str, defs: &quarb::Defs, prior: &[Container]) -> Members {
+    fn members(&self, query: &str, defs: &quarb::Defs, prior: &[Container]) -> Vec<Member> {
         // A constructor over the base alone is the common case; one
         // that reaches an earlier derived container runs against a
         // scratch enrichment holding just those.
@@ -217,17 +285,19 @@ impl<A: AstAdapter> ModelAdapter<A> {
         match result {
             Ok(QueryResult::Values(vs)) => {
                 let mut seen = std::collections::HashSet::new();
-                Members::Values(
-                    vs.into_iter()
-                        .filter(|v| seen.insert(v.to_string()))
-                        .collect(),
-                )
+                vs.into_iter()
+                    .filter(|v| seen.insert(v.to_string()))
+                    .map(Member::Value)
+                    .collect()
             }
             Ok(QueryResult::Nodes(ns)) => {
                 let mut seen = std::collections::HashSet::new();
-                Members::Nodes(ns.into_iter().filter(|n| seen.insert(*n)).collect())
+                ns.into_iter()
+                    .filter(|n| seen.insert(*n))
+                    .map(Member::Node)
+                    .collect()
             }
-            Err(_) => Members::Values(Vec::new()),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -243,10 +313,19 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// The base node an aliased member stands for, if it is one.
     fn aliased(&self, node: NodeId) -> Option<NodeId> {
         match self.decode(node) {
-            Some((c, v)) if v > 0 => match &self.containers()[c].members {
-                Members::Nodes(ns) => ns.get(v - 1).copied(),
-                Members::Values(_) => None,
+            Some((c, v)) if v > 0 => match self.containers()[c].member(v)? {
+                Member::Node(n) => Some(n),
+                Member::Value(_) => None,
             },
+            _ => None,
+        }
+    }
+
+    /// The role of a derived member node, the label a hop landing
+    /// on it carries.
+    fn role_at(&self, node: NodeId) -> Option<String> {
+        match self.decode(node) {
+            Some((c, v)) if v > 0 => Some(self.containers()[c].role_of(v).to_string()),
             _ => None,
         }
     }
@@ -254,9 +333,9 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// An elevated member's value, if the node is one.
     fn elevated(&self, node: NodeId) -> Option<Value> {
         match self.decode(node) {
-            Some((c, v)) if v > 0 => match &self.containers()[c].members {
-                Members::Values(vs) => vs.get(v - 1).cloned(),
-                Members::Nodes(_) => None,
+            Some((c, v)) if v > 0 => match self.containers()[c].member(v)? {
+                Member::Value(val) => Some(val),
+                Member::Node(_) => None,
             },
             _ => None,
         }
@@ -286,14 +365,6 @@ impl<A: AstAdapter> ModelAdapter<A> {
         self.containers().iter().position(|c| c.name == name)
     }
 
-    /// The value node in `container` whose string equals `value`.
-    fn find_value(&self, container: usize, value: &Value) -> Option<NodeId> {
-        let idx = *self.containers()[container]
-            .by_str
-            .get(&value.to_string())?;
-        Some(Self::value_node(container, idx))
-    }
-
     /// The reference and edge fabric, built on first use.
     fn fabric(&self) -> &Fabric {
         self.fabric.get_or_init(|| {
@@ -301,6 +372,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             let mut f = Fabric {
                 alias: HashMap::new(),
                 resolve: HashMap::new(),
+                sources: HashMap::new(),
                 ref_back: HashMap::new(),
                 ref_fwd: HashMap::new(),
                 rel_fwd: HashMap::new(),
@@ -308,32 +380,86 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 edges: HashMap::new(),
             };
             for (c, cont) in self.containers().iter().enumerate() {
-                if let Members::Nodes(ns) = &cont.members {
-                    for (i, n) in ns.iter().enumerate() {
+                for (i, m) in cont.members.iter().enumerate() {
+                    if let Member::Node(n) = m {
                         f.alias
                             .entry(*n)
-                            .or_insert((Self::value_node(c, i), cont.role.clone()));
+                            .or_insert((Self::value_node(c, i), cont.roles[i].0.clone()));
                     }
                 }
             }
             // References: for each scoped base node, resolve its
-            // field value into the target container.
+            // field value into the target container. What each
+            // (node, field) reaches is kept for the edges below.
+            let mut reached: HashMap<(NodeId, String), Vec<(String, NodeId)>> = HashMap::new();
             for decl in &self.model.refs {
-                let Some(container) = self.container_by_name(&decl.container) else {
-                    continue;
-                };
-                // The explicit form names the target property the
-                // value matches (`[::id = $]`); the short form uses
-                // the member key (the default projection).
-                let by_key: Option<HashMap<String, NodeId>> = decl.key_field.as_deref().map(|f| {
-                    (1..=self.containers()[container].members.len())
-                        .filter_map(|v| {
+                // The target's key index: a derived container's
+                // members (within the role the path names, when it
+                // names one), keyed by the explicit target property
+                // or the member key; or, when no container answers to
+                // the name, the nodes any path selects over the base
+                // and derived view (another mount's rows), keyed by
+                // the target property or their default projection.
+                // The first node with a key wins a collision.
+                let mut index: HashMap<String, NodeId> = HashMap::new();
+                let derived = self.container_by_name(&decl.container);
+                match derived {
+                    Some(container) => {
+                        let cont = &self.containers()[container];
+                        let slots: Vec<usize> = match decl.role.as_deref() {
+                            Some(role) => cont.of_role(role).map(|i| i + 1).collect(),
+                            None => (1..=cont.members.len()).collect(),
+                        };
+                        for v in slots {
                             let n = Self::value_node(container, v - 1);
-                            self.property(n, f).map(|k| (k.to_string(), n))
-                        })
-                        .collect()
-                });
-                for node in self.scope_nodes(&decl.scope, &defs) {
+                            let key = match decl.key_field.as_deref() {
+                                Some(f) => self.property(n, f).map(|k| k.to_string()),
+                                None => match cont.member(v) {
+                                    Some(Member::Value(val)) => Some(val.to_string()),
+                                    Some(Member::Node(b)) => self.base_key(b),
+                                    None => None,
+                                },
+                            };
+                            if let Some(k) = key {
+                                index.entry(k).or_insert(n);
+                            }
+                        }
+                    }
+                    None => {
+                        let view = PriorView {
+                            base: &self.base,
+                            prior: self.containers(),
+                        };
+                        for n in self.view_nodes(&decl.path, &defs) {
+                            let key = match decl.key_field.as_deref() {
+                                Some(f) => view.property(n, f).map(|k| k.to_string()),
+                                None => view
+                                    .default_value(n)
+                                    .map(|v| v.to_string())
+                                    .or_else(|| view.name(n)),
+                            };
+                            if let Some(k) = key {
+                                index.entry(k).or_insert(n);
+                            }
+                        }
+                    }
+                }
+                // A hop to a base target is labelled by the last
+                // named segment of the target path (`--кузнецова`);
+                // a derived target by the role of the node it lands on.
+                let path_label = scope_role(&decl.path);
+                // The source may be written through a role
+                // (`ref /library/book::author --> …`): the role nodes
+                // stand for the base rows beneath them.
+                let mut scoped = self.scope_nodes(&decl.scope, &defs);
+                if scoped.is_empty() {
+                    scoped = self
+                        .view_nodes(&decl.scope, &defs)
+                        .into_iter()
+                        .filter_map(|n| self.aliased(n))
+                        .collect();
+                }
+                for node in scoped {
                     let Some(value) = self.base.property(node, &decl.field) else {
                         continue;
                     };
@@ -345,26 +471,15 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     // what `-->` resolves to, every element gets its
                     // hop and its backlink.
                     let elements: Vec<Value> = match value {
-                        Value::List(items) => items,
+                        l @ Value::List(_) => l.into_items().unwrap_or_default(),
                         other => vec![other],
                     };
                     let mut first = true;
                     for value in elements {
-                        let target = match &by_key {
-                            Some(idx) => idx.get(&value.to_string()).copied(),
-                            None => self.find_value(container, &value),
-                        };
-                        let Some(target) = target else {
+                        let Some(target) = index.get(&value.to_string()).copied() else {
                             continue;
                         };
-                        // A hop is labelled by the role of the node it
-                        // lands on — never by the property it came
-                        // from. Forward, that is the target container's
-                        // role; backward, it is the base node's own
-                        // name. (`--ip` from an ip node therefore names
-                        // no relation at all, which is the point: it
-                        // would land on a row, not an ip.)
-                        let fwd = self.containers()[container].role.clone();
+                        let fwd = self.role_at(target).unwrap_or_else(|| path_label.clone());
                         // Backward the hop lands on the source node — on
                         // the alias if a `node` gave it a role, else on
                         // the raw node, named by the path that found it.
@@ -375,6 +490,14 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         if first {
                             f.resolve.insert((node, decl.field.clone()), target);
                             first = false;
+                        }
+                        reached
+                            .entry((node, decl.field.clone()))
+                            .or_default()
+                            .push((fwd.clone(), target));
+                        let from = f.sources.entry((target, decl.field.clone())).or_default();
+                        if !from.contains(&back_node) {
+                            from.push(back_node);
                         }
                         f.ref_fwd.entry(node).or_default().push((fwd, target));
                         f.ref_back
@@ -411,48 +534,34 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     }
                 }
             }
-            // Edges: read the two fields per scoped node, connect the
-            // two derived value nodes, labelled by the container each
-            // reaches; collapse parallel edges.
+            // Edges: per scoped node, connect what its two fields
+            // reach — the very nodes the refs resolved to, so an edge
+            // follows a ref by key property, into another mount, or
+            // with both ends in one role (a network of pairs) as it
+            // follows one into a value container. Each end is
+            // labelled by the role it lands in; parallel edges
+            // collapse.
             for decl in &self.model.edges {
-                let ca = self.field_container(&decl.field_a);
-                let cb = self.field_container(&decl.field_b);
-                let (Some((ca, la)), Some((cb, lb))) = (ca, cb) else {
-                    continue;
-                };
                 let mut seen = std::collections::HashSet::new();
                 for node in self.scope_nodes(&decl.scope, &defs) {
-                    let (Some(va), Some(vb)) = (
-                        self.base.property(node, &decl.field_a),
-                        self.base.property(node, &decl.field_b),
+                    let (Some(ends_a), Some(ends_b)) = (
+                        reached.get(&(node, decl.field_a.clone())),
+                        reached.get(&(node, decl.field_b.clone())),
                     ) else {
                         continue;
                     };
-                    if matches!(va, Value::Null) || matches!(vb, Value::Null) {
-                        continue;
-                    }
-                    let (Some(na), Some(nb)) = (self.find_value(ca, &va), self.find_value(cb, &vb))
-                    else {
-                        continue;
-                    };
-                    if seen.insert((na, nb)) {
-                        f.edges.entry(na).or_default().push((lb.clone(), nb));
-                        f.edges.entry(nb).or_default().push((la.clone(), na));
+                    for (ra, na) in ends_a {
+                        for (rb, nb) in ends_b {
+                            if na != nb && seen.insert((*na, *nb)) {
+                                f.edges.entry(*na).or_default().push((rb.clone(), *nb));
+                                f.edges.entry(*nb).or_default().push((ra.clone(), *na));
+                            }
+                        }
                     }
                 }
             }
             f
         })
-    }
-
-    /// The container a `ref`-declared field points into, and the
-    /// container's name (the edge label reaching it).
-    /// The container a `ref`-declared field points into, with the
-    /// role a hop landing there is labelled by.
-    fn field_container(&self, field: &str) -> Option<(usize, String)> {
-        let decl = self.model.refs.iter().find(|r| r.field == field)?;
-        let c = self.container_by_name(&decl.container)?;
-        Some((c, self.containers()[c].role.clone()))
     }
 
     /// The base nodes selected by a scope path.
@@ -613,7 +722,7 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
             return Some(if v == 0 {
                 cont.name.clone()
             } else {
-                cont.role.clone()
+                cont.role_of(v).to_string()
             });
         }
         self.base.name(node)
@@ -632,8 +741,9 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
             let Some(cont) = self.prior.get(c) else {
                 return Vec::new();
             };
-            if v == 0 && name == cont.role {
-                return (0..cont.members.len())
+            if v == 0 {
+                return cont
+                    .of_role(name)
                     .map(|i| NodeId(MODEL_TAG | (c as u64) << CIDX_SHIFT | (i as u64 + 1)))
                     .collect();
             }
@@ -646,7 +756,7 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
             let c = ((node.0 & !MODEL_TAG) >> CIDX_SHIFT) as usize;
             let v = (node.0 & VAL_MASK) as usize;
             return match self.prior.get(c) {
-                Some(cont) if v > 0 => vec![cont.trait_name.clone()],
+                Some(cont) if v > 0 => vec![cont.trait_of(v).to_string()],
                 _ => Vec::new(),
             };
         }
@@ -767,16 +877,10 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         match self.decode(node) {
             // Every child answers to the role; none answers to its
             // value (that is a predicate's job, not a name's).
-            Some((c, 0)) => {
-                let cont = &self.containers()[c];
-                if name == cont.role {
-                    (0..cont.members.len())
-                        .map(|v| Self::value_node(c, v))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
+            Some((c, 0)) => self.containers()[c]
+                .of_role(name)
+                .map(|i| Self::value_node(c, i))
+                .collect(),
             Some(_) => match self.aliased(node) {
                 Some(base) => self.base.children_named(base, name),
                 None => Vec::new(),
@@ -791,7 +895,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             // A derived node is named for its role, not its value:
             // a name says what a node *is* where you found it. The
             // value stays in the value space, on `::`.
-            Some((c, _)) => Some(self.containers()[c].role.clone()),
+            Some((c, v)) => Some(self.containers()[c].role_of(v).to_string()),
             None => self.base.name(node),
         }
     }
@@ -809,7 +913,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             // Each derived value node carries its container's trait,
             // so mixed-type walk results self-describe (`[<ip>]`).
             Some((c, v)) if v > 0 => {
-                let mut out = vec![self.containers()[c].trait_name.clone()];
+                let mut out = vec![self.containers()[c].trait_of(v).to_string()];
                 // An aliased node is the source wearing a role, so it
                 // keeps the traits the source already carried.
                 if let Some(base) = self.aliased(node) {
@@ -1044,8 +1148,14 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
                 out
             }
             Some(_) => Vec::new(),
+            // A base node: its own backlinks, the declared refs that
+            // resolve to it (a ref may target any path, so another
+            // mount's row is a target too), and the relations toward it.
             None => {
                 let mut out = self.base.backlinks(node);
+                if let Some(refs) = f.ref_back.get(&node) {
+                    out.extend(refs.iter().cloned());
+                }
                 if let Some(rels) = f.rel_back.get(&node) {
                     out.extend(rels.iter().cloned());
                 }
@@ -1069,6 +1179,30 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         property: Option<&str>,
         hint: Option<&str>,
     ) -> Option<Vec<NodeId>> {
+        // A field the model declares a ref for: the fabric knows its
+        // sources, each once — the walk would meet a source twice,
+        // as the base row and as the role node over it.
+        if let Some(field) = property
+            && self.model.refs.iter().any(|r| r.field == field)
+        {
+            let f = self.fabric();
+            let target = f.alias.get(&node).map_or(node, |(alias, _)| *alias);
+            let mut out = f
+                .sources
+                .get(&(target, field.to_string()))
+                .cloned()
+                .unwrap_or_default();
+            if target != node
+                && let Some(more) = f.sources.get(&(node, field.to_string()))
+            {
+                for n in more {
+                    if !out.contains(n) {
+                        out.push(*n);
+                    }
+                }
+            }
+            return Some(out);
+        }
         if self.decode(node).is_some()
             || !self.model.refs.is_empty()
             || !self.model.rels.is_empty()

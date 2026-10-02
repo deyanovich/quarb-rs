@@ -12,8 +12,8 @@ homepage.workspace = true
 
 [dependencies]
 url = "2"
-quarb = { path = "../quarb", version = "0.30.0" }
-quarb-text = { path = "../quarb-text", version = "0.30.0" }
+quarb = { path = "../quarb", version = "0.31.0" }
+quarb-text = { path = "../quarb-text", version = "0.31.0" }
 scraper.workspace = true
 serde_json.workspace = true
 ego-tree = "0.6"

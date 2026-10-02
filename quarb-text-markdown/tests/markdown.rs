@@ -204,3 +204,27 @@ fn pandoc_bracketed_citations() {
         ["Mail [x@y.com] or ping @someone about it."]
     );
 }
+
+/// A heading is a link's landing place by the identifier pandoc
+/// derives from its text: an internal `#fragment` link resolves in
+/// the Markdown as it does in the rendered HTML, and only a link
+/// to no heading is `<dangling>`.
+#[test]
+fn headings_bear_pandoc_identifiers() {
+    let md = "# 1. Intro: A/B test\n\n## Notes\n\ntext\n\n## Notes\n\n## 2024\n\n\
+              ## Custom {#my-id}\n\n\
+              [a](#intro-ab-test) [b](#notes) [c](#notes-1) [d](#section) \
+              [e](#my-id) [f](#custom)\n";
+    let m = quarb_text_markdown::parse(md);
+    let values = |q: &str| -> Vec<String> {
+        match quarb::run(q, &m).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            _ => panic!("expected values"),
+        }
+    };
+    assert_eq!(values("//ref<dangling>::target"), ["#custom"]);
+    assert_eq!(
+        values("//ref->*::lemma"),
+        ["1. Intro: A/B test", "Notes", "Notes", "2024", "Custom"]
+    );
+}

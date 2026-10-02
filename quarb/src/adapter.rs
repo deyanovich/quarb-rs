@@ -449,6 +449,25 @@ pub trait AstAdapter {
         None
     }
 
+    /// The descendants of `node` named `name` whose property
+    /// `property` equals `value`, each with its depth, in document
+    /// order — the fast path behind `//name[::property = "value"]`
+    /// for an adapter that indexes a property (the corpus reading's
+    /// positional index answers `//token[::lower = "tom"]` from it).
+    /// `None` keeps the engine's walk and its comparison; `Some`
+    /// must be exactly what the walk would find under the standard
+    /// equality, so an adapter answers only the values it can
+    /// compare as the engine does (text against text).
+    fn descendants_where(
+        &self,
+        _node: NodeId,
+        _name: &str,
+        _property: &str,
+        _value: &Value,
+    ) -> Option<Vec<(NodeId, usize)>> {
+        None
+    }
+
     /// A batching hint: the engine is about to follow `dir`
     /// crosslinks from every node in `nodes`. An adapter backed by
     /// a store may fetch them in one statement; semantics are

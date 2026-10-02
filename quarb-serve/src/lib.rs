@@ -137,7 +137,7 @@ fn value_from_json(j: &Json) -> Value {
                 .unwrap_or(Value::Null);
         }
         Json::String(s) if j.pointer("/t").is_none() => return Value::Str(s.clone()),
-        Json::Array(a) => return Value::List(a.iter().map(value_from_json).collect()),
+        Json::Array(a) => return Value::list(a.iter().map(value_from_json).collect()),
         _ => {}
     }
     let t = j.pointer("/t").and_then(|v| v.as_str()).unwrap_or("");
@@ -147,7 +147,7 @@ fn value_from_json(j: &Json) -> Value {
         ("int", Some(v)) => Value::Int(v.as_i64().unwrap_or(0)),
         ("float", Some(v)) => Value::Float(v.as_f64().unwrap_or(0.0)),
         ("str", Some(v)) => Value::Str(v.as_str().unwrap_or("").to_string()),
-        ("list", Some(v)) => Value::List(
+        ("list", Some(v)) => Value::list(
             v.as_array()
                 .map(|a| a.iter().map(value_from_json).collect())
                 .unwrap_or_default(),
@@ -892,7 +892,7 @@ mod tests {
                 base: "m".into(),
                 written: Some((42.0, "km".into())),
             },
-            Value::List(vec![sample_instant(), Value::Int(1)]),
+            Value::list(vec![sample_instant(), Value::Int(1)]),
         ] {
             assert_eq!(value_from_json(&value_to_json(&v, true)), v, "for {v:?}");
         }
@@ -960,7 +960,7 @@ mod tests {
             name: &str,
         ) -> Option<Value> {
             (source.0 == 0 && label == "cites" && target.0 == 1 && name == "tags")
-                .then(|| Value::List(vec![Value::Str("key".into())]))
+                .then(|| Value::list(vec![Value::Str("key".into())]))
         }
     }
 
@@ -992,7 +992,7 @@ mod tests {
         );
         assert_eq!(
             value_from_json(resp.pointer("/value").unwrap()),
-            Value::List(vec![Value::Str("key".into())])
+            Value::list(vec![Value::Str("key".into())])
         );
         // A bare edge answers null.
         let resp = ask(

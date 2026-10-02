@@ -51,19 +51,19 @@ import quarb
 
 doc = quarb.loads("""{
   "books": [
-    {"title": "Sapiens", "price": 25},
-    {"title": "Cosmos",  "price": 18}
+    {"title": "The Odyssey", "price": 25},
+    {"title": "The Iliad",  "price": 18}
   ]
 }""", "json")
 
 doc.values('/books/*[/price:: > 20]/title::')
-# ['Sapiens']
+# ['The Odyssey']
 
 doc.value('/books/*/price:: @| mean')
 # 21.5
 
 doc.records('/books/* | %(t = /title::; p = /price::)')
-# [{'t': 'Sapiens', 'p': 25}, {'t': 'Cosmos', 'p': 18}]
+# [{'t': 'The Odyssey', 'p': 25}, {'t': 'The Iliad', 'p': 18}]
 ```
 
 `loads(text, format)` / `load(path)` parse once into a

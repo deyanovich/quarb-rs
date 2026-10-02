@@ -633,7 +633,7 @@ impl AstAdapter for GitAdapter {
             "parent" => Value::Str(info.parents.first()?.clone()),
             // The paths this commit's diff touches (vs its first
             // parent) — deletions included, unlike the tree view.
-            "changed" => Value::List(
+            "changed" => Value::list(
                 self.changed_paths(&hash)
                     .into_iter()
                     .map(Value::Str)
@@ -707,7 +707,7 @@ impl AstAdapter for GitAdapter {
                 "short" => Some(Value::Str(hash[..7.min(hash.len())].to_string())),
                 "n-parents" => Some(Value::Int(self.commit_info(&hash)?.parents.len() as i64)),
                 "n-changed" => Some(Value::Int(self.changed_paths(&hash).len() as i64)),
-                "tags" => Some(Value::List(
+                "tags" => Some(Value::list(
                     self.tags_at(&hash).into_iter().map(Value::Str).collect(),
                 )),
                 "n-tags" => Some(Value::Int(self.tags_at(&hash).len() as i64)),

@@ -108,7 +108,7 @@ impl AstAdapter for CsvAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             return match key {
-                "columns" => Some(Value::List(
+                "columns" => Some(Value::list(
                     self.columns.iter().map(|c| Value::Str(c.clone())).collect(),
                 )),
                 "n-rows" => Some(Value::Int(self.rows.len() as i64)),

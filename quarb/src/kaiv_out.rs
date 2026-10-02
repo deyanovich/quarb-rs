@@ -265,7 +265,7 @@ mod tests {
                 ("name".into(), Value::Str("Ada".into())),
                 (
                     "tags".into(),
-                    Value::List(vec![Value::Int(1), Value::Int(2)]),
+                    Value::list(vec![Value::Int(1), Value::Int(2)]),
                 ),
             ]),
             Value::Int(7),

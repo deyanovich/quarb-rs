@@ -245,7 +245,7 @@ impl QueryArbor {
     }
 
     fn walk_trait(&mut self, t: &TraitClause, parent: usize) {
-        let alts = Value::List(t.alts.iter().map(|a| Value::Str(a.clone())).collect());
+        let alts = Value::list(t.alts.iter().map(|a| Value::Str(a.clone())).collect());
         self.intern(
             Some("trait"),
             vec![("alts".to_string(), alts)],

@@ -26,10 +26,10 @@ ingest = ["dep:tar", "dep:flate2"]
 cli = ["sqlite", "postgres", "ingest", "dep:clap", "dep:anyhow"]
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.30.0" }
-quarb-text = { path = "../quarb-text", version = "0.30.0" }
-quarb-text-html = { path = "../quarb-text-html", version = "0.30.0" }
-quarb-archive = { path = "../quarb-archive", version = "0.30.0", optional = true }
+quarb = { path = "../quarb", version = "0.31.0" }
+quarb-text = { path = "../quarb-text", version = "0.31.0" }
+quarb-text-html = { path = "../quarb-text-html", version = "0.31.0" }
+quarb-archive = { path = "../quarb-archive", version = "0.31.0", optional = true }
 scraper.workspace = true
 url = "2"
 percent-encoding = "2"

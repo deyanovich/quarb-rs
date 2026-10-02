@@ -78,6 +78,11 @@ struct Cli {
     /// enriched view.
     #[arg(long, value_name = "FILE")]
     model: Option<PathBuf>,
+    /// Sentence bonds: a .desm file (repeatable; see `qua --help`),
+    /// loaded for the session — the corpus: reading, `sentences`
+    /// and `sc` agree on "Dr. Smith".
+    #[arg(long, value_name = "FILE")]
+    desm: Vec<PathBuf>,
 
     /// Back the session with a resident `qua` daemon: materialize the
     /// source once in a background process (shared across quai runs
@@ -246,10 +251,7 @@ fn main() -> Result<()> {
     // directory) as NAME=TARGET inputs, ahead of any positional ones.
     let model = match &cli.model {
         Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
-            let m = quarb_model::parse_model(&text)
+            let m = quarb_model::parse_model_file(path)
                 .map_err(|e| anyhow::anyhow!("parsing model {}: {e}", path.display()))?;
             let base_dir = path.parent();
             for mt in m.mounts.iter().rev() {
@@ -298,12 +300,27 @@ fn main() -> Result<()> {
             }
             None => Vec::new(),
         };
+        let bonds = if cli.desm.is_empty() {
+            None
+        } else {
+            let mut b = syndesmos::Syndesmos::empty();
+            for f in &cli.desm {
+                b.extend(
+                    syndesmos::Syndesmos::load(f)
+                        .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()))?,
+                );
+            }
+            Some(std::rc::Rc::new(b))
+        };
+        quarb::set_sentence_bonds(bonds.clone());
         let opts = Options {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
             graft: cli.graft,
             no_graft: cli.no_graft,
             refs: std::rc::Rc::new(refs),
+            allow_shell: cli.allow_shell,
+            bonds,
         };
         let ctx = Remount {
             specs,
@@ -324,6 +341,12 @@ fn main() -> Result<()> {
         Session::new(executor, Box::new(MemStore))
     };
     let session = std::rc::Rc::new(std::cell::RefCell::new(session));
+    // A model's own `def`/`macro` statements come first, then --defs.
+    if let Some(m) = &model
+        && !m.defs_text.trim().is_empty()
+    {
+        session.borrow_mut().seed_defs(&m.defs_text)?;
+    }
     if let Some(p) = &cli.defs {
         let text =
             std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;

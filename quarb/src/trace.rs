@@ -802,13 +802,13 @@ fn node_props<A: AstAdapter>(adapter: &A, family: &str, node: NodeId) -> Vec<(St
             props.push(("tag".to_string(), qt::Scalar::Str(tag)));
         }
         if let Some(Value::List(names)) = adapter.metadata(node, "attrs") {
-            for n in names {
+            for n in names.iter() {
                 let Value::Str(name) = n else { continue };
-                if clash(&name) {
+                if clash(name) {
                     continue;
                 }
-                if let Some(v) = adapter.property(node, &name) {
-                    props.push((name, scalar(&v)));
+                if let Some(v) = adapter.property(node, name) {
+                    props.push((name.clone(), scalar(&v)));
                 }
             }
         }

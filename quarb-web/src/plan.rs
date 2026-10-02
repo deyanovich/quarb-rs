@@ -673,7 +673,7 @@ fn translate_trait(q: &Q, t: NodeId, sql: &mut Sql) -> Option<Conj> {
         return None;
     };
     let mut parts = Vec::new();
-    for a in alts {
+    for a in alts.iter() {
         let Value::Str(a) = a else { return None };
         let part = if a == "page" || a == "category" {
             "1 = 1".to_string()

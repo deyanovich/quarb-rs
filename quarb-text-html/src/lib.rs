@@ -405,6 +405,7 @@ fn element<'a>(
                 onym,
                 family: None,
                 margin: false,
+                at: None,
             }),
             NoteKind::Body(mut onym, family) => {
                 // An aside's flow position IS its anchor: emit
@@ -421,6 +422,7 @@ fn element<'a>(
                         onym: onym.clone(),
                         family: Some(NoteFamily::Aside),
                         margin: false,
+                        at: None,
                     });
                 }
                 out.push(Block::Open {
@@ -902,6 +904,7 @@ fn emit_notes(notes: Vec<Note>, out: &mut Vec<Block>, aside_seq: &mut usize) {
                 onym,
                 family: None,
                 margin: false,
+                at: None,
             }),
             Note::Link(target, text) => {
                 let internal = target.starts_with('#');
@@ -924,6 +927,7 @@ fn emit_notes(notes: Vec<Note>, out: &mut Vec<Block>, aside_seq: &mut usize) {
                         onym: onym.clone(),
                         family: Some(NoteFamily::Aside),
                         margin: false,
+                        at: None,
                     });
                 }
                 out.push(Block::Open {

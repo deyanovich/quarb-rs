@@ -6,7 +6,7 @@ use quarb_serve::ServeAdapter;
 const DOC: &str = r#"{"books": [
   {"title": "Dune", "price": 9.99},
   {"title": "Emma", "price": 7.5},
-  {"title": "Sapiens", "price": 22.5}
+  {"title": "The Histories", "price": 22.5}
 ]}"#;
 
 #[test]

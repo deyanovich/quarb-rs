@@ -11,6 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+csv = "1.4"
+regex = "1"
 url = "2"
 percent-encoding = "2"
-quarb = { path = "../quarb", version = "0.30.0" }
+quarb = { path = "../quarb", version = "0.31.0" }
+unicode-segmentation = "1"
+syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }

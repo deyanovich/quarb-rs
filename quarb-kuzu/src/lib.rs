@@ -94,7 +94,7 @@ fn cell_value(v: &kuzu::Value) -> Value {
             }
         }
         K::List(_, items) | K::Array(_, items) => {
-            Value::List(items.iter().map(cell_value).collect())
+            Value::list(items.iter().map(cell_value).collect())
         }
         other => Value::Str(other.to_string()),
     }
@@ -448,15 +448,15 @@ impl AstAdapter for KuzuAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {
-            (Kind::Root, "tables") => Some(Value::List(
+            (Kind::Root, "tables") => Some(Value::list(
                 self.tables.iter().map(|t| Value::Str(t.clone())).collect(),
             )),
             (Kind::Root, "rel-types") => {
                 let mut names: Vec<String> = self.rels.iter().map(|r| r.name.clone()).collect();
                 names.dedup();
-                Some(Value::List(names.into_iter().map(Value::Str).collect()))
+                Some(Value::list(names.into_iter().map(Value::Str).collect()))
             }
-            (Kind::Root, "rel-connections") => Some(Value::List(
+            (Kind::Root, "rel-connections") => Some(Value::list(
                 self.rels
                     .iter()
                     .map(|r| Value::Str(format!("{}: {} -> {}", r.name, r.src, r.dst)))

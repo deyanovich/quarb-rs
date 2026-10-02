@@ -198,6 +198,15 @@ pub struct RefDecl {
     /// The property resolved into the container.
     pub field: String,
     pub container: String,
+    /// The target path as written, condition stripped: when no
+    /// derived container answers to the first segment, the target
+    /// is this path over the base and derived view (`/кузнецова/*`).
+    pub path: String,
+    /// The role within the container the path form names
+    /// (`/tables/class`), which restricts resolution to that role's
+    /// members; `None` for the bare form (`tables`), which resolves
+    /// anywhere in the container.
+    pub role: Option<String>,
     /// The target property the value is matched against, from the
     /// explicit form `--> /cookies/cookie[::id = $]`. `None` is the
     /// short form, matching the target's default projection.
@@ -223,14 +232,18 @@ pub struct EdgeDecl {
     pub field_b: String,
 }
 
-/// Split model-file text into statements at a lone `;`. A maximal
-/// run of two or more `;` is a projection sigil in a body (`;;;` and
-/// its `::;` cousin), never a terminator; strings are opaque.
+/// Split model-file text into statements at a lone `;` outside any
+/// bracket pair. A maximal run of two or more `;` is a projection
+/// sigil in a body (`;;;` and its `::;` cousin), never a terminator;
+/// a `;` inside `(…)`, `[…]` or `{…}` separates a call's arguments
+/// or a record's fields (`%(a = ::a; b = ::b)`), never statements;
+/// strings are opaque.
 fn statements(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut start = 0;
     let mut i = 0;
+    let mut depth = 0usize;
     while i < b.len() {
         match b[i] {
             q @ ('\'' | '"') => {
@@ -243,13 +256,21 @@ fn statements(text: &str) -> Vec<String> {
                 }
                 i += 1;
             }
+            '(' | '[' | '{' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
             ';' => {
                 let mut run = 0;
                 while i < b.len() && b[i] == ';' {
                     run += 1;
                     i += 1;
                 }
-                if run == 1 {
+                if run == 1 && depth == 0 {
                     out.push(b[start..i - 1].iter().collect());
                     start = i;
                 }
@@ -398,8 +419,9 @@ fn split_trailing_group(s: &str) -> Option<(String, String)> {
     None
 }
 
-/// Parse a `ref` target: `ips`, `/ips/ip`, or `/ips/ip[::id = $]`.
-fn parse_ref_target(s: &str) -> Result<(String, Option<String>), String> {
+/// Parse a `ref` target: `ips`, `/ips/ip`, or `/ips/ip[::id = $]` —
+/// the container, the role the path form names, and the key field.
+fn parse_ref_target(s: &str) -> Result<(String, String, Option<String>, Option<String>), String> {
     let (path, key_field) = match split_trailing_group(s) {
         Some((path, group)) => {
             let inner = group.trim_start_matches('[').trim_end_matches(']').trim();
@@ -417,18 +439,14 @@ fn parse_ref_target(s: &str) -> Result<(String, Option<String>), String> {
         None => (s.trim().to_string(), None),
     };
     // The container is the first segment of a path form, or the whole
-    // word of the bare form.
-    let container = path
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    // word of the bare form; the path form's second segment is the role.
+    let mut segs = path.trim_start_matches('/').split('/').map(str::trim);
+    let container = segs.next().unwrap_or("").to_string();
+    let role = segs.next().filter(|r| !r.is_empty()).map(str::to_string);
     if container.is_empty() {
         return Err(format!("ref needs a target container: '{s}'"));
     }
-    Ok((container, key_field))
+    Ok((container, path, role, key_field))
 }
 
 /// Split at the first `->` that is not part of a `-->`.
@@ -447,8 +465,33 @@ fn split_arrow(s: &str) -> Option<(String, String)> {
     None
 }
 
-/// Parse model-file text.
+/// Parse model-file text. A `use FILE;` statement needs a location
+/// to resolve against, so it is refused here; [`parse_model_file`]
+/// is the entry point for a model on disk.
 pub fn parse_model(text: &str) -> Result<Model, String> {
+    parse_model_in(text, None, &mut Vec::new(), &mut Vec::new())
+}
+
+/// Parse a model file, resolving its `use FILE;` includes against
+/// its own directory (recursively; a cycle is refused). An included
+/// model's mounts are resolved against the included file's
+/// directory, so each model stays self-locating; its `node`, `ref`,
+/// `rel`, `edge`, `alias` and `def` statements join the includer's,
+/// ahead of them; a mount name declared twice is refused.
+pub fn parse_model_file(path: &std::path::Path) -> Result<Model, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
+    let mut visited = vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())];
+    parse_model_in(&text, path.parent(), &mut visited, &mut Vec::new())
+}
+
+fn parse_model_in(
+    text: &str,
+    base_dir: Option<&std::path::Path>,
+    visited: &mut Vec<std::path::PathBuf>,
+    done: &mut Vec<std::path::PathBuf>,
+) -> Result<Model, String> {
     let mut model = Model::default();
     let mut defs = Vec::new();
     for raw in statements(&strip_comments(text)) {
@@ -484,21 +527,85 @@ pub fn parse_model(text: &str) -> Result<Model, String> {
                 let (name, target) = rest
                     .split_once(':')
                     .ok_or_else(|| format!("mount needs 'NAME: target': '{stmt}'"))?;
+                let name = name.trim().to_string();
+                if model.mounts.iter().any(|m| m.name == name) {
+                    return Err(format!("mount '{name}' is already declared: '{stmt}'"));
+                }
                 model.mounts.push(Mount {
-                    name: name.trim().to_string(),
+                    name,
                     target: target.trim().to_string(),
                 });
+            }
+            "use" => {
+                let file = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                if file.is_empty() {
+                    return Err(format!("use needs a model file: '{stmt}'"));
+                }
+                let Some(dir) = base_dir else {
+                    return Err(format!(
+                        "use needs a location to resolve '{file}' against: pass the model as a file (--model FILE)"
+                    ));
+                };
+                let path = {
+                    let p = std::path::Path::new(file);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        dir.join(p)
+                    }
+                };
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                // `visited` is the chain of files being read: meeting
+                // one of them again is a cycle. A file already read
+                // on another branch (two models over one base, used
+                // by a third) is in `done`, and is not read twice.
+                if visited.contains(&canon) {
+                    return Err(format!("use {file}: the model includes itself"));
+                }
+                if done.contains(&canon) {
+                    continue;
+                }
+                visited.push(canon.clone());
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("use {file}: reading {}: {e}", path.display()))?;
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
+                let sub = parse_model_in(&text, path.parent(), visited, done)
+                    .map_err(|e| format!("use {file}: {e}"))?;
+                visited.pop();
+                done.push(canon);
+                for m in sub.mounts {
+                    if model.mounts.iter().any(|x| x.name == m.name) {
+                        return Err(format!(
+                            "use {file}: mount '{}' is already declared",
+                            m.name
+                        ));
+                    }
+                    model.mounts.push(Mount {
+                        name: m.name,
+                        target: resolve_mount_target(&m.target, path.parent()),
+                    });
+                }
+                model.nodes.extend(sub.nodes);
+                model.refs.extend(sub.refs);
+                model.rels.extend(sub.rels);
+                model.edges.extend(sub.edges);
+                model.aliases.extend(sub.aliases);
+                if !sub.defs_text.trim().is_empty() {
+                    defs.push(sub.defs_text);
+                }
             }
             "ref" => {
                 let (left, container) = rest
                     .split_once("-->")
                     .ok_or_else(|| format!("ref needs 'PATH::field --> container': '{stmt}'"))?;
                 let (scope, field) = split_field(left)?;
-                let (container, key_field) = parse_ref_target(container)?;
+                let (container, path, role, key_field) = parse_ref_target(container)?;
                 model.refs.push(RefDecl {
                     scope,
                     field,
                     container,
+                    path,
+                    role,
                     key_field,
                 });
             }

@@ -202,7 +202,7 @@ fn cell_value(v: &Json) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         Json::String(s) => Value::Str(s.clone()),
-        Json::Array(items) => Value::List(items.iter().map(cell_value).collect()),
+        Json::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         Json::Object(_) => Value::Str(v.to_string()),
     }
 }
@@ -509,10 +509,10 @@ impl AstAdapter for Neo4jAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {
-            (Kind::Root, "labels") => Some(Value::List(
+            (Kind::Root, "labels") => Some(Value::list(
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
-            (Kind::Root, "rel-types") => Some(Value::List(
+            (Kind::Root, "rel-types") => Some(Value::list(
                 self.rel_types
                     .iter()
                     .map(|t| Value::Str(t.clone()))
@@ -527,7 +527,7 @@ impl AstAdapter for Neo4jAdapter {
                 nodes[node.0 as usize].children.borrow().is_some(),
             )),
             (Kind::Entity { eid, .. }, "element-id") => Some(Value::Str(eid.clone())),
-            (Kind::Entity { labels, .. }, "labels") => Some(Value::List(
+            (Kind::Entity { labels, .. }, "labels") => Some(Value::list(
                 labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             (Kind::Entity { labels, .. }, "label") => labels.first().map(|l| Value::Str(l.clone())),
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(cell_value(&serde_json::json!(null)), Value::Null);
         assert_eq!(
             cell_value(&serde_json::json!([1, 2])),
-            Value::List(vec![Value::Int(1), Value::Int(2)])
+            Value::list(vec![Value::Int(1), Value::Int(2)])
         );
         // maps take the text posture
         assert_eq!(

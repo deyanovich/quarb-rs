@@ -306,7 +306,7 @@ impl AstAdapter for HtmlAdapter {
         match key {
             "tag" => n.tag.clone().map(Value::Str),
             "classes" => n.attr("class").map(|c| {
-                Value::List(
+                Value::list(
                     c.split_whitespace()
                         .map(|s| Value::Str(s.to_string()))
                         .collect(),
@@ -315,7 +315,7 @@ impl AstAdapter for HtmlAdapter {
             "attrs" => {
                 let mut names: Vec<&str> = n.attrs.iter().map(|(k, _)| k.as_str()).collect();
                 names.sort_unstable();
-                Some(Value::List(
+                Some(Value::list(
                     names
                         .into_iter()
                         .map(|k| Value::Str(k.to_string()))

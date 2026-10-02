@@ -621,6 +621,7 @@ impl<'a> Lower<'a> {
                             onym,
                             family: Some(family),
                             margin,
+                            at: None,
                         }),
                         Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
                         Inline::Ref(target, text, internal) => {
@@ -756,6 +757,7 @@ impl<'a> Lower<'a> {
                     onym,
                     family: Some(family),
                     margin,
+                    at: None,
                 }),
                 Inline::Mark(term) => self.out.push(Block::IndexMark { term }),
                 Inline::Ref(target, text, internal) => {

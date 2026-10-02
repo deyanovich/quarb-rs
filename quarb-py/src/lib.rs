@@ -115,6 +115,24 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
+            // A treebank: as a document, and as a corpus with its
+            // own tokens.
+            "conllu" => quarb_text::TextModel::parse_conllu_text(input)
+                .map(Doc::Text)
+                .map_err(|e| format!("reading CoNLL-U: {e}")),
+            "corpus-conllu" => quarb_text::TextModel::parse_conllu_corpus(input)
+                .map(Doc::Text)
+                .map_err(|e| format!("reading CoNLL-U: {e}")),
+            // The corpus reading: the same three, tokenized.
+            "corpus-html" | "corpus-markdown" | "corpus" => {
+                let mut model = match format {
+                    "corpus-html" => quarb_text_html::parse(input),
+                    "corpus-markdown" => quarb_text_markdown::parse(input),
+                    _ => quarb_text::TextModel::parse_plain(input),
+                };
+                model.tokenize();
+                Ok(Doc::Text(model))
+            }
             // The code level: identifiers as names; the format
             // name carries the language.
             "code-rust" => quarb_code::CodeModel::parse(input, "rs")
@@ -488,7 +506,7 @@ fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
         Value::Str(s) => s.into_py_any(py)?,
         Value::List(items) => {
             let list = PyList::empty(py);
-            for item in items {
+            for item in items.iter() {
                 list.append(value_to_py(py, item)?)?;
             }
             list.unbind().into()

@@ -149,3 +149,25 @@ fn reverse_resolve_scans_past_derived_nodes() {
     // And a query anchored on a base node completes without panicking.
     assert_eq!(values(&a, "/posts/1::ip<-- @| count"), vec!["0"]);
 }
+
+/// Aliased rows of a table share a name, which is no identity: a
+/// constructor over them keeps every row.
+#[test]
+fn aliased_rows_keep_their_count() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE cast (mention TEXT, name TEXT);
+         INSERT INTO cast VALUES ('Tom','Tom Sawyer'),('Huck','Huckleberry Finn'),('Becky','Becky Thatcher');",
+    )
+    .unwrap();
+    let base = SqliteAdapter::load(&conn).unwrap();
+    let model =
+        parse_model("node /characters/character: /cast/*;\nnode /characters/character: /cast/*;")
+            .unwrap();
+    let a = ModelAdapter::new(base, model);
+    assert_eq!(values(&a, "/characters/character @| count"), vec!["3"]);
+    assert_eq!(
+        values(&a, "/characters/character[::mention = 'Huck']::name"),
+        vec!["Huckleberry Finn"]
+    );
+}

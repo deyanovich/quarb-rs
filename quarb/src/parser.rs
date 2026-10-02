@@ -317,6 +317,7 @@ fn group_wrap(
         alts: vec![elems],
         quant,
         predicates,
+        traits: Vec::new(),
         reach,
     })]
 }
@@ -1117,14 +1118,29 @@ impl Parser<'_> {
             }
             // `| [cond]` — a per-capsa filter. Positional selection
             // is a whole-context operation and lives on `@|`.
-            Some(Token::LBracket) => match self.predicate()? {
-                Predicate::Expr(e) => Ok(Stage::Filter(e)),
-                Predicate::Index(_) | Predicate::Range(_, _) => Err(QuarbError::Parse(
-                    "positional selection is whole-context; write '@| [n]' / \
-                     '@| [a..b]' (a plain '| [cond]' filters per capsa)"
-                        .into(),
-                )),
-            },
+            Some(Token::LBracket) => {
+                let positional = || {
+                    QuarbError::Parse(
+                        "positional selection is whole-context; write '@| [n]' / \
+                         '@| [a..b]' (a plain '| [cond]' filters per capsa)"
+                            .into(),
+                    )
+                };
+                let mut e = match self.predicate()? {
+                    Predicate::Expr(e) => e,
+                    Predicate::Index(_) | Predicate::Range(_, _) => return Err(positional()),
+                };
+                // Glued predicates chain as on a path step:
+                // `| [a][b]` ≡ `| [a] | [b]` — every capsa passes
+                // both, in order.
+                while matches!(self.peek(), Some(Token::LBracket)) {
+                    match self.predicate()? {
+                        Predicate::Expr(next) => e = PredExpr::And(Box::new(e), Box::new(next)),
+                        Predicate::Index(_) | Predicate::Range(_, _) => return Err(positional()),
+                    }
+                }
+                Ok(Stage::Filter(e))
+            }
             // A value-expression stage starts with a projection, a
             // parenthesized group, or an interpolated string:
             // `| ::price * ::qty`, `| "${::name} (${::age})"`.
@@ -2199,6 +2215,7 @@ impl Parser<'_> {
                         max: Some(1),
                     },
                     predicates: Vec::new(),
+                    traits: Vec::new(),
                     reach: Reach::All,
                 })],
                 None,
@@ -2579,7 +2596,9 @@ impl Parser<'_> {
                 "'{name}' takes no range argument ('window(a..b)' does)"
             )));
         }
-        Ok(FnCall { name, args })
+        let call = FnCall { name, args };
+        validate_stat_args(&call)?;
+        Ok(call)
     }
 
     /// One function argument: a full value expression; a plain
@@ -2785,6 +2804,7 @@ impl Parser<'_> {
                 alts: vec![vec![PathElem::Step(hop)]],
                 quant,
                 predicates,
+                traits: Vec::new(),
                 reach: self.reach(),
             }));
         }
@@ -2800,6 +2820,7 @@ impl Parser<'_> {
                 alts: vec![vec![PathElem::Step(step)]],
                 quant,
                 predicates,
+                traits: Vec::new(),
                 reach: self.reach(),
             }));
         }
@@ -2839,14 +2860,29 @@ impl Parser<'_> {
             min: 1,
             max: Some(1),
         });
+        // `<trait>` after a quantified group filters its matches
+        // like a step's trait does, in the step's order (traits,
+        // then predicates): `(>token){2}<word>[::lower != "the"]`.
+        let traits = self.group_traits()?;
         let predicates = self.group_predicates()?;
         let reach = self.reach();
         Ok(Group {
             alts,
             quant,
             predicates,
+            traits,
             reach,
         })
+    }
+
+    /// Parse the `<...>` trait clauses of a group (after the
+    /// quantifier, before its predicates), as a step's.
+    fn group_traits(&mut self) -> Result<Vec<TraitClause>> {
+        let mut traits = Vec::new();
+        while let Some(clauses) = self.try_trait()? {
+            traits.extend(clauses);
+        }
+        Ok(traits)
     }
 
     /// Parse the `[...]` predicates of a group (between the
@@ -3265,7 +3301,8 @@ impl Parser<'_> {
                 _ => {}
             }
             if matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Match | CmpOp::NotMatch)
-                && let Some(right) = self.pattern_operand()?
+                && let Some(right) =
+                    self.pattern_operand(matches!(op, CmpOp::Match | CmpOp::NotMatch))?
             {
                 if matches!(op, CmpOp::Eq | CmpOp::Ne) {
                     let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
@@ -3298,7 +3335,11 @@ impl Parser<'_> {
     /// spelling and never a pattern segment. Returns None (position
     /// restored) when the tokens aren't a pattern, so a plain
     /// string or arithmetic parses as before.
-    fn pattern_operand(&mut self) -> Result<Option<Operand>> {
+    ///
+    /// After `==` / `!==` (`bare`), a quoted string with no star is
+    /// a pattern too — the glob without a wildcard: literal text,
+    /// anchored at both ends, as in the shell. It is not a regex.
+    fn pattern_operand(&mut self, bare: bool) -> Result<Option<Operand>> {
         let start = self.pos;
         let star = |t: &Token| matches!(t, Token::Name { text, quoted: false, .. } if text == "*");
         let is_glued = |t: &Token| match t {
@@ -3355,6 +3396,28 @@ impl Parser<'_> {
                 ));
             }
             return Ok(Some(Operand::Pattern(segs)));
+        }
+        if bare && stars == 0 && lits == 1 {
+            // `== "x"`: only when the string is the whole operand —
+            // a glued or arithmetic continuation is an expression.
+            let continues = match self.peek() {
+                Some(Token::Name {
+                    glued,
+                    text,
+                    quoted: false,
+                    ..
+                }) => *glued || matches!(text.as_str(), "+" | "-" | "*" | "div" | "mod"),
+                Some(Token::Name {
+                    glued,
+                    quoted: true,
+                    ..
+                }) => *glued,
+                Some(Token::Interp(_)) => true,
+                _ => false,
+            };
+            if !continues {
+                return Ok(Some(Operand::Pattern(segs)));
+            }
         }
         if stars == 1 && lits == 0 {
             // The bare `= *` (and the spaced `= * \"x\"`): a lone
@@ -3569,9 +3632,14 @@ impl Parser<'_> {
             // parses both ways with the same meaning, so preferring
             // the path changes nothing observable.
             let start = self.pos;
-            match self.rel_from_group() {
-                Ok(op) => return Ok(op),
-                Err(_) => self.pos = start,
+            // A leading `:name` after the paren is the topic's field
+            // (`(:t | ngrams(3))`), never a path: skip the path
+            // reading, which would otherwise swallow the pipe.
+            if !matches!(self.toks.get(self.pos + 1), Some(Token::Field)) {
+                match self.rel_from_group() {
+                    Ok(op) => return Ok(op),
+                    Err(_) => self.pos = start,
+                }
             }
             self.pos += 1;
             let inner = self.cond_expr()?;
@@ -4712,6 +4780,7 @@ impl Parser<'_> {
                         max: Some(1),
                     },
                     predicates: Vec::new(),
+                    traits: Vec::new(),
                     reach: Reach::All,
                 })],
                 projection: None,
@@ -5294,28 +5363,39 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
     if call.name == "group" {
         return validate_record_convention(call, "group");
     }
-    // `sort` takes at most one argument: a Unicode locale
-    // identifier selecting the collation (`sort(ru-RU)`),
-    // validated here so a typo fails the parse, not the sort.
-    // The check is syntactic (BCP 47 shape) and deliberately
-    // feature-independent: a query parses identically whether or
-    // not collation is compiled in; existence and support are
-    // the collator's concern at sort time.
+    // `sort` takes a Unicode locale identifier selecting the
+    // collation (`sort(ru-RU)`), the word `atergo` selecting the
+    // inverse-lexicographic order, or both, locale first
+    // (`sort(ru-RU; atergo)`). The tag is validated here so a
+    // typo fails the parse, not the sort. The check is syntactic
+    // (BCP 47 shape) and deliberately feature-independent: a
+    // query parses identically whether or not collation is
+    // compiled in; existence and support are the collator's
+    // concern at sort time.
     if call.name == "sort" {
+        let locale = |v: &Value| -> Result<()> {
+            let tag = v.to_string();
+            if !valid_locale_tag(&tag) {
+                return Err(QuarbError::Parse(format!(
+                    "sort: '{tag}' is not a Unicode locale identifier \
+                     (try ru-RU, de-DE, zh-Hant, ...)"
+                )));
+            }
+            Ok(())
+        };
+        let atergo = |v: &Value| matches!(v, Value::Str(s) if s == "atergo");
         match call.args.as_slice() {
             [] => return Ok(()),
-            [Arg::Lit(v)] => {
-                let tag = v.to_string();
-                if !valid_locale_tag(&tag) {
-                    return Err(QuarbError::Parse(format!(
-                        "sort: '{tag}' is not a Unicode locale identifier                          (try ru-RU, de-DE, zh-Hant, ...)"
-                    )));
-                }
-                return Ok(());
+            [Arg::Lit(v)] if atergo(v) => return Ok(()),
+            [Arg::Lit(v)] => return locale(v),
+            [Arg::Lit(loc), Arg::Lit(mode)] if atergo(mode) && !atergo(loc) => {
+                return locale(loc);
             }
             _ => {
                 return Err(QuarbError::Parse(
-                    "sort takes at most one argument: a locale identifier,                      e.g. sort(ru-RU); keyed sorting is sort_by"
+                    "sort takes a locale identifier, the word atergo, or both \
+                     with the locale first: sort, sort(ru-RU), sort(atergo), \
+                     sort(ru-RU; atergo); keyed sorting is sort_by"
                         .into(),
                 ));
             }
@@ -5382,6 +5462,117 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                     .into(),
             )),
         },
+        // `combinations(n)`, and its two named sizes.
+        "combinations" => match call.args.as_slice() {
+            [Arg::Lit(Value::Int(n))] if *n >= 1 => Ok(()),
+            _ => Err(QuarbError::Parse(
+                "combinations takes the size of the subset: combinations(2)".into(),
+            )),
+        },
+        "pairs" | "triples" => {
+            if call.args.is_empty() {
+                Ok(())
+            } else {
+                Err(QuarbError::Parse(format!(
+                    "'{}' takes no arguments; a subset of another size is combinations(n)",
+                    call.name
+                )))
+            }
+        }
+        // `csv[(a; b; …)]` / `table[(a; b; …)]` — the columns by name.
+        "csv" | "table" => {
+            if call
+                .args
+                .iter()
+                .all(|a| matches!(a, Arg::Lit(Value::Str(_))))
+            {
+                Ok(())
+            } else {
+                Err(QuarbError::Parse(format!(
+                    "{0} takes column names: {0}, {0}(year; title)",
+                    call.name
+                )))
+            }
+        }
+        // `number[(level)]` — the level expression, or the value at
+        // hand without one.
+        "number" => match call.args.as_slice() {
+            [] | [Arg::Expr(_)] => Ok(()),
+            _ => Err(QuarbError::Parse(
+                "number takes an optional level expression: number, number(:::depth)".into(),
+            )),
+        },
+        // `outline[(level; text[; "1."])]` — the two expressions, then
+        // the numbering style; bare over a record stream.
+        "outline" => match call.args.as_slice() {
+            [] | [Arg::Expr(_), Arg::Expr(_)] => Ok(()),
+            [Arg::Expr(_), Arg::Expr(_), Arg::Lit(Value::Str(style))] if style == "1." => Ok(()),
+            _ => Err(QuarbError::Parse(
+                "outline takes a level and a text, then an optional numbering \
+                 style: outline(:::depth; ::lemma), outline(:::depth; ::lemma; \"1.\")"
+                    .into(),
+            )),
+        },
+        // `zscore([sample][; key])` — the word `sample` selects the
+        // n − 1 spread, an expression partitions the standardizing.
+        "zscore" => {
+            let ok = match call.args.split_first() {
+                None => true,
+                Some((Arg::Lit(Value::Str(s)), rest)) if s == "sample" => key_ok(rest),
+                Some((Arg::Expr(_), [])) => true,
+                _ => false,
+            };
+            if ok {
+                Ok(())
+            } else {
+                Err(QuarbError::Parse(
+                    "zscore takes the word sample and/or a partition key: \
+                     zscore, zscore(sample), zscore($.w), zscore(sample; $.w)"
+                        .into(),
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check the statistics round's argument shapes wherever a call is
+/// parsed (`|`, `@|`, the operand form): the dispersion measures
+/// take an optional leading topic field (ruling #66) and then only
+/// the word `sample`; the association aggregates take exactly two
+/// value expressions.
+fn validate_stat_args(call: &FnCall) -> Result<()> {
+    match call.name.as_str() {
+        "std" | "var" | "stddev" | "variance" => {
+            let rest = match call.args.split_first() {
+                Some((Arg::Expr(_), rest)) => rest,
+                _ => &call.args,
+            };
+            let ok = match rest {
+                [] => true,
+                [Arg::Lit(Value::Str(s))] => s == "sample",
+                _ => false,
+            };
+            if ok {
+                Ok(())
+            } else {
+                Err(QuarbError::Parse(format!(
+                    "{0} takes only the word sample: {0}, {0}(sample)",
+                    call.name
+                )))
+            }
+        }
+        "corr" | "spearman" | "cosine" | "delta" | "dp" | "kappa" | "precision" | "recall"
+        | "f1" => {
+            if matches!(call.args.as_slice(), [Arg::Expr(_), Arg::Expr(_)]) {
+                Ok(())
+            } else {
+                Err(QuarbError::Parse(format!(
+                    "{0} needs two value-expression keys: {0}(:a; :b), {0}(::x; ::y)",
+                    call.name
+                )))
+            }
+        }
         _ => Ok(()),
     }
 }

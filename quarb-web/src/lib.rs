@@ -446,7 +446,7 @@ fn kind_named(name: &str) -> Option<PageKind> {
 }
 
 fn list(v: &[String]) -> Value {
-    Value::List(v.iter().cloned().map(Value::Str).collect())
+    Value::list(v.iter().cloned().map(Value::Str).collect())
 }
 
 impl<S: WebStore> AstAdapter for WebAdapter<S> {

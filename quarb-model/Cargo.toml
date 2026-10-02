@@ -11,10 +11,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.30.0" }
+quarb = { path = "../quarb", version = "0.31.0" }
 regex = "1"
 
 [dev-dependencies]
+quarb-json = { path = "../quarb-json" }
+tempfile = "3"
 quarb-text-html = { path = "../quarb-text-html" }
 quarb-text = { path = "../quarb-text" }
 quarb-sqlite = { path = "../quarb-sqlite" }
