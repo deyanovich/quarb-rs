@@ -2,13 +2,19 @@
 //! a document parses to a [`quarb_json::JsonAdapter`] — the JSON
 //! recipes apply to a `.toml` file unchanged.
 
-use quarb_json::JsonAdapter;
+use quarb_json::{JsonAdapter, Reading};
 
 /// Parse TOML `text` into a JSON-model adapter.
 pub fn parse(text: &str) -> Result<JsonAdapter, toml::de::Error> {
+    parse_as(text, Reading::Node)
+}
+
+/// Parse TOML `text` under the given reading (`json2` is the
+/// property reading).
+pub fn parse_as(text: &str, reading: Reading) -> Result<JsonAdapter, toml::de::Error> {
     let mut value: serde_json::Value = toml::from_str(text)?;
     flatten_datetimes(&mut value);
-    Ok(JsonAdapter::from_json_value(value))
+    Ok(JsonAdapter::from_json_value_as(value, reading))
 }
 
 /// The `toml` crate tunnels every datetime value through serde as a

@@ -35,8 +35,11 @@ pub fn parse(text: &str) -> TextModel {
 /// narrative `@key` is deliberately not read: outside pandoc's
 /// own parser it is indistinguishable from emails and
 /// @mentions, so the bracket is the unambiguous spelling. The
-/// bracket text stays in the prose as authored.
-fn scan_citations(text: &str, cites: &mut Vec<String>) {
+/// bracket text stays in the prose as authored. Each key comes
+/// with its locator: the text after the key up to the next `;`
+/// or the closing bracket (`[@key, I.1]` → `I.1`), a leading
+/// comma dropped; pandoc's suffix, read as the pinpoint.
+fn scan_citations(text: &str, cites: &mut Vec<(String, Option<String>)>) {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -56,7 +59,16 @@ fn scan_citations(text: &str, cites: &mut Vec<String>) {
                     || matches!(group[j - 1], '-' | ';' | '('))
                 && let Some(key) = citation_key(&group[j + 1..])
             {
-                cites.push(key);
+                let after = j + 1 + key.chars().count();
+                let end = group[after..]
+                    .iter()
+                    .position(|&c| c == ';')
+                    .map_or(group.len(), |e| after + e);
+                let suffix: String = group[after..end].iter().collect();
+                let locator = suffix.trim().trim_start_matches(',').trim().to_string();
+                cites.push((key, Some(locator).filter(|l| !l.is_empty())));
+                j = end;
+                continue;
             }
             j += 1;
         }
@@ -98,9 +110,9 @@ fn citation_key(rest: &[char]) -> Option<String> {
 }
 
 /// Emit the block's citation marks after it, in source order.
-fn drain_cites(cites: &mut Vec<String>, out: &mut Vec<Block>) {
-    for target in cites.drain(..) {
-        out.push(Block::Cite { target });
+fn drain_cites(cites: &mut Vec<(String, Option<String>)>, out: &mut Vec<Block>) {
+    for (target, locator) in cites.drain(..) {
+        out.push(Block::Cite { target, locator });
     }
 }
 
@@ -148,7 +160,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
     let mut refs: Vec<(String, String, bool)> = Vec::new();
     // Pandoc-style bracketed citations met in the open block,
     // emitted after it like the callouts.
-    let mut cites: Vec<String> = Vec::new();
+    let mut cites: Vec<(String, Option<String>)> = Vec::new();
     let mut link_open: Option<(String, usize)> = None;
     // The heading's `{#id}` attribute — the section's label.
     let mut heading_id: Option<String> = None;

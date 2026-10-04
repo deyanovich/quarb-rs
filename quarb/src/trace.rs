@@ -126,6 +126,7 @@ fn axis_text(a: &Axis) -> &'static str {
     match a {
         Axis::Child => "/",
         Axis::Descendant(_) => "//",
+        Axis::Universal => "*//",
         Axis::Parent => "\\",
         Axis::Ancestor(_) => "\\\\",
         Axis::NextSibling => ">",
@@ -345,7 +346,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         arrived: &[exec::EdgeCtx],
     ) -> Vec<Walked> {
         match &step.axis {
-            Axis::Child | Axis::Descendant(_) => self.tree_path(from, to, false),
+            Axis::Child | Axis::Descendant(_) | Axis::Universal => self.tree_path(from, to, false),
             Axis::Parent | Axis::Ancestor(_) => self.tree_path(to, from, true),
             Axis::NextSibling
             | Axis::PrevSibling

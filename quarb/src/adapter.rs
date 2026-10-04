@@ -266,6 +266,39 @@ pub trait AstAdapter {
         None
     }
 
+    /// The node's own properties, enumerated — name and value, in
+    /// the source's order — for readings that keep values off the
+    /// tree (the JSON property reading, where an object's scalar
+    /// fields are no nodes). The serializers (`| json`, `| xml`,
+    /// `| kaiv`) merge them with the children, a child winning a
+    /// shared name. The default is none: for a reading whose values
+    /// are all nodes, the children already say everything.
+    fn properties(&self, _node: NodeId) -> Vec<(String, Value)> {
+        Vec::new()
+    }
+
+    /// The nodes of the arbor that are not in the tree — joined to
+    /// it by crosslinks alone, with no parent and no path. The
+    /// universal search `*//` reaches them after the tree, in this
+    /// order; `:::is-non-tree` is true on them. The default is
+    /// none: every shipped adapter puts every node in the tree.
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        Vec::new()
+    }
+
+    /// The node whose children an explicit child step from `node`
+    /// reads. The default is `node` itself. An adapter whose tree
+    /// holds transparent links (a filesystem's symlink to a
+    /// directory) answers the link's target, so `/link/name` lands
+    /// on the target's own child — the same node `/target/name`
+    /// reaches. The descendant walk never consults this: it reads
+    /// [`children`](Self::children) alone, so a linked subtree is
+    /// walked once, under its own parent, and a cycle of links
+    /// cannot trap it.
+    fn child_host(&self, node: NodeId) -> NodeId {
+        node
+    }
+
     /// The children of `node` whose edge name is exactly `name` —
     /// the engine's fast path for name-matcher child hops. The
     /// default filters [`children`](Self::children); an adapter
@@ -596,6 +629,15 @@ impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.inner.children_named(node, name)
     }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.inner.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.inner.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.inner.properties(node)
+    }
     fn default_value(&self, node: NodeId) -> Option<Value> {
         self.inner.default_value(node)
     }
@@ -702,6 +744,15 @@ impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
     }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.inner.children_named(node, name)
+    }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.inner.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.inner.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.inner.properties(node)
     }
     fn default_value(&self, node: NodeId) -> Option<Value> {
         self.inner.default_value(node)
@@ -811,6 +862,15 @@ impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
     }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.inner.children_named(node, name)
+    }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.inner.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.inner.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.inner.properties(node)
     }
     fn default_value(&self, node: NodeId) -> Option<Value> {
         self.inner.default_value(node)

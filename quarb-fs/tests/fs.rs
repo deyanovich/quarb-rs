@@ -283,3 +283,52 @@ fn provenance_is_path_and_mtime() {
     );
     assert_eq!(composite, vec![expected]);
 }
+
+#[test]
+fn dot_names_carry_the_hidden_trait() {
+    let dir = tree_with_ignore();
+    let shown = FsOptions {
+        hidden: true,
+        respect_ignore: true,
+    };
+    assert_eq!(
+        names_with("//*<hidden>", &dir, shown),
+        vec![".gitignore", ".hidden"]
+    );
+    assert_eq!(names_with("/*<!hidden>", &dir, shown), vec!["src"]);
+    // Without the flag the walk never meets them.
+    assert!(names("//*<hidden>", &dir).is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_directory_link_is_transparent_to_a_child_step() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    fs::create_dir(p.join("drafts")).unwrap();
+    fs::write(p.join("drafts/a.md"), "alpha").unwrap();
+    fs::write(p.join("drafts/b.md"), "beta").unwrap();
+    std::os::unix::fs::symlink("drafts", p.join("latest")).unwrap();
+    std::os::unix::fs::symlink("nowhere", p.join("broken")).unwrap();
+    // Two links in opposite directions: a cycle on disk.
+    fs::create_dir(p.join("x")).unwrap();
+    fs::create_dir(p.join("y")).unwrap();
+    std::os::unix::fs::symlink("../y", p.join("x/to-y")).unwrap();
+    std::os::unix::fs::symlink("../x", p.join("y/to-x")).unwrap();
+
+    // The explicit step reads the target's children: the same
+    // nodes, under their own path.
+    assert_eq!(names("/latest/*", &dir), vec!["drafts/a.md", "drafts/b.md"]);
+    assert_eq!(names("/latest/a.md", &dir), vec!["drafts/a.md"]);
+    assert_eq!(values("/latest/a.md::", &dir), vec!["alpha"]);
+    assert_eq!(names("/latest/a.md\\", &dir), vec!["drafts"]);
+    // The crosslink says the same thing.
+    assert_eq!(names("/latest->*/*", &dir), names("/latest/*", &dir));
+    // The descendant walk does not go through a link: each file
+    // once, and the cycle is no trap.
+    assert_eq!(names("//*.md", &dir), vec!["drafts/a.md", "drafts/b.md"]);
+    assert_eq!(names("/latest//*.md", &dir), Vec::<String>::new());
+    assert_eq!(names("/x/to-y/to-x/to-y", &dir), vec!["x/to-y"]);
+    // A broken link stays a leaf.
+    assert_eq!(names("/broken/*", &dir), Vec::<String>::new());
+}

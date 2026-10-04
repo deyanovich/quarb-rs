@@ -203,8 +203,13 @@ pub enum Block {
     /// A citation mark — the bibliography's mention (LaTeX's
     /// `\cite`, koine's cite monosim): `target` is the authored
     /// key, resolved against the `bib` bearers — a namespace of
-    /// its own, separate from labels (LaTeX precedent).
-    Cite { target: String },
+    /// its own, separate from labels (LaTeX precedent). The
+    /// `locator` is the mark's own pinpoint (`\cite[I.1]{key}`,
+    /// `[@key, I.1]`), kept as written.
+    Cite {
+        target: String,
+        locator: Option<String>,
+    },
     /// One bibliographic entry: a block bearing its authored
     /// `key`. Unstructured sources (\bibitem) carry the full
     /// reference as `text`; structured ones (bibliogramma,
@@ -576,6 +581,8 @@ struct Node {
     cites: Vec<NodeId>,
     /// A ref's target identifier, as written.
     target: Option<String>,
+    /// A cit's locator (page, chapter, line), as written.
+    locator: Option<String>,
     /// The producer declared the target in-document.
     internal: bool,
     /// A structured bib entry's fields (campus → value) and its
@@ -1114,6 +1121,7 @@ impl Node {
             note_edge: None,
             cites: Vec::new(),
             target: None,
+            locator: None,
             internal: false,
             fields: Vec::new(),
             genus: None,
@@ -1631,12 +1639,15 @@ impl TextModel {
                     n.target = Some(target.trim().to_string()).filter(|t| !t.is_empty());
                     n.text = text.map(|t| normalize_ws(&t)).unwrap_or_default();
                 }
-                Block::Cite { target } => {
+                Block::Cite { target, locator } => {
                     let parent = last_flow.unwrap_or(root);
                     let id = push(&mut nodes, Kind::Cit, parent);
                     let n = &mut nodes[id.0 as usize];
                     n.internal = true;
                     n.target = Some(target.trim().to_string()).filter(|t| !t.is_empty());
+                    n.locator = locator
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty());
                 }
                 Block::Bib {
                     key,
@@ -3933,6 +3944,9 @@ impl AstAdapter for TextModel {
         {
             out.push("target".to_string());
         }
+        if n.kind == Kind::Cit && n.locator.is_some() {
+            out.push("locator".to_string());
+        }
         if matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) {
             // The body IS the note — `<note>` marks it, whichever
             // note family; the callout carries `<deixis>` alone.
@@ -4067,6 +4081,9 @@ impl AstAdapter for TextModel {
             // A ref's word: the identifier as written. Never the
             // resolved content — that is what `-->` is for.
             "target" if matches!(n.kind, Kind::Ref | Kind::Cit) => n.target.clone().map(Value::Str),
+            // A cit's pinpoint, as written: `\cite[I.1]{key}`,
+            // `[@key, I.1]`.
+            "locator" if n.kind == Kind::Cit => n.locator.clone().map(Value::Str),
             // A structured entry answers its campi (auctor,
             // titulus, annus, …) — the bibliogramma vocabulary,
             // canonicalized upstream.

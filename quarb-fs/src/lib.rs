@@ -17,6 +17,8 @@
 //! and `permissions`); and `<trait>` filters on a structural class
 //! (`dir`, `file`, `symlink`) or a file class by extension (`code`,
 //! `text`, `image`, `audio`, `video`, `document`, `archive`, `data`).
+//! An entry whose name starts with a dot carries `<hidden>`; such
+//! entries are in the tree only when the walk includes them.
 //!
 //! Symlinks are crosslinks: a symlink node carries a `target`
 //! crosslink to the node it points at, navigable with `->` (and
@@ -186,6 +188,24 @@ impl AstAdapter for FsAdapter {
         self.children[node.0 as usize].clone()
     }
 
+    /// A symlink to a directory of the tree lends that directory's
+    /// children to an explicit child step, as the file system
+    /// does: `/latest/a.md` is the node `/drafts/a.md` when
+    /// `latest -> drafts`. A broken link, a link to a file, and a
+    /// link whose target lies outside the tree host nothing new.
+    fn child_host(&self, node: NodeId) -> NodeId {
+        let i = node.0 as usize;
+        // Only a childless node can be a link; this keeps the
+        // lookup off every ordinary directory.
+        if !self.children[i].is_empty() {
+            return node;
+        }
+        match Self::symlink_target(&self.paths[i]).and_then(|t| self.index.get(&t)) {
+            Some(&target) => target,
+            None => node,
+        }
+    }
+
     fn name(&self, node: NodeId) -> Option<String> {
         if node == self.root {
             return None;
@@ -200,8 +220,9 @@ impl AstAdapter for FsAdapter {
     }
 
     /// Traits of a filesystem node: a structural trait (`dir`,
-    /// `file`, or `symlink`) plus, for files, a class derived from
-    /// the extension (`code`, `text`, `image`, …).
+    /// `file`, or `symlink`), for files a class derived from the
+    /// extension (`code`, `text`, `image`, …), and `hidden` for an
+    /// entry whose name starts with a dot.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let path = &self.paths[node.0 as usize];
         let mut out = Vec::new();
@@ -223,6 +244,16 @@ impl AstAdapter for FsAdapter {
             if let Some(lang) = source_language(&ext) {
                 out.push(lang.into());
             }
+        }
+        // A dot-name is hidden, as `ls` has it. The mount root is
+        // the tree's own name and never is.
+        if node != self.root
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+        {
+            out.push("hidden".into());
         }
         out
     }

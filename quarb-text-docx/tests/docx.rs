@@ -339,3 +339,99 @@ fn xe_fields_are_index_marks() {
         ["A PAGEREF field keeps only its 7."]
     );
 }
+
+/// Word's citation machinery: CITATION fields are cit marks
+/// (the tag as target, `\p` as the locator; the cached printed
+/// result stays prose), the b:Sources custom XML part is the
+/// bib list under the Latin campi, and the BIBLIOGRAPHY field's
+/// generated listing is not prose.
+#[test]
+fn citation_fields_and_the_sources_part() {
+    const SOURCES: &str = r#"<?xml version="1.0"?>
+<b:Sources xmlns:b="http://schemas.openxmlformats.org/officeDocument/2006/bibliography">
+  <b:Source><b:Tag>Gib76</b:Tag><b:SourceType>Book</b:SourceType>
+    <b:Author><b:Author><b:NameList><b:Person><b:Last>Gibbon</b:Last><b:First>Edward</b:First></b:Person></b:NameList></b:Author></b:Author>
+    <b:Title>The History of the Decline and Fall of the Roman Empire</b:Title>
+    <b:Year>1776</b:Year><b:City>London</b:City><b:Publisher>Strahan &amp; Cadell</b:Publisher></b:Source>
+  <b:Source><b:Tag>Her</b:Tag><b:SourceType>Book</b:SourceType>
+    <b:Author><b:Author><b:Corporate>Herodotus</b:Corporate></b:Author></b:Author>
+    <b:Title>The Histories</b:Title></b:Source>
+  <b:Source><b:Tag>Hom</b:Tag><b:SourceType>JournalArticle</b:SourceType>
+    <b:Author><b:Author><b:NameList><b:Person><b:Last>Homer</b:Last></b:Person></b:NameList></b:Author></b:Author>
+    <b:Title>The Iliad</b:Title><b:JournalName>Epics</b:JournalName></b:Source>
+</b:Sources>"#;
+    let body = "<w:p><w:r><w:t xml:space=\"preserve\">Gibbon says so </w:t></w:r>\
+        <w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>\
+        <w:r><w:instrText xml:space=\"preserve\"> CITATION Gib76 \\l 1033 \\p 15 </w:instrText></w:r>\
+        <w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>\
+        <w:r><w:t>(Gibbon, 1776, p. 15)</w:t></w:r>\
+        <w:r><w:fldChar w:fldCharType=\"end\"/></w:r>\
+        <w:r><w:t xml:space=\"preserve\"> and Herodotus </w:t></w:r>\
+        <w:fldSimple w:instr=\" CITATION Her \\l 1033 \"><w:r><w:t>(Herodotus)</w:t></w:r></w:fldSimple>\
+        <w:r><w:t xml:space=\"preserve\"> and a ghost </w:t></w:r>\
+        <w:fldSimple w:instr=\" CITATION Twa83 \\l 1033 \"><w:r><w:t>(Twain, 1883)</w:t></w:r></w:fldSimple>\
+        <w:r><w:t>.</w:t></w:r></w:p>\
+        <w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>References</w:t></w:r></w:p>\
+        <w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>\
+        <w:r><w:instrText xml:space=\"preserve\"> BIBLIOGRAPHY </w:instrText></w:r>\
+        <w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>\
+        <w:r><w:t>Gibbon, E. (1776). The History.</w:t></w:r></w:p>\
+        <w:p><w:r><w:t>Herodotus. The Histories.</w:t></w:r>\
+        <w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>\
+        <w:p><w:r><w:t>Closing words.</w:t></w:r></w:p>";
+    let document = format!(
+        "<?xml version=\"1.0\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body>{body}</w:body></w:document>"
+    );
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("word/document.xml", o).unwrap();
+        z.write_all(document.as_bytes()).unwrap();
+        z.start_file("word/styles.xml", o).unwrap();
+        z.write_all(STYLES.as_bytes()).unwrap();
+        z.start_file("customXml/item1.xml", o).unwrap();
+        z.write_all(SOURCES.as_bytes()).unwrap();
+        z.finish().unwrap();
+    }
+    let m = parse(&cursor.into_inner()).unwrap();
+    // The marks, in order, with the one locator.
+    assert_eq!(values(&m, "//cit::target"), ["Gib76", "Her", "Twa83"]);
+    assert_eq!(values(&m, "//cit[::locator]::locator"), ["15"]);
+    // The printed result is prose; the field machinery is not.
+    assert_eq!(
+        values(&m, "//paragraph[1]::"),
+        [
+            "Gibbon says so (Gibbon, 1776, p. 15) and Herodotus (Herodotus) and a ghost (Twain, 1883)."
+        ]
+    );
+    // The sources: tag, authors "Last, First" (a corporate name
+    // as is), the campi under the Latin canon, the genus.
+    assert_eq!(values(&m, "//bib::onym"), ["Gib76", "Her", "Hom"]);
+    assert_eq!(
+        values(&m, "//bib::auctor"),
+        ["Gibbon, Edward", "Herodotus", "Homer"]
+    );
+    assert_eq!(
+        values(&m, "//bib[::officina]::officina"),
+        ["Strahan & Cadell"]
+    );
+    assert_eq!(
+        values(&m, "//bib::::genus"),
+        ["liber", "liber", "commentarius"]
+    );
+    assert_eq!(values(&m, "//bib[::onym = \"Hom\"]::ephemeris"), ["Epics"]);
+    // Resolution in-document: the arrow, the two linters.
+    assert_eq!(
+        values(&m, "//cit[::target = \"Gib76\"]->*::titulus"),
+        ["The History of the Decline and Fall of the Roman Empire"]
+    );
+    assert_eq!(values(&m, "//cit<dangling>::target"), ["Twa83"]);
+    assert_eq!(values(&m, "//bib[!<-cit]::onym"), ["Hom"]);
+    // The BIBLIOGRAPHY listing is dropped; the heading and the
+    // paragraph after the field stay.
+    assert_eq!(values(&m, "//section::lemma"), ["References"]);
+    assert_eq!(values(&m, "//section//paragraph::"), ["Closing words."]);
+}

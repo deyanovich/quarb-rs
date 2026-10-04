@@ -198,6 +198,9 @@ fn pandoc_bracketed_citations() {
     // The bare narrative @key is deliberately not read: an email
     // in brackets and an @mention stay prose.
     assert_eq!(vals("//cit @| count"), ["3"]);
+    // The suffix after a key is its locator; a prefix is prose.
+    assert_eq!(vals("//cit[::locator]::locator"), ["pp. 3-5"]);
+    assert_eq!(vals("//cit[!::locator] @| count"), ["2"]);
     // The bracket text stays in the prose as authored.
     assert_eq!(
         vals("//paragraph[2]::"),

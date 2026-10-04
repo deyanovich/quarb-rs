@@ -2013,6 +2013,16 @@ impl Parser<'_> {
         // anchors — `(name)`, `(N)`, `(.)`, `(@)`, `(@name)` —
         // read as anchors only in the exact shapes peek_anchor
         // accepts; groups keep `(` for everything else.
+        // `*//name` — the universal search: a branch head only,
+        // root-anchored, its first step over the whole arbor.
+        if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "*")
+            && matches!(self.toks.get(self.pos + 1), Some(Token::SlashSlash))
+        {
+            self.pos += 1;
+            let mut elem = self.path_elem()?;
+            universalize(&mut elem)?;
+            return self.branch_tail(Anchor::Root, vec![elem], None);
+        }
         let anchor = if matches!(self.peek(), Some(Token::Caret)) {
             self.pos += 1;
             Anchor::Root
@@ -4134,9 +4144,24 @@ impl Parser<'_> {
             // arbor root rather than the current node, mirroring the
             // branch anchor. Comparisons stay existential, so
             // `[::x = ^/set/*::x]` reads "equals SOME of them".
-            Some(Token::Caret) => {
-                self.pos += 1;
+            // `*//name` opens one too: the universal search as an
+            // operand (`(*//p @| count)`), root-anchored as in a
+            // branch head.
+            Some(Token::Caret) | Some(Token::Name { quoted: false, .. })
+                if matches!(self.peek(), Some(Token::Caret))
+                    || (matches!(self.peek(), Some(Token::Name { text, .. }) if text == "*")
+                        && matches!(self.toks.get(self.pos + 1), Some(Token::SlashSlash))) =>
+            {
                 let mut steps = Vec::new();
+                if matches!(self.peek(), Some(Token::Caret)) {
+                    self.pos += 1;
+                } else {
+                    // The `*` of `*//`: the head step follows.
+                    self.pos += 1;
+                    let mut elem = self.path_elem()?;
+                    universalize(&mut elem)?;
+                    steps.push(elem);
+                }
                 loop {
                     if self.is_resolution_ahead() {
                         steps.push(self.path_elem()?);
@@ -6651,4 +6676,42 @@ const BARE_BOOL_WORDS: &[(&str, &str)] = &[("and", "&&"), ("or", "||"), ("not", 
 /// is never a property name.
 pub(crate) fn is_bool_word(word: &str) -> bool {
     AND_WORDS.contains(&word) || OR_WORDS.contains(&word) || NOT_WORDS.contains(&word)
+}
+
+/// Turn the `//` step written after the `*` of a `*//` head into the
+/// universal search: the step itself, or each alternative of a
+/// name-alternation group (`*//(h1|h2|h3)`, the axis distributed).
+/// A reach (`*//?`) and anything else are refused.
+fn universalize(elem: &mut PathElem) -> Result<()> {
+    fn step(s: &mut Step) -> Result<()> {
+        match s.axis {
+            Axis::Descendant(Reach::All) => {
+                s.axis = Axis::Universal;
+                Ok(())
+            }
+            _ => Err(QuarbError::Parse(
+                "'*//' searches the whole arbor and takes no reach ('*//?', '*//!')".into(),
+            )),
+        }
+    }
+    match elem {
+        PathElem::Step(s) => step(s),
+        PathElem::Group(g) => {
+            for alt in &mut g.alts {
+                match alt.as_mut_slice() {
+                    [PathElem::Step(s)] => step(s)?,
+                    _ => {
+                        return Err(QuarbError::Parse(
+                            "'*//(…)' takes name alternatives: each a single name or pattern"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Err(QuarbError::Parse(
+            "'*//' is the universal search: follow it with a name, a pattern, or '*'".into(),
+        )),
+    }
 }

@@ -1160,6 +1160,27 @@ fn execute(cli: &Cli, query: &str) -> anyhow::Result<()> {
             cli.kaiv.then_some(src.as_str()),
         );
     }
+    // The property reading of a document (`json2`): containers are
+    // nodes, scalars are properties — JSON, JSONL, YAML, TOML, CBOR.
+    if let Some(p) = &path
+        && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("json2:"))
+        && !rest.is_empty()
+    {
+        return match property_reading(Path::new(rest))? {
+            PropertyDoc::Json(adapter) => run(
+                query,
+                &adapter,
+                |n| adapter.pointer(n),
+                cli.kaiv.then_some(rest),
+            ),
+            PropertyDoc::Cbor(adapter) => run(
+                query,
+                &adapter,
+                |n| adapter.pointer(n),
+                cli.kaiv.then_some(rest),
+            ),
+        };
+    }
     // The corpus reading: the text level plus tokens (ruling #62).
     if let Some(p) = &path
         && let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("corpus:"))
@@ -2783,7 +2804,14 @@ fn binary_text_kind(path: &Path) -> Option<&'static str> {
 
 fn binary_text_level(kind: &str, bytes: &[u8]) -> anyhow::Result<quarb_text::TextModel> {
     match kind {
-        "docx" => quarb_text_docx::parse(bytes).map_err(|e| anyhow::anyhow!("as Word: {e}")),
+        "docx" => quarb_text_docx::parse(bytes)
+            .map(|mut m| {
+                // Word's sources list lowers under the Latin
+                // campi; the census lets ::author answer.
+                quarb_text_koine::attach_bib_aliases(&mut m);
+                m
+            })
+            .map_err(|e| anyhow::anyhow!("as Word: {e}")),
         _ => quarb_text_epub::parse(bytes).map_err(|e| anyhow::anyhow!("as EPUB: {e}")),
     }
 }
@@ -3027,6 +3055,49 @@ fn koine_level(spec: &str) -> anyhow::Result<quarb_text::TextModel> {
 /// Markdown, LaTeX, atrep, TEI and the other koine dialects,
 /// .docx and .epub. An archive keeps to `text:` for now, and a
 /// PDF's reading is line geometry, never prose.
+/// A document under the property reading (`json2:`).
+enum PropertyDoc {
+    Json(JsonAdapter),
+    Cbor(quarb_cbor::CborAdapter),
+}
+
+/// Read `target` under the property reading: the format by
+/// extension (JSON by default; JSONL, YAML, TOML, CBOR by theirs),
+/// every one of them the JSON data model read the `json2` way —
+/// containers as nodes, scalars as properties.
+fn property_reading(target: &Path) -> anyhow::Result<PropertyDoc> {
+    use quarb_json::Reading;
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "cbor" {
+        let bytes =
+            std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
+        let a =
+            quarb_cbor::CborAdapter::parse_as(&bytes, Reading::Property).context("parsing CBOR")?;
+        return Ok(PropertyDoc::Cbor(a));
+    }
+    let text =
+        std::fs::read_to_string(target).with_context(|| format!("reading {}", target.display()))?;
+    let a = match ext.as_str() {
+        "yaml" | "yml" => quarb_yaml::parse_as(&text, Reading::Property).context("parsing YAML")?,
+        "toml" => quarb_toml::parse_as(&text, Reading::Property).context("parsing TOML")?,
+        "jsonl" | "ndjson" => {
+            JsonAdapter::parse_lines_as(&text, Reading::Property).context("parsing JSONL")?
+        }
+        _ => match JsonAdapter::parse_as(&text, Reading::Property) {
+            Ok(a) => a,
+            Err(e) => match JsonAdapter::parse_lines_as(&text, Reading::Property) {
+                Ok(a) => a,
+                Err(_) => return Err(e).context("parsing JSON"),
+            },
+        },
+    };
+    Ok(PropertyDoc::Json(a))
+}
+
 fn corpus_level(rest: &str, allow_shell: bool) -> anyhow::Result<quarb_text::TextModel> {
     // The house ?param syntax: `?conllu=FILE` takes the tokens,
     // sentences and annotation from a CoNLL-U sidecar; `?annotate=CMD`
@@ -3747,6 +3818,24 @@ fn open_mount(p: &Path, cli: &Cli) -> anyhow::Result<Mounted> {
         let r = a.clone();
         return Ok((Box::new(Shared(a)), Box::new(move |n| r.locator(n))));
     }
+    // The property reading (`json2:`), matching the single-input flow.
+    if let Some(s) = p.to_str()
+        && let Some(rest) = s.strip_prefix("json2:")
+        && !rest.is_empty()
+    {
+        return Ok(match property_reading(Path::new(rest))? {
+            PropertyDoc::Json(adapter) => {
+                let a = Rc::new(adapter);
+                let r = a.clone();
+                (Box::new(Shared(a)), Box::new(move |n| r.pointer(n)))
+            }
+            PropertyDoc::Cbor(adapter) => {
+                let a = Rc::new(adapter);
+                let r = a.clone();
+                (Box::new(Shared(a)), Box::new(move |n| r.pointer(n)))
+            }
+        });
+    }
     // The corpus reading, matching the single-input flow.
     if let Some(s) = p.to_str()
         && let Some(rest) = s.strip_prefix("corpus:")
@@ -4423,6 +4512,9 @@ fn run<A: AstAdapter>(
     // and its derived nodes render through the composed locator.
     if let Some(model) = MODEL.with(|m| m.borrow().clone()) {
         let enriched = quarb_model::ModelAdapter::new(quarb_model::Borrowed(adapter), model);
+        enriched
+            .check_declared_traits()
+            .map_err(|e| anyhow::anyhow!("reading the model: {e}"))?;
         let base_render = &render;
         let model_render = |n: NodeId| enriched.locator(n, base_render);
         return run_dispatch(query, &enriched, model_render, kaiv_source);

@@ -105,6 +105,35 @@ impl AstAdapter for MountAdapter {
 
     /// Forward the inner adapter's name-addressed fast path (git's
     /// `rev-parse`, a remote tree's direct lookup), which may alias.
+    fn child_host(&self, node: NodeId) -> NodeId {
+        match self.decode(node) {
+            None => node,
+            Some((m, inner)) => self.encode(m, self.mounts[m].adapter.child_host(inner)),
+        }
+    }
+
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self.mounts[m].adapter.properties(inner),
+        }
+    }
+
+    /// Every mount's non-tree nodes, mount by mount.
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.mounts
+            .iter()
+            .enumerate()
+            .flat_map(|(m, mount)| {
+                mount
+                    .adapter
+                    .non_tree_nodes()
+                    .into_iter()
+                    .map(move |n| self.encode(m, n))
+            })
+            .collect()
+    }
+
     /// At the synthetic root the children are the mount roots, keyed
     /// by mount name — matching what [`name`](Self::name) reports.
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
@@ -445,6 +474,15 @@ impl<A: AstAdapter> AstAdapter for Shared<A> {
     }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.0.children_named(node, name)
+    }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.0.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.0.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.0.properties(node)
     }
     fn quantifier_bound(&self) -> usize {
         self.0.quantifier_bound()

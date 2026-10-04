@@ -148,8 +148,9 @@ enum Inline {
     /// A mid-flow \label: a point anchor at this position.
     Point(String),
     /// A citation mark: the authored key, resolved against the
-    /// bib namespace.
-    Cite(String),
+    /// bib namespace, and its locator (`\cite[I.1]{key}`; of two
+    /// optionals the second, natbib's postnote) if any.
+    Cite(String, Option<String>),
 }
 
 impl<'a> Lower<'a> {
@@ -410,15 +411,28 @@ impl<'a> Lower<'a> {
                     self.inline.push(Inline::Ref(key, None, true));
                 }
             }
-            "cite" | "citep" | "citet" => {
+            "cite" | "citep" | "citet" | "citealt" | "citealp" | "Citep" | "Citet" | "Citealt"
+            | "Citealp" | "citeauthor" | "citeyear" | "citeyearpar" | "nocite" | "parencite"
+            | "Parencite" | "textcite" | "Textcite" | "autocite" | "Autocite" | "footcite"
+            | "smartcite" | "supercite" => {
                 // The keys stay in the prose (as before), and each
-                // becomes a citation mark — \cite{a,b} is two.
+                // becomes a citation mark — \cite{a,b} is two. One
+                // optional is the locator (`\cite[I.1]{k}`); of two
+                // (natbib's `[pre][post]`) the second is, the first
+                // being prose.
+                let first = self.optional();
+                let second = first.as_ref().and_then(|_| self.optional());
+                let locator = second
+                    .or(first)
+                    .map(|l| l.replace('~', " "))
+                    .filter(|l| !l.trim().is_empty());
                 if let Some(keys) = self.braced() {
                     self.para.push_str(&keys);
                     for key in keys.split(',') {
                         let key = key.trim();
                         if !key.is_empty() {
-                            self.inline.push(Inline::Cite(key.to_string()));
+                            self.inline
+                                .push(Inline::Cite(key.to_string(), locator.clone()));
                         }
                     }
                 }
@@ -632,7 +646,9 @@ impl<'a> Lower<'a> {
                             });
                         }
                         Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
-                        Inline::Cite(target) => self.out.push(Block::Cite { target }),
+                        Inline::Cite(target, locator) => {
+                            self.out.push(Block::Cite { target, locator })
+                        }
                     }
                 }
             }
@@ -768,7 +784,7 @@ impl<'a> Lower<'a> {
                     });
                 }
                 Inline::Point(onym) => self.out.push(Block::Anchor { onym }),
-                Inline::Cite(target) => self.out.push(Block::Cite { target }),
+                Inline::Cite(target, locator) => self.out.push(Block::Cite { target, locator }),
             }
         }
     }

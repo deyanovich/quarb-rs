@@ -531,6 +531,13 @@ fn respond(
             json!({"nodes": nodes_json(&adapter.children_named(node, name_arg))})
         }
         "name" => json!({"name": adapter.name(node)}),
+        "child_host" => json!({"node": adapter.child_host(node).0}),
+        "non_tree_nodes" => json!({"nodes": nodes_json(&adapter.non_tree_nodes())}),
+        "properties" => json!({"properties": adapter
+            .properties(node)
+            .iter()
+            .map(|(k, v)| json!({"name": k, "value": value_json(v)}))
+            .collect::<Vec<_>>()}),
         "parent" => json!({"node": adapter.parent(node).map(|n| n.0)}),
         "traits" => json!({"traits": adapter.traits(node)}),
         "property" => json!({"value": adapter
@@ -697,6 +704,43 @@ impl AstAdapter for ServeAdapter {
             .pointer("/name")
             .and_then(|v| v.as_str())
             .map(str::to_string)
+    }
+
+    /// A server that predates the op answers with an error, which
+    /// `call_ok` maps to Null → the node itself, the trait default.
+    /// An older server errs on the op; the client takes none.
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.call_ok(json!({"op": "properties", "node": node.0}))
+            .pointer("/properties")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.pointer("/name")?.as_str()?.to_string(),
+                            value_from_json(e.pointer("/value")?),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// An older server errs on the op; the client takes none.
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.call_ok(json!({"op": "non_tree_nodes"}))
+            .pointer("/nodes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_u64()).map(NodeId).collect())
+            .unwrap_or_default()
+    }
+
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.call_ok(json!({"op": "child_host", "node": node.0}))
+            .pointer("/node")
+            .and_then(|v| v.as_u64())
+            .map(NodeId)
+            .unwrap_or(node)
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {

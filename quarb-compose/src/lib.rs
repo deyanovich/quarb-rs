@@ -493,6 +493,41 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    fn child_host(&self, node: NodeId) -> NodeId {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let h = self.grafts.borrow()[g].inner.adapter().child_host(inner);
+                self.wrap(g, h)
+            }
+            None => self.outer.child_host(node),
+        }
+    }
+
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().properties(inner),
+            None => self.outer.properties(node),
+        }
+    }
+
+    /// The outer tree's non-tree nodes, then each graft's (the
+    /// grafts already read).
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        let mut out = self.outer.non_tree_nodes();
+        let grafts = self.grafts.borrow();
+        for (g, graft) in grafts.iter().enumerate() {
+            out.extend(
+                graft
+                    .inner
+                    .adapter()
+                    .non_tree_nodes()
+                    .into_iter()
+                    .map(|n| self.wrap(g, n)),
+            );
+        }
+        out
+    }
+
     /// A written name reaches a node by the owning adapter's rule
     /// (its aliases included).
     fn answers_to(&self, node: NodeId, name: &str) -> bool {

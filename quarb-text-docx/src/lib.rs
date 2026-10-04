@@ -39,6 +39,20 @@
 //!   `w:instrText` run sequence. XE is the one instruction read
 //!   as a fact; every other field keeps only its cached result
 //!   text.
+//! - Citations: Word's `CITATION tag \p 15` field (fldSimple or
+//!   the fldChar run sequence) is a `cit` mark with `::target`
+//!   the source tag and `::locator` the `\p` value; its cached
+//!   result ("(Gibbon, 1776)") stays prose, as an atrep cite
+//!   span's text does. The sources list — the `b:Sources` custom
+//!   XML part Word keeps beside the body — lowers to one `bib`
+//!   per `b:Source`, the tag as `::onym`, the campi under the
+//!   bibliogramma's Latin canon (auctor, titulus, annus, …) and
+//!   the genus from `b:SourceType`; `cit` resolves against them
+//!   in-document (`->`, `<dangling>`, `//bib[!<-cit]`). The
+//!   `BIBLIOGRAPHY` field's cached listing is generated from
+//!   that list and is dropped from the prose. Reference
+//!   managers' own fields (Zotero, Mendeley, EndNote) are a
+//!   recorded follow-up.
 //! - Out of band in this version, recorded in the design row:
 //!   headers/footers, textboxes.
 //!
@@ -88,7 +102,26 @@ pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, DocxError> {
     let Some(document) = member(&mut zip, "word/document.xml") else {
         return Err(DocxError::NoDocument);
     };
+    // Word's sources list is a custom XML part with the
+    // bibliography namespace's `b:Sources` root; the part's
+    // number is not fixed, so every customXml item is tried.
+    let sources: Vec<Block> = {
+        let names: Vec<String> = zip
+            .file_names()
+            .filter(|n| n.starts_with("customXml/item") && n.ends_with(".xml"))
+            .map(str::to_string)
+            .collect();
+        let mut names = names;
+        names.sort();
+        names
+            .iter()
+            .filter_map(|n| member(&mut zip, n))
+            .filter(|xml| xml.contains(BIB_NS))
+            .flat_map(|xml| parse_sources(&xml))
+            .collect()
+    };
     let mut out = lower(&document, &styles, &numbering, &rels)?;
+    out.extend(sources);
     if let Some(xml) = footnotes {
         append_notes(
             &xml,
@@ -153,7 +186,7 @@ fn append_notes(
                 }
             }
             Event::Start(e) if e.name().as_ref() == b"w:p" && current.is_some() => {
-                let para = read_para(&mut reader, &std::collections::HashMap::new())?;
+                let para = read_para(&mut reader, &std::collections::HashMap::new(), &mut false)?;
                 let text = quarb_text::normalize_ws(&para.text);
                 if !text.is_empty() {
                     out.push(Block::Paragraph { text });
@@ -374,6 +407,46 @@ fn field_ref(instr: &str) -> Option<(String, bool)> {
     }
 }
 
+/// Word's citation field: `CITATION tag \l 1033 \p 15` — the tag
+/// of a `b:Source`, and the `\p` switch's value (quoted or bare)
+/// as the locator. The other switches (`\l` locale, the
+/// suppressions `\n` `\t` `\y`, `\v` volume) are presentation.
+fn field_cite(instr: &str) -> Option<(String, Option<String>)> {
+    let t = instr.trim();
+    let rest = t.strip_prefix("CITATION")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let mut words = rest.split_whitespace();
+    let tag = words.next()?.trim_matches('"').to_string();
+    if tag.is_empty() {
+        return None;
+    }
+    let mut locator = None;
+    let mut want = false;
+    for w in words {
+        if want {
+            locator = Some(w.trim_matches('"').to_string()).filter(|l| !l.is_empty());
+            want = false;
+        } else if w == "\\p" {
+            want = true;
+        }
+    }
+    // A quoted locator with spaces: take the quoted run whole.
+    if let Some(q) = rest.find("\\p \"") {
+        let after = &rest[q + 4..];
+        if let Some(close) = after.find('"') {
+            locator = Some(after[..close].to_string()).filter(|l| !l.is_empty());
+        }
+    }
+    Some((tag, locator))
+}
+
+/// A field instruction's first word, for the BIBLIOGRAPHY test.
+fn field_word(instr: &str) -> &str {
+    instr.trim().split_whitespace().next().unwrap_or("")
+}
+
 /// One body paragraph, fully read.
 #[derive(Default)]
 struct Para {
@@ -401,6 +474,8 @@ enum Apparatus {
     Ref(String, String, bool),
     /// A mid-paragraph bookmark: a point anchor at this position.
     Point(String),
+    /// A CITATION field: (source tag, `\p` locator).
+    Cite(String, Option<String>),
 }
 
 fn lower(
@@ -418,13 +493,16 @@ fn lower(
     // NEW list — the declaration names the list identity.
     let mut frames: Vec<Frame> = Vec::new();
     let mut quote_open = false;
+    // Inside a BIBLIOGRAPHY field's result (it spans paragraphs):
+    // the generated listing is not prose.
+    let mut in_bibliography = false;
     loop {
         let ev = reader
             .read_event_into(&mut buf)
             .map_err(|e| DocxError::Xml("word/document.xml", e))?;
         match &ev {
             Event::Start(e) if e.name().as_ref() == b"w:p" => {
-                let para = read_para(&mut reader, rels)?;
+                let para = read_para(&mut reader, rels, &mut in_bibliography)?;
                 emit_para(
                     para,
                     styles,
@@ -571,6 +649,10 @@ fn emit_callouts(para: &Para, out: &mut Vec<Block>) {
                 internal: *internal,
             }),
             Apparatus::Point(onym) => out.push(Block::Anchor { onym: onym.clone() }),
+            Apparatus::Cite(target, locator) => out.push(Block::Cite {
+                target: target.clone(),
+                locator: locator.clone(),
+            }),
         }
     }
 }
@@ -604,6 +686,7 @@ fn close_quote(quote_open: &mut bool, out: &mut Vec<Block>) {
 fn read_para(
     reader: &mut Reader<&[u8]>,
     rels: &std::collections::HashMap<String, String>,
+    in_bibliography: &mut bool,
 ) -> Result<Para, DocxError> {
     let mut para = Para::default();
     let mut buf = Vec::new();
@@ -665,6 +748,9 @@ fn read_para(
                         if let Some(term) = xe_term(&instr) {
                             para.apparatus.push(Apparatus::Mark(term));
                         }
+                        if let Some((t, l)) = field_cite(&instr) {
+                            para.apparatus.push(Apparatus::Cite(t, l));
+                        }
                         if let Some((t, internal)) = field_ref(&instr) {
                             fs = Some((t, internal, para.text.len()));
                         }
@@ -719,6 +805,9 @@ fn read_para(
                         if let Some(term) = xe_term(&si) {
                             para.apparatus.push(Apparatus::Mark(term));
                         }
+                        if let Some((t, l)) = field_cite(&si) {
+                            para.apparatus.push(Apparatus::Cite(t, l));
+                        }
                         if let Some((t, internal)) = field_ref(&si) {
                             // No result runs: a mention without
                             // visible text.
@@ -734,6 +823,14 @@ fn read_para(
                             if let Some(term) = xe_term(&instr) {
                                 para.apparatus.push(Apparatus::Mark(term));
                             }
+                            if let Some((t, l)) = field_cite(&instr) {
+                                para.apparatus.push(Apparatus::Cite(t, l));
+                            }
+                            if field_word(&instr) == "BIBLIOGRAPHY" {
+                                // The listing follows until the
+                                // field's end, paragraphs away.
+                                *in_bibliography = ty == "separate";
+                            }
                             if let Some((t, internal)) = field_ref(&instr) {
                                 if ty == "separate" {
                                     // The visible result follows.
@@ -744,6 +841,10 @@ fn read_para(
                                 }
                             }
                             instr.clear();
+                        }
+                        if ty == "end" && *in_bibliography {
+                            *in_bibliography = false;
+                            para.text.clear();
                         }
                         if ty == "end"
                             && let Some((t, internal, at)) = pending_field.take()
@@ -760,8 +861,21 @@ fn read_para(
                     if let Ok(s) = t.decode() {
                         instr.push_str(&s);
                     }
-                } else if in_text && let Ok(s) = t.decode() {
+                } else if in_text
+                    && !*in_bibliography
+                    && let Ok(s) = t.decode()
+                {
                     para.text.push_str(&s);
+                }
+            }
+            Event::GeneralRef(r) if skip == 0 => {
+                // `&amp;` and friends arrive as references.
+                if let Some(c) = general_ref(r) {
+                    if in_instr {
+                        instr.push_str(&c);
+                    } else if in_text && !*in_bibliography {
+                        para.text.push_str(&c);
+                    }
                 }
             }
             Event::End(e) => {
@@ -862,6 +976,11 @@ fn read_table(
                     c.push_str(&s);
                 }
             }
+            Event::GeneralRef(r) if in_text && skip == 0 => {
+                if let (Some(c), Some(s)) = (cell.as_mut(), general_ref(r)) {
+                    c.push_str(&s);
+                }
+            }
             Event::End(e) => {
                 depth -= 1;
                 let name = e.name();
@@ -932,4 +1051,229 @@ fn xe_term(instr: &str) -> Option<String> {
     let rest = &rest[open + 1..];
     let close = rest.find('"')?;
     Some(rest[..close].to_string())
+}
+
+// ---------------------------------------------------------------
+// customXml/item*.xml — Word's sources list (b:Sources)
+// ---------------------------------------------------------------
+
+/// The bibliography part's namespace.
+const BIB_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/bibliography";
+
+/// Word's `b:SourceType` → the bibliogramma genus.
+fn source_genus(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        "Book" => "liber",
+        "BookSection" => "membrum",
+        "JournalArticle" | "ArticleInAPeriodical" => "commentarius",
+        "ConferenceProceedings" => "acta",
+        "Report" => "renuntiatio",
+        "InternetSite" | "DocumentFromInternetSite" | "ElectronicSource" => "interretialis",
+        "Patent" => "diploma",
+        "Misc" | "Film" | "SoundRecording" | "Performance" | "Art" | "Interview" | "Case" => {
+            "miscellanea"
+        }
+        _ => return None,
+    })
+}
+
+/// Word's `b:Source` child element → the bibliogramma campus
+/// (the Latin canon the alias census maps `::author`, `::title`
+/// … onto).
+fn source_campus(el: &str) -> Option<&'static str> {
+    Some(match el {
+        "Title" => "titulus",
+        "ShortTitle" => "titulus-brevis",
+        "Year" => "annus",
+        "Month" => "mensis",
+        "City" => "locus",
+        "Publisher" => "officina",
+        "JournalName" | "PeriodicalTitle" => "ephemeris",
+        "BookTitle" => "titulus-libri",
+        "Volume" => "volumen",
+        "Issue" => "numerus",
+        "Pages" => "paginae",
+        "Edition" => "editio",
+        "URL" => "url",
+        "DOI" => "doi",
+        "StandardNumber" => "isbn",
+        "Comments" => "nota",
+        "Institution" => "institutum",
+        "ConferenceName" => "titulus-eventus",
+        "Medium" => "modus",
+        _ => return None,
+    })
+}
+
+/// One `bib` per `b:Source`: the tag is the key, the simple
+/// children the campi, the authors joined "Last, First" per
+/// person (a corporate author by its name); the plain text is
+/// the authors, title and year in that order.
+fn parse_sources(xml: &str) -> Vec<Block> {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    // The element path inside the current source, unprefixed.
+    let mut path: Vec<String> = Vec::new();
+    let mut tag = String::new();
+    let mut genus: Option<String> = None;
+    let mut fields: Vec<(String, String)> = Vec::new();
+    // Persons under the current name list: (last, first); the
+    // list's role (Author, Editor, Translator) is its parent.
+    let mut persons: Vec<(String, String)> = Vec::new();
+    let mut corporate = String::new();
+    let mut cur = String::new();
+    let mut in_source = false;
+    let local = |name: &[u8]| -> String {
+        let n = String::from_utf8_lossy(name);
+        n.rsplit(':').next().unwrap_or(&n).to_string()
+    };
+    let push_names = |role: &str,
+                      persons: &mut Vec<(String, String)>,
+                      corporate: &mut String,
+                      fields: &mut Vec<(String, String)>| {
+        let campus = match role {
+            "Editor" => "editor",
+            "Translator" => "interpres",
+            _ => "auctor",
+        };
+        let mut names: Vec<String> = persons
+            .drain(..)
+            .map(|(last, first)| match (last.is_empty(), first.is_empty()) {
+                (false, false) => format!("{last}, {first}"),
+                (false, true) => last,
+                _ => first,
+            })
+            .collect();
+        if !corporate.trim().is_empty() {
+            names.push(corporate.trim().to_string());
+            corporate.clear();
+        }
+        if !names.is_empty() {
+            fields.push((campus.to_string(), names.join("; ")));
+        }
+    };
+    loop {
+        let Ok(ev) = reader.read_event_into(&mut buf) else {
+            break;
+        };
+        match &ev {
+            Event::Start(e) => {
+                let l = local(e.name().as_ref());
+                if l == "Source" && !in_source {
+                    in_source = true;
+                    tag.clear();
+                    genus = None;
+                    fields.clear();
+                    persons.clear();
+                    corporate.clear();
+                    path.clear();
+                } else if in_source {
+                    if l == "Person" {
+                        persons.push((String::new(), String::new()));
+                    }
+                    path.push(l);
+                }
+            }
+            Event::Text(t) if in_source => {
+                // An element's text may arrive in pieces (around
+                // an entity); it is read whole at the end tag.
+                if let Ok(text) = t.decode() {
+                    cur.push_str(&text);
+                }
+            }
+            Event::GeneralRef(r) if in_source => {
+                if let Some(c) = general_ref(r) {
+                    cur.push_str(&c);
+                }
+            }
+            Event::End(e) => {
+                let l = local(e.name().as_ref());
+                if !in_source {
+                    continue;
+                }
+                let text = std::mem::take(&mut cur).trim().to_string();
+                if !text.is_empty() {
+                    let leaf = path.last().map(String::as_str).unwrap_or("");
+                    match (path.len(), leaf) {
+                        (1, "Tag") => tag = text,
+                        (1, "SourceType") => genus = source_genus(&text).map(str::to_string),
+                        (1, el) => {
+                            if let Some(c) = source_campus(el) {
+                                fields.push((c.to_string(), text));
+                            }
+                        }
+                        (_, "Last") => {
+                            if let Some(p) = persons.last_mut() {
+                                p.0 = text;
+                            }
+                        }
+                        (_, "First" | "Middle") => {
+                            if let Some(p) = persons.last_mut() {
+                                if !p.1.is_empty() {
+                                    p.1.push(' ');
+                                }
+                                p.1.push_str(&text);
+                            }
+                        }
+                        (_, "Corporate") => corporate = text,
+                        _ => {}
+                    }
+                }
+                if l == "Source" && path.is_empty() {
+                    in_source = false;
+                    if tag.is_empty() {
+                        continue;
+                    }
+                    let pick =
+                        |c: &str| fields.iter().find(|(k, _)| k == c).map(|(_, v)| v.clone());
+                    let text = [pick("auctor"), pick("titulus"), pick("annus")]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(". ");
+                    out.push(Block::Bib {
+                        key: std::mem::take(&mut tag),
+                        text,
+                        fields: std::mem::take(&mut fields),
+                        genus: genus.take(),
+                    });
+                    continue;
+                }
+                // A name list closes under its role element
+                // (b:Author/b:Author, b:Author/b:Editor, …).
+                if path.len() == 2
+                    && path[0] == "Author"
+                    && matches!(l.as_str(), "Author" | "Editor" | "Translator")
+                {
+                    push_names(&l, &mut persons, &mut corporate, &mut fields);
+                }
+                path.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// A general entity reference's text: the five XML entities and
+/// numeric character references.
+fn general_ref(r: &quick_xml::events::BytesRef) -> Option<String> {
+    if let Ok(Some(c)) = r.resolve_char_ref() {
+        return Some(c.to_string());
+    }
+    let name = r.decode().ok()?;
+    Some(
+        match name.as_ref() {
+            "amp" => "&",
+            "lt" => "<",
+            "gt" => ">",
+            "quot" => "\"",
+            "apos" => "'",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }

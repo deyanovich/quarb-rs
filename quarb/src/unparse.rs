@@ -90,7 +90,9 @@ fn branch(b: &Branch) -> String {
     // node inside a subcontext body; marks are the thread's own),
     // so they reprint whenever set.
     let mut out = String::new();
-    out.push_str(&anchor(&b.anchor));
+    if !universal_head(&b.anchor, &b.steps) {
+        out.push_str(&anchor(&b.anchor));
+    }
     for e in &b.steps {
         out.push_str(&elem(e));
     }
@@ -102,6 +104,16 @@ fn branch(b: &Branch) -> String {
     // spacing.
     out.truncate(out.trim_end().len());
     out
+}
+
+/// `*//` is root-anchored by construction and spells its own
+/// head: the `^` is not reprinted before it.
+fn universal_head(a: &crate::ast::Anchor, steps: &[PathElem]) -> bool {
+    matches!(a, crate::ast::Anchor::Root)
+        && matches!(
+            steps.first(),
+            Some(PathElem::Step(s)) if matches!(s.axis, crate::ast::Axis::Universal)
+        )
 }
 
 /// An anchor's canonical spelling; empty for the default.
@@ -180,6 +192,7 @@ pub(crate) fn step(s: &Step) -> String {
         Axis::Descendant(Reach::All) => out.push_str("//"),
         Axis::Descendant(Reach::Proximal) => out.push_str("//?"),
         Axis::Descendant(Reach::Distal) => out.push_str("//!"),
+        Axis::Universal => out.push_str("*//"),
         Axis::Parent => out.push('\\'),
         Axis::Ancestor(Reach::All) => out.push_str("\\\\"),
         Axis::Ancestor(Reach::Proximal) => out.push_str("\\\\?"),
@@ -515,7 +528,9 @@ fn operand(o: &Operand) -> String {
             anchor: a,
         } => {
             let mut out = String::new();
-            out.push_str(&anchor(a));
+            if !universal_head(a, steps) {
+                out.push_str(&anchor(a));
+            }
             out.extend(steps.iter().map(elem));
             if let Some(p) = p {
                 out.push_str(&projection(p));

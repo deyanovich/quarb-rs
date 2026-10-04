@@ -128,6 +128,81 @@ pub use exec::{
 pub use parser::Defs;
 pub use value::Value;
 
+/// The universal search over a step body: `*//BODY`, with the
+/// wildcard supplied when the body opens with a trait expression or
+/// a predicate (`trait <long-text>: [:: | cc > 300];` means every
+/// node that passes).
+pub fn step_body_query(body: &str) -> String {
+    let body = body.trim();
+    if body.starts_with(['<', '[']) {
+        format!("*//*{body}")
+    } else {
+        format!("*//{body}")
+    }
+}
+
+/// One path step's body, parsed — a name, a pattern, an
+/// alternation, a trait expression, predicates, in any combination,
+/// without the navigation operator — as a model's `trait <name>:
+/// BODY;` declaration takes it. Test a node against it with
+/// [`node_matches_step_body`]: decided at the node, no walk.
+pub struct StepBody(ast::PathElem);
+
+/// Parse `body` as one step's body; refuses anything beyond that
+/// single step, and positional predicates (`[1]`, `[2..3]`), which
+/// have no meaning at a single node.
+pub fn parse_step_body(body: &str) -> Result<StepBody> {
+    let q = parser::parse(&lexer::lex(&step_body_query(body))?)?;
+    let refuse = |what: &str| {
+        Err(QuarbError::Parse(format!(
+            "a trait declaration takes one step's body (a name, a pattern, \
+             a trait expression, predicates), not {what}: '{body}'"
+        )))
+    };
+    if !q.correlations.is_empty() || !q.pipeline.is_empty() {
+        return refuse("a pipeline");
+    }
+    if q.branches.len() != 1 || q.branches[0].projection.is_some() {
+        return refuse("a projection or a union");
+    }
+    if q.branches[0].steps.len() != 1 {
+        return refuse("a path");
+    }
+    let elem = q
+        .branches
+        .into_iter()
+        .next()
+        .unwrap()
+        .steps
+        .into_iter()
+        .next()
+        .unwrap();
+    let preds = match &elem {
+        ast::PathElem::Step(s) => &s.predicates,
+        ast::PathElem::Group(g) => &g.predicates,
+        _ => return refuse("that"),
+    };
+    if preds
+        .iter()
+        .any(|p| matches!(p, ast::Predicate::Index(_) | ast::Predicate::Range(_, _)))
+    {
+        return refuse("a positional predicate");
+    }
+    Ok(StepBody(elem))
+}
+
+/// Check that `body` parses as one step's body (see
+/// [`parse_step_body`]).
+pub fn validate_step_body(body: &str) -> Result<()> {
+    parse_step_body(body).map(|_| ())
+}
+
+/// Whether `node` would match the step body as a step of a path:
+/// decided at the node, the predicates evaluated there, no hop.
+pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &StepBody) -> bool {
+    exec::node_matches_elem(adapter, node, &body.0)
+}
+
 /// Convert a refusal recorded during evaluation into an error. The
 /// eval layer below the entry points has no error channel; a walk
 /// that would return a silently incomplete answer (e.g. a

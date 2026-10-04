@@ -1012,6 +1012,30 @@ impl AstAdapter for ExpansionAdapter<'_> {
         self.params.property(node, name)
     }
 
+    fn child_host(&self, node: NodeId) -> NodeId {
+        if Self::is_data(node)
+            && let Some(real) = self.untag(node)
+        {
+            return self.tag(self.data.child_host(real));
+        }
+        node
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if Self::is_data(node)
+            && let Some(real) = self.untag(node)
+        {
+            return self.data.properties(real);
+        }
+        Vec::new()
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.data
+            .non_tree_nodes()
+            .into_iter()
+            .map(|n| self.tag(n))
+            .collect()
+    }
+
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         if Self::is_data(node) {
             // Forward to the data adapter's own name test, which the
@@ -1182,6 +1206,7 @@ fn axis_spelling(a: &Axis) -> String {
         Axis::Descendant(Reach::All) => "//".to_string(),
         Axis::Descendant(Reach::Proximal) => "//?".to_string(),
         Axis::Descendant(Reach::Distal) => "//!".to_string(),
+        Axis::Universal => "*//".to_string(),
         Axis::Parent => "\\".to_string(),
         Axis::Ancestor(Reach::All) => "\\\\".to_string(),
         Axis::Ancestor(Reach::Proximal) => "\\\\?".to_string(),

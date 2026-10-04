@@ -236,7 +236,7 @@ fn resolve_prefix(text: &str, word_start: usize, adapter: &dyn AstAdapter) -> Ve
         }
         nodes = nodes
             .iter()
-            .flat_map(|n| adapter.children_named(*n, seg))
+            .flat_map(|n| adapter.children_named(adapter.child_host(*n), seg))
             .collect();
         if nodes.is_empty() {
             break;

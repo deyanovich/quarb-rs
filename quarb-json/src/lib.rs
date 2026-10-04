@@ -26,9 +26,33 @@
 //! Newline-delimited JSON (`.jsonl` / `.ndjson`) parses via
 //! [`JsonAdapter::parse_lines`]: the lines become one array, so the
 //! same queries work over both spellings of a record stream.
+//!
+//! JSON is ambiguous under the arbor model, so the adapter has two
+//! readings ([`Reading`]). The default is the node reading above
+//! (`json`). The *property reading* (`json2`,
+//! [`JsonAdapter::parse_as`]) is the Quarb-idiomatic one: objects
+//! and arrays are nodes, a scalar is a value a projection reads
+//! (`::port`) and never a node — `/port` and `//port` land on
+//! nothing, there is no `<string>` node, a scalar leaf has no
+//! locator and cannot be marked or grafted into. An array of
+//! scalars under a key is one list-valued property; an array that
+//! holds a container stays a node, and its scalar elements are the
+//! array node's own projection `::`, a list. The root is always a
+//! node: a document that is a scalar, or an array of scalars,
+//! carries it as the root's `::`.
 
 use quarb::{AstAdapter, NodeId, Value};
 use serde_json::Value as Json;
+
+/// How a document is read onto the arbor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Reading {
+    /// `json`: every value a node; a scalar field also a property.
+    #[default]
+    Node,
+    /// `json2`: containers are nodes, scalars are properties.
+    Property,
+}
 
 /// The JSON type of a node, used as its trait.
 #[derive(Clone, Copy)]
@@ -69,21 +93,54 @@ struct Node {
     name: Option<String>,
     kind: Kind,
     /// The scalar value for a primitive; `Value::Null` for containers.
+    /// Under the property reading: the root's own scalar when the
+    /// document is one.
     scalar: Value,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+    /// Property reading: an object's scalar fields (a list for an
+    /// array of scalars), in document order.
+    fields: Vec<(String, Value)>,
+    /// Property reading: an array node's scalar elements, with
+    /// their positions (the serializers put them back in place).
+    items: Vec<(usize, Value)>,
 }
 
 /// A Quarb adapter over a parsed JSON document.
 pub struct JsonAdapter {
     nodes: Vec<Node>,
     root: NodeId,
+    reading: Reading,
 }
 
 impl JsonAdapter {
     /// Parse `text` as JSON and build the adapter.
     pub fn parse(text: &str) -> serde_json::Result<Self> {
         Ok(Self::from_json_value(serde_json::from_str(text)?))
+    }
+
+    /// Parse `text` under the given reading (`json2` is
+    /// [`Reading::Property`]).
+    pub fn parse_as(text: &str, reading: Reading) -> serde_json::Result<Self> {
+        Ok(Self::from_json_value_as(
+            serde_json::from_str(text)?,
+            reading,
+        ))
+    }
+
+    /// [`parse_lines`](Self::parse_lines) under the given reading.
+    pub fn parse_lines_as(text: &str, reading: Reading) -> serde_json::Result<Self> {
+        let values = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<Vec<Json>>>()?;
+        Ok(Self::from_json_value_as(Json::Array(values), reading))
+    }
+
+    /// The reading this adapter took.
+    pub fn reading(&self) -> Reading {
+        self.reading
     }
 
     /// Parse newline-delimited JSON (JSONL / NDJSON): every
@@ -104,11 +161,24 @@ impl JsonAdapter {
     /// TOML share the JSON data model, so their adapters route
     /// their parse through here.
     pub fn from_json_value(value: Json) -> Self {
+        Self::from_json_value_as(value, Reading::Node)
+    }
+
+    /// Build the adapter from a parsed value under the given reading.
+    pub fn from_json_value_as(value: Json, reading: Reading) -> Self {
         let mut nodes = Vec::new();
-        build(&value, None, None, &mut nodes);
+        match reading {
+            Reading::Node => {
+                build(&value, None, None, &mut nodes);
+            }
+            Reading::Property => {
+                build_property(&value, None, None, &mut nodes);
+            }
+        }
         JsonAdapter {
             nodes,
             root: NodeId(0),
+            reading,
         }
     }
 
@@ -165,6 +235,8 @@ fn build(
         scalar: scalar_of(value),
         parent,
         children: Vec::new(),
+        fields: Vec::new(),
+        items: Vec::new(),
     });
     let this = NodeId(id as u64);
 
@@ -181,6 +253,88 @@ fn build(
         _ => Vec::new(),
     };
     nodes[id].children = child_ids;
+    this
+}
+
+/// Whether `value` is a scalar, or an array of scalars — the shapes
+/// the property reading answers as a property, never as a node.
+fn is_property_shaped(value: &Json) -> bool {
+    match value {
+        Json::Object(_) => false,
+        Json::Array(arr) => arr
+            .iter()
+            .all(|v| !matches!(v, Json::Object(_) | Json::Array(_))),
+        _ => true,
+    }
+}
+
+/// A scalar, or an array of scalars as a list.
+fn property_value(value: &Json) -> Value {
+    match value {
+        Json::Array(arr) => Value::list(arr.iter().map(scalar_of).collect()),
+        other => scalar_of(other),
+    }
+}
+
+/// The property reading: intern `value` as a node when it is a
+/// container (or the root), its scalar fields and elements kept
+/// as values on it.
+fn build_property(
+    value: &Json,
+    name: Option<String>,
+    parent: Option<NodeId>,
+    nodes: &mut Vec<Node>,
+) -> NodeId {
+    let id = nodes.len();
+    let kind = Kind::of(value);
+    nodes.push(Node {
+        name,
+        kind,
+        // A scalar root carries its value; a scalar-array root its list.
+        scalar: if parent.is_none() && is_property_shaped(value) {
+            property_value(value)
+        } else {
+            Value::Null
+        },
+        parent,
+        children: Vec::new(),
+        fields: Vec::new(),
+        items: Vec::new(),
+    });
+    let this = NodeId(id as u64);
+    let mut children = Vec::new();
+    let mut fields = Vec::new();
+    let mut items = Vec::new();
+    match value {
+        Json::Object(map) => {
+            for (k, v) in map {
+                if is_property_shaped(v) {
+                    fields.push((k.clone(), property_value(v)));
+                } else {
+                    children.push(build_property(v, Some(k.clone()), Some(this), nodes));
+                }
+            }
+        }
+        Json::Array(arr) => {
+            // Only an array holding a container is reached here
+            // under a key (a scalar array is its parent's property);
+            // the root may be either, and a scalar-array root
+            // already carries its list as the scalar.
+            let root_list = parent.is_none() && is_property_shaped(value);
+            for (i, v) in arr.iter().enumerate() {
+                if matches!(v, Json::Object(_) | Json::Array(_)) {
+                    children.push(build_property(v, Some(i.to_string()), Some(this), nodes));
+                } else if !root_list {
+                    items.push((i, scalar_of(v)));
+                }
+            }
+        }
+        _ => {}
+    }
+    let n = &mut nodes[id];
+    n.children = children;
+    n.fields = fields;
+    n.items = items;
     this
 }
 
@@ -217,8 +371,16 @@ impl AstAdapter for JsonAdapter {
     }
 
     /// The node's JSON type: `<object>`, `<string>`, `<number>`, …
+    /// The value type, and `scalar` over the primitive types — the
+    /// ones dual exposure answers as properties (string, number,
+    /// boolean, and null: a null field is exposed too).
     fn traits(&self, node: NodeId) -> Vec<String> {
-        vec![self.nodes[node.0 as usize].kind.name().to_string()]
+        let kind = self.nodes[node.0 as usize].kind;
+        let mut out = vec![kind.name().to_string()];
+        if !matches!(kind, Kind::Object | Kind::Array) {
+            out.push("scalar".to_string());
+        }
+        out
     }
 
     /// Dual exposure: a scalar-valued object field answers as a
@@ -237,6 +399,14 @@ impl AstAdapter for JsonAdapter {
         let n = &self.nodes[node.0 as usize];
         if !matches!(n.kind, Kind::Object) {
             return None;
+        }
+        if self.reading == Reading::Property {
+            // The scalar fields live on the object itself.
+            return n
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
         }
         let child = n
             .children
@@ -260,10 +430,44 @@ impl AstAdapter for JsonAdapter {
         }
     }
 
+    /// Property reading: an object's scalar fields, an array's
+    /// scalar elements under their index — what the serializers
+    /// merge with the children. The node reading has none: every
+    /// value is a child there.
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if self.reading != Reading::Property {
+            return Vec::new();
+        }
+        let n = &self.nodes[node.0 as usize];
+        match n.kind {
+            Kind::Object => n.fields.clone(),
+            Kind::Array => n
+                .items
+                .iter()
+                .map(|(i, v)| (i.to_string(), v.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// A primitive projects to its value; a container has no default
     /// projection (navigate into it instead).
     fn default_value(&self, node: NodeId) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
+        if self.reading == Reading::Property {
+            // A mixed array projects its scalar elements as a list;
+            // a scalar (or scalar-array) root projects its value.
+            return match n.kind {
+                Kind::Array if !n.items.is_empty() => Some(Value::list(
+                    n.items.iter().map(|(_, v)| v.clone()).collect(),
+                )),
+                Kind::Object => None,
+                Kind::Array => {
+                    (n.parent.is_none() && n.scalar != Value::Null).then(|| n.scalar.clone())
+                }
+                _ => Some(n.scalar.clone()),
+            };
+        }
         match n.kind {
             Kind::Object | Kind::Array => None,
             _ => Some(n.scalar.clone()),
@@ -277,7 +481,9 @@ impl AstAdapter for JsonAdapter {
         match key {
             "type" => Some(Value::Str(n.kind.name().to_string())),
             "length" => match n.kind {
-                Kind::Object | Kind::Array => Some(Value::Int(n.children.len() as i64)),
+                Kind::Object | Kind::Array => Some(Value::Int(
+                    (n.children.len() + n.fields.len() + n.items.len()) as i64,
+                )),
                 Kind::String => {
                     if let Value::Str(s) = &n.scalar {
                         Some(Value::Int(s.chars().count() as i64))
@@ -295,6 +501,13 @@ impl AstAdapter for JsonAdapter {
     /// JSON Pointer (`#/definitions/address`)\,---\,to its target node.
     /// The hint is unused (JSON references carry no relation type).
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
+        if self.reading == Reading::Property {
+            let n = &self.nodes[node.0 as usize];
+            if let Some((_, Value::Str(pointer))) = n.fields.iter().find(|(k, _)| k == property) {
+                return self.resolve_pointer(pointer);
+            }
+            return None;
+        }
         let child = self
             .children(node)
             .into_iter()

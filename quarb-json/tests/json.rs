@@ -87,6 +87,11 @@ fn type_traits() {
         nodes("//*<boolean>"),
         vec!["/users/0/admin", "/users/1/admin"]
     );
+    // `scalar` umbrellas the primitive types, null included; a
+    // container is never one.
+    assert_eq!(nodes("//*<scalar>"), nodes("//*<!object><!array>"));
+    assert_eq!(nodes("/*<scalar>"), vec!["/count"]);
+    assert_eq!(nodes("/users/0/*<scalar>"), nodes("/users/0/*"));
 }
 
 /// JSONL: every non-empty line one value, the document their
@@ -283,4 +288,63 @@ fn scalar_arrays_are_list_properties() {
     );
     // an empty list is falsy
     assert_eq!(vals(r#"/entries/*[::marks]::w"#), vec![r#""дом""#]);
+}
+
+/// The property reading (`json2`): objects and arrays are nodes, a
+/// scalar is a value a projection reads and never a node; an array
+/// of scalars is one list-valued property; a mixed array stays a
+/// node whose `::` lists its scalars; a scalar root rides the root.
+#[test]
+fn property_reading() {
+    use quarb_json::Reading;
+    let doc = r##"{"server": {"port": 8080, "host": "x", "tags": ["a", "b"], "n": null},
+                 "users": [{"name": "Emma", "age": 21}, {"name": "Tom", "age": 12}],
+                 "mixed": [1, {"x": 2}, "s"],
+                 "ref": {"$ref": "#/users/0"}}"##;
+    let a = JsonAdapter::parse_as(doc, Reading::Property).unwrap();
+    let run = |q: &str| -> Vec<String> {
+        match quarb::run(q, &a).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| a.pointer(n)).collect(),
+        }
+    };
+    // Containers are the nodes; the root is one of them.
+    assert_eq!(
+        run("*//*"),
+        [
+            "/", "/server", "/users", "/users/0", "/users/1", "/mixed", "/mixed/1", "/ref"
+        ]
+    );
+    // A scalar is not a node: no `port`, no `<string>`.
+    assert_eq!(run("//port @| count"), ["0"]);
+    assert_eq!(run("//*<scalar> @| count"), ["0"]);
+    // It is a property; null answers as null; a scalar array is a list.
+    assert_eq!(
+        run("/server | %(::port; ::host; ::tags; ::n)"),
+        [r#"%(port = 8080; host = "x"; tags = @("a"; "b"); n = null)"#]
+    );
+    assert_eq!(run("//*[::age > 15]::name"), ["Emma"]);
+    // A mixed array: a node for the container, its scalars as `::`.
+    assert_eq!(run("/mixed::"), ["1, s"]);
+    assert_eq!(run("/mixed/*::x"), ["2"]);
+    // Length counts fields and children alike; the ref still resolves.
+    assert_eq!(run("/server::::length"), ["4"]);
+    assert_eq!(run(r##"/ref::"$ref"-->::name"##), ["Emma"]);
+    // Roots that are values.
+    let l = JsonAdapter::parse_as("[1, 2, 3]", Reading::Property).unwrap();
+    match quarb::run("::", &l).unwrap() {
+        quarb::QueryResult::Values(vs) => assert_eq!(vs[0].to_string(), "1, 2, 3"),
+        _ => panic!(),
+    }
+    let s = JsonAdapter::parse_as("42", Reading::Property).unwrap();
+    match quarb::run("::", &s).unwrap() {
+        quarb::QueryResult::Values(vs) => assert_eq!(vs[0].to_string(), "42"),
+        _ => panic!(),
+    }
+    // The node reading is untouched.
+    let n = JsonAdapter::parse(doc).unwrap();
+    match quarb::run("//port @| count", &n).unwrap() {
+        quarb::QueryResult::Values(vs) => assert_eq!(vs[0].to_string(), "1"),
+        _ => panic!(),
+    }
 }

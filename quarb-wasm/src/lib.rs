@@ -47,6 +47,11 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
         "json" => quarb_json::JsonAdapter::parse(input)
             .map_err(|e| format!("parsing JSON: {e}"))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
+        // The property reading: containers are nodes, scalars are
+        // properties.
+        "json2" => quarb_json::JsonAdapter::parse_as(input, quarb_json::Reading::Property)
+            .map_err(|e| format!("parsing JSON: {e}"))
+            .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         "yaml" => quarb_yaml::parse(input)
             .map_err(|e| format!("parsing YAML: {e}"))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
@@ -217,10 +222,11 @@ impl Site {
         let model = quarb_model::parse_model(model)
             .map_err(|e| JsError::new(&format!("reading the model: {e}")))?;
         let defs = model.defs_text.clone();
-        Ok(Site {
-            inner: quarb_model::ModelAdapter::new(site, model),
-            defs,
-        })
+        let inner = quarb_model::ModelAdapter::new(site, model);
+        inner
+            .check_declared_traits()
+            .map_err(|e| JsError::new(&format!("reading the model: {e}")))?;
+        Ok(Site { inner, defs })
     }
 
     /// Run `query` over the site; the same JSON envelope as

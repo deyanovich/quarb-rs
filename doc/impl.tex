@@ -1248,6 +1248,22 @@ impl AstAdapter for FsAdapter {
 }
 \end{lstlisting}
 
+\paragraph{Hidden entries and directory links \live.}
+An entry whose name starts with a dot carries the
+\texttt{<hidden>} trait (the mount root never does); such entries
+are in the tree only under \texttt{-{}-hidden}. A symlink is a node
+with a \texttt{target} crosslink, and a symlink to a directory of
+the tree is also transparent to an explicit child step, as it is
+in the file system: with \texttt{latest -> drafts},
+\texttt{/latest/a.md} is the node \texttt{/drafts/a.md}, the same
+one \texttt{/latest->*/a.md} reaches. The trait method behind this
+is \texttt{child\_host(node)}, the node whose children a child step
+reads; it defaults to the node itself, and the wrapping adapters
+(mounts, grafts, models, reflection) forward it. The descendant
+walk reads \texttt{children} alone, so \texttt{//} sees each file
+once and a cycle of links cannot trap it. A broken link, and a
+link whose target lies outside the mounted tree, stay leaves.
+
 \paragraph{Ignore rules \live.}
 The materializing walk uses \texttt{ignore::WalkBuilder}\,---\,the
 same machinery ripgrep uses\,---\,so by default the adapter respects

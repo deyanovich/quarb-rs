@@ -89,6 +89,11 @@ impl Doc {
             "json" => quarb_json::JsonAdapter::parse(input)
                 .map(Doc::Json)
                 .map_err(|e| format!("parsing JSON: {e}")),
+            // The property reading: containers are nodes, scalars
+            // are properties.
+            "json2" => quarb_json::JsonAdapter::parse_as(input, quarb_json::Reading::Property)
+                .map(Doc::Json)
+                .map_err(|e| format!("parsing JSON: {e}")),
             "jsonl" | "ndjson" => quarb_json::JsonAdapter::parse_lines(input)
                 .map(Doc::Json)
                 .map_err(|e| format!("parsing JSONL: {e}")),
@@ -232,6 +237,15 @@ impl AstAdapter for Dyn {
     }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.0.children_named(node, name)
+    }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.0.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.0.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        self.0.properties(node)
     }
     fn default_value(&self, node: NodeId) -> Option<Value> {
         self.0.default_value(node)

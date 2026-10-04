@@ -25,6 +25,21 @@ pub struct Model {
     /// answers to (ruling #30 — an alias is a way in, never a way
     /// out; locators and reflection keep the canonical spelling).
     pub aliases: Vec<AliasDecl>,
+    /// `trait <name>: STEP;` — declared traits: a node carries
+    /// `name` exactly when it would match STEP as a step of a path,
+    /// decided at the node. In declaration order; a declaration may
+    /// use the traits declared before it.
+    pub traits: Vec<TraitDecl>,
+}
+
+/// A declared trait: `trait <heading>: (h1|h2|h3);`.
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub name: String,
+    /// The step body, as written — a name, a pattern, an
+    /// alternation, a trait expression, predicates, in any
+    /// combination, without the navigation operator.
+    pub step: String,
 }
 
 /// What an alias applies to.
@@ -95,6 +110,53 @@ impl AliasDecl {
 
 /// Parse one alias body: `NEW ORIGINAL`, `s/pat/rep/flags`, or the
 /// same two forms inside angle brackets for traits.
+/// `trait <NAME>: STEP` — a plain name in angle brackets (no
+/// period prefix: a declared trait is arbor structure, named like
+/// the adapter's own), then the body of one path step.
+fn parse_trait(body: &str, stmt: &str) -> Result<TraitDecl, String> {
+    let body = body.trim();
+    let Some(rest) = body.strip_prefix('<') else {
+        return Err(format!(
+            "trait needs '<name>: STEP' (the name in angle brackets): '{stmt}'"
+        ));
+    };
+    let Some((name, step)) = rest.split_once('>') else {
+        return Err(format!("trait <name> is not closed: '{stmt}'"));
+    };
+    let name = name.trim();
+    if let Some(bare) = name.strip_prefix('.') {
+        return Err(format!(
+            "a declared trait has a plain name — write 'trait <{bare}>', not '<.{bare}>': '{stmt}'"
+        ));
+    }
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'));
+    if !plain {
+        return Err(format!(
+            "trait name '<{name}>' is not a plain name: '{stmt}'"
+        ));
+    }
+    let Some(step) = step.trim().strip_prefix(':') else {
+        return Err(format!(
+            "trait <{name}> needs ': STEP' after the name: '{stmt}'"
+        ));
+    };
+    let step = step.trim();
+    if step.is_empty() {
+        return Err(format!("trait <{name}> needs a step body: '{stmt}'"));
+    }
+    quarb::validate_step_body(step).map_err(|e| format!("trait <{name}>: {e}"))?;
+    Ok(TraitDecl {
+        name: name.to_string(),
+        step: step.to_string(),
+    })
+}
+
 fn parse_alias(body: &str, stmt: &str) -> Result<AliasDecl, String> {
     let body = body.trim();
     let (kind, body) = match body.strip_prefix('<') {
@@ -590,6 +652,15 @@ fn parse_model_in(
                 model.rels.extend(sub.rels);
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
+                for t in sub.traits {
+                    if model.traits.iter().any(|x| x.name == t.name) {
+                        return Err(format!(
+                            "use {file}: trait <{}> is already declared",
+                            t.name
+                        ));
+                    }
+                    model.traits.push(t);
+                }
                 if !sub.defs_text.trim().is_empty() {
                     defs.push(sub.defs_text);
                 }
@@ -648,10 +719,17 @@ fn parse_model_in(
             "alias" => {
                 model.aliases.push(parse_alias(rest, stmt)?);
             }
+            "trait" => {
+                let decl = parse_trait(rest, stmt)?;
+                if model.traits.iter().any(|t| t.name == decl.name) {
+                    return Err(format!("trait <{}> is declared twice: '{stmt}'", decl.name));
+                }
+                model.traits.push(decl);
+            }
             other => {
                 return Err(format!(
                     "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/alias/def/macro)"
+                     (expected node/ref/rel/edge/mount/alias/trait/def/macro)"
                 ));
             }
         }

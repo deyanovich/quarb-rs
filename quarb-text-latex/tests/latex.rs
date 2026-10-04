@@ -324,7 +324,9 @@ fn multibyte_prose_survives() {
 fn citations_and_the_bibliography() {
     let m = quarb_text_latex::parse(
         r"\section{Intro}
-Knuth said so \cite{knuth84}, twice \citep{knuth84,lamport94}.
+Knuth said so \cite{knuth84}, twice \citep{knuth84,lamport94},
+with a pinpoint \cite[ch.~3]{knuth84} and natbib's two
+optionals \citet[see][p.~7]{lamport94}.
 
 \begin{thebibliography}{99}
 \bibitem{knuth84} Donald E. Knuth. \emph{The TeXbook}. 1984.
@@ -334,7 +336,14 @@ Knuth said so \cite{knuth84}, twice \citep{knuth84,lamport94}.
 ",
     );
     // The mark projects its raw key; \citep{a,b} is two marks.
-    assert_eq!(values(&m, "//cit::"), ["knuth84", "knuth84", "lamport94"]);
+    assert_eq!(
+        values(&m, "//cit::"),
+        ["knuth84", "knuth84", "lamport94", "knuth84", "lamport94"]
+    );
+    // A locator rides the mark as written (ties as spaces); of
+    // natbib's two optionals the second is the locator.
+    assert_eq!(values(&m, "//cit[::locator]::locator"), ["ch. 3", "p. 7"]);
+    assert_eq!(values(&m, "//cit[!::locator] @| count"), ["3"]);
     // The arrow lands on the entry; its projection is the full
     // reference text, plain.
     assert_eq!(

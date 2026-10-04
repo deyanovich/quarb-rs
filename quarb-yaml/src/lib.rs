@@ -10,20 +10,29 @@
 //! streams (`---`-separated) are not yet supported — a file must hold
 //! a single document.
 
-use quarb_json::JsonAdapter;
+use quarb_json::{JsonAdapter, Reading};
 
 /// Parse YAML `text` into a JSON-model adapter.
 pub fn parse(text: &str) -> Result<JsonAdapter, serde_yaml_ng::Error> {
+    parse_as(text, Reading::Node)
+}
+
+/// Parse YAML `text` under the given reading (`json2` is the
+/// property reading).
+pub fn parse_as(text: &str, reading: Reading) -> Result<JsonAdapter, serde_yaml_ng::Error> {
     // Fast path: a document whose mapping keys are all strings maps
     // straight onto the JSON model, exactly as before.
     match serde_yaml_ng::from_str::<serde_json::Value>(text) {
-        Ok(value) => Ok(JsonAdapter::from_json_value(value)),
+        Ok(value) => Ok(JsonAdapter::from_json_value_as(value, reading)),
         // Fall back for a shape `serde_json::Value` rejects but that is
         // still valid YAML: a mapping with non-string keys. Parsing into
         // YAML's own value model and stringifying the keys recovers it.
         Err(_) => {
             let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
-            Ok(JsonAdapter::from_json_value(yaml_to_json(value)))
+            Ok(JsonAdapter::from_json_value_as(
+                yaml_to_json(value),
+                reading,
+            ))
         }
     }
 }

@@ -73,12 +73,23 @@ struct Node {
     tag: Option<u64>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+    /// Property reading: a map's scalar entries (a list for an
+    /// array of scalars), in document order.
+    fields: Vec<(String, Value)>,
+    /// Property reading: an array node's scalar elements, with
+    /// their positions.
+    items: Vec<(usize, Value)>,
 }
+
+/// How a document is read onto the arbor: the JSON adapter's two
+/// readings, the same way here.
+pub use quarb_json::Reading;
 
 /// A Quarb adapter over a parsed CBOR document.
 pub struct CborAdapter {
     nodes: Vec<Node>,
     root: NodeId,
+    reading: Reading,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -149,6 +160,8 @@ fn build(
                 tag: Some(*t),
                 parent,
                 children: Vec::new(),
+                fields: Vec::new(),
+                items: Vec::new(),
             });
             return id;
         }
@@ -182,6 +195,8 @@ fn build(
         tag,
         parent,
         children: Vec::new(),
+        fields: Vec::new(),
+        items: Vec::new(),
     });
 
     match value {
@@ -202,17 +217,140 @@ fn build(
     id
 }
 
+/// The content a tag wraps, tags peeled (a time tag's content is a
+/// scalar instant either way).
+fn untagged(value: &Cbor) -> &Cbor {
+    match value {
+        Cbor::Tag(_, inner) => untagged(inner),
+        v => v,
+    }
+}
+
+fn is_container(value: &Cbor) -> bool {
+    matches!(untagged(value), Cbor::Map(_) | Cbor::Array(_))
+}
+
+/// Whether `value` is a scalar, or an array of scalars — what the
+/// property reading answers as a property.
+fn is_property_shaped(value: &Cbor) -> bool {
+    match untagged(value) {
+        Cbor::Map(_) => false,
+        Cbor::Array(items) => items.iter().all(|v| !is_container(v)),
+        _ => true,
+    }
+}
+
+/// A scalar's value under its tag (a time tag gives an instant).
+fn scalar_value(value: &Cbor) -> Value {
+    let mut nodes = Vec::new();
+    build(value, None, None, None, &mut nodes);
+    nodes[0].scalar.clone()
+}
+
+/// A scalar, or an array of scalars as a list.
+fn property_value(value: &Cbor) -> Value {
+    match untagged(value) {
+        Cbor::Array(items) => Value::list(items.iter().map(scalar_value).collect()),
+        _ => scalar_value(value),
+    }
+}
+
+/// The property reading: containers are nodes, scalars are values
+/// on them — the JSON adapter's `json2`, over CBOR.
+fn build_property(
+    value: &Cbor,
+    name: Option<String>,
+    parent: Option<NodeId>,
+    nodes: &mut Vec<Node>,
+) -> NodeId {
+    let (tag, inner) = match value {
+        Cbor::Tag(t, inner) => (Some(*t), untagged(inner)),
+        v => (None, v),
+    };
+    let kind = match inner {
+        Cbor::Map(_) => Kind::Map,
+        _ => Kind::Array,
+    };
+    let root_list = parent.is_none() && is_property_shaped(value);
+    let id = NodeId(nodes.len() as u64);
+    nodes.push(Node {
+        name,
+        kind: if root_list && !matches!(inner, Cbor::Array(_)) {
+            // A scalar document: the root wears its type.
+            match inner {
+                Cbor::Text(_) => Kind::String,
+                Cbor::Integer(_) | Cbor::Float(_) => Kind::Number,
+                Cbor::Bool(_) => Kind::Boolean,
+                Cbor::Bytes(_) => Kind::Bytes,
+                _ => Kind::Null,
+            }
+        } else {
+            kind
+        },
+        scalar: if root_list {
+            property_value(value)
+        } else {
+            Value::Null
+        },
+        bytes_len: None,
+        tag,
+        parent,
+        children: Vec::new(),
+        fields: Vec::new(),
+        items: Vec::new(),
+    });
+    let mut children = Vec::new();
+    let mut fields = Vec::new();
+    let mut items = Vec::new();
+    match inner {
+        Cbor::Map(entries) => {
+            for (k, v) in entries {
+                if is_property_shaped(v) {
+                    fields.push((key_name(k), property_value(v)));
+                } else {
+                    children.push(build_property(v, Some(key_name(k)), Some(id), nodes));
+                }
+            }
+        }
+        Cbor::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                if is_container(v) {
+                    children.push(build_property(v, Some(i.to_string()), Some(id), nodes));
+                } else if !root_list {
+                    items.push((i, scalar_value(v)));
+                }
+            }
+        }
+        _ => {}
+    }
+    let n = &mut nodes[id.0 as usize];
+    n.children = children;
+    n.fields = fields;
+    n.items = items;
+    id
+}
+
 impl CborAdapter {
     /// Decode `bytes` as a single CBOR item and build the
     /// adapter.
     pub fn parse(bytes: &[u8]) -> Result<Self, CborError> {
+        Self::parse_as(bytes, Reading::Node)
+    }
+
+    /// Decode under the given reading (`json2` is the property
+    /// reading).
+    pub fn parse_as(bytes: &[u8], reading: Reading) -> Result<Self, CborError> {
         let value: Cbor =
             ciborium::from_reader(bytes).map_err(|e| CborError::Decode(e.to_string()))?;
         let mut nodes = Vec::new();
-        build(&value, None, None, None, &mut nodes);
+        match reading {
+            Reading::Node => build(&value, None, None, None, &mut nodes),
+            Reading::Property => build_property(&value, None, None, &mut nodes),
+        };
         Ok(CborAdapter {
             nodes,
             root: NodeId(0),
+            reading,
         })
     }
 
@@ -250,14 +388,29 @@ impl AstAdapter for CborAdapter {
         self.nodes[node.0 as usize].parent
     }
 
+    /// The value type, and `scalar` over the primitive types
+    /// (string, number, boolean, bytes, null, instant), as the
+    /// JSON adapter has it.
     fn traits(&self, node: NodeId) -> Vec<String> {
-        vec![self.nodes[node.0 as usize].kind.name().to_string()]
+        let kind = self.nodes[node.0 as usize].kind;
+        let mut out = vec![kind.name().to_string()];
+        if !matches!(kind, Kind::Map | Kind::Array) {
+            out.push("scalar".to_string());
+        }
+        out
     }
 
     /// A map's scalar entries answer as properties, like the
     /// JSON adapter's objects.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
+        if self.reading == Reading::Property {
+            return n
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone());
+        }
         for &c in &n.children {
             let child = &self.nodes[c.0 as usize];
             if child.name.as_deref() == Some(name) {
@@ -270,8 +423,34 @@ impl AstAdapter for CborAdapter {
         None
     }
 
+    /// Property reading: a map's scalar entries, an array's scalar
+    /// elements under their index.
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if self.reading != Reading::Property {
+            return Vec::new();
+        }
+        let n = &self.nodes[node.0 as usize];
+        match n.kind {
+            Kind::Map => n.fields.clone(),
+            Kind::Array => n
+                .items
+                .iter()
+                .map(|(i, v)| (i.to_string(), v.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn default_value(&self, node: NodeId) -> Option<Value> {
-        match &self.nodes[node.0 as usize].scalar {
+        let n = &self.nodes[node.0 as usize];
+        // Property reading: a mixed array projects its scalar
+        // elements as a list.
+        if self.reading == Reading::Property && !n.items.is_empty() {
+            return Some(Value::list(
+                n.items.iter().map(|(_, v)| v.clone()).collect(),
+            ));
+        }
+        match &n.scalar {
             Value::Null => None,
             v => Some(v.clone()),
         }
@@ -285,7 +464,9 @@ impl AstAdapter for CborAdapter {
         match key {
             "type" => Some(Value::Str(n.kind.name().to_string())),
             "length" => match n.kind {
-                Kind::Map | Kind::Array => Some(Value::Int(n.children.len() as i64)),
+                Kind::Map | Kind::Array => Some(Value::Int(
+                    (n.children.len() + n.fields.len() + n.items.len()) as i64,
+                )),
                 Kind::Bytes => Some(Value::Int(n.bytes_len? as i64)),
                 Kind::String => match &n.scalar {
                     Value::Str(s) => Some(Value::Int(s.chars().count() as i64)),
@@ -337,6 +518,22 @@ mod tests {
             quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
             quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| a.pointer(n)).collect(),
         }
+    }
+
+    /// The property reading: the map is a node, its scalar entries
+    /// (the tagged instant and the bytes included) are its
+    /// properties, and no scalar is a node.
+    #[test]
+    fn property_reading() {
+        let a = CborAdapter::parse_as(&music(), Reading::Property).unwrap();
+        assert_eq!(v(&a, "*//*"), ["/", "/tracks", "/tracks/0"]);
+        assert_eq!(v(&a, "//title @| count"), ["0"]);
+        assert_eq!(v(&a, "/tracks/*::title"), ["Mars"]);
+        assert_eq!(v(&a, "/tracks/*::price"), ["1.29"]);
+        assert_eq!(v(&a, "/tracks/*::art"), ["c0ffee"]);
+        assert_eq!(v(&a, "/tracks/*::42"), ["int-keyed"]);
+        assert_eq!(v(&a, "/tracks/*::added | year"), ["2023"]);
+        assert_eq!(v(&a, "/tracks/0::::length"), ["5"]);
     }
 
     #[test]

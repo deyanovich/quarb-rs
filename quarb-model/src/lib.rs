@@ -22,7 +22,7 @@ pub use parse::{
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 /// Derived nodes carry this tag bit; the base's own ids never set it
@@ -146,16 +146,96 @@ pub struct ModelAdapter<A: AstAdapter> {
     model: Model,
     containers: OnceCell<Vec<Container>>,
     fabric: OnceCell<Fabric>,
+    /// The declared traits' step bodies, parsed once; one per
+    /// declaration, in order.
+    bodies: OnceCell<Vec<quarb::StepBody>>,
+    /// What each declared trait decided at each node asked so far —
+    /// the step is tested at the node, never by a walk; the memo
+    /// spares re-testing a predicate the query asks about again.
+    decided: RefCell<HashMap<(usize, NodeId), bool>>,
+    /// How many declarations are visible while one is tested: a
+    /// declaration sees only the traits declared before it, so the
+    /// order of the file settles every reference and no cycle can
+    /// arise.
+    visible: Cell<usize>,
 }
 
 impl<A: AstAdapter> ModelAdapter<A> {
     pub fn new(base: A, model: Model) -> Self {
+        let n = model.traits.len();
         ModelAdapter {
             base,
             model,
             containers: OnceCell::new(),
             fabric: OnceCell::new(),
+            bodies: OnceCell::new(),
+            decided: RefCell::new(HashMap::new()),
+            visible: Cell::new(n),
         }
+    }
+
+    /// Refuse a declared trait that redefines one the arbor already
+    /// has: a trait the adapter puts on any node, or the trait a
+    /// `node` constructor gives a derived container's members. The
+    /// check walks the base arbor once per declaration; call it
+    /// after construction, before the first query.
+    pub fn check_declared_traits(&self) -> Result<(), String> {
+        for decl in &self.model.traits {
+            if let Some(n) = self.model.nodes.iter().find(|n| n.trait_name == decl.name) {
+                return Err(format!(
+                    "trait <{}> is already the trait of the derived container /{} — \
+                     a declared trait cannot redefine one the arbor has",
+                    decl.name, n.name
+                ));
+            }
+            let q = format!("*//*<{}> @| count", decl.name);
+            if let Ok(QueryResult::Values(vs)) = quarb::run(&q, &self.base)
+                && matches!(vs.first(), Some(Value::Int(n)) if *n > 0)
+            {
+                return Err(format!(
+                    "trait <{}> is the adapter's own — a declared trait cannot \
+                     redefine one the arbor has",
+                    decl.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The declared traits `node` carries: those whose step it would
+    /// match, among the declarations visible now.
+    fn declared_traits_of(&self, node: NodeId) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..self.visible.get().min(self.model.traits.len()) {
+            if self.declared_at(i, node) {
+                out.push(self.model.traits[i].name.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether declaration `i` holds at `node`: its step body tested
+    /// at the node, over this adapter with only the earlier
+    /// declarations visible, memoized.
+    fn declared_at(&self, i: usize, node: NodeId) -> bool {
+        if let Some(&d) = self.decided.borrow().get(&(i, node)) {
+            return d;
+        }
+        let bodies = self.bodies.get_or_init(|| {
+            self.model
+                .traits
+                .iter()
+                .map(|t| {
+                    quarb::parse_step_body(&t.step).expect("validated when the model was parsed")
+                })
+                .collect()
+        });
+        let was = self.visible.get();
+        self.visible.set(i);
+        let d = quarb::node_matches_step_body(self, node, &bodies[i]);
+        self.visible.set(was);
+        self.decided.borrow_mut().insert((i, node), d);
+        d
     }
 
     pub fn base(&self) -> &A {
@@ -727,6 +807,23 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
         }
         self.base.name(node)
     }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        if node.0 & MODEL_TAG != 0 {
+            node
+        } else {
+            self.base.child_host(node)
+        }
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.base.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if node.0 & MODEL_TAG != 0 {
+            Vec::new()
+        } else {
+            self.base.properties(node)
+        }
+    }
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         if node == self.base.root() {
             let mut out = self.base.children_named(node, name);
@@ -865,6 +962,25 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// A base node's transparent links stay transparent; the
+    /// model's own nodes host their own children.
+    fn child_host(&self, node: NodeId) -> NodeId {
+        match self.decode(node) {
+            Some(_) => node,
+            None => self.base.child_host(node),
+        }
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.base.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if node.0 & MODEL_TAG != 0 {
+            Vec::new()
+        } else {
+            self.base.properties(node)
+        }
+    }
+
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         // The root's fast path must see the derived containers too.
         if node == self.base.root() {
@@ -909,7 +1025,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn traits(&self, node: NodeId) -> Vec<String> {
-        match self.decode(node) {
+        let mut out = match self.decode(node) {
             // Each derived value node carries its container's trait,
             // so mixed-type walk results self-describe (`[<ip>]`).
             Some((c, v)) if v > 0 => {
@@ -923,7 +1039,12 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             }
             Some(_) => Vec::new(),
             None => self.base.traits(node),
+        };
+        // The model's declared traits, decided at the node.
+        if !self.model.traits.is_empty() {
+            out.extend(self.declared_traits_of(node));
         }
+        out
     }
 
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
@@ -1313,6 +1434,15 @@ impl AstAdapter for Borrowed<'_> {
     }
     fn children_named(&self, n: NodeId, name: &str) -> Vec<NodeId> {
         self.0.children_named(n, name)
+    }
+    fn child_host(&self, n: NodeId) -> NodeId {
+        self.0.child_host(n)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.0.non_tree_nodes()
+    }
+    fn properties(&self, n: NodeId) -> Vec<(String, Value)> {
+        self.0.properties(n)
     }
     fn property(&self, n: NodeId, name: &str) -> Option<Value> {
         self.0.property(n, name)

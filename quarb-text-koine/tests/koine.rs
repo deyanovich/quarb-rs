@@ -976,3 +976,28 @@ fn lit_places_table_declares_the_gazetteer() {
         ["%(where = \"New York, Paris\")", "%(where = \"Paris\")"]
     );
 }
+
+/// A cite monosim opening an endo-diaphane annotates the span:
+/// one mark, the key as `::target`, the span's text as
+/// `::locator`; a bare cite has none. The span's text is prose,
+/// the key is not.
+#[test]
+fn cite_span_carries_its_locator() {
+    let atd = "\
+@@@!litogramma
+
+Rome fell slowly @@.@>[(gibbon1776)ch. 15.@@ and Persia was vast \
+@@.@>[(herodotus)I.1.@@, as every schoolboy knows @>[(twain1876).
+";
+    let m = quarb_text_koine::parse_str(atd, std::path::Path::new(".")).unwrap();
+    assert_eq!(
+        values(&m, "//cit::target"),
+        ["gibbon1776", "herodotus", "twain1876"]
+    );
+    assert_eq!(values(&m, "//cit[::locator]::locator"), ["ch. 15", "I.1"]);
+    assert_eq!(values(&m, "//cit[!::locator]::target"), ["twain1876"]);
+    assert_eq!(
+        values(&m, "//paragraph::"),
+        ["Rome fell slowly ch. 15 and Persia was vast I.1, as every schoolboy knows twain1876."]
+    );
+}

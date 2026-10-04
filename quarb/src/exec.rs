@@ -4073,7 +4073,7 @@ fn arrived_edge(
     succ: NodeId,
 ) -> Option<EdgeCtx> {
     let edge = match &step.axis {
-        Axis::Child | Axis::Descendant(_) => EdgeCtx {
+        Axis::Child | Axis::Descendant(_) | Axis::Universal => EdgeCtx {
             source: adapter.parent(succ).unwrap_or(from),
             label: CHILD.into(),
             target: succ,
@@ -4836,9 +4836,9 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
             matches!((index(), n_siblings()), (Some(i), Some(n)) if i == n + 1),
         )),
         "is-top-level" => Some(Value::Bool(depth_of(adapter, node) == 1)),
-        // Non-tree nodes would carry depth -1; the current adapters put
-        // every node in the child tree, so this is always false.
-        "is-non-tree" => Some(Value::Bool(false)),
+        // A node the adapter declares outside the tree (joined to
+        // it by crosslinks alone); the shipped adapters declare none.
+        "is-non-tree" => Some(Value::Bool(adapter.non_tree_nodes().contains(&node))),
         // Root-relative location paths, one token per level.
         "name-path" => Some(Value::Str(ancestor_path(adapter, node, |a, n| a.name(n)))),
         "index-path" => Some(Value::Str(ancestor_path(adapter, node, |a, n| {
@@ -4977,14 +4977,17 @@ fn apply_step(
             // contract) — which permits deliberate aliasing, like
             // git revision syntax resolving to a hash-named commit
             // — so only the nameless tests re-run.
+            // A transparent link lends its target's children to the
+            // explicit step (the descendant walk never asks).
+            let host = adapter.child_host(node);
             let matched: Vec<NodeId> = match &step.matcher {
                 Matcher::Name(n) => adapter
-                    .children_named(node, n)
+                    .children_named(host, n)
                     .into_iter()
                     .filter(|&c| tests_ok(adapter, c, step))
                     .collect(),
                 _ => adapter
-                    .children(node)
+                    .children(host)
                     .into_iter()
                     .filter(|&c| matches_step(adapter, c, step))
                     .collect(),
@@ -5066,6 +5069,41 @@ fn apply_step(
                 },
             );
             out.extend(by_reach(found, *reach));
+        }
+        Axis::Universal => {
+            // The whole arbor: the root (the anchor node) and its
+            // descendants in document order, then the nodes outside
+            // the tree in the adapter's order; one step, so the
+            // tests run on each.
+            let mut found: Vec<(NodeId, usize)> = Vec::new();
+            if matches_step(adapter, node, step) {
+                found.push((node, 0));
+            }
+            descendants(adapter, node, 1, step, &mut found);
+            for n in adapter.non_tree_nodes() {
+                if matches_step(adapter, n, step) {
+                    found.push((n, 0));
+                }
+            }
+            let found = apply_predicates(
+                adapter,
+                found,
+                step,
+                trace,
+                outer,
+                witness,
+                marks,
+                register,
+                |&(n, _)| n,
+                |&(n, _)| {
+                    Some(EdgeCtx {
+                        source: adapter.parent(n).unwrap_or(node),
+                        label: CHILD.into(),
+                        target: n,
+                    })
+                },
+            );
+            out.extend(found.into_iter().map(|(n, _)| n));
         }
         Axis::Parent => {
             let matched: Vec<NodeId> = adapter
@@ -5532,6 +5570,76 @@ fn tests_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
         return false;
     }
     !step.leaf || adapter.children(node).is_empty()
+}
+
+/// Whether `node` would match `elem` as a step of a path, decided
+/// at the node and nowhere else: the name matcher, the trait
+/// clauses, the leaf anchor and the expression predicates, with no
+/// hop performed and no context beyond the node (a predicate may
+/// still look around from it). A name-alternation group matches
+/// when any alternative does and the group's own clauses hold. A
+/// model's declared trait is this test, so the engine never walks
+/// the arbor to answer `<declared>`.
+pub fn node_matches_elem(adapter: &impl AstAdapter, node: NodeId, elem: &PathElem) -> bool {
+    let trace = Correlation::default();
+    let edge = |n: &NodeId| {
+        Some(EdgeCtx {
+            source: adapter.parent(*n).unwrap_or(*n),
+            label: CHILD.into(),
+            target: *n,
+        })
+    };
+    match elem {
+        PathElem::Step(step) => {
+            matches_step(adapter, node, step)
+                && !apply_predicates(
+                    adapter,
+                    vec![node],
+                    step,
+                    &trace,
+                    None,
+                    &[],
+                    &[],
+                    &[],
+                    |&n| n,
+                    edge,
+                )
+                .is_empty()
+        }
+        PathElem::Group(g) => {
+            let any_alt = g.alts.iter().any(|alt| match alt.as_slice() {
+                [PathElem::Step(s)] => matches_step(adapter, node, s),
+                _ => false,
+            });
+            if !any_alt {
+                return false;
+            }
+            // The group's own clauses, through a step that carries
+            // them (positional predicates are refused upstream).
+            let own = Step {
+                axis: Axis::Universal,
+                matcher: Matcher::Any,
+                traits: g.traits.clone(),
+                predicates: g.predicates.clone(),
+                leaf: false,
+            };
+            tests_ok(adapter, node, &own)
+                && !apply_predicates(
+                    adapter,
+                    vec![node],
+                    &own,
+                    &trace,
+                    None,
+                    &[],
+                    &[],
+                    &[],
+                    |&n| n,
+                    edge,
+                )
+                .is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Apply `step`'s predicates to one hop's result list (the tested
@@ -6816,26 +6924,47 @@ fn value_cmp(a: &Value, b: &Value, scale: UnitScale) -> Option<Ordering> {
 /// Adapter-agnostic, so it round-trips a JSON document and gives a
 /// sensible JSON view of any other tree.
 fn node_to_json(adapter: &impl AstAdapter, node: NodeId) -> Value {
-    let children = adapter.children(node);
-    if children.is_empty() {
+    let entries = node_entries(adapter, node);
+    if entries.is_empty() {
         return adapter.default_value(node).unwrap_or(Value::Null);
     }
-    let names: Vec<Option<String>> = children.iter().map(|&c| adapter.name(c)).collect();
-    let is_array = names
+    let is_array = entries
         .iter()
         .enumerate()
-        .all(|(i, n)| n.as_deref() == Some(i.to_string().as_str()));
+        .all(|(i, (n, _))| n == &i.to_string());
     if is_array {
-        Value::list(children.iter().map(|&c| node_to_json(adapter, c)).collect())
+        Value::list(entries.into_iter().map(|(_, v)| v).collect())
     } else {
-        Value::Record(
-            children
-                .iter()
-                .zip(&names)
-                .map(|(&c, n)| (n.clone().unwrap_or_default(), node_to_json(adapter, c)))
-                .collect(),
-        )
+        Value::Record(entries)
     }
+}
+
+/// A node's content as (name, value) entries: its children,
+/// reconstructed, merged with its enumerated properties (a reading
+/// that keeps scalars off the tree — the JSON property reading);
+/// a child wins a shared name. Entries whose names are all
+/// indexes are put in index order, so a mixed array comes back
+/// in the source's order.
+fn node_entries(adapter: &impl AstAdapter, node: NodeId) -> Vec<(String, Value)> {
+    let children = adapter.children(node);
+    let mut entries: Vec<(String, Value)> = children
+        .iter()
+        .map(|&c| {
+            (
+                adapter.name(c).unwrap_or_default(),
+                node_to_json(adapter, c),
+            )
+        })
+        .collect();
+    for (k, v) in adapter.properties(node) {
+        if !entries.iter().any(|(n, _)| *n == k) {
+            entries.push((k, v));
+        }
+    }
+    if entries.len() > 1 && entries.iter().all(|(n, _)| n.parse::<usize>().is_ok()) {
+        entries.sort_by_key(|(n, _)| n.parse::<usize>().unwrap_or(usize::MAX));
+    }
+    entries
 }
 
 /// Serialize a value as XML, wrapping it in `<tag>` when it needs
@@ -6889,23 +7018,33 @@ fn node_to_xml(adapter: &impl AstAdapter, node: NodeId) -> String {
 
 fn node_to_xml_named(adapter: &impl AstAdapter, node: NodeId, tag: &str) -> String {
     let children = adapter.children(node);
-    if children.is_empty() {
+    // A reading that keeps scalars off the tree (the JSON property
+    // reading) enumerates them; they nest as elements after the
+    // children, a child winning a shared name.
+    let names: Vec<Option<String>> = children.iter().map(|&c| adapter.name(c)).collect();
+    let props: Vec<(String, Value)> = adapter
+        .properties(node)
+        .into_iter()
+        .filter(|(k, _)| !names.iter().any(|n| n.as_deref() == Some(k.as_str())))
+        .collect();
+    if children.is_empty() && props.is_empty() {
         let body = adapter
             .default_value(node)
             .map(|v| xml_escape(&v.to_string()))
             .unwrap_or_default();
         format!("<{tag}>{body}</{tag}>")
     } else {
-        let inner: String = children
+        let mut inner: String = children
             .iter()
-            .map(|&c| {
-                let t = adapter
-                    .name(c)
-                    .map(|n| xml_tag(&n))
-                    .unwrap_or_else(|| "item".into());
+            .zip(&names)
+            .map(|(&c, n)| {
+                let t = n.as_deref().map(xml_tag).unwrap_or_else(|| "item".into());
                 node_to_xml_named(adapter, c, &t)
             })
             .collect();
+        for (k, v) in &props {
+            inner.push_str(&value_to_xml(v, &xml_tag(k)));
+        }
         format!("<{tag}>{inner}</{tag}>")
     }
 }
@@ -7224,6 +7363,8 @@ mod tests {
     struct MockTree {
         names: Vec<Option<String>>,
         kids: HashMap<u64, Vec<u64>>,
+        /// Nodes outside the tree (crosslink targets only).
+        loose: Vec<u64>,
         /// Outgoing crosslinks: node -> [(label, target)].
         links: HashMap<u64, Vec<(String, u64)>>,
         /// Edge properties: (source, label, target) -> [(name, value)].
@@ -7261,6 +7402,7 @@ mod tests {
             MockTree {
                 names,
                 kids,
+                loose: Vec::new(),
                 links,
                 edge_props: HashMap::new(),
                 prov: HashMap::new(),
@@ -7300,6 +7442,7 @@ mod tests {
             MockTree {
                 names,
                 kids,
+                loose: Vec::new(),
                 links: HashMap::new(),
                 edge_props: HashMap::new(),
                 prov: HashMap::new(),
@@ -7375,6 +7518,9 @@ mod tests {
                 .find(|(_, v)| v.contains(&node.0))
                 .map(|(&p, _)| NodeId(p))
         }
+        fn non_tree_nodes(&self) -> Vec<NodeId> {
+            self.loose.iter().map(|&i| NodeId(i)).collect()
+        }
         fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
             self.links
                 .get(&node.0)
@@ -7430,6 +7576,43 @@ mod tests {
             QueryResult::Values(vs) => vs,
             QueryResult::Nodes(_) => panic!("expected values, got nodes"),
         }
+    }
+
+    /// `*//` is the universal search: the root and its descendants
+    /// in document order, then the nodes outside the tree in the
+    /// adapter's order; `^//` and `//` stay the proper descendants.
+    #[test]
+    fn universal_search_reaches_the_whole_arbor() {
+        let mut t = MockTree::sample();
+        // A node joined to the tree by a crosslink alone.
+        t.names.push(Some("x.rs".into())); // 8
+        t.loose.push(8);
+        t.links.insert(3, vec![("see".to_string(), 8)]);
+        assert_eq!(run("*//x.rs", &t), vec![2, 8]);
+        assert_eq!(run("//x.rs", &t), vec![2]);
+        assert_eq!(run("^//x.rs", &t), vec![2]);
+        // The root is in the universe and first.
+        assert_eq!(run("*//*", &t), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(run("//*", &t), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(run("*//*[:::is-non-tree]", &t), vec![8]);
+        // Steps continue from the found nodes as usual.
+        assert_eq!(run("*//y.txt->see", &t), vec![8]);
+        // Head position only, no reach.
+        assert!(parse(&lex("*//?x.rs").unwrap()).is_err());
+        assert!(parse(&lex("/a/*//x.rs").unwrap()).is_ok());
+        assert_eq!(run("/a/*//x.rs", &t), Vec::<u64>::new());
+        assert_eq!(
+            crate::unparse::unparse(&parse(&lex("*//x.rs[1]").unwrap()).unwrap()),
+            "*//x.rs[1]"
+        );
+        // As an operand, root-anchored like `^`.
+        assert_eq!(
+            vals("/a | %(n = (*//x.rs @| count); d = (//x.rs @| count))", &t),
+            vec![Value::Record(vec![
+                ("n".to_string(), Value::Int(2)),
+                ("d".to_string(), Value::Int(1)),
+            ])]
+        );
     }
 
     #[test]
@@ -8143,6 +8326,7 @@ mod tests {
         let t = MockTree {
             names,
             kids,
+            loose: Vec::new(),
             links: HashMap::new(),
             edge_props: HashMap::new(),
             prov: HashMap::new(),
@@ -8196,6 +8380,7 @@ mod tests {
         let t = MockTree {
             names,
             kids,
+            loose: Vec::new(),
             links: HashMap::new(),
             edge_props: HashMap::new(),
             prov: HashMap::new(),

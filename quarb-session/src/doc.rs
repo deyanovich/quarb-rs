@@ -103,6 +103,15 @@ impl quarb::AstAdapter for Dyn {
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         self.0.children_named(node, name)
     }
+    fn child_host(&self, node: NodeId) -> NodeId {
+        self.0.child_host(node)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.0.non_tree_nodes()
+    }
+    fn properties(&self, node: NodeId) -> Vec<(String, quarb::Value)> {
+        self.0.properties(node)
+    }
     fn default_value(&self, node: NodeId) -> Option<quarb::Value> {
         self.0.default_value(node)
     }
@@ -225,6 +234,12 @@ impl Doc {
                 return Ok(Self::boxed_kaiv(a));
             }
             "json" => quarb_json::JsonAdapter::parse(input)
+                .map(Doc::Json)
+                .context("parsing JSON"),
+            // The property reading: containers are nodes, scalars
+            // are properties (json2:FILE in qua; the format name for
+            // a pasted document).
+            "json2" => quarb_json::JsonAdapter::parse_as(input, quarb_json::Reading::Property)
                 .map(Doc::Json)
                 .context("parsing JSON"),
             "jsonl" | "ndjson" => quarb_json::JsonAdapter::parse_lines(input)
@@ -389,6 +404,9 @@ impl Doc {
             nanos,
         };
         let enriched = quarb_model::ModelAdapter::new(nowed, model.clone());
+        enriched
+            .check_declared_traits()
+            .map_err(|e| quarb::QuarbError::Parse(format!("reading the model: {e}")))?;
         if allow_shell {
             quarb::run(query, &AllowShell { inner: &enriched })
         } else {
@@ -988,6 +1006,34 @@ impl Doc {
                 model, conllu, annotate, &desm, cast, places, modernize, opts, "corpus",
             );
         }
+        // `json2:FILE` — the property reading of a JSON-model
+        // document (JSON, JSONL, YAML, TOML), matching qua.
+        if let Some(rest) = s.strip_prefix("json2:")
+            && !rest.is_empty()
+        {
+            use quarb_json::Reading;
+            let target = Path::new(rest);
+            let text = std::fs::read_to_string(target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let a = match ext.as_str() {
+                "yaml" | "yml" => {
+                    quarb_yaml::parse_as(&text, Reading::Property).context("parsing YAML")?
+                }
+                "toml" => quarb_toml::parse_as(&text, Reading::Property).context("parsing TOML")?,
+                "jsonl" | "ndjson" => {
+                    quarb_json::JsonAdapter::parse_lines_as(&text, Reading::Property)
+                        .context("parsing JSONL")?
+                }
+                _ => quarb_json::JsonAdapter::parse_as(&text, Reading::Property)
+                    .context("parsing JSON")?,
+            };
+            return Ok(Doc::Json(a));
+        }
         // A `text:` prefix forces the text-level reading, matching
         // qua's dispatch: producer by extension, `<` sniffing
         // markup, plain paragraphs as the fallback.
@@ -1050,8 +1096,10 @@ impl Doc {
                 let bytes = std::fs::read(target)
                     .with_context(|| format!("reading {}", target.display()))?;
                 let model = if ext == "docx" {
-                    quarb_text_docx::parse(&bytes)
-                        .with_context(|| format!("reading {} as Word", target.display()))?
+                    let mut m = quarb_text_docx::parse(&bytes)
+                        .with_context(|| format!("reading {} as Word", target.display()))?;
+                    quarb_text_koine::attach_bib_aliases(&mut m);
+                    m
                 } else {
                     quarb_text_epub::parse(&bytes)
                         .with_context(|| format!("reading {} as EPUB", target.display()))?

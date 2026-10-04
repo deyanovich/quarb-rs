@@ -695,6 +695,11 @@ pub enum Axis {
     Child,
     /// `//`, `//?`, `//!` — descendants at any depth.
     Descendant(Reach),
+    /// `*//` — the universal search: every node of the arbor,
+    /// the root and its descendants in document order, then the
+    /// nodes outside the tree in the adapter's order. Written
+    /// only as the head of a branch; it takes no reach.
+    Universal,
     /// `\` — the immediate parent.
     Parent,
     /// `\\`, `\\?`, `\\!` — ancestors at any distance.

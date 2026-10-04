@@ -439,10 +439,20 @@ fn bib_entry(block: &ABlock, bg: &Dialektos) -> Option<Block> {
 fn finish_model(blocks: Vec<Block>) -> TextModel {
     let has_bib = blocks.iter().any(|b| matches!(b, Block::Bib { .. }));
     let mut model = TextModel::build(blocks);
-    if has_bib && let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma") {
-        model.set_bib_aliases(bib_alias_census(&bg));
+    if has_bib {
+        attach_bib_aliases(&mut model);
     }
     model
+}
+
+/// Attach the bib-field alias census to a model another reading
+/// built with `bib` entries under the Latin canon (Word's sources
+/// list through quarb-text-docx), so `::author`, `::title`,
+/// `::year` answer there too.
+pub fn attach_bib_aliases(model: &mut TextModel) {
+    if let Ok(bg) = dialektos::resolve(Path::new("."), "bibliogramma") {
+        model.set_bib_aliases(bib_alias_census(&bg));
+    }
 }
 
 /// The bib-field alias census: every campus alias (lowercased)
@@ -491,8 +501,9 @@ enum Pending {
     Ref(String, bool),
     /// A standalone onym anchor: a point bearer at this position.
     Point(String),
-    /// A citation mark: the authored key, the bib namespace.
-    Cite(String),
+    /// A citation mark: the key, and the locator when the cite
+    /// monosim opened an endo-diaphane whose text is the pinpoint.
+    Cite(String, Option<String>),
     /// The literary reading: an inline simmere as a span of the
     /// block being flattened (pre-order: pushed at its start, the
     /// end filled in after its content).
@@ -1130,6 +1141,21 @@ impl Lower {
                             id: param.clone(),
                         });
                     }
+                    // A cite monosim opening the diaphane annotates
+                    // its span: one mark, the key as target, the
+                    // span's text as the locator (`@@.@>[(key)ch.
+                    // 15.@@`); the text stays in the prose, the key
+                    // does not.
+                    Some(Inline::Monosim { symbol, param, .. })
+                        if sim_name(dial, symbol) == "cite" =>
+                    {
+                        let rest: Vec<Inline> = content.iter().skip(1).cloned().collect();
+                        let mut text = String::new();
+                        self.flatten_into(&rest, dial, &mut text);
+                        let locator = Some(text.trim().to_string()).filter(|t| !t.is_empty());
+                        out.push_str(&text);
+                        self.pending.push(Pending::Cite(param.clone(), locator));
+                    }
                     // An editorial pair (TEI's `<choice>`, at-aphanes'
                     // paradosis): the reading in the prose, the
                     // original as the `choice` span's field under the
@@ -1216,7 +1242,7 @@ impl Lower {
                         // recorded follow-up).
                         "cite" => {
                             push_norm(out, param);
-                            self.pending.push(Pending::Cite(param.clone()));
+                            self.pending.push(Pending::Cite(param.clone(), None));
                         }
                         _ => {}
                     }
@@ -1318,7 +1344,7 @@ impl Lower {
                     internal,
                 }),
                 Pending::Point(onym) => self.out.push(Block::Anchor { onym }),
-                Pending::Cite(target) => self.out.push(Block::Cite { target }),
+                Pending::Cite(target, locator) => self.out.push(Block::Cite { target, locator }),
                 Pending::Span {
                     kind,
                     lo,
