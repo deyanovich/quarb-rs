@@ -5,8 +5,8 @@
 //! stores to a relational shape: `/tracks/mars::title`, kinds as
 //! the root's children, entities named by their key (name or
 //! numeric id). Entity properties are typed values; `keyValue`
-//! properties are *native references*, so `~>` needs neither a
-//! schema nor a refs file: `::album~>::title` follows the key,
+//! properties are *native references*, so `-->` needs neither a
+//! schema nor a refs file: `::album-->::title` follows the key,
 //! and `->` enumerates every key property as a labeled edge.
 //!
 //! Loading is lazy: the kind list comes from a `__kind__` query,
@@ -504,7 +504,7 @@ impl AstAdapter for DatastoreAdapter {
         }
     }
 
-    /// `::prop~>` follows a native `keyValue` — no schema, no refs
+    /// `::prop-->` follows a native `keyValue` — no schema, no refs
     /// file; the key knows its kind.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let props = self.props_of(node)?;

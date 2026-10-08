@@ -1340,7 +1340,7 @@ mod tests {
     }
 }
 
-/// The spelling tables `modernize(table)` knows (ruling #82): a
+/// The spelling tables `modernize(table)` knows: a
 /// historical orthography folded to the modern one, letter by
 /// letter, case kept. `ru-1918` is the pre-reform Russian
 /// alphabet (ѣ→е, і→и, ѳ→ф, ѵ→и, the word-final ъ dropped);

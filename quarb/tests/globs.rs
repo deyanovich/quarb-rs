@@ -31,8 +31,9 @@ fn pattern_forms_round_trip() {
     assert_eq!(canon("/x[::n == *\"web\"*]"), "/x[::n == *\"web\"*]");
     // `!=` takes the same operand
     assert_eq!(canon("/x[::n !== *\"web\"*]"), "/x[::n !== *\"web\"*]");
-    // glued to the operator is tolerated, canonical prints spaced
-    assert!(refuse("/x[::n =*\"web\"*]").contains("retired"));
+    // glued to the operator: the spacing rule's refusal, with the
+    // spaced spelling as the pointer
+    assert!(refuse("/x[::n =*\"web\"*]").contains("write ' = '"));
 }
 
 #[test]

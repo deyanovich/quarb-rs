@@ -31,7 +31,7 @@ fn opaque_navigation_and_properties() {
     // Item 1's kids enumerate (bounded container).
     assert_eq!(values(&a, "/item/1/kids/* @| count"), ["4"]);
     assert_eq!(values(&a, "/item/1/kids/0::"), ["15"]);
-    // The opaque container yields nothing to a wildcard — honest.
+    // The opaque container yields nothing to a wildcard, by design.
     assert_eq!(values(&a, "/item/* @| count"), ["0"]);
 }
 

@@ -6,7 +6,7 @@
 //! SDK, no async runtime. The catalog comes from
 //! `INFORMATION_SCHEMA` (tables, columns, and the *unenforced*
 //! `PRIMARY KEY` / `FOREIGN KEY` constraints BigQuery records as
-//! metadata — declare them and the whole `~>` / `->` / `<~`
+//! metadata — declare them and the whole `-->` / `->` / `<--`
 //! reference machinery works on BigQuery like on any engine).
 //!
 //! **Cost model.** BigQuery bills by bytes scanned, which makes
@@ -357,25 +357,32 @@ fn fetch_rows(
     spec: &TableSpec,
     where_sql: Option<&str>,
 ) -> Result<Vec<RowSpec>, BigqueryError> {
-    let cols: Vec<String> = spec.columns.iter().map(|c| format!("`{c}`")).collect();
+    let cols: Vec<String> = spec
+        .columns
+        .iter()
+        .map(|c| quarb_relational::quote_backtick(c))
+        .collect();
     let filter = match where_sql {
         Some(w) => format!(" WHERE {w}"),
         None => String::new(),
     };
     let order = match spec.pk {
-        Some(i) => format!(" ORDER BY `{}`", spec.columns[i]),
+        Some(i) => format!(
+            " ORDER BY {}",
+            quarb_relational::quote_backtick(&spec.columns[i])
+        ),
         None => String::new(),
     };
     let (_, rows) = client.sql(&format!(
-        "SELECT {} FROM {dataset}.`{}`{filter}{order}",
+        "SELECT {} FROM {dataset}.{}{filter}{order}",
         cols.join(", "),
-        spec.name
+        quarb_relational::quote_backtick(&spec.name)
     ))?;
     Ok(rows
         .into_iter()
         .enumerate()
         .map(|(i, values)| RowSpec {
-            rowid: i as i64 + 1,
+            rowid: Some(i as i64 + 1),
             values,
         })
         .collect())
@@ -514,6 +521,9 @@ impl AstAdapter for BigqueryAdapter {
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
     }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
+    }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
     }
@@ -537,5 +547,37 @@ impl AstAdapter for BigqueryAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }

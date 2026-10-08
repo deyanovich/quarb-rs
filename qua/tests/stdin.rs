@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 fn qua(query: &str, target: &str, input: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
         .args([query, target])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -40,7 +41,7 @@ fn corpus_dash_reads_stdin() {
     assert_eq!(qua("//token<word> @| count", "corpus:-", PROSE), "6\n");
 }
 
-/// CoNLL-U on the pipe (ruling #63): the treebank reading, by the
+/// CoNLL-U on the pipe: the treebank reading, by the
 /// sniff or by `?format=conllu`, never a prose tokenization.
 const TREEBANK: &str = "# sent_id = 1
 # text = One two.

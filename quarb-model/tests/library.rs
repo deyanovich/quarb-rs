@@ -39,8 +39,15 @@ fn a_ref_may_name_its_source_by_role() {
     let by_path = library("ref /books/*::author --> /writers/author[::id = $];");
     let by_role = library("ref /library/book::author --> /writers/author[::id = $];");
     for a in [&by_path, &by_role] {
+        // the arrow is a hop: one capsa per author reached, as the
+        // glued path and `| ->x::name` read; the per-book value is
+        // the parenthesized expression
         assert_eq!(
             values(a, "//book | ::author-->::name"),
+            ["Mark Twain", "Jane Austen"]
+        );
+        assert_eq!(
+            values(a, "//book | (::author-->::name)"),
             ["Mark Twain", "Mark Twain", "Jane Austen"]
         );
         assert_eq!(
@@ -55,15 +62,18 @@ fn the_reverse_value_form_meets_each_source_once() {
     let a = library("ref /books/*::author --> /writers/author[::id = $];");
     // from the role node and from the base row alike
     assert_eq!(
-        values(&a, r#"//author[::id = "twain"]::author<--::title"#),
+        values(&a, r#"//author[::id = "twain"]<--(::author)::title"#),
         ["Tom Sawyer", "Huckleberry Finn"]
     );
     assert_eq!(
-        values(&a, r#"/authors/*[::id = "twain"]::author<--::title"#),
+        values(&a, r#"/authors/*[::id = "twain"]<--(::author)::title"#),
         ["Tom Sawyer", "Huckleberry Finn"]
     );
     assert_eq!(
-        values(&a, r#"//author[::id = "austen"] | (::author<-- @| count)"#),
+        values(
+            &a,
+            r#"//author[::id = "austen"] | (<--(::author) @| count)"#
+        ),
         ["1"]
     );
 }

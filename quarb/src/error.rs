@@ -26,7 +26,7 @@ pub enum QuarbError {
     Expansion(String),
 
     /// A query the engine refuses to answer because the result
-    /// would be silently wrong or incomplete — the honest
+    /// would be silently wrong or incomplete — the
     /// alternative to returning a truncated answer (the same
     /// doctrine as pushdown's refuse-or-fall-back, but with
     /// nothing to fall back to).

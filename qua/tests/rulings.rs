@@ -68,7 +68,7 @@ fn pattern_literals_match() {
 #[test]
 fn strict_hole_refuses() {
     let a = doc();
-    // the refusal surfaces as run()'s Refused error (ruling #24)
+    // the refusal surfaces as run()'s Refused error
     let e = quarb::run(r#"= "${/items/1::missing:?}""#, &a).unwrap_err();
     assert!(e.to_string().contains("produced nothing"), "{e}");
     let e = quarb::run(r#"= "${/items/1::missing:?no gz name}""#, &a).unwrap_err();

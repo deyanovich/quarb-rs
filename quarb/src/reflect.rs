@@ -25,7 +25,7 @@
 //! node kinds, property keys, and spellings keep their meaning;
 //! growth is additive only (new kinds and keys may appear, existing
 //! ones never change or vanish). v2 (2026-07-28) respelled the
-//! resolution axes canonically (`~>` → `-->`, `<~` → `<--`, ruling
+//! resolution axes canonically (`-->` → `-->`, `<--` → `<--`, ruling
 //! #14) and added the `--` axis; v1 consumers reading axis
 //! spellings see the new canon. The root carries the version as
 //! `::::vocabulary`, and [`QueryArbor::inventory`] exposes the
@@ -39,7 +39,7 @@ use std::cell::RefCell;
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
     Anchor, Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate, Projection,
-    PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
+    PushBody, Query, Reach, RefProp, RegRef, Stage, Step, TraitClause,
 };
 use crate::error::Result;
 use crate::value::Value;
@@ -226,14 +226,52 @@ impl QueryArbor {
             ),
             ("leaf".to_string(), Value::Bool(s.leaf)),
         ];
-        if let Axis::Resolve { property, hint } | Axis::ReverseResolve { property, hint } = &s.axis
-        {
-            if let Some(p) = property {
-                props.push(("property".to_string(), Value::Str(p.clone())));
+        match &s.axis {
+            Axis::Resolve { property, label } => {
+                if let Some(p) = property {
+                    props.push(("property".to_string(), Value::Str(p.clone())));
+                }
+                if let Some(h) = label {
+                    props.push(("label".to_string(), Value::Str(h.clone())));
+                }
             }
-            if let Some(h) = hint {
-                props.push(("hint".to_string(), Value::Str(h.clone())));
+            Axis::ReverseResolve {
+                label,
+                scope,
+                property,
+            } => {
+                match property {
+                    RefProp::Named(p) => {
+                        props.push(("property".to_string(), Value::Str(p.clone())))
+                    }
+                    RefProp::Any => props.push(("property".to_string(), Value::Str("*".into()))),
+                    RefProp::Default => {}
+                }
+                if let Some(h) = label {
+                    props.push(("label".to_string(), Value::Str(h.clone())));
+                }
+                if let Some(sp) = scope {
+                    props.push((
+                        "scope".to_string(),
+                        Value::Str(sp.0.iter().map(crate::unparse::elem).collect()),
+                    ));
+                }
             }
+            Axis::ValueMatch {
+                property,
+                scope,
+                target,
+            } => {
+                props.push(("property".to_string(), Value::Str(property.clone())));
+                props.push(("target".to_string(), Value::Str(target.clone())));
+                if let Some(sp) = scope {
+                    props.push((
+                        "scope".to_string(),
+                        Value::Str(sp.0.iter().map(crate::unparse::elem).collect()),
+                    ));
+                }
+            }
+            _ => {}
         }
         let id = self.intern(Some("step"), props, Some(parent));
         for t in &s.traits {
@@ -1028,6 +1066,74 @@ impl AstAdapter for ExpansionAdapter<'_> {
         }
         Vec::new()
     }
+    fn walks_for_references(&self) -> bool {
+        self.data.walks_for_references()
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        if !Self::is_data(source) || !Self::is_data(target) {
+            return None;
+        }
+        self.data
+            .can_refer_to(self.untag(source)?, self.untag(target)?)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        if !Self::is_data(source) || !Self::is_data(target) {
+            return Vec::new();
+        }
+        match (self.untag(source), self.untag(target)) {
+            (Some(s), Some(t)) => self.data.reference_properties(s, t),
+            _ => Vec::new(),
+        }
+    }
+    fn resolves_references(&self) -> bool {
+        self.data.resolves_references()
+    }
+    fn tree_identities(&self) -> Vec<(String, NodeId)> {
+        self.data
+            .tree_identities()
+            .into_iter()
+            .map(|(i, n)| (i, self.tag(n)))
+            .collect()
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        if !Self::is_data(target) {
+            return None;
+        }
+        self.data.reverse_label(self.untag(target)?)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        Self::is_data(node)
+            && self
+                .untag(node)
+                .is_some_and(|n| self.data.resolve_needs_label(n, property))
+    }
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        if !Self::is_data(node) {
+            return Vec::new();
+        }
+        self.untag(node)
+            .map(|n| self.data.property_names(n))
+            .unwrap_or_default()
+    }
+    fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        let v = self.data.index_lookup(scope, property, value)?;
+        Some(v.into_iter().map(|n| self.tag(n)).collect())
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        if !Self::is_data(target) {
+            return None;
+        }
+        let v = self
+            .data
+            .index_referrers(scope, property, label, self.untag(target)?)?;
+        Some(v.into_iter().map(|n| self.tag(n)).collect())
+    }
     fn non_tree_nodes(&self) -> Vec<NodeId> {
         self.data
             .non_tree_nodes()
@@ -1196,6 +1302,7 @@ fn type_name(v: &Value) -> &'static str {
         // reserved additively.
         Value::Instant { .. } => "instant",
         Value::Duration { .. } => "duration",
+        Value::Period { .. } => "period",
         Value::Quantity { .. } => "quantity",
     }
 }
@@ -1224,6 +1331,7 @@ fn axis_spelling(a: &Axis) -> String {
         Axis::BothLink => "--".to_string(),
         Axis::Resolve { .. } => "-->".to_string(),
         Axis::ReverseResolve { .. } => "<--".to_string(),
+        Axis::ValueMatch { .. } => "=>".to_string(),
     }
 }
 
@@ -1306,8 +1414,8 @@ impl AstAdapter for QueryArbor {
     }
 
     /// Use→definition jumps on the reflected query. A register use
-    /// resolves to the site that binds it, so `::ref~>` (recall) and
-    /// `::index~>` (correlation context) navigate from a reference
+    /// resolves to the site that binds it, so `::ref-->` (recall) and
+    /// `::index-->` (correlation context) navigate from a reference
     /// to its definition — the reflection arbor stops being a pure
     /// tree exactly where the language itself has non-tree edges.
     /// Resolution is static and best-effort: it follows source
@@ -1515,7 +1623,7 @@ pub(crate) fn usage_of_operand(op: &Operand) -> RegUsage {
 }
 
 /// The register names an argument can "invite" through the
-/// parentheses (ruling #22): named recalls or pushes anywhere in
+/// parentheses: named recalls or pushes anywhere in
 /// the argument, bare step matchers, and string-literal values —
 /// every way a caller can hand a name in. A macro-pushed register
 /// with an invited name is deliberate anaphora; one without is the

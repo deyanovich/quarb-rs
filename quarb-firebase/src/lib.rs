@@ -23,9 +23,9 @@
 //! child hops): on a remote tree, `/items/42::score` should cost
 //! one tiny request, and does.
 //!
-//! **References resolve by hint.** RTDB has no schema, so `~>`
+//! **References resolve by hint.** RTDB has no schema, so `-->`
 //! always takes a hint naming a root-relative container:
-//! `::parent~>item` reads the `parent` field and lands on
+//! `::parent-->item` reads the `parent` field and lands on
 //! `<base>/item/<value>` — the same convention as the relational
 //! adapters' hint (the target "table"). Chains work.
 //!
@@ -42,11 +42,11 @@
 //! containers —
 //! `{"refs": {"parent": "item", "by": "user", "kids/*": "item"}}`
 //! (the `field/*` form declares an array field whose *elements*
-//! reference the target). With refs supplied, bare `~>` resolves
-//! (`::parent~>`), and `->` crosslinks enumerate: every declared
+//! reference the target). With refs supplied, bare `-->` resolves
+//! (`::parent-->`), and `->` crosslinks enumerate: every declared
 //! field with a value becomes a labeled, probed edge, including
 //! one edge per element for array fields. An inline hint always
-//! overrides. Reverse resolution (`<~`) stays empty: it would
+//! overrides. Reverse resolution (`<--`) stays empty: it would
 //! require scanning the referrer container, which is exactly what
 //! opaque containers refuse (a server-side `.indexOn` query is
 //! the recorded v2 path).
@@ -80,7 +80,7 @@ enum Kind {
     /// A container that refuses enumeration (permission-scoped or
     /// unbounded — the database answered the shallow GET with a
     /// 401). Its children are reachable by *name* only: `/item/1`
-    /// navigates, `/item/*` is empty. This is the honest shape of
+    /// navigates, `/item/*` is empty. This is the true shape of
     /// databases like the public Hacker News API, whose `/v0/item`
     /// holds tens of millions of keys.
     Opaque,
@@ -166,7 +166,7 @@ impl FirebaseAdapter {
     }
 
     /// [`connect`], with a declared reference schema (see the
-    /// module doc): bare `~>` and `->` crosslinks work for the
+    /// module doc): bare `-->` and `->` crosslinks work for the
     /// declared fields.
     pub fn connect_with_refs(target: &str, refs: Refs) -> Result<Self, FirebaseError> {
         let rest = target
@@ -470,7 +470,13 @@ impl AstAdapter for FirebaseAdapter {
         }
     }
 
-    /// Hint-based only (RTDB has no schema): `::parent~>item`
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// Hint-based only (RTDB has no schema): `::parent-->item`
     /// reads the `parent` field and lands on `<base>/item/<value>`
     /// — the hint names a root-relative container, like the
     /// relational adapters' target table.

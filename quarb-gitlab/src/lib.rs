@@ -298,8 +298,13 @@ impl GitlabAdapter {
             let items = match self.call(&url) {
                 Ok(Json::Array(a)) => a,
                 Ok(_) => break,
+                // Mid-pagination failure: refused (the query errors)
+                // rather than a silently short answer cached.
                 Err(e) if page > 1 => {
-                    panic!("gitlab: listing {path} truncated mid-pagination: {e}")
+                    quarb::record_refusal(format!(
+                        "gitlab: listing {path} truncated at page {page}: {e}"
+                    ));
+                    break;
                 }
                 Err(_) => break,
             };
@@ -1085,7 +1090,7 @@ impl AstAdapter for GitlabAdapter {
         }
     }
 
-    /// `::parent~>` (a fork's upstream), `::author~>`.
+    /// `::parent-->` (a fork's upstream), `::author-->`.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let proj = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Project { path } => Some(path.clone()),

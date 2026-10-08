@@ -36,7 +36,7 @@ fn fk_machinery() {
     );
     // reverse resolution
     assert_eq!(
-        values("/artists/2::artist_id<--::title"),
+        values("/artists/2<--(::artist_id)::title"),
         vec!["Mikrokosmos", "Quartets"]
     );
 }

@@ -33,10 +33,12 @@ pub enum Token {
     Backslash,
     /// `\\`
     BackslashBackslash,
-    /// `>` — `spaced` when a space (or the end) follows. Spaced, it
-    /// is the comparison; glued to what follows, the next-sibling
-    /// hop. Spacing alone decides, in every position.
-    Gt { spaced: bool },
+    /// `>` — `spaced` when a space (or the end) follows, `before`
+    /// when one precedes. Spaced on both sides, it is the
+    /// comparison; glued to what follows, the next-sibling hop (or
+    /// a trait's closer). Spacing alone decides, in every position;
+    /// spaced on one side only, it is refused with the pointer.
+    Gt { spaced: bool, before: bool },
     /// `;-` — the next-sibling hop's rounded spelling. A token of
     /// its own, not `Gt`: the alias names the hop only, never the
     /// comparison `>` (which gets its own rounded form).
@@ -49,12 +51,13 @@ pub enum Token {
     FollowingSiblings(char),
     /// `<` — see [`Token::Gt`]: spaced, the comparison; glued, the
     /// previous-sibling hop or a trait's opener.
-    Lt { spaced: bool },
+    Lt { spaced: bool, before: bool },
     /// `<<`, `<<?`, `<<!` — all / proximal / distal preceding
     /// siblings. The payload is the reach mark (' ', '?', '!').
     PrecedingSiblings(char),
-    /// `?` — proximal suffix.
-    Question,
+    /// `?` — the proximal suffix, glued to its axis; or, `spaced`
+    /// on both sides, the conditional's test marker.
+    Question { spaced: bool },
     /// `?=` — the value-match marker inside a parenthesized
     /// conditional: `(x ?= k ? r : else)`.
     QuestionEq,
@@ -92,7 +95,7 @@ pub enum Token {
     /// one `RParen`. Single parentheses are the value side, so a
     /// `(name)` group is never an anchor.
     MarkOpen,
-    /// `((!` — the node-id anchor's opener (ruling #58): an
+    /// `((!` — the node-id anchor's opener: an
     /// expression yielding a node id follows, then `))`.
     IdAnchorOpen,
     /// `_` — the served node: the driver inside a join condition,
@@ -131,14 +134,15 @@ pub enum Token {
     Amp,
     /// `&&` — trait conjunction.
     AmpAmp,
-    /// `:` — the definition separator (`def &name: body;`), or the
-    /// conditional's else; spaced on its right.
-    Colon,
-    /// `:name` — a record's field (ruling #48): the single colon
+    /// `:` — the definition separator (`def &name: body;`, glued
+    /// to the name), or, `spaced` on both sides, the conditional's
+    /// else.
+    Colon { spaced: bool },
+    /// `:name` — a record's field: the single colon
     /// glued to the field name, the bottom rung of the colon ladder.
     Field,
     /// `:.name` / `:.` / `:.N` / `:@.` / `:%.` / `:%%.` glued after
-    /// a node path — the cross-capsa read (ruling #57): the register
+    /// a node path — the cross-capsa read: the register
     /// of the capsa standing at the node. The body is the register
     /// accessor as written (`.name`, `@.`, …).
     Capsa(String),
@@ -151,6 +155,8 @@ pub enum Token {
     /// `-->` — cross-reference resolution (`-->` is the deprecated
     /// alias; both lex to this token and unparse canonically).
     Resolve,
+    /// `=>` — the value match.
+    ValueMatch,
     /// `<--` — reverse cross-reference resolution (`<--` is the
     /// deprecated alias).
     ReverseResolve,
@@ -346,7 +352,7 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
 /// the hop and takes no trailing modifiers.
 /// Whether char position `i` follows whitespace (or is the start
 /// of the input): the constructor sigils `%(`, `@(`, `*(` stand
-/// only there, or after a push dot (ruling #53). Char-indexed, as
+/// only there, or after a push dot. Char-indexed, as
 /// the lexer is — a byte slice would misread after any non-ASCII
 /// character.
 fn after_whitespace(chars: &[char], i: usize) -> bool {
@@ -393,11 +399,14 @@ fn after_axis(tokens: &[Token]) -> bool {
                 | Token::DashDash
                 | Token::Resolve
                 | Token::ReverseResolve
+                | Token::ValueMatch
         )
     };
     match tokens.last() {
         Some(t) if axis(t) => true,
-        Some(Token::Question | Token::Bang) => tokens.len() >= 2 && axis(&tokens[tokens.len() - 2]),
+        Some(Token::Question { .. } | Token::Bang) => {
+            tokens.len() >= 2 && axis(&tokens[tokens.len() - 2])
+        }
         _ => false,
     }
 }
@@ -507,6 +516,22 @@ fn after_call_head(tokens: &[Token], glued: bool) -> bool {
             // a macro's marker: `&tok!(…)`, `(=tok!)(…)`
             || (matches!(tokens.last(), Some(Token::Bang))
                 && matches!(tokens.get(tokens.len().wrapping_sub(2)), Some(Token::Name { .. }))))
+}
+
+/// The spacing rule (spec: Lexical Disambiguation): a binary
+/// operator of the value grammar is written with whitespace on both
+/// sides — glued, the same characters are path grammar or a
+/// literal. `glued` says no space preceded the operator; `next` is
+/// the character after it (`None` at the end). Spaced on one side
+/// only, or on neither, the operator is refused with the spaced
+/// spelling, never read as something else.
+fn binary(op: &str, glued: bool, next: Option<char>) -> Result<()> {
+    if glued || !next.is_none_or(char::is_whitespace) {
+        return Err(QuarbError::Lex(format!(
+            "'{op}' is an operator and takes a space on both sides: write ' {op} '"
+        )));
+    }
+    Ok(())
 }
 
 /// Tokenize `input` into the subset's token stream.
@@ -627,7 +652,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Resolve);
                 i += 3;
             }
-            // `__` — the pipe, lying down (ruling #43): a standalone
+            // `__` — the pipe, lying down: a standalone
             // double underscore is `|`; glued to name characters it
             // stays a name (`x__y`, `__init__`). `*__` and `,__` are
             // the aggregation and iteration pipes
@@ -670,7 +695,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             // `%(…)` / `%%(…)` — the record sigil — follows whitespace
             // or the push dot (`.%(…)`, `.name%(…)`); glued to anything
-            // else it is refused (ruling #53). The paren lexes on its
+            // else it is refused. The paren lexes on its
             // own, as for any call.
             '%' if matches!(
                 (at(i + 1), at(i + 2)),
@@ -793,12 +818,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 3;
             }
             '<' if at(i + 1) == Some('=') => {
+                binary("<=", glued, at(i + 2))?;
                 tokens.push(Token::Le);
                 i += 2;
             }
             '<' => {
                 let spaced = at(i + 1).is_none_or(char::is_whitespace);
-                tokens.push(Token::Lt { spaced });
+                tokens.push(Token::Lt {
+                    spaced,
+                    before: !glued,
+                });
                 i += 1;
             }
             '>' if at(i + 1) == Some('>') => {
@@ -813,6 +842,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '>' if at(i + 1) == Some('=') => {
+                binary(">=", glued, at(i + 2))?;
                 tokens.push(Token::Ge);
                 i += 2;
             }
@@ -823,23 +853,30 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     ));
                 }
                 let spaced = at(i + 1).is_none_or(char::is_whitespace);
-                tokens.push(Token::Gt { spaced });
+                tokens.push(Token::Gt {
+                    spaced,
+                    before: !glued,
+                });
                 i += 1;
             }
             '?' => {
                 if chars.get(i + 1) == Some(&'=') {
+                    binary("?=", glued, at(i + 2))?;
                     tokens.push(Token::QuestionEq);
                     i += 2;
                 } else {
-                    tokens.push(Token::Question);
+                    let spaced = !glued && at(i + 1).is_none_or(char::is_whitespace);
+                    tokens.push(Token::Question { spaced });
                     i += 1;
                 }
             }
             '!' if at(i + 1) == Some('=') && at(i + 2) == Some('=') => {
+                binary("!==", glued, at(i + 3))?;
                 tokens.push(Token::NotMatchEq);
                 i += 3;
             }
             '!' if at(i + 1) == Some('=') => {
+                binary("!=", glued, at(i + 2))?;
                 tokens.push(Token::Ne);
                 i += 2;
             }
@@ -895,7 +932,12 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             '$' if at(i + 1) == Some('$') && at(i + 2) == Some('.') => {
                 let mut k = i + 3;
-                while at(k).is_some_and(is_name_char) {
+                // A hyphen belongs to the name unless it opens an
+                // arrow glued to the anchor (`$$.e->boss`,
+                // `$$.e-->ref`, `$$.e--`).
+                while at(k).is_some_and(is_name_char)
+                    && !(at(k) == Some('-') && matches!(at(k + 1), Some('>' | '-')))
+                {
                     k += 1;
                 }
                 let spec: String = chars[i + 3..k].iter().collect();
@@ -936,7 +978,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::ArrowOut);
                 i += 2;
             }
-            // `:name` — a record's field (ruling #48): a single
+            // `:name` — a record's field: a single
             // colon glued to a name on its right. Spaced on the
             // right, a colon is the else of a conditional or a
             // definition's separator, as ever (`? 2 : 0`, `: -3`).
@@ -958,7 +1000,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Capsa("@.".to_string()));
                 i += 5;
             }
-            // `X:.r` — the cross-capsa read (ruling #57): a colon
+            // `X:.r` — the cross-capsa read: a colon
             // glued on the left to a node path and on the right to
             // a register accessor (`.name`, `.`, `.N`, `@.`, `%.`,
             // `%%.`). Spaced on the left it stays the conditional's
@@ -990,7 +1032,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 // projection ladder ('::;' and ';;;' lex as the
                 // deprecated aliases of '::::').
                 if at(i + 1) != Some(':') {
-                    tokens.push(Token::Colon);
+                    let spaced = !glued && at(i + 1).is_none_or(char::is_whitespace);
+                    tokens.push(Token::Colon { spaced });
                     i += 1;
                     continue;
                 }
@@ -1007,7 +1050,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                         i += 3;
                         // `:::%provenance` / `:::@origin` — the
                         // record and list shapes of a core key
-                        // (ruling #58): the sigil rides in the key.
+                        //: the sigil rides in the key.
                         if matches!(at(i), Some('%' | '@'))
                             && at(i + 1).is_some_and(|c| c.is_alphabetic())
                         {
@@ -1044,6 +1087,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 }
             }
             '|' if at(i + 1) == Some('|') => {
+                binary("||", glued, at(i + 2))?;
                 tokens.push(Token::PipePipe);
                 i += 2;
             }
@@ -1055,6 +1099,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // glob is handled by the name-char arm below; `=` cannot
             // appear unescaped in a name, so this never steals one.
             '*' if at(i + 1) == Some('=') => {
+                binary("*=", glued, at(i + 2))?;
                 tokens.push(Token::Contains);
                 i += 2;
             }
@@ -1063,6 +1108,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // never a regex literal: `(/…/)` is the one regex
             // spelling there.
             '=' if at(i + 1) == Some('=') => {
+                binary("==", glued, at(i + 2))?;
                 tokens.push(Token::MatchEq);
                 i += 2;
             }
@@ -1073,13 +1119,19 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             // `=>` — the scalar pattern-search hop (spec: Search
             // Operators). Not implemented yet; recognized here so it
-            // yields the honest message rather than lexing as `=` `>`.
+            // yields the pointed message rather than lexing as `=` `>`.
+            // `=>` — the value match: the nodes of a scope whose
+            // property equals the current node's (spec: Value Match).
             '=' if at(i + 1) == Some('>') => {
-                return Err(QuarbError::Unsupported(
-                    "the pattern-search operator '=>' is not implemented yet".into(),
-                ));
+                tokens.push(Token::ValueMatch);
+                i += 2;
             }
+            // The expression head `= expr` opens the query and is no
+            // binary operator; everywhere else `=` is one.
             '=' => {
+                if !tokens.is_empty() {
+                    binary("=", glued, at(i + 1))?;
+                }
                 tokens.push(Token::Eq);
                 i += 1;
             }
@@ -1155,7 +1207,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     "'((_))' and '((_N))' are retired: the served node is '((0))', the joined '((N))'".into(),
                 ));
             }
-            // `((!expr))` — the node-id anchor (ruling #58): the
+            // `((!expr))` — the node-id anchor: the
             // node whose id the expression yields (`((!7))`,
             // `((!$.v:::origin))`), stood on; a list forks.
             '(' if !after_call_head(&tokens, glued)
@@ -1171,7 +1223,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.extend(unit);
                 i = next;
             }
-            // `(/…/)` — the regex literal (ruling #44), canonical in
+            // `(/…/)` — the regex literal, canonical in
             // both positions. In name position it closes strictly
             // with `/)` (flags inline: `(/(?i)^foo/)`), so a pattern
             // group ending in a hop named i/m/s/x is never misread;
@@ -1212,7 +1264,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     && !after_axis(&tokens[..tokens.len() - 1])) =>
             {
                 openers.push(Opener::RoundedTrait);
-                tokens.push(Token::Lt { spaced: false });
+                tokens.push(Token::Lt {
+                    spaced: false,
+                    before: !glued,
+                });
                 i += 2;
             }
             // `(+m;n)` — the rounded quantifier, `{m;n}`'s alias:
@@ -1261,7 +1316,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     }
                     Some(Opener::RoundedTrait) => {
                         openers.pop();
-                        tokens.push(Token::Gt { spaced: false });
+                        tokens.push(Token::Gt {
+                            spaced: false,
+                            before: false,
+                        });
                     }
                     Some(Opener::Paren) => {
                         openers.pop();
@@ -1329,6 +1387,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             '&' if at(i + 1) == Some('&') => {
+                binary("&&", glued, at(i + 2))?;
                 tokens.push(Token::AmpAmp);
                 i += 2;
             }
@@ -1458,7 +1517,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     // A glued dot is a name character, always
                     // (`/x.rs(...)` keeps its filename, `b.m` is a
                     // name): the push dot stands after whitespace
-                    // (ruling #45), so no `.(` or `.name(` ever
+                    //, so no `.(` or `.name(` ever
                     // splits a name.
                     // A full ISO instant keeps its colons: once the
                     // text reads `YYYY-MM-DDT…`, a `:` followed by a
@@ -1500,7 +1559,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     }
                 }
                 // A push dot is never glued to a name character
-                // (ruling #45): `x.(…)` reads as the name `x.` and
+                //: `x.(…)` reads as the name `x.` and
                 // a paren, which is never meant — refuse it with the
                 // fix. (`x.m` and `x.rs(` are names, as ever.)
                 if text.len() > 1
@@ -1881,7 +1940,7 @@ mod quant_tests {
                 Token::Name { .. },
                 Token::RParen,
                 Token::Name { text, glued: true, .. },
-                Token::Question,
+                Token::Question { .. },
             ] if text == "+"
         ));
     }
@@ -1950,8 +2009,10 @@ mod glued_operator_tests {
 
     #[test]
     fn glued_contains_after_projection_key() {
-        // `::Name*='x'` is key `Name` + Contains, not key `Name*` + Eq.
-        let toks = lex("[::Name*='Countess']").unwrap();
+        // `::Name *= 'x'` is key `Name` + Contains; the glued
+        // spelling is refused with the pointer, never read as key
+        // `Name*` + Eq.
+        let toks = lex("[::Name *= 'Countess']").unwrap();
         assert!(
             matches!(
                 toks.as_slice(),
@@ -1966,9 +2027,43 @@ mod glued_operator_tests {
             ),
             "got {toks:?}"
         );
+        let e = lex("[::Name*='Countess']").unwrap_err().to_string();
+        assert!(e.contains("write ' *= '"), "{e}");
         // A `*` mid-name that is not part of `*=` stays a name char.
         let toks = lex("a*b").unwrap();
         assert!(matches!(toks.as_slice(), [Token::Name { text, .. }] if text == "a*b"));
+    }
+
+    #[test]
+    fn operators_take_a_space_on_both_sides() {
+        // The spacing rule (spec: Lexical Disambiguation): every
+        // binary operator of the value grammar is spaced on both
+        // sides; glued or spaced on one side only, it is refused
+        // with the spaced spelling — never read as a name.
+        for (q, op) in [
+            ("[::v=2]", "="),
+            ("[::v =2]", "="),
+            ("[::v= 2]", "="),
+            ("[::n!=1]", "!="),
+            ("[::n<=1]", "<="),
+            ("[::n>=1]", ">="),
+            ("[::n==\"x\"]", "=="),
+            ("[::n!==\"x\"]", "!=="),
+            ("[::v = 2&&::n = 1]", "&&"),
+            ("[::v = 2 ||::n = 1]", "||"),
+            ("%(k=::n)", "="),
+            ("(::n ?=1 ? 2 : 3)", "?="),
+        ] {
+            let e = lex(q).unwrap_err().to_string();
+            assert!(e.contains(&format!("write ' {op} '")), "{q}: {e}");
+        }
+        // The expression head is no binary operator.
+        assert!(lex("= 1 + 2").is_ok());
+        // Glued, the characters are names, hops and literals.
+        assert!(lex("/chapter-02.md").is_ok());
+        assert!(lex("//h2>p").is_ok());
+        assert!(lex("[::d = 2024-02-15]").is_ok());
+        assert!(lex("[::n = -1]").is_ok());
     }
 
     #[test]
@@ -2084,7 +2179,7 @@ mod glued_operator_tests {
                 Token::Slash,
                 name("b"),
                 Token::BackslashBackslash,
-                Token::Question,
+                Token::Question { spaced: false },
                 name("c")
             ]
         );
@@ -2110,12 +2205,18 @@ mod glued_operator_tests {
             vec![
                 Token::Slash,
                 name("x"),
-                Token::Lt { spaced: false },
+                Token::Lt {
+                    spaced: false,
+                    before: false
+                },
                 name("admin"),
                 Token::AmpAmp,
                 Token::Bang,
                 name("banned"),
-                Token::Gt { spaced: false }
+                Token::Gt {
+                    spaced: false,
+                    before: false
+                }
             ]
         );
         assert!(matches!(
@@ -2150,11 +2251,11 @@ mod glued_operator_tests {
         ));
         assert!(matches!(
             lex("(:stage-direction)").unwrap().as_slice(),
-            [Token::Lt { spaced: false }, Token::Name { .. }, ..]
+            [Token::Lt { spaced: false, .. }, Token::Name { .. }, ..]
         ));
         assert!(matches!(
             lex("(:word and not punct)").unwrap().as_slice(),
-            [Token::Lt { spaced: false }, Token::Name { .. }, ..]
+            [Token::Lt { spaced: false, .. }, Token::Name { .. }, ..]
         ));
         // root anchor: `(())` is `^`; a glued `()` stays a call's parens
         assert_eq!(
@@ -2341,32 +2442,30 @@ mod glued_operator_tests {
     fn angle_brackets_carry_their_spacing() {
         // `>` spaced is the comparison, glued the hop: the lexer
         // records which, the parser decides nothing.
-        assert!(
-            lex("[::n > 3]")
-                .unwrap()
-                .contains(&Token::Gt { spaced: true })
-        );
-        assert!(
-            lex("//h2>p")
-                .unwrap()
-                .contains(&Token::Gt { spaced: false })
-        );
-        assert!(
-            lex("[::n>3]")
-                .unwrap()
-                .contains(&Token::Gt { spaced: false })
-        );
-        assert!(lex("//a<b").unwrap().contains(&Token::Lt { spaced: false }));
-        assert!(
-            lex("[::n < 3]")
-                .unwrap()
-                .contains(&Token::Lt { spaced: true })
-        );
-        assert!(
-            lex("/*<function>")
-                .unwrap()
-                .contains(&Token::Lt { spaced: false })
-        );
+        assert!(lex("[::n > 3]").unwrap().contains(&Token::Gt {
+            spaced: true,
+            before: true
+        }));
+        assert!(lex("//h2>p").unwrap().contains(&Token::Gt {
+            spaced: false,
+            before: false
+        }));
+        assert!(lex("[::n>3]").unwrap().contains(&Token::Gt {
+            spaced: false,
+            before: false
+        }));
+        assert!(lex("//a<b").unwrap().contains(&Token::Lt {
+            spaced: false,
+            before: false
+        }));
+        assert!(lex("[::n < 3]").unwrap().contains(&Token::Lt {
+            spaced: true,
+            before: true
+        }));
+        assert!(lex("/*<function>").unwrap().contains(&Token::Lt {
+            spaced: false,
+            before: false
+        }));
     }
 
     #[test]
@@ -2504,9 +2603,9 @@ mod glued_operator_tests {
         assert!(matches!(
             lex("? 2 : 0").unwrap().as_slice(),
             [
-                Token::Question,
+                Token::Question { .. },
                 Token::Name { .. },
-                Token::Colon,
+                Token::Colon { .. },
                 Token::Name { .. }
             ]
         ));
@@ -2516,7 +2615,7 @@ mod glued_operator_tests {
                 Token::Name { .. },
                 Token::Amp,
                 Token::Name { .. },
-                Token::Colon,
+                Token::Colon { .. },
                 ..
             ]
         ));
@@ -2746,11 +2845,11 @@ mod regex_and_search_tests {
     }
 
     #[test]
-    fn arrow_search_operator_is_unsupported_not_eq_gt() {
-        // `=>` is the (unimplemented) pattern-search hop; it reports
-        // that honestly rather than lexing as `=` then `>`.
-        let err = lex("//a => b").unwrap_err();
-        assert!(matches!(err, QuarbError::Unsupported(_)), "got {err:?}");
+    fn value_match_lexes_as_one_token() {
+        // `=>` is the value match, one token, never `=` then `>`.
+        let toks = lex("//a::x=>(/b/*::y)").unwrap();
+        assert!(toks.contains(&Token::ValueMatch), "got {toks:?}");
+        assert!(!toks.contains(&Token::Eq), "got {toks:?}");
     }
 }
 

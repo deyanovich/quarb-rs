@@ -46,7 +46,7 @@ fn parens_keep_their_navigational_meanings() {
     // before the head existed; a leading paren is never a head.
     canon("(/a|/b)");
     canon("(/a/(x.rs|y.txt)|/b/z.rs)");
-    // (mark anchors print in double parentheses since ruling #43)
+    // (mark anchors print in double parentheses)
     assert_eq!(canon("/a.m | $$.m/address"), "/a.m | $$.m/address");
     assert!(refuse("(|/a)").contains("at least one hop"));
 }

@@ -17,10 +17,10 @@
 //! **References.** DynamoDB declares no foreign keys, so `->`
 //! enumerates nothing; the by-convention pointers single-table
 //! and multi-table designs use resolve with a hint naming the
-//! target table: `::artist_id~>artists` fetches the item whose
+//! target table: `::artist_id-->artists` fetches the item whose
 //! partition key equals the value (a `GetItem`, not a scan).
 //! Hint-less resolution falls back to the property name minus a
-//! trailing `_id`, pluralized bare (`::artist_id~>` tries the
+//! trailing `_id`, pluralized bare (`::artist_id-->` tries the
 //! `artist` and `artists` tables).
 //!
 //! **Scalars are properties AND leaves** (the dual-exposure
@@ -211,7 +211,7 @@ impl DynamodbAdapter {
         let resp = match req.send_string(&payload) {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
+                let text = quarb::source::text_from_reader(r.into_reader()).unwrap_or_default();
                 let msg = serde_json::from_str::<serde_json::Value>(&text)
                     .ok()
                     .and_then(|v| {
@@ -226,8 +226,7 @@ impl DynamodbAdapter {
             Err(e) => return Err(DynamodbError::Api(format!("{op}: {e}"))),
         };
         serde_json::from_str(
-            &resp
-                .into_string()
+            &quarb::source::text_from_reader(resp.into_reader())
                 .map_err(|e| DynamodbError::Api(format!("{op}: reading response: {e}")))?,
         )
         .map_err(|e| DynamodbError::Api(format!("{op}: parsing response: {e}")))
@@ -301,7 +300,14 @@ impl DynamodbAdapter {
         let made = match plan {
             Plan::Done(k) => return k,
             Plan::Leaf => Vec::new(),
-            Plan::Table(name) => self.scan(name, node).unwrap_or_default(),
+            // Refused and left uncached.
+            Plan::Table(name) => match self.scan(name.clone(), node) {
+                Ok(items) => items,
+                Err(e) => {
+                    quarb::record_refusal(format!("dynamodb: scanning table {name}: {e}"));
+                    return Vec::new();
+                }
+            },
             Plan::Entries(entries) => self.field_children(&entries, node),
             Plan::List(items) => items
                 .into_iter()
@@ -392,7 +398,9 @@ impl DynamodbAdapter {
     /// primary key, so tables with a range key resolve via a
     /// key-condition `Query` instead, taking the first item).
     fn fetch(&self, table: &str, key_value: &Value) -> Option<NodeId> {
-        let (hash, range) = self.keys_of(table).ok()?;
+        let (hash, range) = quarb::fetched_opt(self.keys_of(table), || {
+            format!("dynamodb: describing table {table}")
+        })?;
         if hash.is_empty() {
             return None;
         }
@@ -596,6 +604,12 @@ impl AstAdapter for DynamodbAdapter {
             (_, Some(t), "table") => Some(Value::Str(t)),
             _ => None,
         }
+    }
+
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
     }
 
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {

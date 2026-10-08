@@ -54,7 +54,7 @@
 //! - **Verbatim** blocks keep their text as authored
 //!   (`::::lang` from the first genos); an `englossis` reads as
 //!   verbatim in its embedded dialect's name; verse stichoi
-//!   lower as `verse`/`strophe`/`stichos` (ruling #37), the
+//!   lower as `verse`/`strophe`/`stichos`, the
 //!   stichos taxis the citation coordinate.
 //! - **Tables** (litogramma's stichoi table: pipe cells, a
 //!   dash-run separating the header row) lower through the
@@ -68,7 +68,7 @@
 
 use std::path::Path;
 
-use atrep::dendron::{Block as ABlock, Inline, Strophe};
+use atrep::dendron::{Block as ABlock, Inline, Strophe, Taxis};
 use atrep::dialektos::{self, Dialektos};
 use atrep::{Checked, kanonizo};
 use quarb_text::{Block, Cell, Container, NoteFamily, TextModel};
@@ -80,6 +80,8 @@ pub enum KoineError {
     Atrep(#[from] atrep::Error),
     #[error("input is an atrep dialektos definition, not a document")]
     NotADocument,
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
     #[error(
         "unknown koine format {0:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, atd"
     )]
@@ -96,7 +98,10 @@ pub fn parse_file(path: &Path) -> Result<TextModel, KoineError> {
             let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
             let dial = dialektos::resolve(&base, &doc.dialect_id)?;
             kanonizo::tasso(&mut doc, &dial, &base)?;
-            Ok(finish_model(blocks(&doc, &dial)))
+            let head = head_meta(&doc, &dial);
+            let mut model = finish_model(blocks(&doc, &dial));
+            model.set_head_meta(head);
+            Ok(model)
         }
     }
 }
@@ -109,7 +114,10 @@ pub fn parse_str(source: &str, dir: &Path) -> Result<TextModel, KoineError> {
         Checked::Document(mut doc) => {
             let dial = dialektos::resolve(dir, &doc.dialect_id)?;
             kanonizo::tasso(&mut doc, &dial, dir)?;
-            Ok(finish_model(blocks(&doc, &dial)))
+            let head = head_meta(&doc, &dial);
+            let mut model = finish_model(blocks(&doc, &dial));
+            model.set_head_meta(head);
+            Ok(model)
         }
     }
 }
@@ -146,11 +154,16 @@ pub fn parse_djot(text: &str) -> Result<TextModel, KoineError> {
 
 /// Import one of the XML vocabularies by its declared identity —
 /// `kind` as detected by [`detect_xml_kind`] or forced by
-/// `?format=`: `"tei"`, `"docbook"`, `"jats"`, `"usx"`, `"osis"`.
+/// `?format=`: `"tei"`, `"docbook"`, `"jats"`, `"usx"`, `"osis"`,
+/// `"fb2"`.
 pub fn parse_xml_as(text: &str, kind: &str) -> Result<TextModel, KoineError> {
     let doc = match kind {
         "usfm" => atrep::endo::usfm_to_document(text)?,
         "tei" => atrep::endo::tei_to_document(text)?,
+        // FictionBook 2: titled sections, epigraphs and citations as
+        // quotation blocks, poems as strophes, notes as footnotes;
+        // the description's title and author as declared identity.
+        "fb2" => atrep::fb2::fb2_to_document(text)?,
         "docbook" => atrep::endo::docbook_to_document(text)?,
         "jats" => atrep::endo::jats_to_document(text)?,
         "usx" => atrep::endo::usx_to_document(text)?,
@@ -193,6 +206,7 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
                         "http://www.bibletechnologies.net/2003/OSIS/namespace" => {
                             return Some("osis");
                         }
+                        "http://www.gribuser.ru/xml/fictionbook/2.0" => return Some("fb2"),
                         _ => {}
                     }
                 }
@@ -211,10 +225,11 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
                 let local = name.local_name();
                 return match local.as_ref() {
                     b"TEI" | b"teiCorpus" => Some("tei"),
+                    b"FictionBook" => Some("fb2"),
                     b"usx" => Some("usx"),
                     b"osis" => Some("osis"),
                     b"book" => Some("docbook"),
-                    // The parsed corpora (ruling #80): OpenCorpora's
+                    // The parsed corpora: OpenCorpora's
                     // `<annotation>`, PROIEL's `<proiel>`, and the
                     // Russian National Corpus's XHTML-shaped export,
                     // told from a web page by its `<ana` analyses.
@@ -242,7 +257,127 @@ fn import(doc: atrep::Document) -> Result<TextModel, KoineError> {
 fn import_with(mut doc: atrep::Document, lit: bool) -> Result<TextModel, KoineError> {
     let dial = dialektos::resolve(Path::new("."), &doc.dialect_id)?;
     kanonizo::tasso(&mut doc, &dial, Path::new("."))?;
-    Ok(finish_model(blocks_with(&doc, &dial, lit)))
+    let head = head_meta(&doc, &dial);
+    let mut model = finish_model(blocks_with(&doc, &dial, lit));
+    model.set_head_meta(head);
+    Ok(model)
+}
+
+/// The document's declared identity, as the html reading declares
+/// its head: the hoisted header an importer writes at the top
+/// (`=` title, `=:` author, `="` abstract — a FictionBook's
+/// description, a TEI title statement) becomes `::::title`,
+/// `::::author`, `::::description` on the document node. The
+/// paragraphs themselves stay in the text as they are.
+fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
+    let mut head = quarb_text::HeadMeta::default();
+    for block in &doc.blocks {
+        let ABlock::Paragraph(inlines) = block else {
+            // The abstract is a block of its own (`="`); any other
+            // structural block ends the hoisted header.
+            if let ABlock::Para {
+                symbol, children, ..
+            } = block
+                && sim_name(dial, symbol) == "abstract"
+            {
+                let text = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        ABlock::Paragraph(i) => Some(flat(i)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                head.declare("description", &text);
+                if head.description.is_none() && !text.trim().is_empty() {
+                    head.description = Some(quarb_text::normalize_ws(&text));
+                }
+                continue;
+            }
+            if matches!(block, ABlock::Para { .. } | ABlock::Stichoi { .. }) {
+                break;
+            }
+            continue;
+        };
+        let [
+            Inline::Endo {
+                symbol, content, ..
+            },
+        ] = inlines.as_slice()
+        else {
+            continue;
+        };
+        let text = flat(content);
+        match sim_name(dial, symbol).as_str() {
+            "title" => {
+                head.declare("title", &text);
+                if head.title.is_none() {
+                    head.title = Some(quarb_text::normalize_ws(&text));
+                }
+            }
+            "author" => {
+                head.declare("author", &text);
+                if head.author.is_none() {
+                    head.author = Some(quarb_text::normalize_ws(&text));
+                }
+            }
+            "abstract" => {
+                head.declare("description", &text);
+                if head.description.is_none() {
+                    head.description = Some(quarb_text::normalize_ws(&text));
+                }
+            }
+            // The dictionary vocabulary: the languages line, the
+            // index language first — `::::languages`.
+            "languages" => {
+                for code in text.split(|c: char| c.is_whitespace() || c == ',') {
+                    if !code.is_empty() {
+                        head.declare("languages", code);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    head
+}
+
+/// The dictionary vocabulary's inline sims (lexigramma's names)
+/// and the node name each lowers to, with which genos-borne
+/// property the node carries (`kind` or `lang`).
+fn dict_inline(name: &str) -> Option<(&'static str, Option<&'static str>)> {
+    Some(match name {
+        "variant" => ("variant", Some("kind")),
+        "pronunciation" => ("pronunciation", Some("kind")),
+        "syllabification" => ("syllabification", None),
+        "grammar" => ("grammar", None),
+        "grammar-label" => ("grammar-label", None),
+        "etymology" => ("etymology", None),
+        "usage-label" => ("label", Some("kind")),
+        "equivalent" => ("equivalent", Some("lang")),
+        "citation" => ("citation", None),
+        "inflection" => ("inflection", Some("kind")),
+        "languages" => ("languages", None),
+        _ => return None,
+    })
+}
+
+/// A genos as the spec's kind value: usage labels by their
+/// lexigramma genoses, variants and pronunciations by theirs.
+fn dict_kind(kind: &str, genos: &str) -> Option<&'static str> {
+    Some(match (kind, genos) {
+        ("label", "reg") => "register",
+        ("label", "dom") => "domain",
+        ("label", "geo") => "geography",
+        ("label", "time") => "period",
+        ("label", "lang") => "language",
+        ("variant", "spelling") => "spelling",
+        ("variant", "dialect") => "dialect",
+        ("variant", "inflection" | "inflected") => "inflected",
+        ("pronunciation", "ipa") => "ipa",
+        ("pronunciation", "respell") => "respell",
+        _ => return None,
+    })
 }
 
 /// The literary reading (`lit:`) of a document file: every inline
@@ -252,7 +387,7 @@ pub fn parse_lit_file(path: &Path) -> Result<TextModel, KoineError> {
     parse_lit_file_with(path, None)
 }
 
-/// [`parse_lit_file`] under a citation scheme (ruling #81): the
+/// [`parse_lit_file`] under a citation scheme: the
 /// at-usfm chapter and verse markers become milestones with
 /// full-path values under `scheme` (`scheme:jhn.3.16`), and
 /// `::cite` answers under it.
@@ -266,7 +401,9 @@ pub fn parse_lit_file_with(path: &Path, scheme: Option<&str>) -> Result<TextMode
                 atrep::endo::usfm_apply_scheme(&mut doc, s);
             }
             kanonizo::tasso(&mut doc, &dial, &base)?;
+            let head = head_meta(&doc, &dial);
             let mut model = finish_model(blocks_with(&doc, &dial, true));
+            model.set_head_meta(head);
             if let Some(s) = scheme {
                 model.set_cite_scheme(s);
             }
@@ -283,19 +420,22 @@ pub fn parse_lit_str(source: &str, dir: &Path) -> Result<TextModel, KoineError> 
         Checked::Document(mut doc) => {
             let dial = dialektos::resolve(dir, &doc.dialect_id)?;
             kanonizo::tasso(&mut doc, &dial, dir)?;
-            Ok(finish_model(blocks_with(&doc, &dial, true)))
+            let head = head_meta(&doc, &dial);
+            let mut model = finish_model(blocks_with(&doc, &dial, true));
+            model.set_head_meta(head);
+            Ok(model)
         }
     }
 }
 
 /// The literary reading of one of the literary XML vocabularies —
-/// `"tei"`, `"usx"`, `"osis"` — through atrep's importer, which
-/// emits the aphanes monosims from the source's attributes.
+/// `"tei"`, `"usx"`, `"osis"`, `"fb2"` — through atrep's importer,
+/// which emits the aphanes monosims from the source's attributes.
 pub fn parse_lit_xml_as(text: &str, kind: &str) -> Result<TextModel, KoineError> {
     parse_lit_xml_as_with(text, kind, None)
 }
 
-/// [`parse_lit_xml_as`] under a citation scheme (ruling #81) —
+/// [`parse_lit_xml_as`] under a citation scheme —
 /// also the route for USFM (`"usfm"`), whose chapter and verse
 /// markers the scheme turns into milestones.
 pub fn parse_lit_xml_as_with(
@@ -310,6 +450,7 @@ pub fn parse_lit_xml_as_with(
         "tei" => atrep::endo::tei_to_document_lines(text, scheme)?,
         "usx" => atrep::endo::usx_to_document(text)?,
         "osis" => atrep::endo::osis_to_document(text)?,
+        "fb2" => atrep::fb2::fb2_to_document(text)?,
         "rnc" => atrep::epimerismos::rnc_to_document(text)?,
         "opencorpora" => atrep::epimerismos::opencorpora_to_document(text)?,
         "proiel" => atrep::epimerismos::proiel_to_document(text)?,
@@ -344,6 +485,11 @@ pub fn blocks_with(doc: &atrep::Document, dial: &Dialektos, lit: bool) -> Vec<Bl
         pending: Vec::new(),
         heading_depth: 0,
         lit,
+        // The dictionary vocabulary (spec: The Dictionary
+        // Vocabulary): lexigramma's sims lower to entries, senses
+        // and the inline apparatus whatever the reading.
+        dict: doc.dialect_id == "lexigramma",
+        seen_entry: false,
         open_spans: Vec::new(),
         para_fields: Vec::new(),
         note_bodies: Vec::new(),
@@ -351,6 +497,98 @@ pub fn blocks_with(doc: &atrep::Document, dial: &Dialektos, lit: bool) -> Vec<Bl
     };
     lower.seq(&doc.blocks, dial);
     lower.out
+}
+
+/// Import a Word document through atrep's importer (`atrep::docx`,
+/// declared structure only — the parity with the native `text:`
+/// reading) and lower it — `koine:report.docx`, the second route
+/// beside `text:report.docx`.
+pub fn parse_docx(bytes: &[u8]) -> Result<TextModel, KoineError> {
+    import(atrep::docx::docx_to_document(bytes)?)
+}
+
+/// Import a Lingvo DSL dictionary (`.dsl`; the encoding by its
+/// byte-order mark or `#SOURCE_CODE_PAGE` header) through atrep's
+/// importer into lexigramma and lower it under the dictionary
+/// vocabulary — `koine:webster.dsl`. `abbreviations` is the file
+/// an `#INCLUDE` names, when the caller has it.
+pub fn parse_dsl(bytes: &[u8], abbreviations: Option<&[u8]>) -> Result<TextModel, KoineError> {
+    let doc = match abbreviations {
+        Some(a) => atrep::dsl::dsl_to_document_with_abbreviations(bytes, a)?,
+        None => atrep::dsl::dsl_to_document(bytes)?,
+    };
+    import(doc)
+}
+
+/// [`parse_dsl`] over a file: `.dsl.dz` (gzip) is decompressed,
+/// and the file an `#INCLUDE` names is read beside it.
+pub fn parse_dsl_file(path: &Path) -> Result<TextModel, KoineError> {
+    let bytes = read_dsl_bytes(path)?;
+    let abbreviations = match atrep::dsl::dsl_include(&bytes)? {
+        Some(name) => {
+            let p = path.parent().unwrap_or(Path::new(".")).join(&name);
+            Some(read_dsl_bytes(&p)?)
+        }
+        None => None,
+    };
+    parse_dsl(&bytes, abbreviations.as_deref())
+}
+
+/// The file's bytes, a `.dz` member decompressed (gzip).
+fn read_dsl_bytes(path: &Path) -> Result<Vec<u8>, KoineError> {
+    let bytes = std::fs::read(path)?;
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dz"))
+        || bytes.starts_with(&[0x1f, 0x8b])
+    {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::MultiGzDecoder::new(&bytes[..]).read_to_end(&mut out)?;
+        return Ok(out);
+    }
+    Ok(bytes)
+}
+
+/// Whether a path names a Lingvo DSL dictionary: `.dsl`, or
+/// `.dsl.dz`.
+pub fn is_dsl_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".dsl") || name.ends_with(".dsl.dz")
+}
+
+/// The encoding a DSL file declares, for the source boundary's
+/// record: a UTF-16 byte-order mark, else its `#SOURCE_CODE_PAGE`
+/// header (Lingvo's names map onto the Encoding Standard's
+/// labels), else nothing (UTF-8).
+pub fn dsl_declared_encoding(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return Some("utf-16le".to_string());
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return Some("utf-16be".to_string());
+    }
+    let head = std::str::from_utf8(&bytes[..bytes.len().min(2048)]).ok()?;
+    let line = head.lines().find(|l| l.starts_with("#SOURCE_CODE_PAGE"))?;
+    let value = line.split('"').nth(1)?.trim();
+    Some(match value {
+        "Cyrillic" => "windows-1251".to_string(),
+        "Latin" | "Western" => "windows-1252".to_string(),
+        "EasternEuropean" => "windows-1250".to_string(),
+        "Greek" => "windows-1253".to_string(),
+        "Turkish" => "windows-1254".to_string(),
+        "Hebrew" => "windows-1255".to_string(),
+        "Arabic" => "windows-1256".to_string(),
+        "Baltic" => "windows-1257".to_string(),
+        "Vietnamese" => "windows-1258".to_string(),
+        "Thai" => "windows-874".to_string(),
+        other => other.to_string(),
+    })
 }
 
 /// The flat heading endos (at-html and its heirs): the level
@@ -520,7 +758,15 @@ enum Pending {
         value: String,
         at: u32,
     },
-    /// The parsing pack (ruling #80): a token the source parsed,
+    /// The dictionary vocabulary: an inline node with text of its
+    /// own that is not in the prose (an inflection lookup key).
+    Hidden {
+        kind: String,
+        text: String,
+        genoses: Vec<String>,
+        fields: Vec<(String, String)>,
+    },
+    /// The parsing pack: a token the source parsed,
     /// at byte offsets, with its parsings and its onym.
     Parsed {
         lo: u32,
@@ -587,6 +833,13 @@ struct Lower {
     heading_depth: u8,
     /// The literary reading is on: keep the inline simmeres.
     lit: bool,
+    /// The document is a dictionary (lexigramma): entries, senses
+    /// and the inline apparatus lower under the dictionary
+    /// vocabulary, whatever the reading.
+    dict: bool,
+    /// An entry has been met: a definition list before the first
+    /// entry is the abbreviations list.
+    seen_entry: bool,
     /// Indices into `pending` of the spans open around the text
     /// being flattened (innermost last): an aphanes monosim
     /// annotates the innermost open span.
@@ -719,6 +972,7 @@ impl Lower {
             }
             ABlock::Para {
                 symbol,
+                taxis,
                 lemma,
                 children,
                 hypograph,
@@ -730,7 +984,78 @@ impl Lower {
                 if SKIP.contains(&name) {
                     return;
                 }
+                let taxis_n = match taxis {
+                    Some(Taxis::Explicit(n)) => Some(*n as i64),
+                    _ => None,
+                };
                 match name {
+                    // The dictionary vocabulary: an entry is a
+                    // record named by its headword (the lemma; the
+                    // taxis its homograph number), a sense a block
+                    // under it numbered at its depth, nested as the
+                    // dictionary subdivides; the definition is the
+                    // sense's own paragraphs.
+                    "entry" if self.dict => {
+                        self.seen_entry = true;
+                        let lemma = self.flatten(lemma, dial);
+                        self.out.push(Block::Open {
+                            kind: Container::Entry {
+                                taxis: taxis_n,
+                                onym: ann.onym.clone(),
+                            },
+                            lemma: (!lemma.is_empty()).then_some(lemma),
+                        });
+                        self.drain_pending();
+                        self.seq(children, dial);
+                        self.out.push(Block::Close { hypograph: None });
+                    }
+                    "sense" if self.dict => {
+                        let lemma = self.flatten(lemma, dial);
+                        self.out.push(Block::Open {
+                            kind: Container::Sense { taxis: taxis_n },
+                            lemma: (!lemma.is_empty()).then_some(lemma),
+                        });
+                        self.drain_pending();
+                        self.seq(children, dial);
+                        self.out.push(Block::Close { hypograph: None });
+                    }
+                    // The table model (litogramma's table / row /
+                    // header-row / cell sims, the spans as monosims
+                    // first inside a cell): rows are records, cells
+                    // fields named by their column — the shared
+                    // table rule's shape.
+                    "table" => {
+                        self.table_rows(lemma, children, hypograph, dial);
+                    }
+                    // The abbreviations list (lexigramma's
+                    // `abbreviations` sim, `@[[ … ]]@`): the
+                    // definition list it wraps is the list of that
+                    // kind, which the labels resolve against.
+                    "abbreviations" if self.dict => {
+                        for child in children {
+                            match child {
+                                ABlock::Para {
+                                    symbol, children, ..
+                                } if sim_name(dial, symbol) == "definition-list" => {
+                                    self.out.push(Block::Open {
+                                        kind: Container::UnorderedList,
+                                        lemma: None,
+                                    });
+                                    self.out.push(Block::Annotate {
+                                        fields: vec![(
+                                            "kind".to_string(),
+                                            "abbreviations".to_string(),
+                                        )],
+                                    });
+                                    for item in children {
+                                        self.block(item, dial);
+                                    }
+                                    self.out.push(Block::Close { hypograph: None });
+                                }
+                                other => self.block(other, dial),
+                            }
+                        }
+                    }
                     _ if HEADINGS.contains(&name) => {
                         let lemma = self.flatten(lemma, dial);
                         self.heading_depth += 1;
@@ -775,6 +1100,17 @@ impl Lower {
                             },
                             lemma: None,
                         });
+                        // The dictionary vocabulary: a definition
+                        // list standing before the first entry of a
+                        // dictionary, outside the `abbreviations`
+                        // sim (a hand-written list left undeclared,
+                        // or the importer's shape before the sim),
+                        // is the abbreviations list as well.
+                        if name == "definition-list" && self.dict && !self.seen_entry {
+                            self.out.push(Block::Annotate {
+                                fields: vec![("kind".to_string(), "abbreviations".to_string())],
+                            });
+                        }
                         for child in children {
                             self.block(child, dial);
                         }
@@ -908,7 +1244,7 @@ impl Lower {
                 if name == "table" {
                     self.table(lemma, strophes, hypograph, dial);
                 } else {
-                    // The verse vocabulary (ruling #37): stichoi
+                    // The verse vocabulary: stichoi
                     // lower as verse/strophe/stichos, the line
                     // taxis the citation coordinate.
                     let lemma = self.flatten(lemma, dial);
@@ -976,6 +1312,147 @@ impl Lower {
             | ABlock::ParaAxioma { .. }
             | ABlock::AxiomaRefBlock { .. } => {}
         }
+    }
+
+    /// Lower the table model: `row` / `header-row` children, each
+    /// holding `cell` blocks (the optional lemma names the column
+    /// explicitly, winning over the header's); an `hspan` /
+    /// `vspan` monosim first inside a cell covers the cells the
+    /// columns to the right / the rows below omit, which become
+    /// empty cells so every row stays a record of the same width.
+    fn table_rows(
+        &mut self,
+        lemma: &[Inline],
+        children: &[ABlock],
+        hypograph: &[Inline],
+        dial: &Dialektos,
+    ) {
+        let mut headers: Option<Vec<String>> = None;
+        let mut rows: Vec<Vec<Cell>> = Vec::new();
+        // Columns a cell above spans into: (column, rows left).
+        let mut reserved: Vec<(usize, usize)> = Vec::new();
+        let take_reserved = |reserved: &mut Vec<(usize, usize)>, col: usize| -> bool {
+            match reserved.iter().position(|(c, _)| *c == col) {
+                Some(i) => {
+                    reserved[i].1 -= 1;
+                    if reserved[i].1 == 0 {
+                        reserved.remove(i);
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        for child in children {
+            let ABlock::Para {
+                symbol, children, ..
+            } = child
+            else {
+                continue;
+            };
+            let kind = sim_name(dial, symbol);
+            if kind != "row" && kind != "header-row" {
+                continue;
+            }
+            let mut row: Vec<Cell> = Vec::new();
+            let mut col = 0usize;
+            let mut cells = children.iter().filter_map(|c| match c {
+                ABlock::Para {
+                    symbol,
+                    lemma,
+                    children,
+                    ..
+                } if sim_name(dial, symbol) == "cell" => Some((lemma, children)),
+                _ => None,
+            });
+            loop {
+                if take_reserved(&mut reserved, col) {
+                    row.push(Cell::from(""));
+                    col += 1;
+                    continue;
+                }
+                let Some((lemma, blocks)) = cells.next() else {
+                    break;
+                };
+                let (text, hspan, vspan) = self.cell_text(blocks, dial);
+                let label = self.flatten(lemma, dial);
+                row.push(Cell {
+                    label: (!label.is_empty()).then_some(label),
+                    text,
+                });
+                if vspan > 1 {
+                    reserved.push((col, vspan - 1));
+                }
+                col += 1;
+                for _ in 1..hspan {
+                    row.push(Cell::from(""));
+                    col += 1;
+                }
+            }
+            while take_reserved(&mut reserved, col) {
+                row.push(Cell::from(""));
+                col += 1;
+            }
+            if kind == "header-row" {
+                if headers.is_none() {
+                    headers = Some(row.into_iter().map(|c| c.text).collect());
+                }
+            } else {
+                rows.push(row);
+            }
+        }
+        let lemma = self.flatten(lemma, dial);
+        let hypograph = self.flatten(hypograph, dial);
+        let caption = if !lemma.is_empty() {
+            Some(lemma)
+        } else if !hypograph.is_empty() {
+            Some(hypograph)
+        } else {
+            None
+        };
+        self.out.push(Block::Table {
+            lemma: caption,
+            headers,
+            rows,
+        });
+        self.drain_pending();
+    }
+
+    /// A cell's text (its blocks' prose, joined) and its spans
+    /// (1 when none): the `hspan` / `vspan` monosims stand first
+    /// inside the cell's first paragraph.
+    fn cell_text(&mut self, blocks: &[ABlock], dial: &Dialektos) -> (String, usize, usize) {
+        let mut hspan = 1usize;
+        let mut vspan = 1usize;
+        let mut parts: Vec<String> = Vec::new();
+        for (i, block) in blocks.iter().enumerate() {
+            match block {
+                ABlock::Paragraph(inlines) => {
+                    let mut rest: &[Inline] = inlines;
+                    if i == 0 {
+                        while let Some(Inline::Monosim { symbol, param, .. }) = rest.first() {
+                            match sim_name(dial, symbol).as_str() {
+                                "hspan" => hspan = param.trim().parse().unwrap_or(1).max(1),
+                                "vspan" => vspan = param.trim().parse().unwrap_or(1).max(1),
+                                _ => break,
+                            }
+                            rest = &rest[1..];
+                        }
+                    }
+                    let text = self.flatten(rest, dial);
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                }
+                other => {
+                    let text = block_text(other);
+                    if !text.trim().is_empty() {
+                        parts.push(quarb_text::normalize_ws(&text));
+                    }
+                }
+            }
+        }
+        (parts.join(" "), hspan, vspan)
     }
 
     /// Lower litogramma's stichoi table: one row per line, cells
@@ -1095,6 +1572,68 @@ impl Lower {
                             self.pending.push(Pending::Ref(t, internal));
                         }
                     }
+                    // The dictionary vocabulary: the inline
+                    // apparatus — a variant, a pronunciation, the
+                    // grammatical line and labels, the etymology, a
+                    // usage label, an equivalent, a citation — is
+                    // a span named by its sim with its kind (or
+                    // language) from the genos, whatever the
+                    // reading; an inflection is a hidden node
+                    // (never in the prose); the languages line is
+                    // head metadata.
+                    name if self.dict && dict_inline(name).is_some() => {
+                        let (kind, field) = dict_inline(name).expect("checked");
+                        if kind == "inflection" {
+                            let mut fields = Vec::new();
+                            if ann.genoses.iter().any(|g| g == "sort") {
+                                fields.push(("kind".to_string(), "sort".to_string()));
+                            }
+                            self.pending.push(Pending::Hidden {
+                                kind: kind.to_string(),
+                                text: flat(content),
+                                genoses: Vec::new(),
+                                fields,
+                            });
+                            continue;
+                        }
+                        if kind == "languages" {
+                            continue;
+                        }
+                        let mut fields = Vec::new();
+                        let mut genoses = Vec::new();
+                        for g in &ann.genoses {
+                            match (field, g.as_str()) {
+                                (Some("lang"), lang) => {
+                                    fields.push(("lang".to_string(), lang.to_string()))
+                                }
+                                (Some("kind"), g) => match dict_kind(kind, g) {
+                                    Some(k) => fields.push(("kind".to_string(), k.to_string())),
+                                    None => genoses.push(g.to_string()),
+                                },
+                                _ => genoses.push(g.to_string()),
+                            }
+                        }
+                        let idx = self.pending.len();
+                        self.pending.push(Pending::Span {
+                            kind: kind.to_string(),
+                            lo: out.len() as u32,
+                            hi: 0,
+                            genoses,
+                            fields,
+                        });
+                        self.open_spans.push(idx);
+                        self.flatten_into(content, dial, out);
+                        self.open_spans.pop();
+                        let hi = out.trim_end().len() as u32;
+                        if let Pending::Span { lo, hi: h, .. } = &mut self.pending[idx] {
+                            while (*lo as usize) < hi as usize
+                                && out.as_bytes()[*lo as usize] == b' '
+                            {
+                                *lo += 1;
+                            }
+                            *h = hi.max(*lo);
+                        }
+                    }
                     // The literary reading keeps every other
                     // inline simmere as a span named by its sim,
                     // in pre-order: its entry is pushed before its
@@ -1125,12 +1664,37 @@ impl Lower {
                     }
                     _ => self.flatten_into(content, dial, out),
                 },
-                // The parsing pack (ruling #80): a diaphane opened
+                // The parsing pack: a diaphane opened
                 // by the periodos is a declared sentence, one
                 // opened by a token monosim a parsed token — both
                 // at their offsets in the prose, the monosims
                 // never in it.
                 Inline::EndoDiaphane { content, ann } => match content.first() {
+                    // The dictionary vocabulary: text shown only in
+                    // a full reading (DSL's secondary text) is a
+                    // span of kind `secondary`.
+                    _ if self.dict && ann.genoses.iter().any(|g| g == "secondary") => {
+                        let idx = self.pending.len();
+                        self.pending.push(Pending::Span {
+                            kind: "span".to_string(),
+                            lo: out.len() as u32,
+                            hi: 0,
+                            genoses: Vec::new(),
+                            fields: vec![("kind".to_string(), "secondary".to_string())],
+                        });
+                        self.open_spans.push(idx);
+                        self.flatten_into(content, dial, out);
+                        self.open_spans.pop();
+                        let hi = out.trim_end().len() as u32;
+                        if let Pending::Span { lo, hi: h, .. } = &mut self.pending[idx] {
+                            while (*lo as usize) < hi as usize
+                                && out.as_bytes()[*lo as usize] == b' '
+                            {
+                                *lo += 1;
+                            }
+                            *h = hi.max(*lo);
+                        }
+                    }
                     Some(Inline::Monosim { symbol, param, .. }) if symbol == PERIODOS => {
                         let lo = out.len() as u32;
                         self.flatten_into(content, dial, out);
@@ -1361,6 +1925,17 @@ impl Lower {
                 Pending::Milestone { scheme, value, at } => {
                     self.out.push(Block::Milestone { scheme, value, at })
                 }
+                Pending::Hidden {
+                    kind,
+                    text,
+                    genoses,
+                    fields,
+                } => self.out.push(Block::Hidden {
+                    kind,
+                    text,
+                    genoses,
+                    fields,
+                }),
                 Pending::Parsed {
                     lo,
                     hi,

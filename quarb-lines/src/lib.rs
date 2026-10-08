@@ -19,7 +19,7 @@
 //! - Annotations: `::::n` (1-based ordinal), `::::blank`;
 //!   root carries `::::n-lines` and `::::n-blank`.
 //! - Lines have no properties at all — a closed surface — so
-//!   the annotations alias at `::` per ruling #29: `::n` and
+//!   the annotations alias at `::` under the alias rule: `::n` and
 //!   `::blank` just work, and can never shadow anything.
 //!
 //! With the `code:` reading of the same file mounted beside
@@ -63,8 +63,19 @@ impl LinesAdapter {
 }
 
 impl AstAdapter for LinesAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -122,7 +133,7 @@ impl AstAdapter for LinesAdapter {
     }
 
     /// Lines have no properties — a closed surface — so the
-    /// annotations answer at `::` too (ruling #29).
+    /// annotations answer at `::` too.
     fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
         if node.0 == 0 {
             &["n-lines", "n-blank"]

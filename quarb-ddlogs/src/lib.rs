@@ -392,8 +392,7 @@ impl DdlAdapter {
                 .set("Content-Type", "application/json")
                 .send_string(&body.to_string())
                 .map_err(|e| DdlError::Api(format!("logs/events/search: {e}")))?;
-            let text = resp
-                .into_string()
+            let text = quarb::source::text_from_reader(resp.into_reader())
                 .map_err(|e| DdlError::Api(format!("logs/events/search: {e}")))?;
             let doc: Json = serde_json::from_str(&text)
                 .map_err(|e| DdlError::Api(format!("logs/events/search: {e}")))?;
@@ -567,6 +566,11 @@ impl DdlAdapter {
 }
 
 impl AstAdapter for DdlAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

@@ -135,9 +135,15 @@ impl DuckdbAdapter {
             duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
         )?;
         let specs = introspect(&conn)?;
-        let model = RelationalModel::lazy(
+        // One row source with an optional WHERE: the whole read and
+        // the keyed read a hop makes (`WHERE key IN (…)`).
+        let model = RelationalModel::lazy_where(
             specs,
-            Box::new(move |_, spec| fetch_rows(&conn, spec).map_err(|e| e.to_string())),
+            std::rc::Rc::new(move |_: usize, spec: &TableSpec, w: Option<&str>| {
+                fetch_rows(&conn, spec, w).map_err(|e| e.to_string())
+            }),
+            None,
+            quarb_relational::quote_double,
         );
         Ok(DuckdbAdapter { model })
     }
@@ -228,25 +234,36 @@ fn introspect(conn: &Connection) -> Result<Vec<TableSpec>, DuckdbError> {
 
 /// Stream one table's rows; order follows the key when one names
 /// rows.
-fn fetch_rows(conn: &Connection, spec: &TableSpec) -> Result<Vec<RowSpec>, DuckdbError> {
+fn fetch_rows(
+    conn: &Connection,
+    spec: &TableSpec,
+    where_sql: Option<&str>,
+) -> Result<Vec<RowSpec>, DuckdbError> {
     let cols = spec
         .columns
         .iter()
-        .map(|c| format!("\"{c}\""))
+        .map(|c| quarb_relational::quote_double(c))
         .collect::<Vec<_>>()
         .join(", ");
     let order = match spec.pk {
-        Some(i) => format!(" ORDER BY \"{}\"", spec.columns[i]),
+        Some(i) => format!(
+            " ORDER BY {}",
+            quarb_relational::quote_double(&spec.columns[i])
+        ),
         None => String::new(),
     };
-    let mut stmt = conn.prepare(&format!("SELECT {cols} FROM \"{}\"{order}", spec.name))?;
+    let filter = match where_sql {
+        Some(w) => format!(" WHERE {w}"),
+        None => String::new(),
+    };
+    let mut stmt = conn.prepare(&format!("SELECT {cols} FROM {}{filter}{order}", spec.name))?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     let mut i = 0i64;
     while let Some(r) = rows.next()? {
         i += 1;
         out.push(RowSpec {
-            rowid: i,
+            rowid: Some(i),
             values: (0..spec.columns.len()).map(|c| cell(r, c)).collect(),
         });
     }
@@ -315,6 +332,9 @@ impl AstAdapter for DuckdbAdapter {
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
     }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
+    }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
     }
@@ -338,5 +358,37 @@ impl AstAdapter for DuckdbAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }

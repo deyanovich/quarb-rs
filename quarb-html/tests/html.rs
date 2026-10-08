@@ -119,8 +119,8 @@ fn resolve_fragment_href() {
     // follow the fragment and read the target's text
     assert_eq!(values("//a::href-->::"), vec!["Welcome"]);
     // reverse resolution: which nodes' href resolves to the <h1>?
-    assert_eq!(nodes("//h1::href<--"), vec!["/html/body/main/a[1]"]);
-    assert_eq!(values("//h1::href<--::"), vec!["back to top"]);
+    assert_eq!(nodes("//h1<--(::href)"), vec!["/html/body/main/a[1]"]);
+    assert_eq!(values("//h1<--(::href)::"), vec!["back to top"]);
 }
 
 /// Numeric aggregation over HTML, whose attribute values are all
@@ -202,16 +202,16 @@ fn correlated_join_shares_one_binding() {
     // (the ON clause reaches the driver as `$$`) — both
     // conditions must hold under the same binding.
     let join = concat!(
-        r#"//li[::class="order"]:: <=> "#,
-        r#"//li[::class="user"][::data-id = _::data-uid "#,
+        r#"//li[::class = "order"]:: <=> "#,
+        r#"//li[::class = "user"][::data-id = _::data-uid "#,
         r#"&& ::data-limit < _::data-amount]"#,
     );
     assert_eq!(run(join), vec!["order-A"]);
     // Stacked brackets are a conjunction, so they share the binding
     // and must give the identical result.
     let stacked = concat!(
-        r#"//li[::class="order"]:: <=> "#,
-        r#"//li[::class="user"][::data-id = _::data-uid]"#,
+        r#"//li[::class = "order"]:: <=> "#,
+        r#"//li[::class = "user"][::data-id = _::data-uid]"#,
         r#"[::data-limit < _::data-amount]"#,
     );
     assert_eq!(run(stacked), vec!["order-A"]);

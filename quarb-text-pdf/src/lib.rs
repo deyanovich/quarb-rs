@@ -224,7 +224,8 @@ fn extract_outline(doc: &Document, page_index: &HashMap<ObjectId, u32>) -> Vec<O
         return out;
     };
     let first = outlines.get(b"First").ok().cloned();
-    walk_outline(doc, page_index, first, 1, &mut out, 0);
+    let mut seen = std::collections::HashSet::new();
+    walk_outline(doc, page_index, first, 1, &mut out, 0, &mut seen);
     // Entries whose destination did not resolve cannot bound
     // anything: drop them (never a guess).
     out
@@ -237,6 +238,7 @@ fn walk_outline(
     level: u8,
     out: &mut Vec<OutlineEntry>,
     depth: usize,
+    seen: &mut std::collections::HashSet<ObjectId>,
 ) {
     if depth > 64 {
         return;
@@ -245,6 +247,15 @@ fn walk_outline(
     while let Some(obj) = item {
         guard += 1;
         if guard > 4096 {
+            return;
+        }
+        // An outline item that points back at one already walked
+        // (`/First` or `/Next` to itself or an ancestor) is a loop:
+        // each object is visited once, so a self-referential
+        // outline ends where the sound part of it does.
+        if let Object::Reference(id) = &obj
+            && !seen.insert(*id)
+        {
             return;
         }
         let Some(dict) = resolve_dict(doc, Some(&obj)).cloned() else {
@@ -267,6 +278,7 @@ fn walk_outline(
                 level + 1,
                 out,
                 depth + 1,
+                seen,
             );
         }
         item = dict.get(b"Next").ok().cloned();
@@ -776,6 +788,11 @@ impl PdfText {
 }
 
 impl AstAdapter for PdfText {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

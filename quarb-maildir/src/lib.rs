@@ -3,7 +3,7 @@
 //! A mailbox is a flat store whose *real* structure is the thread
 //! graph, and the thread graph is reference fabric: every message
 //! carries a `Message-ID`, replies carry `In-Reply-To`, and the
-//! adapter indexes the ids so that `::in-reply-to~>` walks to the
+//! adapter indexes the ids so that `::in-reply-to-->` walks to the
 //! parent message and `<-in-reply-to` finds the replies — the same
 //! two axes that walk commit parents and foreign keys.
 //!
@@ -17,7 +17,7 @@
 //! (`::subject`, `::from`, `::to`, `::date`, `::in-reply-to`,
 //! `::message-id`, ...) with RFC 2047 left as-is (v1); the body
 //! is the node's value (`::`). For multipart messages the body is
-//! the raw MIME body — honest, not pretty; a `text/plain` part
+//! the raw MIME body — as stored, not pretty; a `text/plain` part
 //! extractor is a recorded refinement. `;;;n-messages` on the
 //! root; `<message>` trait; `;;;epoch` parses the `Date` header
 //! to a unix timestamp for range predicates.
@@ -25,6 +25,7 @@
 //! Read-only, entirely: the adapter never touches flags, never
 //! moves files between `new/` and `cur/`.
 
+use quarb::source::SourceDecoding;
 use quarb::{AstAdapter, NodeId, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,6 +37,42 @@ pub enum MailError {
     Io(#[from] std::io::Error),
     #[error("maildir: {0} is neither a Maildir (cur/ + new/) nor an mbox file")]
     Format(String),
+    #[error("maildir: {0}: {1}")]
+    Source(String, quarb::source::SourceError),
+}
+
+/// The charset a message declares in its own headers
+/// (`Content-Type: text/plain; charset=koi8-r`), reported for the
+/// engine's source boundary; the headers themselves are ASCII by
+/// RFC 5322, so the scan reads bytes. The adapter decodes nothing.
+pub fn declared_encoding(bytes: &[u8]) -> Option<String> {
+    let end = bytes
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .or_else(|| bytes.windows(4).position(|w| w == b"\r\n\r\n"))
+        .unwrap_or(bytes.len());
+    let head = String::from_utf8_lossy(&bytes[..end]);
+    let mut unfolded = String::new();
+    for line in head.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            unfolded.push(' ');
+            unfolded.push_str(line.trim());
+        } else {
+            unfolded.push('\n');
+            unfolded.push_str(line);
+        }
+    }
+    let line = unfolded
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))?;
+    let at = line.to_ascii_lowercase().find("charset=")?;
+    let label = line[at + 8..]
+        .trim()
+        .trim_matches('"')
+        .split([';', ' ', '"'])
+        .next()?
+        .trim();
+    (!label.is_empty()).then(|| label.to_string())
 }
 
 struct Message {
@@ -54,6 +91,9 @@ pub struct MaildirAdapter {
     messages: Vec<Message>,
     /// Message-ID (angle brackets stripped) → message index.
     by_id: HashMap<String, usize>,
+    /// Per message: the decoding record from the source boundary
+    /// (`::::encoding`, `::::replaced`).
+    records: Vec<(String, usize)>,
 }
 
 /// Parse one RFC 822 message: headers (unfolded) and body.
@@ -87,12 +127,88 @@ fn parse_message(raw: &str, name: String, path: Option<std::path::PathBuf>) -> M
             headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
+    // Encoded words are decoded once the header is unfolded: a word
+    // may continue on the next line, and whitespace between two
+    // words is theirs to drop.
+    for h in &mut headers {
+        h.1 = decode_words(&h.1);
+    }
     Message {
         name,
         headers,
         body,
         path,
     }
+}
+
+/// RFC 2047 encoded words in a header value
+/// (`=?windows-1251?B?...?=`, `=?utf-8?Q?...?=`): decoded under
+/// their own charset through the source boundary's tables, the
+/// text between them kept, whitespace between two adjacent words
+/// dropped as the RFC says. A word that does not decode stays as
+/// written.
+fn decode_words(value: &str) -> String {
+    if !value.contains("=?") {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = value;
+    let mut after_word = false;
+    while let Some(start) = rest.find("=?") {
+        let before = &rest[..start];
+        if !(after_word && before.trim().is_empty()) {
+            out.push_str(before);
+        }
+        let Some((word, tail)) = encoded_word(&rest[start..]) else {
+            out.push_str("=?");
+            rest = &rest[start + 2..];
+            after_word = false;
+            continue;
+        };
+        out.push_str(&word);
+        rest = tail;
+        after_word = true;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `=?charset?enc?text?=` at the start of `s`: the decoded text
+/// and what follows it.
+fn encoded_word(s: &str) -> Option<(String, &str)> {
+    // `=?charset?enc?text?=`: the terminator is looked for after
+    // the third `?`, since Q text may itself begin with `=XX`.
+    let body = s.strip_prefix("=?")?;
+    let (charset, rest) = body.split_once('?')?;
+    let charset = charset.split('*').next().unwrap_or(charset);
+    let (enc, rest) = rest.split_once('?')?;
+    let end = rest.find("?=")?;
+    let text = &rest[..end];
+    let tail = &rest[end + 2..];
+    let bytes = match enc {
+        "B" | "b" => quarb::base64_decode(text)?,
+        "Q" | "q" => {
+            let b = text.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                match b[i] {
+                    b'_' => out.push(b' '),
+                    b'=' if i + 2 < b.len() => {
+                        let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
+                        out.push(u8::from_str_radix(hex, 16).ok()?);
+                        i += 2;
+                    }
+                    c => out.push(c),
+                }
+                i += 1;
+            }
+            out
+        }
+        _ => return None,
+    };
+    let decoded = quarb::source::decode_label(&bytes, charset)?;
+    Some((decoded, tail))
 }
 
 /// A `Date:` header value to a unix timestamp (RFC 2822-ish;
@@ -124,6 +240,11 @@ fn parse_date_full(s: &str) -> Option<(i64, i16)> {
         _ => return None,
     };
     let year: i64 = it.next()?.parse().ok()?;
+    // A year outside the four-digit range is no date this header
+    // can carry (and would overflow the day arithmetic below).
+    if !(0..=9999).contains(&year) || !(1..=31).contains(&day) {
+        return None;
+    }
     let hms = it.next()?;
     let mut t = hms.split(':');
     let (h, m, sec): (i64, i64, i64) = (
@@ -158,7 +279,25 @@ fn parse_date_full(s: &str) -> Option<(i64, i16)> {
 impl MaildirAdapter {
     /// Open a Maildir directory or an mbox file.
     pub fn open(path: &Path) -> Result<Self, MailError> {
+        Self::open_with_decoding(
+            path,
+            SourceDecoding::default().with_declared(|_, b| declared_encoding(b)),
+        )
+    }
+
+    /// [`open`](Self::open) under a mount's source-boundary rule:
+    /// every message's bytes decode by `?encoding=`, then a
+    /// byte-order mark, then the charset its own headers declare,
+    /// then strict UTF-8 — a message that decodes under none is
+    /// refused, naming the option.
+    pub fn open_with_decoding(path: &Path, decoding: SourceDecoding) -> Result<Self, MailError> {
         let mut messages = Vec::new();
+        let mut records = Vec::new();
+        let decode = |name: &str, bytes: &[u8]| {
+            decoding
+                .decode(name, bytes)
+                .map_err(|e| MailError::Source(name.to_string(), e))
+        };
         if path.is_dir() {
             let cur = path.join("cur");
             let new = path.join("new");
@@ -176,23 +315,43 @@ impl MaildirAdapter {
                     .collect();
                 files.sort();
                 for f in files {
-                    let raw = std::fs::read_to_string(&f).unwrap_or_default();
+                    let bytes = std::fs::read(&f).unwrap_or_default();
                     let base = f.file_name().unwrap_or_default().to_string_lossy();
                     // The unique portion, before the flags part.
                     let name = base.split(':').next().unwrap_or(&base).to_string();
-                    messages.push(parse_message(&raw, name, Some(f.clone())));
+                    let d = decode(&f.display().to_string(), &bytes)?;
+                    records.push((d.encoding, d.replaced));
+                    messages.push(parse_message(&d.text, name, Some(f.clone())));
                 }
             }
         } else {
-            let text = std::fs::read_to_string(path)?;
-            if !text.starts_with("From ") {
+            let bytes = std::fs::read(path)?;
+            if !bytes.starts_with(b"From ") {
                 return Err(MailError::Format(path.display().to_string()));
             }
-            for (i, chunk) in text.split("\nFrom ").enumerate() {
-                let chunk = chunk.strip_prefix("From ").unwrap_or(chunk);
+            // Message by message: each declares its own charset.
+            let mut starts = vec![0];
+            starts.extend(
+                bytes
+                    .windows(6)
+                    .enumerate()
+                    .filter(|(_, w)| *w == b"\nFrom ")
+                    .map(|(i, _)| i + 1),
+            );
+            starts.push(bytes.len());
+            for (i, pair) in starts.windows(2).enumerate() {
+                let chunk = &bytes[pair[0]..pair[1]];
+                let chunk = chunk.strip_prefix(b"From ").unwrap_or(chunk);
                 // Drop the "From " envelope line itself.
-                let raw = chunk.split_once('\n').map(|(_, r)| r).unwrap_or("");
-                messages.push(parse_message(raw, (i + 1).to_string(), None));
+                let body = chunk
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|i| &chunk[i + 1..])
+                    .unwrap_or(&[]);
+                let body = body.strip_suffix(b"\n").unwrap_or(body);
+                let d = decode(&format!("{}:{}", path.display(), i + 1), body)?;
+                records.push((d.encoding, d.replaced));
+                messages.push(parse_message(&d.text, (i + 1).to_string(), None));
             }
         }
         let by_id = messages
@@ -205,7 +364,11 @@ impl MaildirAdapter {
                     .map(|(_, v)| (v.trim_matches(['<', '>']).to_string(), i))
             })
             .collect();
-        Ok(MaildirAdapter { messages, by_id })
+        Ok(MaildirAdapter {
+            messages,
+            by_id,
+            records,
+        })
     }
 
     /// A human-readable locator: `/name`.
@@ -239,6 +402,12 @@ impl MaildirAdapter {
 impl AstAdapter for MaildirAdapter {
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -285,6 +454,15 @@ impl AstAdapter for MaildirAdapter {
             };
         }
         match key {
+            "encoding" => Some(Value::Str(
+                self.records
+                    .get((node.0 as usize).checked_sub(1)?)?
+                    .0
+                    .clone(),
+            )),
+            "replaced" => Some(Value::Int(
+                self.records.get((node.0 as usize).checked_sub(1)?)?.1 as i64,
+            )),
             // Whether the message still sits in new/ (Maildir's
             // "unseen" signal) — `/*[;;;new]` is the unread query.
             "new" => Some(Value::Bool(
@@ -310,7 +488,7 @@ impl AstAdapter for MaildirAdapter {
         }
     }
 
-    /// `::in-reply-to~>` (or any header holding a message id)
+    /// `::in-reply-to-->` (or any header holding a message id)
     /// resolves through the Message-ID index.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let v = self.header(node, property)?;
@@ -329,6 +507,29 @@ impl AstAdapter for MaildirAdapter {
             .map(|t| ("in-reply-to".to_string(), t))
             .into_iter()
             .collect()
+    }
+
+    /// A message's reference is what it replies to: the bare arrows
+    /// read `in-reply-to`.
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.header(node, "in-reply-to")
+            .map(|_| "in-reply-to".to_string())
+    }
+
+    /// `<--(::in-reply-to)` is the replies, with no walk; any other
+    /// header keeps the engine's search.
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        _hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        // With no property named: the message's reference property.
+        if property.is_some_and(|p| p != "in-reply-to") {
+            return None;
+        }
+        self.header(node, "message-id")?;
+        Some(self.backlinks(node).into_iter().map(|(_, n)| n).collect())
     }
 
     /// Replies: the messages whose `in-reply-to` points here.
@@ -355,6 +556,18 @@ impl AstAdapter for MaildirAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding 19: a year outside four digits is no date (and
+    /// would overflow the day arithmetic).
+    #[test]
+    fn absurd_dates_are_none() {
+        assert_eq!(
+            parse_date("Mon, 1 Jan 99999999999999999 00:00:00 +0000"),
+            None
+        );
+        assert_eq!(parse_date("Mon, 99 Jan 2024 00:00:00 +0000"), None);
+        assert_eq!(parse_date("Thu, 1 Jan 1970 00:00:00 +0000"), Some(0));
+    }
 
     #[test]
     fn crlf_message_splits_headers_from_body() {

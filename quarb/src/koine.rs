@@ -25,7 +25,7 @@ pub enum Render {
     /// enforces real nesting); prose lines that would open a sim
     /// are a known escaping seam, recorded in the spec.
     Atrep,
-    /// CoNLL-U (ruling #63): the tokens of the rendered subtree as
+    /// CoNLL-U: the tokens of the rendered subtree as
     /// sentence blocks — the corpus reading's round trip to the
     /// treebank tools. Prose without tokens renders nothing.
     Conllu,

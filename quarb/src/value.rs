@@ -41,6 +41,15 @@ pub enum Value {
     /// A span of time (instant minus instant; the `days(n)` family).
     /// Displays as an ISO-8601 duration (`P1DT2H`).
     Duration { secs: i64, nanos: u32 },
+    /// A stretch of the UTC calendar named at a grain (spec: The
+    /// Temporal Fragment): its first second and the grain. Displays
+    /// as ISO-8601 at reduced precision (`1812`, `2025-10`,
+    /// `1899-10-06T14:30`). Compares as an interval; takes no part
+    /// in arithmetic.
+    Period {
+        start: i64,
+        grain: crate::period::Grain,
+    },
     /// A value on a dimension (spec: The Quantital Fragment):
     /// the magnitude scaled to the dimension's SI-base expansion
     /// (`base`, e.g. `m`, `kg*m^2/s^3`), the written form kept
@@ -100,6 +109,7 @@ impl Value {
             Value::Record(o) => !o.is_empty(),
             Value::Instant { .. } => true,
             Value::Duration { secs, nanos } => *secs != 0 || *nanos != 0,
+            Value::Period { .. } => true,
             Value::Quantity { value, .. } => *value != 0.0,
         }
     }
@@ -112,6 +122,8 @@ impl Value {
     pub fn temporal_reading(&self) -> Option<(i64, u32)> {
         match self {
             Value::Instant { secs, nanos, .. } => Some((*secs, *nanos)),
+            // A period reads as its first instant.
+            Value::Period { start, .. } => Some((*start, 0)),
             Value::Int(n) => Some((*n, 0)),
             Value::Float(f) if f.is_finite() => {
                 let secs = f.floor() as i64;
@@ -120,6 +132,41 @@ impl Value {
             }
             Value::Str(s) => crate::temporal::parse_iso(s).map(|(s, n, _)| (s, n)),
             _ => None,
+        }
+    }
+
+    /// The *calendar reading* (spec: The Calendar Reading): the
+    /// period a value denotes, if any — a period itself, ISO-8601
+    /// text at reduced precision (or a full instant's text), an
+    /// integer (that year), or an instant at the grain it prints
+    /// at (the day for a midnight instant with no offset, the
+    /// second otherwise).
+    pub fn calendar_reading(&self) -> Option<crate::period::Period> {
+        use crate::period::Period;
+        match self {
+            Value::Period { start, grain } => Some(Period {
+                start: *start,
+                grain: *grain,
+            }),
+            Value::Int(n) => Period::of(*n, 1, 1, 0, 0, 0, crate::period::Grain::Year),
+            Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+            } => Some(Period::of_instant(*secs, *nanos, *offset_min)),
+            Value::Str(s) => Period::parse(s).or_else(|| {
+                crate::temporal::parse_iso(s)
+                    .map(|(secs, nanos, off)| Period::of_instant(secs, nanos, off))
+            }),
+            _ => None,
+        }
+    }
+
+    /// A period as a value.
+    pub fn period(p: crate::period::Period) -> Value {
+        Value::Period {
+            start: p.start,
+            grain: p.grain,
         }
     }
 
@@ -158,7 +205,7 @@ impl Value {
         }
     }
 
-    /// The Quarb form (ruling #51): the value spelled as Quarb
+    /// The Quarb form: the value spelled as Quarb
     /// query text, so a printed result reads back as an expression.
     /// Strings quoted as literals, numbers and booleans bare,
     /// `null`, lists as `@(a; b)`, records as `%(k = v; k2 = v2)`
@@ -215,9 +262,10 @@ impl Value {
                     .collect();
                 format!("{{{}}}", inner.join(", "))
             }
-            Value::Instant { .. } | Value::Duration { .. } | Value::Quantity { .. } => {
-                json_string(&self.to_string())
-            }
+            Value::Instant { .. }
+            | Value::Duration { .. }
+            | Value::Period { .. }
+            | Value::Quantity { .. } => json_string(&self.to_string()),
         }
     }
 
@@ -227,11 +275,40 @@ impl Value {
     /// fail over text adapters, where every value is a string (an HTML
     /// attribute like `rank="3"`, a CSV cell). Non-numeric strings,
     /// booleans, lists, and null do not coerce.
+    /// The key under which a value may be indexed for equality
+    /// (`=`, the value match `=>`): two values with keys compare
+    /// equal only if their keys are equal — the numeric reading
+    /// when there is one (so `1`, `1.0` and `"1"` share a key, as
+    /// they compare equal), else the text, booleans and null apart.
+    /// `None` for values compared under another reading (instants,
+    /// durations, quantities, lists, records): a search for one, or
+    /// among them, takes the scan.
+    pub fn equality_key(&self) -> Option<String> {
+        match self {
+            Value::Int(_) | Value::Float(_) | Value::Str(_) => Some(match self.numeric_reading() {
+                // An integer keys as itself (exact past 2^53); a
+                // whole double keys as that integer, so `1`, `1.0`
+                // and `"1"` still share a key, and -0.0 is 0.
+                Some(Value::Int(n)) => format!("n:{n}"),
+                Some(Value::Float(f)) if f.fract() == 0.0 && f.abs() < 9.2e18 => {
+                    format!("n:{}", f as i64)
+                }
+                Some(Value::Float(f)) => format!("n:{f}"),
+                _ => format!("s:{self}"),
+            }),
+            Value::Bool(b) => Some(format!("b:{b}")),
+            Value::Null => Some("0:".to_string()),
+            _ => None,
+        }
+    }
+
     pub fn numeric(&self) -> Option<f64> {
         match self {
             Value::Int(n) => Some(*n as f64),
             Value::Float(f) => Some(*f),
-            Value::Str(s) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
+            Value::Str(s) => {
+                crate::number::read(s, crate::number::Decimal::Point).and_then(|v| v.numeric())
+            }
             // A quantity's base magnitude, so aggregates work
             // (`::power @| sum` sums watts). Arithmetic never sees
             // this: the quantital fragment intercepts first.
@@ -249,17 +326,11 @@ impl Value {
         match self {
             Value::Int(n) => Some(Value::Int(*n)),
             Value::Float(f) => Some(Value::Float(*f)),
-            Value::Str(s) => {
-                let s = s.trim();
-                if let Ok(n) = s.parse::<i64>() {
-                    Some(Value::Int(n))
-                } else {
-                    s.parse::<f64>()
-                        .ok()
-                        .filter(|f| f.is_finite())
-                        .map(Value::Float)
-                }
-            }
+            // The canonical form, and under the default convention
+            // grouped thousands (`1,234`, `1 234`); a source that
+            // writes decimal commas declares it (`?decimal=comma`)
+            // and its text arrives in canonical form.
+            Value::Str(s) => crate::number::read(s, crate::number::Decimal::Point),
             _ => None,
         }
     }
@@ -316,8 +387,14 @@ pub(crate) enum SortKey {
     Null,
     Bool(bool),
     /// The magnitude line: everything with a numeric, temporal,
-    /// durational, or unital reading, by that reading's magnitude.
-    Line(f64),
+    /// durational, or unital reading, by that reading's magnitude —
+    /// and, where the magnitude is a whole number, the integer
+    /// itself, so two 64-bit integers a double cannot tell apart
+    /// still order and key exactly.
+    Line(f64, i64),
+    /// A period: by its start, the coarser first where two start
+    /// together.
+    Period(i64, u8),
     /// Text with no reading, by codepoint order.
     Text(String),
     /// Lists then records order after scalars, by display form.
@@ -339,21 +416,37 @@ impl std::hash::Hash for SortKey {
         match self {
             SortKey::Null => {}
             SortKey::Bool(b) => b.hash(state),
-            SortKey::Line(f) => f.to_bits().hash(state),
+            SortKey::Line(f, i) => {
+                // -0.0 and 0.0 are one point of the line.
+                (if *f == 0.0 { 0.0f64 } else { *f }).to_bits().hash(state);
+                i.hash(state);
+            }
+            SortKey::Period(start, grain) => {
+                start.hash(state);
+                grain.hash(state);
+            }
             SortKey::Text(s) | SortKey::ListText(s) | SortKey::RecordText(s) => s.hash(state),
         }
     }
 }
 
 impl SortKey {
+    /// A point of the magnitude line from a double: a whole number
+    /// in range carries its integer, anything else zero.
+    fn line(f: f64) -> SortKey {
+        let whole = f.fract() == 0.0 && f.abs() < 9.2e18;
+        SortKey::Line(f, if whole { f as i64 } else { 0 })
+    }
+
     fn rank(&self) -> u8 {
         match self {
             SortKey::Null => 0,
             SortKey::Bool(_) => 1,
-            SortKey::Line(_) => 2,
-            SortKey::Text(_) => 3,
-            SortKey::ListText(_) => 4,
-            SortKey::RecordText(_) => 5,
+            SortKey::Line(..) => 2,
+            SortKey::Period(..) => 3,
+            SortKey::Text(_) => 4,
+            SortKey::ListText(_) => 5,
+            SortKey::RecordText(_) => 6,
         }
     }
 
@@ -364,7 +457,14 @@ impl SortKey {
             // total_cmp: NaN (mintable by query arithmetic) sorts
             // deterministically after +inf instead of poisoning
             // the order.
-            (Line(a), Line(b)) => a.total_cmp(b),
+            (Line(a, i), Line(b, j)) => {
+                if *a == 0.0 && *b == 0.0 {
+                    i.cmp(j)
+                } else {
+                    a.total_cmp(b).then(i.cmp(j))
+                }
+            }
+            (Period(a, g), Period(b, h)) => a.cmp(b).then(g.cmp(h)),
             (Text(a), Text(b)) | (ListText(a), ListText(b)) | (RecordText(a), RecordText(b)) => {
                 a.cmp(b)
             }
@@ -377,26 +477,29 @@ fn sort_key(v: &Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey
     match v {
         Value::Null => SortKey::Null,
         Value::Bool(b) => SortKey::Bool(*b),
-        Value::Int(n) => SortKey::Line(*n as f64),
-        Value::Float(f) => SortKey::Line(*f),
+        Value::Int(n) => SortKey::Line(*n as f64, *n),
+        Value::Float(f) => SortKey::line(*f),
         Value::Instant { secs, nanos, .. } | Value::Duration { secs, nanos } => {
-            SortKey::Line(*secs as f64 + *nanos as f64 / 1e9)
+            SortKey::line(*secs as f64 + *nanos as f64 / 1e9)
         }
-        Value::Quantity { value, .. } => SortKey::Line(*value),
+        Value::Period { start, grain } => SortKey::Period(*start, *grain as u8),
+        Value::Quantity { value, .. } => SortKey::line(*value),
         // A string has at most one reading — numeric text carries
         // no unit, unital text excludes pure time (that is span
         // territory), span text needs its span grammar, ISO text
         // is none of those — so the priority order below never
         // actually chooses between readings.
         Value::Str(s) => {
-            if let Some(f) = s.trim().parse::<f64>().ok().filter(|f| f.is_finite()) {
-                SortKey::Line(f)
+            if let Some(f) =
+                crate::number::read(s, crate::number::Decimal::Point).and_then(|v| v.numeric())
+            {
+                SortKey::line(f)
             } else if let Some((bv, ..)) = crate::quantity::parse_unit_text_with(s, scale) {
-                SortKey::Line(bv)
+                SortKey::line(bv)
             } else if let Some((secs, nanos)) = crate::temporal::parse_span(s) {
-                SortKey::Line(secs as f64 + nanos as f64 / 1e9)
+                SortKey::line(secs as f64 + nanos as f64 / 1e9)
             } else if let Some((secs, nanos, _)) = crate::temporal::parse_iso(s) {
-                SortKey::Line(secs as f64 + nanos as f64 / 1e9)
+                SortKey::line(secs as f64 + nanos as f64 / 1e9)
             } else {
                 SortKey::Text(s.clone())
             }
@@ -418,7 +521,7 @@ impl fmt::Display for Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "{}", parts.join(", "))
             }
-            // A record's text is its Quarb form (ruling #51).
+            // A record's text is its Quarb form.
             Value::Record(_) => write!(f, "{}", self.to_quarb()),
             Value::Instant {
                 secs,
@@ -432,6 +535,15 @@ impl fmt::Display for Value {
             Value::Duration { secs, nanos } => {
                 write!(f, "{}", crate::temporal::format_duration(*secs, *nanos))
             }
+            Value::Period { start, grain } => write!(
+                f,
+                "{}",
+                crate::period::Period {
+                    start: *start,
+                    grain: *grain
+                }
+                .format()
+            ),
             // The written form when the source had one (`42 km`),
             // the base otherwise; single-factor forms re-parse
             // through the unital reading.
@@ -579,7 +691,7 @@ mod tests {
             obj.to_json(),
             r#"{"name": "A\"da\n", "age": 36, "score": 2.5, "ok": true, "gone": null, "tags": ["x", 1]}"#
         );
-        // Display of a record is its Quarb form (ruling #51); an
+        // Display of a record is its Quarb form; an
         // empty record is falsy
         assert_eq!(
             obj.to_quarb(),
@@ -621,6 +733,11 @@ pub fn quarb_string(s: &str) -> String {
             '$' if chars.peek() == Some(&'{') => {
                 out.push('\\');
                 out.push('$');
+            }
+            // `(,` opens the rounded hole; `\(` is the literal.
+            '(' if chars.peek() == Some(&',') => {
+                out.push('\\');
+                out.push('(');
             }
             _ => out.push(c),
         }

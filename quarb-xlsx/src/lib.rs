@@ -5,7 +5,7 @@
 //! headers, every following row a node named by its spreadsheet
 //! row number (2, 3, ...), cells as properties typed by what the
 //! cell holds (numbers arrive numeric, not stringly). No keys, no
-//! foreign keys — a spreadsheet declares none — but the `~>` hint
+//! foreign keys — a spreadsheet declares none — but the `-->` hint
 //! form and a `--refs` document work as on any schemaless source.
 //!
 //! Headerless or ragged sheets get positional column names
@@ -96,7 +96,7 @@ impl XlsxAdapter {
                 values.resize(columns.len(), Value::Null);
                 rows.push(RowSpec {
                     // Spreadsheet row numbers: headers are row 1.
-                    rowid: i as i64 + 2,
+                    rowid: Some(i as i64 + 2),
                     values,
                 });
             }
@@ -125,8 +125,17 @@ impl AstAdapter for XlsxAdapter {
     fn root(&self) -> NodeId {
         self.model.root()
     }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
+    }
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
+    }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
     }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
@@ -148,6 +157,38 @@ impl AstAdapter for XlsxAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }
 

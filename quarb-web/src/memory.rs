@@ -150,11 +150,32 @@ pub(crate) fn dom_links(html: &str) -> (Option<String>, Vec<Found>) {
     (base, out)
 }
 
+/// A page's declared own URL: `<link rel=canonical>`, or Parsoid's
+/// `<link rel="dc:isVersionOf">` (a protocol-relative `//host/…`
+/// read as https).
+fn declared_url(doc: &scraper::Html) -> Option<url::Url> {
+    use scraper::Selector;
+    for rel in ["link[rel=canonical]", "link[rel=\"dc:isVersionOf\"]"] {
+        let sel = Selector::parse(rel).ok()?;
+        if let Some(href) = doc.select(&sel).next().and_then(|e| e.value().attr("href")) {
+            let href = href.trim();
+            let abs = if href.starts_with("//") {
+                format!("https:{href}")
+            } else {
+                href.to_string()
+            };
+            if let Ok(u) = url::Url::parse(&abs) {
+                return Some(u);
+            }
+        }
+    }
+    None
+}
+
 /// The base URL a set of pages is served from, from the first
-/// page that declares a canonical URL ending in its own path.
+/// page that declares its own URL ending in its own path.
 fn infer_base(files: &[PageFile]) -> Option<String> {
-    use scraper::{Html, Selector};
-    let sel = Selector::parse("link[rel=canonical]").ok()?;
+    use scraper::Html;
     let mut sorted: Vec<&PageFile> = files.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     for f in sorted {
@@ -163,21 +184,25 @@ fn infer_base(files: &[PageFile]) -> Option<String> {
             continue;
         }
         let doc = Html::parse_document(&f.html);
-        let Some(href) = doc.select(&sel).next().and_then(|e| e.value().attr("href")) else {
-            continue;
-        };
-        let Ok(u) = url::Url::parse(href.trim()) else {
+        let Some(u) = declared_url(&doc) else {
             continue;
         };
         let rel = f.path.trim_start_matches("./").trim_start_matches('/');
-        let path = u.path();
+        let path = percent_encoding::percent_decode_str(u.path())
+            .decode_utf8_lossy()
+            .into_owned();
+        let path = path.as_str();
         let stem = rel.strip_suffix("index.html").unwrap_or(rel);
-        // `…/guides/jq.html` ends the canonical path, or the
-        // directory form `…/guides/` for an index page.
+        // `…/guides/jq.html` ends the canonical path, the directory
+        // form `…/guides/` for an index page, or the extension-less
+        // `…/wiki/X` a wiki declares for the file `wiki/X.html`.
+        let bare = rel.strip_suffix(".html").unwrap_or(rel);
         let prefix = if path.ends_with(rel) {
             &path[..path.len() - rel.len()]
         } else if path.ends_with(stem) {
             &path[..path.len() - stem.len()]
+        } else if path.ends_with(bare) {
+            &path[..path.len() - bare.len()]
         } else {
             continue;
         };
@@ -293,13 +318,17 @@ impl MemoryStore {
             };
             // The page's declared identity, read once at build from
             // the head alone — the lowering waits for the graft.
-            let head = quarb_text_html::head_meta(&scraper::Html::parse_document(&html));
+            let doc = scraper::Html::parse_document(&html);
+            let head = quarb_text_html::head_meta(&doc);
+            // The page's own URL: declared (canonical, or Parsoid's
+            // dc:isVersionOf), else its path under the base.
             let url = match head.declared_value("canonical") {
                 Some(Value::Str(u)) => Some(u),
-                _ => base
-                    .as_ref()
-                    .and_then(|b| b.join(&path).ok())
-                    .map(|u| u.to_string()),
+                _ => declared_url(&doc).map(|u| u.to_string()).or_else(|| {
+                    base.as_ref()
+                        .and_then(|b| b.join(&path).ok())
+                        .map(|u| u.to_string())
+                }),
             };
             let mut row = blank(k, parent, PageKind::Page, name, path.clone());
             row.title = head.title.clone();
@@ -443,6 +472,14 @@ impl MemoryStore {
         }
 
         // 4. Links from the DOM, resolved against the page's URL.
+        // A page before a directory of the same stem: a wiki's
+        // `X` page sits beside its `X/` subpages, and a link to
+        // `X` means the page.
+        let page_by_path: HashMap<&str, PageKey> = by_path
+            .iter()
+            .filter(|(_, i)| built[**i].row.kind != PageKind::Dir)
+            .map(|(p, &i)| (p.as_str(), built[i].row.key))
+            .collect();
         let key_by_path: HashMap<&str, PageKey> = by_path
             .iter()
             .map(|(p, &i)| (p.as_str(), built[i].row.key))
@@ -479,8 +516,13 @@ impl MemoryStore {
                     .and_then(|bs| site_path(&u, bs))
                     .and_then(|p| {
                         path_variants(&p)
-                            .into_iter()
-                            .find_map(|v| key_by_path.get(v.as_str()).copied())
+                            .iter()
+                            .find_map(|v| page_by_path.get(v.as_str()).copied())
+                            .or_else(|| {
+                                path_variants(&p)
+                                    .iter()
+                                    .find_map(|v| key_by_path.get(v.as_str()).copied())
+                            })
                     });
                 // A same-site path no page answers to is a redlink.
                 let red = f.red
@@ -686,8 +728,9 @@ impl WebStore for MemoryStore {
 /// (`docs/` → `docs/index.html`, already applied by
 /// [`site_path`]) also answers to the bare directory when the
 /// site was fetched under extension-less URLs (`docs`), and an
-/// extension-less target answers to its index page when the
-/// site was packed as files. Both spellings of one page meet.
+/// extension-less target answers to its own page file (`X` →
+/// `X.html`, the wiki convention) and to its index page when the
+/// site was packed as files. Every spelling of one page meets.
 pub(crate) fn path_variants(path: &str) -> Vec<String> {
     let mut out = vec![path.to_string()];
     if let Some(dir) = path.strip_suffix("/index.html") {
@@ -697,6 +740,7 @@ pub(crate) fn path_variants(path: &str) -> Vec<String> {
     } else {
         let last = path.rsplit('/').next().unwrap_or(path);
         if !last.contains('.') {
+            out.push(format!("{path}.html"));
             out.push(format!("{path}/index.html"));
         }
     }

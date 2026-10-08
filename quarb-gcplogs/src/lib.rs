@@ -610,6 +610,11 @@ impl GclAdapter {
 }
 
 impl AstAdapter for GclAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

@@ -139,6 +139,9 @@ struct Listing {
 /// A metatheca vault, exposed as an arbor.
 pub struct MetathecaAdapter {
     vault: Vault,
+    /// The mount's rule at the source boundary: an entry's blob
+    /// decodes under it (`?encoding=`, else strict UTF-8).
+    decoding: quarb::source::SourceDecoding,
     /// The head state, pinned at `open`.
     head: Hash,
     nodes: RefCell<Vec<Node>>,
@@ -195,6 +198,14 @@ impl MetathecaAdapter {
     /// Open the vault at `path` (its root — the directory holding
     /// `cella/`).
     pub fn open(path: &std::path::Path) -> Result<Self, MetathecaError> {
+        Self::open_with_decoding(path, quarb::source::SourceDecoding::default())
+    }
+
+    /// [`open`](Self::open) under a mount's source-boundary rule.
+    pub fn open_with_decoding(
+        path: &std::path::Path,
+        decoding: quarb::source::SourceDecoding,
+    ) -> Result<Self, MetathecaError> {
         let vault = Vault::open(path)?;
         let head = vault.current_state_hash()?;
         let mk = |kind: Kind, parent: Option<NodeId>| Node {
@@ -204,6 +215,7 @@ impl MetathecaAdapter {
         };
         Ok(MetathecaAdapter {
             vault,
+            decoding,
             head,
             nodes: RefCell::new(vec![
                 mk(Kind::Root, None),
@@ -873,7 +885,12 @@ impl AstAdapter for MetathecaAdapter {
                 let hex = fact.body.get("blob")?.as_str()?;
                 let hash = Hash::from_hex(hex).ok()?;
                 let bytes = self.vault.get_blob(&hash).ok()?;
-                Some(Value::Str(String::from_utf8_lossy(&bytes).into_owned()))
+                // Under the mount's rule; a blob that decodes under
+                // none has no text.
+                self.decoding
+                    .decode(hex, &bytes)
+                    .ok()
+                    .map(|d| Value::Str(d.text))
             }
             Kind::FactEvent { entry, seq } => {
                 let sweep = self.sweep();
@@ -954,7 +971,7 @@ impl AstAdapter for MetathecaAdapter {
         }
     }
 
-    /// `::previous~>` on a state; `::state~>` / `::entry~>` on a
+    /// `::previous-->` on a state; `::state-->` / `::entry-->` on a
     /// fact event.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         if let Some(hash) = self.state_of(node) {

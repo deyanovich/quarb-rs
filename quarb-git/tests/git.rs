@@ -167,3 +167,28 @@ fn provenance_repo_and_commit_instant() {
         [format!("?{}@2020-01-01T00:00:00Z", dir.display())]
     );
 }
+
+/// Finding 22: a blob is bytes; it decodes under the mount's rule
+/// (`?encoding=`, a byte-order mark, else strict UTF-8) and never
+/// with replacement characters — a blob that decodes under none has
+/// no text.
+#[test]
+fn blobs_decode_under_the_mounts_rule() {
+    let dir = fixture("encoding");
+    // «Привет» in windows-1251.
+    std::fs::write(dir.join("ru.txt"), b"\xcf\xf0\xe8\xe2\xe5\xf2\n").unwrap();
+    sh(&dir, &["add", "-A"]);
+    sh(&dir, &["commit", "-q", "-m", "ru: a cp1251 file"]);
+    let strict = GitAdapter::open(&dir).unwrap();
+    match quarb::run("/branches/master/ru.txt::", &strict).unwrap() {
+        quarb::QueryResult::Values(vs) => {
+            assert!(vs.iter().all(|v| matches!(v, quarb::Value::Null)), "{vs:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+    let decoding = quarb::source::SourceDecoding::default()
+        .with_option(Some("windows-1251"))
+        .unwrap();
+    let ru = GitAdapter::open_with_decoding(&dir, decoding).unwrap();
+    assert_eq!(values(&ru, "/branches/master/ru.txt::"), ["Привет\n"]);
+}

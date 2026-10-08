@@ -117,3 +117,47 @@ fn not_an_epub_refuses() {
     };
     assert!(e.to_string().contains("container.xml"), "{e}");
 }
+
+/// Finding 15: each chapter's ids are its own namespace — the same
+/// `id` in two chapters names two bearers, a `#frag` reference
+/// lands in its own chapter and `other.xhtml#frag` in that one.
+#[test]
+fn chapter_ids_keep_to_their_chapter() {
+    const A: &str = r##"<html><body><h1>A</h1>
+<p id="n1">A's note.</p>
+<p>See <a href="#n1">here</a> and <a href="b.xhtml#n1">there</a>.</p>
+</body></html>"##;
+    const B: &str = r##"<html><body><h1>B</h1>
+<p id="n1">B's note.</p>
+</body></html>"##;
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>
+    <item id="b" href="b.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="a"/><itemref idref="b"/></spine>
+</package>"#;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("META-INF/container.xml", opts).unwrap();
+        z.write_all(CONTAINER.as_bytes()).unwrap();
+        z.start_file("OEBPS/content.opf", opts).unwrap();
+        z.write_all(opf.as_bytes()).unwrap();
+        z.start_file("OEBPS/a.xhtml", opts).unwrap();
+        z.write_all(A.as_bytes()).unwrap();
+        z.start_file("OEBPS/b.xhtml", opts).unwrap();
+        z.write_all(B.as_bytes()).unwrap();
+        z.finish().unwrap();
+    }
+    let m = parse(&cursor.into_inner()).unwrap();
+    assert_eq!(values(&m, "//ref @| count"), ["2"]);
+    assert_eq!(values(&m, "//ref-->::"), ["A's note.", "B's note."]);
+    assert_eq!(values(&m, "//ref<dangling> @| count"), ["0"]);
+    assert_eq!(
+        values(&m, "//paragraph[::onym = \"a.xhtml#n1\"]::"),
+        ["A's note."]
+    );
+}

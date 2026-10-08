@@ -107,9 +107,31 @@ fn fk_links() {
     );
     // reverse resolution: rows whose artist_id points here
     assert_eq!(
-        values("/artists/2::artist_id<--::title"),
+        values("/artists/2<--(::artist_id)::title"),
         vec!["Mikrokosmos", "Quartets"]
     );
+    // scoped, by name and through any property: a row's columns are
+    // its properties, and only the declared key resolves on its own
+    // (album 2's id equals the artist's key and must not count).
+    assert_eq!(
+        values("/artists/2<--(/albums/*::artist_id)::title"),
+        vec!["Mikrokosmos", "Quartets"]
+    );
+    assert_eq!(
+        values("/artists/2<--(/albums/*::*)::title"),
+        vec!["Mikrokosmos", "Quartets"]
+    );
+    // decided by declaration, whatever the scope's predicates let
+    // through: albums declare a key into artists, so an empty answer
+    // is a true empty…
+    assert!(values("/artists/2<--(/albums/*[::id > 99]::*)::title").is_empty());
+    // …and tracks declare a key into albums only: nothing declared
+    // on them can refer to an artist, and the query is refused.
+    let a = adapter();
+    let err = quarb::run("/artists/2<--(/tracks/*::*)", &a).unwrap_err();
+    assert!(err.to_string().contains("nothing declared"), "{err}");
+    // a written reference label takes the responsibility
+    assert!(quarb::run("/artists/2<--artists(/tracks/*::*)", &a).is_ok());
 }
 
 #[test]

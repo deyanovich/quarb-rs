@@ -141,17 +141,18 @@ impl MysqlAdapter {
             Ok::<_, sqlx::Error>((conn, specs, decodes))
         })?;
         let conn = Rc::new(RefCell::new(conn));
-        let model = RelationalModel::lazy(
+        // One row source with an optional WHERE: the whole read, the
+        // listing under a pushed-down filter, and the keyed read a
+        // hop makes (`WHERE key IN (…)`) all derive from it.
+        let model = RelationalModel::lazy_where(
             specs,
-            Box::new(move |t, spec| {
+            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
                 let mut conn = conn.borrow_mut();
-                let w = filter
-                    .as_ref()
-                    .filter(|(tn, _)| *tn == spec.name)
-                    .map(|(_, w)| w.as_str());
                 rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w))
                     .map_err(|e| e.to_string())
             }),
+            filter,
+            quarb_relational::quote_backtick,
         );
         Ok(MysqlAdapter { model })
     }
@@ -265,14 +266,20 @@ async fn fetch_rows(
         .iter()
         .zip(decodes)
         .map(|(c, d)| match d {
-            Decode::Int | Decode::Float => format!("`{c}`"),
+            Decode::Int | Decode::Float => quarb_relational::quote_backtick(c),
             // Text covers both native character columns and every
             // cast column; casting a native text column is a no-op.
-            Decode::Text => format!("CAST(`{c}` AS CHAR) AS `{c}`"),
+            Decode::Text => {
+                let q = quarb_relational::quote_backtick(c);
+                format!("CAST({q} AS CHAR) AS {q}")
+            }
         })
         .collect();
     let order = match spec.pk {
-        Some(i) => format!(" ORDER BY `{}`", spec.columns[i]),
+        Some(i) => format!(
+            " ORDER BY {}",
+            quarb_relational::quote_backtick(&spec.columns[i])
+        ),
         None => String::new(),
     };
     let filter = match where_sql {
@@ -280,9 +287,9 @@ async fn fetch_rows(
         None => String::new(),
     };
     let rows = sqlx::query(&format!(
-        "SELECT {} FROM `{}`{filter}{order}",
+        "SELECT {} FROM {}{filter}{order}",
         select.join(", "),
-        spec.name
+        quarb_relational::quote_backtick(&spec.name)
     ))
     .fetch_all(&mut *conn)
     .await?;
@@ -290,12 +297,56 @@ async fn fetch_rows(
         .iter()
         .enumerate()
         .map(|(i, r)| RowSpec {
-            rowid: i as i64 + 1,
+            rowid: Some(i as i64 + 1),
             values: (0..spec.columns.len())
                 .map(|c| cell(r, c, decodes[c]))
                 .collect(),
         })
         .collect())
+}
+
+/// The catalog for a pushed plan's column-type assumptions
+/// (`quarb_sql::ColumnTypes::hold`): every column of `tables`, with
+/// whether its type is numeric. MySQL converts text to a number in
+/// a mixed comparison by rules of its own (`n = 'abc'` is `n = 0`),
+/// so a plan is Quarb's scan only where a column compared with a
+/// number is numeric and one compared with text is not.
+pub fn column_catalog(config: &str, tables: &[&str]) -> Result<Vec<(String, bool)>, MysqlError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let opts = MySqlConnectOptions::from_str(config)?;
+    rt.block_on(async {
+        let mut conn = opts.connect().await?;
+        let mut catalog = Vec::new();
+        for table in tables {
+            let cols = sqlx::query(
+                "SELECT column_name, data_type FROM information_schema.columns \
+                 WHERE table_schema = DATABASE() AND table_name = ? \
+                 ORDER BY ordinal_position",
+            )
+            .bind(*table)
+            .fetch_all(&mut conn)
+            .await?;
+            for r in &cols {
+                let name: String = r.get(0);
+                let data_type: String = r.get(1);
+                let numeric = matches!(
+                    data_type.to_ascii_lowercase().as_str(),
+                    "tinyint"
+                        | "smallint"
+                        | "mediumint"
+                        | "int"
+                        | "bigint"
+                        | "float"
+                        | "double"
+                        | "decimal"
+                );
+                catalog.push((name, numeric));
+            }
+        }
+        Ok(catalog)
+    })
 }
 
 /// Execute pushed-down SQL directly: the column names and rows,
@@ -372,6 +423,9 @@ impl AstAdapter for MysqlAdapter {
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
     }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
+    }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
     }
@@ -395,5 +449,37 @@ impl AstAdapter for MysqlAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }

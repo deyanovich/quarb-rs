@@ -3,12 +3,29 @@
 
 use crate::WebAdapter;
 use crate::memory::{MemoryStore, PageFile, SiteInput};
+use quarb::source::SourceDecoding;
 use std::path::Path;
 
 /// Open a directory of pages as a site whose paths join against
 /// `base_url`. Only `.html` / `.htm` files become pages; hidden
 /// entries (`.git`, `.cito.yml`) are skipped.
 pub fn open_dir(root: &Path, base_url: &str) -> std::io::Result<WebAdapter<MemoryStore>> {
+    open_dir_with_decoding(
+        root,
+        base_url,
+        SourceDecoding::default().with_declared(|_, b| quarb_html::declared_encoding(b)),
+    )
+}
+
+/// [`open_dir`] under a mount's source-boundary rule: each page's
+/// bytes decode by `?encoding=`, then a byte-order mark, then the
+/// charset the page declares, then strict UTF-8; a page that
+/// decodes under none refuses the mount, naming the option.
+pub fn open_dir_with_decoding(
+    root: &Path,
+    base_url: &str,
+    decoding: SourceDecoding,
+) -> std::io::Result<WebAdapter<MemoryStore>> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -35,7 +52,10 @@ pub fn open_dir(root: &Path, base_url: &str) -> std::io::Result<WebAdapter<Memor
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
-            let html = String::from_utf8_lossy(&std::fs::read(&p)?).into_owned();
+            let html = decoding
+                .decode(&rel, &std::fs::read(&p)?)
+                .map_err(|e| std::io::Error::other(format!("{}: {e}", p.display())))?
+                .text;
             files.push(PageFile { path: rel, html });
         }
     }

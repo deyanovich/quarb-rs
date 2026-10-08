@@ -8,7 +8,8 @@
 use crate::adapter::{AstAdapter, InstantFrom, NodeId, Provenance, ProvenanceList};
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step,
+    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Stage,
+    Step,
 };
 use crate::stdlib;
 use crate::value::{SortKey, Value};
@@ -194,7 +195,7 @@ pub(crate) struct Mark {
 /// forks one thread per node); a miss yields nothing, never an
 /// error.
 
-/// The nodes a relative operand starts from (ruling #84): a
+/// The nodes a relative operand starts from: a
 /// group's members when the capsa is a group and the anchor is
 /// the current node, else the anchor's own resolution.
 fn operand_from(
@@ -391,7 +392,7 @@ pub(crate) struct Scope<'a> {
     /// per trace context; null for an unmatched outer context),
     /// read back by `$*k` in pipeline stages.
     bindings: &'a [Option<NodeId>],
-    /// A group's members (ruling #84): the rows the capsa stands
+    /// A group's members: the rows the capsa stands
     /// for. A relative operand from a group reads every member's
     /// node, as `:field` reads every member's record; empty on an
     /// ordinary capsa.
@@ -452,6 +453,11 @@ pub(crate) struct Correlation {
     outer: Vec<bool>,
     contexts: Vec<Vec<NodeId>>,
     witnesses: std::cell::RefCell<std::collections::HashMap<u64, Vec<Option<NodeId>>>>,
+    /// Per joined context and property: the context's nodes by the
+    /// equality key of that property — the hash side of a join
+    /// whose ON holds `::p = _::q`, built on first use.
+    join_keys:
+        std::cell::RefCell<std::collections::HashMap<(usize, String), std::rc::Rc<ValueKeys>>>,
 }
 
 pub(crate) type Trace = Correlation;
@@ -465,6 +471,31 @@ thread_local! {
     /// write wins; the entry points clear it before evaluating.
     static REFUSAL: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// The topics of the value capsas whose path operands are
+    /// being navigated, innermost last: what `$_` answers inside
+    /// such a path's predicates, where the predicate scope has no
+    /// topic of its own.
+    static ENCLOSING_TOPIC: std::cell::RefCell<Vec<Value>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with `scope`'s topic (if any) reachable as `$_` inside
+/// the predicates of the paths it navigates (see `Operand::Topic`).
+fn with_enclosing_topic<R>(scope: &Scope<'_>, f: impl FnOnce() -> R) -> R {
+    let carried = scope.topic.is_some();
+    if let Some(t) = scope.topic {
+        ENCLOSING_TOPIC.with(|s| s.borrow_mut().push(t.clone()));
+    }
+    let out = f();
+    if carried {
+        ENCLOSING_TOPIC.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+    out
 }
 
 thread_local! {
@@ -567,7 +598,249 @@ pub(crate) fn clear_refs() {
     REFS.with(|n| n.borrow_mut().clear());
 }
 
-pub(crate) fn record_refusal(msg: String) {
+/// What a run has learned about one scope of a reverse arrow or a
+/// value match: the nodes the scope selects, what each resolves to
+/// under a property and a reference label, and the nodes holding
+/// each value of a property. A scope is a path from the root, so
+/// its nodes are the same for every node the step is asked about;
+/// without the memo a step over N nodes read an M-node scope N
+/// times.
+struct ScopeMemo {
+    nodes: std::rc::Rc<Vec<NodeId>>,
+    referrers: std::cell::RefCell<HashMap<(String, Option<String>), std::rc::Rc<Referrers>>>,
+    values: std::cell::RefCell<HashMap<String, std::rc::Rc<ValueKeys>>>,
+    /// Whether the scoped nodes declare a reference that can land
+    /// in a container (by the kind of question and the container's
+    /// node): asked once, since it is a matter of declarations.
+    declared: std::cell::RefCell<HashMap<(bool, u64), bool>>,
+}
+
+/// Target node → the positions (in scope order) of the nodes whose
+/// property resolves to it.
+type Referrers = HashMap<NodeId, Vec<usize>>;
+
+/// The scope's nodes by the equality key of a property's value;
+/// `unkeyed` are the nodes whose value is compared under another
+/// reading and must be tested every time.
+struct ValueKeys {
+    keyed: HashMap<String, Vec<usize>>,
+    unkeyed: Vec<usize>,
+}
+
+thread_local! {
+    /// The scope memos of the eval in progress, by adapter and
+    /// scope text; cleared with the refusal cell. The adapter's
+    /// address is in the key because an adapter may run queries of
+    /// its own (a model reading its base) inside the outer eval.
+    static SCOPES: std::cell::RefCell<HashMap<(usize, String), std::rc::Rc<ScopeMemo>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A node's link list as last asked: `(adapter, node)` and the
+/// list. A step asks for a node's links to walk them, and then
+/// once more per successor to recover the label of the edge it
+/// arrived by; on a store adapter each ask is a remote query, so
+/// the second and later asks answer from here.
+type LastLinks = Option<((usize, NodeId), std::rc::Rc<Vec<(String, NodeId)>>)>;
+
+thread_local! {
+    static LAST_OUT: std::cell::RefCell<LastLinks> = const { std::cell::RefCell::new(None) };
+    static LAST_IN: std::cell::RefCell<LastLinks> = const { std::cell::RefCell::new(None) };
+}
+
+fn links_of(adapter: &impl AstAdapter, node: NodeId) -> std::rc::Rc<Vec<(String, NodeId)>> {
+    let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
+    if let Some(hit) = LAST_OUT.with(|c| match &*c.borrow() {
+        Some((k, v)) if *k == key => Some(v.clone()),
+        _ => None,
+    }) {
+        return hit;
+    }
+    let v = std::rc::Rc::new(adapter.links(node));
+    LAST_OUT.with(|c| *c.borrow_mut() = Some((key, v.clone())));
+    v
+}
+
+fn backlinks_of(adapter: &impl AstAdapter, node: NodeId) -> std::rc::Rc<Vec<(String, NodeId)>> {
+    let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
+    if let Some(hit) = LAST_IN.with(|c| match &*c.borrow() {
+        Some((k, v)) if *k == key => Some(v.clone()),
+        _ => None,
+    }) {
+        return hit;
+    }
+    let v = std::rc::Rc::new(adapter.backlinks(node));
+    LAST_IN.with(|c| *c.borrow_mut() = Some((key, v.clone())));
+    v
+}
+
+/// Whether a scope's nodes are the same wherever the step stands:
+/// its text mentions no register, mark, topic, driver, capture or
+/// fragment — nothing that looks outward. A conservative test on
+/// the canonical text: a scope it rejects is evaluated afresh for
+/// every node, as before.
+fn scope_is_static(text: &str) -> bool {
+    if text.contains(['$', '@', '%', '&']) || text.contains("((") {
+        return false;
+    }
+    let b: Vec<char> = text.chars().collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    for (i, &c) in b.iter().enumerate() {
+        // the driver `_`, standing alone
+        if c == '_' && !(i > 0 && word(b[i - 1])) && !(i + 1 < b.len() && word(b[i + 1])) {
+            return false;
+        }
+        // a capture `(N)`
+        if c == '(' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit()) {
+            let mut j = i + 1;
+            while b.get(j).is_some_and(|d| d.is_ascii_digit()) {
+                j += 1;
+            }
+            if b.get(j) == Some(&')') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The memo of a scope, its nodes found by `nodes` on first use.
+fn scope_memo(
+    adapter: &impl AstAdapter,
+    key: &str,
+    nodes: impl FnOnce() -> Vec<NodeId>,
+) -> std::rc::Rc<ScopeMemo> {
+    let k = (
+        std::ptr::from_ref(adapter).cast::<u8>() as usize,
+        key.to_string(),
+    );
+    if let Some(m) = SCOPES.with(|s| s.borrow().get(&k).cloned()) {
+        return m;
+    }
+    // Found outside any borrow: the scope's own predicates may run
+    // a scoped step of their own.
+    let memo = std::rc::Rc::new(ScopeMemo {
+        nodes: std::rc::Rc::new(nodes()),
+        referrers: std::cell::RefCell::new(HashMap::new()),
+        values: std::cell::RefCell::new(HashMap::new()),
+        declared: std::cell::RefCell::new(HashMap::new()),
+    });
+    SCOPES.with(|s| s.borrow_mut().insert(k, memo.clone()));
+    memo
+}
+
+/// Every node of the arbor: the tree and the nodes outside it.
+fn whole_arbor(adapter: &impl AstAdapter) -> Vec<NodeId> {
+    let mut all = Vec::new();
+    collect_subtree(adapter, adapter.root(), &mut all);
+    all.extend(adapter.non_tree_nodes());
+    all
+}
+
+/// The scope's nodes one of whose properties resolves to `target`
+/// under `label` — and, with no label written, under `implied`
+/// (the target's own container) too — in scope order.
+/// `properties_of` says which properties a scoped node is asked
+/// about, and `property` names that choice in the memo. Each
+/// scoped node is resolved once a run per label; the caller still
+/// tests what this names.
+fn memo_referrers(
+    adapter: &impl AstAdapter,
+    memo: &ScopeMemo,
+    property: &str,
+    properties_of: impl Fn(NodeId) -> Vec<String>,
+    label: Option<&str>,
+    implied: Option<&str>,
+    target: NodeId,
+) -> Vec<NodeId> {
+    let mut labels = vec![label.map(str::to_string)];
+    if label.is_none()
+        && let Some(i) = implied
+    {
+        labels.push(Some(i.to_string()));
+    }
+    let mut at: Vec<usize> = Vec::new();
+    for l in labels {
+        let key = (property.to_string(), l);
+        let known = memo.referrers.borrow().get(&key).cloned();
+        let map = match known {
+            Some(m) => m,
+            None => {
+                let nodes = memo.nodes.clone();
+                let mut map: Referrers = HashMap::new();
+                for (pos, &u) in nodes.iter().enumerate() {
+                    for p in properties_of(u) {
+                        if let Some(t) = adapter.resolve(u, &p, key.1.as_deref()) {
+                            let at = map.entry(t).or_default();
+                            if at.last() != Some(&pos) {
+                                at.push(pos);
+                            }
+                        }
+                    }
+                }
+                let map = std::rc::Rc::new(map);
+                memo.referrers.borrow_mut().insert(key, map.clone());
+                map
+            }
+        };
+        if let Some(hits) = map.get(&target) {
+            at.extend(hits);
+        }
+    }
+    at.sort_unstable();
+    at.dedup();
+    at.into_iter().map(|pos| memo.nodes[pos]).collect()
+}
+
+/// The scope's nodes that may hold `value` in `property`: those
+/// under its equality key and those that must be tested every
+/// time, in scope order. A value with no key is tested against all.
+fn memo_holders(
+    adapter: &impl AstAdapter,
+    memo: &ScopeMemo,
+    property: &str,
+    value: &Value,
+) -> Vec<NodeId> {
+    let Some(key) = value.equality_key() else {
+        return memo.nodes.to_vec();
+    };
+    let known = memo.values.borrow().get(property).cloned();
+    let keys = match known {
+        Some(k) => k,
+        None => {
+            let nodes = memo.nodes.clone();
+            let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+            let mut unkeyed = Vec::new();
+            for (pos, &u) in nodes.iter().enumerate() {
+                match adapter.property(u, property) {
+                    Some(v) => match v.equality_key() {
+                        Some(k) => keyed.entry(k).or_default().push(pos),
+                        None => unkeyed.push(pos),
+                    },
+                    None => {}
+                }
+            }
+            let keys = std::rc::Rc::new(ValueKeys { keyed, unkeyed });
+            memo.values
+                .borrow_mut()
+                .insert(property.to_string(), keys.clone());
+            keys
+        }
+    };
+    let mut at: Vec<usize> = keys.keyed.get(&key).cloned().unwrap_or_default();
+    at.extend(&keys.unkeyed);
+    at.sort_unstable();
+    at.dedup();
+    at.into_iter().map(|pos| memo.nodes[pos]).collect()
+}
+
+/// Record a refusal from inside an evaluation — the engine's own
+/// bounds and an adapter's failed fetch alike (a fetch that fails
+/// mid-query must surface as an error, never as an empty answer):
+/// the entry points turn the first one into [`QuarbError::Refused`]
+/// and treat the result as void. Outside an evaluation it is
+/// cleared by the next one.
+pub fn record_refusal(msg: String) {
     REFUSAL.with(|r| {
         let mut r = r.borrow_mut();
         if r.is_none() {
@@ -576,8 +849,45 @@ pub(crate) fn record_refusal(msg: String) {
     });
 }
 
+/// A fetch's outcome inside an evaluation: its value, or — when
+/// the read failed — a refusal recorded under `what` and the
+/// type's default, so a failed read never answers as an empty
+/// one. For a read whose caller caches its answer, match the
+/// result instead and return before caching.
+pub fn fetched<T: Default, E: std::fmt::Display>(
+    result: Result<T, E>,
+    what: impl FnOnce() -> String,
+) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            record_refusal(format!("{}: {e}", what()));
+            T::default()
+        }
+    }
+}
+
+/// [`fetched`] for a read answered as an `Option`: `None` after
+/// the refusal is recorded.
+pub fn fetched_opt<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    what: impl FnOnce() -> String,
+) -> Option<T> {
+    match result {
+        Ok(v) => Some(v),
+        Err(e) => {
+            record_refusal(format!("{}: {e}", what()));
+            None
+        }
+    }
+}
+
 fn clear_refusal() {
     REFUSAL.with(|r| *r.borrow_mut() = None);
+    ENCLOSING_TOPIC.with(|t| t.borrow_mut().clear());
+    SCOPES.with(|m| m.borrow_mut().clear());
+    LAST_OUT.with(|c| *c.borrow_mut() = None);
+    LAST_IN.with(|c| *c.borrow_mut() = None);
     clear_refs();
     READS.with(|r| r.borrow_mut().clear());
     STAGE.with(|s| s.set(0));
@@ -621,7 +931,7 @@ fn uses_shell_stage(stage: &Stage) -> bool {
     };
     match stage {
         Stage::Func(call) | Stage::Agg(call) => call.name == "sh" || args(call),
-        Stage::RecordPush { call, .. } => args(call),
+        Stage::RecordPush { call, .. } | Stage::RecordWith(call) => args(call),
         Stage::Subcontext { body, .. } => uses_shell_query(body),
         Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => uses_shell_stage(inner),
         Stage::Filter(e) => uses_shell_pred(e),
@@ -698,6 +1008,8 @@ fn uses_shell_operand(o: &Operand) -> bool {
             steps.iter().any(uses_shell_elem)
         }
         Operand::PeerReg { at, .. } => uses_shell_operand(at),
+        Operand::List(items) => items.iter().any(uses_shell_operand),
+        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => uses_shell_operand(base),
         _ => false,
     }
 }
@@ -811,6 +1123,7 @@ fn eval_query_caps_outer(
         contexts,
         outer: outers,
         witnesses: Default::default(),
+        join_keys: Default::default(),
     };
     let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
     // The join binds where it was written: the driver's stages
@@ -910,6 +1223,105 @@ fn correlate_gate(
         .collect()
 }
 
+/// The candidates of joined context `ctx_idx` worth testing for
+/// one driver. Where the ON holds an equality between a property of
+/// the candidate and a value of the driver (`::id = _::author_id`),
+/// the context is indexed once by that property's equality key and
+/// only the nodes under the driver's key are returned — with the
+/// nodes whose value has no key, which must be tested every time —
+/// in the context's own order, so the first witness is the one the
+/// full scan would find. Every candidate is still tested against
+/// the whole ON. Without such an equality, or when the driver's
+/// value has no key, the whole context is returned: the nested
+/// loop, as before.
+fn join_candidates(
+    adapter: &impl AstAdapter,
+    driver: &Scope<'_>,
+    on: &[PredExpr],
+    trace: &Trace,
+    ctx_idx: usize,
+    bound: &[Option<NodeId>],
+) -> Vec<NodeId> {
+    let context = &trace.contexts[ctx_idx];
+    // A top-level conjunct `::p = <driver value>`, either way round.
+    fn equality<'a>(e: &'a PredExpr) -> Option<(&'a str, &'a Operand, &'a Operand)> {
+        match e {
+            PredExpr::And(a, b) => equality(a).or_else(|| equality(b)),
+            PredExpr::Compare(l, CmpOp::Eq, r) => {
+                let own = |o: &'a Operand| match o {
+                    Operand::Rel {
+                        steps,
+                        projection: Some(Projection::Property(Some(p))),
+                        anchor: Anchor::Current,
+                    } if steps.is_empty() => Some(p.as_str()),
+                    _ => None,
+                };
+                match (own(l), r, own(r), l) {
+                    (Some(p), Operand::Outer(_), _, _) => Some((p, l, r)),
+                    (_, _, Some(p), Operand::Outer(_)) => Some((p, r, l)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    let Some((prop, own_side, driver_side)) = on.iter().find_map(equality) else {
+        return context.clone();
+    };
+    let scope = Scope {
+        prov: None,
+        register: driver.register,
+        topic: driver.topic,
+        captures: driver.captures,
+        named: driver.named,
+        marks: driver.marks,
+        outer: Some(driver),
+        ..NO_SCOPE
+    };
+    let at = driver.node.unwrap_or_else(|| adapter.root());
+    let wanted = eval_operand(adapter, at, driver_side, trace, bound, scope);
+    let keys: Option<Vec<String>> = wanted.iter().map(Value::equality_key).collect();
+    let Some(keys) = keys else {
+        return context.clone();
+    };
+    let memo_key = (ctx_idx, prop.to_string());
+    let known = trace.join_keys.borrow().get(&memo_key).cloned();
+    let index = match known {
+        Some(ix) => ix,
+        None => {
+            let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+            let mut unkeyed = Vec::new();
+            for (pos, &cand) in context.iter().enumerate() {
+                let values = eval_operand(adapter, cand, own_side, trace, &[], NO_SCOPE);
+                let ks: Option<Vec<String>> = values.iter().map(Value::equality_key).collect();
+                match ks {
+                    Some(ks) => {
+                        for k in ks {
+                            let at = keyed.entry(k).or_default();
+                            if at.last() != Some(&pos) {
+                                at.push(pos);
+                            }
+                        }
+                    }
+                    None => unkeyed.push(pos),
+                }
+            }
+            let ix = std::rc::Rc::new(ValueKeys { keyed, unkeyed });
+            trace.join_keys.borrow_mut().insert(memo_key, ix.clone());
+            ix
+        }
+    };
+    let mut at: Vec<usize> = index.unkeyed.clone();
+    for k in keys {
+        if let Some(hits) = index.keyed.get(&k) {
+            at.extend(hits);
+        }
+    }
+    at.sort_unstable();
+    at.dedup();
+    at.into_iter().map(|pos| context[pos]).collect()
+}
+
 /// Depth-first search over the joined contexts, one entry at a
 /// time. `bound` holds the partial tuple; entry `i` binds context
 /// `first_new + i`.
@@ -926,7 +1338,8 @@ fn bind_entries(
         return true;
     }
     let ctx_idx = bound.len();
-    let candidates: Vec<NodeId> = trace.contexts[ctx_idx].clone();
+    let candidates: Vec<NodeId> =
+        join_candidates(adapter, driver, &on_preds[i], trace, ctx_idx, bound);
     for cand in candidates {
         bound.push(Some(cand));
         // One capsa, two nodes: the condition reads the driver's
@@ -1192,7 +1605,7 @@ fn stage_reads_context(stage: &Stage) -> bool {
 }
 
 /// One field of a record — or of every record in a list, so a
-/// group's member list reads elementwise (ruling #66); anything
+/// group's member list reads elementwise; anything
 /// else is null.
 fn record_field(v: Value, name: &str) -> Value {
     match v {
@@ -1387,6 +1800,13 @@ pub(crate) fn apply_stage(
                 c
             })
             .collect(),
+        // The gate again, where the command would run: the scan
+        // before evaluation is the early refusal, this is the one
+        // no query shape can walk around.
+        Stage::Func(call) if call.name == "sh" && !adapter.allow_shell() => {
+            record_refusal("the sh(...) stage runs external commands; pass --allow-shell".into());
+            Vec::new()
+        }
         Stage::Func(call) if call.name == "sh" => caps
             .into_iter()
             .enumerate()
@@ -1431,7 +1851,7 @@ pub(crate) fn apply_stage(
         // `default(fallback)`: the topic when non-null, else the
         // fallback — which may be an expression evaluated against
         // the capsa's own node, making `(a) | default$$.b` the
-        // coalesce idiom (chainable; ruling #21). Literal
+        // coalesce idiom (chainable). Literal
         // fallbacks keep working through stdlib for adapter-free
         // callers.
         Stage::Func(call) if call.name == "default" => caps
@@ -1606,7 +2026,9 @@ pub(crate) fn apply_stage(
         // rides `|`. A non-list topic reduces as a singleton. The
         // reduction consumes the members: they no longer correspond
         // to the topic.
-        Stage::Func(call) if stdlib::known_agg(&call.name) => caps
+        // (`number` is both: `@| number` numbers an outline, `| number(LOCALE)`
+        // reads text as a number under a locale's conventions.)
+        Stage::Func(call) if stdlib::known_agg(&call.name) && call.name != "number" => caps
             .into_iter()
             .map(|mut c| {
                 let mut items = match c.topic.take() {
@@ -1614,7 +2036,7 @@ pub(crate) fn apply_stage(
                     Some(other) => vec![other],
                     None => vec![node_scalar(adapter, c.node)],
                 };
-                // `sum(:n)` over a group of records (ruling #66): a
+                // `sum(:n)` over a group of records: a
                 // leading topic-field argument projects the members
                 // before the reduction — `top(3; :n)`'s spelling on
                 // the reducing side.
@@ -1712,7 +2134,7 @@ pub(crate) fn apply_stage(
         // the topic, per capsa — capsae unchanged, the list
         // reassembled (an expanding inner stage flattens). Inside,
         // `$_` is the element and `@*` reads the element-context.
-        // `.v(body){N}` — the iteration loop (ruling #60): the push
+        // `.v(body){N}` — the iteration loop: the push
         // applied round after round, every round a stage of its own
         // (its own snapshot, so each capsa reads the previous
         // round's values); exactly N rounds for `{N}`, else at least
@@ -1724,7 +2146,27 @@ pub(crate) fn apply_stage(
             max,
         } => {
             let mut caps = caps;
-            let limit = max.unwrap_or_else(|| adapter.quantifier_bound());
+            // The bound holds here as in a path quantifier: an
+            // explicit ceiling or minimum above it is refused, an
+            // open loop runs to it.
+            let n_max = adapter.quantifier_bound();
+            if let Some(n) = max
+                && *n > n_max
+            {
+                record_refusal(format!(
+                    "the loop's explicit ceiling ({n}) exceeds the quantifier \
+                     bound ({n_max}); raise --quantifier-bound"
+                ));
+                return Vec::new();
+            }
+            if *min > n_max {
+                record_refusal(format!(
+                    "the loop's minimum ({min}) exceeds the quantifier bound \
+                     ({n_max}); raise --quantifier-bound"
+                ));
+                return Vec::new();
+            }
+            let limit = max.unwrap_or(n_max);
             let exact = *max == Some(*min);
             let signature = |caps: &[Capsa]| -> Vec<RoundState> {
                 caps.iter()
@@ -2200,6 +2642,12 @@ pub(crate) fn apply_stage(
         Stage::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
             outline_stage(call, caps, adapter, trace, outer, peers)
         }
+        // `@| timeline(EXPR[; ANCHOR][; forward])` — the narrative
+        // point carried from capsa to capsa. Row-aligned like
+        // `shift`.
+        Stage::Agg(call) if call.name == "timeline" => {
+            timeline_stage(call, caps, adapter, trace, outer, peers)
+        }
         // `@| corr(:a; :b)` and its kin reduce two per-capsa
         // expressions to one number over the whole context.
         Stage::Agg(call) if stdlib::association(&call.name) => {
@@ -2248,9 +2696,18 @@ pub(crate) fn apply_stage(
                     Some(cmp) => {
                         caps.sort_by(|a, b| cmp(&topic_of(a).to_string(), &topic_of(b).to_string()))
                     }
-                    None => caps.sort_by(|a, b| {
-                        topic_of(a).compare_with(&topic_of(b), &|e| adapter.unit_scale(e))
-                    }),
+                    None => {
+                        let collate = stdlib::default_text_order();
+                        let scale = |e: &str| adapter.unit_scale(e);
+                        caps.sort_by(|a, b| {
+                            stdlib::default_cmp(
+                                &topic_of(a),
+                                &topic_of(b),
+                                &scale,
+                                collate.as_deref(),
+                            )
+                        })
+                    }
                 },
                 "reverse" => caps.reverse(),
                 "unique" => {
@@ -2339,7 +2796,7 @@ pub(crate) fn apply_stage(
                 // A successful `=~` in the filter binds its groups
                 // for later stages ($1 …); a filter without one
                 // leaves earlier captures intact. A NAMED group is
-                // a named push (ruling #47): `(?<year>…)` files its
+                // a named push: `(?<year>…)` files its
                 // text into the register under `year`, read back as
                 // `$.year` / `(.year)` and seen by `%.`.
                 // A named group is a capture, not a push: `%+:year`
@@ -2355,14 +2812,78 @@ pub(crate) fn apply_stage(
             .collect(),
         // Reduce the whole context's topics to a new context.
         Stage::Agg(call) => {
+            // The output boundary is the tool's: `qua`, `quai` and the
+            // session take `@| encoding(LABEL)` off the end of a query
+            // and encode what they print. Reaching the executor means
+            // it stood somewhere else, or the host does not encode.
+            if call.name == "encoding" {
+                record_refusal(
+                    "the encoding stage stands last: '… @| csv @| encoding(windows-1251)'; \
+                     the tool that prints the output applies it"
+                        .into(),
+                );
+                return Vec::new();
+            }
+            // `@| csv(title; year)` / `@| table(…)` over nodes: the
+            // named columns are the nodes' properties, as they are a
+            // record's fields — a node stands for the record of the
+            // columns asked of it.
+            let columns: Vec<&str> = if matches!(call.name.as_str(), "csv" | "table")
+                || call.name == stdlib::ROWS_FOR_RENDERING
+            {
+                stdlib::split_csv_delimiter(call)
+                    .1
+                    .iter()
+                    .filter_map(|a| match a {
+                        Arg::Lit(Value::Str(s)) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let topics: Vec<Value> = caps
                 .iter()
-                .map(|c| {
-                    c.topic
-                        .clone()
-                        .unwrap_or_else(|| node_scalar(adapter, c.node))
+                .map(|c| match &c.topic {
+                    Some(t) => t.clone(),
+                    None if !columns.is_empty() => Value::Record(
+                        columns
+                            .iter()
+                            .map(|col| {
+                                (
+                                    col.to_string(),
+                                    adapter.property(c.node, col).unwrap_or(Value::Null),
+                                )
+                            })
+                            .collect(),
+                    ),
+                    None => node_scalar(adapter, c.node),
                 })
                 .collect();
+            // The combinations family combines values; a node
+            // stands in a reduction by its name. Nodes that share one
+            // name (a table's rows, a list's same-named fields) would
+            // combine into a silent nothing, so the stage says what
+            // to write instead.
+            if matches!(call.name.as_str(), "combinations" | "pairs" | "triples")
+                && caps.len() > 1
+                && caps.iter().all(|c| c.topic.is_none())
+                && topics
+                    .iter()
+                    .filter(|t| !matches!(t, Value::Null))
+                    .map(|t| t.to_string())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    <= 1
+            {
+                record_refusal(format!(
+                    "'{0}' combines values, and these nodes have none to tell \
+                     them apart (a node stands by its name): project a value \
+                     first — '| ::title @| {0}'",
+                    call.name
+                ));
+                return Vec::new();
+            }
             // The reduction's origins: every reduced value's, bounded.
             let mut origins = Origins::default();
             for c in &caps {
@@ -2909,6 +3430,127 @@ fn shift_stage(
         .collect()
 }
 
+/// `@| timeline(EXPR[; ANCHOR][; forward])` (spec: The Timeline): walk
+/// the context in order holding one period, the narrative point.
+/// `EXPR` names each capsa's time expression — a `timex` record, or
+/// a value with a calendar reading (a complete date). A complete
+/// date is its own result; a relative expression, a time of day and
+/// a date with fields left out are valued against the point; a
+/// duration, a vague expression and a null stay unvalued. A result
+/// becomes the point — under `forward`, only where it is not behind
+/// it. `ANCHOR`, evaluated per capsa, cuts the context into runs of
+/// one value: each run is a chain that starts with its anchor as
+/// the point. Each topic becomes the expression's record with
+/// `when` (the period, or null) and `from` (the `$ord` of the capsa
+/// whose result was the point, 0 for the anchor, null for a
+/// complete date or an unvalued one). Consumes any members.
+fn timeline_stage(
+    call: &FnCall,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<Capsa> {
+    use crate::period::{Period, Shape};
+    let (forward, args) = match call.args.split_last() {
+        Some((Arg::Lit(Value::Str(w)), rest)) if w == "forward" => (true, rest),
+        _ => (false, call.args.as_slice()),
+    };
+    let rows: Vec<(Value, Option<Value>)> = caps
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let read = |a: &Arg| match a {
+                Arg::Lit(v) => v.clone(),
+                Arg::Range(..) => Value::Null,
+                Arg::Expr(e) => operand_scalar(
+                    adapter,
+                    c.node,
+                    e,
+                    trace,
+                    Scope {
+                        prov: Some(&c.prov),
+                        node: Some(c.node),
+                        register: &c.register,
+                        members: &c.members,
+                        topic: c.topic.as_ref(),
+                        ordinal: Some(i + 1),
+                        captures: &c.captures,
+                        named: &c.named,
+                        marks: &c.marks,
+                        bindings: &c.bindings,
+                        edge: None,
+                        arrived: &c.arrived,
+                        peers,
+                        outer,
+                    },
+                ),
+            };
+            let expr = match args.first() {
+                Some(a) => read(a),
+                None => effective_topic(c, adapter),
+            };
+            (expr, args.get(1).map(read))
+        })
+        .collect();
+    // The fold: the point, and the position of the capsa that set it.
+    let mut point: Option<(Period, i64)> = None;
+    let mut run: Option<&Value> = None;
+    let mut out: Vec<(Option<Period>, Option<i64>)> = Vec::with_capacity(rows.len());
+    for (i, (expr, anchor)) in rows.iter().enumerate() {
+        if let Some(a) = anchor
+            && (i == 0 || run != Some(a))
+        {
+            // A new run: the chain starts at its anchor, or with no
+            // point where the anchor has no calendar reading.
+            point = a.calendar_reading().map(|p| (p, 0));
+            run = Some(a);
+        }
+        let ord = i as i64 + 1;
+        let value = stdlib::timex_value(expr);
+        let (when, from) = match value.as_deref().map(crate::period::shape) {
+            Some(Shape::Complete(p)) => (Some(p), None),
+            Some(Shape::Anchored) => {
+                let at = point.as_ref().map(|(p, _)| p);
+                match crate::period::anchor(value.as_deref().unwrap_or(""), at, forward) {
+                    Some(p) => (Some(p), point.as_ref().map(|(_, src)| *src)),
+                    None => (None, None),
+                }
+            }
+            _ => (None, None),
+        };
+        if let Some(p) = when {
+            let behind = point
+                .as_ref()
+                .is_some_and(|(at, _)| p.interval_cmp(at) == Ordering::Less);
+            if !(forward && behind) {
+                point = Some((p, ord));
+            }
+        }
+        out.push((when, from));
+    }
+    caps.into_iter()
+        .zip(rows)
+        .zip(out)
+        .map(|((mut c, (expr, _)), (when, from))| {
+            if c.topic.is_none() {
+                c.prov = Prov::at(c.node, stage_now());
+            }
+            let mut fields = match expr {
+                Value::Record(fields) => fields,
+                other => vec![("value".to_string(), other)],
+            };
+            fields.retain(|(k, _)| k != "when" && k != "from");
+            fields.push(("when".to_string(), when.map_or(Value::Null, Value::period)));
+            fields.push(("from".to_string(), from.map_or(Value::Null, Value::Int)));
+            c.topic = Some(Value::Record(fields));
+            c.members = Vec::new();
+            c
+        })
+        .collect()
+}
+
 /// `@| number[(level)]`: each capsa's topic becomes its dotted number
 /// (`1`, `1.1`, `1.2`, `2`) in the stream of levels — the level
 /// expression read per capsa, or the value at hand without one.
@@ -2988,6 +3630,19 @@ fn outline_stage(
         })
         .collect();
     let levels: Vec<Option<i64>> = rows.iter().map(|(l, _)| *l).collect();
+    // The levels come from data; a depth beyond any outline
+    // (`MAX_OUTLINE_DEPTH` levels below the shallowest) is refused
+    // rather than indented or numbered to that depth.
+    if let (Some(lo), Some(hi)) = (levels.iter().flatten().min(), levels.iter().flatten().max())
+        && hi.saturating_sub(*lo) > stdlib::MAX_OUTLINE_DEPTH
+    {
+        record_refusal(format!(
+            "{}: level {hi} is more than {} levels below the shallowest ({lo})",
+            call.name,
+            stdlib::MAX_OUTLINE_DEPTH
+        ));
+        return Vec::new();
+    }
     let numbers = stdlib::outline_numbers(&levels);
     caps.into_iter()
         .zip(rows)
@@ -3219,7 +3874,7 @@ fn association_stage(
 
 /// Record-convention arguments with each field's provenance: every
 /// field expression is evaluated under its own read frame.
-/// A field's value is what its operand yields (ruling #85, as for
+/// A field's value is what its operand yields (as for
 /// a computed push): one value itself, several as a list, none as
 /// null — so `%(where = (//token->place::lemma @| unique))` holds
 /// the list and an aggregate is not needed to keep it.
@@ -3927,7 +4582,7 @@ fn mark_key(marks: &[Mark]) -> Vec<(Option<String>, u64)> {
 /// predicate (no capsa of its own) the invoking scope stays what it
 /// was.
 /// An expression's value on a capsa: its first value, or on a
-/// group every member's value as a list (ruling #84) — one row's
+/// group every member's value as a list — one row's
 /// worth per member, so `| ::lower` after a group is the members'
 /// forms.
 fn group_value(
@@ -3973,6 +4628,23 @@ fn nested_outer<'a>(scope: &'a Scope<'a>) -> Option<&'a Scope<'a>> {
     } else {
         scope.outer
     }
+}
+
+/// A scope path with its predicates dropped: every node the path
+/// could select, whatever the data holds — what a question about
+/// declarations is asked of.
+fn without_predicates(elems: &[PathElem]) -> Vec<PathElem> {
+    elems
+        .iter()
+        .map(|e| match e {
+            PathElem::Step(s) => {
+                let mut s = s.clone();
+                s.predicates.clear();
+                PathElem::Step(s)
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 fn navigate_from(
@@ -4109,9 +4781,9 @@ fn arrived_edge(
             target: succ,
         },
         Axis::OutLink => {
-            let label = adapter
-                .links(from)
-                .into_iter()
+            let label = links_of(adapter, from)
+                .iter()
+                .cloned()
                 .find(|(l, t)| *t == succ && matches_label(&step.matcher, l))
                 .map(|(l, _)| l)?;
             EdgeCtx {
@@ -4121,9 +4793,9 @@ fn arrived_edge(
             }
         }
         Axis::InLink => {
-            let label = adapter
-                .backlinks(from)
-                .into_iter()
+            let label = backlinks_of(adapter, from)
+                .iter()
+                .cloned()
                 .find(|(l, s)| *s == succ && matches_label(&step.matcher, l))
                 .map(|(l, _)| l)?;
             EdgeCtx {
@@ -4136,9 +4808,9 @@ fn arrived_edge(
         // edge's true direction — the walk just declined to assert
         // it. Outgoing is tried first.
         Axis::BothLink => {
-            if let Some(label) = adapter
-                .links(from)
-                .into_iter()
+            if let Some(label) = links_of(adapter, from)
+                .iter()
+                .cloned()
                 .find(|(l, t)| *t == succ && matches_label(&step.matcher, l))
                 .map(|(l, _)| l)
             {
@@ -4148,9 +4820,9 @@ fn arrived_edge(
                     target: succ,
                 }
             } else {
-                let label = adapter
-                    .backlinks(from)
-                    .into_iter()
+                let label = backlinks_of(adapter, from)
+                    .iter()
+                    .cloned()
                     .find(|(l, s)| *s == succ && matches_label(&step.matcher, l))
                     .map(|(l, _)| l)?;
                 EdgeCtx {
@@ -4167,8 +4839,20 @@ fn arrived_edge(
         },
         Axis::ReverseResolve { property, .. } => EdgeCtx {
             source: succ,
-            label: property.clone().unwrap_or_else(|| "ref".to_string()),
+            label: match property {
+                RefProp::Named(p) => p.clone(),
+                _ => adapter
+                    .ref_property(succ)
+                    .unwrap_or_else(|| "ref".to_string()),
+            },
             target: from,
+        },
+        Axis::ValueMatch {
+            property, target, ..
+        } => EdgeCtx {
+            source: from,
+            label: format!("{property}={target}"),
+            target: succ,
         },
     };
     Some(edge)
@@ -4308,7 +4992,7 @@ fn expand_group(
 }
 
 /// `::name` on a node: the document's property, or — when the
-/// adapter declares the key an alias (ruling #29) and the node
+/// adapter declares the key an alias and the node
 /// has no such property — its metadata. Data always wins.
 fn property_or_alias(adapter: &impl AstAdapter, node: NodeId, name: &str) -> Value {
     if let Some(v) = adapter.property(node, name) {
@@ -4532,6 +5216,212 @@ pub fn name_path<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Whether `text` is a URL with a scheme and a host (`https://…`),
+/// as against a path or an opaque identity.
+pub fn is_url(text: &str) -> bool {
+    url::Url::parse(text).is_ok_and(|u| u.has_host() || u.cannot_be_a_base()) && text.contains(':')
+}
+
+/// An identity in the form the tree registry compares: a URL
+/// normalized (scheme and host lowercased, the default port
+/// dropped, no fragment); a path made absolute against the working
+/// directory with `.` and `..` folded (symlinks left alone); any
+/// other string as it is. A trailing `/` is kept: it marks a base.
+pub fn canonical_identity(text: &str) -> String {
+    if is_url(text)
+        && let Ok(mut u) = url::Url::parse(text)
+    {
+        u.set_fragment(None);
+        return u.to_string();
+    }
+    let looks_like_path = text.starts_with('/')
+        || text.starts_with("./")
+        || text.starts_with("../")
+        || text == "."
+        || text == "..";
+    if !looks_like_path && !std::path::Path::new(text).exists() {
+        return text.to_string();
+    }
+    let base = std::env::current_dir().unwrap_or_default();
+    let joined = base.join(text);
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                parts.clear();
+            }
+            std::path::Component::Normal(p) => parts.push(p.to_os_string()),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(
+        &parts
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    );
+    if text.ends_with('/') && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
+/// A reference made absolute against the identity of the tree it
+/// was written in: a URL by RFC 3986 where the base is a URL, a
+/// path joined to the base's directory and folded where the base is
+/// a path; a reference absolute in its own terms (a URL, a `/`-led
+/// path) and a reference with no base stay as they are, canonical.
+fn absolute_identity(reference: &str, base: Option<&str>) -> String {
+    if is_url(reference) {
+        return canonical_identity(reference);
+    }
+    match base {
+        Some(b) if is_url(b) => match url::Url::parse(b).and_then(|u| u.join(reference)) {
+            Ok(mut u) => {
+                u.set_fragment(None);
+                u.to_string()
+            }
+            Err(_) => canonical_identity(reference),
+        },
+        Some(b) if b.starts_with('/') && !reference.starts_with('/') => {
+            let dir = if b.ends_with('/') {
+                b.to_string()
+            } else {
+                b.rsplit_once('/')
+                    .map_or("/".to_string(), |(d, _)| format!("{d}/"))
+            };
+            canonical_identity(&format!("{dir}{reference}"))
+        }
+        _ => canonical_identity(reference),
+    }
+}
+
+/// The tree `from` is written in: the nearest ancestor-or-self that
+/// is the root of its source (its provenance path empty), named by
+/// the identity declared for it, or the base declared above it with
+/// the names down to it, else the automatic one (its mount's
+/// target, a file's path).
+fn identity_of(adapter: &impl AstAdapter, from: NodeId) -> Option<String> {
+    let mut document = from;
+    loop {
+        let p = adapter.provenance(document);
+        let at_root = p.path.as_deref().is_none_or(|x| x.is_empty() || x == "/");
+        if at_root {
+            break;
+        }
+        match adapter.parent(document) {
+            Some(q) => document = q,
+            None => break,
+        }
+    }
+    let entries = adapter.tree_identities();
+    // nearest ancestor-or-self of the document that carries an
+    // identity; a base carries its remainder
+    let mut names: Vec<String> = Vec::new();
+    let mut at = Some(document);
+    while let Some(n) = at {
+        if let Some((identity, _)) = entries.iter().find(|(_, node)| *node == n) {
+            return Some(match identity.chars().last() {
+                Some(sep) if !sep.is_alphanumeric() && n != document => {
+                    let mut id = identity.clone();
+                    names.reverse();
+                    id.push_str(&names.join(&sep.to_string()));
+                    id
+                }
+                _ => identity.clone(),
+            });
+        }
+        if let Some(name) = adapter.name(n) {
+            names.push(name);
+        }
+        at = adapter.parent(n);
+    }
+    adapter
+        .provenance(document)
+        .source
+        .map(|s| canonical_identity(&s))
+}
+
+/// The node a reference's document part names: the identity made
+/// absolute against the tree the reference was written in, then —
+/// after the engine's own locator boundary `!/…` is split off — the
+/// host's registration, the adapter's own lookup (a store of pages
+/// answers by URL), an exact identity, and the longest base, whose
+/// remainder's segments (split on the base's own separator) are
+/// navigated by names beneath its node; then `!/…`, a Quarb path
+/// evaluated inside the tree. `Err` carries the absolute identity,
+/// for the run's record of unresolved references — or nothing,
+/// for a relative reference with no tree to be relative to.
+fn find_tree(
+    adapter: &impl AstAdapter,
+    document: &str,
+    from: NodeId,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
+    marks: &[Mark],
+    register: &[Reg],
+) -> Result<NodeId, Option<String>> {
+    let (identity, within) = match document.find("!/") {
+        Some(i) => (&document[..i], Some(&document[i + 1..])),
+        None => (document, None),
+    };
+    let base = identity_of(adapter, from);
+    // A reference from a tree with no identity of its own (pasted
+    // text, nowhere) is anchored only when it is absolute by
+    // itself — a URL with a scheme. A relative one, and a `/`-led
+    // one (a path, or a URL path: which, the missing base would
+    // have said), names nothing: it resolves nothing and is not
+    // recorded, since there is nothing to acquire.
+    let anchored = base.is_some() || is_url(identity);
+    let identity = absolute_identity(identity, base.as_deref());
+    let found = ref_target(&identity)
+        .or_else(|| adapter.document_by_ref(&identity))
+        .or_else(|| {
+            let entries = adapter.tree_identities();
+            if let Some((_, n)) = entries
+                .iter()
+                .find(|(i, _)| canonical_identity(i) == identity)
+            {
+                return Some(*n);
+            }
+            let mut bases: Vec<(String, NodeId)> = entries
+                .into_iter()
+                .filter(|(i, _)| i.chars().last().is_some_and(|c| !c.is_alphanumeric()))
+                .map(|(i, n)| (canonical_identity(&i), n))
+                .filter(|(i, _)| identity.starts_with(i.as_str()))
+                .collect();
+            bases.sort_by_key(|(i, _)| std::cmp::Reverse(i.len()));
+            let (base, node) = bases.into_iter().next()?;
+            let sep = base.chars().last()?;
+            let mut cur = node;
+            for seg in identity[base.len()..].split(sep).filter(|s| !s.is_empty()) {
+                cur = adapter.children_named(cur, seg).into_iter().next()?;
+            }
+            Some(cur)
+        });
+    let Some(node) = found else {
+        return Err(anchored.then_some(identity));
+    };
+    // `!/…`: a Quarb path inside the tree, evaluated from its node.
+    let Some(path) = within else {
+        return Ok(node);
+    };
+    let elems =
+        crate::parser::parse_scope_path(path).map_err(|_| Some(format!("{identity}!{path}")))?;
+    navigate_from(
+        &elems.0, adapter, node, trace, outer, witness, marks, register,
+    )
+    .into_iter()
+    .next()
+    .ok_or_else(|| Some(format!("{identity}!{path}")))
+}
+
 /// A node's provenance as the query answers it: the adapter's
 /// entries (one empty entry where it records nothing), each with
 /// its path filled from the arbor root where no layer set it, and
@@ -4742,18 +5632,22 @@ fn operand_nodes(
                 members: &[],
                 ..scope
             };
-            for from in operand_from(adapter, anchor, node, trace, bound, scope) {
-                nodes.extend(navigate_from(
-                    steps,
-                    adapter,
-                    from,
-                    trace,
-                    nested_outer(&inner),
-                    witness,
-                    inner.marks,
-                    inner.register,
-                ));
-            }
+            // The capsa's topic stays reachable as `$_` in the
+            // path's predicates (see `Operand::Topic`).
+            with_enclosing_topic(&scope, || {
+                for from in operand_from(adapter, anchor, node, trace, bound, scope) {
+                    nodes.extend(navigate_from(
+                        steps,
+                        adapter,
+                        from,
+                        trace,
+                        nested_outer(&inner),
+                        witness,
+                        inner.marks,
+                        inner.register,
+                    ));
+                }
+            });
             dedup(nodes)
         }
         Operand::Ctx { index, steps, .. } => {
@@ -4884,7 +5778,7 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
                 .canonical()
                 .map_or(Value::Null, Value::Str),
         ),
-        // The shaped keys (ruling #58): `%` the record, `@` the
+        // The shaped keys: `%` the record, `@` the
         // list — of the provenance entries, and of the origin
         // coordinates. A node's origin is itself, at stage 0.
         "%provenance" => Some(prov_record(&resolved_provenance(adapter, node).first())),
@@ -4950,11 +5844,13 @@ fn depth_of(adapter: &impl AstAdapter, node: NodeId) -> usize {
 
 /// Total number of proper descendants of `node`.
 fn n_descendants(adapter: &impl AstAdapter, node: NodeId) -> usize {
-    adapter
-        .children(node)
-        .into_iter()
-        .map(|c| 1 + n_descendants(adapter, c))
-        .sum()
+    let mut n = 0;
+    let mut stack = adapter.children(node);
+    while let Some(c) = stack.pop() {
+        n += 1;
+        stack.extend(adapter.children(c));
+    }
+    n
 }
 
 /// Apply one step to a single source node, appending results to `out`.
@@ -5263,9 +6159,9 @@ fn apply_step(
             out.extend(by_reach(found, *reach));
         }
         Axis::OutLink => {
-            let matched: Vec<(String, NodeId)> = adapter
-                .links(node)
-                .into_iter()
+            let matched: Vec<(String, NodeId)> = links_of(adapter, node)
+                .iter()
+                .cloned()
                 .filter(|(label, target)| {
                     matches_label(&step.matcher, label) && tests_ok(adapter, *target, step)
                 })
@@ -5291,9 +6187,9 @@ fn apply_step(
             out.extend(kept.into_iter().map(|(_, target)| target));
         }
         Axis::InLink => {
-            let matched: Vec<(String, NodeId)> = adapter
-                .backlinks(node)
-                .into_iter()
+            let matched: Vec<(String, NodeId)> = backlinks_of(adapter, node)
+                .iter()
+                .cloned()
                 .filter(|(label, source)| {
                     matches_label(&step.matcher, label) && tests_ok(adapter, *source, step)
                 })
@@ -5324,14 +6220,14 @@ fn apply_step(
         // with its true direction so the edge context (`$-`) still
         // reports source and target faithfully.
         Axis::BothLink => {
-            let matched: Vec<(String, NodeId, bool)> = adapter
-                .links(node)
-                .into_iter()
+            let matched: Vec<(String, NodeId, bool)> = links_of(adapter, node)
+                .iter()
+                .cloned()
                 .map(|(label, target)| (label, target, true))
                 .chain(
-                    adapter
-                        .backlinks(node)
-                        .into_iter()
+                    backlinks_of(adapter, node)
+                        .iter()
+                        .cloned()
                         .map(|(label, source)| (label, source, false)),
                 )
                 .filter(|(label, other, _)| {
@@ -5366,45 +6262,75 @@ fn apply_step(
             );
             out.extend(kept.into_iter().map(|(_, other, _)| other));
         }
-        Axis::Resolve { property, hint } => {
+        Axis::Resolve {
+            property,
+            label: hint,
+        } => {
             // The bare arrow (`//a-->`) asks the adapter which
             // property carries this node's reference; a named
             // property spells it. No property at all resolves
             // nothing — an unreferencing node simply yields empty.
+            // A source with no notion of a reference cannot answer:
+            // an empty set would read as "this points nowhere".
+            if !adapter.resolves_references() {
+                record_refusal(
+                    "resolution follows references, and this source defines none \
+                     (no keys, no reference properties): match by value instead — \
+                     '::a=>(/scope/*::b)' — or declare the reference in a model \
+                     ('ref /scope/*::a --> target;')"
+                        .into(),
+                );
+                return;
+            }
             let prop = property.clone().or_else(|| adapter.ref_property(node));
             let Some(prop) = prop else { return };
             let property = &prop;
+            // A property that declares no target resolves only under
+            // a reference label: without one the answer is refused,
+            // whatever the data holds.
+            if hint.is_none() && adapter.resolve_needs_label(node, property) {
+                record_refusal(format!(
+                    "'::{property}-->' needs a reference label here: the property \
+                     declares no target, so name the container it points into — \
+                     '::{property}-->target'"
+                ));
+                return;
+            }
             let mut resolved: Vec<NodeId> = adapter
                 .resolve(node, property, hint.as_deref())
                 .into_iter()
                 .collect();
             if resolved.is_empty() {
                 // The property may hold an external reference — a
-                // document outside the arbor. Its fragment part is
-                // the crossref *within* that document (URI
-                // semantics; html's #id, JSON's #/pointer), so the
-                // document identity is the fragment-stripped part:
-                // a mounted target answers with the fragment's
-                // element (else its root); an unmounted one is
+                // document outside the arbor, and perhaps a location
+                // within it. The adapter has read both out of its
+                // own reference syntax; the engine looks at neither:
+                // a mounted target answers with the node its own
+                // adapter finds at the location (else its root); an
+                // unmounted one is
                 // recorded among the run's unresolved external
                 // references, for the host's acquisition loop. No
                 // IO here, ever.
                 if let Some(ext) = adapter.external_ref(node, property, hint.as_deref()) {
-                    let (doc, frag) = match ext.split_once('#') {
-                        Some((d, f)) if !f.is_empty() => (d.to_string(), Some(f.to_string())),
-                        _ => (ext.trim_end_matches('#').to_string(), None),
-                    };
-                    // The host's registration first, then the
-                    // adapter's own lookup (a store of pages
-                    // answers by URL), else the acquisition loop.
-                    match ref_target(&doc).or_else(|| adapter.document_by_ref(&doc)) {
-                        Some(root) => {
+                    let frag = ext.within;
+                    match find_tree(
+                        adapter,
+                        &ext.document,
+                        node,
+                        trace,
+                        outer,
+                        witness,
+                        marks,
+                        register,
+                    ) {
+                        Ok(root) => {
                             let landed = frag
                                 .and_then(|f| adapter.resolve_fragment(root, &f))
                                 .unwrap_or(root);
                             resolved.push(landed);
                         }
-                        None => record_ref(doc),
+                        Err(Some(identity)) => record_ref(identity),
+                        Err(None) => {}
                     }
                 }
             }
@@ -5435,33 +6361,356 @@ fn apply_step(
                 },
             ));
         }
-        Axis::ReverseResolve { property, hint } => {
-            // "What points here?" — every node whose `property`
-            // resolves to `node`. The naive scan walks the whole arbor
-            // from the root; an adapter with a reverse index could
-            // shortcut this later.
-            let prop_of =
-                |source: NodeId| property.clone().or_else(|| adapter.ref_property(source));
-            // An adapter with a reverse index answers outright;
-            // otherwise the whole arbor is walked.
-            let matched: Vec<NodeId> =
-                match adapter.reverse_resolve(node, property.as_deref(), hint.as_deref()) {
-                    Some(sources) => sources
-                        .into_iter()
-                        .filter(|&source| tests_ok(adapter, source, step))
-                        .collect(),
-                    None => {
-                        let mut all = Vec::new();
-                        collect_subtree(adapter, adapter.root(), &mut all);
-                        all.into_iter()
-                            .filter(|&source| {
-                                prop_of(source).is_some_and(|p| {
-                                    adapter.resolve(source, &p, hint.as_deref()) == Some(node)
-                                }) && tests_ok(adapter, source, step)
-                            })
-                            .collect()
+        Axis::ReverseResolve {
+            label,
+            scope,
+            property,
+        } => {
+            // "What points here?" — every node whose property resolves
+            // to `node`. A declared reference (a catalog foreign key, a
+            // model `ref`) answers through the adapter's reverse index;
+            // a scope path bounds the search to the nodes it selects;
+            // with neither, the whole arbor is walked, which an adapter
+            // must open to (an empty answer could not be told from an
+            // absence of referrers), else the query is refused.
+            // A model `index SCOPE::prop;` over this very scope names
+            // the candidates without the walk; each is still tested
+            // below, so the answer is the walk's.
+            let indexed = match (scope, property) {
+                (Some(sp), RefProp::Named(p)) => {
+                    adapter.index_referrers(&sp.text(), p, label.as_deref(), node)
+                }
+                _ => None,
+            };
+            // With no reference label written, the adapter may name
+            // one under which a referrer's property is also resolved
+            // when the question is about this node (a database reads
+            // a column with no declared key as a key into the node's
+            // table). The engine supplies none of its own.
+            let implied = label.clone().or_else(|| adapter.reverse_label(node));
+            // The candidates: the scope's nodes — found once a run
+            // where the scope looks nowhere outward, and narrowed to
+            // those known to resolve here when the property is named
+            // — or, with no scope, the declared referrers, else the
+            // whole arbor where the adapter opens to the walk.
+            let narrowed = |memo: &ScopeMemo| match property {
+                RefProp::Named(p) => memo_referrers(
+                    adapter,
+                    memo,
+                    p,
+                    |_| vec![p.clone()],
+                    label.as_deref(),
+                    implied.as_deref(),
+                    node,
+                ),
+                // The declared reference properties depend on the
+                // container the target stands in: one map per
+                // container.
+                RefProp::Default => memo_referrers(
+                    adapter,
+                    memo,
+                    &format!(
+                        "\u{0}default:{}",
+                        adapter.parent(node).map_or(u64::MAX, |p| p.0)
+                    ),
+                    |u| adapter.reference_properties(u, node),
+                    label.as_deref(),
+                    implied.as_deref(),
+                    node,
+                ),
+                // Any property: no implied container (see below).
+                RefProp::Any => memo_referrers(
+                    adapter,
+                    memo,
+                    "\u{0}any",
+                    |u| adapter.property_names(u),
+                    label.as_deref(),
+                    None,
+                    node,
+                ),
+            };
+            let mut memo: Option<std::rc::Rc<ScopeMemo>> = None;
+            let candidates: Vec<NodeId> = match scope {
+                Some(_) if indexed.is_some() => indexed.unwrap_or_default(),
+                Some(sp) => {
+                    let text = sp.text();
+                    let walk = || {
+                        navigate_from(
+                            &sp.0,
+                            adapter,
+                            adapter.root(),
+                            trace,
+                            outer,
+                            witness,
+                            marks,
+                            register,
+                        )
+                    };
+                    if scope_is_static(&text) {
+                        let m = scope_memo(adapter, &text, walk);
+                        let c = narrowed(&m);
+                        memo = Some(m);
+                        c
+                    } else {
+                        walk()
                     }
+                }
+                None => {
+                    let named = match property {
+                        RefProp::Named(p) => Some(p.as_str()),
+                        _ => None,
+                    };
+                    match adapter.reverse_resolve(node, named, label.as_deref()) {
+                        Some(sources) if *property != RefProp::Any => {
+                            let found: Vec<(NodeId, String)> = sources
+                                .into_iter()
+                                .filter(|&u| tests_ok(adapter, u, step))
+                                .map(|u| {
+                                    let p = named
+                                        .map(str::to_string)
+                                        .or_else(|| {
+                                            adapter.reference_properties(u, node).into_iter().next()
+                                        })
+                                        .unwrap_or_else(|| "ref".to_string());
+                                    (u, p)
+                                })
+                                .collect();
+                            out.extend(reverse_found(
+                                adapter, node, found, step, trace, outer, witness, marks, register,
+                            ));
+                            return;
+                        }
+                        _ => {
+                            if !adapter.walks_for_references() {
+                                record_refusal(
+                                    "reverse resolution over the whole arbor: this source \
+                                     does not open to the walk — give the arrow a scope, \
+                                     '<--(/path/*::y)', or declare the reference in a model"
+                                        .into(),
+                                );
+                                return;
+                            }
+                            let m = scope_memo(adapter, "", || whole_arbor(adapter));
+                            let c = narrowed(&m);
+                            memo = Some(m);
+                            c
+                        }
+                    }
+                }
+            };
+            // A source with no notion of a reference cannot answer:
+            // an empty set would read as "nothing points here".
+            if !adapter.resolves_references() {
+                record_refusal(
+                    "reverse resolution follows references, and this source defines \
+                     none (no keys, no reference properties): match by value \
+                     instead — 't::id=>(/scope/*::y)' — or declare the reference \
+                     in a model ('ref /scope/*::y --> target;')"
+                        .into(),
+                );
+                return;
+            }
+            // Under `::*` with no label written the question is
+            // settled by declaration, before any property is read:
+            // can a reference declared on the scoped nodes — a
+            // catalog key, a model `ref`, a reference property the
+            // format defines — land in this node's container? If
+            // none can, an empty answer would read as an absence of
+            // referrers, and the query is refused. The predicates of
+            // the scope do not decide it: the same query behaves the
+            // same way whatever the data holds.
+            let asks_declaration = match property {
+                RefProp::Any => label.is_none(),
+                // `t<--` and `t<--(SCOPE)` read the reference property
+                // the scoped nodes declare: where none does, there is
+                // nothing to read.
+                RefProp::Default => true,
+                RefProp::Named(_) => false,
+            };
+            if asks_declaration {
+                let declares = |u: NodeId| match property {
+                    RefProp::Default => !adapter.reference_properties(u, node).is_empty(),
+                    _ => adapter.can_refer_to(u, node) == Some(true),
                 };
+                let declared = |ns: &[NodeId]| ns.iter().any(|&u| u != node && declares(u));
+                // Asked of the whole scope, once a run per container
+                // where the scope is memoized.
+                let memo_key = (
+                    *property == RefProp::Any,
+                    adapter.parent(node).map_or(u64::MAX, |p| p.0),
+                );
+                let known = memo
+                    .as_ref()
+                    .and_then(|m| m.declared.borrow().get(&memo_key).copied());
+                let mut ok = match (known, &memo) {
+                    (Some(k), _) => k,
+                    (None, Some(m)) => declared(&m.nodes),
+                    (None, None) => declared(&candidates),
+                };
+                if !ok
+                    && known.is_none()
+                    && let Some(sp) = scope
+                {
+                    let bare = without_predicates(&sp.0);
+                    let all = navigate_from(
+                        &bare,
+                        adapter,
+                        adapter.root(),
+                        trace,
+                        outer,
+                        witness,
+                        marks,
+                        register,
+                    );
+                    ok = declared(&all);
+                    if !ok && all.is_empty() && !bare.is_empty() {
+                        // An empty scope has no node to ask: its
+                        // containers answer where the source keeps a
+                        // schema (a table with no rows still has its
+                        // keys); where none says no, the search runs.
+                        let containers = navigate_from(
+                            &bare[..bare.len() - 1],
+                            adapter,
+                            adapter.root(),
+                            trace,
+                            outer,
+                            witness,
+                            marks,
+                            register,
+                        );
+                        let answers: Vec<Option<bool>> = containers
+                            .iter()
+                            .map(|&c| adapter.can_refer_to(c, node))
+                            .collect();
+                        ok = answers.contains(&Some(true)) || !answers.contains(&Some(false));
+                    }
+                }
+                if let Some(m) = &memo {
+                    m.declared.borrow_mut().insert(memo_key, ok);
+                }
+                if !ok {
+                    let msg = if *property == RefProp::Any {
+                        let remedy = implied
+                            .as_deref()
+                            .map(|c| format!(", or write the reference label, '<--{c}(…::*)'"))
+                            .unwrap_or_default();
+                        format!(
+                            "reverse resolution through any property ('::*'): nothing \
+                             declared on the scoped nodes can refer to this node's \
+                             container, so an empty answer would not mean that nothing \
+                             points here — name the property, '<--(…::y)'{remedy}"
+                        )
+                    } else {
+                        let place = if scope.is_some() {
+                            "the scoped nodes declare"
+                        } else {
+                            "this source declares"
+                        };
+                        format!(
+                            "reverse resolution with no property named: {place} no \
+                             reference property that can point at this node's \
+                             container, so there is nothing to read — name the \
+                             property, '<--(…::y)'"
+                        )
+                    };
+                    record_refusal(msg);
+                    return;
+                }
+            }
+            let mut found: Vec<(NodeId, String)> = Vec::new();
+            for u in candidates {
+                if u == node {
+                    continue;
+                }
+                let props: Vec<String> = match property {
+                    RefProp::Named(p) => vec![p.clone()],
+                    RefProp::Default => adapter.reference_properties(u, node),
+                    RefProp::Any => adapter.property_names(u),
+                };
+                if let Some(p) = props.into_iter().find(|p| {
+                    // The implied container serves a property the
+                    // query names; under `::*` it would let any
+                    // property whose value happens to equal the key
+                    // count as a reference, so there a property must
+                    // resolve on its own (or under a written label).
+                    adapter.resolve(u, p, label.as_deref()) == Some(node)
+                        || (label.is_none()
+                            && *property != RefProp::Any
+                            && adapter.resolve(u, p, implied.as_deref()) == Some(node))
+                }) && tests_ok(adapter, u, step)
+                {
+                    found.push((u, p));
+                }
+            }
+            out.extend(reverse_found(
+                adapter, node, found, step, trace, outer, witness, marks, register,
+            ));
+        }
+        Axis::ValueMatch {
+            property,
+            scope,
+            target,
+        } => {
+            // The nodes of the scope whose `target` equals this
+            // node's `property`: plain equality, no resolution, no key.
+            // Unscoped, the whole arbor on the reverse arrow's terms.
+            let Some(own) = adapter.property(node, property) else {
+                return;
+            };
+            let candidates: Vec<NodeId> = match scope {
+                // A model `index SCOPE::prop;` over this scope hands
+                // the nodes holding the value; else the scope is
+                // read once a run and its nodes are found by the
+                // value's key. Each is still tested below.
+                Some(sp) => {
+                    let text = sp.text();
+                    match adapter.index_lookup(&text, target, &own) {
+                        Some(hits) => hits,
+                        None => {
+                            let walk = || {
+                                navigate_from(
+                                    &sp.0,
+                                    adapter,
+                                    adapter.root(),
+                                    trace,
+                                    outer,
+                                    witness,
+                                    marks,
+                                    register,
+                                )
+                            };
+                            if scope_is_static(&text) {
+                                let memo = scope_memo(adapter, &text, walk);
+                                memo_holders(adapter, &memo, target, &own)
+                            } else {
+                                walk()
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if !adapter.walks_for_references() {
+                        record_refusal(
+                            "value match over the whole arbor: this source does not \
+                             open to the walk — give the match a scope, '=>(/path/*::b)'"
+                                .into(),
+                        );
+                        return;
+                    }
+                    let memo = scope_memo(adapter, "", || whole_arbor(adapter));
+                    memo_holders(adapter, &memo, target, &own)
+                }
+            };
+            let scale = |e: &str| adapter.unit_scale(e);
+            let matched: Vec<NodeId> = candidates
+                .into_iter()
+                .filter(|&u| {
+                    adapter
+                        .property(u, target)
+                        .is_some_and(|v| value_eq(&own, &v, &scale))
+                        && tests_ok(adapter, u, step)
+                })
+                .collect();
             out.extend(apply_predicates(
                 adapter,
                 matched,
@@ -5472,19 +6721,54 @@ fn apply_step(
                 marks,
                 register,
                 |&n| n,
-                // Stored direction: the found node's property points
-                // at the current one.
-                |&source| {
-                    let p = prop_of(source)?;
+                |&u| {
                     Some(EdgeCtx {
-                        source,
-                        label: adapter.ref_label(source, &p).unwrap_or(p),
-                        target: node,
+                        source: node,
+                        label: format!("{property}={target}"),
+                        target: u,
                     })
                 },
             ));
         }
     }
+}
+
+/// The referrers a reverse resolution found, through the step's
+/// predicates, each arriving by the stored edge (the referrer's
+/// property points at the current node).
+#[allow(clippy::too_many_arguments)]
+fn reverse_found(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    found: Vec<(NodeId, String)>,
+    step: &Step,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    witness: &[Option<NodeId>],
+    marks: &[Mark],
+    register: &[Reg],
+) -> Vec<NodeId> {
+    apply_predicates(
+        adapter,
+        found,
+        step,
+        trace,
+        outer,
+        witness,
+        marks,
+        register,
+        |&(n, _)| n,
+        |&(source, ref p)| {
+            Some(EdgeCtx {
+                source,
+                label: adapter.ref_label(source, p).unwrap_or_else(|| p.clone()),
+                target: node,
+            })
+        },
+    )
+    .into_iter()
+    .map(|(n, _)| n)
+    .collect()
 }
 
 /// Tell the adapter which crosslinks a hop is about to follow from
@@ -5494,6 +6778,9 @@ fn prefetch_hint(adapter: &impl AstAdapter, step: &Step, nodes: impl Iterator<It
         Axis::OutLink => &[crate::adapter::LinkDir::Out],
         Axis::InLink => &[crate::adapter::LinkDir::In],
         Axis::BothLink => &[crate::adapter::LinkDir::Out, crate::adapter::LinkDir::In],
+        // A resolution with no label follows the declared keys —
+        // the outgoing crosslinks — so the same hint serves it.
+        Axis::Resolve { label: None, .. } => &[crate::adapter::LinkDir::Out],
         _ => return,
     };
     let nodes: Vec<NodeId> = nodes.collect();
@@ -5507,9 +6794,14 @@ fn prefetch_hint(adapter: &impl AstAdapter, step: &Step, nodes: impl Iterator<It
 
 /// Collect `node` and all of its descendants (the whole subtree).
 fn collect_subtree(adapter: &impl AstAdapter, node: NodeId, out: &mut Vec<NodeId>) {
-    out.push(node);
-    for child in adapter.children(node) {
-        collect_subtree(adapter, child, out);
+    // An explicit stack, so a tree as deep as the source allows
+    // (XML nested hundreds of thousands of levels) walks within
+    // the thread's stack. Children are pushed reversed to keep
+    // document order.
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        out.push(n);
+        stack.extend(adapter.children(n).into_iter().rev());
     }
 }
 
@@ -5523,11 +6815,25 @@ fn descendants(
     step: &Step,
     out: &mut Vec<(NodeId, usize)>,
 ) {
-    for child in adapter.children(node) {
+    // An explicit stack (see `collect_subtree`): depth-first in
+    // document order, no recursion per level.
+    let mut stack: Vec<(NodeId, usize)> = adapter
+        .children(node)
+        .into_iter()
+        .rev()
+        .map(|c| (c, depth))
+        .collect();
+    while let Some((child, d)) = stack.pop() {
         if matches_step(adapter, child, step) {
-            out.push((child, depth));
+            out.push((child, d));
         }
-        descendants(adapter, child, depth + 1, step, out);
+        stack.extend(
+            adapter
+                .children(child)
+                .into_iter()
+                .rev()
+                .map(|c| (c, d + 1)),
+        );
     }
 }
 
@@ -6112,7 +7418,17 @@ fn eval_operand(
             if let Some(p) = scope.prov {
                 note_all(&p.origins);
             }
-            vec![scope.topic.cloned().unwrap_or(Value::Null)]
+            // Inside the predicate of a path evaluated from a value
+            // context (`%(lemma = (^//entry[//inflection:: = $_]
+            // ::lemma))`), the predicate's own scope has no topic:
+            // `$_` is the enclosing capsa's, carried across.
+            vec![
+                scope
+                    .topic
+                    .cloned()
+                    .or_else(|| ENCLOSING_TOPIC.with(|t| t.borrow().last().cloned()))
+                    .unwrap_or(Value::Null),
+            ]
         }
         // `base:name` — a record's field; null on a non-record. A
         // field of a recalled record keeps that field's origins.
@@ -6137,7 +7453,7 @@ fn eval_operand(
             note_all(&o);
             vec![origins_meta(adapter, &o, key).unwrap_or(Value::Null)]
         }
-        // A field read on a list of records reads each (ruling #66):
+        // A field read on a list of records reads each:
         // a group's member list projects to the members' values, so
         // `@| group(...) | :n | sum` sums a field per group.
         Operand::Field { base, name } => eval_operand(adapter, node, base, trace, bound, scope)
@@ -6175,7 +7491,7 @@ fn eval_operand(
             };
             eval_operand(adapter, node, taken, trace, bound, scope)
         }
-        // `X:.r` — the cross-capsa read (ruling #57): at each node
+        // `X:.r` — the cross-capsa read: at each node
         // `at` reaches, the regula of every capsa of the stage's
         // input context standing there — the snapshot, so the read
         // is synchronous within the stage. One value per (node,
@@ -6263,18 +7579,20 @@ fn eval_operand(
                         members: &[],
                         ..scope
                     };
-                    for from in operand_from(adapter, anchor, node, trace, bound, scope) {
-                        nodes.extend(navigate_from(
-                            steps,
-                            adapter,
-                            from,
-                            trace,
-                            nested_outer(&inner),
-                            witness,
-                            inner.marks,
-                            inner.register,
-                        ));
-                    }
+                    with_enclosing_topic(&scope, || {
+                        for from in operand_from(adapter, anchor, node, trace, bound, scope) {
+                            nodes.extend(navigate_from(
+                                steps,
+                                adapter,
+                                from,
+                                trace,
+                                nested_outer(&inner),
+                                witness,
+                                inner.marks,
+                                inner.register,
+                            ));
+                        }
+                    });
                     let nodes = dedup(nodes);
                     let values: Vec<Value> = match projection {
                         Some(p) => nodes.iter().map(|&n| project(adapter, n, p)).collect(),
@@ -6287,7 +7605,7 @@ fn eval_operand(
                     node_of = nodes;
                     values
                 }
-                // The topic of a group is its members (ruling #84):
+                // The topic of a group is its members:
                 // `($_ | ::lower @| join)` runs the stages over the
                 // rows, each on its own node.
                 Operand::Topic if !scope.members.is_empty() => {
@@ -6328,7 +7646,7 @@ fn eval_operand(
                 // path yields no values at all, which would starve
                 // the stage — seed the null it exists to replace,
                 // so `(a) | default$$.b` coalesces missing paths
-                // too (ruling #21).
+                // too.
                 if state.is_empty() && matches!(stage, Stage::Func(c) if c.name == "default") {
                     state.push(Value::Null);
                     provs.push(Prov::default());
@@ -6550,18 +7868,20 @@ fn eval_operand(
                 members: &[],
                 ..scope
             };
-            for from in operand_from(adapter, anchor, node, trace, bound, scope) {
-                nodes.extend(navigate_from(
-                    steps,
-                    adapter,
-                    from,
-                    trace,
-                    nested_outer(&inner),
-                    witness,
-                    inner.marks,
-                    inner.register,
-                ));
-            }
+            with_enclosing_topic(&scope, || {
+                for from in operand_from(adapter, anchor, node, trace, bound, scope) {
+                    nodes.extend(navigate_from(
+                        steps,
+                        adapter,
+                        from,
+                        trace,
+                        nested_outer(&inner),
+                        witness,
+                        inner.marks,
+                        inner.register,
+                    ));
+                }
+            });
             let nodes = dedup(nodes);
             for &n in &nodes {
                 note(n);
@@ -6580,7 +7900,7 @@ fn eval_operand(
         // Arithmetic: each side contributes its first value; the
         // combination rules (numeric readings, null propagation,
         // overflow promotion) live in `arith`. A shaped LITERAL
-        // operand types itself first (ruling #12): the author's own
+        // operand types itself first: the author's own
         // spelling — `1900-01-01 + 12d`, `2h + 30min`, `1500m +
         // 2km` — is unambiguous, unlike data text (Rel reads never
         // retype) or comparison criteria (which stay criteria and
@@ -6810,7 +8130,7 @@ fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
     }
 }
 
-/// Test one value against a pattern literal (ruling #33). Null
+/// Test one value against a pattern literal. Null
 /// never matches (mirroring `*=`); everything else tests its
 /// string rendering, as the substring operator always has.
 fn pattern_test(segs: &[PatSeg], v: &Value) -> bool {
@@ -6854,6 +8174,16 @@ fn glob_match(segs: &[PatSeg], text: &str) -> bool {
 }
 
 fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
+    // A period beside anything: both through the calendar reading,
+    // as intervals — nested periods are equal, so equality is
+    // containment. This precedes the temporal rule where the other
+    // side is an instant.
+    if matches!(a, Value::Period { .. }) || matches!(b, Value::Period { .. }) {
+        return match (a.calendar_reading(), b.calendar_reading()) {
+            (Some(x), Some(y)) => x.interval_cmp(&y) == Ordering::Equal,
+            _ => false,
+        };
+    }
     // Timeline equality when either side is an instant, the other
     // coercing via its temporal reading (epoch ints, ISO text).
     if matches!(a, Value::Instant { .. }) || matches!(b, Value::Instant { .. }) {
@@ -6882,8 +8212,12 @@ fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
             None => false,
         };
     }
-    if let (Some(x), Some(y)) = (a.numeric(), b.numeric()) {
-        return x == y;
+    // Two integer readings compare exactly (a 64-bit id is not a
+    // double); any other numeric pair by magnitude.
+    match (a.numeric_reading(), b.numeric_reading()) {
+        (Some(Value::Int(x)), Some(Value::Int(y))) => return x == y,
+        (Some(x), Some(y)) => return x.numeric() == y.numeric(),
+        _ => {}
     }
     match (a, b) {
         (Value::Str(x), Value::Str(y)) => x == y,
@@ -6894,6 +8228,12 @@ fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
 }
 
 fn value_cmp(a: &Value, b: &Value, scale: UnitScale) -> Option<Ordering> {
+    if matches!(a, Value::Period { .. }) || matches!(b, Value::Period { .. }) {
+        return match (a.calendar_reading(), b.calendar_reading()) {
+            (Some(x), Some(y)) => Some(x.interval_cmp(&y)),
+            _ => None,
+        };
+    }
     if matches!(a, Value::Instant { .. }) || matches!(b, Value::Instant { .. }) {
         return match (a.temporal_reading(), b.temporal_reading()) {
             (Some(x), Some(y)) => Some(x.cmp(&y)),
@@ -6909,8 +8249,10 @@ fn value_cmp(a: &Value, b: &Value, scale: UnitScale) -> Option<Ordering> {
     if matches!(a, Value::Quantity { .. }) || matches!(b, Value::Quantity { .. }) {
         return crate::value::quantital_pair_with(a, b, scale).and_then(|(x, y)| x.partial_cmp(&y));
     }
-    if let (Some(x), Some(y)) = (a.numeric(), b.numeric()) {
-        return x.partial_cmp(&y);
+    match (a.numeric_reading(), b.numeric_reading()) {
+        (Some(Value::Int(x)), Some(Value::Int(y))) => return Some(x.cmp(&y)),
+        (Some(x), Some(y)) => return x.numeric()?.partial_cmp(&y.numeric()?),
+        _ => {}
     }
     match (a, b) {
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
@@ -7165,7 +8507,7 @@ fn regex_test(a: &Value, b: &Value, want: bool) -> bool {
 fn matches_name(adapter: &impl AstAdapter, node: NodeId, matcher: &Matcher) -> bool {
     match matcher {
         Matcher::Any | Matcher::Dot => true,
-        // A literal name asks the adapter (ruling #30: per-node
+        // A literal name asks the adapter (per-node
         // aliases answer on every axis); patterns test the
         // canonical name only.
         Matcher::Name(n) => adapter.answers_to(node, n),
@@ -7872,6 +9214,32 @@ mod tests {
         // for exactly that depth: complete at n, silent.
         let (out, msg) = refusal("/div(/ul/li){1;2}");
         assert_eq!(out, vec![3, 5]);
+        assert!(msg.is_none());
+        // The iteration loop is bounded the same way: an exact
+        // count, a ceiling or a minimum beyond the bound refuses,
+        // an open loop runs to the bound and stops.
+        let looped = |q: &str| match crate::run(q, &t) {
+            Ok(QueryResult::Values(vs)) => (vs, take_refusal()),
+            Ok(QueryResult::Nodes(ns)) => (
+                ns.into_iter().map(|n| Value::Int(n.0 as i64)).collect(),
+                take_refusal(),
+            ),
+            Err(e) => {
+                let _ = take_refusal();
+                (Vec::new(), Some(e.to_string()))
+            }
+        };
+        let (out, msg) = looped("/div | .n(1){5} | $.n");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("loop's explicit ceiling"));
+        let (out, msg) = looped("/div | .n(1){1;3} | $.n");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("loop's explicit ceiling"));
+        let (out, msg) = looped("/div | .n(1){3;} | $.n");
+        assert!(out.is_empty());
+        assert!(msg.unwrap().contains("loop's minimum"));
+        let (out, msg) = looped("/div | .n(1){1;2} | $.n");
+        assert_eq!(out, vec![Value::Int(1)]);
         assert!(msg.is_none());
     }
 
@@ -8686,7 +10054,7 @@ mod tests {
             vals("/b/z.rs:::provenance", &t),
             vec![Value::Str("?#row-7".into())]
         );
-        // Honest nulls where nothing is recorded.
+        // Nulls where nothing is recorded.
         assert_eq!(vals("/b/deep:::source", &t), vec![Value::Null]);
         assert_eq!(vals("/b/deep:::instant", &t), vec![Value::Null]);
         assert_eq!(vals("/b/deep:::provenance", &t), vec![Value::Null]);
@@ -9288,7 +10656,7 @@ mod tests {
 
     #[test]
     fn mark_array_symmetry() {
-        // Anchors in double parentheses — canonical since ruling #43
+        // Anchors in double parentheses — the canonical spelling
         // (the single-paren spellings still parse, except `(.)`,
         // which is now the register file).
         let t = MockTree::sample();

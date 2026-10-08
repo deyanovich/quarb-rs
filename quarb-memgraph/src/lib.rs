@@ -51,6 +51,12 @@ fn cell_value(v: &serde_json::Value) -> Value {
 }
 
 /// A value as an inline Cypher literal.
+/// A label or property name in backticks, the backtick doubled
+/// inside — the one quoting Cypher's grammar gives an identifier.
+fn bt(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
 fn cypher_literal(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
@@ -128,7 +134,7 @@ impl MemgraphAdapter {
     pub fn connect(target: &str) -> Result<Self, MemgraphError> {
         let rest = target
             .strip_prefix("memgraph://")
-            .ok_or_else(|| MemgraphError::Target(target.to_string()))?;
+            .ok_or_else(|| MemgraphError::Target(quarb::target::redact(target)))?;
         let (rest, query) = match rest.split_once('?') {
             Some((r, q)) => (r, Some(q)),
             None => (rest, None),
@@ -138,7 +144,7 @@ impl MemgraphAdapter {
             None => (None, rest),
         };
         if hostport.is_empty() {
-            return Err(MemgraphError::Target(target.to_string()));
+            return Err(MemgraphError::Target(quarb::target::redact(target)));
         }
         let (user, pass) = match creds.map(|c| c.split_once(':')) {
             Some(Some((u, p))) => (u.to_string(), p.to_string()),
@@ -286,7 +292,9 @@ impl MemgraphAdapter {
         let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
         let stmt =
             format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)");
-        let rows = self.rows(&stmt).unwrap_or_default();
+        let rows = quarb::fetched(self.rows(&stmt), || {
+            format!("memgraph: reading the relationships of node {gid}")
+        });
         rows.iter()
             .filter_map(|row| {
                 let r: neo4rs::Relation = row.get("r").ok()?;
@@ -331,10 +339,21 @@ impl AstAdapter for MemgraphAdapter {
         let order = if self.key.is_empty() {
             "id(m)".to_string()
         } else {
-            format!("m.`{}`", self.key.join("`, m.`"))
+            self.key
+                .iter()
+                .map(|k| format!("m.{}", bt(k)))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        let stmt = format!("MATCH (m:`{label}`) RETURN m ORDER BY {order}");
-        let rows = self.rows(&stmt).unwrap_or_default();
+        let stmt = format!("MATCH (m:{}) RETURN m ORDER BY {order}", bt(&label));
+        // A failed listing is refused and left uncached.
+        let rows = match self.rows(&stmt) {
+            Ok(rows) => rows,
+            Err(e) => {
+                quarb::record_refusal(format!("memgraph: listing label {label}: {e}"));
+                return Vec::new();
+            }
+        };
         let ids: Vec<NodeId> = rows
             .iter()
             .filter_map(|row| self.intern(&row.get::<neo4rs::Node>("m").ok()?))
@@ -377,9 +396,14 @@ impl AstAdapter for MemgraphAdapter {
                 self.labels.iter().map(|l| Value::Str(l.clone())).collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
-                let stmt = format!("MATCH (m:`{}`) RETURN count(m) AS c", self.labels[*index]);
+                let stmt = format!(
+                    "MATCH (m:{}) RETURN count(m) AS c",
+                    bt(&self.labels[*index])
+                );
                 drop(nodes);
-                let rows = self.rows(&stmt).ok()?;
+                let rows = quarb::fetched_opt(self.rows(&stmt), || {
+                    "memgraph: counting a label".to_string()
+                })?;
                 rows.first()?.get::<i64>("c").ok().map(Value::Int)
             }
             (Kind::Entity { gid, .. }, "id") => Some(Value::Int(*gid)),
@@ -398,17 +422,32 @@ impl AstAdapter for MemgraphAdapter {
         self.edges(node, true)
     }
 
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// A property names a node only under a node label
+    /// (`::manager-->Person`): without one there is nothing to
+    /// match the value against.
+    fn resolve_needs_label(&self, _node: NodeId, _property: &str) -> bool {
+        true
+    }
+
     /// Hint-form resolution against the target label's `?key=`
     /// property (or the internal id without one).
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let label = hint?;
         let value = self.property(node, property)?;
         let cond = match self.key.first() {
-            Some(k) => format!("m.`{k}` = {}", cypher_literal(&value)),
+            Some(k) => format!("m.{} = {}", bt(k), cypher_literal(&value)),
             None => format!("id(m) = {}", cypher_literal(&value)),
         };
-        let stmt = format!("MATCH (m:`{label}`) WHERE {cond} RETURN m LIMIT 1");
-        let rows = self.rows(&stmt).ok()?;
+        let stmt = format!("MATCH (m:{}) WHERE {cond} RETURN m LIMIT 1", bt(&label));
+        let rows = quarb::fetched_opt(self.rows(&stmt), || {
+            format!("memgraph: resolving into label {label}")
+        })?;
         self.intern(&rows.first()?.get::<neo4rs::Node>("m").ok()?)
     }
 

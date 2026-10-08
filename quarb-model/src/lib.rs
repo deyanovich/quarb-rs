@@ -17,13 +17,13 @@
 mod parse;
 
 pub use parse::{
-    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl,
+    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl, UnitsDecl,
     parse_model, parse_model_file, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Derived nodes carry this tag bit; the base's own ids never set it
 /// (the mount layer's index rides bits 56–63 but never reaches 128,
@@ -158,11 +158,135 @@ pub struct ModelAdapter<A: AstAdapter> {
     /// order of the file settles every reference and no cycle can
     /// arise.
     visible: Cell<usize>,
+    /// The declared indexes, built on first use: per declaration,
+    /// the canonical scope text, the scoped nodes, and the value
+    /// index over them. The referrer index (per relation label) is
+    /// built the first time a reverse arrow asks for it.
+    indexes: OnceCell<Vec<ValueIndex>>,
+    /// The declared trees, resolved to their nodes on first use.
+    trees: OnceCell<Vec<(String, NodeId)>>,
+    /// Per `ref` declaration, the nodes its scope selects — what
+    /// "a reference is declared on this node" means for a model.
+    ref_scopes: OnceCell<Vec<std::collections::HashSet<NodeId>>>,
+    referrers: RefCell<HashMap<(usize, Option<String>), HashMap<NodeId, Vec<usize>>>>,
+    /// The unit libraries' definitions (`units LIBRARY;`), loaded at
+    /// construction: name → definition, aliases included. An error
+    /// here is what `check` reports.
+    units: Result<BTreeMap<String, kaiv::faiv::UnitDef>, String>,
+}
+
+/// One `index SCOPE::prop;` declaration, materialized.
+struct ValueIndex {
+    scope: String,
+    property: String,
+    nodes: Vec<NodeId>,
+    by_value: HashMap<String, Vec<NodeId>>,
+}
+
+/// The key a value is indexed under: the engine's equality key.
+fn index_key(v: &Value) -> Option<String> {
+    v.equality_key()
 }
 
 impl<A: AstAdapter> ModelAdapter<A> {
+    fn value_indexes(&self) -> &Vec<ValueIndex> {
+        self.indexes.get_or_init(|| {
+            let defs = self.seeded_defs();
+            self.model
+                .indexes
+                .iter()
+                .map(|d| {
+                    let scope = quarb::parse_scope_path(&d.scope)
+                        .map(|sp| sp.text())
+                        .unwrap_or_else(|_| d.scope.clone());
+                    let nodes = self.view_nodes(&d.scope, &defs);
+                    let mut by_value: HashMap<String, Vec<NodeId>> = HashMap::new();
+                    for &n in &nodes {
+                        if let Some(v) = self.property(n, &d.property) {
+                            // A list-valued property is a set of values:
+                            // the node is found under each.
+                            let vals: Vec<&Value> = match &v {
+                                Value::List(items) => items.iter().collect(),
+                                other => vec![other],
+                            };
+                            for item in vals {
+                                if let Some(k) = index_key(item) {
+                                    by_value.entry(k).or_default().push(n);
+                                }
+                            }
+                        }
+                    }
+                    ValueIndex {
+                        scope,
+                        property: d.property.clone(),
+                        nodes,
+                        by_value,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    fn ref_scopes(&self) -> &Vec<std::collections::HashSet<NodeId>> {
+        self.ref_scopes.get_or_init(|| {
+            let defs = self.seeded_defs();
+            self.model
+                .refs
+                .iter()
+                .map(|decl| {
+                    let mut scoped = self.scope_nodes(&decl.scope, &defs);
+                    if scoped.is_empty() {
+                        scoped = self
+                            .view_nodes(&decl.scope, &defs)
+                            .into_iter()
+                            .filter_map(|n| self.aliased(n))
+                            .collect();
+                    }
+                    scoped.into_iter().collect()
+                })
+                .collect()
+        })
+    }
+
+    /// The fields of the `ref` declarations whose scope holds the
+    /// source and whose target is the container the target node
+    /// stands in (a derived container, or a container of the
+    /// source it sits under).
+    fn declared_fields(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        let src = self.aliased(source).unwrap_or(source);
+        let mut homes: Vec<String> = Vec::new();
+        match self.decode(target) {
+            Some((c, _)) => homes.push(self.containers()[c].name.clone()),
+            None => {
+                let mut at = self.base.parent(target);
+                while let Some(p) = at {
+                    if let Some(name) = self.base.name(p) {
+                        homes.push(name);
+                    }
+                    at = self.base.parent(p);
+                }
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        for (decl, scope) in self.model.refs.iter().zip(self.ref_scopes()) {
+            if scope.contains(&src) && homes.contains(&decl.container) && !out.contains(&decl.field)
+            {
+                out.push(decl.field.clone());
+            }
+        }
+        out
+    }
+
+    fn value_index(&self, scope: &str, property: &str) -> Option<(usize, &ValueIndex)> {
+        self.value_indexes()
+            .iter()
+            .enumerate()
+            .find(|(_, ix)| ix.scope == scope && ix.property == property)
+    }
+
     pub fn new(base: A, model: Model) -> Self {
         let n = model.traits.len();
+        let model_units = model.units.clone();
         ModelAdapter {
             base,
             model,
@@ -171,7 +295,101 @@ impl<A: AstAdapter> ModelAdapter<A> {
             bodies: OnceCell::new(),
             decided: RefCell::new(HashMap::new()),
             visible: Cell::new(n),
+            indexes: OnceCell::new(),
+            ref_scopes: OnceCell::new(),
+            trees: OnceCell::new(),
+            referrers: RefCell::new(HashMap::new()),
+            units: Self::load_units(&model_units),
         }
+    }
+
+    /// Read every `units LIBRARY;` into one table. Refused: a file
+    /// that cannot be read or parsed, and a name the table already
+    /// holds — built in, or from a library imported earlier.
+    fn load_units(decls: &[UnitsDecl]) -> Result<BTreeMap<String, kaiv::faiv::UnitDef>, String> {
+        let mut table: BTreeMap<String, kaiv::faiv::UnitDef> = BTreeMap::new();
+        for decl in decls {
+            let bytes =
+                std::fs::read(&decl.path).map_err(|e| format!("units {}: {e}", decl.library))?;
+            let lib = kaiv::faiv::parse_faiv(&bytes)
+                .map_err(|e| format!("units {}: {e}", decl.library))?;
+            for (name, def) in lib.units {
+                if kaiv::unit::scale(&name).is_some() {
+                    return Err(format!(
+                        "units {}: '{name}' is a built-in unit already",
+                        decl.library
+                    ));
+                }
+                if table.contains_key(&name) {
+                    return Err(format!(
+                        "units {}: '{name}' is already defined by an earlier library",
+                        decl.library
+                    ));
+                }
+                table.insert(name, def);
+            }
+        }
+        Ok(table)
+    }
+
+    /// Everything a model can get wrong that only the source can
+    /// tell: call after construction, before the first query.
+    pub fn check(&self) -> Result<(), String> {
+        if let Err(e) = &self.units {
+            return Err(e.clone());
+        }
+        self.check_declared_traits()?;
+        self.check_ref_targets()?;
+        self.check_trees()
+    }
+
+    /// Refuse a `tree` whose path names no node.
+    pub fn check_trees(&self) -> Result<(), String> {
+        let defs = self.seeded_defs();
+        for decl in &self.model.trees {
+            if self.view_nodes(&decl.path, &defs).is_empty() {
+                return Err(format!(
+                    "tree '{}': the path {} names no node",
+                    decl.identity, decl.path
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a `ref` whose target names nothing: neither a
+    /// container a `node` statement declares nor a root-level node
+    /// of the source (a table, a mount, a top-level key). A typo in
+    /// the target would otherwise resolve nothing, silently. The
+    /// derived containers are not materialized for the check: their
+    /// names are in the declarations.
+    pub fn check_ref_targets(&self) -> Result<(), String> {
+        let defs = self.seeded_defs();
+        for decl in &self.model.refs {
+            if self.model.nodes.iter().any(|n| n.name == decl.container) {
+                continue;
+            }
+            let found = [
+                format!("/{}", decl.container),
+                format!("/\"{}\"", decl.container),
+            ]
+            .iter()
+            .any(|q| !self.scope_nodes(q, &defs).is_empty());
+            if !found {
+                return Err(format!(
+                    "ref target '{}' names nothing: no 'node /{}/…' statement \
+                     declares that container and the source has no \
+                     root-level '{}' (ref {}::{} --> {})",
+                    decl.container,
+                    decl.container,
+                    decl.container,
+                    decl.scope,
+                    decl.field,
+                    decl.path
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a declared trait that redefines one the arbor already
@@ -510,7 +728,16 @@ impl<A: AstAdapter> ModelAdapter<A> {
                             base: &self.base,
                             prior: self.containers(),
                         };
-                        for n in self.view_nodes(&decl.path, &defs) {
+                        // The bare form (`--> authors`) with no derived
+                        // container of that name is the root-level
+                        // container the source has: its children,
+                        // keyed by name (a table's rows by their key).
+                        let path = if decl.path.starts_with('/') {
+                            decl.path.clone()
+                        } else {
+                            format!("/{}/*", decl.path)
+                        };
+                        for n in self.view_nodes(&path, &defs) {
                             let key = match decl.key_field.as_deref() {
                                 Some(f) => view.property(n, f).map(|k| k.to_string()),
                                 None => view
@@ -817,6 +1044,9 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
     fn non_tree_nodes(&self) -> Vec<NodeId> {
         self.base.non_tree_nodes()
     }
+    fn walks_for_references(&self) -> bool {
+        self.base.walks_for_references()
+    }
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
         if node.0 & MODEL_TAG != 0 {
             Vec::new()
@@ -973,6 +1203,145 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     fn non_tree_nodes(&self) -> Vec<NodeId> {
         self.base.non_tree_nodes()
     }
+    fn walks_for_references(&self) -> bool {
+        self.base.walks_for_references()
+    }
+    /// A `ref` declared over the source whose target is the
+    /// container the target node stands in (a derived container, or
+    /// a container of the source it sits under); else the base's
+    /// own declarations.
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        if !self.declared_fields(source, target).is_empty() {
+            return Some(true);
+        }
+        if self.decode(source).is_none() && self.decode(target).is_none() {
+            return self.base.can_refer_to(source, target);
+        }
+        None
+    }
+    /// The fields of the `ref`s declared over the source into the
+    /// target's container; else the base's own declarations.
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        let fields = self.declared_fields(source, target);
+        if !fields.is_empty() {
+            return fields;
+        }
+        if self.decode(source).is_none() && self.decode(target).is_none() {
+            return self.base.reference_properties(source, target);
+        }
+        Vec::new()
+    }
+    fn resolves_references(&self) -> bool {
+        !self.model.refs.is_empty() || self.base.resolves_references()
+    }
+    /// A base node's label is the base's to give; a derived node
+    /// needs none (the model's refs resolve without labels).
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        if self.decode(target).is_some() {
+            return None;
+        }
+        self.base.reverse_label(target)
+    }
+    /// The declared trees first (a declaration names the same node
+    /// as the mount's own target would, and wins), then the base's
+    /// own identities.
+    fn tree_identities(&self) -> Vec<(String, NodeId)> {
+        let declared = self.trees.get_or_init(|| {
+            let defs = self.seeded_defs();
+            self.model
+                .trees
+                .iter()
+                .filter_map(|d| {
+                    self.view_nodes(&d.path, &defs)
+                        .first()
+                        .map(|&n| (d.identity.clone(), n))
+                })
+                .collect()
+        });
+        let mut out = declared.clone();
+        out.extend(self.base.tree_identities());
+        out
+    }
+    /// A property the model declares a `ref` for resolves by that
+    /// declaration; any other asks the base.
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.decode(node).is_none()
+            && !self.model.refs.iter().any(|r| r.field == property)
+            && self.base.resolve_needs_label(node, property)
+    }
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        if self.decode(node).is_none() {
+            return self.base.property_names(node);
+        }
+        let mut ps: Vec<String> = self.properties(node).into_iter().map(|(k, _)| k).collect();
+        for c in self.children(node) {
+            if let Some(name) = self.name(c)
+                && !ps.contains(&name)
+            {
+                ps.push(name);
+            }
+        }
+        ps
+    }
+    fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        let (_, ix) = self.value_index(scope, property)?;
+        let key = index_key(value)?;
+        Some(ix.by_value.get(&key).cloned().unwrap_or_default())
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        let Some((i, ix)) = self.value_index(scope, property) else {
+            // No declared index: the base may read the scope by key
+            // (a database), provided the model does not resolve
+            // this property its own way.
+            if self.decode(target).is_none() && !self.model.refs.iter().any(|r| r.field == property)
+            {
+                return self.base.index_referrers(scope, property, label, target);
+            }
+            return None;
+        };
+        // The walk tests a candidate under the given label and, with
+        // none given, also under the target's own container (a
+        // resolver that needs the relation named); the index answers
+        // on the same terms, in the scope's order.
+        let mut labels = vec![label.map(str::to_string)];
+        if label.is_none()
+            && let Some(implied) = self.reverse_label(target)
+        {
+            labels.push(Some(implied));
+        }
+        let mut at: Vec<usize> = Vec::new();
+        for l in labels {
+            let key = (i, l);
+            if !self.referrers.borrow().contains_key(&key) {
+                // Resolve each scoped node's property once; the map
+                // answers every later target.
+                let mut map: HashMap<NodeId, Vec<usize>> = HashMap::new();
+                for (pos, &n) in ix.nodes.iter().enumerate() {
+                    if let Some(t) = self.resolve(n, property, key.1.as_deref()) {
+                        map.entry(t).or_default().push(pos);
+                    }
+                }
+                self.referrers.borrow_mut().insert(key.clone(), map);
+            }
+            if let Some(hits) = self
+                .referrers
+                .borrow()
+                .get(&key)
+                .and_then(|m| m.get(&target))
+            {
+                at.extend(hits);
+            }
+        }
+        at.sort_unstable();
+        at.dedup();
+        Some(at.into_iter().map(|pos| ix.nodes[pos]).collect())
+    }
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
         if node.0 & MODEL_TAG != 0 {
             Vec::new()
@@ -1085,9 +1454,14 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     /// Model nodes add their own annotations (`n-rows`); base nodes
-    /// keep the mounted adapter's, aliases included.
+    /// keep the mounted adapter's, aliases included. A model node's
+    /// id means nothing to the base, so it is never passed down
+    /// (a mount would read a mount index out of it).
     fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
-        self.base.aliased_metadata(node)
+        match self.decode(node) {
+            Some(_) => &[],
+            None => self.base.aliased_metadata(node),
+        }
     }
 
     /// Data provenance. An aliased node *is* its base node under a
@@ -1183,7 +1557,12 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         None
     }
 
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         // An aliased node references as the node it stands for; a
         // base id passes straight through, and a purely derived
         // node (tagged id) references nothing external.
@@ -1347,6 +1726,42 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         self.base.descendants_named(node, name)
     }
 
+    fn descendants_where(
+        &self,
+        node: NodeId,
+        name: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<(NodeId, usize)>> {
+        if self.decode(node).is_some() || node == self.base.root() || !self.model.aliases.is_empty()
+        {
+            return None;
+        }
+        self.base.descendants_where(node, name, property, value)
+    }
+
+    fn has_node(&self, node: NodeId) -> bool {
+        self.decode(node).is_some() || self.base.has_node(node)
+    }
+
+    /// An edge's own properties are the base's: a model adds links
+    /// (refs, relations) that carry none, and a node standing for a
+    /// base one reads through to it.
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<Value> {
+        let base_of = |n: NodeId| match self.decode(n) {
+            None => Some(n),
+            Some(_) => self.aliased(n),
+        };
+        self.base
+            .link_property(base_of(source)?, label, base_of(target)?, name)
+    }
+
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let base: Vec<NodeId> = nodes
             .iter()
@@ -1367,7 +1782,15 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     fn invocation_instant(&self) -> Option<(i64, u32)> {
         self.base.invocation_instant()
     }
+    /// The imported libraries first (`units LIBRARY;`), then the
+    /// source's own.
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
+        if let Ok(customs) = &self.units
+            && !customs.is_empty()
+            && let Some(hit) = kaiv::unit::scale_with(expr, customs)
+        {
+            return Some(hit);
+        }
         self.base.unit_scale(expr)
     }
 }
@@ -1407,104 +1830,5 @@ fn scope_role(scope: &str) -> String {
 pub struct Borrowed<'a>(pub &'a dyn AstAdapter);
 
 impl AstAdapter for Borrowed<'_> {
-    fn root(&self) -> NodeId {
-        self.0.root()
-    }
-    fn children(&self, n: NodeId) -> Vec<NodeId> {
-        self.0.children(n)
-    }
-    fn name(&self, n: NodeId) -> Option<String> {
-        self.0.name(n)
-    }
-
-    /// Aliases (ruling #30) and trait aliases pass through: the
-    /// wrapped adapter's word, not name equality on this layer.
-    fn answers_to(&self, n: NodeId, name: &str) -> bool {
-        self.0.answers_to(n, name)
-    }
-
-    fn has_trait(&self, n: NodeId, name: &str) -> bool {
-        self.0.has_trait(n, name)
-    }
-    fn parent(&self, n: NodeId) -> Option<NodeId> {
-        self.0.parent(n)
-    }
-    fn traits(&self, n: NodeId) -> Vec<String> {
-        self.0.traits(n)
-    }
-    fn children_named(&self, n: NodeId, name: &str) -> Vec<NodeId> {
-        self.0.children_named(n, name)
-    }
-    fn child_host(&self, n: NodeId) -> NodeId {
-        self.0.child_host(n)
-    }
-    fn non_tree_nodes(&self) -> Vec<NodeId> {
-        self.0.non_tree_nodes()
-    }
-    fn properties(&self, n: NodeId) -> Vec<(String, Value)> {
-        self.0.properties(n)
-    }
-    fn property(&self, n: NodeId, name: &str) -> Option<Value> {
-        self.0.property(n, name)
-    }
-    fn default_value(&self, n: NodeId) -> Option<Value> {
-        self.0.default_value(n)
-    }
-    fn metadata(&self, n: NodeId, key: &str) -> Option<Value> {
-        self.0.metadata(n, key)
-    }
-    fn links(&self, n: NodeId) -> Vec<(String, NodeId)> {
-        self.0.links(n)
-    }
-    fn backlinks(&self, n: NodeId) -> Vec<(String, NodeId)> {
-        self.0.backlinks(n)
-    }
-    fn resolve(&self, n: NodeId, p: &str, h: Option<&str>) -> Option<NodeId> {
-        self.0.resolve(n, p, h)
-    }
-    fn external_ref(&self, n: NodeId, p: &str, h: Option<&str>) -> Option<String> {
-        self.0.external_ref(n, p, h)
-    }
-    fn resolve_fragment(&self, n: NodeId, f: &str) -> Option<NodeId> {
-        self.0.resolve_fragment(n, f)
-    }
-    fn ref_property(&self, n: NodeId) -> Option<String> {
-        self.0.ref_property(n)
-    }
-    fn ref_label(&self, n: NodeId, p: &str) -> Option<String> {
-        self.0.ref_label(n, p)
-    }
-    fn link_property(&self, s: NodeId, l: &str, t: NodeId, name: &str) -> Option<Value> {
-        self.0.link_property(s, l, t, name)
-    }
-    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
-        self.0.document_by_ref(id)
-    }
-    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
-        self.0.reverse_resolve(n, p, h)
-    }
-    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
-        self.0.descendants_named(n, name)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.0.prefetch_links(nodes, dir)
-    }
-    fn quantifier_bound(&self) -> usize {
-        self.0.quantifier_bound()
-    }
-    fn allow_shell(&self) -> bool {
-        self.0.allow_shell()
-    }
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.0.invocation_instant()
-    }
-    fn provenance(&self, n: NodeId) -> quarb::Provenance {
-        self.0.provenance(n)
-    }
-    fn provenance_list(&self, n: NodeId) -> quarb::ProvenanceList {
-        self.0.provenance_list(n)
-    }
-    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        self.0.unit_scale(expr)
-    }
+    quarb::forward_ast_adapter!(0);
 }

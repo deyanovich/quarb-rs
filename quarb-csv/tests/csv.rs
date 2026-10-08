@@ -618,3 +618,16 @@ fn correlated_subqueries() {
         vec!["1"]
     );
 }
+
+// A table of text defines no references: both arrows are refused
+// with the value match as the remedy, never answered with nothing.
+#[test]
+fn arrows_are_refused_where_nothing_refers() {
+    let adapter = CsvAdapter::parse(DOC).unwrap();
+    for q in ["/*[1]::dept-->", "/*[1]<--(/*::dept)", "/*[1]<--"] {
+        let err = quarb::run(q, &adapter).unwrap_err().to_string();
+        assert!(err.contains("defines none"), "{q}: {err}");
+    }
+    // the value match is the working spelling
+    assert_eq!(values("/*[1]::dept=>(/*::dept)::name"), ["Ada", "Cy"]);
+}

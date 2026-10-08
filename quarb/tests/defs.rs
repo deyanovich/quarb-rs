@@ -70,7 +70,7 @@ fn rec_refuses_call_operand_position() {
             .contains("retired"),
         "rec as macro argument must refuse"
     );
-    // the honest spelling still parses and round-trips
+    // the explicit spelling still parses and round-trips
     assert_eq!(
         exp("/row | (\"seen\" | %(::Fare))"),
         "/row | (\"seen\" | %(::Fare))"
@@ -154,7 +154,7 @@ fn expand_first_steps() {
     );
 }
 
-/// Path-position splicing (ruling #17): invocations are legal
+/// Path-position splicing: invocations are legal
 /// mid-path, in groups, and as predicate operands; trailing
 /// refinement group-wraps.
 #[test]
@@ -295,7 +295,7 @@ fn path_splice_errors() {
     // a guard needs something to refine
     assert!(err("def &vis: [::x]; &vis").contains("nothing precedes"));
     // reverse resolution stays out of predicates, spliced or not
-    assert!(err("def &back: ::id<--; /row[&back]::").contains("reverse resolution"));
+    assert!(err("def &back: <--(::id); /row[&back]::").contains("reverse resolution"));
     // trailing-refinement refusals survive for pipeline-carrying
     // bodies, where refine-through-the-pipe is still the truth
     assert!(err("def &s: /row | upper; &s[::x > 1]").contains("pipeline filter"));
@@ -415,7 +415,7 @@ fn macro_errors() {
 }
 
 /// Data-aware macros (`&name!`): the `!` is enforced both ways, and
-/// pure expansion (no dataset) refuses them honestly.
+/// pure expansion (no dataset) refuses them outright.
 #[test]
 fn data_aware_errors() {
     let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
@@ -527,7 +527,7 @@ fn unparse_fixpoint() {
         "//a<\"-x\"",
         "//a<-3",
         "def &f: /a$; &f | upper",
-        // Path-position splices (ruling #17): the expansions must
+        // Path-position splices: the expansions must
         // themselves round-trip.
         "def &clean: (<-a->b); /x&clean+ @| count",
         "def &g: /a || /b; /x&g{2}",

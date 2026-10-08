@@ -533,6 +533,7 @@ fn respond(
         "name" => json!({"name": adapter.name(node)}),
         "child_host" => json!({"node": adapter.child_host(node).0}),
         "non_tree_nodes" => json!({"nodes": nodes_json(&adapter.non_tree_nodes())}),
+        "walks_for_references" => json!({"value": adapter.walks_for_references()}),
         "properties" => json!({"properties": adapter
             .properties(node)
             .iter()
@@ -724,6 +725,14 @@ impl AstAdapter for ServeAdapter {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// An older server errs on the op; the client takes false.
+    fn walks_for_references(&self) -> bool {
+        self.call_ok(json!({"op": "walks_for_references"}))
+            .pointer("/value")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// An older server errs on the op; the client takes none.

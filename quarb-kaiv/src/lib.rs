@@ -533,8 +533,19 @@ impl KaivAdapter {
 }
 
 impl AstAdapter for KaivAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {

@@ -1,4 +1,4 @@
-//! CoNLL-U in full (ruling #63): a treebank read as a document
+//! CoNLL-U in full: a treebank read as a document
 //! (`text:`) and as a corpus (`corpus:`), every column and key on
 //! the tokens, the basic and enhanced graphs, empty nodes,
 //! multiword ranges, CoNLL-U Plus columns, the sidecar over prose,
@@ -269,7 +269,7 @@ fn the_sidecar_aligns_ranges_past_nine() {
         .join("\n\n");
     let mut m = quarb_text::TextModel::parse_plain(prose);
     m.annotate_conllu(&sidecar).unwrap();
-    // The sidecar's sentences are the tier (ruling #64): derived,
+    // The sidecar's sentences are the tier: derived,
     // one per block here, the tokens beneath.
     assert_eq!(values(&m, "//sentence @| count"), ["2"]);
     assert_eq!(values(&m, "//sentence<derived> @| count"), ["2"]);
@@ -532,6 +532,7 @@ fn a_directory_of_treebank_files() {
     std::fs::write(dir.join("README.md"), "# not a treebank\n").unwrap();
     let qua = |query: &str, target: &str| -> String {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
             .args([query, target])
             .output()
             .unwrap();
@@ -555,6 +556,7 @@ fn a_directory_of_treebank_files() {
     let empty = dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
         .args([
             "//sentence @| count",
             &format!("corpus:{}", empty.display()),

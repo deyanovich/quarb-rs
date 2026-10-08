@@ -665,8 +665,7 @@ fn verse_lines_carry_the_citation_coordinate() {
     assert_eq!(values(&m, "//stichos<block> @| count"), ["0"]);
 }
 
-/// The corpus reading (ruling #62, the sentence tier of ruling
-/// #64): under every prose block its sentences, under each its
+/// The corpus reading (with its sentence tier): under every prose block its sentences, under each its
 /// tokens — UAX #29 word segments with their class as a trait,
 /// `::lower`, and document-wide `::::n` / `::::sentence`; the
 /// block's own prose and the renderers are unchanged, and a
@@ -716,7 +715,7 @@ fn corpus_reading_tokenizes_prose_blocks() {
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::::n"), ["3"]);
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::n"), ["3"]);
     // UAX #29 breaks after "Dr." — the sentence ordinal shows it,
-    // and the sibling hop stops there (ruling #64): the sentence
+    // and the sibling hop stops there: the sentence
     // is the token's parent.
     assert_eq!(values(&m, "//token[:: = \"Dr\"]::::sentence"), ["2"]);
     assert_eq!(values(&m, "//token[:: = \"Smith\"]::::sentence"), ["3"]);
@@ -731,7 +730,7 @@ fn corpus_reading_tokenizes_prose_blocks() {
         ["Smith owes 3,000 dollars.”"]
     );
     assert_eq!(values(&m, "//token[:: = \"No\"]::sentence"), ["No answer."]);
-    // Quotation marks wear <quote> beside <punct> (ruling #65).
+    // Quotation marks wear <quote> beside <punct>.
     assert_eq!(values(&m, "//token<quote>::"), ["“", "”"]);
     assert_eq!(values(&m, "//token<quote><punct> @| count"), ["2"]);
     assert_eq!(values(&m, "//token<quote>::class"), ["punct", "punct"]);
@@ -748,7 +747,7 @@ fn corpus_reading_tokenizes_prose_blocks() {
     assert!(md.contains("Tom’s aunt said"), "{md}");
 }
 
-/// Sentence bonds (ruling #62): a `.desm` abbreviation undoes a
+/// Sentence bonds: a `.desm` abbreviation undoes a
 /// UAX #29 break; the tokens and their positions are untouched,
 /// only `::::sentence` and `::sentence` change.
 #[test]
@@ -859,7 +858,7 @@ fn conllu_annotation_replaces_the_token_layer() {
         values(&m, "//paragraph[2]/sentence/token::"),
         ["He", "do", "n't", "."]
     );
-    // The tool's sentences are the tier (ruling #64).
+    // The tool's sentences are the tier.
     assert_eq!(values(&m, "//sentence @| count"), ["2"]);
     assert_eq!(
         values(&m, "//paragraph[1]/sentence[1]::"),
@@ -886,7 +885,7 @@ fn conllu_annotation_replaces_the_token_layer() {
     assert!(m.annotate_conllu(conllu).is_err());
 }
 
-/// Under an annotation the class follows UPOS (ruling #65): a
+/// Under an annotation the class follows UPOS: a
 /// lettered `NUM` is a number, a tagger's `PUNCT` is punctuation,
 /// and a form the tags leave alone keeps the form rule.
 #[test]
@@ -911,7 +910,7 @@ fn annotated_classes_follow_upos() {
 
 /// A cast row's `cluster` column names a coreference chain of the
 /// annotation: every mention of the chain is the character's, its
-/// first token carrying the mention (ruling #79 addendum).
+/// first token carrying the mention.
 #[test]
 fn cast_table_resolves_coreference_chains() {
     let conllu = "\

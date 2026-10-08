@@ -18,20 +18,20 @@ fn refuse(q: &str) -> String {
 
 #[test]
 fn strict_hole_round_trips() {
-    assert_eq!(canon(r#"= "${::x:?}""#), r#"^ | "${::x:?}""#);
+    assert_eq!(canon(r#"= "${::x:?}""#), r#"= "${::x:?}""#);
     assert_eq!(
         canon(r#"= "${::x:?no form here}""#),
-        r#"^ | "${::x:?no form here}""#
+        r#"= "${::x:?no form here}""#
     );
 }
 
 #[test]
 fn default_hole_round_trips() {
-    assert_eq!(canon(r#"= "${::x:-"n/a"}""#), r#"^ | "${::x:-"n/a"}""#);
+    assert_eq!(canon(r#"= "${::x:-"n/a"}""#), r#"= "${::x:-"n/a"}""#);
     // the fallback is a full value expression — a path works
-    assert_eq!(canon(r#"= "${::x:-::y}""#), r#"^ | "${::x:-::y}""#);
+    assert_eq!(canon(r#"= "${::x:-::y}""#), r#"= "${::x:-::y}""#);
     // a projection run before the operator is not the operator
-    assert_eq!(canon(r#"= "${::a:-1}""#), r#"^ | "${::a:-1}""#);
+    assert_eq!(canon(r#"= "${::a:-1}""#), r#"= "${::a:-1}""#);
 }
 
 #[test]
@@ -69,4 +69,20 @@ fn quasiquote_holes_untouched() {
         canon(r#"macro &hop($n): ^ | "/w{${$n}}"; /x&hop(2)/leaf::"#),
         "/x(/w){2}/leaf::"
     );
+}
+
+/// Finding 18: a hole inside a hole starts a nested parser; the
+/// nesting bound carries into it, so a query of nested holes is
+/// refused at the bound instead of overflowing the stack.
+#[test]
+fn nested_holes_count_against_the_nesting_bound() {
+    let nest = |n: usize| {
+        let mut q = String::from("1");
+        for _ in 0..n {
+            q = format!(r#""${{{q}}}""#);
+        }
+        format!("= {q}")
+    };
+    assert!(expand(&nest(20), &Defs::default()).is_ok());
+    assert!(refuse(&nest(3000)).contains("nested more than"));
 }

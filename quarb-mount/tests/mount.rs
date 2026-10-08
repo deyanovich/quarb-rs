@@ -201,3 +201,22 @@ fn mount_fills_provenance_source() {
     };
     assert_eq!(got, vec!["bundle.tar"]);
 }
+
+/// Finding 19: the mount index rides the id's high byte, so more
+/// than 254 mounts are refused by `try_new` (and `new` panics)
+/// rather than mis-routing nodes.
+#[test]
+fn too_many_mounts_are_refused() {
+    let mounts = |n: usize| {
+        (0..n)
+            .map(|i| Mount {
+                name: format!("m{i}"),
+                target: None,
+                adapter: Box::new(CsvAdapter::parse("a\n1\n").unwrap()),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(MountAdapter::try_new(mounts(254)).is_ok());
+    let err = MountAdapter::try_new(mounts(255)).err().unwrap();
+    assert!(err.contains("255 mounts"), "{err}");
+}

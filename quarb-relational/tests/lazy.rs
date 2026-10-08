@@ -38,16 +38,16 @@ fn counting_model() -> (RelationalModel, Rc<RefCell<Vec<String>>>) {
             Ok(match spec.name.as_str() {
                 "users" => vec![
                     RowSpec {
-                        rowid: 1,
+                        rowid: Some(1),
                         values: vec![Value::Int(1), Value::Str("Ada".into())],
                     },
                     RowSpec {
-                        rowid: 2,
+                        rowid: Some(2),
                         values: vec![Value::Int(2), Value::Str("Bo".into())],
                     },
                 ],
                 _ => vec![RowSpec {
-                    rowid: 1,
+                    rowid: Some(1),
                     values: vec![Value::Int(10), Value::Int(2), Value::Int(99)],
                 }],
             })
@@ -92,7 +92,7 @@ fn eager_build_never_fetches() {
     let model = RelationalModel::build(vec![(
         spec("t", &["id"], Some(0), &[]),
         vec![RowSpec {
-            rowid: 1,
+            rowid: Some(1),
             values: vec![Value::Int(7)],
         }],
     )]);

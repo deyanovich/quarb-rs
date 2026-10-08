@@ -11,13 +11,30 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.32.0" }
-# deflate only: the pure-Rust subset, so the crate builds for
-# wasm32 (bzip2/zstd would pull in C).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+quarb = { path = "../quarb", version = "0.33.0" }
+# Every format a reliable pure-Rust library covers, so the crate
+# builds for wasm32: zip members deflate / deflate64 / bzip2 (the
+# bzip2 crate's default backend is libbz2-rs-sys, pure Rust) /
+# lzma (lzma-rs); tar plain / gzip (flate2) / xz (lzma-rs) /
+# bzip2 / zstd (ruzstd); 7z (sevenz-rust without its C-backed
+# extras). Zip members in zstd and xz, and rar, would need a C
+# library and are left out.
+zip = { version = "2", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma"] }
 tar.workspace = true
 flate2.workspace = true
+bzip2 = { version = "0.5", default-features = false, features = ["libbz2-rs-sys"] }
+lzma-rs = "0.3"
+ruzstd = "0.9"
+sevenz-rust = { version = "0.6", default-features = false }
 thiserror.workspace = true
+unrar = { version = "0.5.8", optional = true }
+libchm = "0.3.0"
 
 [dev-dependencies]
 zip.workspace = true
+tempfile.workspace = true
+quarb-compose = { path = "../quarb-compose", version = "0.33.0" }
+sevenz-rust = { version = "0.6", features = ["compress"] }
+
+[features]
+rar = ["dep:unrar"]

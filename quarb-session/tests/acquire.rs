@@ -176,7 +176,7 @@ fn text_level_refs_cross_documents() {
     assert_eq!(ex.refs(), vec!["https://other.example/faq.html"]);
 }
 
-/// The corpus reading through the session (ruling #62): `corpus:`
+/// The corpus reading through the session: `corpus:`
 /// opens as `text:` and tokenizes, so quai and the daemon keep
 /// the tokens with the arbor; the format-name route has the same
 /// three twins for the bindings.

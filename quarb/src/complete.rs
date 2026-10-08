@@ -7,7 +7,7 @@
 //! completes without a second edit. The **data tier** adds a live
 //! adapter: hop-name candidates enumerate the actual children at
 //! the cursor's path prefix, and `::` candidates include the
-//! adapter's aliased annotations (ruling #29), so a git mount
+//! adapter's aliased annotations, so a git mount
 //! offers `::short` and a JSON mount offers nothing invented.
 //!
 //! Consumers: quai's readline completer calls [`complete_with`]

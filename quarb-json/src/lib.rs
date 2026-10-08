@@ -16,7 +16,7 @@
 //!   exposure, mirroring record substrates. Container-valued
 //!   fields answer only to navigation.
 //! - Adapter metadata exposes `;;;type` and `;;;length`.
-//! - A `$ref`-style property resolves (`::'$ref'~>`) by treating its
+//! - A `$ref`-style property resolves (`::'$ref'-->`) by treating its
 //!   string value as a JSON Pointer (`#/definitions/address`).
 //!
 //! Object keys are visited in document order: the workspace builds
@@ -113,6 +113,29 @@ pub struct JsonAdapter {
     reading: Reading,
 }
 
+/// Decode the percent-escapes of a URI fragment (`%7E` → `~`); a
+/// malformed escape is kept as written.
+fn percent_decode(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(byte) = text
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 impl JsonAdapter {
     /// Parse `text` as JSON and build the adapter.
     pub fn parse(text: &str) -> serde_json::Result<Self> {
@@ -182,14 +205,31 @@ impl JsonAdapter {
         }
     }
 
-    /// Resolve a JSON Pointer (e.g. `#/definitions/address` or
-    /// `/users/0`) from the root to a node.
-    fn resolve_pointer(&self, pointer: &str) -> Option<NodeId> {
-        let path = pointer.strip_prefix('#').unwrap_or(pointer);
-        let path = path.strip_prefix('/').unwrap_or(path);
-        if path.is_empty() {
+    /// Resolve a reference value by the standards JSON has for
+    /// one: a JSON Pointer (RFC 6901 — a path whose every token is
+    /// led by `/`) and its URI fragment form (`#/a/b`, `#` for the
+    /// whole document, percent-encoded; RFC 6901 section 6, the
+    /// form a `$ref` holds). Any other string is not a reference
+    /// into this document. Quarb reads the conventions data is
+    /// written in and adds none of its own, so a bare word
+    /// (`"users"`) points nowhere, however it happens to match a
+    /// key.
+    fn resolve_pointer(&self, reference: &str) -> Option<NodeId> {
+        match reference.strip_prefix('#') {
+            Some(fragment) => self.walk_pointer(&percent_decode(fragment)),
+            None if reference.starts_with('/') => self.walk_pointer(reference),
+            None => None,
+        }
+    }
+
+    /// Evaluate a JSON Pointer (RFC 6901): the empty pointer is the
+    /// whole document; otherwise each `/`-led token names a member
+    /// (or an array index), with `~1` for `/` and `~0` for `~`.
+    fn walk_pointer(&self, pointer: &str) -> Option<NodeId> {
+        if pointer.is_empty() {
             return Some(self.root);
         }
+        let path = pointer.strip_prefix('/')?;
         let mut cur = self.root;
         for part in path.split('/') {
             let token = part.replace("~1", "/").replace("~0", "~");
@@ -199,6 +239,28 @@ impl JsonAdapter {
                 .find(|&c| self.name(c).as_deref() == Some(token.as_str()))?;
         }
         Some(cur)
+    }
+
+    /// The string a node holds under `property`, in either reading.
+    fn string_property(&self, node: NodeId, property: &str) -> Option<String> {
+        if self.reading == Reading::Property {
+            return match self.nodes[node.0 as usize]
+                .fields
+                .iter()
+                .find(|(k, _)| k == property)
+            {
+                Some((_, Value::Str(s))) => Some(s.clone()),
+                _ => None,
+            };
+        }
+        let child = self
+            .children(node)
+            .into_iter()
+            .find(|&c| self.name(c).as_deref() == Some(property))?;
+        match &self.nodes[child.0 as usize].scalar {
+            Value::Str(s) => Some(s.clone()),
+            _ => None,
+        }
     }
 
     /// A JSON Pointer path to `node` (`/users/0/name`), for rendering.
@@ -358,6 +420,12 @@ impl AstAdapter for JsonAdapter {
         self.root
     }
 
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes[node.0 as usize].children.clone()
     }
@@ -500,22 +568,74 @@ impl AstAdapter for JsonAdapter {
     /// Resolve `node`'s `property` child\,---\,whose string value is a
     /// JSON Pointer (`#/definitions/address`)\,---\,to its target node.
     /// The hint is unused (JSON references carry no relation type).
+    /// Any string value may be a JSON Pointer, into any part of the
+    /// document: the format declares no narrower reference.
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
+    /// JSON's own reference syntax: an object's `$ref`. The bare
+    /// arrows (`//x-->`, `t<--`) read it.
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let has = if self.reading == Reading::Property {
+            self.nodes[node.0 as usize]
+                .fields
+                .iter()
+                .any(|(k, v)| k == "$ref" && matches!(v, Value::Str(_)))
+        } else {
+            self.children(node).into_iter().any(|c| {
+                self.name(c).as_deref() == Some("$ref")
+                    && matches!(self.nodes[c.0 as usize].scalar, Value::Str(_))
+            })
+        };
+        has.then(|| "$ref".to_string())
+    }
+
+    /// The node a property's string refers to, by the two standards
+    /// JSON has. `$ref` holds a URI reference: only its fragment —
+    /// `#/a/b`, `#`, and the empty reference — points into this
+    /// document (anything else is another resource, see
+    /// [`external_ref`](Self::external_ref)). Any other property is
+    /// read as a JSON Pointer, in the plain form (`/a/b`) or the
+    /// fragment form (`#/a/b`, `#`); an empty string there is an
+    /// empty value, and a bare word is text.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
-        if self.reading == Reading::Property {
-            let n = &self.nodes[node.0 as usize];
-            if let Some((_, Value::Str(pointer))) = n.fields.iter().find(|(k, _)| k == property) {
-                return self.resolve_pointer(pointer);
+        let reference = self.string_property(node, property)?;
+        if property == "$ref" {
+            if reference.is_empty() {
+                return Some(self.root);
             }
+            let fragment = reference.strip_prefix('#')?;
+            return self.walk_pointer(&percent_decode(fragment));
+        }
+        if reference.is_empty() {
             return None;
         }
-        let child = self
-            .children(node)
-            .into_iter()
-            .find(|&c| self.name(c).as_deref() == Some(property))?;
-        if let Value::Str(pointer) = &self.nodes[child.0 as usize].scalar {
-            self.resolve_pointer(pointer)
-        } else {
-            None
+        self.resolve_pointer(&reference)
+    }
+
+    /// A `$ref` to another resource (`other.json#/definitions/x`,
+    /// `/schemas/x.json`): the URI read into its document and its
+    /// fragment, for the engine to look up among the mounts. Only
+    /// the reference keyword is read this way; any other property
+    /// holding such a string is plain text.
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        _hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
+        if property != "$ref" {
+            return None;
         }
+        let reference = self.string_property(node, property)?;
+        (!reference.is_empty() && !reference.starts_with('#'))
+            .then(|| quarb::ExternalRef::uri(&reference))
+    }
+
+    /// The location of a reference that landed in this document: a
+    /// JSON Pointer in its URI fragment form.
+    fn resolve_fragment(&self, _node: NodeId, fragment: &str) -> Option<NodeId> {
+        self.walk_pointer(&percent_decode(fragment))
     }
 }

@@ -11,7 +11,7 @@
 //!
 //! **DN-valued attributes are native references.** `member`,
 //! `manager`, `secretary`, `seeAlso`, and `memberOf` hold DNs,
-//! so `~>` follows them with no schema: `::manager~>::cn` walks
+//! so `-->` follows them with no schema: `::manager-->::cn` walks
 //! an entry to its manager's common name, and `->member`
 //! enumerates a group's members as labeled edges. The reverse of
 //! `member` — the groups an entry belongs to — is `<-member`,
@@ -136,17 +136,17 @@ fn parse_target(target: &str) -> Result<Target, LdapError> {
     } else if target.starts_with("ldap://") {
         "ldap"
     } else {
-        return Err(LdapError::Target(target.to_string()));
+        return Err(LdapError::Target(quarb::target::redact(target)));
     };
     let rest = &target[scheme.len() + 3..];
     let (authority, base) = rest
         .split_once('/')
-        .ok_or_else(|| LdapError::Target(target.to_string()))?;
+        .ok_or_else(|| LdapError::Target(quarb::target::redact(target)))?;
     let (creds, hostport) = match authority.rsplit_once('@') {
         Some((c, h)) => {
             let (u, p) = c
                 .split_once(':')
-                .ok_or_else(|| LdapError::Target(target.to_string()))?;
+                .ok_or_else(|| LdapError::Target(quarb::target::redact(target)))?;
             (Some((pct_decode(u), pct_decode(p))), h)
         }
         None => (None, authority),
@@ -158,7 +158,7 @@ fn parse_target(target: &str) -> Result<Target, LdapError> {
         format!("{hostport}:{port}")
     };
     if base.is_empty() {
-        return Err(LdapError::Target(target.to_string()));
+        return Err(LdapError::Target(quarb::target::redact(target)));
     }
     Ok((format!("{scheme}://{hostport}"), creds, pct_decode(base)))
 }
@@ -282,6 +282,15 @@ impl LdapAdapter {
     }
 }
 
+/// Whether a search failed because the server denies the level
+/// (insufficientAccessRights) or has no such entry (noSuchObject):
+/// an empty answer is then the server's own. Anything else — the
+/// size limit (sizeLimitExceeded), a timeout, a dropped connection
+/// — is a failed read.
+fn denied(e: &ldap3::LdapError) -> bool {
+    matches!(e, ldap3::LdapError::LdapResult { result } if matches!(result.rc, 32 | 50))
+}
+
 impl AstAdapter for LdapAdapter {
     fn root(&self) -> NodeId {
         NodeId(0)
@@ -303,9 +312,16 @@ impl AstAdapter for LdapAdapter {
                 .and_then(|r| r.success())
             {
                 Ok((rs, _)) => rs,
-                // An unreadable level is an empty one (ACLs deny
-                // some subtrees; the rest of the DIT still works).
-                Err(_) => Vec::new(),
+                // A denied or absent level is an empty one (ACLs
+                // deny some subtrees; the rest of the DIT still
+                // works). Any other failure — the size limit, a
+                // dropped connection — is refused and left
+                // uncached.
+                Err(e) if denied(&e) => Vec::new(),
+                Err(e) => {
+                    quarb::record_refusal(format!("ldap: listing under {dn}: {e}"));
+                    return Vec::new();
+                }
             }
         };
         let mut ids = Vec::new();
@@ -375,7 +391,7 @@ impl AstAdapter for LdapAdapter {
         }
     }
 
-    /// `::manager~>`, `::member~>`, and the other DN-valued
+    /// `::manager-->`, `::member-->`, and the other DN-valued
     /// attributes follow to the referenced entry (the first
     /// value when multi-valued).
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
@@ -438,7 +454,11 @@ impl AstAdapter for LdapAdapter {
                 .and_then(|r| r.success())
             {
                 Ok((rs, _)) => rs,
-                Err(_) => return Vec::new(),
+                Err(e) if denied(&e) => return Vec::new(),
+                Err(e) => {
+                    quarb::record_refusal(format!("ldap: searching {filter}: {e}"));
+                    return Vec::new();
+                }
             }
         };
         let mut out = Vec::new();

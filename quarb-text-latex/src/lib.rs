@@ -28,7 +28,7 @@
 //!   an `aside` deixis at the flow point, the body at the
 //!   document end, an `->aside` edge between them. Content, not
 //!   apparatus: no `<note>` on the body.
-//! - **Index marks** (ruling #36): `\index{term}` becomes an
+//! - **Index marks**: `\index{term}` becomes an
 //!   `index-mark` in its flow position, the term as written (`!`
 //!   subentries kept; `|...` directives stripped by the model).
 //!   `\makeindex` / `\printindex` vanish — the back-of-book
@@ -36,13 +36,15 @@
 //! - **Quotes** from `quote`/`quotation` environments, **lists**
 //!   from `itemize`/`enumerate` with `\item`, **verbatim** from
 //!   the `verbatim` environment, kept as authored; the `verse`
-//!   environment lowers to the verse vocabulary (ruling #37 —
+//!   environment lowers to the verse vocabulary (litogramma's stichoi model —
 //!   `\\` breaks lines, a blank line breaks strophes).
 //! - Prose reads with a drop list, not a guess list: known
 //!   metadata commands vanish (`\label`, spacing,
 //!   `\documentclass`, `\usepackage`, `\includegraphics`, …),
-//!   `\ref`/`\cite` keep their key as written (the reader sees a
-//!   mark there), every *other* one-argument command unwraps to
+//!   `\ref` is a `ref` to its label and `\cite` (the natbib and
+//!   biblatex family too) a citation mark with its locator, both
+//!   resolved against the document; every *other* one-argument
+//!   command unwraps to
 //!   its content — the house corpus wraps prose in custom macros,
 //!   and dropping their arguments would eat the text. Comments
 //!   (`%` to end of line) vanish; math is kept as authored,
@@ -106,6 +108,17 @@ const SKIP_ENVS: &[&str] = &[
 /// Lower LaTeX source into the block event stream.
 pub fn blocks(source: &str) -> Vec<Block> {
     Lower::new(source).run()
+}
+
+/// How many bytes the UTF-8 character starting with `lead` takes
+/// (the source is a `&str`, so a lead byte is always a boundary).
+fn char_width(lead: u8) -> usize {
+    match lead {
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
 }
 
 struct Lower<'a> {
@@ -277,6 +290,19 @@ impl<'a> Lower<'a> {
         // An escaped symbol: \%, \&, \$, \_, \#, \{, \}, \\ …
         if self.pos < self.src.len() && !self.src[self.pos].is_ascii_alphabetic() {
             let c = self.src[self.pos];
+            if !c.is_ascii() {
+                // `\` before a multibyte character: the character,
+                // whole (a byte-wise push would split it).
+                let w = char_width(c);
+                if let Some(ch) = std::str::from_utf8(&self.src[self.pos..self.pos + w])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                {
+                    self.para.push(ch);
+                }
+                self.pos += w;
+                return;
+            }
             self.pos += 1;
             match c {
                 b'\\' => self.para.push(' '),
@@ -296,15 +322,18 @@ impl<'a> Lower<'a> {
             // arbitrary delimiter — copied as authored, so a $,
             // %, or \ inside cannot derail the scan.
             if self.pos < self.src.len() {
-                let delim = self.src[self.pos];
-                self.pos += 1;
+                // The delimiter is one character, however many
+                // bytes it takes.
+                let w = char_width(self.src[self.pos]);
+                let delim = self.src[self.pos..self.pos + w].to_vec();
+                self.pos += w;
                 let start = self.pos;
-                while self.pos < self.src.len() && self.src[self.pos] != delim {
+                while self.pos < self.src.len() && !self.src[self.pos..].starts_with(&delim) {
                     self.pos += 1;
                 }
                 self.para
                     .push_str(&String::from_utf8_lossy(&self.src[start..self.pos]));
-                self.pos += 1;
+                self.pos += w;
             }
             return;
         }
@@ -373,7 +402,7 @@ impl<'a> Lower<'a> {
                     .push((onym, NoteFamily::Aside, false, strip_inline(&body)));
             }
             "index" => {
-                // An index mark (ruling #36): the term as written;
+                // An index mark: the term as written;
                 // the model strips `|...` directives.
                 if let Some(term) = self.braced() {
                     self.inline.push(Inline::Mark(term));
@@ -564,7 +593,7 @@ impl<'a> Lower<'a> {
                 self.envs.push(("list", false));
             }
             "verse" => {
-                // The verse vocabulary (ruling #37): `\\\\` breaks
+                // The verse vocabulary: `\\\\` breaks
                 // lines, a blank line breaks strophes; inline
                 // markup unwraps per line.
                 self.flush_para();

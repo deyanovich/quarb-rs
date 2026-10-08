@@ -73,3 +73,26 @@ int main(void) {
     assert!(quarb_tree_sitter::supported("c"));
     assert!(quarb_tree_sitter::supported("h"));
 }
+
+/// Finding 22: a source file decodes under the mount's rule
+/// (`?encoding=`, a byte-order mark, else strict UTF-8), refused
+/// with the byte offset otherwise — never read with replacement
+/// characters.
+#[test]
+fn a_source_file_decodes_under_the_mounts_rule() {
+    let dir = std::env::temp_dir().join(format!("quarb-ts-enc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("ru.py");
+    // s = "Привет" in windows-1251.
+    std::fs::write(&p, b"s = \"\xcf\xf0\xe8\xe2\xe5\xf2\"\n").unwrap();
+    let err = match TreeSitterAdapter::open(&p) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("decoded where a refusal was due"),
+    };
+    assert!(err.contains("?encoding="), "{err}");
+    let d = quarb::source::SourceDecoding::default()
+        .with_option(Some("windows-1251"))
+        .unwrap();
+    let a = TreeSitterAdapter::open_with_decoding(&p, &d).unwrap();
+    assert!(a.source().contains("Привет"));
+}

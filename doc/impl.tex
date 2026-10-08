@@ -186,10 +186,57 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   (\texttt{word/footnotes.xml}, \texttt{word/endnotes.xml}), and
   \texttt{XE} field instructions as index marks. Depends on
   \texttt{quarb-text}, \texttt{zip}, and \texttt{quick-xml}. \\
+\texttt{quarb-text-odt} & The OpenDocument text-level adapter
+  (\texttt{.odt}, the flat \texttt{.fodt}, OpenOffice.org's
+  \texttt{.sxw}), the Word reader's sibling: \texttt{text:h}
+  outline levels and a paragraph style's
+  \texttt{default-outline-level} along the parent chain, the
+  declared list containers with their style's level kind,
+  \texttt{table-header-rows}, the same cited quote style, inline
+  \texttt{text:note} bodies lifted to the document end with the
+  callout at its offset, bookmarks and reference marks as bearers
+  or anchors, \texttt{text:a} and the reference fields as refs,
+  index marks, emphasis and code spans from character styles'
+  declared properties, the accepted view of tracked changes,
+  \texttt{meta.xml} as the declared identity. Depends on
+  \texttt{quarb-text}, \texttt{zip}, and \texttt{quick-xml}. \\
+\texttt{quarb-text-rtf} & The Rich Text Format text-level
+  adapter, from declared control words: \texttt{\textbackslash
+  outlinelevel} direct or through the stylesheet's
+  \texttt{\textbackslash s} / \texttt{\textbackslash sbasedon}
+  chain, the list table's level kinds behind \texttt{\textbackslash
+  ls} / \texttt{\textbackslash ilvl} (and the old
+  \texttt{\textbackslash pn} group), \texttt{\textbackslash trhdr}
+  header rows, the same cited quote-style names, inline
+  \texttt{\textbackslash footnote} groups as callouts with their
+  bodies at the end (\texttt{\textbackslash ftnalt} the endnote),
+  HYPERLINK fields as refs, bookmarks, \texttt{\textbackslash xe}
+  index marks, \texttt{\textbackslash deleted} dropped, emphasis
+  and code spans from the run's declared formatting, the code page
+  of \texttt{\textbackslash ansicpg} for the \texttt{\textbackslash
+  'xx} bytes (reported as the source's declaration), the info
+  group as the declared identity. Its own tokenizer; depends on
+  \texttt{quarb-text} and \texttt{encoding\_rs}. \\
+\texttt{quarb-text-doc} & The legacy Word (97--2003, OLE2)
+  text-level adapter, the text-only first cut: the
+  \texttt{WordDocument} stream's FIB names the table stream and
+  the CLX, the piece table gives the text (8-bit pieces in the
+  FIB language's code page, UTF-16 pieces as they are),
+  paragraph and cell marks split paragraphs, a field's instruction
+  is dropped and its result kept, the footnote text's bodies are
+  split by \texttt{PlcffndTxt} with the footnote marks as their
+  callouts, and \texttt{SummaryInformation} declares the identity.
+  No outline levels, lists or tables yet (they need the property
+  pages and the stylesheet). A plain-text file named
+  \texttt{.doc} is told apart by the OLE2 magic. Depends on
+  \texttt{quarb-text}, \texttt{cfb} and \texttt{encoding\_rs}. \\
 \texttt{quarb-text-epub} & The EPUB text-level adapter: container to
   rootfile to spine, chapters through the HTML adapter in spine
   order (\texttt{linear="no"} excluded); the EPUB note vocabulary
-  arrives via \texttt{quarb-text-html}. Depends on
+  arrives via \texttt{quarb-text-html}. Each chapter's ids are
+  its own namespace (\texttt{ch2.xhtml\#n1}): a reused
+  \texttt{id} names one bearer per chapter, and a reference lands
+  in its own chapter or the one it names. Depends on
   \texttt{quarb-text}, \texttt{quarb-text-html}, and
   \texttt{zip}. \\
 \texttt{quarb-text-html} & The HTML text-level adapter:
@@ -215,13 +262,36 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   lowers into the shared block vocabulary through its
   dialektos-resolved sim names — enclosing headings by nesting
   depth, both note families and asides by name, index endos as
-  marks, stichoi tables, refs keeping their key as written.
-  Foreign formats arrive through atrep's endomorphosis
-  importers (\texttt{atrep::endo}) into their mirror dialects —
-  Markdown, HTML, reStructuredText, Org, djot — read by the same
-  name-keyed mapping (flat \texttt{heading-N} endos, flat item
-  runs wrapped, rst footnotes into the shared apparatus). Serves
-  \texttt{koine:} (and \texttt{text:} on
+  marks, the table model (\texttt{table} / \texttt{row} /
+  \texttt{header-row} / \texttt{cell}, the \texttt{hspan} /
+  \texttt{vspan} monosims padding the cells a span covers, so
+  every row is a record of the same width) and the older
+  stichoi tables, refs keeping their key as written. The
+  dictionary vocabulary (spec: The Dictionary Vocabulary): a
+  lexigramma document lowers its \texttt{entry} and
+  \texttt{sense} sims to containers of those kinds (the
+  headword the lemma and the onym, the taxis the homograph or
+  sense number), the inline apparatus to spans named by their
+  sims with \texttt{::kind} / \texttt{::lang} from the genos,
+  an \texttt{inflection} to a \texttt{<hidden>} node outside
+  the prose, the languages line to \texttt{::::languages}, and
+  the definition list typed \texttt{.abbreviations} (or, left
+  untyped, the one before the first entry) to the abbreviations
+  list (\texttt{::kind}) the labels resolve against
+  (\texttt{-->}). Foreign formats arrive through
+  atrep's endomorphosis importers (\texttt{atrep::endo}) into
+  their mirror dialects — Markdown, HTML, reStructuredText,
+  Org, djot — read by the same name-keyed mapping (flat
+  \texttt{heading-N} endos, flat item runs wrapped, rst
+  footnotes into the shared apparatus); Word through
+  \texttt{atrep::docx} (\texttt{koine:report.docx}, declared
+  structure only, beside the native \texttt{text:} reading);
+  a Lingvo DSL dictionary (\texttt{.dsl}, \texttt{.dsl.dz})
+  through \texttt{atrep::dsl} into lexigramma, the
+  \texttt{\#INCLUDE}d abbreviations read beside it, under
+  \texttt{koine:}, \texttt{text:} and \texttt{corpus:} alike
+  (\texttt{lit:} refuses: a dictionary is no literary
+  edition). Serves \texttt{koine:} (and \texttt{text:} on
   \texttt{.atd}/\texttt{.atk}, where the routes converge);
   \texttt{.xml} dispatches by declared identity (root
   namespace, DOCTYPE public id, unambiguous root element) into
@@ -254,6 +324,20 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   metadata; ToUnicode CMaps decoded, one stated kern constant for
   word gaps). No \texttt{paragraph} is ever minted. Depends on
   \texttt{quarb-text}, \texttt{quarb-pdf}, and \texttt{lopdf}. \\
+\texttt{quarb-text-djvu} & The DjVu text-level adapter
+  (\texttt{text:scan.djvu}), by the PDF reading's doctrine: the
+  \texttt{NAVM} outline is the heading ladder (sections holding
+  their pages, front matter at the root; \texttt{page/*} without
+  one); a page's zones are its tree as the text layer names them
+  (\texttt{column}, \texttt{region}, \texttt{paragraph},
+  \texttt{line}; words a line's text; declared paragraphs kept,
+  none minted); \texttt{::::page}/\texttt{x}/\texttt{y}/
+  \texttt{width}/\texttt{height} on every zone; \texttt{::::text-layer}
+  on page and document; the \texttt{ANT} metadata as the document
+  node's properties. Bundled, single-page and indirect documents;
+  the text layer only (no OCR). The plain mount of a \texttt{.djvu}
+  names the reading. Depends on \texttt{quarb} and
+  \texttt{djvu-rs} (pure Rust, MIT). \\
 \texttt{quarb-xml} & The XML adapter (qualified tags as names,
   attributes as properties, \texttt{id}/\texttt{xml:id} references
   resolve; strict well-formedness, no traits). Depends on
@@ -261,13 +345,21 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-relational} & The shared relational model: tables
   as root children, rows named by primary key, columns as
   properties, declared foreign keys driving
-  \texttt{\textasciitilde>} resolution (chained hops instead of
+  \texttt{-->} resolution (chained hops instead of
   JOINs), \texttt{->}/\texttt{<-} crosslinks labeled by column,
-  \texttt{<\textasciitilde} reverse resolution, and the
-  table-naming hint for undeclared references. Loading is catalog-
-  eager, rows-lazy: a table materializes on first touch through
-  the driver-supplied fetcher, once, and untouched tables are
-  never read (\texttt{::::loaded} reports the state). Engine
+  \texttt{<--(::fk)} reverse resolution from the declared keys
+  (\texttt{reverse\_resolve} on the relational model), and the
+  table-naming reference label for undeclared references (required
+  where a column declares no key). Loading is catalog-
+  eager, rows-lazy, hops by key: a table is read whole only when a
+  query lists it (\texttt{/t/*}, \texttt{::::n-rows}); a hop reads
+  the rows it lands on through the driver's keyed source
+  (\texttt{WHERE key IN (\dots)}, one statement per frontier; such
+  a row carries no row id until the table is read, never a
+  sentinel value a real row could bear), rows
+  keep their identity when the table is later read whole, and
+  untouched tables are never read (\texttt{::::loaded},
+  \texttt{::::n-loaded} report the state). Engine
   adapters are thin catalog drivers over it. Depends on
   \texttt{quarb}. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
@@ -416,7 +508,10 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   (\texttt{<function>}, \texttt{<type>}, \texttt{<loop>});
   \texttt{::signature} / \texttt{::doc} / \texttt{::callee};
   raw backend kind only at \texttt{::::kind} (aliased, closed
-  surface); \texttt{->definition} file-local crosslinks.
+  surface); \texttt{->definition} file-local crosslinks, one
+  declaration list per identifier: a qualified callee
+  (\texttt{Type::new}, \texttt{obj.helper}) prefers the
+  declarations under that qualifier, an unqualified one fans out.
   Opt-in via the \texttt{code:} target prefix;
   \texttt{code:DIR} grafts every supported source leaf —
   filesystem into declarations, one namespace. \\
@@ -434,12 +529,29 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   node), and locators mark the boundary jar-style
   (\texttt{store.json!/books/1}). \texttt{qua}: default for
   archives, \texttt{--graft} for directories. \\
-\texttt{quarb-archive} & Zip and tar (\texttt{.tar[.gz]})
-  archives as path trees: entry content as the node value,
-  \texttt{::::size} / \texttt{::::compressed}; zip contents lazy
-  per entry, tar in one pass. With composition, \texttt{.docx} /
-  \texttt{.epub} / \texttt{.jar} internals are directly
-  queryable. \\
+\texttt{quarb-archive} & Zip, tar and 7z archives as directory trees
+  (entries as nodes, content as value, \texttt{::::size} /
+  \texttt{::::compressed}), every format through a pure-Rust
+  library so the wasm build reads them too: zip members deflate,
+  deflate64, bzip2 (\texttt{bzip2} with \texttt{libbz2-rs-sys}),
+  lzma (\texttt{lzma-rs}); tar plain and under gzip
+  (\texttt{flate2}), xz (\texttt{lzma-rs}), bzip2, zstd
+  (\texttt{ruzstd}); 7z (\texttt{sevenz-rust}, LZMA/LZMA2). The
+  format is told by its magic bytes. Zip members in zstd or xz and
+  rar would need a C library and are not read by default:
+  rar rides the opt-in \texttt{rar} feature over the
+  \texttt{unrar} crate (rarlab's library under its own licence),
+  on for \texttt{qua}, off for the playground and the extension,
+  and a RAR without it is refused naming the feature. CHM help
+  files read through \texttt{libchm} (pure Rust, \texttt{ITSF}):
+  members under their paths, the system records left out, a page
+  without a \texttt{<meta charset>} decoding under the
+  \texttt{\#SYSTEM} locale's code page. An MHTML web archive
+  (\texttt{.mhtml}, \texttt{.mht}, or MIME header lines) reads
+  through an in-crate RFC 2045/2046 splitter: each part a member
+  under its \texttt{Content-Location} path, transfer-decoded,
+  its charset the declaration. Members decode under the mount's
+  source-boundary rule. \\
 \texttt{quarb-web} & The \emph{web level}: a site as an arbor —
   \texttt{/sites/<host>/pages/<path>} for every page (directories
   from the URL paths, \texttt{<dir>} / \texttt{<page>} /
@@ -798,8 +910,22 @@ hold this), so the rungs trade only latency and transfer:
     GROUP BY/DISTINCT order, collations, unordered LIMIT) refuses.
     Row order is part of the contract — the plan names the result
     table, and each driver appends \texttt{ORDER BY} its key from
-    the catalog. Measured: COUNT over 500k PostgreSQL rows,
-    2.57\,s scanned vs.\ 0.018\,s pushed.
+    the catalog. Column types are part of it too: Quarb compares
+    by value (numeric-looking text meets a number as a number, a
+    number and other text never meet), SQL by the column's type,
+    and SQLite and MySQL coerce a mixed comparison by rules of
+    their own. A numeric-looking \emph{text} literal therefore
+    never pushes; for the rest the plan records what it assumes
+    (\texttt{ColumnTypes}: the columns it compares with a number,
+    those it compares with text), and \texttt{qua} asks the
+    driver's catalog (\texttt{column\_catalog}: SQLite's
+    affinity, MySQL's \texttt{data\_type}) before using a plan,
+    full or partial; an unmet assumption scans, and
+    \texttt{--explain} names the column. The strictly typed
+    engines reject the mismatch themselves, which falls back the
+    same way. What remains outside: a SQLite cell that violates
+    its column's declared type. Measured: COUNT over 500k
+    PostgreSQL rows, 2.57\,s scanned vs.\ 0.018\,s pushed.
   \item \textbf{Partial pushdown}
     (\texttt{quarb\_sql::partial\_pushdown}): the leading run of
     strictly-translatable row predicates becomes the table's fetch
@@ -1001,9 +1127,13 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{::ref\textasciitilde>}, \texttt{::'\$ref'\textasciitilde>/city}
   & \live cross-reference resolution (JSON: follow a \texttt{\$ref}
     JSON Pointer) \\
-\texttt{::ref<\textasciitilde}
-  & \live reverse resolution: every node whose \texttt{ref} resolves
-    to this one (naive whole-arbor scan) \\
+\texttt{<--(::ref)}, \texttt{<--(/scope/*::ref)}
+  & \live reverse resolution (2026-10-05): every node whose
+    \texttt{ref} resolves to this one — a declared reference
+    answers from the adapter's index, a scope bounds the search,
+    and the whole-arbor walk runs only where the adapter opts in
+    (\texttt{walks\_for\_references}), else the query is refused;
+    \texttt{::a=>(/scope/*::b)} is the value match \\
 \texttt{\$.r:::provenance}, \texttt{:::\%provenance},
 \texttt{:::@origin}, \texttt{--reproducible}
   & \live value provenance (2026-09-06/07): every value carries
@@ -1132,7 +1262,10 @@ pub trait AstAdapter {
 
     // --- the reference surface (defaulted) ---
 
-    /// Resolve a cross-reference: `::prop-->hint` maps a property
+    /// (The name glued to a resolution arrow is its reference label;
+    /// the parameter keeps its historical name `hint`; reflection
+    /// reports it as `label`.)
+    /// Resolve a cross-reference: `::prop-->label` maps a property
     /// value to its in-document target (html: a `#fragment` href
     /// to the element with that id).
     fn resolve(&self, _n: NodeId, _prop: &str, _hint: Option<&str>)
@@ -1146,8 +1279,10 @@ pub trait AstAdapter {
     /// mounted root) and lands, or records the identifier among
     /// the run's unresolved external references for the host's
     /// acquisition loop. The engine performs no IO, ever.
+    /// (document, location within): the adapter reads both out of
+    /// its own reference syntax; the engine splits nothing.
     fn external_ref(&self, _n: NodeId, _prop: &str, _hint: Option<&str>)
-        -> Option<String> { None }
+        -> Option<ExternalRef> { None }
 
     /// The element `fragment` names inside `node`'s document --
     /// the landing rung of a fragment-carrying external reference.
@@ -1166,9 +1301,52 @@ pub trait AstAdapter {
     /// The document an external identifier names (a URL -> its
     /// page), the arrow's landing rung after the mount layer.
     fn document_by_ref(&self, _id: &str) -> Option<NodeId> { None }
-    /// `<--` from an index instead of a whole-arbor scan.
+    /// `<--(::prop)` from an index (a declared reference);
+    /// `None` means no declaration answers.
     fn reverse_resolve(&self, _n: NodeId, _prop: Option<&str>,
         _hint: Option<&str>) -> Option<Vec<NodeId>> { None }
+    /// Whether an unscoped `<--` may walk the whole arbor here
+    /// (the in-memory formats say yes; a catalog says no).
+    fn walks_for_references(&self) -> bool { false }
+    /// `index SCOPE::prop;` (a model statement): the scoped nodes
+    /// holding `value`, and those whose property resolves to a
+    /// target, from an index the model keeps. Cost only: the
+    /// caller still tests each node, so the answer is the walk's.
+    fn index_lookup(&self, _scope: &str, _prop: &str, _v: &Value)
+        -> Option<Vec<NodeId>> { None }
+    fn index_referrers(&self, _scope: &str, _prop: &str,
+        _label: Option<&str>, _target: NodeId)
+        -> Option<Vec<NodeId>> { None }
+    /// Can a reference *declared* on `source` (a catalog key, a
+    /// model `ref`, a reference property the format defines) land
+    /// in `target`'s container? Schema, never data; `None` where
+    /// nothing is declared. Decides `<--(SCOPE::*)` with no label.
+    fn can_refer_to(&self, source: NodeId, _target: NodeId)
+        -> Option<bool> { self.ref_property(source).map(|_| true) }
+    /// The reference properties declared on `source` into
+    /// `target`'s container: what `t<--` and `t<--(SCOPE)` read.
+    fn reference_properties(&self, source: NodeId, _target: NodeId)
+        -> Vec<String> { self.ref_property(source).into_iter().collect() }
+    /// Whether the source resolves references at all (a CSV file
+    /// does not): both arrows are refused where it does not.
+    fn resolves_references(&self) -> bool { true }
+    /// The label a label-less reverse arrow also resolves under,
+    /// when the question is about `target` (a database: its
+    /// table). None by default; the engine derives none.
+    fn reverse_label(&self, _target: NodeId) -> Option<String>
+        { None }
+    /// The trees other trees refer to by name: (identity, node);
+    /// an identity ending in a separator is a base. Declared in a
+    /// model (`tree IDENTITY: PATH;`), automatic for a mount's
+    /// own target. The engine reads prefix and separator, no more.
+    fn tree_identities(&self) -> Vec<(String, NodeId)> { vec![] }
+    /// Whether `::prop-->` needs a reference label here (a column
+    /// with no key, a property graph): refused without one.
+    fn resolve_needs_label(&self, _n: NodeId, _prop: &str) -> bool
+        { false }
+    /// A node's property names, for `<--(SCOPE::*)`; an element
+    /// lists its attributes.
+    fn property_names(&self, _n: NodeId) -> Vec<String> { /* … */ }
     /// `//name` below `node` from an index, with each hit's depth;
     /// `None` means walk. The answer must equal the walk's.
     fn descendants_named(&self, _n: NodeId, _name: &str)
@@ -1213,21 +1391,294 @@ Three observations that the filesystem work has already forced:
 
 \item \textbf{New trait methods need their forwarders.} The run
   path wraps every adapter in decorators (\texttt{WithNow},
-  \texttt{AllowShell}), the session in \texttt{Dyn}, mounts in
+  \texttt{AllowShell}, \texttt{Sourced}), the session in \texttt{Dyn}, mounts in
   \texttt{MountAdapter}/\texttt{Shared}, models in
   \texttt{ModelAdapter} -- a defaulted method silently answers
   \texttt{None} through any wrapper that does not forward it.
-  When adding to the trait, sweep every delegating impl. The
+  The plain wrappers (those that override at most a method or
+  two) write their forwarding with
+  \texttt{quarb::forward\_ast\_adapter!(FIELD; except m, \ldots)},
+  whose method table is checked against the trait by a test in
+  \texttt{adapter.rs}, and a probe adapter is run through each
+  shipped wrapper -- so a new trait method is forwarded by all
+  of them once it is added to the table. The composing wrappers
+  (\texttt{MountAdapter}, \texttt{ModelAdapter}, the graft, the
+  reflection views) still forward by hand: when adding to the
+  trait, sweep those. The
   case in point (2026-09-07): \texttt{Dyn} had never forwarded
   \texttt{answers\_to}, so a web level behind the session's
   boxed door answered \texttt{//page} with nothing -- its rows
-  answer to their kind through that method. It forwards the
-  whole surface now.
+  answer to their kind through that method. The sweep of 2026-10-06 found three hooks
+  no wrapper forwarded (\texttt{descendants\_where},
+  \texttt{has\_node}, \texttt{provenance\_list}), and
+  \texttt{ModelAdapter} dropping \texttt{link\_property} and
+  aliased metadata, so an edge property or \texttt{::::size}
+  answered nothing under \texttt{--model}; the macro round of
+  2026-10-07 found the Python binding's \texttt{Dyn} forwarding
+  29 methods of 45. A model's mount
+  targets stay relative to its own file (the tool resolves
+  them once, against the file it was given), so a
+  \texttt{use}d model's targets are carried over by the
+  \texttt{use} path as written.
+
+\item \textbf{Integers compare as integers.} Two integers are
+  compared, keyed for joins and \texttt{unique}, and sorted
+  exactly; the float reading enters only when one side is not
+  an integer (\texttt{SortKey::Line} carries the integer beside
+  the float, and $-0.0$ keys as $0.0$). Above $2^{53}$ the float
+  reading alone would merge neighbours.
+
+\item \textbf{The shell gate is checked twice.} The static walk
+  refuses a query that names \texttt{sh(...)} or a backtick
+  command anywhere it can stand (record fields, list items and
+  field bases included); the executor refuses the stage again
+  when it runs, so a path the walk does not know cannot reach
+  the shell without \texttt{--allow-shell}.
 
 \item \textbf{The root may be unnamed.} \texttt{name} returns
   \texttt{Option} precisely so an adapter can leave the root without a
   name, as the filesystem root \texttt{/} does.
+
+\item \textbf{A failed fetch is a refusal, never an empty answer.}
+  The trait has no error channel below the entry points, so a read
+  that fails inside an evaluation\,---\,a table load, a label
+  listing, a relationship fetch, a count, a paginated listing cut
+  off mid-way\,---\,records a refusal
+  (\texttt{quarb::record\_refusal}; \texttt{quarb::fetched} /
+  \texttt{fetched\_opt} wrap a \texttt{Result} that way) and the
+  query errors with the adapter's message. A listing that failed is
+  left uncached, so the next query reads again. The one legitimate
+  emptiness is the server's own word\,---\,LDAP's
+  \texttt{noSuchObject} and \texttt{insufficientAccessRights}.
+
+\item \textbf{Bounds where data set the size.} Every bound refuses
+  with a message naming it: nesting (\texttt{MAX\_NEST}, carried
+  into holes, expansions and generated text), \texttt{repeat} /
+  \texttt{indent} (\texttt{MAX\_REPEAT\_BYTES}, 64 MiB), outline
+  levels (\texttt{MAX\_OUTLINE\_DEPTH}, 64 below the shallowest),
+  unit exponents (\texttt{MAX\_EXPONENT}, 32), mounts
+  (\texttt{MAX\_MOUNTS}, 254: \texttt{MountAdapter::try\_new}),
+  what an archive may decompress into memory
+  (\texttt{MAX\_ARCHIVE\_BYTES}, 1 GiB, an xz stream checked
+  against its index first). The executor's tree walks run on an
+  explicit stack, so a source's depth is never the thread's.
 \end{itemize}
+
+\section{The Source Boundary}\label{sec:source-boundary}
+
+Text is text inside the language; bytes meet it at two boundaries,
+both the engine's, in \texttt{quarb::source}. An adapter decides
+nothing about encodings.
+
+\begin{itemize}
+\item \textbf{Decoding} (\texttt{source::decode}, carried by a
+  \texttt{SourceDecoding} per mount): \texttt{?encoding=LABEL} on the
+  mount, then a byte-order mark, then the declaration the format's
+  reporter finds in the bytes, then strict UTF-8\,---\,a source that
+  reaches the last step and is not valid UTF-8 is refused, naming
+  the option. Nothing is guessed from bytes and nothing is decoded
+  lossily; within a decided encoding a malformed sequence becomes
+  U+FFFD and is counted. Labels are the Encoding Standard's
+  (\texttt{encoding\_rs}); the CJK tables ride the \texttt{cjk}
+  feature of \texttt{quarb} (on for \texttt{qua}, off for the
+  playground and the extension).
+\item \textbf{Reporters} are plain functions over bytes in the
+  adapter crates: \texttt{quarb\_xml::declared\_encoding} (the
+  prologue; the reader itself is
+  \texttt{quarb::source::xml\_declared\_encoding}, shared with
+  the packages), \texttt{quarb\_html::declared\_encoding} (the meta
+  charset prescan), \texttt{quarb\_maildir::declared\_encoding} (the
+  MIME charset of a message's own headers). A host chooses the
+  reporter by the source's name
+  (\texttt{quarb\_compose::declared\_encoding}); the adapter never
+  decodes.
+\item \textbf{Layers that read bytes} take the rule and answer for
+  what they decoded: \texttt{Sourced} (the wrapper \texttt{qua}
+  puts on a mount it read itself) answers \texttt{::::encoding} and
+  \texttt{::::replaced} on the root; \texttt{ComposeAdapter}
+  (\texttt{with\_decoding}) reads a grafted leaf through its path
+  and answers on that leaf; \texttt{ArchiveAdapter}
+  (\texttt{open\_with\_decoding}) on each member it reads, tar
+  and zip names included (an entry name is bytes under the rule,
+  never the format's CP437 guess; zip members are read by index, so
+  a decoded name need not match the library's);
+  \texttt{MaildirAdapter} / \texttt{ImapAdapter} per message;
+  \texttt{quarb\_web::fs::open\_dir\_with\_decoding} per page;
+  \texttt{GitAdapter} / \texttt{MetathecaAdapter}
+  (\texttt{open\_with\_decoding}) on a blob (one that decodes
+  under none has no text; git's own structured output must be
+  UTF-8, paths unquoted and messages transcoded by
+  \texttt{--encoding=UTF-8}); the packages\,---\,docx, odt,
+  epub\,---\,on each XML member through
+  \texttt{parse\_with\_decoding} (the option, a byte-order
+  mark, the member's XML prologue, else strict UTF-8; a member
+  that decodes under none is an error naming it, never a part
+  silently missing); \texttt{TreeSitterAdapter} /
+  \texttt{CodeModel::open\_with\_decoding} and
+  \texttt{quarb\_text::read\_conllu\_dir\_with} on a source
+  file. A response body over HTTP is read whole under
+  \texttt{source::text\_from\_reader} (a 256 MiB bound, strict
+  UTF-8\,---\,the wire formats are UTF-8 by their standards), never
+  cut at a client library's cap nor replaced.
+\item \textbf{Delimited text} is decided the same way, never
+  sniffed: \texttt{CsvAdapter::parse\_declared} takes
+  \texttt{?delimiter=} off the mount (\texttt{CsvOptions}), else an
+  Excel \texttt{sep=X} first line, else the extension's default; a
+  header without the decided delimiter but another candidate
+  throughout is refused naming the option. Numbers in text read in
+  the canonical form (\texttt{quarb::number}: digits, sign,
+  \texttt{.}, exponent; grouped thousands under the default
+  convention); a source that writes decimal commas declares
+  \texttt{?decimal=comma} and its cells with a reading arrive in
+  canonical form, so every reading downstream agrees.
+  \texttt{| number(LOCALE)} reads text under a locale's convention
+  from a small embedded table; \texttt{@| csv(";"; …)} takes the
+  delimiter as a quoted first argument (the parser carries it as
+  \texttt{delimiter=;}).
+\item \textbf{Dates in a locale's words}: \texttt{strptime(fmt;
+  LOCALE)} / \texttt{tp} and \texttt{strftime(fmt; LOCALE)} /
+  \texttt{tfmt} read and write the \texttt{\%B \%b \%A \%a} names
+  from \texttt{quarb::datenames}, a small embedded CLDR table (by size
+  of language: en, zh, es, ar, pt, ru, ja, de, fr, tr, it) listing every form a locale writes
+  (the date form \texttt{октября}, the stand-alone
+  \texttt{октябрь}, the abbreviations); every form parses, case
+  folded, longest first, and writing takes the date form where
+  the format carries a day (\texttt{\%d}, \texttt{\%e}) and the
+  stand-alone form where it does not (\texttt{\%B \%Y}: октябрь
+  1899). Format
+  literals match as written (\texttt{'\%d \%B \%Y г.'}). Without a
+  locale the English names; a locale with no table refuses. The
+  temporal reading of bare text stays ISO-8601.
+\item \textbf{Periods and time expressions} (spec: Time
+  Expressions and the Timeline). \texttt{Value::Period} is a
+  start second and a grain (\texttt{quarb::period}: year to
+  second, ISO-8601 at reduced precision in print and in the
+  interchange forms). The \emph{calendar reading}
+  (\texttt{Value::calendar\_reading}) reads a period, reduced
+  or full ISO text, an integer as a year, an instant at its
+  printing grain. \texttt{value\_eq} / \texttt{value\_cmp} test
+  for a period operand first and compare as intervals: nested
+  periods are equal, disjoint ones ordered. A period has its
+  own sort key (start, then the coarser first), no equality key
+  (a search takes the scan), no numeric reading (arithmetic is
+  null), and reads as its first instant wherever a function
+  goes through the temporal reading. \texttt{period([GRAIN])}
+  and \texttt{grain} are scalar functions.
+  \texttt{timex(LOCALE)} (\texttt{quarb::timex}) is an
+  expanding scalar function like \texttt{words}: one record
+  per expression. Recognition is a list of templates per
+  locale (\texttt{timexdata.rs}, the eleven locales of the
+  date names), each a regular expression over slots
+  (numeral, unit, month, weekday, day, year, clock, part of
+  day) compiled once per locale. The earliest match wins,
+  then the longest, then the rule listed first, and an
+  overlapping match is dropped. Widening a list is the whole
+  of teaching the reader an expression. No stemmer and no
+  tagger takes part. Digits of other scripts, the
+  typographic apostrophe and the Turkish dotted capital are
+  folded one character for one before matching, so
+  \texttt{at} counts characters of the text as written. A
+  word boundary closes every template in the spaced locales,
+  so an abbreviation's final point (\texttt{p.m.},
+  \texttt{г.}) stays with the sentence.
+  \texttt{time\_anchor(T)} and \texttt{@| timeline} share
+  \texttt{period::anchor}: a span moves by calendar units
+  keeping the anchor's grain (the month's last day where the
+  target month lacks the day), except that an anchor finer
+  than the day drops to the day when the offset names no unit
+  finer than the day, a weekday offset and a time of
+  day ask for a day or finer, a date with fields left out
+  takes them from the anchor (under \texttt{forward}, the
+  first such date at or after it). \texttt{timeline\_stage}
+  is row-aligned like \texttt{shift}: it evaluates the
+  expression and the anchor per capsa, folds the point over
+  the context (a change of anchor value starts a chain), and
+  adds \texttt{when} and \texttt{from} to each record. A
+  value that is not a \texttt{timex} record is carried as
+  \texttt{\%(value; when; from)}.
+\item \textbf{Unit libraries}: \texttt{units LIBRARY;} in a model
+  imports a kaiv \texttt{.faiv} library (path relative to the model
+  file; \texttt{use} merges) into the unit table the unital reading
+  consults for every source the model mounts:
+  \texttt{ModelAdapter::unit\_scale} answers from the imported
+  definitions first (\texttt{kaiv::unit::scale\_with}), then the
+  source's own. Loaded at construction, refused by \texttt{check}:
+  an unreadable or malformed file, the same file twice, a name
+  the table holds already (built in, or an earlier library).
+  Unit names are letters in any script (the unital tokenizer
+  admits Unicode letters), matched byte for byte as kaiv lists
+  them; aliases read as their primary. A quantity prints its unit
+  as written. Through kaiv-rs dev (0.15.0, path dependency) until
+  kaiv publishes.
+\item \textbf{The output locale} (\texttt{quarb::locale}) governs
+  rendering only, never the value: a tool decides the locale in
+  force by its layers, nearest first — \texttt{--locale},
+  \texttt{QUARB\_LOCALE}, \texttt{\textasciitilde/.quarb/config.toml}
+  (\texttt{[output] locale}), the system's \texttt{LC\_ALL} /
+  \texttt{LANG} (\texttt{C} and \texttt{POSIX} canonical) — and
+  renders what it prints through \texttt{OutputLocale}: numbers'
+  decimal mark and grouping (CLDR's, with its minimum grouping
+  digits), instants in the locale's medium date and time pattern
+  through \texttt{strftime\_in}, \texttt{@| csv}'s delimiter (the
+  semicolon where the decimal mark is the comma), and
+  \texttt{sort}'s collation when the query names none
+  (\texttt{set\_default\_collation}, read by
+  \texttt{default\_text\_order}; text alone is collated, numbers
+  and instants keep their own order). Digits are grouped only
+  when asked (\texttt{--grouping}, \texttt{QUARB\_GROUPING=1},
+  \texttt{[output] grouping = true}): a year is not
+  \texttt{1,876}. The engine itself never renders under a locale.
+  A stage is a value, the same wherever the query runs, so
+  \texttt{@| csv} and \texttt{@| table} inside a pipeline are
+  canonical; when one \emph{closes} the query the tool renders
+  it, as it renders \texttt{--csv} and \texttt{--table}:
+  \texttt{quarb::run\_for\_rendering} runs the query with the
+  closing stage replaced by an internal stand-in that yields the
+  rows, and hands back the stage's columns and named delimiter
+  (\texttt{ClosingTable}). \texttt{@| json}, \texttt{@| jsonl} and
+  \texttt{@| kaiv} stay canonical. A reader
+  (\texttt{number}, \texttt{tp}) takes its locale from its argument
+  alone, and refuses a locale it has no table for. \texttt{qua --explain} reports the locale and its layer;
+  the gates run with the environment's locale cleared. The session
+  and wasm doors have no locale yet (the browser's
+  \texttt{navigator.language} would be their system layer).
+\item \textbf{Encoding} (\texttt{source::encode}): \texttt{@|
+  encoding(LABEL)} is the output boundary and stands last. The
+  engine has no byte value, so the tool takes the stage off the
+  end of the query, runs the rest and encodes what it would have
+  printed (\texttt{qua}'s \texttt{OutSink}); met anywhere else it
+  is refused by the executor. The stage before it decides what a
+  character the encoding cannot hold becomes: after \texttt{@|
+  json} / \texttt{@| jsonl} the format's \texttt{\textbackslash
+  u} escape (\texttt{source::Escape::Json}); after anything else
+  the output is encoded while representable and refused at the
+  first such character. Mail headers' RFC 2047 encoded words
+  decode under their own charset through the same tables
+  (\texttt{quarb-maildir}).
+\end{itemize}
+
+  \texttt{bibref(STANDARD)} (\texttt{quarb::bibref}) reads one
+  reference text under a citation standard — \texttt{gost},
+  \texttt{gb7714}, \texttt{cmos}, \texttt{ams}, an open tag set
+  the function refuses outside of, naming it — into a record of
+  the fields the grammar places without doubt (English names:
+  \texttt{author}, \texttt{title}, \texttt{year},
+  \texttt{journal}, \texttt{pages}, \ldots), its \texttt{genus}
+  and the list \texttt{label}; a text that is no reference is
+  null, as \texttt{strptime} answers for a text that is no date.
+  Each grammar is a hand-written reader of the standard's
+  punctuation (GOST's areas at \texttt{. –}, GB's type code after
+  the title, Chicago's sentences and quoted titles, AMS's comma
+  fields), the numbering prefix stripped first. The same module
+  finds citations in prose (bracketed numbers and ranges with a
+  pinpoint, author-year parentheses) and
+  \texttt{TextModel::lower\_references} (quarb-text) applies both
+  for the \texttt{?references=STANDARD} mount option: a paragraph
+  or list item that parses becomes a \texttt{bib} node under the
+  canonical campi (with the English aliases attached when no
+  census is), its \texttt{::onym} the written number, the list
+  ordinal, or party and year; the citations become \texttt{cit}
+  nodes and the resolution pass runs again.
 
 \section{Worked Example: the Filesystem Adapter}
 

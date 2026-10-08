@@ -372,8 +372,19 @@ impl CborAdapter {
 }
 
 impl AstAdapter for CborAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {

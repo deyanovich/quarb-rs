@@ -11,13 +11,14 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.32.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.32.0" }
+quarb = { path = "../quarb", version = "0.33.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.33.0" }
 rusqlite = { workspace = true, features = ["serialize"] }
 thiserror.workspace = true
 
 [dev-dependencies]
 quarb-sql = { path = "../quarb-sql" }
+tempfile.workspace = true
 
 [features]
 # Vendor SQLite (rusqlite's bundled build) — portable wheels and

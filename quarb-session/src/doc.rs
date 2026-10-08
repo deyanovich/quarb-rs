@@ -41,6 +41,125 @@ pub struct Options {
     pub bonds: Option<Rc<syndesmos::Syndesmos>>,
 }
 
+/// The session's declaration reporter at the source boundary: an
+/// XML prologue for XML-family names, the HTML prescan for HTML
+/// names, both tried for a name that says nothing.
+fn declared_encoding(name: &str, bytes: &[u8]) -> Option<String> {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "xml" | "svg" | "xhtml" | "fb2" | "tei" | "rss" | "atom" | "opml" | "xsd" | "xsl" => {
+            quarb_xml::declared_encoding(bytes)
+        }
+        "html" | "htm" => quarb_html::declared_encoding(bytes),
+        // RTF's header names its code page (`\ansicpg1251`).
+        "rtf" => quarb_text_rtf::declared_encoding(bytes),
+        _ => quarb_xml::declared_encoding(bytes).or_else(|| quarb_html::declared_encoding(bytes)),
+    }
+}
+
+/// Read one file at the source boundary: `?encoding=` (the
+/// `explicit` label), then a byte-order mark, then what the bytes
+/// declare, then strict UTF-8 — refused, naming the option, when
+/// none applies.
+fn read_source(path: &Path, explicit: Option<&str>) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    quarb::source::SourceDecoding::default()
+        .with_declared(declared_encoding)
+        .with_option(explicit)
+        .and_then(|d| d.decode(name, &bytes))
+        .map(|d| d.text)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
+}
+
+/// Take `?encoding=LABEL` off a plain target (one that is not a
+/// path as written; a reader prefix parses its own options).
+fn take_encoding_option(path: &Path) -> Result<(std::path::PathBuf, Option<String>)> {
+    let (p, explicit, _) = take_source_options(path)?;
+    Ok((p, explicit))
+}
+
+/// The source options off a plain target: `?encoding=`, and for a
+/// delimited file `?delimiter=` / `?decimal=`.
+/// Take `references=STANDARD` off a target's query, wherever it
+/// stands among the other options; the standard is validated here.
+fn take_references_option(path: &Path) -> Result<(std::path::PathBuf, Option<String>)> {
+    let Some(s) = path.to_str() else {
+        return Ok((path.to_path_buf(), None));
+    };
+    if path.exists() || !s.contains("references=") {
+        return Ok((path.to_path_buf(), None));
+    }
+    let Some((p, query)) = s.rsplit_once('?') else {
+        return Ok((path.to_path_buf(), None));
+    };
+    let mut standard = None;
+    let mut kept = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("references", v)) => {
+                anyhow::ensure!(
+                    quarb::bibref::STANDARDS.contains(&v),
+                    "{s}: references={v} — references= takes {}",
+                    quarb::bibref::STANDARDS.join(", ")
+                );
+                standard = Some(v.to_string());
+            }
+            _ => kept.push(pair),
+        }
+    }
+    let rebuilt = if kept.is_empty() {
+        p.to_string()
+    } else {
+        format!("{p}?{}", kept.join("&"))
+    };
+    Ok((std::path::PathBuf::from(rebuilt), standard))
+}
+
+fn take_source_options(
+    path: &Path,
+) -> Result<(std::path::PathBuf, Option<String>, quarb_csv::CsvOptions)> {
+    let mut csv = quarb_csv::CsvOptions::default();
+    let Some(s) = path.to_str() else {
+        return Ok((path.to_path_buf(), None, csv));
+    };
+    let prefixed = s.split_once(':').is_some_and(|(pre, _)| {
+        !pre.is_empty()
+            && pre
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    });
+    if path.exists() || !s.contains('?') || prefixed {
+        return Ok((path.to_path_buf(), None, csv));
+    }
+    let (p, query) = s.rsplit_once('?').unwrap();
+    let mut explicit = None;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("encoding", label)) => {
+                quarb::source::encoding_for_label(label)
+                    .ok_or_else(|| anyhow::anyhow!("{s}: unknown encoding label {label:?}"))?;
+                explicit = Some(label.to_string());
+            }
+            Some(("delimiter", label)) => {
+                csv = csv
+                    .with_delimiter_label(label)
+                    .map_err(|e| anyhow::anyhow!("{s}: {e}"))?;
+            }
+            Some(("decimal", label)) => {
+                csv = csv
+                    .with_decimal_label(label)
+                    .map_err(|e| anyhow::anyhow!("{s}: {e}"))?;
+            }
+            _ => bail!(
+                "unknown option {pair:?} on {p} — a file or folder takes encoding=, \
+                 delimiter=, decimal="
+            ),
+        }
+    }
+    Ok((std::path::PathBuf::from(p), explicit, csv))
+}
+
 /// A materialized source: one variant per adapter family. JSON-model
 /// formats (json/yaml/toml) render node results as pointers, the rest
 /// as locators.
@@ -77,128 +196,12 @@ pub enum Doc {
     Boxed(Dyn, Box<dyn Fn(NodeId) -> String>),
 }
 
-/// A boxed adapter as an adapter — plain delegation (the
-/// quarb-py `Dyn` pattern).
+/// A boxed adapter as an adapter — plain delegation, every method
+/// forwarded.
 pub struct Dyn(pub Box<dyn quarb::AstAdapter>);
 
 impl quarb::AstAdapter for Dyn {
-    fn root(&self) -> NodeId {
-        self.0.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.0.children(node)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.0.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.0.parent(node)
-    }
-    fn traits(&self, node: NodeId) -> Vec<String> {
-        self.0.traits(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<quarb::Value> {
-        self.0.property(node, name)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.0.children_named(node, name)
-    }
-    fn child_host(&self, node: NodeId) -> NodeId {
-        self.0.child_host(node)
-    }
-    fn non_tree_nodes(&self) -> Vec<NodeId> {
-        self.0.non_tree_nodes()
-    }
-    fn properties(&self, node: NodeId) -> Vec<(String, quarb::Value)> {
-        self.0.properties(node)
-    }
-    fn default_value(&self, node: NodeId) -> Option<quarb::Value> {
-        self.0.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<quarb::Value> {
-        self.0.metadata(node, key)
-    }
-    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
-        self.0.aliased_metadata(node)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.backlinks(node)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.0.resolve(node, property, hint)
-    }
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
-        self.0.external_ref(node, property, hint)
-    }
-    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
-        self.0.resolve_fragment(node, fragment)
-    }
-    fn ref_property(&self, node: NodeId) -> Option<String> {
-        self.0.ref_property(node)
-    }
-    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
-        self.0.ref_label(node, property)
-    }
-    fn link_property(
-        &self,
-        source: NodeId,
-        label: &str,
-        target: NodeId,
-        name: &str,
-    ) -> Option<quarb::Value> {
-        self.0.link_property(source, label, target, name)
-    }
-    fn quantifier_bound(&self) -> usize {
-        self.0.quantifier_bound()
-    }
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.0.invocation_instant()
-    }
-    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        self.0.unit_scale(expr)
-    }
-    // The rest of the surface, forwarded too: an adapter behind
-    // this door keeps its own answers to names and traits (a web
-    // level's rows answer to their kind), its index hooks, its
-    // provenance, and its shell gate.
-    fn answers_to(&self, node: NodeId, name: &str) -> bool {
-        self.0.answers_to(node, name)
-    }
-    fn has_trait(&self, node: NodeId, name: &str) -> bool {
-        self.0.has_trait(node, name)
-    }
-    fn has_node(&self, node: NodeId) -> bool {
-        self.0.has_node(node)
-    }
-    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
-        self.0.document_by_ref(id)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.0.reverse_resolve(node, property, hint)
-    }
-    fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
-        self.0.descendants_named(node, name)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.0.prefetch_links(nodes, dir)
-    }
-    fn provenance(&self, node: NodeId) -> quarb::Provenance {
-        self.0.provenance(node)
-    }
-    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
-        self.0.provenance_list(node)
-    }
-    fn allow_shell(&self) -> bool {
-        self.0.allow_shell()
-    }
+    quarb::forward_ast_adapter!(0);
 }
 
 impl Doc {
@@ -251,10 +254,10 @@ impl Doc {
             "toml" => quarb_toml::parse(input)
                 .map(Doc::Json)
                 .context("parsing TOML"),
-            "csv" => quarb_csv::CsvAdapter::parse_with_delimiter(input, b',')
+            "csv" => quarb_csv::CsvAdapter::parse_declared(input, b',', Default::default())
                 .map(Doc::Csv)
                 .context("parsing CSV"),
-            "tsv" => quarb_csv::CsvAdapter::parse_with_delimiter(input, b'\t')
+            "tsv" => quarb_csv::CsvAdapter::parse_declared(input, b'\t', Default::default())
                 .map(Doc::Csv)
                 .context("parsing TSV"),
             "xml" => quarb_xml::XmlAdapter::parse(input)
@@ -271,7 +274,10 @@ impl Doc {
             "text-html" => Ok(Doc::Text(quarb_text_html::parse(input))),
             "text-markdown" | "text-md" => Ok(Doc::Text(quarb_text_markdown::parse(input))),
             "text" => Ok(Doc::Text(quarb_text::TextModel::parse_plain(input))),
-            // A treebank (ruling #63): as a document, and as a corpus
+            "text-rtf" => quarb_text_rtf::parse(input.as_bytes())
+                .map(Doc::Text)
+                .map_err(|e| anyhow::anyhow!("reading RTF: {e}")),
+            // A treebank: as a document, and as a corpus
             // with its own tokens.
             "conllu" => quarb_text::TextModel::parse_conllu_text(input)
                 .map(Doc::Text)
@@ -293,6 +299,12 @@ impl Doc {
             // bibliogramma: a document of bib entries.
             #[cfg(feature = "koine")]
             "text-bibtex" | "bibtex" => quarb_text_koine::parse_bibtex(input)
+                .map(Doc::Text)
+                .map_err(|e| anyhow::anyhow!("{e}")),
+            // FictionBook 2 at the text level, through the koine
+            // route (atrep's importer).
+            #[cfg(feature = "koine")]
+            "text-fb2" | "fb2" => quarb_text_koine::parse_xml_as(input, "fb2")
                 .map(Doc::Text)
                 .map_err(|e| anyhow::anyhow!("{e}")),
             // The code level: identifiers as names; the format
@@ -405,7 +417,7 @@ impl Doc {
         };
         let enriched = quarb_model::ModelAdapter::new(nowed, model.clone());
         enriched
-            .check_declared_traits()
+            .check()
             .map_err(|e| quarb::QuarbError::Parse(format!("reading the model: {e}")))?;
         if allow_shell {
             quarb::run(query, &AllowShell { inner: &enriched })
@@ -581,7 +593,10 @@ impl Doc {
                 adapter: doc.into_boxed()?,
             });
         }
-        Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
+        Ok(Doc::Mount(
+            quarb_mount::MountAdapter::try_new(mounts)
+                .map_err(|e| anyhow::anyhow!("mount: {e}"))?,
+        ))
     }
 
     /// Declare a source's own URL on its adapter — today the html
@@ -684,6 +699,33 @@ impl Doc {
     /// source files dispatch by extension/magic; everything else is a
     /// text document parsed by extension or content sniff.
     pub fn open(path: &Path, opts: &Options) -> Result<Doc> {
+        // `?references=STANDARD` applies to the text model once it
+        // is built, whichever door built it; the pair comes off
+        // the target before the door reads its own options.
+        let (stripped, references) = take_references_option(path)?;
+        let doc = Self::open_inner(stripped.as_path(), opts)?;
+        match (doc, references) {
+            (Doc::Text(mut model), Some(standard)) => {
+                model
+                    .lower_references(&standard)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+                Ok(Doc::Text(model))
+            }
+            (doc, Some(_)) => {
+                let _ = doc;
+                bail!(
+                    "{}: references= applies to a text-level reading (text:, koine:)",
+                    path.display()
+                )
+            }
+            (doc, None) => Ok(doc),
+        }
+    }
+
+    fn open_inner(path: &Path, opts: &Options) -> Result<Doc> {
+        let (path, explicit, csv) = take_source_options(path)?;
+        let path = path.as_path();
+        let explicit = explicit.as_deref();
         if path.is_dir() {
             let fsopts = quarb_fs::FsOptions {
                 hidden: opts.hidden,
@@ -692,10 +734,14 @@ impl Doc {
             let fs = quarb_fs::FsAdapter::with_options(path, fsopts)
                 .with_context(|| format!("opening directory {}", path.display()))?;
             return Ok(if opts.graft {
-                Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(
-                    fs,
-                    |fs, n| Some(fs.path(n)),
-                ))
+                Doc::FsDeep(
+                    quarb_compose::ComposeAdapter::with_source_paths(fs, |fs, n| Some(fs.path(n)))
+                        .with_decoding(
+                            quarb_compose::source_decoding(explicit)
+                                .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        )
+                        .with_csv_options(csv),
+                )
             } else {
                 Doc::Fs(fs)
             });
@@ -706,6 +752,65 @@ impl Doc {
             let a =
                 quarb_git::GitAdapter::open(Path::new(repo)).context("opening git repository")?;
             return Ok(Doc::Git(a));
+        }
+        // The lines reading (`lines:`): every line a node, as on
+        // the command line.
+        if let Some(rest) = s.strip_prefix("lines:")
+            && !rest.is_empty()
+        {
+            let (target, opt) = take_encoding_option(Path::new(rest))?;
+            let text = read_source(&target, opt.as_deref().or(explicit))?;
+            let a = std::rc::Rc::new(quarb_lines::LinesAdapter::parse(&text));
+            let r = a.clone();
+            return Ok(Doc::Boxed(
+                Dyn(Box::new(quarb_mount::Shared(a))),
+                Box::new(move |n| r.locator(n)),
+            ));
+        }
+        // The web level (`web:`): a directory of pages or an
+        // archive of them as one site, in memory. An index-backed
+        // store (site.db, postgres://) is the command line's own
+        // run loop and is refused here naming it.
+        if let Some(rest) = s.strip_prefix("web:")
+            && !rest.is_empty()
+        {
+            let (path_part, base) = match rest.split_once('?') {
+                Some((p, q)) => {
+                    let mut base = String::new();
+                    for pair in q.split('&') {
+                        match pair.split_once('=') {
+                            Some(("base", v)) => base = v.to_string(),
+                            _ => {
+                                return Err(anyhow::anyhow!(
+                                    "unknown web option {pair:?} — supported: base="
+                                ));
+                            }
+                        }
+                    }
+                    (p, base)
+                }
+                None => (rest, String::new()),
+            };
+            let decoding =
+                quarb_compose::source_decoding(explicit).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let target = Path::new(path_part);
+            let site = if target.is_dir() {
+                quarb_web::fs::open_dir_with_decoding(target, &base, decoding)
+                    .with_context(|| format!("reading {} as a site", target.display()))?
+            } else if target.is_file() && !path_part.starts_with("postgres") {
+                quarb_web::archive::open_path_with_decoding(target, &base, decoding)
+                    .with_context(|| format!("reading {} as a site", target.display()))?
+            } else {
+                return Err(anyhow::anyhow!(
+                    "web: in a session takes a directory of pages or an archive of them; a site store ({path_part}) is read on the command line (qua … web:{path_part})"
+                ));
+            };
+            let a = std::rc::Rc::new(site);
+            let r = a.clone();
+            return Ok(Doc::Boxed(
+                Dyn(Box::new(quarb_mount::Shared(a))),
+                Box::new(move |n| r.locator(n)),
+            ));
         }
         // A `koine:` prefix takes the koine route to the same
         // reader's model: the native atrep formats today, foreign
@@ -738,8 +843,7 @@ impl Doc {
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase());
             let read = || -> Result<String> {
-                let text = std::fs::read_to_string(target)
-                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = read_source(target, explicit)?;
                 Ok(text
                     .strip_prefix('\u{feff}')
                     .map(str::to_owned)
@@ -758,17 +862,25 @@ impl Doc {
                     "rst" => quarb_text_koine::parse_rst(&read()?),
                     "org" => quarb_text_koine::parse_org(&read()?),
                     "dj" | "djot" => quarb_text_koine::parse_djot(&read()?),
-                    "tei" | "docbook" | "jats" | "usx" | "osis" | "rnc" | "opencorpora"
+                    "tei" | "docbook" | "jats" | "usx" | "osis" | "fb2" | "rnc" | "opencorpora"
                     | "proiel" => quarb_text_koine::parse_xml_as(&read()?, &fmt),
+                    "docx" => quarb_text_koine::parse_docx(&std::fs::read(target)?),
+                    "dsl" => quarb_text_koine::parse_dsl_file(target),
                     other => {
                         return Err(anyhow::anyhow!(
-                            "unknown koine format {other:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, atd"
+                            "unknown koine format {other:?} — known: md, html, rst, org, djot, tei, docbook, jats, usx, osis, fb2, docx, dsl, atd"
                         ));
                     }
                 };
                 return imported.map(Doc::Text).with_context(|| {
                     format!("importing {} through atrep as {fmt}", target.display())
                 });
+            }
+            if quarb_text_koine::is_dsl_path(target) {
+                let model = quarb_text_koine::parse_dsl_file(target).with_context(|| {
+                    format!("importing {} as a Lingvo DSL dictionary", target.display())
+                })?;
+                return Ok(Doc::Text(model));
             }
             let imported = match ext.as_deref() {
                 Some("atd" | "atk") => {
@@ -777,7 +889,9 @@ impl Doc {
                     })?;
                     return Ok(Doc::Text(model));
                 }
+                Some("docx") => quarb_text_koine::parse_docx(&std::fs::read(target)?),
                 Some("usfm" | "sfm") => quarb_text_koine::parse_xml_as(&read()?, "usfm"),
+                Some("fb2") => quarb_text_koine::parse_xml_as(&read()?, "fb2"),
                 Some("bib") => quarb_text_koine::parse_bibtex(&read()?),
                 Some("md" | "markdown") => quarb_text_koine::parse_markdown(&read()?),
                 Some("html" | "htm") => quarb_text_koine::parse_html(&read()?),
@@ -820,45 +934,64 @@ impl Doc {
         if let Some(rest) = s.strip_prefix("lit:")
             && !rest.is_empty()
         {
-            let (rest, conllu, annotate, desm, format, cast, places, modernize) = match rest
-                .split_once('?')
-            {
-                Some((p, q)) => {
-                    let (
-                        mut conllu,
-                        mut annotate,
-                        mut desm,
-                        mut format,
-                        mut cast,
-                        mut places,
-                        mut modernize,
-                    ) = (None, None, Vec::new(), None, None, None, None);
-                    for pair in q.split('&') {
-                        match pair.split_once('=') {
-                            Some(("conllu", v)) => conllu = Some(v.to_string()),
-                            Some(("annotate", v)) => annotate = Some(v.to_string()),
-                            Some(("desm", v)) => desm.push(v.to_string()),
-                            Some(("cast", v)) => cast = Some(v.to_string()),
-                            Some(("places", v)) => places = Some(v.to_string()),
-                            Some(("modernize", v)) => modernize = Some(v.to_string()),
-                            Some(("format", v)) => format = Some(v.to_string()),
-                            _ => bail!(
-                                "unknown lit option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, format="
-                            ),
+            let (rest, conllu, annotate, desm, format, cast, places, scheme, modernize, notes) =
+                match rest.split_once('?') {
+                    Some((p, q)) => {
+                        let (
+                            mut conllu,
+                            mut annotate,
+                            mut desm,
+                            mut format,
+                            mut cast,
+                            mut places,
+                            mut scheme,
+                            mut modernize,
+                            mut notes,
+                        ) = (None, None, Vec::new(), None, None, None, None, None, None);
+                        for pair in q.split('&') {
+                            match pair.split_once('=') {
+                                Some(("conllu", v)) => conllu = Some(v.to_string()),
+                                Some(("annotate", v)) => annotate = Some(v.to_string()),
+                                Some(("desm", v)) => desm.push(v.to_string()),
+                                Some(("cast", v)) => cast = Some(v.to_string()),
+                                Some(("places", v)) => places = Some(v.to_string()),
+                                Some(("scheme", v)) => scheme = Some(v.to_string()),
+                                Some(("modernize", v)) => modernize = Some(v.to_string()),
+                                Some(("notes", v)) => notes = Some(v.to_string()),
+                                Some(("format", v)) => format = Some(v.to_string()),
+                                // `encoding=` is read off the whole target
+                                // before the door (`explicit`).
+                                Some(("encoding", _)) => {}
+                                _ => bail!(
+                                    "unknown lit option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, format=, scheme=, modernize=, notes=, encoding="
+                                ),
+                            }
                         }
+                        (
+                            p, conllu, annotate, desm, format, cast, places, scheme, modernize,
+                            notes,
+                        )
                     }
-                    (p, conllu, annotate, desm, format, cast, places, modernize)
-                }
-                None => (rest, None, None, Vec::new(), None, None, None, None),
-            };
+                    None => (
+                        rest,
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                };
             let target = Path::new(rest);
             let ext = target
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase());
             let read = || -> Result<String> {
-                let text = std::fs::read_to_string(target)
-                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = read_source(target, explicit)?;
                 Ok(text
                     .strip_prefix('\u{feff}')
                     .map(str::to_owned)
@@ -869,33 +1002,37 @@ impl Doc {
                 None => match ext.as_deref() {
                     Some("atd" | "atk") => "atd".to_string(),
                     Some("usx") => "usx".to_string(),
+                    Some("usfm" | "sfm") => "usfm".to_string(),
+                    Some("fb2") => "fb2".to_string(),
                     _ => match quarb_text_koine::detect_xml_kind(&read()?) {
                         Some(k) => k.to_string(),
                         None => bail!(
-                            "lit: reads TEI, USX, OSIS, RNC, OpenCorpora, PROIEL and litogramma — {rest} declares none of them (koine:{rest} reads the other XML vocabularies, corpus:{rest} plain prose)"
+                            "lit: reads TEI, USX, OSIS, USFM, FictionBook, RNC, OpenCorpora, PROIEL and litogramma — {rest} declares none of them (koine:{rest} reads the other XML vocabularies, corpus:{rest} plain prose)"
                         ),
                     },
                 },
             };
             let mut model = match kind.as_str() {
-                "atd" | "atk" => quarb_text_koine::parse_lit_file(target).with_context(|| {
+                "atd" | "atk" => quarb_text_koine::parse_lit_file_with(target, scheme.as_deref())
+                    .with_context(|| {
                     format!("reading {} as an atrep document", target.display())
                 })?,
-                "tei" | "usx" | "osis" | "rnc" | "opencorpora" | "proiel" => {
-                    quarb_text_koine::parse_lit_xml_as(&read()?, &kind).with_context(|| {
-                        format!("reading {} as {}", target.display(), kind.to_uppercase())
-                    })?
+                "tei" | "usx" | "osis" | "fb2" | "usfm" | "rnc" | "opencorpora" | "proiel" => {
+                    quarb_text_koine::parse_lit_xml_as_with(&read()?, &kind, scheme.as_deref())
+                        .with_context(|| {
+                            format!("reading {} as {}", target.display(), kind.to_uppercase())
+                        })?
                 }
                 other => bail!(
-                    "lit: reads TEI, USX, OSIS, RNC, OpenCorpora, PROIEL and litogramma — not {other} (koine:{rest} reads the other XML vocabularies)"
+                    "lit: reads TEI, USX, OSIS, USFM, FictionBook, RNC, OpenCorpora, PROIEL and litogramma — not {other} (koine:{rest} reads the other XML vocabularies)"
                 ),
             };
             model.set_document_path(rest);
             return finish_corpus(
-                model, conllu, annotate, &desm, cast, places, modernize, opts, "lit",
+                model, conllu, annotate, &desm, cast, places, modernize, notes, opts, "lit",
             );
         }
-        // The corpus reading (ruling #62): the text-level reading
+        // The corpus reading: the text-level reading
         // with every prose block's tokens as children, the
         // tokenizer decided once, at mount — where the resident
         // session keeps it. An XML source takes the koine route
@@ -905,7 +1042,7 @@ impl Doc {
             && !rest.is_empty()
         {
             // `?conllu=FILE` / `?annotate=CMD`, as in qua.
-            let (rest, conllu, annotate, desm, format, cast, places, modernize) = match rest
+            let (rest, conllu, annotate, desm, format, cast, places, modernize, notes) = match rest
                 .split_once('?')
             {
                 Some((p, q)) => {
@@ -917,7 +1054,8 @@ impl Doc {
                         mut cast,
                         mut places,
                         mut modernize,
-                    ) = (None, None, Vec::new(), None, None, None, None);
+                        mut notes,
+                    ) = (None, None, Vec::new(), None, None, None, None, None);
                     for pair in q.split('&') {
                         match pair.split_once('=') {
                             Some(("conllu", v)) => conllu = Some(v.to_string()),
@@ -926,18 +1064,21 @@ impl Doc {
                             Some(("cast", v)) => cast = Some(v.to_string()),
                             Some(("places", v)) => places = Some(v.to_string()),
                             Some(("modernize", v)) => modernize = Some(v.to_string()),
+                            Some(("notes", v)) => notes = Some(v.to_string()),
                             Some(("format", "conllu")) => format = Some("conllu"),
                             Some(("format", v)) => bail!(
                                 "corpus: format={v} is not a treebank format — format= takes conllu"
                             ),
                             _ => bail!(
-                                "unknown corpus option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, format="
+                                "unknown corpus option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, notes=, format="
                             ),
                         }
                     }
-                    (p, conllu, annotate, desm, format, cast, places, modernize)
+                    (
+                        p, conllu, annotate, desm, format, cast, places, modernize, notes,
+                    )
                 }
-                None => (rest, None, None, Vec::new(), None, None, None, None),
+                None => (rest, None, None, Vec::new(), None, None, None, None, None),
             };
             let target = Path::new(rest);
             let ext = target
@@ -949,7 +1090,7 @@ impl Doc {
                     "corpus: needs a prose reading, and a PDF's is line geometry — text:{rest} reads its lines"
                 );
             }
-            // A treebank is its own annotation (ruling #63): by
+            // A treebank is its own annotation: by
             // extension, by `?format=conllu`, or sniffed on an
             // extensionless file; a directory of treebank files is
             // one corpus, a section per file.
@@ -978,12 +1119,11 @@ impl Doc {
             let treebank = matches!(ext.as_deref(), Some("conllu" | "conllup"))
                 || format == Some("conllu")
                 || (ext.is_none()
-                    && std::fs::read_to_string(target)
+                    && read_source(target, explicit)
                         .is_ok_and(|t| quarb_text::looks_like_conllu(&t)));
             if treebank {
                 own_annotation()?;
-                let text = std::fs::read_to_string(target)
-                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = read_source(target, explicit)?;
                 let text = text
                     .strip_prefix('\u{feff}')
                     .map(str::to_owned)
@@ -1003,7 +1143,7 @@ impl Doc {
                 bail!("corpus: needs a prose reading of {rest}")
             };
             return finish_corpus(
-                model, conllu, annotate, &desm, cast, places, modernize, opts, "corpus",
+                model, conllu, annotate, &desm, cast, places, modernize, notes, opts, "corpus",
             );
         }
         // `json2:FILE` — the property reading of a JSON-model
@@ -1013,8 +1153,7 @@ impl Doc {
         {
             use quarb_json::Reading;
             let target = Path::new(rest);
-            let text = std::fs::read_to_string(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let text = read_source(target, explicit)?;
             let ext = target
                 .extension()
                 .and_then(|e| e.to_str())
@@ -1064,8 +1203,7 @@ impl Doc {
                 .map(|e| e.to_ascii_lowercase());
             // Native atrep files converge on the koine route.
             if let Some("usfm" | "sfm") = ext.as_deref() {
-                let text = std::fs::read_to_string(target)
-                    .with_context(|| format!("reading {}", target.display()))?;
+                let text = read_source(target, explicit)?;
                 let text = text
                     .strip_prefix('\u{feff}')
                     .map(str::to_owned)
@@ -1092,22 +1230,54 @@ impl Doc {
                     Box::new(move |n| r.locator(n)),
                 ));
             }
-            if let Some(ext @ ("docx" | "epub")) = ext.as_deref() {
+            if matches!(ext.as_deref(), Some("djvu" | "djv")) {
+                let model = quarb_text_djvu::parse_file(target)
+                    .with_context(|| format!("reading {} as DjVu", target.display()))?;
+                let a = std::rc::Rc::new(model);
+                let r = a.clone();
+                return Ok(Doc::Boxed(
+                    Dyn(Box::new(quarb_mount::Shared(a))),
+                    Box::new(move |n| r.locator(n)),
+                ));
+            }
+            // A `.doc` is Word 97 only by its OLE2 magic; a plain
+            // text file so named reads as plain text below.
+            // A Lingvo DSL dictionary reads through the koine route
+            // under text: and corpus: alike.
+            if quarb_text_koine::is_dsl_path(target) {
+                let model = quarb_text_koine::parse_dsl_file(target).with_context(|| {
+                    format!("reading {} as a Lingvo DSL dictionary", target.display())
+                })?;
+                return Ok(Doc::Text(model));
+            }
+            let word97 = ext.as_deref() == Some("doc")
+                && std::fs::read(target).is_ok_and(|b| quarb_text_doc::is_ole2(&b));
+            if let Some(ext @ ("docx" | "epub" | "odt" | "fodt" | "sxw" | "doc")) =
+                ext.as_deref().filter(|e| *e != "doc" || word97)
+            {
                 let bytes = std::fs::read(target)
                     .with_context(|| format!("reading {}", target.display()))?;
-                let model = if ext == "docx" {
-                    let mut m = quarb_text_docx::parse(&bytes)
-                        .with_context(|| format!("reading {} as Word", target.display()))?;
-                    quarb_text_koine::attach_bib_aliases(&mut m);
-                    m
-                } else {
-                    quarb_text_epub::parse(&bytes)
-                        .with_context(|| format!("reading {} as EPUB", target.display()))?
+                let decoding =
+                    quarb_compose::source_decoding(explicit).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let model = match ext {
+                    "doc" => quarb_text_doc::parse(&bytes)
+                        .with_context(|| format!("reading {} as Word 97", target.display()))?,
+                    "docx" => {
+                        let mut m = quarb_text_docx::parse_with_decoding(&bytes, &decoding)
+                            .with_context(|| format!("reading {} as Word", target.display()))?;
+                        quarb_text_koine::attach_bib_aliases(&mut m);
+                        m
+                    }
+                    "odt" | "fodt" | "sxw" => quarb_text_odt::parse_with_decoding(
+                        &bytes, &decoding,
+                    )
+                    .with_context(|| format!("reading {} as OpenDocument", target.display()))?,
+                    _ => quarb_text_epub::parse_with_decoding(&bytes, &decoding)
+                        .with_context(|| format!("reading {} as EPUB", target.display()))?,
                 };
                 return Ok(Doc::Text(model));
             }
-            let text = std::fs::read_to_string(target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            let text = read_source(target, explicit)?;
             let text = text
                 .strip_prefix('\u{feff}')
                 .map(str::to_owned)
@@ -1122,9 +1292,19 @@ impl Doc {
                 Some("md" | "markdown") => "text-markdown",
                 Some("tex" | "latex") => "tex",
                 Some("txt") => "text",
+                Some("rtf") => "text-rtf",
                 Some("conllu" | "conllup") => "conllu",
                 #[cfg(feature = "koine")]
                 Some("bib") => "text-bibtex",
+                // FictionBook by its extension or its namespace.
+                #[cfg(feature = "koine")]
+                Some("fb2") => "text-fb2",
+                #[cfg(feature = "koine")]
+                _ if text.trim_start().starts_with('<')
+                    && quarb_text_koine::detect_xml_kind(&text) == Some("fb2") =>
+                {
+                    "text-fb2"
+                }
                 _ if text.trim_start().starts_with('<') => "text-html",
                 None if quarb_text::looks_like_conllu(&text) => "conllu",
                 _ => "text",
@@ -1204,15 +1384,40 @@ impl Doc {
         }
 
         // Text documents.
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = read_source(path, explicit)?;
         let text = text
             .strip_prefix('\u{feff}')
             .map(str::to_owned)
             .unwrap_or(text);
         match ext.as_deref() {
-            Some("csv") => Doc::parse(&text, "csv"),
-            Some("tsv") => Doc::parse(&text, "tsv"),
+            // The kaiv family by extension, resolving imports beside
+            // the file (the command line's door).
+            Some("kaiv") => quarb_kaiv::KaivAdapter::parse_kaiv_at(&text, path.parent())
+                .map(Doc::boxed_kaiv)
+                .map_err(|e| anyhow::anyhow!("parsing kaiv: {e}")),
+            Some("daiv") => quarb_kaiv::KaivAdapter::parse_daiv_at(&text, path.parent())
+                .map(Doc::boxed_kaiv)
+                .map_err(|e| anyhow::anyhow!("parsing daiv: {e}")),
+            Some("raiv") => quarb_kaiv::KaivAdapter::parse_raiv_at(&text, path.parent())
+                .map(Doc::boxed_kaiv)
+                .map_err(|e| anyhow::anyhow!("parsing raiv: {e}")),
+            // A Quarb query file reflects as a query arbor.
+            Some("quarb") => {
+                let a = std::rc::Rc::new(
+                    quarb::reflect::QueryArbor::parse(&text).context("parsing Quarb query")?,
+                );
+                let r = a.clone();
+                Ok(Doc::Boxed(
+                    Dyn(Box::new(quarb_mount::Shared(a))),
+                    Box::new(move |n| r.locator(n)),
+                ))
+            }
+            Some("csv") => quarb_csv::CsvAdapter::parse_declared(&text, b',', csv)
+                .map(Doc::Csv)
+                .context("parsing CSV"),
+            Some("tsv") => quarb_csv::CsvAdapter::parse_declared(&text, b'\t', csv)
+                .map(Doc::Csv)
+                .context("parsing TSV"),
             Some("yaml" | "yml") => Doc::parse(&text, "yaml"),
             Some("toml") => Doc::parse(&text, "toml"),
             Some("md" | "markdown") => Doc::parse(&text, "markdown"),
@@ -1270,7 +1475,10 @@ impl Doc {
                 adapter,
             });
         }
-        Ok(Doc::Mount(quarb_mount::MountAdapter::new(mounts)))
+        Ok(Doc::Mount(
+            quarb_mount::MountAdapter::try_new(mounts)
+                .map_err(|e| anyhow::anyhow!("mount: {e}"))?,
+        ))
     }
 }
 
@@ -1315,7 +1523,23 @@ fn is_archive(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "zip" | "tar" | "gz" | "tgz" | "jar" | "war" | "docx" | "pptx" | "odt" | "odp"
+            "zip"
+                | "tar"
+                | "gz"
+                | "tgz"
+                | "jar"
+                | "war"
+                | "docx"
+                | "pptx"
+                | "odt"
+                | "odp"
+                | "7z"
+                | "xz"
+                | "txz"
+                | "bz2"
+                | "tbz2"
+                | "zst"
+                | "tzst"
         )
     }) {
         return true;
@@ -1385,9 +1609,17 @@ fn finish_corpus(
     cast: Option<String>,
     places: Option<String>,
     modernize: Option<String>,
+    notes: Option<String>,
     opts: &Options,
     level: &str,
 ) -> Result<Doc> {
+    match notes.as_deref() {
+        None => {}
+        Some("omit") => model.omit_notes(true),
+        Some(v) => {
+            bail!("{level}: notes={v} — notes= takes omit (a note is part of the text by default)")
+        }
+    }
     if let Some(table) = &modernize {
         model
             .set_orthography(table)
@@ -1396,7 +1628,8 @@ fn finish_corpus(
     let conllu_text = match (conllu, annotate) {
         (Some(_), Some(_)) => bail!("{level}: takes conllu= or annotate=, not both"),
         (Some(file), None) => Some(
-            std::fs::read_to_string(&file).with_context(|| format!("reading {file} as CoNLL-U"))?,
+            read_source(Path::new(&file), None)
+                .with_context(|| format!("reading {file} as CoNLL-U"))?,
         ),
         (None, Some(cmd)) => {
             if !opts.allow_shell {

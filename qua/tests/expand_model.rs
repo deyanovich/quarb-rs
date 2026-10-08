@@ -13,6 +13,7 @@ fn expand_sees_the_models_definitions() {
     )
     .unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
         .args([
             "--model",
             dir.join("desk.model").to_str().unwrap(),

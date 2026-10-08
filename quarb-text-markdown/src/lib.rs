@@ -17,8 +17,9 @@
 //!   (the syntactic header row as headers), denormalized to
 //!   nested lists by `quarb-text`.
 //! - Inline markup flattens to its text; image alt text and raw
-//!   inline HTML are dropped; footnote definitions flow as
-//!   ordinary content, their reference markers are dropped.
+//!   inline HTML are dropped; a footnote definition is a note
+//!   body of the footnote family, its `[^name]` reference the
+//!   callout that resolves to it.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use quarb_text::{Block, Container, NoteFamily, TextModel};
@@ -360,7 +361,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
             Event::SoftBreak | Event::HardBreak => sink(&mut cap, &mut run, " "),
             Event::Rule => flush(&mut run, &mut out),
             // The callout: a footnote-family reference, no marker
-            // text in the prose (ruling #35).
+            // text in the prose.
             Event::FootnoteReference(name) => callouts.push(name.to_string()),
             // Raw HTML, task-list checkboxes, math: not prose.
             Event::Html(_)

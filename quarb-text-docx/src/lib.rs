@@ -25,7 +25,7 @@
 //!   otherwise none — no first-row guessing.
 //! - Tracked changes read as the accepted view: `w:ins` content
 //!   is text, `w:del` subtrees are skipped entirely.
-//! - Footnotes are first class (ruling #35, the litogramma F5
+//! - Footnotes are first class (the note model, the litogramma F5
 //!   model): a `w:footnoteReference` becomes a `footnote`
 //!   callout under its paragraph (`<deixis>`, `->footnote` to
 //!   the body; the paragraph's text stays clean of markers),
@@ -33,7 +33,7 @@
 //!   at the document end; the separator pseudo-notes skipped).
 //!   `w:endnoteReference` / `word/endnotes.xml` read identically
 //!   into the endnote family.
-//! - Index marks (ruling #36): the `XE "term"` field instruction
+//! - Index marks: the `XE "term"` field instruction
 //!   — Word's declared index mark — becomes an `index-mark` in
 //!   its flow position, whether spelled as a `w:fldSimple` or a
 //!   `w:instrText` run sequence. XE is the one instruction read
@@ -53,6 +53,10 @@
 //!   that list and is dropped from the prose. Reference
 //!   managers' own fields (Zotero, Mendeley, EndNote) are a
 //!   recorded follow-up.
+//! - `docProps/core.xml` declares the identity (`dc:title`,
+//!   `dc:creator`, `dc:description`, `dc:subject`, `cp:keywords`,
+//!   `cp:category`, the dates) under the HTML head's keys, as the
+//!   OpenDocument reader reads `meta.xml`.
 //! - Out of band in this version, recorded in the design row:
 //!   headers/footers, textboxes.
 //!
@@ -63,12 +67,16 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use quarb_text::{Block, Cell, Container, NoteFamily, TextModel};
+use quarb::source::SourceDecoding;
+
+use quarb_text::{Block, Cell, Container, HeadMeta, NoteFamily, TextModel};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocxError {
+    #[error("member {name}: {error}")]
+    MemberText { name: String, error: String },
     #[error("not a docx (zip) container: {0}")]
     Zip(#[from] zip::result::ZipError),
     #[error("reading {0}: {1}")]
@@ -79,46 +87,173 @@ pub enum DocxError {
     Xml(&'static str, quick_xml::Error),
 }
 
-/// Parse `.docx` bytes into the text-level model.
+/// Parse `.docx` bytes into the text-level model, with what
+/// `docProps/core.xml` declares as the head.
 pub fn parse(bytes: &[u8]) -> Result<TextModel, DocxError> {
-    Ok(TextModel::build(blocks(bytes)?))
+    parse_with_decoding(bytes, &SourceDecoding::default())
+}
+
+/// [`parse`] under a mount's source-boundary rule: every XML
+/// member decodes by `?encoding=`, its byte-order mark, its XML
+/// declaration, else strict UTF-8.
+pub fn parse_with_decoding(
+    bytes: &[u8],
+    decoding: &SourceDecoding,
+) -> Result<TextModel, DocxError> {
+    let mut model = TextModel::build(blocks_with_decoding(bytes, decoding)?);
+    model.set_head_meta(head_with_decoding(bytes, decoding)?);
+    Ok(model)
+}
+
+/// What the document declares about itself: `docProps/core.xml`'s
+/// `dc:title`, `dc:creator`, `dc:description`, `dc:subject`,
+/// `cp:keywords`, `cp:category`, `dc:language`, `dcterms:created`
+/// and `dcterms:modified`, under the HTML head's keys.
+pub fn head(bytes: &[u8]) -> Result<HeadMeta, DocxError> {
+    head_with_decoding(bytes, &SourceDecoding::default())
+}
+
+/// [`head`] under a mount's source-boundary rule.
+pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<HeadMeta, DocxError> {
+    let mut h = HeadMeta::default();
+    let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
+    let Some(xml) = zip.get("docProps/core.xml")? else {
+        return Ok(h);
+    };
+    let mut reader = Reader::from_str(&xml);
+    let mut buf = Vec::new();
+    let mut open: Option<String> = None;
+    let mut text = String::new();
+    while let Ok(ev) = reader.read_event_into(&mut buf) {
+        match &ev {
+            Event::Start(e) => {
+                let name = e.name();
+                let name = String::from_utf8_lossy(name.as_ref()).to_string();
+                if matches!(
+                    name.as_str(),
+                    "dc:title"
+                        | "dc:creator"
+                        | "dc:description"
+                        | "dc:subject"
+                        | "cp:keywords"
+                        | "cp:category"
+                        | "dc:language"
+                        | "dcterms:created"
+                        | "dcterms:modified"
+                ) {
+                    open = Some(name);
+                    text.clear();
+                }
+            }
+            Event::Text(t) if open.is_some() => {
+                if let Ok(s) = t.decode() {
+                    text.push_str(&s);
+                }
+            }
+            Event::GeneralRef(r) if open.is_some() => {
+                if let Some(c) = general_ref(r) {
+                    text.push_str(&c);
+                }
+            }
+            Event::End(_) => {
+                if let Some(name) = open.take() {
+                    let value = quarb_text::normalize_ws(&text);
+                    if value.is_empty() {
+                        continue;
+                    }
+                    match name.as_str() {
+                        "dc:title" => {
+                            h.declare("title", &value);
+                            h.title = Some(value);
+                        }
+                        "dc:creator" => {
+                            h.declare("author", &value);
+                            h.author = Some(value);
+                        }
+                        "dc:description" => {
+                            h.declare("description", &value);
+                            h.description = Some(value);
+                        }
+                        "dc:subject" => {
+                            h.declare("subject", &value);
+                            if h.category.is_none() {
+                                h.category = Some(value);
+                            }
+                        }
+                        "cp:category" => {
+                            h.declare("category", &value);
+                            h.category = Some(value);
+                        }
+                        "cp:keywords" => {
+                            h.declare("keywords", &value);
+                            for t in value.split([',', ';']) {
+                                h.tag(t);
+                            }
+                        }
+                        "dc:language" => h.declare("lang", &value),
+                        "dcterms:created" => h.declare("created", &value),
+                        "dcterms:modified" => h.declare("modified", &value),
+                        _ => {}
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(h)
 }
 
 /// Lower `.docx` bytes into the block event stream (the
 /// [`TextModel::build`] input) — exposed for tests and tooling.
 pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, DocxError> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let styles = member(&mut zip, "word/styles.xml")
+    blocks_with_decoding(bytes, &SourceDecoding::default())
+}
+
+/// [`blocks`] under a mount's source-boundary rule.
+pub fn blocks_with_decoding(
+    bytes: &[u8],
+    decoding: &SourceDecoding,
+) -> Result<Vec<Block>, DocxError> {
+    let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
+    let styles = zip
+        .get("word/styles.xml")?
         .map(|xml| parse_styles(&xml))
         .unwrap_or_default();
-    let numbering = member(&mut zip, "word/numbering.xml")
+    let numbering = zip
+        .get("word/numbering.xml")?
         .map(|xml| parse_numbering(&xml))
         .unwrap_or_default();
-    let footnotes = member(&mut zip, "word/footnotes.xml");
-    let endnotes = member(&mut zip, "word/endnotes.xml");
-    let rels = member(&mut zip, "word/_rels/document.xml.rels")
+    let footnotes = zip.get("word/footnotes.xml")?;
+    let endnotes = zip.get("word/endnotes.xml")?;
+    let rels = zip
+        .get("word/_rels/document.xml.rels")?
         .map(|xml| parse_rels(&xml))
         .unwrap_or_default();
-    let Some(document) = member(&mut zip, "word/document.xml") else {
+    let Some(document) = zip.get("word/document.xml")? else {
         return Err(DocxError::NoDocument);
     };
     // Word's sources list is a custom XML part with the
     // bibliography namespace's `b:Sources` root; the part's
     // number is not fixed, so every customXml item is tried.
     let sources: Vec<Block> = {
-        let names: Vec<String> = zip
+        let mut names: Vec<String> = zip
+            .zip
             .file_names()
             .filter(|n| n.starts_with("customXml/item") && n.ends_with(".xml"))
             .map(str::to_string)
             .collect();
-        let mut names = names;
         names.sort();
-        names
-            .iter()
-            .filter_map(|n| member(&mut zip, n))
-            .filter(|xml| xml.contains(BIB_NS))
-            .flat_map(|xml| parse_sources(&xml))
-            .collect()
+        let mut blocks = Vec::new();
+        for n in &names {
+            if let Some(xml) = zip.get(n)?
+                && xml.contains(BIB_NS)
+            {
+                blocks.extend(parse_sources(&xml));
+            }
+        }
+        blocks
     };
     let mut out = lower(&document, &styles, &numbering, &rels)?;
     out.extend(sources);
@@ -200,11 +335,45 @@ fn append_notes(
     Ok(())
 }
 
-fn member(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut f = zip.by_name(name).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+/// The package's members, read under the mount's rule: a member
+/// decodes by `?encoding=`, its byte-order mark, its XML
+/// declaration, else strict UTF-8. A member that decodes under
+/// none is an error naming it, never a part silently missing.
+struct Members<'a> {
+    zip: zip::ZipArchive<std::io::Cursor<&'a [u8]>>,
+    explicit: Option<String>,
+}
+
+impl<'a> Members<'a> {
+    fn new(zip: zip::ZipArchive<std::io::Cursor<&'a [u8]>>, decoding: &SourceDecoding) -> Self {
+        Members {
+            zip,
+            explicit: decoding.explicit.clone(),
+        }
+    }
+
+    /// `None` when the package has no such member.
+    fn get(&mut self, name: &str) -> Result<Option<String>, DocxError> {
+        let Ok(mut f) = self.zip.by_name(name) else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes)
+            .map_err(|e| DocxError::MemberText {
+                name: name.to_string(),
+                error: e.to_string(),
+            })?;
+        let d = quarb::source::decode(
+            &bytes,
+            self.explicit.as_deref(),
+            quarb::source::xml_declared_encoding,
+        )
+        .map_err(|e| DocxError::MemberText {
+            name: name.to_string(),
+            error: e.to_string(),
+        })?;
+        Ok(Some(d.text))
+    }
 }
 
 // ---------------------------------------------------------------
@@ -496,13 +665,27 @@ fn lower(
     // Inside a BIBLIOGRAPHY field's result (it spans paragraphs):
     // the generated listing is not prose.
     let mut in_bibliography = false;
+    // A bookmark opened at body level, between paragraphs (pandoc
+    // writes a heading's this way): it names the block that
+    // follows, as one opened before a paragraph's runs does.
+    let mut pending_label: Option<String> = None;
     loop {
         let ev = reader
             .read_event_into(&mut buf)
             .map_err(|e| DocxError::Xml("word/document.xml", e))?;
         match &ev {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"w:bookmarkStart" => {
+                if let Some(nm) = attr(e, b"w:name").filter(|n| n != "_GoBack") {
+                    pending_label = Some(nm);
+                }
+            }
             Event::Start(e) if e.name().as_ref() == b"w:p" => {
-                let para = read_para(&mut reader, rels, &mut in_bibliography)?;
+                let mut para = read_para(&mut reader, rels, &mut in_bibliography)?;
+                if para.label.is_none() {
+                    para.label = pending_label.take();
+                } else {
+                    pending_label = None;
+                }
                 emit_para(
                     para,
                     styles,
@@ -1036,7 +1219,7 @@ fn attr(e: &quick_xml::events::BytesStart, name: &[u8]) -> Option<String> {
         .and_then(|a| a.unescape_value().ok().map(|v| v.to_string()))
 }
 
-/// The one field instruction read as a fact (ruling #36): an
+/// The one field instruction read as a fact: an
 /// ` XE "term" ` instruction declares an index mark. The term is
 /// the first quoted string after the XE token; the switches
 /// (`\b`, `\i`, …) are presentation and drop. Any other

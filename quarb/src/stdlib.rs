@@ -18,6 +18,10 @@ use unicode_segmentation::UnicodeSegmentation;
 /// as criteria and ordering do.
 type Scale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
 
+/// The internal aggregate standing in for a closing `@| csv` /
+/// `@| table` while a tool renders it (see `run_for_rendering`).
+pub(crate) const ROWS_FOR_RENDERING: &str = "\u{1}rows";
+
 const SCALAR: &[&str] = &[
     "upper",
     "lower",
@@ -38,6 +42,12 @@ const SCALAR: &[&str] = &[
     "words",
     "ngrams",
     "levenshtein",
+    // Time expressions and the calendar (spec: Time Expressions and
+    // the Timeline).
+    "timex",
+    "time_anchor",
+    "period",
+    "grain",
     "haversine",
     // Unicode normalization, the stress apparatus, transliteration.
     "nfc",
@@ -48,6 +58,7 @@ const SCALAR: &[&str] = &[
     "unstress",
     "accent",
     "translit",
+    "number",
     "modernize",
     "gc",
     "sentences",
@@ -108,6 +119,7 @@ const SCALAR: &[&str] = &[
     "td",
     "strptime",
     "tp",
+    "bibref",
     "quantity",
     "convert",
     "isodate",
@@ -168,6 +180,7 @@ const AGGREGATE: &[&str] = &[
     "csv",
     "table",
     "kaiv",
+    "encoding",
     "sort",
     "unique",
     "reverse",
@@ -180,6 +193,7 @@ const AGGREGATE: &[&str] = &[
     "zscore",
     "number",
     "outline",
+    "timeline",
 ];
 
 /// Whether `name` is a whole-context stage that never works per
@@ -188,7 +202,16 @@ const AGGREGATE: &[&str] = &[
 pub fn context_only(name: &str) -> bool {
     matches!(
         name,
-        "ungroup" | "window" | "shift" | "zscore" | "number" | "outline" | "csv" | "table"
+        "ungroup"
+            | "window"
+            | "shift"
+            | "zscore"
+            | "number"
+            | "outline"
+            | "timeline"
+            | "csv"
+            | "table"
+            | "encoding"
     )
 }
 
@@ -198,6 +221,33 @@ pub fn context_only(name: &str) -> bool {
 /// Aligned text with a rule under the header (widths in grapheme
 /// clusters), or RFC 4180 CSV; lines joined, no trailing newline.
 pub fn tabulate(values: &[Value], named: Option<&[String]>, csv: bool) -> String {
+    tabulate_with(values, named, csv, b',')
+}
+
+/// [`tabulate`] with the CSV delimiter chosen (`@| csv(";")`); the
+/// table form ignores it.
+pub fn tabulate_with(
+    values: &[Value],
+    named: Option<&[String]>,
+    csv: bool,
+    delimiter: u8,
+) -> String {
+    tabulate_in(values, named, csv, delimiter, &|v| match v {
+        Value::Null => String::new(),
+        Value::Str(s) => s.clone(),
+        other => other.display_form(),
+    })
+}
+
+/// [`tabulate_with`] with the cell renderer chosen — the output
+/// locale's, when a tool prints under one.
+pub fn tabulate_in(
+    values: &[Value],
+    named: Option<&[String]>,
+    csv: bool,
+    delimiter: u8,
+    cell: &dyn Fn(&Value) -> String,
+) -> String {
     let columns: Vec<String> = match named {
         Some(names) => names.to_vec(),
         None => {
@@ -219,13 +269,6 @@ pub fn tabulate(values: &[Value], named: Option<&[String]>, csv: bool) -> String
                 columns.push("value".to_string());
             }
             columns
-        }
-    };
-    let cell = |v: &Value| -> String {
-        match v {
-            Value::Null => String::new(),
-            Value::Str(s) => s.clone(),
-            other => other.display_form(),
         }
     };
     let rows: Vec<Vec<String>> = values
@@ -255,14 +298,21 @@ pub fn tabulate(values: &[Value], named: Option<&[String]>, csv: bool) -> String
         .collect();
     let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
     if csv {
+        let sep = (delimiter as char).to_string();
         let quote = |s: &str| -> String {
-            if s.contains([',', '"', '\n', '\r']) {
+            if s.contains([delimiter as char, '"', '\n', '\r']) {
                 format!("\"{}\"", s.replace('"', "\"\""))
             } else {
                 s.to_string()
             }
         };
-        let row = |cells: &[String]| cells.iter().map(|c| quote(c)).collect::<Vec<_>>().join(",");
+        let row = |cells: &[String]| {
+            cells
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(&sep)
+        };
         lines.push(row(&columns));
         lines.extend(rows.iter().map(|r| row(r)));
         return lines.join("\n");
@@ -302,13 +352,37 @@ pub fn tabulate(values: &[Value], named: Option<&[String]>, csv: bool) -> String
 /// forgets the deeper ones. A level that is skipped (1, then 3)
 /// counts as present once (`1.1.1`); a row without a level stands
 /// at the shallowest.
+/// The longest text a repetition may build (`repeat`, `indent`):
+/// 64 MiB. Past it the query is refused — a count taken from data
+/// (`repeat(::n)`) must not be able to exhaust memory.
+pub const MAX_REPEAT_BYTES: usize = 64 << 20;
+
+/// `text` repeated `n` times within [`MAX_REPEAT_BYTES`], else a
+/// refusal naming the function and the size it would have built.
+fn bounded_repeat(text: &str, n: usize, what: &str) -> Value {
+    match text.len().checked_mul(n) {
+        Some(bytes) if bytes <= MAX_REPEAT_BYTES => Value::Str(text.repeat(n)),
+        _ => {
+            crate::exec::record_refusal(format!(
+                "{what}({n}): the result would exceed {} bytes",
+                MAX_REPEAT_BYTES
+            ));
+            Value::Null
+        }
+    }
+}
+
+/// How far below the shallowest level an outline may reach: the
+/// executor refuses `number` / `outline` past it (levels are data).
+pub const MAX_OUTLINE_DEPTH: i64 = 64;
+
 pub fn outline_numbers(levels: &[Option<i64>]) -> Vec<(usize, String)> {
     let base = levels.iter().flatten().copied().min().unwrap_or(0);
     let mut counters: Vec<u64> = Vec::new();
     levels
         .iter()
         .map(|l| {
-            let depth = (l.unwrap_or(base) - base).max(0) as usize;
+            let depth = (l.unwrap_or(base) - base).clamp(0, MAX_OUTLINE_DEPTH) as usize;
             counters.truncate(depth + 1);
             if counters.len() == depth + 1 {
                 counters[depth] += 1;
@@ -379,6 +453,51 @@ pub(crate) fn text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Orde
         })),
         (None, false) => None,
     }
+}
+
+/// The text order `sort` falls to when the query names no locale:
+/// the output locale's collation, when the tool set one.
+pub(crate) fn default_text_order() -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
+    default_collator()
+        .map(|c| -> Box<dyn Fn(&str, &str) -> Ordering> { Box::new(move |a, b| c.compare(a, b)) })
+}
+
+/// `sort` without a locale argument: the standard value comparison,
+/// with text that has no reading collated under `collate` (the
+/// output locale's order) — numbers, dates, quantities and text
+/// that reads as one keep their magnitude order whatever the
+/// locale.
+pub(crate) fn default_cmp(
+    a: &Value,
+    b: &Value,
+    scale: Scale,
+    collate: Option<&dyn Fn(&str, &str) -> Ordering>,
+) -> Ordering {
+    if let (Some(c), Value::Str(x), Value::Str(y)) = (collate, a, b)
+        && matches!(a.sort_key_with(scale), crate::value::SortKey::Text(_))
+        && matches!(b.sort_key_with(scale), crate::value::SortKey::Text(_))
+    {
+        return c(x, y);
+    }
+    a.compare_with(b, scale)
+}
+
+/// The collator for the output locale's tag, when the tool set
+/// one (`quarb::locale::set_default_collation`).
+#[cfg(feature = "colligo")]
+fn default_collator() -> Option<colligo::Collator> {
+    let tag = crate::locale::default_collation()?;
+    Some(
+        colligo::Collator::builder(&tag)
+            .allow_approximate(true)
+            .build()
+            .unwrap_or_else(|_| colligo::Collator::root()),
+    )
+}
+
+#[cfg(not(feature = "colligo"))]
+fn default_collator() -> Option<NeverCollator> {
+    None
 }
 
 /// Keyed aggregates reorder or filter the capsae themselves (nodes
@@ -471,6 +590,61 @@ pub fn keyed_names() -> &'static [&'static str] {
     KEYED
 }
 
+/// The locale argument of `strptime` / `strftime`: the table for
+/// the second argument, English without one; a locale no table
+/// covers is refused.
+fn date_names(call: &FnCall) -> Option<&'static crate::datenames::Names> {
+    let locale = arg_str(call, 1, "");
+    match crate::datenames::names(locale) {
+        Some(n) => Some(n),
+        None => {
+            crate::exec::record_refusal(format!(
+                "{}: no month and weekday names for locale {locale:?} (shipped: en, zh, es, ar, pt, ru, ja, de, fr, tr, it)",
+                call.name
+            ));
+            None
+        }
+    }
+}
+
+/// The value text of a time expression: a `timex` record's `value`
+/// field, text in the value notation as it stands, or anything
+/// else with a calendar reading as its period (a complete date).
+pub(crate) fn timex_value(v: &Value) -> Option<String> {
+    match v {
+        Value::Record(fields) => match fields.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => Some(s.clone()),
+            Some((_, other)) => other.calendar_reading().map(|p| p.format()),
+            None => None,
+        },
+        Value::Str(s) => Some(s.clone()),
+        other => other.calendar_reading().map(|p| p.format()),
+    }
+}
+
+/// A whole double as an integer where one holds it, else as it is
+/// (the cast would saturate at the rim of the integers).
+fn whole(n: f64) -> Value {
+    if n.abs() < 9.2e18 {
+        Value::Int(n as i64)
+    } else {
+        Value::Float(n)
+    }
+}
+
+/// The delimiter `csv(";"; …)` names, if it names one, and the
+/// arguments after it (the columns). The parser carries the quoted
+/// first argument of `csv` as `delimiter=X`; `table` takes none.
+pub(crate) fn split_csv_delimiter(call: &FnCall) -> (Option<u8>, &[Arg]) {
+    if call.name == "csv"
+        && let Some((Arg::Lit(Value::Str(d)), rest)) = call.args.split_first()
+        && let Some(d) = d.strip_prefix("delimiter=")
+    {
+        return (d.as_bytes().first().copied(), rest);
+    }
+    (None, call.args.as_slice())
+}
+
 /// Apply a per-capsa scalar function to a single topic. May return
 /// several values (an expanding function like `lines`).
 pub fn apply_scalar(
@@ -480,6 +654,116 @@ pub fn apply_scalar(
 ) -> Vec<Value> {
     let text = topic.to_string();
     match call.name.as_str() {
+        // `number(LOCALE)` — the numeric reading of text under the
+        // locale's conventions (`number(ru-RU)` reads `1 234,56`,
+        // `number(de-CH)` reads `1'234.56`); a number stays itself;
+        // text with no reading, or a locale with no table, is null.
+        "number" => {
+            let locale = arg_str(call, 0, "");
+            let decimal = if locale.is_empty() {
+                Some(crate::number::Decimal::Point)
+            } else {
+                crate::number::locale_convention(locale)
+            };
+            if decimal.is_none() {
+                crate::exec::record_refusal(format!(
+                    "number: no number conventions for locale {locale:?}"
+                ));
+                return vec![Value::Null];
+            }
+            return vec![match (&topic, decimal) {
+                (Value::Int(_) | Value::Float(_), _) => topic.clone(),
+                (Value::Str(s), Some(d)) => crate::number::read(s, d).unwrap_or(Value::Null),
+                _ => Value::Null,
+            }];
+        }
+        // `timex(LOCALE)` — the time expressions of a text, one
+        // record each in the order of the text: `%(text; at; kind;
+        // value; grain)`. Found by the locale's finite lists and
+        // nothing else; a locale that carries none is refused. A
+        // text with no time expression yields nothing.
+        "timex" => {
+            let locale = arg_str(call, 0, "en");
+            if matches!(topic, Value::Null) {
+                return Vec::new();
+            }
+            let Some(found) = crate::timex::find(&text, locale) else {
+                crate::exec::record_refusal(format!(
+                    "timex: no time-expression lists for locale {locale:?} (carried: {})",
+                    crate::timex::CARRIED
+                ));
+                return Vec::new();
+            };
+            let opt = |s: Option<String>| s.map_or(Value::Null, Value::Str);
+            return found
+                .into_iter()
+                .map(|f| {
+                    Value::Record(vec![
+                        ("text".to_string(), Value::Str(f.text)),
+                        ("at".to_string(), Value::Int(f.at as i64)),
+                        ("kind".to_string(), Value::Str(f.kind.word().to_string())),
+                        ("value".to_string(), opt(f.value)),
+                        (
+                            "grain".to_string(),
+                            opt(f.grain.map(|g| g.word().to_string())),
+                        ),
+                    ])
+                })
+                .collect();
+        }
+        // `time_anchor(T)` — a time expression valued against a
+        // point: the topic is a `timex` record or its value text,
+        // `T` anything with a calendar reading, the result a
+        // period. A complete date passes through; a duration, a
+        // vague expression, and an offset the anchor's grain cannot
+        // carry are null.
+        "time_anchor" => {
+            let anchor = match call.args.first() {
+                Some(Arg::Lit(v)) => v.calendar_reading(),
+                _ => {
+                    crate::exec::record_refusal(
+                        "time_anchor takes the anchor — time_anchor(1899-10-06), \
+                         time_anchor($.d)"
+                            .into(),
+                    );
+                    return vec![Value::Null];
+                }
+            };
+            return vec![
+                timex_value(&topic)
+                    .and_then(|v| crate::period::anchor(&v, anchor.as_ref(), false))
+                    .map_or(Value::Null, Value::period),
+            ];
+        }
+        // `period[(GRAIN)]` — the calendar reading as a period; with
+        // a grain, the period of that grain holding the value (a
+        // finer grain than the value's own is null).
+        "period" => {
+            let reading = topic.calendar_reading();
+            return vec![match (reading, call.args.first()) {
+                (None, _) => Value::Null,
+                (Some(p), None) => Value::period(p),
+                (Some(p), Some(Arg::Lit(Value::Str(g)))) => {
+                    match crate::period::Grain::from_word(g) {
+                        Some(g) => p.at(g).map_or(Value::Null, Value::period),
+                        None => {
+                            crate::exec::record_refusal(format!(
+                                "period: {g:?} is not a grain (year, month, day, hour, minute, second)"
+                            ));
+                            Value::Null
+                        }
+                    }
+                }
+                _ => Value::Null,
+            }];
+        }
+        // `grain` — a period's grain as its word.
+        "grain" => {
+            return vec![match &topic {
+                Value::Period { grain, .. } => Value::Str(grain.word().to_string()),
+                _ => Value::Null,
+            }];
+        }
         "upper" => vec![Value::Str(text.to_uppercase())],
         "lower" => vec![Value::Str(text.to_lowercase())],
         // Title case, Python-shaped: each word's first alphabetic
@@ -607,11 +891,11 @@ pub fn apply_scalar(
             }
         }
         // `repeat(n)` — the text n times (0 is the empty string).
-        // The one honest home for repetition: `"a" * 3` stays
+        // Repetition lives here alone: `"a" * 3` stays
         // null-propagating arithmetic.
         "repeat" => {
             let n = arg_int(call, 0).unwrap_or(0).max(0) as usize;
-            vec![Value::Str(text.repeat(n))]
+            vec![bounded_repeat(&text, n, "repeat")]
         }
         // `indent(n)` / `indent(n; unit)` — the text behind n copies
         // of the unit (two spaces by default): the level of a tree
@@ -620,7 +904,10 @@ pub fn apply_scalar(
         "indent" => {
             let n = arg_num(call, 0).map_or(0, |f| f as i64).max(0) as usize;
             let unit = arg_str(call, 1, "  ");
-            vec![Value::Str(format!("{}{text}", unit.repeat(n)))]
+            vec![match bounded_repeat(&unit, n, "indent") {
+                Value::Str(pad) => Value::Str(format!("{pad}{text}")),
+                v => v,
+            }]
         }
         "lines" => text.lines().map(|s| Value::Str(s.to_string())).collect(),
         // The character classes — POSIX's alpha / digit / alnum,
@@ -1003,17 +1290,30 @@ pub fn apply_scalar(
         // `strftime("%Y-%m-%d %H:%M")` (alias `tfmt`) — the
         // C/POSIX formatting standard Perl, Python, and Ruby
         // share, in the instant's own offset.
+        // `strftime(fmt[; LOCALE])` — a second argument names the
+        // locale whose month and weekday names `%B %b %A %a` write;
+        // without it the English names. A locale with no table
+        // refuses.
         "strftime" | "tfmt" => {
             let fmt = arg_str(call, 0, "%Y-%m-%dT%H:%M:%S").to_string();
+            let Some(names) = date_names(call) else {
+                return vec![Value::Null];
+            };
             vec![match &topic {
                 Value::Instant {
                     secs,
                     nanos,
                     offset_min,
-                } => Value::Str(crate::temporal::strftime(&fmt, *secs, *nanos, *offset_min)),
+                } => Value::Str(crate::temporal::strftime_in(
+                    &fmt,
+                    *secs,
+                    *nanos,
+                    *offset_min,
+                    names,
+                )),
                 other => other
                     .temporal_reading()
-                    .map(|(s, n)| Value::Str(crate::temporal::strftime(&fmt, s, n, None)))
+                    .map(|(s, n)| Value::Str(crate::temporal::strftime_in(&fmt, s, n, None, names)))
                     .unwrap_or(Value::Null),
             }]
         }
@@ -1089,16 +1389,59 @@ pub fn apply_scalar(
         // fixed English names. A parsed %z is kept for display;
         // fields the format omits default to the Unix epoch's;
         // non-text topics and non-matching text are null.
+        // `strptime(fmt[; LOCALE])` — the names read under the
+        // locale's table, in every form it lists; the format's
+        // literal text matches as written (`'%d %B %Y г.'`).
         "strptime" | "tp" => {
             let fmt = arg_str(call, 0, "%Y-%m-%dT%H:%M:%S").to_string();
+            let Some(names) = date_names(call) else {
+                return vec![Value::Null];
+            };
             vec![match &topic {
-                Value::Str(s) => crate::temporal::strptime(s, &fmt)
+                Value::Str(s) => crate::temporal::strptime_in(s, &fmt, names)
                     .map(|(secs, nanos, offset_min)| Value::Instant {
                         secs,
                         nanos,
                         offset_min,
                     })
                     .unwrap_or(Value::Null),
+                _ => Value::Null,
+            }]
+        }
+
+        // `bibref(STANDARD)` — one reference text read under a
+        // citation standard (gost, gb7714, cmos, ams) into a record
+        // of its fields, `:genus` and the list `:label`; a text
+        // that is no reference answers null, as `strptime` does for
+        // a text that is no date; an unknown standard is refused
+        // naming the ones this build reads.
+        "bibref" => {
+            let standard = arg_str(call, 0, "").to_string();
+            if !crate::bibref::STANDARDS.contains(&standard.as_str()) {
+                crate::exec::record_refusal(format!(
+                    "bibref: unknown standard {standard:?} — this build reads {}",
+                    crate::bibref::STANDARDS.join(", ")
+                ));
+                return vec![Value::Null];
+            }
+            vec![match &topic {
+                Value::Str(s) => match crate::bibref::parse(&standard, s) {
+                    Ok(Some(r)) => {
+                        let mut rec: Vec<(String, Value)> = r
+                            .fields
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), Value::Str(v.clone())))
+                            .collect();
+                        if let Some(g) = r.genus {
+                            rec.push(("genus".into(), Value::Str(g.into())));
+                        }
+                        if let Some(l) = r.label {
+                            rec.push(("label".into(), Value::Str(l)));
+                        }
+                        Value::Record(rec)
+                    }
+                    _ => Value::Null,
+                },
                 _ => Value::Null,
             }]
         }
@@ -1127,7 +1470,7 @@ pub fn apply_scalar(
         // refuses to guess (numbers never lift into ±). Unit-shaped
         // TEXT lifts through the unital reading first: invoking
         // convert by name is explicit intent, so `2KiB |
-        // convert(B)` needs no separate `| quantity` (ruling #12's
+        // convert(B)` needs no separate `| quantity` (the expression head's
         // author-spelling scope).
         "convert" => {
             let target = arg_str(call, 0, "").to_string();
@@ -1194,14 +1537,19 @@ pub fn apply_scalar(
         // world, the bare form in the integer one). Serialization
         // stays shortest-round-trip — `round(d)` is the in-query
         // remedy for presenting arithmetic like 68.99000000000001.
+        // (a whole number past the integers stays a float: the
+        // cast would saturate at i64::MAX)
         "round" => vec![numeric_scalar(&topic, |n| match round_digits(call) {
             Some(d) => Value::Float(round_to(n, d)),
-            None => Value::Int(n.round() as i64),
+            None => whole(n.round()),
         })],
-        "floor" => vec![numeric_scalar(&topic, |n| Value::Int(n.floor() as i64))],
-        "ceil" => vec![numeric_scalar(&topic, |n| Value::Int(n.ceil() as i64))],
+        "floor" => vec![numeric_scalar(&topic, |n| whole(n.floor()))],
+        "ceil" => vec![numeric_scalar(&topic, |n| whole(n.ceil()))],
         "abs" => vec![match topic {
-            Value::Int(n) => Value::Int(n.abs()),
+            // (`i64::MIN` has no integer absolute value)
+            Value::Int(n) => n
+                .checked_abs()
+                .map_or(Value::Float(-(n as f64)), Value::Int),
             // A quantity has no numeric reading and only the rounders
             // are quantity-aware (spec: The Quantital Fragment), so
             // `abs` over a quantity is null rather than silently
@@ -1347,7 +1695,7 @@ pub fn apply_scalar(
         // adapter at hand for its expression arguments.)
         "json" | "jsonl" => vec![Value::Str(topic.to_json())],
         // The one-value kaiv document; `@| kaiv` renders the whole
-        // stream as one (ruling #51's family, the kaiv member).
+        // stream as one (the serialization family, the kaiv member).
         "kaiv" => vec![Value::Str(
             crate::kaiv_out::document(std::slice::from_ref(&topic)).unwrap_or_else(|e| e),
         )],
@@ -1396,6 +1744,10 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// the executor instead.
 pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
     match call.name.as_str() {
+        // What `run_for_rendering` leaves where a closing `@| csv` /
+        // `@| table` stood: the rows themselves, for the tool to
+        // tabulate. Not a name a query can write.
+        ROWS_FOR_RENDERING => input,
         "count" => vec![Value::Int(input.len() as i64)],
         "sum" => vec![sum(&input, scale)],
         "product" => vec![product(&input)],
@@ -1458,7 +1810,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         }
         "join" => vec![Value::Str(join(&input, arg_str(call, 0, "")))],
         // The stream as one JSON document — an array — or as JSON
-        // Lines, one document per line (ruling #51).
+        // Lines, one document per line.
         "json" => {
             let items: Vec<String> = input.iter().map(Value::to_json).collect();
             vec![Value::Str(format!("[{}]", items.join(", ")))]
@@ -1472,8 +1824,14 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // apart from its rows. Named columns select and order the
         // fields; without them, every field.
         "csv" | "table" => {
-            let columns: Vec<String> = call
-                .args
+            // `csv(";"; year; title)`: a quoted first argument is the
+            // delimiter (a bare word is a column, so no collision).
+            // The stage is a value like any other and never
+            // depends on a locale: a tool that prints under one
+            // takes a closing `@| csv` / `@| table` off the query
+            // and renders it itself (`run_for_rendering`).
+            let (delimiter, args) = split_csv_delimiter(call);
+            let columns: Vec<String> = args
                 .iter()
                 .filter_map(|a| match a {
                     Arg::Lit(Value::Str(s)) => Some(s.clone()),
@@ -1481,7 +1839,12 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 })
                 .collect();
             let columns = (!columns.is_empty()).then_some(columns.as_slice());
-            vec![Value::Str(tabulate(&input, columns, call.name == "csv"))]
+            vec![Value::Str(tabulate_with(
+                &input,
+                columns,
+                call.name == "csv",
+                delimiter.unwrap_or(b','),
+            ))]
         }
         // The stream as one kaiv document: results under
         // `/@results`, records as namespaces, lists as arrays,
@@ -1504,7 +1867,10 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             let mut v = input;
             match text_order(call) {
                 Some(cmp) => v.sort_by(|a, b| cmp(&a.to_string(), &b.to_string())),
-                None => v.sort_by(|a, b| a.compare_with(b, scale)),
+                None => {
+                    let collate = default_text_order();
+                    v.sort_by(|a, b| default_cmp(a, b, scale, collate.as_deref()))
+                }
             }
             v
         }
@@ -1741,7 +2107,49 @@ fn sum(input: &[Value], scale: Scale) -> Value {
 /// is an integer, promoting to float on overflow (as arithmetic
 /// does) rather than wrapping; float otherwise. An empty input
 /// multiplies to 1 (the fold identity).
+/// The product of the numeric readings. Empty input is the fold's
+/// identity, 1; input with no reading at all is null, as `sum`'s
+/// is. One quantity among numbers scales (`2 km` by 3 is `6 km`);
+/// two quantities would multiply their dimensions, which the
+/// unital fragment does not combine, so that is refused rather
+/// than answered on a dropped unit.
 fn product(input: &[Value]) -> Value {
+    if !input.is_empty() && !input.iter().any(|v| v.numeric().is_some()) {
+        return Value::Null;
+    }
+    let quantities: Vec<&Value> = input
+        .iter()
+        .filter(|v| matches!(v, Value::Quantity { .. }))
+        .collect();
+    match quantities.as_slice() {
+        [] => {}
+        [
+            Value::Quantity {
+                value,
+                base,
+                written,
+            },
+        ] => {
+            let factor: f64 = input
+                .iter()
+                .filter(|v| !matches!(v, Value::Quantity { .. }))
+                .filter_map(Value::numeric)
+                .product();
+            return Value::Quantity {
+                value: value * factor,
+                base: base.clone(),
+                written: written.as_ref().map(|(m, u)| (m * factor, u.clone())),
+            };
+        }
+        _ => {
+            crate::exec::record_refusal(
+                "product: two quantities would multiply their units, which the unital \
+                 fragment does not combine; take the magnitudes first"
+                    .into(),
+            );
+            return Value::Null;
+        }
+    }
     if input.iter().all(|v| matches!(v, Value::Int(_))) {
         let mut acc: i64 = 1;
         let mut overflowed = false;
@@ -2705,7 +3113,7 @@ mod tests {
             scalar_with("pad", s("ab"), vec![int(6), lit("-")]),
             vec![s("--ab--")]
         );
-        // repeat: the one honest home for repetition
+        // repeat: the one home for repetition
         assert_eq!(
             scalar_with("repeat", s("ab"), vec![int(3)]),
             vec![s("ababab")]
@@ -3476,6 +3884,39 @@ mod tests {
         assert_eq!(agg("sum", vec![Value::Str("x".into())]), vec![Value::Null]);
         // `product` keeps the spec's fold-from-1 identity.
         assert_eq!(agg("product", vec![]), vec![Value::Int(1)]);
+        assert_eq!(
+            agg("product", vec![Value::Str("x".into())]),
+            vec![Value::Null]
+        );
+        // one quantity scales; two are refused, never answered bare
+        let km = |v: f64| Value::Quantity {
+            value: v * 1000.0,
+            base: "m".into(),
+            written: Some((v, "km".into())),
+        };
+        assert_eq!(agg("product", vec![km(2.0), Value::Int(3)]), vec![km(6.0)]);
+        assert_eq!(agg("product", vec![km(2.0), km(3.0)]), vec![Value::Null]);
+        assert!(crate::exec::take_refusal().unwrap().contains("units"));
+    }
+
+    #[test]
+    fn rounding_past_the_integers_stays_a_float() {
+        let f = |name: &str, v: Value| {
+            let call = FnCall {
+                name: name.into(),
+                args: vec![],
+            };
+            apply_scalar(&call, v, &|_| None).remove(0)
+        };
+        assert_eq!(f("round", Value::Float(2.5)), Value::Int(3));
+        assert_eq!(f("round", Value::Float(1e30)), Value::Float(1e30));
+        assert_eq!(f("floor", Value::Float(-1e30)), Value::Float(-1e30));
+        assert_eq!(f("ceil", Value::Float(1e19)), Value::Float(1e19));
+        assert_eq!(f("abs", Value::Int(-7)), Value::Int(7));
+        assert_eq!(
+            f("abs", Value::Int(i64::MIN)),
+            Value::Float(9_223_372_036_854_775_808.0)
+        );
     }
 
     #[test]

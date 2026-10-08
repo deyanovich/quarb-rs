@@ -826,7 +826,7 @@ fn text_of_raw(el: ElementRef) -> String {
 }
 
 /// Like [`text_of_raw`], collecting the declared notes met in the
-/// flow (ruling #35): a noteref contributes its onym and NO marker
+/// flow: a noteref contributes its onym and NO marker
 /// text; an inline note body contributes (onym, its text) and is
 /// excluded from the flow it interrupts.
 fn text_and_notes_raw(el: ElementRef, notes: &mut Vec<Note>) -> String {

@@ -226,6 +226,12 @@ pub fn scale_expr(expr: &str) -> Option<(f64, String)> {
                 return None;
             }
             let n: i64 = cs[ds..i].iter().collect::<String>().parse().ok()?;
+            // An exponent beyond any unit (`m^99999999999`) is not a
+            // unit: it would overflow the exponent map and the
+            // factor's `powi`.
+            if n > MAX_EXPONENT {
+                return None;
+            }
             exp = if neg { -n } else { n };
         }
         if !one {
@@ -251,6 +257,10 @@ pub fn scale_expr(expr: &str) -> Option<(f64, String)> {
     Some((factor, out))
 }
 
+/// The largest exponent a unit factor may carry (`m^32`); beyond
+/// it the text is not a unit.
+pub const MAX_EXPONENT: i64 = 32;
+
 /// Fold one canonical expansion string (`kg*m^2/s^3`) into the
 /// exponent map, scaled by `signed`.
 fn accumulate(
@@ -268,7 +278,12 @@ fn accumulate(
             },
         };
         let (name, e) = match tok.split_once('^') {
-            Some((n, x)) => (n, x.parse::<i64>().unwrap_or(1)),
+            Some((n, x)) => (
+                n,
+                x.parse::<i64>()
+                    .unwrap_or(1)
+                    .clamp(-MAX_EXPONENT, MAX_EXPONENT),
+            ),
             None => (tok, 1),
         };
         if name != "1" {
@@ -374,11 +389,13 @@ pub fn parse_unit_text_with(
     }
     let value: f64 = s[..i].parse().ok()?;
     let unit = s[i..].trim_start();
+    // A unit name is letters in any script (a mounted library may
+    // name `пуд`), digits and the operators of an expression.
     if unit.is_empty()
         || !unit
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'*' | b'/' | b'^'))
-        || !unit.bytes().next().is_some_and(|c| c.is_ascii_alphabetic())
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '*' | '/' | '^'))
+        || !unit.chars().next().is_some_and(|c| c.is_alphabetic())
     {
         return None;
     }
@@ -392,6 +409,15 @@ pub fn parse_unit_text_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding 19: an exponent beyond any unit is not a unit (it
+    /// would overflow the exponent map and the factor).
+    #[test]
+    fn absurd_exponents_are_not_units() {
+        assert!(parse_unit_text("1 m^99999999999").is_none());
+        assert!(parse_unit_text("1 m^-99999999999").is_none());
+        assert!(parse_unit_text("1 m^3").is_some());
+    }
 
     #[test]
     fn scale_table() {

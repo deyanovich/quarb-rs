@@ -69,7 +69,7 @@ pub enum Anchor {
     /// `(@name)` — every mark pushed under `name`, shadowed ones
     /// included, in push order; forks like `(@)`.
     MarksNamed(String),
-    /// `((!expr))` — the node-id anchor (ruling #58): the node
+    /// `((!expr))` — the node-id anchor: the node
     /// whose id the expression yields — a literal (`((!7))`), a
     /// value's origin (`((!$.v:::origin))`), a coordinate record
     /// (`:::%origin`, its `id` field), or a list of them, which
@@ -157,10 +157,10 @@ pub enum Stage {
     RecordWith(FnCall),
     /// `| .%(...)` / `| .name%(...)` — build the record and push it
     /// in one step, anonymous or named, the topic set to the record
-    /// (ruling #49); `.%%(...)` builds the enriched register view
+    ///; `.%%(...)` builds the enriched register view
     /// instead. The operand spelling `.name(%(...))` cannot exist: a
     /// record constructor in operand position would ride its first
-    /// field as the topic (ruling #38), so the push carries the
+    /// field as the topic, so the push carries the
     /// constructor itself.
     RecordPush {
         name: Option<String>,
@@ -201,7 +201,7 @@ pub enum Stage {
     /// `$| [a..b]` slices. Null maps to null; a non-list topic is
     /// a singleton; an expanding inner stage flattens.
     Map(Box<Stage>),
-    /// `.v(body){N}` — a quantified push (ruling #60): the push
+    /// `.v(body){N}` — a quantified push: the push
     /// applied to the context again and again, each round reading
     /// the previous round's values (the snapshot rule) and filing
     /// one more regula on the same capsa — the iteration loop.
@@ -272,7 +272,7 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
         return Some(n);
     }
     // `:title` — a record's field derives its name as a projection
-    // does (ruling #48): `group(:title)`, `%(:title, 'n', 1)`.
+    // does: `group(:title)`, `%(:title, 'n', 1)`.
     if let Operand::Field { name, .. } = op {
         return Some(name);
     }
@@ -440,7 +440,7 @@ pub enum PredExpr {
     Truthy(Operand),
 }
 
-/// One segment of a pattern literal on `=` / `!=` (ruling #33):
+/// One segment of a pattern literal on `=` / `!=`:
 /// quoted literal text and the glob star. The stars live outside
 /// the quotes, so the quoted text is always literal and no escape
 /// mechanism exists or is needed; strict alternation is enforced
@@ -495,7 +495,7 @@ pub enum Operand {
     Recall(RegRef),
     /// `$_` — the topic: the current pipeline value.
     Topic,
-    /// `base:name` — a field of a record value (ruling #48): the
+    /// `base:name` — a field of a record value: the
     /// bottom rung of the colon ladder, a value's field below a
     /// node's property. A leading `:name` reads the topic's field.
     Field { base: Box<Operand>, name: String },
@@ -504,7 +504,7 @@ pub enum Operand {
     /// origins the value was read from (`source`, `instant`,
     /// `dpid`, `provenance`, `origins`, `elided`).
     ValueMeta { base: Box<Operand>, key: String },
-    /// `X:.r` — the cross-capsa read (ruling #57): `at` is a node
+    /// `X:.r` — the cross-capsa read: `at` is a node
     /// path (a `Rel`, a `Ctx`, or the served node); at each node it
     /// reaches, the regula `reg` of every capsa of the stage's
     /// *input* context standing there (the `@*` snapshot rule), one
@@ -514,7 +514,7 @@ pub enum Operand {
     /// `%+` — the record of the last match's named groups (Perl's
     /// `%+`); the empty record outside any match.
     NamedCaptures,
-    /// `@(a; b; c)` — the list literal (ruling #52): each item
+    /// `@(a; b; c)` — the list literal: each item
     /// contributes every value it yields, so `@(/tags/*::)` gathers
     /// a path's values into one list. `@()` is the empty list.
     List(Vec<Operand>),
@@ -625,7 +625,7 @@ pub enum InterpSeg {
     /// #34): refuses when the hole would splice nothing, with the
     /// optional message. Bash's own spelling for "error if unset".
     Strict(Operand, Option<String>),
-    /// `${expr:-fallback}` — the default hole (ruling #34):
+    /// `${expr:-fallback}` — the default hole:
     /// `default(expr, fallback)`, bash-faithfully spelled. The
     /// fallback is a full value expression — quote a literal.
     Default(Operand, Operand),
@@ -728,21 +728,67 @@ pub enum Axis {
     /// only one direction usually exists, so the spelling drops
     /// the direction claim the data never needed.
     BothLink,
-    /// `::prop-->hint` — resolve a cross-reference: the adapter maps
-    /// `(node, property, hint)` to a target node. With no property
+    /// `::prop-->label` — resolve a cross-reference (the glued name
+    /// is the reference label): the adapter maps
+    /// `(node, property, label)` to a target node. With no property
     /// (`//a-->`, the bare arrow) the adapter names the node's own
     /// reference property — an html anchor's `href`.
     Resolve {
         property: Option<String>,
-        hint: Option<String>,
+        label: Option<String>,
     },
-    /// `::prop<--hint` — reverse resolution: find every node whose
-    /// `prop` resolves to the current node ("what points here?").
-    /// With no property, each candidate's own reference property.
+    /// `<--label(SCOPE::prop)` — reverse resolution, the inverse of
+    /// `-->`: every node whose `prop` resolves to the current node
+    /// ("what points here?"). The argument names the referring
+    /// nodes' property and, by its scope path, where to look; with
+    /// no property, each candidate's own reference property; `::*`
+    /// any property (a scope is then required). Bare `<--` takes the
+    /// whole arbor, which an adapter must open to the walk.
     ReverseResolve {
-        property: Option<String>,
-        hint: Option<String>,
+        label: Option<String>,
+        /// The scope path, root-anchored; `None` is the whole arbor.
+        scope: Option<ScopePath>,
+        property: RefProp,
     },
+    /// `::a=>(SCOPE::b)` — the value match: the nodes of SCOPE whose
+    /// `b` equals the current node's `a`, plain equality of two named
+    /// properties, no resolution function, neither a key. One
+    /// spelling in both directions; a 1-to-many hop.
+    ValueMatch {
+        property: String,
+        scope: Option<ScopePath>,
+        target: String,
+    },
+}
+
+/// A root-anchored scope path inside an arrow's argument. Two
+/// scopes are equal when they are spelled alike.
+#[derive(Debug, Clone)]
+pub struct ScopePath(pub Vec<PathElem>);
+
+impl ScopePath {
+    /// The scope as the canonical query text — what a model's
+    /// `index SCOPE::prop;` declaration is matched against.
+    pub fn text(&self) -> String {
+        self.0.iter().map(crate::unparse::elem).collect()
+    }
+}
+impl PartialEq for ScopePath {
+    fn eq(&self, other: &ScopePath) -> bool {
+        self.text() == other.text()
+    }
+}
+impl Eq for ScopePath {}
+
+/// Which property of a candidate a reverse resolution consults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefProp {
+    /// `(::y)` — the named property.
+    Named(String),
+    /// `(SCOPE::*)` — any property the candidate has.
+    Any,
+    /// Omitted — the candidate's own reference property.
+    Default,
 }
 
 /// For descendant/ancestor axes, which matches to keep by distance.

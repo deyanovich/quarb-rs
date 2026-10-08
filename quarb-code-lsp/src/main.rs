@@ -123,7 +123,7 @@ impl Lexer {
             h[0].signature.as_deref(),
             Some("fn is_name_char(c: char) -> bool")
         );
-        // Homonym fan-out is the honest answer: struct + impl.
+        // Homonym fan-out: struct + impl.
         assert_eq!(w.definition("file:///t/lexer.rs", "Lexer").len(), 2);
     }
 

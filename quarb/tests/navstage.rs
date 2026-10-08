@@ -42,7 +42,7 @@ fn nav_stages_round_trip() {
 fn mark_anchors_round_trip() {
     for q in [
         // anonymous marks, positional and recency anchors
-        // (double parentheses are canonical since ruling #43; the
+        // (double parentheses are canonical; the
         // single-paren spellings parse as deprecated aliases)
         "/a . /b | $$.1/c",
         "/a . /b | $$./c",
@@ -57,7 +57,7 @@ fn mark_anchors_round_trip() {
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
-    // `(2)` is the match capture `$2` (ruling #46); a number needs
+    // `(2)` is the match capture `$2`; a number needs
     // no parentheses to be the topic
     assert_eq!(canon("/a | (2)"), "/a | $2");
 }

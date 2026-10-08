@@ -30,6 +30,7 @@
 //! Locators show the boundary with a bang, jar-URL style:
 //! `store.json!/books/1`.
 
+use quarb::source::SourceDecoding;
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -108,16 +109,65 @@ pub enum DocumentGraft {
     Text,
 }
 
+/// The declaration reporter a host hands the source boundary: by
+/// the source's name, the XML prologue for XML-family names, the
+/// HTML prescan for HTML names, both tried (prologue first) for a
+/// name that says nothing — a plain text file declares nothing
+/// either way.
+pub fn declared_encoding(name: &str, bytes: &[u8]) -> Option<String> {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "xml" | "svg" | "xhtml" | "fb2" | "tei" | "rss" | "atom" | "opml" | "xsd" | "xsl" => {
+            quarb_xml::declared_encoding(bytes)
+        }
+        "html" | "htm" => quarb_html::declared_encoding(bytes),
+        // RTF's header names its code page (`\ansicpg1251`).
+        "rtf" => quarb_text_rtf::declared_encoding(bytes),
+        _ => quarb_xml::declared_encoding(bytes).or_else(|| quarb_html::declared_encoding(bytes)),
+    }
+}
+
+/// The rule a host mount carries: `?encoding=` validated at open,
+/// the reporter above.
+pub fn source_decoding(
+    explicit: Option<&str>,
+) -> Result<SourceDecoding, quarb::source::SourceError> {
+    SourceDecoding::default()
+        .with_declared(declared_encoding)
+        .with_option(explicit)
+}
+
+/// Read one file at the source boundary under the host rule:
+/// `?encoding=`, then a byte-order mark, then what the file
+/// declares, then strict UTF-8.
+pub fn read_source(
+    path: &std::path::Path,
+    explicit: Option<&str>,
+) -> std::io::Result<Result<quarb::source::Decoded, quarb::source::SourceError>> {
+    let bytes = std::fs::read(path)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    Ok(source_decoding(explicit).and_then(|d| d.decode(name, &bytes)))
+}
+
 /// Names [`quarb_archive::ArchiveAdapter::open`] can take: the
 /// zip family, tar, and gzip (`.gz` alone included — the open
 /// checks magic bytes, and a failure leaves the leaf a leaf).
 fn archive_name(name: &str) -> bool {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    matches!(ext.as_str(), "zip" | "tar" | "tgz" | "gz")
+    matches!(
+        ext.as_str(),
+        "zip" | "tar" | "tgz" | "gz" | "7z" | "xz" | "txz" | "bz2" | "tbz2" | "zst" | "tzst"
+    )
 }
 
 /// Parse `content` by `name`'s extension, else by sniffing.
-fn parse_inner(name: &str, content: &str, graft: SourceGraft, doc: DocumentGraft) -> Option<Inner> {
+fn parse_inner(
+    name: &str,
+    content: &str,
+    graft: SourceGraft,
+    doc: DocumentGraft,
+    csv: quarb_csv::CsvOptions,
+) -> Option<Inner> {
     #[cfg(not(feature = "source"))]
     let _ = graft;
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -133,6 +183,25 @@ fn parse_inner(name: &str, content: &str, graft: SourceGraft, doc: DocumentGraft
                 .map(Inner::Json);
         }
         "xml" | "svg" | "xhtml" => {
+            // A FictionBook declared by its namespace grafts at the
+            // text level through the koine route when the level
+            // asks for it; the DOM otherwise, like any XML.
+            #[cfg(feature = "koine")]
+            if doc == DocumentGraft::Text
+                && quarb_text_koine::detect_xml_kind(content) == Some("fb2")
+                && let Ok(m) = quarb_text_koine::parse_xml_as(content, "fb2")
+            {
+                return Some(Inner::Text(m));
+            }
+            return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
+        }
+        "fb2" => {
+            #[cfg(feature = "koine")]
+            if doc == DocumentGraft::Text
+                && let Ok(m) = quarb_text_koine::parse_xml_as(content, "fb2")
+            {
+                return Some(Inner::Text(m));
+            }
             return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
         }
         "html" | "htm" => {
@@ -152,9 +221,13 @@ fn parse_inner(name: &str, content: &str, graft: SourceGraft, doc: DocumentGraft
         // Plain text grafts at the text level (blank-line
         // paragraphs); html/md keep their DOM-level graft.
         "txt" => return Some(Inner::Text(quarb_text::TextModel::parse_plain(content))),
-        "csv" => return quarb_csv::CsvAdapter::parse(content).ok().map(Inner::Csv),
+        "csv" => {
+            return quarb_csv::CsvAdapter::parse_declared(content, b',', csv)
+                .ok()
+                .map(Inner::Csv);
+        }
         "tsv" => {
-            return quarb_csv::CsvAdapter::parse_with_delimiter(content, b'\t')
+            return quarb_csv::CsvAdapter::parse_declared(content, b'\t', csv)
                 .ok()
                 .map(Inner::Csv);
         }
@@ -233,6 +306,18 @@ pub struct ComposeAdapter<A: AstAdapter> {
     /// tokens, a format this crate does not parse); when it
     /// declines, the leaf grafts as it otherwise would.
     document_reader: Option<DocumentReader>,
+    /// The mount's rule at the source boundary (`?encoding=` and
+    /// the declaration reporter): every leaf this layer reads by
+    /// path decodes under it, and the layer answers `::::encoding`
+    /// / `::::replaced` on the leaf it grafted. A leaf with no path
+    /// grafts from the outer adapter's text as before.
+    decoding: SourceDecoding,
+    /// Per graft: the record of its decoding, when this layer did
+    /// it.
+    decoded: RefCell<HashMap<usize, (String, usize)>>,
+    /// The mount's `?delimiter=` / `?decimal=`, for the delimited
+    /// leaves it grafts.
+    csv: quarb_csv::CsvOptions,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -249,7 +334,24 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             document_url: None,
             urls: RefCell::new(None),
             document_reader: None,
+            decoding: SourceDecoding::default(),
+            decoded: RefCell::new(HashMap::new()),
+            csv: quarb_csv::CsvOptions::default(),
         }
+    }
+
+    /// The delimited-text options for this mount (builder-style).
+    pub fn with_csv_options(mut self, csv: quarb_csv::CsvOptions) -> Self {
+        self.csv = csv;
+        self
+    }
+
+    /// The source-boundary rule for this mount (builder-style):
+    /// the `?encoding=` option and the reporter the host chose.
+    /// Reaches grafted archives too.
+    pub fn with_decoding(mut self, decoding: SourceDecoding) -> Self {
+        self.decoding = decoding;
+        self
     }
 
     /// Hand document leaves to the host's reader first
@@ -388,12 +490,15 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             if archive_name(&name)
                 && let Some(path_of) = self.source_path
                 && let Some(path) = path_of(&self.outer, node)
-                && let Ok(a) = quarb_archive::ArchiveAdapter::open(&path)
+                && let Ok(a) =
+                    quarb_archive::ArchiveAdapter::open_with_decoding(&path, self.decoding.clone())
             {
                 let inner = Inner::Archive(Box::new(
                     ComposeAdapter::new(a)
                         .with_source_graft(self.source_graft)
-                        .with_document_graft(self.document_graft),
+                        .with_document_graft(self.document_graft)
+                        .with_decoding(self.decoding.clone())
+                        .with_csv_options(self.csv),
                 ));
                 let mut grafts = self.grafts.borrow_mut();
                 grafts.push(Graft { outer: node, inner });
@@ -411,11 +516,33 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 });
                 return Some(grafts.len() - 1);
             }
-            let content = match self.outer.default_value(node)? {
-                Value::Str(s) => s,
-                _ => return None,
+            // Through the path when there is one: the bytes meet
+            // the boundary here, under the mount's rule, and the
+            // record stays with the graft. A leaf whose bytes refuse
+            // to decode (not UTF-8, nothing declared) stays a leaf.
+            let mut record = None;
+            let content = match self
+                .source_path
+                .and_then(|path_of| path_of(&self.outer, node))
+                .and_then(|p| std::fs::read(p).ok())
+            {
+                Some(bytes) => {
+                    let d = self.decoding.decode(&name, &bytes).ok()?;
+                    record = Some((d.encoding, d.replaced));
+                    d.text
+                }
+                None => match self.outer.default_value(node)? {
+                    Value::Str(s) => s,
+                    _ => return None,
+                },
             };
-            let mut inner = parse_inner(&name, &content, self.source_graft, self.document_graft)?;
+            let mut inner = parse_inner(
+                &name,
+                &content,
+                self.source_graft,
+                self.document_graft,
+                self.csv,
+            )?;
             if let (Inner::Text(model), Some(f)) = (&mut inner, self.document_url)
                 && let Some(u) = f(&self.outer, node)
             {
@@ -423,6 +550,9 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             }
             let mut grafts = self.grafts.borrow_mut();
             grafts.push(Graft { outer: node, inner });
+            if let Some(r) = record {
+                self.decoded.borrow_mut().insert(grafts.len() - 1, r);
+            }
             Some(grafts.len() - 1)
         })();
         self.probed.borrow_mut().insert(node, g);
@@ -476,6 +606,38 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    /// A child by name: the outer source's own lookup first (a
+    /// database reads `/books/7` by key), and the listing only where
+    /// the node may hold a grafted document — a leaf with a path or
+    /// with text. A miss on a node that cannot hold one stays a
+    /// miss, without listing its children.
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let ids: Vec<NodeId> = {
+                    let grafts = self.grafts.borrow();
+                    grafts[g].inner.adapter().children_named(inner, name)
+                };
+                ids.into_iter().map(|c| self.wrap(g, c)).collect()
+            }
+            None => {
+                let named = self.outer.children_named(node, name);
+                if !named.is_empty() {
+                    return named;
+                }
+                if self.source_path.is_none()
+                    && !matches!(self.outer.default_value(node), Some(Value::Str(_)))
+                {
+                    return Vec::new();
+                }
+                self.children(node)
+                    .into_iter()
+                    .filter(|&c| self.answers_to(c, name))
+                    .collect()
+            }
+        }
+    }
+
     fn name(&self, node: NodeId) -> Option<String> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().name(inner),
@@ -508,6 +670,83 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().properties(inner),
             None => self.outer.properties(node),
         }
+    }
+
+    /// The walk is open when the outer tree opens to it (a graft is
+    /// read whole once reached).
+    fn walks_for_references(&self) -> bool {
+        self.outer.walks_for_references()
+    }
+    /// A declaration answers on its own side of the boundary; across
+    /// it only a reference property of the source's own can reach.
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        match (self.split(source), self.split(target)) {
+            (None, None) => self.outer.can_refer_to(source, target),
+            (Some((g, s)), Some((h, t))) if g == h => {
+                self.grafts.borrow()[g].inner.adapter().can_refer_to(s, t)
+            }
+            _ => self.ref_property(source).map(|_| true),
+        }
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        match (self.split(source), self.split(target)) {
+            (None, None) => self.outer.reference_properties(source, target),
+            (Some((g, s)), Some((h, t))) if g == h => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .reference_properties(s, t),
+            _ => self.ref_property(source).into_iter().collect(),
+        }
+    }
+    /// The outer source's own index over a scope of its own nodes
+    /// (a database reading `/books/*` by key).
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        match self.split(target) {
+            None => self.outer.index_referrers(scope, property, label, target),
+            Some(_) => None,
+        }
+    }
+    fn tree_identities(&self) -> Vec<(String, NodeId)> {
+        self.outer.tree_identities()
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        match self.split(target) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().reverse_label(inner),
+            None => self.outer.reverse_label(target),
+        }
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .resolve_needs_label(inner, property),
+            None => self.outer.resolve_needs_label(node, property),
+        }
+    }
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .property_names(inner),
+            None => self.outer.property_names(node),
+        }
+    }
+    /// The outer source, or any document grafted so far.
+    fn resolves_references(&self) -> bool {
+        self.outer.resolves_references()
+            || self
+                .grafts
+                .borrow()
+                .iter()
+                .any(|g| g.inner.adapter().resolves_references())
     }
 
     /// The outer tree's non-tree nodes, then each graft's (the
@@ -584,7 +823,28 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     fn default_value(&self, node: NodeId) -> Option<Value> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().default_value(inner),
-            None => self.outer.default_value(node),
+            // A leaf that did not graft (plain text, a format this
+            // crate does not parse) is still a source: read through
+            // its path under the mount's rule, so `?encoding=` and
+            // a declaration reach it. The outer adapter's own text
+            // (strict UTF-8) stands where there is no path.
+            None => {
+                if self.decoding.explicit.is_some()
+                    && self.outer.children(node).is_empty()
+                    && let Some(path_of) = self.source_path
+                    && let Some(p) = path_of(&self.outer, node)
+                    && p.is_file()
+                    && let Ok(bytes) = std::fs::read(&p)
+                {
+                    let name = self.outer.name(node).unwrap_or_default();
+                    return self
+                        .decoding
+                        .decode(&name, &bytes)
+                        .ok()
+                        .map(|d| Value::Str(d.text));
+                }
+                self.outer.default_value(node)
+            }
         }
     }
 
@@ -596,6 +856,29 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
             // file that holds the page).
             None => self.outer.metadata(node, key).or_else(|| {
                 let g = self.graft_at(node)?;
+                if matches!(key, "encoding" | "replaced") {
+                    // A leaf the host's reader read by path has no
+                    // record yet: decode its bytes under the mount's
+                    // rule once, for the record alone.
+                    if !self.decoded.borrow().contains_key(&g)
+                        && let Some(path_of) = self.source_path
+                        && let Some(p) = path_of(&self.outer, node)
+                        && let Ok(bytes) = std::fs::read(&p)
+                    {
+                        let name = self.outer.name(node).unwrap_or_default();
+                        if let Ok(d) = self.decoding.decode(&name, &bytes) {
+                            self.decoded
+                                .borrow_mut()
+                                .insert(g, (d.encoding, d.replaced));
+                        }
+                    }
+                    if let Some((enc, replaced)) = self.decoded.borrow().get(&g) {
+                        return Some(match key {
+                            "encoding" => Value::Str(enc.clone()),
+                            _ => Value::Int(*replaced as i64),
+                        });
+                    }
+                }
                 let grafts = self.grafts.borrow();
                 let a = grafts[g].inner.adapter();
                 a.metadata(a.root(), key)
@@ -702,7 +985,12 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
 
     /// A graft's external references (a text-level ref leaving
     /// its document) come through; an outer leaf's own do too.
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g]
                 .inner
@@ -759,8 +1047,9 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     }
 
     /// A reverse index answers on one side of the boundary only:
-    /// inside a graft, or on the outer tree when no graft could
-    /// hold a referrer (the outer's answer cannot see grafts).
+    /// inside a graft, the graft's own; on the outer tree, the
+    /// outer's declared references (a catalog key, a model `ref`),
+    /// which no graft can hold a referrer for.
     fn reverse_resolve(
         &self,
         node: NodeId,
@@ -775,7 +1064,7 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                     .reverse_resolve(inner, property, hint)?;
                 Some(v.into_iter().map(|t| self.wrap(g, t)).collect())
             }
-            None => None,
+            None => self.outer.reverse_resolve(node, property, hint),
         }
     }
 
@@ -788,6 +1077,44 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
             .adapter()
             .descendants_named(inner, name)?;
         Some(v.into_iter().map(|(t, d)| (self.wrap(g, t), d)).collect())
+    }
+
+    fn descendants_where(
+        &self,
+        node: NodeId,
+        name: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<(NodeId, usize)>> {
+        let (g, inner) = self.split(node)?;
+        let v = self.grafts.borrow()[g]
+            .inner
+            .adapter()
+            .descendants_where(inner, name, property, value)?;
+        Some(v.into_iter().map(|(t, d)| (self.wrap(g, t), d)).collect())
+    }
+
+    fn has_node(&self, node: NodeId) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().has_node(inner),
+            None => self.outer.has_node(node),
+        }
+    }
+
+    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
+        self.outer.unit_scale(expr)
+    }
+
+    fn allow_shell(&self) -> bool {
+        self.outer.allow_shell()
+    }
+
+    fn quantifier_bound(&self) -> usize {
+        self.outer.quantifier_bound()
+    }
+
+    fn invocation_instant(&self) -> Option<(i64, u32)> {
+        self.outer.invocation_instant()
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {

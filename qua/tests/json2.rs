@@ -5,6 +5,7 @@
 
 fn qua(args: &[&str]) -> String {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()

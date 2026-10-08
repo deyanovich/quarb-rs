@@ -1,4 +1,4 @@
-//! The honest structural subset over hand-written LaTeX: declared
+//! The declared structural subset over hand-written LaTeX: declared
 //! sectioning, the at-callout footnote convention normalized to
 //! document-end bodies, explicit-number footnotemark/footnotetext
 //! pairing, quotes, lists, verbatim, comments, and the
@@ -357,4 +357,13 @@ optionals \citet[see][p.~7]{lamport94}.
     // does not resolve (LaTeX's \newlabel vs \bibcite).
     let m2 = quarb_text_latex::parse("\\section{A}\\label{knuth84}\nSee \\cite{knuth84}.\n");
     assert_eq!(values(&m2, "//cit[!::::resolved] @| count"), ["1"]);
+}
+
+/// Finding 22: the scanner walks bytes but never splits a
+/// character — an escaped multibyte character and a multibyte
+/// `\verb` delimiter both come through whole.
+#[test]
+fn multibyte_characters_are_never_split() {
+    let m = parse("\\section{x}\n\nA \\ё b and \\verb§c d§ e.\n");
+    assert_eq!(values(&m, "//paragraph::"), ["A ё b and c d e."]);
 }

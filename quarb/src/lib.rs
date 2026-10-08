@@ -39,27 +39,36 @@
 
 pub mod adapter;
 mod ast;
+pub mod bibref;
+pub mod datenames;
 mod encoding;
 mod error;
 mod exec;
 pub mod kaiv_out;
 mod lexer;
+pub mod locale;
+pub mod number;
 mod parser;
 pub mod reflect;
+pub mod source;
 pub mod trace;
 pub use encoding::{base64, base64_decode, sha256, sha256_hex};
 pub mod complete;
 pub mod highlight;
 pub mod quantity;
 mod stdlib;
-pub use stdlib::tabulate;
+pub use stdlib::{tabulate, tabulate_in, tabulate_with};
+pub mod period;
+pub mod target;
 pub mod temporal;
+pub mod timex;
+mod timexdata;
 pub mod translit;
 mod unparse;
 mod value;
 
 pub use adapter::{
-    AllowShell, AstAdapter, InstantFrom, LinkDir, NodeId, Provenance, ProvenanceList,
+    AllowShell, AstAdapter, ExternalRef, InstantFrom, LinkDir, NodeId, Provenance, ProvenanceList,
     QuantifierBound, WithNow,
 };
 pub use error::{QuarbError, Result};
@@ -86,7 +95,7 @@ pub fn set_invocation_instant(secs: i64, nanos: u32) {
 }
 
 thread_local! {
-    /// The session's sentence bonds (a `.desm` set, ruling #62):
+    /// The session's sentence bonds (a `.desm` set):
     /// what `sentences`, `sc` and the corpus reading segment with,
     /// so a pipeline and a `corpus:` mount agree on "Dr. Smith".
     static SENTENCE_BONDS: std::cell::RefCell<Option<std::rc::Rc<syndesmos::Syndesmos>>> =
@@ -122,10 +131,11 @@ pub fn now_secs() -> i64 {
     }
 }
 pub use exec::{
-    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, Traced, name_path, resolved_provenance,
-    set_ref_targets, set_reproducible, take_refs,
+    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, Traced, canonical_identity, fetched,
+    fetched_opt, is_url, name_path, record_refusal, resolved_provenance, set_ref_targets,
+    set_reproducible, take_refs,
 };
-pub use parser::Defs;
+pub use parser::{Defs, parse_scope_path};
 pub use value::Value;
 
 /// The universal search over a step body: `*//BODY`, with the
@@ -225,6 +235,56 @@ pub fn run(query: &str, adapter: &impl AstAdapter) -> Result<QueryResult> {
     let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
     exec::gate_shell(&ast, adapter)?;
     checked(exec::eval(&ast, adapter))
+}
+
+/// A query's closing serialization for people — `@| csv` or
+/// `@| table` as the last stage — taken off for the tool to render.
+#[derive(Debug, Clone)]
+pub struct ClosingTable {
+    pub csv: bool,
+    /// The named columns, in order; empty for every field.
+    pub columns: Vec<String>,
+    /// The delimiter `csv(";")` names, when it names one.
+    pub delimiter: Option<u8>,
+}
+
+/// Like [`run`], for a tool that renders under an output locale:
+/// when the query closes with `@| csv` or `@| table`, the rows are
+/// returned as they stand before that stage, with its shape, and the
+/// tool tabulates them itself (`tabulate_in` with its locale's cells
+/// and delimiter). The stage anywhere else, and every other stage,
+/// yields the same values as under [`run`] — a value never depends
+/// on a locale.
+pub fn run_for_rendering(
+    query: &str,
+    adapter: &impl AstAdapter,
+) -> Result<(QueryResult, Option<ClosingTable>)> {
+    let tokens = lexer::lex(query)?;
+    let mut ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
+    let mut closing = None;
+    if let Some(ast::Stage::Agg(call)) = ast.pipeline.last_mut()
+        && matches!(call.name.as_str(), "csv" | "table")
+    {
+        let (delimiter, columns) = stdlib::split_csv_delimiter(call);
+        closing = Some(ClosingTable {
+            csv: call.name == "csv",
+            columns: columns
+                .iter()
+                .filter_map(|a| match a {
+                    ast::Arg::Lit(Value::Str(s)) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            delimiter,
+        });
+        // The rows, with a node standing for the record of the
+        // columns asked of it, exactly as the stage would read them.
+        let columns: Vec<ast::Arg> = columns.to_vec();
+        call.name = stdlib::ROWS_FOR_RENDERING.to_string();
+        call.args = columns;
+    }
+    exec::gate_shell(&ast, adapter)?;
+    Ok((checked(exec::eval(&ast, adapter))?, closing))
 }
 
 /// Like [`run`], but returning the final capsae as `(node, topic)`

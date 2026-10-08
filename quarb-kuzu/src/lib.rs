@@ -343,7 +343,9 @@ impl KuzuAdapter {
             bt(&table),
             bt(&pk_col)
         );
-        let rows = self.query_v(&stmt, &pk).unwrap_or_default();
+        let rows = quarb::fetched(self.query_v(&stmt, &pk), || {
+            format!("kuzu: reading the relationships of a {table} node")
+        });
         let mut out: Vec<(String, NodeId)> = rows
             .iter()
             .filter_map(|row| {
@@ -405,7 +407,11 @@ impl AstAdapter for KuzuAdapter {
             .and_then(|c| c.query(&stmt).map(|r| r.collect()))
         {
             Ok(r) => r,
-            Err(_) => return Vec::new(),
+            // Refused and left uncached.
+            Err(e) => {
+                quarb::record_refusal(format!("kuzu: listing table {table}: {e}"));
+                return Vec::new();
+            }
         };
         let ids: Vec<NodeId> = rows
             .iter()
@@ -468,8 +474,12 @@ impl AstAdapter for KuzuAdapter {
             (Kind::Table { index }, "n-rows") => {
                 let stmt = format!("MATCH (m:{}) RETURN count(m)", bt(&self.tables[*index]));
                 drop(nodes);
-                let conn = kuzu::Connection::new(&self.db).ok()?;
-                let mut result = conn.query(&stmt).ok()?;
+                let conn = quarb::fetched_opt(kuzu::Connection::new(&self.db), || {
+                    "kuzu: connecting".to_string()
+                })?;
+                let mut result = quarb::fetched_opt(conn.query(&stmt), || {
+                    format!("kuzu: counting table {}", self.tables[*index])
+                })?;
                 result.next()?.first().map(cell_value)
             }
             (Kind::Entity { table, .. }, "table") => Some(Value::Str(table.clone())),
@@ -487,7 +497,20 @@ impl AstAdapter for KuzuAdapter {
         self.edges(node, true)
     }
 
-    /// Hint-form resolution: `::city~>City` matches the property's
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// A property names a node only under a node label
+    /// (`::manager-->Person`): without one there is nothing to
+    /// match the value against.
+    fn resolve_needs_label(&self, _node: NodeId, _property: &str) -> bool {
+        true
+    }
+
+    /// Hint-form resolution: `::city-->City` matches the property's
     /// value against the target table's primary key.
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let table = hint?;
@@ -498,7 +521,9 @@ impl AstAdapter for KuzuAdapter {
             bt(table),
             bt(&pk)
         );
-        let rows = self.query_v(&stmt, &value).ok()?;
+        let rows = quarb::fetched_opt(self.query_v(&stmt, &value), || {
+            format!("kuzu: resolving into table {table}")
+        })?;
         match rows.first()?.first()? {
             kuzu::Value::Node(nv) => self.intern(nv),
             _ => None,

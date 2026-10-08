@@ -55,7 +55,7 @@ struct Target {
 }
 
 fn parse_target(target: &str) -> Result<Target, AgeError> {
-    let bad = || AgeError::Target(target.to_string());
+    let bad = || AgeError::Target(quarb::target::redact(target));
     let rest = target.strip_prefix("age://").ok_or_else(bad)?;
     let (rest, query) = match rest.split_once('?') {
         Some((r, q)) => (r, Some(q)),
@@ -147,6 +147,30 @@ fn cypher_literal(v: &Value) -> String {
             other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
         ),
     }
+}
+
+/// The `cypher()` call for a statement. The statement rides as a
+/// dollar-quoted string, and the tag is one the statement does
+/// not contain: a stored property holding `$quarb$` would otherwise
+/// close the quote and whatever followed would run as SQL (the
+/// simple-query protocol runs every statement it is handed).
+/// A label or property name in backticks, the backtick doubled
+/// inside — the one quoting Cypher's grammar gives an identifier.
+fn bt(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
+fn cypher_sql(graph: &str, stmt: &str, as_list: &str) -> String {
+    let mut tag = String::from("$quarb$");
+    let mut n = 0u32;
+    while stmt.contains(&tag) {
+        n += 1;
+        tag = format!("$quarb{n}$");
+    }
+    format!(
+        "SELECT * FROM ag_catalog.cypher('{}', {tag}{stmt}{tag}) AS ({as_list})",
+        graph.replace('\'', "''").replace('\\', "\\\\"),
+    )
 }
 
 enum Kind {
@@ -308,13 +332,7 @@ impl AgeAdapter {
     /// columns per row.
     fn cypher(&self, stmt: &str, cols: usize) -> Result<Vec<Vec<String>>, AgeError> {
         let as_list: Vec<String> = (0..cols).map(|i| format!("c{i} agtype")).collect();
-        let sql = format!(
-            "SELECT * FROM ag_catalog.cypher('{}', $quarb${}$quarb$) AS ({})",
-            self.graph.replace('\'', "''"),
-            stmt,
-            as_list.join(", ")
-        );
-        self.simple(&sql)
+        self.simple(&cypher_sql(&self.graph, stmt, &as_list.join(", ")))
     }
 
     /// Intern one vertex from its agtype JSON.
@@ -365,7 +383,9 @@ impl AgeAdapter {
         };
         let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
         let stmt = format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY id(r)");
-        let rows = self.cypher(&stmt, 2).unwrap_or_default();
+        let rows = quarb::fetched(self.cypher(&stmt, 2), || {
+            format!("age: reading the edges of vertex {gid}")
+        });
         rows.iter()
             .filter_map(|row| {
                 let edge = agtype_json(row.first()?)?;
@@ -415,11 +435,18 @@ impl AstAdapter for AgeAdapter {
         let order = if self.key.is_empty() {
             "id(m)".to_string()
         } else {
-            let props: Vec<String> = self.key.iter().map(|k| format!("m.{k}")).collect();
+            let props: Vec<String> = self.key.iter().map(|k| format!("m.{}", bt(k))).collect();
             format!("coalesce({}, id(m))", props.join(", "))
         };
-        let stmt = format!("MATCH (m:{label}) RETURN m ORDER BY {order}");
-        let rows = self.cypher(&stmt, 1).unwrap_or_default();
+        let stmt = format!("MATCH (m:{}) RETURN m ORDER BY {order}", bt(&label));
+        // A failed listing is refused and left uncached.
+        let rows = match self.cypher(&stmt, 1) {
+            Ok(rows) => rows,
+            Err(e) => {
+                quarb::record_refusal(format!("age: listing label {label}: {e}"));
+                return Vec::new();
+            }
+        };
         let ids: Vec<NodeId> = rows
             .iter()
             .filter_map(|row| self.intern(&agtype_json(row.first()?)?))
@@ -468,9 +495,11 @@ impl AstAdapter for AgeAdapter {
                     .collect(),
             )),
             (Kind::Label { index }, "n-rows") => {
-                let stmt = format!("MATCH (m:{}) RETURN count(m)", self.labels[*index]);
+                let stmt = format!("MATCH (m:{}) RETURN count(m)", bt(&self.labels[*index]));
                 drop(nodes);
-                let rows = self.cypher(&stmt, 1).ok()?;
+                let rows = quarb::fetched_opt(self.cypher(&stmt, 1), || {
+                    "age: counting a label".to_string()
+                })?;
                 agtype_json(rows.first()?.first()?).map(|j| cell_value(&j))
             }
             (Kind::Entity { gid, .. }, "id") => Some(Value::Int(*gid)),
@@ -487,18 +516,33 @@ impl AstAdapter for AgeAdapter {
         self.edges(node, true)
     }
 
-    /// Hint-form resolution: `::city~>City` matches the property's
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// A property names a node only under a node label
+    /// (`::manager-->Person`): without one there is nothing to
+    /// match the value against.
+    fn resolve_needs_label(&self, _node: NodeId, _property: &str) -> bool {
+        true
+    }
+
+    /// Hint-form resolution: `::city-->City` matches the property's
     /// value against the target label's `?key=` property (or the
     /// graph id without one).
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let label = hint?;
         let value = self.property(node, property)?;
         let cond = match self.key.first() {
-            Some(k) => format!("m.{k} = {}", cypher_literal(&value)),
+            Some(k) => format!("m.{} = {}", bt(k), cypher_literal(&value)),
             None => format!("id(m) = {}", cypher_literal(&value)),
         };
-        let stmt = format!("MATCH (m:{label}) WHERE {cond} RETURN m LIMIT 1");
-        let rows = self.cypher(&stmt, 1).ok()?;
+        let stmt = format!("MATCH (m:{}) WHERE {cond} RETURN m LIMIT 1", bt(&label));
+        let rows = quarb::fetched_opt(self.cypher(&stmt, 1), || {
+            format!("age: resolving into label {label}")
+        })?;
         self.intern(&agtype_json(rows.first()?.first()?)?)
     }
 
@@ -570,6 +614,27 @@ mod tests {
         assert_eq!(agtype_json("1.5::numeric").unwrap(), serde_json::json!(1.5));
         // a `::` inside a string is not an annotation
         assert_eq!(agtype_json(r#""a::b""#).unwrap(), serde_json::json!("a::b"));
+    }
+
+    #[test]
+    fn the_dollar_quote_cannot_be_closed_from_inside() {
+        let sql = cypher_sql("g", "MATCH (n) RETURN n", "c0 agtype");
+        assert!(sql.contains("$quarb$MATCH (n) RETURN n$quarb$"), "{sql}");
+        // a statement that carries the tag (a stored value, a name)
+        // gets another, and only the cypher() call runs
+        let hostile = "MATCH (n {name: '$quarb$) AS (c0 agtype); DROP TABLE x; --'}) RETURN n";
+        let sql = cypher_sql("g", hostile, "c0 agtype");
+        assert!(sql.contains("$quarb1$MATCH"), "{sql}");
+        assert!(sql.ends_with("$quarb1$) AS (c0 agtype)"), "{sql}");
+        assert_eq!(sql.matches("$quarb1$").count(), 2);
+        // a tag of any order
+        let sql = cypher_sql("g", "$quarb$ $quarb1$ $quarb2$", "c0 agtype");
+        assert!(
+            sql.contains("$quarb3$$quarb$ $quarb1$ $quarb2$$quarb3$"),
+            "{sql}"
+        );
+        // the graph name is a plain SQL string
+        assert!(cypher_sql("o'g", "RETURN 1", "c0 agtype").contains("cypher('o''g'"));
     }
 
     #[test]

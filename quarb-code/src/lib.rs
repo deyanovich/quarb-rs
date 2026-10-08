@@ -23,17 +23,18 @@
 //!   place tree-sitter vocabulary survives), `::::construct`,
 //!   `::::start-line` / `::::end-line`, `::::lang`,
 //!   `::::n-children`, `::::n-params` — every one aliased to
-//!   `::` (the surface is closed; ruling #29).
+//!   `::` (the surface is closed).
 //! - **Crosslinks**: every `call` carries `->definition` edges to
 //!   the same-file declarations matching its callee;
 //!   `//lex<-definition` is find-references.
 //!
 //! The vocabulary and the per-grammar lowering tables are ruled
-//! in the spec (The Code Level, ruling #31) and doubled as
+//! in the spec (The Code Level) and doubled as
 //! conformance fixtures in this crate's tests. Grammars: Rust,
 //! Python, JavaScript, C — the syntax level's set, each nailed.
 
 use quarb::{AstAdapter, NodeId, Value};
+use std::collections::HashMap;
 
 mod lower;
 
@@ -84,6 +85,8 @@ pub enum CodeError {
     Language(String),
     #[error(transparent)]
     Backend(#[from] quarb_tree_sitter::TreeSitterError),
+    #[error("code: {0}")]
+    Encoding(String),
 }
 
 /// One lowered construct — the code level's producer seam, the
@@ -131,10 +134,6 @@ struct Node {
     doc: Option<String>,
     callee: Option<String>,
     n_params: Option<i64>,
-    /// `->definition` targets (calls only).
-    links: Vec<NodeId>,
-    /// `<-definition` sources (declarations only).
-    backlinks: Vec<NodeId>,
 }
 
 /// A source file read at the code level.
@@ -142,11 +141,20 @@ pub struct CodeModel {
     source: String,
     lang: Lang,
     nodes: Vec<Node>,
+    /// Identifier → the named function and type declarations, in
+    /// document order: a call's `->definition` targets. One list
+    /// per identifier, shared by every call of it, so a file with
+    /// a thousand same-named declarations and a thousand calls
+    /// holds two thousand ids, not a million.
+    defs_by_ident: HashMap<String, Vec<NodeId>>,
+    /// Identifier → the calls whose callee ends in it: a
+    /// declaration's `<-definition` sources.
+    calls_by_ident: HashMap<String, Vec<NodeId>>,
 }
 
 /// Every annotation key answers at `::` too: the property
 /// surface is closed (a source file cannot mint a property —
-/// identifiers become names), so ruling #29 applies in full.
+/// identifiers become names), so the alias rule applies in full.
 /// Four colons stay the portable spelling.
 const ALIASED: &[&str] = &[
     "kind",
@@ -178,8 +186,6 @@ impl CodeModel {
             doc: None,
             callee: None,
             n_params: None,
-            links: Vec::new(),
-            backlinks: Vec::new(),
         });
         for d in decls {
             let id = NodeId(nodes.len() as u64);
@@ -197,8 +203,6 @@ impl CodeModel {
                 doc: d.doc,
                 callee: d.callee,
                 n_params: d.n_params,
-                links: Vec::new(),
-                backlinks: Vec::new(),
             });
             nodes[parent.0 as usize].children.push(id);
         }
@@ -206,6 +210,8 @@ impl CodeModel {
             source,
             lang,
             nodes,
+            defs_by_ident: HashMap::new(),
+            calls_by_ident: HashMap::new(),
         };
         model.link_definitions();
         model
@@ -216,33 +222,27 @@ impl CodeModel {
     /// identifier. Unresolved callees carry no edge; an ambiguous
     /// identifier fans out to every match.
     fn link_definitions(&mut self) {
-        let mut by_name: std::collections::HashMap<&str, Vec<NodeId>> =
-            std::collections::HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
             if matches!(n.construct, "function" | "type")
                 && let Some(name) = &n.name
             {
-                by_name
-                    .entry(name.as_str())
+                self.defs_by_ident
+                    .entry(name.clone())
+                    .or_default()
+                    .push(NodeId(i as u64));
+            }
+            if let Some(callee) = &n.callee
+                && let Some(ident) = trailing_ident(callee)
+            {
+                self.calls_by_ident
+                    .entry(ident.to_string())
                     .or_default()
                     .push(NodeId(i as u64));
             }
         }
-        let mut links: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
-        for (i, n) in self.nodes.iter().enumerate() {
-            if let Some(callee) = &n.callee
-                && let Some(ident) = trailing_ident(callee)
-                && let Some(targets) = by_name.get(ident)
-            {
-                links.push((NodeId(i as u64), targets.clone()));
-            }
-        }
-        for (call, targets) in links {
-            for t in &targets {
-                self.nodes[t.0 as usize].backlinks.push(call);
-            }
-            self.nodes[call.0 as usize].links = targets;
-        }
+        // Only calls that resolve count as sources.
+        self.calls_by_ident
+            .retain(|ident, _| self.defs_by_ident.contains_key(ident));
     }
 
     /// Read `text` as `ext`'s language at the code level: the
@@ -259,12 +259,27 @@ impl CodeModel {
 
     /// Read a file at the code level, language by extension.
     pub fn open(path: &std::path::Path) -> Result<Self, CodeError> {
+        Self::open_with_decoding(path, &quarb::source::SourceDecoding::default())
+    }
+
+    /// [`open`](Self::open) under a mount's source-boundary rule:
+    /// the file decodes by `?encoding=`, a byte-order mark, else
+    /// strict UTF-8 — refused with the byte offset otherwise.
+    pub fn open_with_decoding(
+        path: &std::path::Path,
+        decoding: &quarb::source::SourceDecoding,
+    ) -> Result<Self, CodeError> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let text = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
+        let name = path.display().to_string();
+        let text = decoding
+            .decode(&name, &bytes)
+            .map_err(|e| CodeError::Encoding(format!("{name}: {e}")))?
+            .text;
         Self::parse(&text, &ext)
     }
 
@@ -346,6 +361,23 @@ impl CodeModel {
 /// The trailing identifier of a callee text — `Type::method`,
 /// `obj.method`, and `path.to.f` all resolve by their last
 /// segment.
+/// The segment before the callee's last one (`Type` in
+/// `Type::new`, `obj` in `obj.method`), when the callee is
+/// qualified; the receiver keywords (`self`, `this`, `super`,
+/// `crate`) qualify nothing.
+fn qualifier(callee: &str) -> Option<&str> {
+    let end = callee.trim_end_matches(['!', '?']);
+    let last = trailing_ident(end)?;
+    let head = end[..end.len() - last.len()]
+        .trim_end_matches("::")
+        .trim_end_matches('.');
+    if head.len() == end.len() - last.len() {
+        return None;
+    }
+    let q = trailing_ident(head)?;
+    (!matches!(q, "self" | "this" | "super" | "crate" | "Self")).then_some(q)
+}
+
 fn trailing_ident(callee: &str) -> Option<&str> {
     let end = callee.trim_end_matches(['!', '?']);
     let start = end
@@ -358,8 +390,19 @@ fn trailing_ident(callee: &str) -> Option<&str> {
 }
 
 impl AstAdapter for CodeModel {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -430,8 +473,40 @@ impl AstAdapter for CodeModel {
     /// `->definition`: a call's edges to the declarations its
     /// callee resolves to (same file, by identifier).
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.nodes[node.0 as usize]
-            .links
+        let n = &self.nodes[node.0 as usize];
+        let Some(callee) = n.callee.as_deref() else {
+            return Vec::new();
+        };
+        let Some(ident) = trailing_ident(callee) else {
+            return Vec::new();
+        };
+        let Some(targets) = self.defs_by_ident.get(ident) else {
+            return Vec::new();
+        };
+        // A qualified callee (`Type::new`, `module.helper`,
+        // `self.run`) prefers the declarations whose enclosing
+        // declaration bears the qualifier's last segment; only an
+        // unqualified callee, or a qualifier nothing in the file
+        // answers to, fans out to every same-named declaration.
+        let qualified: Vec<NodeId> = match qualifier(callee) {
+            Some(q) => targets
+                .iter()
+                .copied()
+                .filter(|&t| {
+                    self.nodes[t.0 as usize]
+                        .parent
+                        .and_then(|p| self.nodes[p.0 as usize].name.as_deref())
+                        == Some(q)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let chosen: &[NodeId] = if qualified.is_empty() {
+            targets
+        } else {
+            &qualified
+        };
+        chosen
             .iter()
             .map(|&t| ("definition".to_string(), t))
             .collect()
@@ -440,10 +515,19 @@ impl AstAdapter for CodeModel {
     /// `<-definition`: find-references — every call site whose
     /// callee resolves here.
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.nodes[node.0 as usize]
-            .backlinks
-            .iter()
-            .map(|&s| ("definition".to_string(), s))
-            .collect()
+        let n = &self.nodes[node.0 as usize];
+        if !matches!(n.construct, "function" | "type") {
+            return Vec::new();
+        }
+        n.name
+            .as_deref()
+            .and_then(|name| self.calls_by_ident.get(name))
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|&s| ("definition".to_string(), s))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }

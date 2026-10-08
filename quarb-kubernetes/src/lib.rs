@@ -12,7 +12,7 @@
 //! `[::created > 2026-01-01]` is a calendar comparison.
 //!
 //! **Owner references are native.** `metadata.ownerReferences`
-//! is a typed pointer, so `::owner~>` walks a Pod to its
+//! is a typed pointer, so `::owner-->` walks a Pod to its
 //! ReplicaSet to its Deployment with no schema, and `->owner` /
 //! `->node` enumerate as labeled edges. `::app`-style lookups
 //! fall through to `metadata.labels`, since labels are how
@@ -447,7 +447,7 @@ impl KubernetesAdapter {
             return Some(id);
         }
         let path = format!("{}/{name}", self.resources[res].list_path(ns));
-        let json = self.call(&path).ok()?;
+        let json = quarb::fetched_opt(self.call(&path), || format!("kubernetes: reading {path}"))?;
         let info = obj_info(&json, &self.resources[res])?;
         let parent = {
             let listings = self.listing_nodes.borrow();
@@ -686,8 +686,8 @@ impl AstAdapter for KubernetesAdapter {
         }
     }
 
-    /// `::owner~>` climbs the ownership chain; `::node~>` lands
-    /// on the pod's Node; `::namespace~>` on the Namespace
+    /// `::owner-->` climbs the ownership chain; `::node-->` lands
+    /// on the pod's Node; `::namespace-->` on the Namespace
     /// object.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let key = match &self.nodes.borrow()[node.0 as usize].kind {

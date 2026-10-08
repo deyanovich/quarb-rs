@@ -30,6 +30,42 @@ pub struct Mount {
     pub adapter: Box<dyn AstAdapter>,
 }
 
+/// The identity a mount's target gives its root: a URL as itself;
+/// a path made absolute, a directory's with a trailing `/` (a base
+/// over its files); a reading prefix (`text:book.atd`) stripped
+/// when what follows it is a path; anything else as written.
+fn mount_identity(target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if quarb::is_url(t) {
+        return Some(quarb::canonical_identity(t));
+    }
+    let path = match t.split_once(':') {
+        Some((prefix, rest))
+            if !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+                && !rest.starts_with("//")
+                && std::path::Path::new(rest).exists() =>
+        {
+            rest
+        }
+        _ => t,
+    };
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Some(t.to_string());
+    }
+    let mut identity = quarb::canonical_identity(path);
+    if p.is_dir() && !identity.ends_with('/') {
+        identity.push('/');
+    }
+    Some(identity)
+}
+
 /// A Quarb adapter over a set of named mounts.
 pub struct MountAdapter {
     mounts: Vec<Mount>,
@@ -41,15 +77,29 @@ pub struct MountAdapter {
 // at bit 63 — must keep its ids within `INNER_MASK`, or `encode`
 // would spill into the mount byte and `decode` mis-route the node.
 const SHIFT: u32 = 56;
+
+/// How many mounts fit the id's high byte (255 is the root's).
+pub const MAX_MOUNTS: usize = 254;
 const INNER_MASK: u64 = (1 << SHIFT) - 1;
 
 impl MountAdapter {
+    /// Panics past [`MAX_MOUNTS`]; a host that takes its mounts from
+    /// the command line uses [`MountAdapter::try_new`].
     pub fn new(mounts: Vec<Mount>) -> Self {
-        assert!(
-            mounts.len() < 255,
-            "at most 254 mounts (mount index rides the id's high byte)"
-        );
-        MountAdapter { mounts }
+        Self::try_new(mounts).expect("at most 254 mounts (mount index rides the id's high byte)")
+    }
+
+    /// The adapter over `mounts`, or a refusal when there are more
+    /// than [`MAX_MOUNTS`] of them (the mount index rides the
+    /// node id's high byte).
+    pub fn try_new(mounts: Vec<Mount>) -> Result<Self, String> {
+        if mounts.len() > MAX_MOUNTS {
+            return Err(format!(
+                "{} mounts; at most {MAX_MOUNTS} can be mounted together",
+                mounts.len()
+            ));
+        }
+        Ok(MountAdapter { mounts })
     }
 
     /// Which mount a node belongs to, with the inner id — `None` for
@@ -116,6 +166,91 @@ impl AstAdapter for MountAdapter {
         match self.decode(node) {
             None => Vec::new(),
             Some((m, inner)) => self.mounts[m].adapter.properties(inner),
+        }
+    }
+
+    /// The walk is open when every mount opens to it.
+    fn walks_for_references(&self) -> bool {
+        self.mounts.iter().all(|m| m.adapter.walks_for_references())
+    }
+    /// Within one mount its own declarations answer; across mounts
+    /// only a reference property of the source's own can reach.
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        let (m, s) = self.decode(source)?;
+        match self.decode(target) {
+            Some((n, t)) if n == m => self.mounts[m].adapter.can_refer_to(s, t),
+            _ => self.mounts[m].adapter.ref_property(s).map(|_| true),
+        }
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        let Some((m, s)) = self.decode(source) else {
+            return Vec::new();
+        };
+        match self.decode(target) {
+            Some((n, t)) if n == m => self.mounts[m].adapter.reference_properties(s, t),
+            _ => self.mounts[m].adapter.ref_property(s).into_iter().collect(),
+        }
+    }
+    fn resolves_references(&self) -> bool {
+        self.mounts.iter().any(|m| m.adapter.resolves_references())
+    }
+    /// A scope inside the target's own mount (`/db/books/*`) is the
+    /// mount's to answer, under its own path.
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        let (m, inner) = self.decode(target)?;
+        let rest = scope
+            .strip_prefix('/')?
+            .strip_prefix(self.mounts[m].name.as_str())?;
+        if !rest.starts_with('/') {
+            return None;
+        }
+        let v = self.mounts[m]
+            .adapter
+            .index_referrers(rest, property, label, inner)?;
+        Some(v.into_iter().map(|t| self.encode(m, t)).collect())
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        let (m, inner) = self.decode(target)?;
+        self.mounts[m].adapter.reverse_label(inner)
+    }
+    /// Every mount's own target is an identity of its root,
+    /// canonicalized: a file's absolute path, a directory as a base
+    /// over its files (its path with a trailing `/`), a URL as
+    /// itself. A reading prefix (`text:`, `json2:`) is not part of
+    /// the identity. Then whatever the mounts declare inside.
+    fn tree_identities(&self) -> Vec<(String, NodeId)> {
+        let mut out = Vec::new();
+        for (m, mount) in self.mounts.iter().enumerate() {
+            let root = self.encode(m, mount.adapter.root());
+            if let Some(target) = mount.target.as_deref()
+                && let Some(identity) = mount_identity(target)
+            {
+                out.push((identity, root));
+            }
+            out.extend(
+                mount
+                    .adapter
+                    .tree_identities()
+                    .into_iter()
+                    .map(|(i, n)| (i, self.encode(m, n))),
+            );
+        }
+        out
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.decode(node)
+            .is_some_and(|(m, inner)| self.mounts[m].adapter.resolve_needs_label(inner, property))
+    }
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        match self.decode(node) {
+            Some((m, inner)) => self.mounts[m].adapter.property_names(inner),
+            None => Vec::new(),
         }
     }
 
@@ -256,7 +391,12 @@ impl AstAdapter for MountAdapter {
             .map(|t| self.encode(m, t))
     }
 
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         // The identifier is document-external by definition — no
         // id translation, plain delegation to the node's mount.
         let (m, inner) = self.decode(node)?;
@@ -309,6 +449,46 @@ impl AstAdapter for MountAdapter {
         let (m, inner) = self.decode(node)?;
         let v = self.mounts[m].adapter.descendants_named(inner, name)?;
         Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
+    }
+
+    fn descendants_where(
+        &self,
+        node: NodeId,
+        name: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<(NodeId, usize)>> {
+        let (m, inner) = self.decode(node)?;
+        let v = self.mounts[m]
+            .adapter
+            .descendants_where(inner, name, property, value)?;
+        Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
+    }
+
+    fn has_node(&self, node: NodeId) -> bool {
+        match self.decode(node) {
+            None => node == self.root(),
+            Some((m, inner)) => self.mounts[m].adapter.has_node(inner),
+        }
+    }
+
+    /// A mounted adapter's own word on names and traits (a web
+    /// store's rows answer to their kind): inside a mount the
+    /// adapter decides; the mount's root answers by its mount name.
+    fn answers_to(&self, node: NodeId, name: &str) -> bool {
+        match self.decode(node) {
+            Some((m, inner)) if inner != self.mounts[m].adapter.root() => {
+                self.mounts[m].adapter.answers_to(inner, name)
+            }
+            _ => self.name(node).as_deref() == Some(name),
+        }
+    }
+
+    fn has_trait(&self, node: NodeId, name: &str) -> bool {
+        match self.decode(node) {
+            None => false,
+            Some((m, inner)) => self.mounts[m].adapter.has_trait(inner, name),
+        }
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
@@ -393,113 +573,5 @@ impl MountAdapter {
 pub struct Shared<A>(pub std::rc::Rc<A>);
 
 impl<A: AstAdapter> AstAdapter for Shared<A> {
-    fn root(&self) -> NodeId {
-        self.0.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.0.children(node)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.0.name(node)
-    }
-
-    /// Aliases (ruling #30) and trait aliases pass through: the
-    /// wrapped adapter's word, not name equality on this layer.
-    fn answers_to(&self, node: NodeId, name: &str) -> bool {
-        self.0.answers_to(node, name)
-    }
-
-    fn has_trait(&self, node: NodeId, name: &str) -> bool {
-        self.0.has_trait(node, name)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.0.parent(node)
-    }
-    fn traits(&self, node: NodeId) -> Vec<String> {
-        self.0.traits(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.0.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.0.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.0.metadata(node, key)
-    }
-    fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
-        self.0.aliased_metadata(node)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.backlinks(node)
-    }
-    fn link_property(
-        &self,
-        source: NodeId,
-        label: &str,
-        target: NodeId,
-        name: &str,
-    ) -> Option<Value> {
-        self.0.link_property(source, label, target, name)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.0.resolve(node, property, hint)
-    }
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
-        self.0.external_ref(node, property, hint)
-    }
-    fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
-        self.0.resolve_fragment(node, fragment)
-    }
-    fn document_by_ref(&self, id: &str) -> Option<NodeId> {
-        self.0.document_by_ref(id)
-    }
-    fn reverse_resolve(&self, n: NodeId, p: Option<&str>, h: Option<&str>) -> Option<Vec<NodeId>> {
-        self.0.reverse_resolve(n, p, h)
-    }
-    fn descendants_named(&self, n: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
-        self.0.descendants_named(n, name)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.0.prefetch_links(nodes, dir)
-    }
-    fn ref_property(&self, node: NodeId) -> Option<String> {
-        self.0.ref_property(node)
-    }
-    fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
-        self.0.ref_label(node, property)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.0.children_named(node, name)
-    }
-    fn child_host(&self, node: NodeId) -> NodeId {
-        self.0.child_host(node)
-    }
-    fn non_tree_nodes(&self) -> Vec<NodeId> {
-        self.0.non_tree_nodes()
-    }
-    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
-        self.0.properties(node)
-    }
-    fn quantifier_bound(&self) -> usize {
-        self.0.quantifier_bound()
-    }
-    fn allow_shell(&self) -> bool {
-        self.0.allow_shell()
-    }
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.0.invocation_instant()
-    }
-    fn provenance(&self, node: NodeId) -> quarb::Provenance {
-        self.0.provenance(node)
-    }
-    fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
-        self.0.provenance_list(node)
-    }
-    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        self.0.unit_scale(expr)
-    }
+    quarb::forward_ast_adapter!(0);
 }

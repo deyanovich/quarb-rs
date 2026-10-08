@@ -355,8 +355,7 @@ impl CwlAdapter {
         let resp = req
             .send_bytes(&payload)
             .map_err(|e| CwlError::Api(format!("{action}: {e}")))?;
-        let text = resp
-            .into_string()
+        let text = quarb::source::text_from_reader(resp.into_reader())
             .map_err(|e| CwlError::Api(format!("{action}: {e}")))?;
         serde_json::from_str(&text).map_err(|e| CwlError::Api(format!("{action}: {e}")))
     }
@@ -531,7 +530,14 @@ impl CwlAdapter {
             Plan::Done(k) => return k,
             Plan::Leaf => Vec::new(),
             Plan::Group(full) => {
-                let events = self.fetch_events(&full).unwrap_or_default();
+                // Refused and left uncached.
+                let events = match self.fetch_events(&full) {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        quarb::record_refusal(format!("cwlogs: reading group {full}: {e}"));
+                        return Vec::new();
+                    }
+                };
                 let gi = {
                     let mut groups = self.groups.borrow_mut();
                     groups.push((full, events));
@@ -602,6 +608,11 @@ impl CwlAdapter {
 }
 
 impl AstAdapter for CwlAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

@@ -201,7 +201,7 @@ fn xml_identity_from_declarations() {
     );
     assert_eq!(d(r#"<usx version="3.0"/>"#), Some("usx"));
     assert_eq!(d("<TEI/>"), Some("tei"));
-    // undeclared <article>: honestly ambiguous
+    // undeclared <article>: ambiguous
     assert_eq!(d("<article><front/></article>"), None);
 }
 
@@ -225,6 +225,66 @@ fn tei_imports_by_namespace() {
         values(&m, r#"//section[::lemma = "First attempt"]/paragraph::"#),
         ["The Lewis gun jammed."]
     );
+}
+
+/// FictionBook 2 by its declared namespace (or its `FictionBook`
+/// root): titled sections, epigraphs as quotation blocks with the
+/// hypograph, poems as strophes of stichoi, notes as footnotes;
+/// the description's title and author ride in as declared
+/// identity (the literary reading keeps them as nodes).
+#[test]
+fn fictionbook_imports_by_namespace() {
+    let fb2 = r##"<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+<description><title-info>
+<author><first-name>Александр</first-name><last-name>Пушкин</last-name></author>
+<book-title>Евгений Онегин</book-title>
+</title-info></description>
+<body>
+<section><title><p>Глава первая</p></title>
+<epigraph><p>И жить торопится, и чувствовать спешит.</p><text-author>Кн. Вяземский</text-author></epigraph>
+<poem><stanza>
+<v>«Мой дядя самых честных правил,</v>
+<v>Когда не в шутку занемог,</v>
+</stanza><stanza>
+<v>Так думал молодой повеса,</v>
+<v>Наследник всех своих родных.<a l:href="#n1" type="note">[1]</a></v>
+</stanza></poem>
+<p>Так <emphasis>начинается</emphasis> роман.</p>
+</section>
+</body>
+<body name="notes"><section id="n1"><title><p>1</p></title><p>Писано в Бессарабии.</p></section></body>
+</FictionBook>"##;
+    assert_eq!(quarb_text_koine::detect_xml_kind(fb2), Some("fb2"));
+    assert_eq!(
+        quarb_text_koine::detect_xml_kind("<FictionBook><body/></FictionBook>"),
+        Some("fb2")
+    );
+    let m = quarb_text_koine::parse_xml_as(fb2, "fb2").unwrap();
+    assert_eq!(values(&m, "//section::title"), ["Глава первая"]);
+    assert_eq!(values(&m, "//strophe @| count"), ["2"]);
+    assert_eq!(values(&m, "//stichos @| count"), ["4"]);
+    assert_eq!(
+        values(&m, "//stichos[1]::"),
+        ["«Мой дядя самых честных правил,"]
+    );
+    assert_eq!(values(&m, "//blockquote::hypograph"), ["Кн. Вяземский"]);
+    // The note's text stands at its deixis (inside the stanza) and
+    // again as the notes body the importer appends at the end.
+    assert_eq!(
+        values(&m, "//footnote::"),
+        ["Писано в Бессарабии.", "Писано в Бессарабии."]
+    );
+    assert_eq!(values(&m, "//verse/footnote @| count"), ["1"]);
+    // the literary reading keeps the inline emphasis and the identity
+    let l = quarb_text_koine::parse_lit_xml_as(fb2, "fb2").unwrap();
+    assert_eq!(values(&l, "//emphasis::"), ["начинается"]);
+    assert_eq!(values(&l, "//title::"), ["Евгений Онегин"]);
+    assert_eq!(values(&l, "//author::"), ["Александр Пушкин"]);
+    // and declares them on the document node, as html's head does
+    assert_eq!(values(&m, "^::::title"), ["Евгений Онегин"]);
+    assert_eq!(values(&m, "^::::author"), ["Александр Пушкин"]);
+    assert_eq!(values(&l, "^::::title"), ["Евгений Онегин"]);
 }
 
 /// A TEI speech on the text level: a `<sp><speaker>` block keeps
@@ -310,7 +370,7 @@ fn lit_block_stage_directions_wear_their_sim() {
     );
 }
 
-/// The cast layer (ruling #79): a cast table declares characters
+/// The cast layer: a cast table declares characters
 /// the source did not, annotates the word tokens its patterns
 /// match with the character's id as their `prosopon`, and every
 /// mention — a speech, a name span, a token — reaches its character
@@ -636,7 +696,7 @@ const RNC: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </html>
 "#;
 
-/// The parsing pack (ruling #80): a corpus the source itself parsed
+/// The parsing pack: a corpus the source itself parsed
 /// mounts with its own tokens and sentences — the RNC export's
 /// `w`/`ana` become tokens carrying lemma, part of speech,
 /// features and semantic class; the untokenized punctuation is
@@ -744,7 +804,7 @@ fn parsing_pack_proiel() {
     );
 }
 
-/// Citation coordinates (ruling #81): `?scheme=` turns USFM's
+/// Citation coordinates: `?scheme=` turns USFM's
 /// chapter and verse markers into milestones with full-path
 /// values under the scheme, and `::cite` answers the coordinate
 /// in force at any node — a token's, a sentence's, a paragraph's;
@@ -773,7 +833,7 @@ fn lit_scheme_and_cite() {
     assert_eq!(values(&p, r#"//token[:: = "loved"]::cite"#), [""]);
 }
 
-/// Old spelling (ruling #82): under a spelling table the tokens'
+/// Old spelling: under a spelling table the tokens'
 /// `::lower` and `::modern` read the modern spelling of a
 /// historical edition, `::` stays the edition's own, and an
 /// unknown table refuses.
@@ -795,7 +855,7 @@ fn corpus_modernize_folds_old_spelling() {
 }
 
 /// Where no milestone governs, `::cite` is structural: the
-/// enclosing sections' names outermost-in (ruling #81 addendum).
+/// enclosing sections' names outermost-in.
 #[test]
 fn structural_cite_names_the_sections() {
     let md =
@@ -819,8 +879,9 @@ fn structural_cite_names_the_sections() {
 /// An inline-bodied note (at-usfm's `\f`, the `note` sim) is a
 /// footnote: its body out of the prose under a `footnote` node,
 /// the callout at its offset in the block; the corpus reading
-/// tokenizes the text, not the apparatus, and the note cites as
-/// its callout does.
+/// tokenizes the body after the block that carries the callout
+/// (a note is part of the text), and the note cites as its
+/// callout does.
 #[test]
 fn inline_notes_are_footnotes_not_prose() {
     let usfm = "\\id JHN\n\\c 3\n\\p\n\\v 16 For God so loved\\f + \\fr 3:16 \\ft The phrase is Greek.\\f* the world. \\v 17 God sent the Son.\n";
@@ -828,14 +889,23 @@ fn inline_notes_are_footnotes_not_prose() {
     m.tokenize_with(None);
     assert_eq!(
         values(&m, r#"//sentence[::cite = "jhn.3.16"]::"#),
-        ["For God so loved the world."]
+        ["For God so loved the world.", "3:16 The phrase is Greek."]
     );
     assert_eq!(values(&m, "//footnote<deixis> @| count"), ["1"]);
     assert_eq!(
         values(&m, r#"//footnote<deixis>[::cite = "jhn.3.16"]::"#),
         ["3:16 The phrase is Greek."]
     );
-    assert_eq!(values(&m, r#"//token[:: = "phrase"] @| count"#), ["0"]);
+    // The note's tokens follow the block's, numbered after
+    // "world." and citing as the callout does.
+    assert_eq!(values(&m, r#"//token[:: = "phrase"] @| count"#), ["1"]);
+    assert_eq!(values(&m, r#"//token[:: = "phrase"]::cite"#), ["jhn.3.16"]);
+    let n = |w: &str| {
+        values(&m, &format!(r#"//token[:: = "{w}"]::::n"#))[0]
+            .parse::<u32>()
+            .unwrap()
+    };
+    assert!(n("phrase") > n("Son"), "the note follows the block");
     assert_eq!(values(&m, r#"//token[:: = "loved"]::cite"#), ["jhn.3.16"]);
     // The text level reads the same file through the same importer.
     let t = quarb_text_koine::parse_xml_as(usfm, "usfm").unwrap();
@@ -929,7 +999,7 @@ fn lit_tei_speech_keys_its_speaker() {
     );
 }
 
-/// The gazetteer (ruling #87): a places table declares `place`
+/// The gazetteer: a places table declares `place`
 /// nodes as a cast table declares characters; a word token a
 /// row's pattern matches answers `::chora` and reaches the place
 /// as `->place`, the place its mentions as `<-place`, and the

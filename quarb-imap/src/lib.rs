@@ -14,9 +14,9 @@
 //! peeking at one message of a ten-thousand-message inbox
 //! fetches one message.
 //!
-//! **When to use it, honestly**: for a quick remote peek. Every
+//! **When to use it**: for a quick remote peek. Every
 //! touched message is a network round-trip, and the thread
-//! fabric (`~>` / `<-` over Message-IDs) is deliberately absent
+//! fabric (`-->` / `<-` over Message-IDs) is deliberately absent
 //! — indexing it would mean fetching every header, which is a
 //! sync. For real work, sync locally (mbsync) and use
 //! `quarb-maildir`, where everything is instant and the fabric
@@ -28,6 +28,7 @@
 //! else curl's `~/.netrc` (`machine HOST login U password P`).
 //! Read-only: the adapter never stores, flags, or expunges.
 
+use quarb::source::SourceDecoding;
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -75,6 +76,11 @@ pub struct ImapAdapter {
     #[allow(clippy::type_complexity)]
     headers: RefCell<HashMap<(String, u64), Vec<(String, String)>>>,
     bodies: RefCell<HashMap<(String, u64), String>>,
+    /// The mount's rule at the source boundary: what curl brings
+    /// back decodes by `?encoding=`, then a byte-order mark, then
+    /// the charset a message's own headers declare, then strict
+    /// UTF-8.
+    decoding: SourceDecoding,
 }
 
 fn parse_headers(raw: &str) -> Vec<(String, String)> {
@@ -183,6 +189,18 @@ impl ImapAdapter {
     /// Connect to `imap[s]://HOST[:PORT][/FOLDER]`. One `LIST`
     /// probes the connection (and scopes to FOLDER when given).
     pub fn connect(target: &str) -> Result<Self, ImapError> {
+        Self::connect_with_decoding(
+            target,
+            SourceDecoding::default().with_declared(|_, b| quarb_maildir::declared_encoding(b)),
+        )
+    }
+
+    /// [`connect`](Self::connect) under a mount's source-boundary
+    /// rule.
+    pub fn connect_with_decoding(
+        target: &str,
+        decoding: SourceDecoding,
+    ) -> Result<Self, ImapError> {
         if !target.starts_with("imap://") && !target.starts_with("imaps://") {
             return Err(ImapError::Target(target.to_string()));
         }
@@ -222,6 +240,7 @@ impl ImapAdapter {
             }]),
             headers: RefCell::new(HashMap::new()),
             bodies: RefCell::new(HashMap::new()),
+            decoding,
         };
         let folders = adapter.folders()?;
         // Scope to one folder when the target names it.
@@ -290,7 +309,10 @@ impl ImapAdapter {
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        self.decoding
+            .decode(url, &out.stdout)
+            .map(|d| d.text)
+            .map_err(|e| ImapError::Curl(format!("{url}: {e}")))
     }
 
     fn folders(&self) -> Result<Vec<String>, ImapError> {
@@ -418,6 +440,11 @@ fn parse_date(s: &str) -> Option<i64> {
 }
 
 impl AstAdapter for ImapAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

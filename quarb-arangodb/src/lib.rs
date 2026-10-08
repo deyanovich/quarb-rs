@@ -15,7 +15,7 @@
 //! (`;;;id`, `;;;rev`; the `_key` is the node's name). Resolve
 //! follows the `_id` convention: a value like `cities/oslo`
 //! resolves hint-less; a bare key resolves with the collection
-//! hint (`::city~>cities`).
+//! hint (`::city-->cities`).
 //!
 //! Listings are `_key`-sorted (deterministic); documents load
 //! lazily per collection; only read AQL is ever sent.
@@ -123,9 +123,16 @@ impl ArangoAdapter {
     /// Connect to `arango://…`; the collection catalog doubles as
     /// the probe.
     pub fn connect(target: &str) -> Result<Self, ArangoError> {
-        let rest = target
+        // `arango+s://` is the same over TLS; credentials ride in a
+        // Basic header and never leave the machine in clear otherwise.
+        let (rest, scheme) = match target
             .strip_prefix("arango://")
-            .ok_or_else(|| ArangoError::Target(target.to_string()))?;
+            .map(|r| (r, "http"))
+            .or_else(|| target.strip_prefix("arango+s://").map(|r| (r, "https")))
+        {
+            Some(x) => x,
+            None => return Err(ArangoError::Target(quarb::target::redact(target))),
+        };
         let (creds, rest) = match rest.rsplit_once('@') {
             Some((c, r)) => (Some(c), r),
             None => (None, rest),
@@ -133,7 +140,7 @@ impl ArangoAdapter {
         let (hostport, db) = rest
             .split_once('/')
             .filter(|(h, d)| !h.is_empty() && !d.is_empty())
-            .ok_or_else(|| ArangoError::Target(target.to_string()))?;
+            .ok_or_else(|| ArangoError::Target(quarb::target::redact(target)))?;
         let hostport = if hostport.contains(':') {
             hostport.to_string()
         } else {
@@ -150,7 +157,7 @@ impl ArangoAdapter {
             format!("Basic {}", base64(full.as_bytes()))
         });
         let adapter = ArangoAdapter {
-            base: format!("http://{hostport}/_db/{db}"),
+            base: format!("{scheme}://{hostport}/_db/{db}"),
             auth,
             collections: Vec::new(),
             edge_collections: Vec::new(),
@@ -236,7 +243,7 @@ impl ArangoAdapter {
             }))
             .map_err(|e| match e {
                 ureq::Error::Status(code, r) => {
-                    let text = r.into_string().unwrap_or_default();
+                    let text = quarb::source::text_from_reader(r.into_reader()).unwrap_or_default();
                     let msg = serde_json::from_str::<Json>(&text)
                         .ok()
                         .and_then(|v| {
@@ -373,9 +380,10 @@ impl ArangoAdapter {
                 "FOR e IN @@ec FILTER e.{this_end} == @id SORT e._key \
                  RETURN {{ e: e, t: DOCUMENT(e.{other_end}) }}"
             );
-            let rows = self
-                .aql(&query, serde_json::json!({ "@ec": ec, "id": id }))
-                .unwrap_or_default();
+            let rows = quarb::fetched(
+                self.aql(&query, serde_json::json!({ "@ec": ec, "id": id })),
+                || format!("arangodb: reading the edges of {id} in {ec}"),
+            );
             for row in rows {
                 let Some(t) = row.pointer("/t").filter(|t| !t.is_null()) else {
                     continue;
@@ -448,12 +456,17 @@ impl AstAdapter for ArangoAdapter {
             }
             Plan::Leaf => Vec::new(),
             Plan::Coll(name) => {
-                let rows = self
-                    .aql(
-                        "FOR d IN @@c SORT d._key RETURN d",
-                        serde_json::json!({ "@c": name }),
-                    )
-                    .unwrap_or_default();
+                // Refused and left uncached.
+                let rows = match self.aql(
+                    "FOR d IN @@c SORT d._key RETURN d",
+                    serde_json::json!({ "@c": name }),
+                ) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        quarb::record_refusal(format!("arangodb: listing collection {name}: {e}"));
+                        return Vec::new();
+                    }
+                };
                 rows.iter().filter_map(|d| self.intern(d)).collect()
             }
             Plan::Doc(body) => self.json_children(&body, node, true),
@@ -521,9 +534,10 @@ impl AstAdapter for ArangoAdapter {
             (Kind::Collection { index }, "n-rows") => {
                 let name = self.collections[*index].clone();
                 drop(nodes);
-                let rows = self
-                    .aql("RETURN LENGTH(@@c)", serde_json::json!({ "@c": name }))
-                    .ok()?;
+                let rows = quarb::fetched_opt(
+                    self.aql("RETURN LENGTH(@@c)", serde_json::json!({ "@c": name })),
+                    || "arangodb: counting a collection".to_string(),
+                )?;
                 rows.first().map(cell_value)
             }
             (Kind::Doc { id, .. }, "id") => Some(Value::Str(id.clone())),
@@ -540,8 +554,14 @@ impl AstAdapter for ArangoAdapter {
         self.edges(node, true)
     }
 
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
     /// `_id`-convention resolution: hint-less when the value is a
-    /// full `collection/key`, hinted (`~>cities`) for a bare key.
+    /// full `collection/key`, hinted (`-->cities`) for a bare key.
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let value = self.property(node, property)?.to_string();
         let id = match hint {
@@ -554,9 +574,10 @@ impl AstAdapter for ArangoAdapter {
         if let Some(&n) = self.by_id.borrow().get(&id) {
             return Some(n);
         }
-        let rows = self
-            .aql("RETURN DOCUMENT(@id)", serde_json::json!({ "id": id }))
-            .ok()?;
+        let rows = quarb::fetched_opt(
+            self.aql("RETURN DOCUMENT(@id)", serde_json::json!({ "id": id })),
+            || format!("arangodb: reading document {id}"),
+        )?;
         let doc = rows.first().filter(|d| !d.is_null())?;
         self.intern(doc)
     }
@@ -604,6 +625,11 @@ mod tests {
     #[test]
     fn target_scheme() {
         assert!(ArangoAdapter::connect("http://x/db").is_err());
+        let err = match ArangoAdapter::connect("arango://ada:secret@") {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!("an empty host"),
+        };
+        assert!(err.contains("ada:***@") && !err.contains("secret"), "{err}");
         assert!(ArangoAdapter::connect("arango://hostonly").is_err());
     }
 }

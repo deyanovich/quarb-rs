@@ -45,7 +45,7 @@ fn to_value(v: ValueRef<'_>) -> Value {
 /// SQL: wrap in double quotes, doubling any embedded quote, so
 /// reserved words and special characters survive.
 fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    quarb_relational::quote_double(name)
 }
 
 /// Introspect the schema: every user table's and view's spec, via
@@ -171,7 +171,10 @@ fn fetch_rows_where(
             let values: Vec<Value> = (0..spec.columns.len())
                 .map(|i| to_value(r.get_ref(i + 1).expect("column in range")))
                 .collect();
-            out.push(RowSpec { rowid, values });
+            out.push(RowSpec {
+                rowid: Some(rowid),
+                values,
+            });
         }
         return Ok(out);
     }
@@ -193,7 +196,92 @@ fn fetch_rows_where(
         let values: Vec<Value> = (0..spec.columns.len())
             .map(|i| to_value(r.get_ref(i).expect("column in range")))
             .collect();
-        out.push(RowSpec { rowid, values });
+        out.push(RowSpec {
+            rowid: Some(rowid),
+            values,
+        });
+    }
+    Ok(out)
+}
+
+/// The rows of a table whose column — `col`, or the row key (the
+/// primary key, else `rowid`) — holds one of `values`, in rowid
+/// order: what a hop reads instead of the table. Each value is
+/// bound in its own storage class and, where it reads as a number
+/// or is one, in the other too, so the comparison finds what the
+/// engine's text equality would under any column affinity; the
+/// statement can only return more, never less, and the model
+/// matches by text afterwards. A WITHOUT ROWID table is declined
+/// (its rows carry positional ids, which a keyed read cannot
+/// assign).
+fn fetch_rows_keyed(
+    conn: &Connection,
+    spec: &TableSpec,
+    filter: Option<&str>,
+    col: Option<usize>,
+    values: &[Value],
+) -> Result<Vec<RowSpec>, String> {
+    use rusqlite::types::Value as Sql;
+    let column = match col.or(spec.pk) {
+        Some(i) => quote_ident(&spec.columns[i]),
+        None => "rowid".to_string(),
+    };
+    let mut binds: Vec<Sql> = Vec::new();
+    for v in values {
+        match v {
+            Value::Int(i) => {
+                binds.push(Sql::Integer(*i));
+                binds.push(Sql::Text(i.to_string()));
+            }
+            Value::Float(f) => {
+                binds.push(Sql::Real(*f));
+                binds.push(Sql::Text(v.to_string()));
+            }
+            Value::Bool(b) => binds.push(Sql::Integer(*b as i64)),
+            Value::Null => {}
+            other => {
+                let text = other.to_string();
+                if let Ok(i) = text.parse::<i64>() {
+                    binds.push(Sql::Integer(i));
+                } else if let Ok(f) = text.parse::<f64>() {
+                    binds.push(Sql::Real(f));
+                }
+                binds.push(Sql::Text(text));
+            }
+        }
+    }
+    if binds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cols = spec
+        .columns
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let marks = vec!["?"; binds.len()].join(", ");
+    let filter = match filter {
+        Some(w) => format!("({w}) AND "),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT rowid, {cols} FROM {} WHERE {filter}{column} IN ({marks}) ORDER BY rowid",
+        quote_ident(&spec.name)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(binds.iter()))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid: i64 = r.get(0).map_err(|e| e.to_string())?;
+        let values: Vec<Value> = (0..spec.columns.len())
+            .map(|i| to_value(r.get_ref(i + 1).expect("column in range")))
+            .collect();
+        out.push(RowSpec {
+            rowid: Some(rowid),
+            values,
+        });
     }
     Ok(out)
 }
@@ -241,18 +329,32 @@ impl SqliteAdapter {
         filter: Option<(String, String)>,
         refs: &[(String, String)],
     ) -> Result<Self, SqliteError> {
-        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = std::rc::Rc::new(Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?);
         let specs = specs(&conn, refs)?;
-        let model = RelationalModel::lazy(
+        let (whole, keyed, listed) = (conn.clone(), conn.clone(), conn);
+        let mut model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
-                let w = filter
-                    .as_ref()
-                    .filter(|(t, _)| *t == spec.name)
-                    .map(|(_, w)| w.as_str());
-                fetch_rows_where(&conn, spec, w).map_err(|e| e.to_string())
+                fetch_rows_where(&whole, spec, None).map_err(|e| e.to_string())
             }),
-        );
+        )
+        // A hop reads the rows it lands on, by key.
+        .with_key_fetcher(Box::new(move |_, spec, col, values| {
+            fetch_rows_keyed(&keyed, spec, None, col, values)
+        }));
+        // The pushed-down WHERE filters the table's listing only:
+        // hops into it go by key, unfiltered, so they stay exact.
+        if let Some((table, where_sql)) = filter {
+            model = model.with_filtered_listing(
+                &table,
+                Box::new(move |_, spec| {
+                    fetch_rows_where(&listed, spec, Some(&where_sql)).map_err(|e| e.to_string())
+                }),
+            );
+        }
         Ok(SqliteAdapter { model })
     }
 
@@ -353,6 +455,44 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
     Ok(false)
 }
 
+/// The catalog for a pushed plan's column-type assumptions
+/// (`quarb_sql::ColumnTypes::hold`): every column of `tables`, with
+/// whether SQLite gives it a numeric affinity. A column of INTEGER,
+/// REAL or NUMERIC affinity holds numbers and compares with a
+/// numeric literal as Quarb's scan does; a TEXT or untyped column
+/// compares by storage class (`'150'` is not `150`, and any text
+/// is greater than any number), which the scan's comparison by
+/// value is not.
+pub fn column_catalog(
+    path: &std::path::Path,
+    tables: &[&str],
+) -> Result<Vec<(String, bool)>, SqliteError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut catalog = Vec::new();
+    for table in tables {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(table)))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        for row in rows {
+            let (name, declared) = row?;
+            catalog.push((name, numeric_affinity(&declared)));
+        }
+    }
+    Ok(catalog)
+}
+
+/// SQLite's affinity rules (its "Datatypes" document, section 3.1),
+/// reduced to the question asked: INTEGER, REAL or NUMERIC.
+fn numeric_affinity(declared: &str) -> bool {
+    let d = declared.to_ascii_uppercase();
+    if d.contains("INT") {
+        true
+    } else if d.contains("CHAR") || d.contains("CLOB") || d.contains("TEXT") {
+        false
+    } else {
+        !(d.contains("BLOB") || d.trim().is_empty())
+    }
+}
+
 pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
@@ -409,6 +549,9 @@ impl AstAdapter for SqliteAdapter {
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
     }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
+    }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
     }
@@ -432,5 +575,37 @@ impl AstAdapter for SqliteAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }

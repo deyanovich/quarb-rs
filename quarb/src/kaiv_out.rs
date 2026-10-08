@@ -113,9 +113,10 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         // (std/time, in `kaiv_leaf`); durations have no kaiv type
         // yet and quantities normally emit unit-annotated. All ride
         // as text here.
-        Value::Instant { .. } | Value::Duration { .. } | Value::Quantity { .. } => {
-            ("str", v.to_string())
-        }
+        Value::Instant { .. }
+        | Value::Duration { .. }
+        | Value::Period { .. }
+        | Value::Quantity { .. } => ("str", v.to_string()),
     }
 }
 

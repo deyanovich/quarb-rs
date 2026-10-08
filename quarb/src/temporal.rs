@@ -81,9 +81,13 @@ pub fn parse_iso(s: &str) -> Option<(i64, u32, Option<i16>)> {
     if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
         return None;
     }
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
+    // Digits only: `str::parse` would take a sign (`2024-+1-+5`).
+    let digits = |r: std::ops::Range<usize>| -> Option<&str> {
+        s.get(r).filter(|p| p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let year: i64 = digits(0..4)?.parse().ok()?;
+    let month: u32 = digits(5..7)?.parse().ok()?;
+    let day: u32 = digits(8..10)?.parse().ok()?;
     if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
         return None;
     }
@@ -100,15 +104,21 @@ pub fn parse_iso(s: &str) -> Option<(i64, u32, Option<i16>)> {
         if t.len() < 5 || t.as_bytes()[2] != b':' {
             return None;
         }
-        let hour: i64 = t.get(0..2)?.parse().ok()?;
-        let minute: i64 = t.get(3..5)?.parse().ok()?;
+        let two = |r: std::ops::Range<usize>| -> Option<i64> {
+            t.get(r)
+                .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))?
+                .parse()
+                .ok()
+        };
+        let hour: i64 = two(0..2)?;
+        let minute: i64 = two(3..5)?;
         if hour > 23 || minute > 59 {
             return None;
         }
         secs += hour * 3600 + minute * 60;
         let mut i = 5;
         if t.len() >= 8 && t.as_bytes()[5] == b':' {
-            let second: i64 = t.get(6..8)?.parse().ok()?;
+            let second: i64 = two(6..8)?;
             if second > 60 {
                 return None;
             }
@@ -143,16 +153,16 @@ pub fn parse_iso(s: &str) -> Option<(i64, u32, Option<i16>)> {
                     _ => return None,
                 };
                 let body = &tz[1..];
+                let two = |r: std::ops::Range<usize>| -> Option<i32> {
+                    body.get(r)
+                        .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))?
+                        .parse()
+                        .ok()
+                };
                 let (oh, om) = match body.len() {
-                    2 => (body.parse::<i32>().ok()?, 0),
-                    4 => (
-                        body.get(0..2)?.parse::<i32>().ok()?,
-                        body.get(2..4)?.parse::<i32>().ok()?,
-                    ),
-                    5 if body.as_bytes()[2] == b':' => (
-                        body.get(0..2)?.parse::<i32>().ok()?,
-                        body.get(3..5)?.parse::<i32>().ok()?,
-                    ),
+                    2 => (two(0..2)?, 0),
+                    4 => (two(0..2)?, two(2..4)?),
+                    5 if body.as_bytes()[2] == b':' => (two(0..2)?, two(3..5)?),
                     _ => return None,
                 };
                 if oh > 23 || om > 59 {
@@ -489,37 +499,51 @@ pub fn iso_week(secs: i64) -> (i64, u32) {
     }
 }
 
-const DAYS: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
 /// `strftime`-style formatting (the C/POSIX standard Perl, Python,
 /// and Ruby share), in the instant's own offset (UTC when none).
 /// Supported: %Y %y %C %m %d %e %H %I %p %M %S %j %a %A %b %B %u %w
 /// %V %G %g %F %T %R %D %s %z %Z %n %t %%. An unknown specifier
 /// passes through literally.
 pub fn strftime(fmt: &str, secs: i64, nanos: u32, offset_min: Option<i16>) -> String {
+    strftime_in(fmt, secs, nanos, offset_min, &crate::datenames::EN)
+}
+
+/// [`strftime`] writing a locale's month and weekday names for
+/// `%B`, `%b`, `%A`, `%a` (`strftime(fmt; LOCALE)`): the form a
+/// date takes (`6 октября`).
+pub fn strftime_in(
+    fmt: &str,
+    secs: i64,
+    nanos: u32,
+    offset_min: Option<i16>,
+    names: &crate::datenames::Names,
+) -> String {
+    // A month's form: the date form (`6 октября`) where the format
+    // carries a day, the stand-alone (`октябрь 1899`) where it does
+    // not, as the locale's data distinguishes them.
+    let has_day = ["%d", "%e", "%F", "%D"].iter().any(|d| fmt.contains(d));
+    strftime_form(fmt, secs, nanos, offset_min, names, has_day)
+}
+
+/// [`strftime_in`] with the month's form chosen by the caller:
+/// `date_form` writes the form a date takes, otherwise the
+/// stand-alone one.
+pub fn strftime_form(
+    fmt: &str,
+    secs: i64,
+    nanos: u32,
+    offset_min: Option<i16>,
+    names: &crate::datenames::Names,
+    has_day: bool,
+) -> String {
     let _ = nanos;
+    let month_form = |forms: &'static [&'static str]| {
+        if has_day {
+            forms[0]
+        } else {
+            forms.get(1).copied().unwrap_or(forms[0])
+        }
+    };
     let local = secs.saturating_add(offset_min.unwrap_or(0) as i64 * 60);
     let (y, mo, d, h, mi, se) = components(local);
     let wd = weekday(local); // 1 = Monday
@@ -548,10 +572,10 @@ pub fn strftime(fmt: &str, secs: i64, nanos: u32, offset_min: Option<i16>) -> St
             Some('M') => out.push_str(&format!("{mi:02}")),
             Some('S') => out.push_str(&format!("{se:02}")),
             Some('j') => out.push_str(&format!("{doy:03}")),
-            Some('a') => out.push_str(&DAYS[(wd - 1) as usize][..3]),
-            Some('A') => out.push_str(DAYS[(wd - 1) as usize]),
-            Some('b') => out.push_str(&MONTHS[(mo - 1) as usize][..3]),
-            Some('B') => out.push_str(MONTHS[(mo - 1) as usize]),
+            Some('a') => out.push_str(names.days_abbr[(wd - 1) as usize][0]),
+            Some('A') => out.push_str(names.days[(wd - 1) as usize][0]),
+            Some('b') => out.push_str(month_form(names.months_abbr[(mo - 1) as usize])),
+            Some('B') => out.push_str(month_form(names.months[(mo - 1) as usize])),
             Some('u') => out.push_str(&wd.to_string()),
             Some('w') => out.push_str(&(wd % 7).to_string()),
             Some('V') => out.push_str(&format!("{gw:02}")),
@@ -594,6 +618,20 @@ pub fn strftime(fmt: &str, secs: i64, nanos: u32, offset_min: Option<i16>) -> St
 /// %S %a %A %b %B %F %T %R %D %s %z %n %t %%; whitespace in the
 /// format matches a run of input whitespace.
 pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
+    strptime_in(input, fmt, &crate::datenames::EN)
+}
+
+/// [`strptime`] reading a locale's month and weekday names for
+/// `%B`, `%b`, `%A`, `%a` (`strptime(fmt; LOCALE)`): every form
+/// the locale's table lists parses (`октября` in a date,
+/// `октябрь` alone), case folded, the longest spelling first.
+/// Format literals match as written, so `'%d %B %Y г.'` reads
+/// `6 октября 1899 г.`.
+pub fn strptime_in(
+    input: &str,
+    fmt: &str,
+    names: &crate::datenames::Names,
+) -> Option<(i64, u32, Option<i16>)> {
     let inb = input.as_bytes();
     let mut i = 0usize; // input cursor
     let (mut year, mut mo, mut d) = (1970i64, 1u32, 1u32);
@@ -618,31 +656,6 @@ pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
         }
         std::str::from_utf8(&b[start..*i]).ok()?.parse().ok()
     }
-    // Case-insensitive fixed-name match: full form first, then the
-    // three-letter abbreviation. Returns the 0-based index.
-    fn name_match(b: &[u8], i: &mut usize, names: &[&str]) -> Option<usize> {
-        // Compare on raw bytes (all names are ASCII): a match can then
-        // never slice the input inside a multibyte char, and a name
-        // shorter than three bytes (`AM`/`PM`) can never over-index.
-        let rest = &b[*i..];
-        for (k, name) in names.iter().enumerate() {
-            let nb = name.as_bytes();
-            if rest.len() >= nb.len() && rest[..nb.len()].eq_ignore_ascii_case(nb) {
-                *i += nb.len();
-                return Some(k);
-            }
-        }
-        for (k, name) in names.iter().enumerate() {
-            let nb = name.as_bytes();
-            let alen = nb.len().min(3);
-            if rest.len() >= alen && rest[..alen].eq_ignore_ascii_case(&nb[..alen]) {
-                *i += alen;
-                return Some(k);
-            }
-        }
-        None
-    }
-
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         if c.is_whitespace() {
@@ -676,16 +689,24 @@ pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
             Some('H') => h = digits(inb, &mut i, 2, false)? as u32,
             Some('I') => h12 = Some(digits(inb, &mut i, 2, false)? as u32),
             Some('p') => {
-                let k = name_match(inb, &mut i, &["AM", "PM"])?;
+                let (k, len) = crate::datenames::match_name(&input[i..], &[&["AM"], &["PM"]])?;
+                i += len;
                 pm = Some(k == 1);
             }
             Some('M') => mi = digits(inb, &mut i, 2, false)? as u32,
             Some('S') => se = digits(inb, &mut i, 2, false)? as u32,
             Some('a') | Some('A') => {
                 // Parsed and discarded: the date fields decide.
-                name_match(inb, &mut i, &DAYS)?;
+                let (_, len) = crate::datenames::match_name(&input[i..], &names.days)
+                    .or_else(|| crate::datenames::match_name(&input[i..], &names.days_abbr))?;
+                i += len;
             }
-            Some('b') | Some('B') => mo = name_match(inb, &mut i, &MONTHS)? as u32 + 1,
+            Some('b') | Some('B') => {
+                let (k, len) = crate::datenames::match_name(&input[i..], &names.months)
+                    .or_else(|| crate::datenames::match_name(&input[i..], &names.months_abbr))?;
+                i += len;
+                mo = k as u32 + 1;
+            }
             Some('F') => {
                 year = digits(inb, &mut i, 4, false)?;
                 if i >= inb.len() || inb[i] != b'-' {
@@ -825,6 +846,22 @@ pub fn strptime(input: &str, fmt: &str) -> Option<(i64, u32, Option<i16>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_takes_digits_only() {
+        assert!(parse_iso("2024-02-15").is_some());
+        for bad in [
+            "2024-+1-+5",
+            "2024-02-1 ",
+            "+024-02-15",
+            "2024-02-15T+1:05",
+            "2024-02-15T10:+5",
+            "2024-02-15T10:05:+1",
+            "2024-02-15T10:05+-100",
+        ] {
+            assert!(parse_iso(bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn civil_round_trip() {
@@ -1077,5 +1114,68 @@ mod tests {
         let text = strftime("%Y-%m-%d год", s, n, o);
         assert_eq!(text, "2024-02-15 год");
         assert_eq!(strptime(&text, "%Y-%m-%d год"), Some((s, 0, None)));
+    }
+
+    #[test]
+    fn locale_names_read_and_write() {
+        let ru = crate::datenames::names("ru-RU").unwrap();
+        let (s, _, _) = parse_iso("1899-10-06").unwrap();
+        // the date form, the stand-alone form, the abbreviation
+        assert_eq!(
+            strptime_in("6 октября 1899 г.", "%d %B %Y г.", ru),
+            Some((s, 0, None))
+        );
+        assert_eq!(
+            strptime_in("Октябрь 1899", "%B %Y", ru).map(|r| r.0),
+            parse_iso("1899-10-01").map(|r| r.0)
+        );
+        assert_eq!(
+            strptime_in("6 окт. 1899", "%d %b %Y", ru),
+            Some((s, 0, None))
+        );
+        // written in the date form, weekday too
+        assert_eq!(
+            strftime_in("%A, %d %B %Y", s, 0, None, ru),
+            "пятница, 06 октября 1899"
+        );
+        // no day in the format: the stand-alone form
+        assert_eq!(strftime_in("%B %Y", s, 0, None, ru), "октябрь 1899");
+        assert_eq!(strftime_in("%b %Y", s, 0, None, ru), "окт. 1899");
+        assert_eq!(
+            strftime_in("%B %Y", s, 0, None, crate::datenames::names("pt").unwrap()),
+            "outubro 1899"
+        );
+        // the English default reads no Russian
+        assert_eq!(strptime("6 октября 1899", "%d %B %Y"), None);
+        let pt = crate::datenames::names("pt-BR").unwrap();
+        assert_eq!(
+            strptime_in("6 de outubro de 1899", "%d de %B de %Y", pt),
+            Some((s, 0, None))
+        );
+        let zh = crate::datenames::names("zh").unwrap();
+        assert_eq!(
+            strptime_in("1899年10月6日", "%Y年%B%d日", zh),
+            Some((s, 0, None))
+        );
+        assert_eq!(
+            strftime_in("%Y年%B%d日 %A", s, 0, None, zh),
+            "1899年十月06日 星期五"
+        );
+        let tr = crate::datenames::names("tr").unwrap();
+        assert_eq!(
+            strptime_in("6 Ekim 1899", "%d %B %Y", tr),
+            Some((s, 0, None))
+        );
+        assert!(crate::datenames::names("pl").is_none());
+        assert_eq!(
+            strftime_in(
+                "%d %B %Y",
+                s,
+                0,
+                None,
+                crate::datenames::names("de").unwrap()
+            ),
+            "06 Oktober 1899"
+        );
     }
 }

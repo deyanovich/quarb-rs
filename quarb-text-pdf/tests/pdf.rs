@@ -133,3 +133,25 @@ fn tounicode_cmap_decodes() {
 fn not_a_pdf_refuses() {
     assert!(parse(b"not a pdf at all").is_err());
 }
+
+/// Finding 20: an outline whose item points back at itself (or at
+/// an ancestor) through `/First` or `/Next` is a loop; each object
+/// is walked once, so the reading terminates with the sound part.
+#[test]
+fn a_self_referential_outline_terminates() {
+    let c1 = stream("BT /F1 12 Tf 1 0 0 1 72 700 Tm (Only page.) Tj ET");
+    let bytes = pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R \
+         /Resources << /Font << /F1 7 0 R >> >> >>",
+        "<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>",
+        "<< /Title (Loop) /Parent 4 0 R /Dest [3 0 R /XYZ 0 792 0] \
+         /First 5 0 R /Next 5 0 R >>",
+        &c1,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]);
+    let model = parse(&bytes).unwrap();
+    assert_eq!(values(&model, "//section @| count"), ["1"]);
+    assert_eq!(values(&model, "//section::lemma"), ["Loop"]);
+}

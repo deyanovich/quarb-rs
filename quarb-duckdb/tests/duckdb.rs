@@ -3,7 +3,11 @@
 use quarb_duckdb::DuckdbAdapter;
 
 fn fixture() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("quarb-duckdb-test");
+    // One database per call: the tests run in parallel, and two of
+    // them writing one file left the third a half-made database.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("quarb-duckdb-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("t.duckdb");
     let _ = std::fs::remove_file(&path);
@@ -30,7 +34,7 @@ fn catalog_keys_and_pushdown() {
     assert_eq!(v("/tracks/* @| count"), ["3"]);
     // The FK from duckdb_constraints() drives resolution.
     assert_eq!(v("/tracks/1::artist_id-->::name"), ["Holst"]);
-    assert_eq!(v("/artists/2::artist_id<-- @| count"), ["1"]);
+    assert_eq!(v("/artists/2<--(::artist_id) @| count"), ["1"]);
     // The pushdown path answers identically to the scan.
     let plan = quarb_sql::pushdown("/tracks/*[::secs > 100] | %(::title)", None).unwrap();
     let (cols, rows) = quarb_duckdb::raw_query(
@@ -79,4 +83,42 @@ fn non_text_columns_decode() {
     // HUGEINT narrows when it fits, keeps its decimal text when it can't.
     assert_eq!(v("/events/2::big"), ["42"]);
     assert_eq!(v("/events/1::big"), ["100000000000000000000"]);
+}
+
+// A hop reads the rows it lands on (`WHERE key IN (…)`), not the
+// table; the answers are those of a table read whole.
+#[test]
+fn hops_read_by_key() {
+    let path = fixture();
+    let v = |q: &str| {
+        let a = DuckdbAdapter::open(&path).unwrap();
+        match quarb::run(q, &a).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| a.locator(n)).collect(),
+        }
+    };
+    assert_eq!(
+        v(
+            "/tracks/3::artist_id--> | %(::name; t = (^/tracks::::loaded); \
+           a = (^/artists::::loaded); n = (^/artists::::\"n-loaded\"))"
+        ),
+        [r#"%(name = "Bartok"; t = false; a = false; n = 1)"#]
+    );
+    assert_eq!(
+        v("/artists/1<-artist_id | %(::title; t = (^/tracks::::loaded))"),
+        [
+            r#"%(title = "Mars"; t = false)"#,
+            r#"%(title = "Venus"; t = false)"#
+        ]
+    );
+    assert_eq!(v("/tracks/2::title"), ["Venus"]);
+    assert_eq!(v("/tracks/99::title"), Vec::<String>::new());
+    // a row read by key knows its place once asked (the table is
+    // then read to find it)
+    assert_eq!(v("/tracks/3::::rowid"), ["3"]);
+    // a listing still reads the table whole
+    assert_eq!(
+        v("/tracks/* @| count | %(n = $_; t = (^/tracks::::loaded))"),
+        [r#"%(n = 3; t = true)"#]
+    );
 }

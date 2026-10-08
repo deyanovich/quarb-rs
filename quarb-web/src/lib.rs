@@ -1017,21 +1017,26 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 if let Some(t) = g.resolve(n, property, hint) {
                     return Some(self.map_back(k, &g, t));
                 }
-                let url = g.external_ref(n, property, hint)?;
+                let url = g.external_ref(n, property, hint)?.to_uri();
                 self.page_for_url(&url)
             }
             _ => None,
         }
     }
 
-    fn external_ref(&self, id: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        id: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         let (_, g, n) = self.graft_node(id)?;
-        let url = g.external_ref(n, property, hint)?;
+        let ext = g.external_ref(n, property, hint)?;
         // A URL the store answers is not external to this arbor.
-        if self.store.page_by_url(&url).is_some() {
+        if self.store.page_by_url(&ext.to_uri()).is_some() {
             return None;
         }
-        Some(url)
+        Some(ext)
     }
 
     fn resolve_fragment(&self, id: NodeId, fragment: &str) -> Option<NodeId> {

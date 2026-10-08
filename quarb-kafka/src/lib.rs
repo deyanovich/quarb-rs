@@ -22,7 +22,7 @@
 //! messages are unnamed (positional access still works).
 //!
 //! **References.** Kafka's table-stream duality makes resolve a
-//! stream-table join: `::user_id~>users` finds the *latest*
+//! stream-table join: `::user_id-->users` finds the *latest*
 //! message in the `users` topic whose key equals the value —
 //! against a compacted topic, that is precisely the entity's
 //! current row. Hint-less resolution tries the property name
@@ -156,7 +156,7 @@ impl KafkaAdapter {
         let rest = target
             .strip_prefix("kafka://")
             .or_else(|| target.strip_prefix("kafka:"))
-            .ok_or_else(|| KafkaError::Target(target.to_string()))?;
+            .ok_or_else(|| KafkaError::Target(quarb::target::redact(target)))?;
         let (brokers, query) = match rest.split_once('?') {
             Some((b, q)) => (b, Some(q)),
             None => (rest, None),
@@ -169,7 +169,7 @@ impl KafkaAdapter {
             Some((percent_decode(user), percent_decode(pass)))
         });
         if brokers.is_empty() {
-            return Err(KafkaError::Target(target.to_string()));
+            return Err(KafkaError::Target(quarb::target::redact(target)));
         }
         let param = |k: &str| {
             query.and_then(|q| {
@@ -336,22 +336,27 @@ impl KafkaAdapter {
         let made = match plan {
             Plan::Done(k) => return k,
             Plan::Leaf => Vec::new(),
-            Plan::Topic(name, parts) => self
-                .fetch_topic(&name, &parts)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|msg| {
-                    self.push(Node {
-                        name: msg.key.clone(),
-                        kind: Kind::Message {
-                            topic: name.clone(),
-                            msg,
-                        },
-                        parent: Some(node),
-                        children: RefCell::new(None),
-                    })
+            // Refused and left uncached.
+            Plan::Topic(name, parts) => match self.fetch_topic(&name, &parts) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    quarb::record_refusal(format!("kafka: reading topic {name}: {e}"));
+                    return Vec::new();
+                }
+            }
+            .into_iter()
+            .map(|msg| {
+                self.push(Node {
+                    name: msg.key.clone(),
+                    kind: Kind::Message {
+                        topic: name.clone(),
+                        msg,
+                    },
+                    parent: Some(node),
+                    children: RefCell::new(None),
                 })
-                .collect(),
+            })
+            .collect(),
             Plan::Entries(entries) => entries
                 .into_iter()
                 .map(|(k, f)| {
@@ -559,6 +564,12 @@ impl AstAdapter for KafkaAdapter {
             },
             _ => None,
         }
+    }
+
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
     }
 
     /// The stream-table join: the latest message in the target

@@ -1,4 +1,4 @@
-//! The corpus reading's positional index (ruling #62, phase 2) and
+//! The corpus reading's positional index and
 //! traits on a quantified group: `//token[::lower = "x"]` answers
 //! from the text model's form index, exactly as the walk would, and
 //! `(>token){n}<word>` filters a group's matches like a step's
@@ -75,7 +75,7 @@ fn a_trait_filters_a_quantified_group() {
     let from_one = |q: &str| values(&m, &format!(r#"//token[::::n = 1] | {q}"#));
     // The second next token of "One" is the period: no word there.
     assert_eq!(from_one("(>token){2}<word>::"), Vec::<String>::new());
-    // The hop stops at the sentence (ruling #64): "Three" opens
+    // The hop stops at the sentence: "Three" opens
     // the next one, so the window of three reaches only the period.
     assert_eq!(from_one("(>token){1;3}<word>::"), ["two"]);
     assert_eq!(from_one("(>token){1;3}<punct>::"), ["."]);

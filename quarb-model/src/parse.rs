@@ -22,7 +22,7 @@ pub struct Model {
     /// into every constructor query's fragment table.
     pub defs_text: String,
     /// `alias` statements: other spellings a node's name or trait
-    /// answers to (ruling #30 — an alias is a way in, never a way
+    /// answers to (an alias is a way in, never a way
     /// out; locators and reflection keep the canonical spelling).
     pub aliases: Vec<AliasDecl>,
     /// `trait <name>: STEP;` — declared traits: a node carries
@@ -30,10 +30,46 @@ pub struct Model {
     /// decided at the node. In declaration order; a declaration may
     /// use the traits declared before it.
     pub traits: Vec<TraitDecl>,
+    /// `index SCOPE::prop;` — properties the model keeps an index
+    /// of over the scoped nodes, for the searches by value (`=>`,
+    /// `<--(SCOPE::prop)`) whose scope is the declared one. Cost
+    /// only: the answer is the walk's, with or without it.
+    pub indexes: Vec<IndexDecl>,
+    /// `tree IDENTITY: PATH;` — the string other trees refer to this
+    /// one by, and the path (a mount root or a node inside one) the
+    /// tree stands at. An identity ending in a separator is a base.
+    pub trees: Vec<TreeDecl>,
+    /// `units LIBRARY;` — a kaiv `.faiv` unit library imported into
+    /// the unit table the unital reading consults, for every source
+    /// the model mounts: every spelling it lists reads, output
+    /// prints the primary name. A relative path is joined to the
+    /// model file's directory.
+    pub units: Vec<UnitsDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitsDecl {
+    /// The library as written.
+    pub library: String,
+    /// The file, resolved.
+    pub path: std::path::PathBuf,
 }
 
 /// A declared trait: `trait <heading>: (h1|h2|h3);`.
 #[derive(Debug, Clone)]
+pub struct TreeDecl {
+    pub identity: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexDecl {
+    /// The node-selecting path (the `::prop` suffix stripped).
+    pub scope: String,
+    pub property: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
     pub name: String,
     /// The step body, as written — a name, a pattern, an
@@ -642,9 +678,19 @@ fn parse_model_in(
                             m.name
                         ));
                     }
+                    // A mount's target is kept relative to its model's
+                    // own directory (the caller resolves it once,
+                    // against the file it was given). A used model's
+                    // targets are therefore carried over by the `use`
+                    // path as written, not by the path already joined
+                    // to this model's directory: that would name the
+                    // directory twice from anywhere but inside it.
                     model.mounts.push(Mount {
                         name: m.name,
-                        target: resolve_mount_target(&m.target, path.parent()),
+                        target: resolve_mount_target(
+                            &m.target,
+                            std::path::Path::new(file).parent(),
+                        ),
                     });
                 }
                 model.nodes.extend(sub.nodes);
@@ -652,6 +698,21 @@ fn parse_model_in(
                 model.rels.extend(sub.rels);
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
+                model.indexes.extend(sub.indexes);
+                for u in sub.units {
+                    if !model.units.iter().any(|x| x.path == u.path) {
+                        model.units.push(u);
+                    }
+                }
+                for t in sub.trees {
+                    if model.trees.iter().any(|x| x.identity == t.identity) {
+                        return Err(format!(
+                            "use {file}: tree '{}' is already declared",
+                            t.identity
+                        ));
+                    }
+                    model.trees.push(t);
+                }
                 for t in sub.traits {
                     if model.traits.iter().any(|x| x.name == t.name) {
                         return Err(format!(
@@ -719,6 +780,62 @@ fn parse_model_in(
             "alias" => {
                 model.aliases.push(parse_alias(rest, stmt)?);
             }
+            "tree" => {
+                // The identity may hold colons (`https://…`,
+                // `urn:isbn:`): the path is what follows the LAST
+                // `:` that whitespace follows.
+                let (identity, path) = rest
+                    .rfind(": ")
+                    .or_else(|| rest.rfind(":\t"))
+                    .map(|i| (rest[..i].trim(), rest[i + 1..].trim()))
+                    .ok_or_else(|| format!("tree needs 'IDENTITY: PATH': '{stmt}'"))?;
+                if identity.is_empty() || path.is_empty() {
+                    return Err(format!("tree needs 'IDENTITY: PATH': '{stmt}'"));
+                }
+                if !path.starts_with('/') {
+                    return Err(format!(
+                        "a tree stands at a path from the root ('/mount' or '/mount/…'): '{stmt}'"
+                    ));
+                }
+                if model.trees.iter().any(|t| t.identity == identity) {
+                    return Err(format!("tree '{identity}' is declared twice: '{stmt}'"));
+                }
+                model.trees.push(TreeDecl {
+                    identity: identity.to_string(),
+                    path: path.to_string(),
+                });
+            }
+            "units" => {
+                let library = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                if library.is_empty() {
+                    return Err(format!(
+                        "units needs a library: 'units starye-mery.faiv;' ('{stmt}')"
+                    ));
+                }
+                let path = std::path::Path::new(library);
+                let path = match (path.is_absolute(), base_dir) {
+                    (false, Some(dir)) => dir.join(path),
+                    _ => path.to_path_buf(),
+                };
+                if model.units.iter().any(|u| u.path == path) {
+                    return Err(format!("units '{library}' is imported twice: '{stmt}'"));
+                }
+                model.units.push(UnitsDecl {
+                    library: library.to_string(),
+                    path,
+                });
+            }
+            "index" => {
+                let (scope, property) = split_field(rest)?;
+                if model
+                    .indexes
+                    .iter()
+                    .any(|d| d.scope == scope && d.property == property)
+                {
+                    return Err(format!("index is declared twice: '{stmt}'"));
+                }
+                model.indexes.push(IndexDecl { scope, property });
+            }
             "trait" => {
                 let decl = parse_trait(rest, stmt)?;
                 if model.traits.iter().any(|t| t.name == decl.name) {
@@ -729,7 +846,7 @@ fn parse_model_in(
             other => {
                 return Err(format!(
                     "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/alias/trait/def/macro)"
+                     (expected node/ref/rel/edge/mount/alias/trait/index/tree/def/macro)"
                 ));
             }
         }

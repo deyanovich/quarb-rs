@@ -7,8 +7,8 @@
 //! arrays descending as child nodes.
 //!
 //! **DBRefs are native references.** The `{ "$ref": COLL, "$id":
-//! ID }` convention is a typed document pointer, so `~>` needs
-//! neither a schema nor a declared refs file: `::album~>::artist`
+//! ID }` convention is a typed document pointer, so `-->` needs
+//! neither a schema nor a declared refs file: `::album-->::artist`
 //! follows the field's own target, and `->` enumerates every
 //! DBRef field as a labeled edge.
 //!
@@ -173,12 +173,13 @@ impl MongodbAdapter {
     /// Connect to `mongodb://HOST[:PORT]/DATABASE[?options]`.
     pub fn connect(target: &str) -> Result<Self, MongodbError> {
         if !target.starts_with("mongodb://") && !target.starts_with("mongodb+srv://") {
-            return Err(MongodbError::Target(target.to_string()));
+            return Err(MongodbError::Target(quarb::target::redact(target)));
         }
         let mut opts = ClientOptions::parse(target).run()?;
         let Some(dbname) = opts.default_database.clone() else {
             return Err(MongodbError::Target(format!(
-                "{target}: no database in path"
+                "{}: no database in path",
+                quarb::target::redact(target)
             )));
         };
         if opts.server_selection_timeout.is_none() {
@@ -242,9 +243,12 @@ impl MongodbAdapter {
             .run()
         {
             Ok(c) => c,
-            // First request unreadable: an empty (unreadable)
-            // collection, per the adapter's `children` contract.
-            Err(_) => return Vec::new(),
+            // An unreadable collection is refused, not emptied,
+            // and left uncached.
+            Err(e) => {
+                quarb::record_refusal(format!("mongodb: listing a collection: {e}"));
+                return Vec::new();
+            }
         };
         let mut ids = Vec::new();
         for d in cursor {
@@ -487,7 +491,7 @@ impl AstAdapter for MongodbAdapter {
         }
     }
 
-    /// `::field~>` follows a DBRef — no schema, no refs file; the
+    /// `::field-->` follows a DBRef — no schema, no refs file; the
     /// field knows its target.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let path = match &self.nodes.borrow()[node.0 as usize].kind {

@@ -15,7 +15,7 @@
 //! `ORDER BY`/`LIMIT`, `@| [..n]` → `LIMIT`, and single-column
 //! `unique` → `DISTINCT`.
 //!
-//! Deliberately refused: `~>` resolution chains — the foreign-key
+//! Deliberately refused: `-->` resolution chains — the foreign-key
 //! targets live in the *schema*, not the query text, so a chain
 //! cannot be compiled to a join without a database at hand; spell
 //! the join explicitly with `<=>` to export it. Also refused:
@@ -46,10 +46,12 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
         aggregate: false,
+        keyed_hops: false,
     };
     let query = ex.query()?;
     Ok(Translation {
@@ -93,6 +95,60 @@ pub struct Pushdown {
     /// catalog before executing, and fall back to the scan if it
     /// cannot.
     pub join_left: Option<(String, Vec<String>)>,
+    /// What the plan takes for granted about column types. Quarb
+    /// compares by value (a numeric-looking text and a number meet
+    /// as numbers, a number and other text never meet); SQL
+    /// compares by the column's type, and the loosely typed engines
+    /// (SQLite, MySQL) coerce by rules of their own. The plan is
+    /// the scan's only where the columns it compares with a number
+    /// are numeric-typed and those it compares with text are not:
+    /// the caller asks its catalog and scans when one is otherwise.
+    /// (A strictly typed engine rejects the mismatch itself, which
+    /// sends the caller to the scan as well.)
+    pub column_types: ColumnTypes,
+    /// The tables the plan reads (the FROM table, then a joined one).
+    pub tables: Vec<String>,
+}
+
+/// The column types a pushed plan assumes (see
+/// [`Pushdown::column_types`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ColumnTypes {
+    /// Columns compared with a numeric literal.
+    pub numeric: Vec<String>,
+    /// Columns compared with a text literal.
+    pub text: Vec<String>,
+}
+
+impl ColumnTypes {
+    pub fn is_empty(&self) -> bool {
+        self.numeric.is_empty() && self.text.is_empty()
+    }
+
+    /// The assumptions a catalog does not bear out: the columns
+    /// compared with a number that are not numeric-typed, and those
+    /// compared with text that are. `catalog` lists every column of
+    /// the tables read, with whether its type is numeric; names
+    /// meet without regard to case. A column the catalog does not
+    /// list is unknown, and counts as unmet.
+    pub fn unmet(&self, catalog: &[(String, bool)]) -> Vec<String> {
+        let met = |column: &str, want: bool| {
+            let mut found = catalog
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(column))
+                .peekable();
+            found.peek().is_some() && found.all(|(_, numeric)| *numeric == want)
+        };
+        let mut out: Vec<String> = Vec::new();
+        for (columns, want) in [(&self.numeric, true), (&self.text, false)] {
+            for c in columns {
+                if !met(c, want) && !out.contains(c) {
+                    out.push(c.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// The target SQL dialect, for the one construct whose emitted
@@ -136,10 +192,12 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
         aggregate: false,
+        keyed_hops: false,
     };
     let sql = ex.query()?;
     let order_table = if ex.aggregate {
@@ -150,10 +208,14 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         Some(ex.from_table.clone())
     };
     let join_left = ex.join_table.clone().map(|t| (t, ex.join_on_cols.clone()));
+    let mut tables = vec![ex.from_table.clone()];
+    tables.extend(ex.join_table.clone());
     Ok(Pushdown {
         sql,
         order_table,
         join_left,
+        column_types: ex.column_types.clone(),
+        tables,
     })
 }
 
@@ -319,6 +381,9 @@ struct Select {
     distinct: bool,
     from: String,
     join: Option<(String, String)>, // (table, ON condition)
+    /// The join keeps every FROM row (`<=>?`, the outer
+    /// correlation): a LEFT JOIN.
+    join_outer: bool,
     wheres: Vec<String>,
     group_by: Option<String>,
     having: Option<String>,
@@ -339,7 +404,8 @@ impl Select {
         }
         out.push_str(&format!(" FROM {}", self.from));
         if let Some((t, on)) = &self.join {
-            out.push_str(&format!(" JOIN {t} ON {on}"));
+            let kind = if self.join_outer { "LEFT JOIN" } else { "JOIN" };
+            out.push_str(&format!(" {kind} {t} ON {on}"));
         }
         if !self.wheres.is_empty() {
             out.push_str(&format!(" WHERE {}", self.wheres.join(" AND ")));
@@ -370,6 +436,9 @@ impl Select {
 pub struct Partial {
     pub table: String,
     pub where_sql: String,
+    /// As [`Pushdown::column_types`]: the prefilter keeps every row
+    /// the scan would only where these assumptions hold.
+    pub column_types: ColumnTypes,
 }
 
 /// Attempt a partial pushdown: `Some` when the query's leading row
@@ -399,6 +468,25 @@ pub fn partial_pushdown_explained(
     quarb: &str,
     dialect: Option<Dialect>,
 ) -> Result<Partial, SqlError> {
+    partial_pushdown_with(quarb, dialect, false)
+}
+
+/// [`partial_pushdown_explained`] for an adapter that reads hops by
+/// key and filters only the table's listing
+/// (`RelationalModel::with_filtered_listing`): crosslinks and
+/// resolutions no longer refuse the prefilter, since a hop into the
+/// filtered table reads its row unfiltered. What still refuses: a
+/// second navigation into the table, and a `<--` or `=>` scope that
+/// could list it.
+pub fn partial_pushdown_keyed(quarb: &str, dialect: Option<Dialect>) -> Result<Partial, SqlError> {
+    partial_pushdown_with(quarb, dialect, true)
+}
+
+fn partial_pushdown_with(
+    quarb: &str,
+    dialect: Option<Dialect>,
+    keyed_hops: bool,
+) -> Result<Partial, SqlError> {
     refuse_marker(quarb)?;
     let arbor =
         QueryArbor::parse(quarb).map_err(|e| SqlError::Syntax(format!("parsing Quarb: {e}")))?;
@@ -411,10 +499,12 @@ pub fn partial_pushdown_explained(
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
         aggregate: false,
+        keyed_hops,
     };
     ex.partial()
 }
@@ -450,10 +540,17 @@ struct Exporter {
     from_table: String,
     join_on_cols: Vec<String>,
     join_table: Option<String>,
+    /// What the comparisons assume of column types (see
+    /// [`Pushdown::column_types`]).
+    column_types: ColumnTypes,
     from_sql: String,
     join_sql: Option<String>,
     in_on: bool,
     aggregate: bool,
+    /// The adapter reads hops by key (the pushed-down WHERE filters
+    /// the table's listing only), so crosslinks and resolutions are
+    /// safe beside the prefilter.
+    keyed_hops: bool,
 }
 
 impl Exporter {
@@ -492,16 +589,18 @@ impl Exporter {
         let q = self
             .kid(root, "query")
             .ok_or_else(|| SqlError::Unsupported("empty query".into()))?;
-        if self.kid(q, "query").is_some() {
-            return Err(SqlError::Unsupported(
-                "correlations address other tables".into(),
-            ));
-        }
+        // A correlation does not forbid the prefilter: the driver's
+        // own predicates restrict the driver's rows whatever the join
+        // then binds. What must not happen is the join (or anything
+        // else) reaching the filtered table a second time — a
+        // self-join would see only the filtered rows — and the
+        // whole-query gates below refuse exactly that: they walk the
+        // correlation entries too.
         let branches = self.kids(q, "branch");
         if branches.len() != 1 {
             return Err(SqlError::Unsupported("a branch union".into()));
         }
-        let (table, preds) = self.table_branch(branches[0])?;
+        let (table, preds) = self.table_branch_lead(branches[0], self.keyed_hops)?;
 
         // Whole-query gates.
         let all = self.walk_all(root);
@@ -510,12 +609,39 @@ impl Exporter {
             match self.kind(*n).as_str() {
                 "step" => {
                     let axis = self.prop_s(*n, "axis");
-                    if matches!(axis.as_str(), "->" | "<-" | "--" | "-->" | "<--") {
-                        return Err(SqlError::Unsupported(
-                            "crosslink/resolution axes could reach \
-                             the filtered table"
-                                .into(),
-                        ));
+                    // A crosslink, a resolution or a value match may
+                    // land in (or search) the filtered table and would
+                    // see only its filtered rows: `=>` and the scoped
+                    // `<--` carry their scope as text, so the table
+                    // count below cannot see them.
+                    if matches!(axis.as_str(), "->" | "<-" | "--" | "-->" | "<--" | "=>") {
+                        // Where hops are read by key they are exact
+                        // beside the prefilter. A scope is a listing,
+                        // though: it is safe only when it plainly
+                        // lists another table (`/other/…`), and an
+                        // unscoped `=>` walks every table.
+                        let scope = self.prop_s(*n, "scope");
+                        let lists_other_table = scope
+                            .strip_prefix('/')
+                            .and_then(|rest| rest.split(['/', '[', '<']).next())
+                            .is_some_and(|first| {
+                                !first.is_empty()
+                                    && first != table
+                                    && first.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            });
+                        let safe = self.keyed_hops
+                            && if scope.is_empty() {
+                                axis != "=>"
+                            } else {
+                                lists_other_table
+                            };
+                        if !safe {
+                            return Err(SqlError::Unsupported(
+                                "crosslink/resolution axes could reach \
+                                 the filtered table"
+                                    .into(),
+                            ));
+                        }
                     }
                     if self.prop_s(*n, "matcher") == table {
                         table_mentions += 1;
@@ -570,6 +696,7 @@ impl Exporter {
         Ok(Partial {
             table,
             where_sql: conds.join(" AND "),
+            column_types: self.column_types.clone(),
         })
     }
 
@@ -828,6 +955,16 @@ impl Exporter {
             for p in rpreds {
                 self.split_join_pred(p, &rsql, &mut on, &mut wheres)?;
             }
+            // `<=>?` — the outer correlation keeps a driver row no
+            // joined row admits, its witness null: a LEFT JOIN. The
+            // joined expression's own predicates then select the
+            // witness, so they belong to the ON; in a WHERE they
+            // would discard the unmatched rows again.
+            let outer = matches!(self.prop(*corr, "outer"), Some(Value::Bool(true)));
+            if outer {
+                on.append(&mut wheres);
+            }
+            sel.join_outer = outer;
             if on.is_empty() {
                 return Err(SqlError::Unsupported(
                     "a correlation without a '$$' equality (no JOIN condition)".into(),
@@ -887,8 +1024,20 @@ impl Exporter {
     /// A `/table/*[preds]` branch: the table name and the row-step
     /// predicate nodes.
     fn table_branch(&mut self, b: NodeId) -> Result<(String, Vec<NodeId>), SqlError> {
+        self.table_branch_lead(b, false)
+    }
+
+    /// [`table_branch`]; with `more`, the branch may go on after
+    /// `/table/*[…]` (a hop, a cell): the prefilter concerns its
+    /// first two steps only, and the steps after them are held to
+    /// the whole-query gates.
+    fn table_branch_lead(
+        &mut self,
+        b: NodeId,
+        more: bool,
+    ) -> Result<(String, Vec<NodeId>), SqlError> {
         let steps = self.kids(b, "step");
-        if steps.len() != 2 {
+        if steps.len() < 2 || (steps.len() > 2 && !more) {
             return Err(SqlError::Unsupported(
                 "navigation beyond /table/* (SQL sees tables and rows)".into(),
             ));
@@ -1064,6 +1213,45 @@ impl Exporter {
                                  that); this shape rides the partial prefilter"
                                     .into(),
                             ));
+                        }
+                    }
+                }
+                // Quarb compares by value; SQL by the column's type.
+                // A column against a numeric literal is the scan's
+                // comparison only on a numeric-typed column, and
+                // against a text literal only on a column that is
+                // not (MySQL reads `n = 'abc'` as `n = 0`): the
+                // catalog decides, so both are recorded for the
+                // caller. A numeric-looking TEXT literal meets
+                // numbers as a number in Quarb and compares as text
+                // in SQL, on every engine, so it does not push.
+                if self.strict {
+                    for (ci, li) in [(0usize, 1usize), (1, 0)] {
+                        let Some(column) = self.column_operand(kids[ci]) else {
+                            continue;
+                        };
+                        if self.kind(kids[li]) != "literal" {
+                            continue;
+                        }
+                        let numeric = self
+                            .prop(kids[li], "value")
+                            .is_some_and(|v| Value::Str(v.to_string()).numeric_reading().is_some());
+                        let list = match (self.prop_s(kids[li], "type").as_str(), numeric) {
+                            ("null", _) => continue,
+                            ("text", true) => {
+                                return Err(SqlError::Semantics(
+                                    "a numeric-looking text literal compares \
+                                     numerically in Quarb (value coercion); SQL \
+                                     compares it as text"
+                                        .into(),
+                                ));
+                            }
+                            ("text", false) => &mut self.column_types.text,
+                            (_, true) => &mut self.column_types.numeric,
+                            (_, false) => continue,
+                        };
+                        if !list.contains(&column) {
+                            list.push(column);
                         }
                     }
                 }
@@ -1257,7 +1445,7 @@ impl Exporter {
                     let s = self.kids(o, "step")[0];
                     if self.prop_s(s, "axis") == "-->" {
                         return Err(SqlError::Unsupported(
-                            "a '~>' resolution chain: the foreign-key targets live in \
+                            "a '-->' resolution chain: the foreign-key targets live in \
                              the schema, not the query — spell the join with '<=>' to \
                              export it"
                                 .into(),
@@ -1359,6 +1547,22 @@ impl Exporter {
                 "the {other} metadata projection"
             ))),
         }
+    }
+
+    /// The column a plain column operand names (`::col`, `$*1::col`):
+    /// a path without a step, or a context reference, projecting a
+    /// named property.
+    fn column_operand(&self, o: NodeId) -> Option<String> {
+        match self.kind(o).as_str() {
+            "path" if self.kid(o, "step").is_none() => {}
+            "context" => {}
+            _ => return None,
+        }
+        let p = self.kid(o, "projection")?;
+        if self.prop_s(p, "kind") != "property" {
+            return None;
+        }
+        self.prop(p, "key").map(|k| k.to_string())
     }
 
     /// Whether `o` is a text string literal (`'London'`).

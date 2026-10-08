@@ -152,8 +152,8 @@ fn markdown_round_trips() {
 
 /// The markdown footnote extension ([^name] callouts, [^name]:
 /// bodies) lands in the shared apparatus: footnote-family nodes
-/// both ends, clean prose, ->footnote edges (ruling #35's
-/// recorded markdown amendment).
+/// both ends, clean prose, ->footnote edges (the note model's
+/// markdown amendment).
 #[test]
 fn footnotes_join_the_apparatus() {
     let m = quarb_text_markdown::parse(

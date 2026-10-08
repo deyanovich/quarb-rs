@@ -19,10 +19,10 @@
 //!   `blockquote`, `unordered-list`, `ordered-list`,
 //!   `unordered-item`, `ordered-item`, `verbatim` — plus the
 //!   apparatus: `footnote` and `endnote` (callout and body share
-//!   the family name, ruling #35), `aside` (litogramma's fourth
+//!   the family name), `aside` (litogramma's fourth
 //!   deixis-attached family — anchored content, not apparatus),
-//!   `index-mark` (ruling #36), and the verse vocabulary
-//!   (ruling #37): `verse` holding `strophe`s holding `stichos`
+//!   `index-mark`, and the verse vocabulary
+//!  : `verse` holding `strophe`s holding `stichos`
 //!   lines, the stichos `::taxis` the citation coordinate.
 //! - `::lemma`, `::hypograph`, and `::taxis` are properties; bare
 //!   `::` (and `::text`) is the flattened prose of the subtree,
@@ -100,6 +100,17 @@ pub enum Block {
         genoses: Vec<String>,
         fields: Vec<(String, String)>,
     },
+    /// An inline node of the preceding flow block with text of its
+    /// own that is NOT in the prose — the dictionary vocabulary's
+    /// `inflection`, a lookup key the print never displays: named
+    /// by `kind`, `<hidden>` beside its genoses, its fields as
+    /// properties, standing at the end of the block.
+    Hidden {
+        kind: String,
+        text: String,
+        genoses: Vec<String>,
+        fields: Vec<(String, String)>,
+    },
     /// The literary reading: a milestone (`@("page:12")`) at an
     /// offset into the preceding flow block — `::scheme`,
     /// `::value`.
@@ -111,7 +122,7 @@ pub enum Block {
     /// The literary reading: unseen metadata on the preceding
     /// block itself (a paragraph's `eidos`).
     Annotate { fields: Vec<(String, String)> },
-    /// The parsing pack (ruling #80): a token the source itself
+    /// The parsing pack: a token the source itself
     /// parsed — litogramma's at-epimerismos diaphane, which TEI's
     /// `w`/`pc`, the Russian National Corpus, OpenCorpora and
     /// PROIEL import to — at byte offsets into the preceding flow
@@ -158,7 +169,7 @@ pub enum Block {
     /// A verbatim block — code or other preformatted lines, kept
     /// as authored.
     Verbatim { lang: Option<String>, text: String },
-    /// An in-text note callout (the deixis, ruling #35): `onym`
+    /// An in-text note callout (the deixis): `onym`
     /// names the body it cites within its family. Emitted after
     /// the flow block it sits in; it becomes that block's child,
     /// in order, and the block's own text stays clean of markers.
@@ -178,7 +189,7 @@ pub enum Block {
         /// inline notes): the citation in force at the note.
         at: Option<u32>,
     },
-    /// An index mark (ruling #36): an invisible anchor declaring
+    /// An index mark: an invisible anchor declaring
     /// this place concerns `term`. The back-of-book index is a
     /// query over these, never a stored structure.
     IndexMark { term: String },
@@ -228,7 +239,7 @@ pub enum Block {
     /// to a sectioning command — the promotion rule). With no
     /// open section it degrades to a point [`Block::Anchor`].
     Label { onym: String },
-    /// A verse block (ruling #37 — litogramma's stichoi model):
+    /// A verse block (litogramma's stichoi model):
     /// strophes of lines, denormalized like [`Block::Table`].
     /// Lines arrive flattened by the adapter and are kept as
     /// authored; the stichos `::taxis` numbers lines 1-based,
@@ -287,7 +298,7 @@ pub enum Container {
     },
     /// A list item; flavor and taxis come from the enclosing list.
     Item,
-    /// A note body (the noted, ruling #35): opens a note node of
+    /// A note body (the noted): opens a note node of
     /// its family at the document root — litogramma's canonical
     /// document-end placement — holding its own blocks. `margin`
     /// as on [`Block::NoteRef`].
@@ -296,10 +307,22 @@ pub enum Container {
         family: NoteFamily,
         margin: bool,
     },
+    /// The dictionary vocabulary: an entry, the open's lemma its
+    /// headword (which registers as its onym unless one is
+    /// given), the taxis its homograph number.
+    Entry {
+        taxis: Option<i64>,
+        onym: Option<String>,
+    },
+    /// A sense under an entry: the taxis its number at its depth,
+    /// the open's lemma a gloss-title when the source gives one.
+    Sense {
+        taxis: Option<i64>,
+    },
 }
 
 /// The deixis-attached families litogramma's canon names
-/// (ruling #35, as amended): each family's callout and body
+///: each family's callout and body
 /// share its name. `Aside` rides the same construction —
 /// koine's `aside` sim, an anchored body whose insertion point
 /// is a deixis — but is content, not apparatus: its bodies do
@@ -321,7 +344,7 @@ impl NoteFamily {
     }
 }
 
-/// One parsing of a source-parsed token (ruling #80), in the
+/// One parsing of a source-parsed token, in the
 /// pack's own vocabulary: the lexeme's lemma, the part of speech
 /// (`UPOS` or `UPOS/XPOS`), the accidents (features, in the
 /// source's spelling), a semantic class, the head's onym and the
@@ -346,7 +369,7 @@ struct DeclaredToken {
     parsings: Vec<Parsing>,
 }
 
-/// A row of a cast table (ruling #79): the character's id (the
+/// A row of a cast table: the character's id (the
 /// `prosopon` a mention answers), its name, the pattern a word
 /// token must match to be its mention, and the table's other
 /// columns as the character's fields.
@@ -431,11 +454,11 @@ impl CastRow {
 enum Kind {
     Document,
     Section,
-    /// The literary reading's cast entry (ruling #79): a character
+    /// The literary reading's cast entry: a character
     /// declared by the source or by a cast table, `::lemma` its
     /// name, `::onym` its id, `<-character` its mentions.
     Character,
-    /// The literary reading's gazetteer entry (ruling #87): a place
+    /// The literary reading's gazetteer entry: a place
     /// declared by a places table, `::lemma` its name, `::onym` its
     /// id, `<-place` its mentions.
     Place,
@@ -456,7 +479,7 @@ enum Kind {
     /// (litogramma's aside): body + insertion-point deixis. Content, not
     /// apparatus — no `<note>` on its bodies.
     Aside,
-    /// An index mark (ruling #36): `::term`, in flow position.
+    /// An index mark: `::term`, in flow position.
     IndexMark,
     /// A reference mark: `::target`, `-->` resolves it.
     Ref,
@@ -468,22 +491,22 @@ enum Kind {
     Bib,
     /// A point anchor: `::onym`, an invisible in-flow bearer.
     Anchor,
-    /// The verse vocabulary (ruling #37): the stichoi container…
+    /// The verse vocabulary: the stichoi container…
     Verse,
     /// …its strophes…
     Strophe,
     /// …and its lines, `::taxis` the citation coordinate.
     Stichos,
-    /// The corpus reading (ruling #62): one token of a prose
+    /// The corpus reading: one token of a prose
     /// block — a UAX #29 word segment — with `::` its form,
     /// `::lower` the case-folded form, `<word>` / `<number>` /
     /// `<punct>` its class, `::::n` its position in the document
-    /// and `::::sentence` the UAX #29 sentence it falls in. Flat
-    /// under the block: a sentence is an annotation on the token,
-    /// never a container, so sibling hops run across a false
-    /// sentence break ("Dr. Smith") as they do across a true one.
+    /// and `::::sentence` the UAX #29 sentence it falls in. The
+    /// tokens sit under the block's derived `sentence` nodes
+    /// — the sentence tier — and a treebank's
+    /// declared sentences hold them directly.
     Token,
-    /// A treebank's sentence (ruling #63): in a standalone CoNLL-U
+    /// A treebank's sentence: in a standalone CoNLL-U
     /// document the file's blank-line blocks are declared
     /// structure that nothing re-segments, so each is a prose
     /// block — `::` its text (`# text`, else the forms joined per
@@ -503,6 +526,10 @@ enum Kind {
     Span,
     /// The literary reading's milestone, a point in the prose.
     Milestone,
+    /// The dictionary vocabulary: a record named by its headword.
+    Entry,
+    /// A sense under an entry, nested as the dictionary subdivides.
+    Sense,
 }
 
 impl Kind {
@@ -537,6 +564,8 @@ impl Kind {
             // The adapter answers the sim name kept on the node.
             Kind::Span => "span",
             Kind::Milestone => "milestone",
+            Kind::Entry => "entry",
+            Kind::Sense => "sense",
         })
     }
 }
@@ -563,8 +592,8 @@ struct Node {
     row: bool,
     /// The node is a denormalized table cell (`<cell>` trait).
     cell: bool,
-    /// The apparatus (ruling #35): the note name as written —
-    /// and, on an index mark (ruling #36), the term.
+    /// The apparatus: the note name as written —
+    /// and, on an index mark, the term.
     onym: Option<String>,
     /// A footnote callout (`<deixis>`) rather than a body.
     deixis: bool,
@@ -616,7 +645,7 @@ struct Node {
     /// its mentions in `mentions` too.
     place: Option<NodeId>,
     /// The parsing pack's tokens and sentences declared on this
-    /// flow block, consumed by the tokenizer (ruling #80).
+    /// flow block, consumed by the tokenizer.
     declared_tokens: Vec<DeclaredToken>,
     declared_sentences: Vec<(u32, u32, String)>,
 }
@@ -696,7 +725,7 @@ struct Annot {
     mentions: Vec<u32>,
 }
 
-/// A mention (ruling #63): a span of tokens an annotation marks as
+/// A mention: a span of tokens an annotation marks as
 /// a named entity or a coreference mention — the sentence pattern
 /// again, an annotation on the tokens, never a container. Decoded
 /// at mount from a `ner` key in MISC (BIO and BIOES tags) and from
@@ -870,9 +899,20 @@ pub fn looks_like_conllu(text: &str) -> bool {
 /// relative to `dir`, in path order. Hidden entries are skipped.
 /// An empty set is an error: the directory holds no treebank.
 pub fn read_conllu_dir(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    read_conllu_dir_with(dir, &quarb::source::SourceDecoding::default())
+}
+
+/// [`read_conllu_dir`] under a mount's source-boundary rule: each
+/// file decodes by `?encoding=`, a byte-order mark, else strict
+/// UTF-8 — refused naming the file otherwise.
+pub fn read_conllu_dir_with(
+    dir: &std::path::Path,
+    decoding: &quarb::source::SourceDecoding,
+) -> Result<Vec<(String, String)>, String> {
     fn walk(
         dir: &std::path::Path,
         base: &std::path::Path,
+        decoding: &quarb::source::SourceDecoding,
         out: &mut Vec<(String, String)>,
     ) -> Result<(), String> {
         let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
@@ -887,12 +927,16 @@ pub fn read_conllu_dir(dir: &std::path::Path) -> Result<Vec<(String, String)>, S
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                walk(&p, base, out)?;
+                walk(&p, base, decoding, out)?;
             } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                 e.eq_ignore_ascii_case("conllu") || e.eq_ignore_ascii_case("conllup")
             }) {
-                let text = std::fs::read_to_string(&p)
-                    .map_err(|e| format!("reading {}: {e}", p.display()))?;
+                let bytes =
+                    std::fs::read(&p).map_err(|e| format!("reading {}: {e}", p.display()))?;
+                let text = decoding
+                    .decode(&p.display().to_string(), &bytes)
+                    .map_err(|e| format!("reading {}: {e}", p.display()))?
+                    .text;
                 let text = text
                     .strip_prefix('\u{feff}')
                     .map(str::to_owned)
@@ -908,7 +952,7 @@ pub fn read_conllu_dir(dir: &std::path::Path) -> Result<Vec<(String, String)>, S
         Ok(())
     }
     let mut out = Vec::new();
-    walk(dir, dir, &mut out)?;
+    walk(dir, dir, decoding, &mut out)?;
     if out.is_empty() {
         return Err(format!("{} holds no .conllu file", dir.display()));
     }
@@ -1064,7 +1108,7 @@ fn class_of(seg: &str) -> TokenClass {
     }
 }
 
-/// The class an annotation declares (ruling #65): UPOS `PUNCT` is
+/// The class an annotation declares: UPOS `PUNCT` is
 /// punctuation and `NUM` a number whatever the form's letters say
 /// (`3rd`, a tagger's `PUNCT` on a lettered token); every other
 /// tag, or none, leaves the form to decide.
@@ -1076,7 +1120,7 @@ fn class_of_annotated(form: &str, upos: &str) -> TokenClass {
     }
 }
 
-/// Whether a token's form is a quotation mark (ruling #65): every
+/// Whether a token's form is a quotation mark: every
 /// character one of Unicode's initial and final quotation
 /// punctuation, the ASCII quotes, the guillemets, or the CJK
 /// corner brackets. Such a token wears `<quote>` beside `<punct>`.
@@ -1139,6 +1183,27 @@ impl Node {
             declared_tokens: Vec::new(),
             declared_sentences: Vec::new(),
         }
+    }
+}
+
+/// Where an inline node met while flattening lands: the last flow
+/// block, or — the dictionary vocabulary — the entry or sense
+/// opened after it (the node was met in the headword line, whose
+/// text is the lemma; the flag says so).
+fn inline_host(
+    nodes: &[Node],
+    containers: &[NodeId],
+    last_flow: Option<NodeId>,
+) -> Option<(NodeId, bool)> {
+    let container = containers
+        .last()
+        .copied()
+        .filter(|c| matches!(nodes[c.0 as usize].kind, Kind::Entry | Kind::Sense));
+    match (container, last_flow) {
+        (Some(c), Some(f)) if c.0 > f.0 => Some((c, true)),
+        (Some(c), None) => Some((c, true)),
+        (_, Some(f)) => Some((f, false)),
+        (None, None) => None,
     }
 }
 
@@ -1310,10 +1375,14 @@ pub struct TextModel {
     document_path: Option<String>,
     /// The citation scheme `::cite` answers under when the
     /// document carries several (`?scheme=`); else the first
-    /// milestone's (ruling #81).
+    /// milestone's.
     cite_scheme: Option<String>,
+    /// The corpus reading leaves the note bodies untokenized
+    /// (`?notes=omit`): the author's words alone, for work over an
+    /// annotated edition. By default a note is part of the text.
+    notes_omitted: bool,
     /// The spelling table the corpus reading folds through
-    /// (`?modernize=`, ruling #82): `::lower` and `::modern` read
+    /// (`?modernize=`): `::lower` and `::modern` read
     /// the modern spelling of a historical edition's tokens; `::`
     /// stays the edition's own.
     orthography: Option<String>,
@@ -1331,7 +1400,7 @@ pub struct TextModel {
     /// use, once the tokens exist; answers `//token[::lower = "x"]`
     /// through `descendants_where` without a walk.
     token_index: std::sync::OnceLock<std::collections::HashMap<String, Vec<NodeId>>>,
-    /// The mentions an annotation marked (ruling #63), in document
+    /// The mentions an annotation marked, in document
     /// order of their first token; tokens point in by ordinal.
     mentions: Vec<Mention>,
 }
@@ -1351,7 +1420,7 @@ impl TextModel {
         // Innermost-last stack of open explicit containers.
         let mut containers: Vec<NodeId> = Vec::new();
         // The block a NoteRef callout attaches to: the last flow
-        // node created or appended to (ruling #35).
+        // node created or appended to.
         let mut last_flow: Option<NodeId> = None;
         // The block a Label names: the most recently opened block
         // of any kind — a heading's section, a paragraph, a
@@ -1443,9 +1512,21 @@ impl TextModel {
                     genoses,
                     fields,
                 } => {
-                    let Some(flow) = last_flow else { continue };
-                    let text = nodes[flow.0 as usize]
-                        .text
+                    // The host: the last flow block — or the entry
+                    // or sense just opened, when the span was met
+                    // in its headword line (the dictionary
+                    // vocabulary: a variant beside the headword),
+                    // whose text is then the lemma.
+                    let Some((flow, in_lemma)) = inline_host(&nodes, &containers, last_flow) else {
+                        continue;
+                    };
+                    let host = &nodes[flow.0 as usize];
+                    let source = if in_lemma {
+                        host.lemma.as_deref().unwrap_or("")
+                    } else {
+                        host.text.as_str()
+                    };
+                    let text = source
                         .get(lo as usize..hi as usize)
                         .unwrap_or("")
                         .to_string();
@@ -1455,6 +1536,32 @@ impl TextModel {
                     n.span_kind = Some(kind);
                     n.at = Some((lo, hi));
                     n.text = text;
+                    n.genoses = genoses;
+                    n.fields = fields;
+                }
+                Block::Hidden {
+                    kind,
+                    text,
+                    mut genoses,
+                    fields,
+                } => {
+                    let Some((flow, in_lemma)) = inline_host(&nodes, &containers, last_flow) else {
+                        continue;
+                    };
+                    let host = &nodes[flow.0 as usize];
+                    let end = if in_lemma {
+                        host.lemma.as_deref().map_or(0, str::len) as u32
+                    } else {
+                        host.text.len() as u32
+                    };
+                    let id = push(&mut nodes, Kind::Span, flow);
+                    if !genoses.iter().any(|g| g == "hidden") {
+                        genoses.push("hidden".to_string());
+                    }
+                    let n = &mut nodes[id.0 as usize];
+                    n.span_kind = Some(kind);
+                    n.at = Some((end, end));
+                    n.text = normalize_ws(&text);
                     n.genoses = genoses;
                     n.fields = fields;
                 }
@@ -1565,10 +1672,17 @@ impl TextModel {
                         other => other,
                     };
                     let parent = cursor(&sections, &containers, root);
+                    let (taxis, onym) = match &kind {
+                        Container::Entry { taxis, onym } => (*taxis, onym.clone()),
+                        Container::Sense { taxis } => (*taxis, None),
+                        _ => (None, None),
+                    };
                     let (nkind, start) = match kind {
                         Container::Blockquote => (Kind::Blockquote, None),
                         Container::UnorderedList => (Kind::UnorderedList, None),
                         Container::OrderedList { start } => (Kind::OrderedList, Some(start)),
+                        Container::Entry { .. } => (Kind::Entry, None),
+                        Container::Sense { .. } => (Kind::Sense, None),
                         Container::Item => (
                             match nodes[parent.0 as usize].kind {
                                 Kind::OrderedList => Kind::OrderedItem,
@@ -1584,6 +1698,19 @@ impl TextModel {
                         lemma.map(|l| normalize_ws(&l)).filter(|l| !l.is_empty());
                     if let Some(start) = start {
                         nodes[id.0 as usize].start = start;
+                    }
+                    if taxis.is_some() {
+                        nodes[id.0 as usize].taxis = taxis;
+                    }
+                    // An entry is autonym: the headword registers
+                    // as the onym a ref (`See Liberalism`) lands on,
+                    // the first bearer winning among homographs.
+                    if nkind == Kind::Entry {
+                        let n = &mut nodes[id.0 as usize];
+                        n.onym = onym
+                            .map(|o| normalize_ws(&o))
+                            .filter(|o| !o.is_empty())
+                            .or_else(|| n.lemma.clone());
                     }
                     if nkind == Kind::OrderedItem {
                         // `push` already appended this item, so the
@@ -1745,6 +1872,7 @@ impl TextModel {
             link_base: None,
             document_path: None,
             cite_scheme: None,
+            notes_omitted: false,
             orthography: None,
             bib_aliases: Default::default(),
             head: HeadMeta::default(),
@@ -1782,13 +1910,179 @@ impl TextModel {
         self.document_path = Some(path.to_string());
     }
 
-    /// The scheme `::cite` reads (ruling #81): the mount's
+    /// The scheme `::cite` reads: the mount's
     /// `?scheme=`.
+    /// Leave the note bodies out of the corpus reading's tier
+    /// (`?notes=omit`); set before tokenizing.
+    pub fn omit_notes(&mut self, omit: bool) {
+        self.notes_omitted = omit;
+    }
+
+    /// Lower the reference list a document carries as prose
+    /// (`?references=STANDARD`): every paragraph that reads as a
+    /// reference under the standard becomes a `bib` node — its
+    /// text the projection, the fields under the canonical campi,
+    /// the genus as trait and `::::genus`, `::onym` the list's
+    /// number or else the responsible party and year — and the
+    /// citations in the remaining prose become `cit` nodes
+    /// (bracketed numbers and ranges with their pinpoint, author-
+    /// year parentheses) resolved against them. A paragraph that
+    /// does not parse stays prose; no heading is matched. Returns
+    /// the number of entries lowered; an unknown standard is an
+    /// error naming the known ones.
+    pub fn lower_references(&mut self, standard: &str) -> Result<usize, String> {
+        if !quarb::bibref::STANDARDS.contains(&standard) {
+            return Err(format!(
+                "unknown standard {standard:?} for references= — this build reads {}",
+                quarb::bibref::STANDARDS.join(", ")
+            ));
+        }
+        // The entries: (node, parsed) in document order.
+        let mut entries: Vec<(NodeId, quarb::bibref::Reference)> = Vec::new();
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            // A paragraph, or a list item carrying its text itself
+            // (a numbered reference list is one).
+            if !matches!(
+                n.kind,
+                Kind::Paragraph | Kind::OrderedItem | Kind::UnorderedItem
+            ) || n.deixis
+                || self.note_body_of(NodeId(i as u64)).is_some()
+            {
+                continue;
+            }
+            // A loose list's item carries its paragraph's text
+            // itself: the item is the entry, the paragraph inside
+            // it is not a second one.
+            if n.kind == Kind::Paragraph
+                && n.parent.is_some_and(|p| {
+                    matches!(
+                        self.nodes[p.0 as usize].kind,
+                        Kind::OrderedItem | Kind::UnorderedItem
+                    )
+                })
+            {
+                continue;
+            }
+            let text = n.prose.clone();
+            if text.chars().filter(|c| c.is_alphabetic()).count() < 8 {
+                continue;
+            }
+            if let Ok(Some(r)) = quarb::bibref::parse(standard, &text) {
+                // A reference has a title at least, and either a
+                // year or a party: prose seldom carries both.
+                let dated = r.get("year").is_some() || r.get("author").is_some();
+                if r.get("title").is_some() && dated {
+                    entries.push((NodeId(i as u64), r));
+                }
+            }
+        }
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        // Lower each entry in place: the node's kind, onym, fields
+        // and genus; its text stays as it was.
+        let mut census: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for (id, r) in &entries {
+            // The entry's number: written in the text, or the
+            // ordinal of the list item that carries it (a
+            // numbered list's numbering is the format's).
+            let item = if self.nodes[id.0 as usize].kind == Kind::OrderedItem {
+                Some(*id)
+            } else {
+                self.nodes[id.0 as usize]
+                    .parent
+                    .filter(|p| self.nodes[p.0 as usize].kind == Kind::OrderedItem)
+            };
+            let ordinal = item.and_then(|p| {
+                let list = self.nodes[p.0 as usize].parent?;
+                let siblings = &self.nodes[list.0 as usize].children;
+                let pos = siblings.iter().position(|c| *c == p)?;
+                Some((self.nodes[list.0 as usize].start + pos as i64).to_string())
+            });
+            let onym = r.label.clone().or(ordinal).unwrap_or_else(|| {
+                let party = r
+                    .get("author")
+                    .map(|a| a.split([',', ' ']).next().unwrap_or(a).to_string())
+                    .unwrap_or_default();
+                format!("{}{}", party, r.get("year").unwrap_or(""))
+            });
+            let n = &mut self.nodes[id.0 as usize];
+            n.kind = Kind::Bib;
+            n.onym = Some(onym.clone());
+            n.fields = r.campi();
+            n.genus = r.genus.map(str::to_string);
+            n.text = n.prose.clone();
+            census.push((
+                onym,
+                r.get("author").map(str::to_string),
+                r.get("year").map(str::to_string),
+            ));
+        }
+        // The citations in the prose that remains.
+        let entry_ids: std::collections::HashSet<u64> =
+            entries.iter().map(|(id, _)| id.0).collect();
+        let mut new_cits: Vec<(NodeId, String, Option<String>)> = Vec::new();
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if entry_ids.contains(&(i as u64)) || n.deixis {
+                continue;
+            }
+            if !matches!(
+                n.kind,
+                Kind::Paragraph
+                    | Kind::UnorderedItem
+                    | Kind::OrderedItem
+                    | Kind::Footnote
+                    | Kind::Endnote
+            ) || n.prose.is_empty()
+            {
+                continue;
+            }
+            for c in quarb::bibref::citations(&n.prose) {
+                let target = match &c.key {
+                    quarb::bibref::CitationKey::Number(k) => Some(k.clone()),
+                    quarb::bibref::CitationKey::AuthorYear { party, year } => {
+                        quarb::bibref::resolve_author_year(party, year, &census).map(str::to_string)
+                    }
+                };
+                let Some(target) = target else { continue };
+                new_cits.push((NodeId(i as u64), target, c.locator.clone()));
+            }
+        }
+        for (parent, target, locator) in new_cits {
+            let id = push(&mut self.nodes, Kind::Cit, parent);
+            let n = &mut self.nodes[id.0 as usize];
+            n.internal = true;
+            n.target = Some(target);
+            n.locator = locator;
+        }
+        // Resolve anew: the new bearers and the new referrers.
+        for n in self.nodes.iter_mut() {
+            if n.kind == Kind::Cit {
+                n.ref_edge = None;
+                n.dangling = false;
+            }
+            n.ref_cites.clear();
+        }
+        let onyms = resolve_refs(&mut self.nodes);
+        self.onyms = onyms;
+        // `::author` beside `::auctor`: the English names the
+        // census maps, when no vocabulary census is attached.
+        if self.bib_aliases.is_empty() {
+            self.bib_aliases = quarb::bibref::alias_map()
+                .into_iter()
+                .map(|(canon, en)| (en.to_string(), canon.to_string()))
+                .collect();
+        }
+        Ok(entries.len())
+    }
+
     pub fn set_cite_scheme(&mut self, scheme: &str) {
         self.cite_scheme = Some(scheme.to_string());
     }
 
-    /// The spelling table the tokens fold through (ruling #82):
+    /// The spelling table the tokens fold through:
     /// the mount's `?modernize=`. An unknown table is an error.
     pub fn set_orthography(&mut self, table: &str) -> Result<(), String> {
         quarb::translit::modernize("", table)?;
@@ -1847,7 +2141,7 @@ impl TextModel {
         out
     }
 
-    /// The citation in force at a node (ruling #81): the value of
+    /// The citation in force at a node: the value of
     /// the last milestone under the citation scheme at or before
     /// the node's point in the document — a token's or a span's
     /// offset in its block, a sentence's first token, a flow
@@ -2238,7 +2532,7 @@ fn resolve_notes(nodes: &mut [Node]) {
 }
 
 /// An index term as written, with the `|...` formatting and range
-/// directives stripped (v1 of ruling #36; ranges and
+/// directives stripped (ranges and
 /// see-references are recorded follow-ups).
 fn quarb_term(term: &str) -> String {
     normalize_ws(term.split('|').next().unwrap_or(term))
@@ -2253,7 +2547,7 @@ fn cursor(sections: &[NodeId], containers: &[NodeId], root: NodeId) -> NodeId {
 }
 
 impl TextModel {
-    /// The corpus reading (ruling #62): give every prose block its
+    /// The corpus reading: give every prose block its
     /// tokens as children. Segmentation is UAX #29 word boundaries
     /// (the standard `sentences` already follows): `don’t`, `Tom’s`
     /// and `3,000` are one token each, an em dash is its own, and
@@ -2261,7 +2555,7 @@ impl TextModel {
     /// through the document in reading order. The block's own
     /// `::` is unchanged; the tokens sit after any children it
     /// already had (an inline ref, a callout).
-    /// The literary reading's cast layer (ruling #79): declare the
+    /// The literary reading's cast layer: declare the
     /// characters a cast table names (those the source did not),
     /// annotate every word token a row's pattern matches with the
     /// row's id as its `prosopon`, then resolve every mention to
@@ -2408,7 +2702,7 @@ impl TextModel {
         }
     }
 
-    /// The literary reading's gazetteer (ruling #87): a places
+    /// The literary reading's gazetteer: a places
     /// table declares the places a source names, as a cast table
     /// declares its people. Each row is a `place` node under the
     /// root (`::lemma` its name, `::onym` its id, every other
@@ -2513,37 +2807,146 @@ impl TextModel {
         self.tokenize_with(None)
     }
 
+    /// Whether `id` is a block the corpus reading tokenizes — a
+    /// paragraph, item, verse line, speech, or a note body that
+    /// carries its own prose.
+    fn is_prose_block(&self, id: usize) -> bool {
+        let node = &self.nodes[id];
+        let prose_block = match node.kind {
+            // A treebank paragraph delegates to its declared
+            // sentences; the sentences the
+            // corpus reading derives beneath a block (ruling
+            // #64) are annotation, not blocks.
+            Kind::Paragraph => !node.children.iter().any(|c| {
+                let c = &self.nodes[c.0 as usize];
+                c.kind == Kind::Sentence && !c.derived
+            }),
+            Kind::Sentence => !node.derived,
+            Kind::UnorderedItem | Kind::OrderedItem | Kind::Stichos => true,
+            Kind::Speech | Kind::Dialogue => true,
+            // A body is a block of its own only when it holds its
+            // text directly — a body of paragraphs carries their
+            // text too, and the paragraphs are the blocks.
+            Kind::Footnote | Kind::Endnote | Kind::Aside => {
+                !node.deixis && !self.holds_prose_block(id)
+            }
+            _ => false,
+        };
+        prose_block && !node.prose.is_empty()
+    }
+
+    /// Whether a prose block stands anywhere beneath `id`.
+    fn holds_prose_block(&self, id: usize) -> bool {
+        self.nodes[id].children.iter().any(|c| {
+            let c = c.0 as usize;
+            self.is_prose_block(c) || self.holds_prose_block(c)
+        })
+    }
+
     /// The prose blocks the corpus reading tokenizes, in reading
-    /// order.
+    /// order — the order the text is printed in. A note is part of
+    /// the text (spec: the corpus reading; the user's ruling of
+    /// 2026-10-07): a footnote's or an aside's body follows the
+    /// block that holds its callout, as at the foot of that page;
+    /// an endnote's body, and a body no callout reaches, follow
+    /// the flow, as at the end. The tree is untouched — bodies
+    /// stay under their note node, reached by `->footnote` — only
+    /// `::::n` and the sentence tier follow the printed order, so
+    /// a window or a dispersion does not run out of the prose into
+    /// a commentary. With `?notes=omit` the bodies are left
+    /// untokenized.
     fn prose_blocks(&self) -> Vec<NodeId> {
-        (0..self.nodes.len())
-            .filter(|&id| {
-                let node = &self.nodes[id];
-                let prose_block = match node.kind {
-                    // A treebank paragraph delegates to its declared
-                    // sentences (ruling #63); the sentences the
-                    // corpus reading derives beneath a block (ruling
-                    // #64) are annotation, not blocks.
-                    Kind::Paragraph => !node.children.iter().any(|c| {
-                        let c = &self.nodes[c.0 as usize];
-                        c.kind == Kind::Sentence && !c.derived
-                    }),
-                    Kind::Sentence => !node.derived,
-                    Kind::UnorderedItem | Kind::OrderedItem | Kind::Stichos => true,
-                    Kind::Speech | Kind::Dialogue => true,
-                    Kind::Footnote | Kind::Endnote | Kind::Aside => !node.deixis,
-                    _ => false,
-                };
-                prose_block && !node.prose.is_empty() && !self.in_apparatus(NodeId(id as u64))
-            })
-            .map(|id| NodeId(id as u64))
-            .collect()
+        let mut flow = Vec::new();
+        let mut by_body: std::collections::BTreeMap<NodeId, Vec<NodeId>> = Default::default();
+        for id in 0..self.nodes.len() {
+            if !self.is_prose_block(id) {
+                continue;
+            }
+            let block = NodeId(id as u64);
+            match self.in_body(block) {
+                Some(body) => by_body.entry(body).or_default().push(block),
+                None => flow.push(block),
+            }
+        }
+        if self.notes_omitted || by_body.is_empty() {
+            return flow;
+        }
+        // Each body after the block its first callout stands in —
+        // the nearest enclosing prose block, inside another body
+        // when a note is itself noted — or after the flow.
+        let mut after: std::collections::HashMap<NodeId, Vec<NodeId>> = Default::default();
+        let mut trailing = Vec::new();
+        for &body in by_body.keys() {
+            let n = &self.nodes[body.0 as usize];
+            let anchor = (n.kind != Kind::Endnote)
+                .then(|| n.cites.first().and_then(|&c| self.block_of(c)))
+                .flatten();
+            match anchor {
+                Some(block) => after.entry(block).or_default().push(body),
+                None => trailing.push(body),
+            }
+        }
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut seen: std::collections::HashSet<NodeId> = Default::default();
+        fn emit(
+            blocks: &[NodeId],
+            by_body: &std::collections::BTreeMap<NodeId, Vec<NodeId>>,
+            after: &std::collections::HashMap<NodeId, Vec<NodeId>>,
+            seen: &mut std::collections::HashSet<NodeId>,
+            out: &mut Vec<NodeId>,
+        ) {
+            for &b in blocks {
+                out.push(b);
+                if let Some(bodies) = after.get(&b) {
+                    for &body in bodies {
+                        if seen.insert(body) {
+                            emit(&by_body[&body], by_body, after, seen, out);
+                        }
+                    }
+                }
+            }
+        }
+        emit(&flow, &by_body, &after, &mut seen, &mut out);
+        for body in trailing {
+            if seen.insert(body) {
+                emit(&by_body[&body], &by_body, &after, &mut seen, &mut out);
+            }
+        }
+        // A body whose callout block was never reached (the callout
+        // stands outside the prose, or in a cycle): after the flow.
+        for &body in by_body.keys() {
+            if seen.insert(body) {
+                emit(&by_body[&body], &by_body, &after, &mut seen, &mut out);
+            }
+        }
+        out
+    }
+
+    /// The note body `node` stands in, if any — the body itself
+    /// counts, for a body that carries its own prose.
+    fn in_body(&self, node: NodeId) -> Option<NodeId> {
+        let n = &self.nodes[node.0 as usize];
+        if matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) && !n.deixis {
+            return Some(node);
+        }
+        self.note_body_of(node)
+    }
+
+    /// The nearest prose block enclosing `node` (itself included).
+    fn block_of(&self, node: NodeId) -> Option<NodeId> {
+        let mut cur = Some(node);
+        while let Some(c) = cur {
+            if self.is_prose_block(c.0 as usize) {
+                return Some(c);
+            }
+            cur = self.nodes[c.0 as usize].parent;
+        }
+        None
     }
 
     /// The note body a node stands in, if any: the nearest
     /// ancestor that is a footnote, endnote or aside body (not the
-    /// callout). The corpus reading tokenizes the text, not the
-    /// apparatus; a node in a body cites as the body's callout.
+    /// callout). A node in a body cites as the body's callout.
     fn note_body_of(&self, node: NodeId) -> Option<NodeId> {
         let mut cur = self.nodes[node.0 as usize].parent;
         while let Some(p) = cur {
@@ -2554,12 +2957,6 @@ impl TextModel {
             cur = n.parent;
         }
         None
-    }
-
-    fn in_apparatus(&self, node: NodeId) -> bool {
-        let n = &self.nodes[node.0 as usize];
-        (matches!(n.kind, Kind::Footnote | Kind::Endnote | Kind::Aside) && !n.deixis)
-            || self.note_body_of(node).is_some()
     }
 
     /// The document's prose as one text — every prose block's `::`,
@@ -2589,10 +2986,10 @@ impl TextModel {
         for block in self.prose_blocks() {
             let id = block.0 as usize;
             let prose = self.nodes[id].prose.clone();
-            // The sentence tier (ruling #64): one derived sentence
+            // The sentence tier: one derived sentence
             // node per span, under the block; a block the
             // segmenter leaves whole is one sentence.
-            // The parsing pack (ruling #80): the source's own
+            // The parsing pack: the source's own
             // sentences and tokens stand in for the segmenter's
             // where the source declared them.
             let declared_sentences = std::mem::take(&mut self.nodes[id].declared_sentences);
@@ -2728,7 +3125,7 @@ impl TextModel {
         self.attribute_spans();
     }
 
-    /// A token the source parsed (ruling #80): the annotation the
+    /// A token the source parsed: the annotation the
     /// CoNLL-U reading would carry, from the first parsing —
     /// `::lemma` the lexema, `::upos`/`::xpos` the meros (split on
     /// `/`), `::feats` the parepomena with every `Key=Value` a
@@ -2884,8 +3281,8 @@ impl TextModel {
         node
     }
 
-    /// The corpus reading from a CoNLL-U annotation (ruling #62's
-    /// second layer; ruling #63 carries every column): the
+    /// The corpus reading from a CoNLL-U annotation (the corpus
+    /// reading's second layer, carrying every column): the
     /// source's sentences and tokens replace the built-in
     /// segmentation wholesale, aligned to the document's prose by
     /// character offset — each token's form is found at the
@@ -2925,7 +3322,7 @@ impl TextModel {
             let ordinal = si as u32 + 1;
             let mut made: Vec<(NodeId, &ConlluToken)> = Vec::new();
             // The (block, lo, hi) extents the sentence covers — and
-            // the sentence node under each block (ruling #64): a
+            // the sentence node under each block: a
             // sentence the annotator runs across a block boundary
             // is one node per block, sharing the ordinal.
             let mut extents: Vec<(NodeId, usize, usize)> = Vec::new();
@@ -3040,7 +3437,7 @@ impl TextModel {
         Ok(())
     }
 
-    /// A treebank read as a document (ruling #63): the file is the
+    /// A treebank read as a document: the file is the
     /// root; `# newdoc` opens a section, `# newpar` a paragraph,
     /// each sentence block a `sentence` node whose `::` is its
     /// `# text` (else the forms joined per `SpaceAfter`) and whose
@@ -3140,6 +3537,7 @@ impl TextModel {
             link_base: None,
             document_path: None,
             cite_scheme: None,
+            notes_omitted: false,
             orthography: None,
             bib_aliases: Default::default(),
             head: HeadMeta::default(),
@@ -3301,7 +3699,7 @@ impl TextModel {
             }
         }
     }
-    /// The mentions of the annotation (ruling #63), decoded once
+    /// The mentions of the annotation, decoded once
     /// the tokens carry their keys: a `ner` key's BIO / BIOES tags
     /// (Stanza, spacy-conll — `B-PERSON` opens, `I-`/`E-` continue
     /// within the sentence, `S-` stands alone, `O` closes) and
@@ -3604,7 +4002,7 @@ fn lower_table(
     }
 }
 
-/// Lower a verse block (ruling #37): `verse` → `strophe`s →
+/// Lower a verse block: `verse` → `strophe`s →
 /// `stichos` lines. The stichos taxis numbers lines 1-based,
 /// continuously across strophes — Iliad 1.34 is a taxis; the
 /// strophe taxis is its ordinal. Empty lines are dropped (the
@@ -3755,9 +4153,40 @@ impl TextModel {
     }
 }
 
+impl TextModel {
+    /// The dictionary vocabulary: the abbreviations list's item
+    /// whose lemma is `text` — what a usage label resolves to.
+    fn abbreviation(&self, text: &str) -> Option<NodeId> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let list = self.nodes.iter().position(|n| {
+            matches!(n.kind, Kind::UnorderedList | Kind::OrderedList)
+                && n.fields
+                    .iter()
+                    .any(|(k, v)| k == "kind" && v == "abbreviations")
+        })?;
+        // An item's lemma may hold several spellings, comma-separated
+        // (`adj., a.`): any of them is the label's.
+        self.nodes[list].children.iter().copied().find(|&c| {
+            self.nodes[c.0 as usize]
+                .lemma
+                .as_deref()
+                .is_some_and(|l| l.split(',').any(|s| s.trim() == text))
+        })
+    }
+}
+
 impl AstAdapter for TextModel {
     fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -3776,7 +4205,7 @@ impl AstAdapter for TextModel {
         self.nodes[node.0 as usize].parent
     }
 
-    /// The positional index (ruling #62, phase 2): `//token[::lower
+    /// The positional index: `//token[::lower
     /// = "word"]` below any node answers from the form → tokens
     /// map, scoped to the node's subtree. Only a plain word is
     /// answered — a literal with a numeric, temporal, durational or
@@ -3860,9 +4289,9 @@ impl AstAdapter for TextModel {
                 }
             }
         }
-        // A callout is inline apparatus, not a block (ruling #35);
-        // so is an index mark (ruling #36). Strophes and stichos
-        // lines are sub-block structure (ruling #37, litogramma's
+        // A callout is inline apparatus, not a block;
+        // so is an index mark. Strophes and stichos
+        // lines are sub-block structure (litogramma's
         // own family rule) — the verse block carries the trait.
         if let Some(t) = &n.token {
             // An empty node (`8.1`) is in the enhanced graph, not
@@ -3872,7 +4301,7 @@ impl AstAdapter for TextModel {
             } else {
                 out.push(t.class.name().to_string());
                 // A quotation mark wears `<quote>` beside `<punct>`
-                // (ruling #65), so the punctuation counts stand.
+                //, so the punctuation counts stand.
                 if t.class == TokenClass::Punct && is_quote(&n.prose) {
                     out.push("quote".to_string());
                 }
@@ -3905,7 +4334,7 @@ impl AstAdapter for TextModel {
                 out.push(g.clone());
             }
         }
-        // The corpus reading's sentence tier (ruling #64): a
+        // The corpus reading's sentence tier: a
         // sentence the segmentation derived, as against a
         // treebank's declared one.
         if n.derived {
@@ -3987,7 +4416,7 @@ impl AstAdapter for TextModel {
     /// spelling was written.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
-        // The citation in force at any node (ruling #81).
+        // The citation in force at any node.
         if name == "cite" {
             return self.cite(node).map(Value::Str);
         }
@@ -4068,7 +4497,7 @@ impl AstAdapter for TextModel {
                 .map(Value::Str)
             }
             // A treebank sentence: `::id` its sent_id, every other
-            // comment under its key (ruling #63).
+            // comment under its key.
             "id" if n.kind == Kind::Sentence => n
                 .fields
                 .iter()
@@ -4076,7 +4505,7 @@ impl AstAdapter for TextModel {
                 .map(|(_, v)| Value::Str(v.clone())),
             "lemma" | "title" => n.lemma.clone().map(Value::Str),
             "onym" => n.onym.clone().map(Value::Str),
-            // On an index mark the onym IS the term (ruling #36).
+            // On an index mark the onym IS the term.
             "term" if n.kind == Kind::IndexMark => n.onym.clone().map(Value::Str),
             // A ref's word: the identifier as written. Never the
             // resolved content — that is what `-->` is for.
@@ -4129,7 +4558,7 @@ impl AstAdapter for TextModel {
                     .get(lo..hi)
                     .map(|s| Value::Str(s.trim().to_string()))
             }
-            // A mention's text and entity type (ruling #63); a list
+            // A mention's text and entity type; a list
             // where mentions nest.
             "mention" if n.token.is_some() => {
                 self.mention_values(node, |m| Some(Value::Str(self.mention_text(m))))
@@ -4162,6 +4591,8 @@ impl AstAdapter for TextModel {
             // paragraph's unseen metadata under the sim name of the
             // monosim that carried it (`::prosopon`), a list where
             // it repeats (`eidos`); a milestone's scheme and value.
+            // (A list's own kind — the dictionary vocabulary's
+            // abbreviations list — answers the same way.)
             _ if matches!(
                 n.kind,
                 Kind::Span
@@ -4171,6 +4602,8 @@ impl AstAdapter for TextModel {
                     | Kind::Milestone
                     | Kind::Character
                     | Kind::Place
+                    | Kind::UnorderedList
+                    | Kind::OrderedList
             ) && !n.fields.is_empty() =>
             {
                 field_values(&n.fields, name)
@@ -4247,6 +4680,14 @@ impl AstAdapter for TextModel {
     /// resolution re-kinds an open-family callout to its body.
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let n = &self.nodes[node.0 as usize];
+        // The dictionary vocabulary: a usage label resolves against
+        // the abbreviations list by its text.
+        if n.kind == Kind::Span
+            && n.span_kind.as_deref() == Some("label")
+            && let Some(item) = self.abbreviation(&n.text)
+        {
+            return vec![("abbreviation".to_string(), item)];
+        }
         // The literary reading: a mention reaches its character.
         let character: Vec<(String, NodeId)> = n
             .character
@@ -4359,9 +4800,15 @@ impl AstAdapter for TextModel {
     /// bears the name, the point anchor if a point does. The
     /// text-level hints choose the reading: `-->block` normalizes
     /// a point landing to its enclosing block, `-->point` selects
-    /// point targets only; bare is the honest exact landing.
+    /// point targets only; bare is the exact landing.
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let n = &self.nodes[node.0 as usize];
+        if n.kind == Kind::Span && n.span_kind.as_deref() == Some("label") {
+            return (property == "abbreviation"
+                && matches!(hint, None | Some("*") | Some("block")))
+            .then(|| self.abbreviation(&n.text))
+            .flatten();
+        }
         if !matches!(n.kind, Kind::Ref | Kind::Cit) || property != "target" {
             return None;
         }
@@ -4393,14 +4840,22 @@ impl AstAdapter for TextModel {
 
     /// The bare arrow's property: a ref resolves its target.
     fn ref_property(&self, node: NodeId) -> Option<String> {
-        matches!(self.nodes[node.0 as usize].kind, Kind::Ref | Kind::Cit)
-            .then(|| "target".to_string())
+        let n = &self.nodes[node.0 as usize];
+        if n.kind == Kind::Span && n.span_kind.as_deref() == Some("label") {
+            return Some("abbreviation".to_string());
+        }
+        matches!(n.kind, Kind::Ref | Kind::Cit).then(|| "target".to_string())
     }
 
     /// A ref the producer declared external: the absolute URL,
     /// relative targets joined against the document's own URL —
     /// the same acquisition rung the html DOM reading speaks.
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         if !matches!(hint, None | Some("*")) {
             return None;
         }
@@ -4425,7 +4880,7 @@ impl AstAdapter for TextModel {
         if u.scheme() != "http" && u.scheme() != "https" {
             return None;
         }
-        Some(u.into())
+        Some(quarb::ExternalRef::uri(u.as_str()))
     }
 
     /// A sibling document's `#fragment` lands here: the bearer of
@@ -4469,7 +4924,7 @@ impl AstAdapter for TextModel {
             // The corpus reading: a token's position and sentence.
             // A sentence node's document-wide ordinal, under both
             // spellings, so `/paragraph[7]/sentence[3]::::n` and a
-            // token's `::::sentence` agree (ruling #64).
+            // token's `::::sentence` agree.
             "n" | "sentence" if n.kind == Kind::Sentence => n.taxis.map(Value::Int),
             "n" => n
                 .token
@@ -4504,7 +4959,7 @@ impl AstAdapter for TextModel {
                 .and_then(|a| a.mwt.as_ref())
                 .map(|(id, _)| Value::Str(id.clone())),
             // `::::resolved` on a callout: the broken-apparatus
-            // linter's fact (ruling #35).
+            // linter's fact.
             "resolved" if n.deixis => Some(Value::Bool(!n.dangling)),
             // …and on an internal ref: the broken-cross-reference
             // linter's fact. External refs resolve at query time,

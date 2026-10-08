@@ -22,7 +22,7 @@
 //! time-travel file access at any commit. Tree entries carry
 //! `;;;type`, `;;;mode`, `;;;size`, and `;;;hash`.
 //!
-//! References are inherent, no schema needed: `::parent~>`
+//! References are inherent, no schema needed: `::parent-->`
 //! resolves to the first parent, `->parent` enumerates all
 //! parents (merges fan out), and `<-parent` finds the commits
 //! that point *here* (children — served from the enumeration, so
@@ -95,6 +95,9 @@ struct Node {
 /// A git repository, exposed as an arbor.
 pub struct GitAdapter {
     repo: PathBuf,
+    /// The mount's rule at the source boundary: a blob's text
+    /// decodes under it (`?encoding=`, else strict UTF-8).
+    decoding: quarb::source::SourceDecoding,
     nodes: RefCell<Vec<Node>>,
     commits: RefCell<HashMap<String, CommitInfo>>,
     /// hash → its `/commits/<hash>` node.
@@ -115,8 +118,19 @@ const COMMITS: NodeId = NodeId(3);
 impl GitAdapter {
     /// Open the repository at `path` (any directory inside it).
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
+        Self::open_with_decoding(path, quarb::source::SourceDecoding::default())
+    }
+
+    /// [`open`](Self::open) under a mount's source-boundary rule:
+    /// blobs decode by `?encoding=`, a byte-order mark, else strict
+    /// UTF-8 (a blob that decodes under none has no text).
+    pub fn open_with_decoding(
+        path: &std::path::Path,
+        decoding: quarb::source::SourceDecoding,
+    ) -> Result<Self, GitError> {
         let adapter = GitAdapter {
             repo: path.to_path_buf(),
+            decoding,
             nodes: RefCell::new(vec![
                 Node {
                     kind: Kind::Root,
@@ -171,18 +185,39 @@ impl GitAdapter {
         format!("/{}", parts.join("/"))
     }
 
+    /// Run git for structured output (headers, trees, refs): paths
+    /// come unquoted (`core.quotepath=off`) and the output must be
+    /// UTF-8 — the commands that print messages take
+    /// `--encoding=UTF-8`, so git transcodes a commit written in
+    /// another declared encoding. Output that still is not UTF-8
+    /// is an error, never replaced.
     fn git(&self, args: &[&str]) -> Result<String, GitError> {
+        let out = self.git_bytes(args)?;
+        String::from_utf8(out).map_err(|e| {
+            GitError::Git(format!(
+                "git {}: output is not UTF-8 at byte {}",
+                args.first().unwrap_or(&""),
+                e.utf8_error().valid_up_to()
+            ))
+        })
+    }
+
+    /// Run git for raw bytes (a blob): the caller decodes.
+    fn git_bytes(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.repo)
+            .args(["-c", "core.quotepath=off"])
             .args(args)
             .output()?;
         if !out.status.success() {
             return Err(GitError::Git(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                String::from_utf8(out.stderr)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "(git's message is not UTF-8)".to_string()),
             ));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     }
 
     fn push_node(&self, kind: Kind, parent: Option<NodeId>) -> NodeId {
@@ -215,6 +250,7 @@ impl GitAdapter {
             .git(&[
                 "show",
                 "-s",
+                "--encoding=UTF-8",
                 "--format=%an%x00%ae%x00%at%x00%cn%x00%s%x00%B%x00%T%x00%P%x00%ai",
                 hash,
             ])
@@ -239,6 +275,7 @@ impl GitAdapter {
         let out = self
             .git(&[
                 "rev-list",
+                "--encoding=UTF-8",
                 "--all",
                 "--format=%an%x00%ae%x00%at%x00%cn%x00%s%x00%B%x00%T%x00%P%x00%ai%x1e",
             ])
@@ -674,7 +711,12 @@ impl AstAdapter for GitAdapter {
         if !is_blob {
             return None;
         }
-        self.git(&["cat-file", "blob", &oid]).ok().map(Value::Str)
+        // The blob's bytes under the mount's rule; one that decodes
+        // under none has no text (the leaf stays a leaf).
+        self.git_bytes(&["cat-file", "blob", &oid])
+            .ok()
+            .and_then(|bytes| self.decoding.decode(&oid, &bytes).ok())
+            .map(|d| Value::Str(d.text))
     }
 
     /// Commits: `;;;short`, `;;;n-parents`, `;;;tags`,
@@ -736,7 +778,7 @@ impl AstAdapter for GitAdapter {
         }
     }
 
-    /// `::parent~>` — the first parent (the hint is unused: the
+    /// `::parent-->` — the first parent (the hint is unused: the
     /// target is inherently a commit).
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         if property != "parent" {
@@ -759,6 +801,39 @@ impl AstAdapter for GitAdapter {
             .iter()
             .map(|p| ("parent".to_string(), self.commit_node(p)))
             .collect()
+    }
+
+    /// A commit's reference is its parent: the bare arrows
+    /// (`/HEAD-->`, `/HEAD<--`) read it.
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        self.commit_of(node).map(|_| "parent".to_string())
+    }
+
+    /// `<--(::parent)` from the enumeration, with no walk: the
+    /// commits whose `parent` resolves here — `::parent-->` follows
+    /// the FIRST parent, so a merge counts under its first parent
+    /// only. Any other property has no referrers; with no property
+    /// named the question stays the engine's.
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        _hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        let hash = self.commit_of(node)?;
+        // With no property named: the commit's reference property.
+        if property.is_some_and(|p| p != "parent") {
+            return Some(Vec::new());
+        }
+        self.enumerate_commits();
+        let commits = self.commits.borrow();
+        let mut children: Vec<String> = commits
+            .iter()
+            .filter(|(_, i)| i.parents.first() == Some(&hash))
+            .map(|(h, _)| h.clone())
+            .collect();
+        children.sort();
+        Some(children.iter().map(|h| self.commit_node(h)).collect())
     }
 
     /// The commits whose parent is here (the children — served

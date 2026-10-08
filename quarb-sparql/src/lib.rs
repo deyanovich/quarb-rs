@@ -372,6 +372,11 @@ impl SparqlAdapter {
 }
 
 impl AstAdapter for SparqlAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

@@ -131,7 +131,7 @@ impl Client {
         let resp = match req.send_string(&payload) {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
+                let text = quarb::source::text_from_reader(r.into_reader()).unwrap_or_default();
                 let msg = serde_json::from_str::<serde_json::Value>(&text)
                     .ok()
                     .and_then(|v| {
@@ -146,8 +146,7 @@ impl Client {
             Err(e) => return Err(AthenaError::Api(format!("{op}: {e}"))),
         };
         serde_json::from_str(
-            &resp
-                .into_string()
+            &quarb::source::text_from_reader(resp.into_reader())
                 .map_err(|e| AthenaError::Api(format!("{op}: reading response: {e}")))?,
         )
         .map_err(|e| AthenaError::Api(format!("{op}: parsing response: {e}")))
@@ -427,25 +426,32 @@ fn fetch_rows(
     spec: &TableSpec,
     where_sql: Option<&str>,
 ) -> Result<Vec<RowSpec>, AthenaError> {
-    let cols: Vec<String> = spec.columns.iter().map(|c| format!("\"{c}\"")).collect();
+    let cols: Vec<String> = spec
+        .columns
+        .iter()
+        .map(|c| quarb_relational::quote_double(c))
+        .collect();
     let filter = match where_sql {
         Some(w) => format!(" WHERE {w}"),
         None => String::new(),
     };
     let order = match spec.pk {
-        Some(i) => format!(" ORDER BY \"{}\"", spec.columns[i]),
+        Some(i) => format!(
+            " ORDER BY {}",
+            quarb_relational::quote_double(&spec.columns[i])
+        ),
         None => String::new(),
     };
     let (_, rows) = client.sql(&format!(
-        "SELECT {} FROM \"{}\"{filter}{order}",
+        "SELECT {} FROM {}{filter}{order}",
         cols.join(", "),
-        spec.name
+        quarb_relational::quote_double(&spec.name)
     ))?;
     Ok(rows
         .into_iter()
         .enumerate()
         .map(|(i, values)| RowSpec {
-            rowid: i as i64 + 1,
+            rowid: Some(i as i64 + 1),
             values,
         })
         .collect())
@@ -524,6 +530,38 @@ impl AstAdapter for AthenaAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         self.model.resolve(node, property, hint)

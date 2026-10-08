@@ -10,8 +10,8 @@
 //!
 //! **References are native.** Firestore's `referenceValue` is a
 //! typed document pointer, which makes this the first remote
-//! adapter where `~>` needs neither a schema nor a declared refs
-//! file: `::album~>::title` follows the field's own target, and
+//! adapter where `-->` needs neither a schema nor a declared refs
+//! file: `::album-->::title` follows the field's own target, and
 //! `->` enumerates every reference field as a labeled edge.
 //!
 //! Everything loads lazily — collection ids by `listCollectionIds`,
@@ -321,7 +321,9 @@ impl FirestoreAdapter {
         // Fetch the single document; its parent chain is interned
         // shallowly (collection under root).
         let url = format!("{}/{}", self.base(), path);
-        let d = self.call("GET", &url, None).ok()?;
+        let d = quarb::fetched_opt(self.call("GET", &url, None), || {
+            format!("firestore: reading document {path}")
+        })?;
         d.pointer("/name")?;
         let fields: Vec<(String, Field)> = d
             .pointer("/fields")
@@ -398,7 +400,14 @@ impl AstAdapter for FirestoreAdapter {
         };
         let ids = match plan {
             Plan::Root => {
-                let colls = self.list_collections("").unwrap_or_default();
+                // Refused and left uncached.
+                let colls = match self.list_collections("") {
+                    Ok(c) => c,
+                    Err(e) => {
+                        quarb::record_refusal(format!("firestore: listing collections: {e}"));
+                        return Vec::new();
+                    }
+                };
                 colls
                     .into_iter()
                     .map(|c| {
@@ -420,7 +429,16 @@ impl AstAdapter for FirestoreAdapter {
                         )
                     })
                     .collect();
-                for c in self.list_collections(&path).unwrap_or_default() {
+                let subcollections = match self.list_collections(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        quarb::record_refusal(format!(
+                            "firestore: listing the collections under {path}: {e}"
+                        ));
+                        return Vec::new();
+                    }
+                };
+                for c in subcollections {
                     ids.push(self.push_node(
                         Kind::Collection {
                             path: format!("{path}/{c}"),
@@ -509,7 +527,7 @@ impl AstAdapter for FirestoreAdapter {
         }
     }
 
-    /// `::field~>` follows a native `referenceValue` — no schema,
+    /// `::field-->` follows a native `referenceValue` — no schema,
     /// no refs file; the field knows its target.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
         let path = match &self.nodes.borrow()[node.0 as usize].kind {

@@ -117,7 +117,7 @@ fn membership_in_a_large_list_hashes() {
 }
 
 // A record's field holds every value its operand yields (the
-// push rule of ruling #85 applied to records), and the stages of a
+// push rule applied to records), and the stages of a
 // parenthesized operand pipe keep a group's keys for the next
 // stage.
 #[test]

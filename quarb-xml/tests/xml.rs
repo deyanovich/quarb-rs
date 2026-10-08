@@ -115,7 +115,7 @@ fn resolve_idref() {
     // follow the reference and read the target's attribute
     assert_eq!(values("//loan::book-->::pages"), vec!["192"]);
     // reverse resolution: which nodes' book resolves to book[1]?
-    assert_eq!(values("//book::book<--::reader"), vec!["Ada"]);
+    assert_eq!(values("//book<--(::book)::reader"), vec!["Ada"]);
 }
 
 #[test]
@@ -140,4 +140,24 @@ fn malformed_xml_is_an_error() {
     assert!(XmlAdapter::parse(r#"<a x="1" x="2"/>"#).is_err());
     // unknown entity reference
     assert!(XmlAdapter::parse("<a>&nope;</a>").is_err());
+}
+
+/// Finding 18: the descendant walk is iterative, so a document
+/// nested far deeper than any thread's stack allows per frame
+/// (200,000 levels; test threads have 2 MB) still answers `//a`,
+/// a predicate walk and a parent hop.
+#[test]
+fn a_very_deep_document_walks_without_recursion() {
+    let n = 200_000;
+    let deep = format!("{}x{}", "<a>".repeat(n), "</a>".repeat(n));
+    let adapter = XmlAdapter::parse(&deep).unwrap();
+    let count = |q: &str| match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs[0].to_string(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(count("//a @| count"), n.to_string());
+    assert_eq!(count("//*[::x = 1] @| count"), "0");
+    // The outermost `a` and the n - 1 below it are parents of the
+    // n - 1 inner ones (the deepest has no child).
+    assert_eq!(count("/a//a/.. @| count"), (n - 1).to_string());
 }

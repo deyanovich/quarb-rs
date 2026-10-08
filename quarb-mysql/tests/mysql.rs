@@ -30,7 +30,7 @@ fn fk_machinery() {
         vec!["Holst"]
     );
     assert_eq!(
-        values("/artists/2::artist_id<--::title"),
+        values("/artists/2<--(::artist_id)::title"),
         vec!["Mikrokosmos", "Quartets"]
     );
 }

@@ -10,7 +10,8 @@
 
 use crate::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PatSeg, PathElem,
-    PredExpr, Predicate, Projection, PushBody, Query, Reach, RegRef, Stage, Step, TraitClause,
+    PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Stage, Step,
+    TraitClause,
 };
 use crate::value::Value;
 
@@ -19,6 +20,23 @@ use crate::value::Value;
 /// `<=>` (the outer marker glued to the operator), and the driving
 /// pipeline closes the text.
 pub fn unparse(query: &Query) -> String {
+    // The expression head: `= expr` parses as `^ | (expr)`, and
+    // prints as it was written, since `| (3)` would reparse as the
+    // capture `$3`.
+    if let [branch] = query.branches.as_slice()
+        && branch.steps.is_empty()
+        && branch.projection.is_none()
+        && matches!(branch.anchor, crate::ast::Anchor::Root)
+        && query.correlations.is_empty()
+        && let Some((Stage::Expr(head), rest)) = query.pipeline.split_first()
+    {
+        let mut out = format!("= {}", operand(head));
+        for stage_ast in rest {
+            out.push(' ');
+            out.push_str(&stage(stage_ast));
+        }
+        return out;
+    }
     let n = query.correlations.len();
     // The join prints where it binds: the driver's stages before
     // `join_at` precede the `<=>` entries, the rest follow them.
@@ -122,7 +140,7 @@ fn anchor(a: &crate::ast::Anchor) -> String {
     match a {
         Anchor::Current => String::new(),
         Anchor::Root => "^".to_string(),
-        // Double parentheses are the node side (ruling #43).
+        // Double parentheses are the node side.
         // `$$.name` / `$$.N` / `$$.` — the marks, node-side; the
         // rounded spellings are the double-paren anchors.
         Anchor::Mark(m) => format!("$$.{m}"),
@@ -144,7 +162,7 @@ pub(crate) fn elem(e: &PathElem) -> String {
         PathElem::Group(g) => group(g),
         PathElem::Push { name, body } => {
             // A push prints spaced: the push dot stands after
-            // whitespace (ruling #45); glued, it would be a name
+            // whitespace; glued, it would be a name
             // character.
             let lead = " .";
             let n = name.as_deref().unwrap_or("");
@@ -204,7 +222,10 @@ pub(crate) fn step(s: &Step) -> String {
         Axis::OutLink => out.push_str("->"),
         Axis::InLink => out.push_str("<-"),
         Axis::BothLink => out.push_str("--"),
-        Axis::Resolve { property, hint } => {
+        Axis::Resolve {
+            property,
+            label: hint,
+        } => {
             if let Some(p) = property {
                 out.push_str("::");
                 out.push_str(&name_text(p));
@@ -216,15 +237,50 @@ pub(crate) fn step(s: &Step) -> String {
             // A resolution step carries no matcher of its own.
             return out + &step_suffix(s);
         }
-        Axis::ReverseResolve { property, hint } => {
-            if let Some(p) = property {
-                out.push_str("::");
-                out.push_str(&name_text(p));
-            }
+        Axis::ReverseResolve {
+            label,
+            scope,
+            property,
+        } => {
             out.push_str("<--");
-            if let Some(h) = hint {
+            if let Some(h) = label {
                 out.push_str(&name_text(h));
             }
+            if scope.is_some() || *property != RefProp::Default {
+                out.push('(');
+                if let Some(sp) = scope {
+                    for e in &sp.0 {
+                        out.push_str(&elem(e));
+                    }
+                }
+                match property {
+                    RefProp::Named(p) => {
+                        out.push_str("::");
+                        out.push_str(&name_text(p));
+                    }
+                    RefProp::Any => out.push_str("::*"),
+                    RefProp::Default => {}
+                }
+                out.push(')');
+            }
+            return out + &step_suffix(s);
+        }
+        Axis::ValueMatch {
+            property,
+            scope,
+            target,
+        } => {
+            out.push_str("::");
+            out.push_str(&name_text(property));
+            out.push_str("=>(");
+            if let Some(sp) = scope {
+                for e in &sp.0 {
+                    out.push_str(&elem(e));
+                }
+            }
+            out.push_str("::");
+            out.push_str(&name_text(target));
+            out.push(')');
             return out + &step_suffix(s);
         }
     }
@@ -316,7 +372,7 @@ fn step_suffix(s: &Step) -> String {
     out
 }
 
-/// The canonical regex literal (ruling #44): `(/body/mods)`. In
+/// The canonical regex literal: `(/body/mods)`. In
 /// operand position a leading inline-flag group splits out as
 /// trailing modifiers; in name position (`mods` false) it stays
 /// inline, the closer there being strictly `/)`. A slash in the body
@@ -548,9 +604,20 @@ fn operand(o: &Operand) -> String {
             })
             .collect::<String>(),
         Operand::Arith { op, left, right } => {
-            format!("{} {} {}", arith_term(left), arith(*op), arith_term(right))
+            format!(
+                "{} {} {}",
+                arith_term(left, *op, false),
+                arith(*op),
+                arith_term(right, *op, true)
+            )
         }
-        Operand::Neg(inner) => format!("- {}", arith_term(inner)),
+        Operand::Neg(inner) => format!(
+            "- {}",
+            match **inner {
+                Operand::Arith { .. } => format!("({})", operand(inner)),
+                _ => operand(inner),
+            }
+        ),
         Operand::Group(e) => format!("({})", pred_expr(e)),
         Operand::Recall(r) => reg(r),
         Operand::Topic => "$_".to_string(),
@@ -676,13 +743,30 @@ fn operand(o: &Operand) -> String {
     }
 }
 
-/// An arithmetic sub-expression: parenthesized when it is itself
-/// arithmetic, so grouping survives the round-trip regardless of
-/// precedence.
-fn arith_term(o: &Operand) -> String {
+/// An arithmetic sub-expression under `parent`: parenthesized
+/// where the parse would group it otherwise — a looser operator
+/// below a tighter one, or, on the right, the same precedence
+/// (the parse is left-associative). A long left-leaning chain
+/// `1 + 1 + 1 + …` therefore prints flat, within the nesting the
+/// parser accepts.
+fn arith_term(o: &Operand, parent: ArithOp, right: bool) -> String {
     match o {
-        Operand::Arith { .. } => format!("({})", operand(o)),
+        Operand::Arith { op, .. } => {
+            let (inner, outer) = (arith_precedence(*op), arith_precedence(parent));
+            if inner < outer || (right && inner == outer) {
+                format!("({})", operand(o))
+            } else {
+                operand(o)
+            }
+        }
         _ => operand(o),
+    }
+}
+
+fn arith_precedence(op: ArithOp) -> u8 {
+    match op {
+        ArithOp::Add | ArithOp::Sub => 1,
+        _ => 2,
     }
 }
 
@@ -787,7 +871,7 @@ pub(crate) fn stage(st: &Stage) -> String {
             out
         }
         // `%(...)` is the record constructor's canonical spelling
-        // (ruling #38); `rec` / `record` are its aliases.
+        //; `rec` / `record` are its aliases.
         Stage::Func(call) if is_record_call(&call.name) => {
             format!("| %{}", record_args(call, "; "))
         }
@@ -903,7 +987,7 @@ fn is_bare_key(k: &str) -> bool {
         && !crate::parser::is_bool_word(k)
 }
 
-/// The record convention's argument list (ruling #50): a literal
+/// The record convention's argument list: a literal
 /// string is a key and prints as `key = value` — bare when it is an
 /// identifier, quoted otherwise — with `sep` between the items; an
 /// auto-named value prints alone. The kaiv form, which the record
@@ -947,7 +1031,22 @@ fn fn_call(call: &crate::ast::FnCall) -> String {
     if call.args.is_empty() {
         return call.name.clone();
     }
-    let args: Vec<String> = call.args.iter().map(arg_text).collect();
+    let args: Vec<String> = call
+        .args
+        .iter()
+        .map(|a| match a {
+            // `csv(";"; …)`: the delimiter the parser carried as
+            // `delimiter=;` reads back as the quoted character.
+            Arg::Lit(Value::Str(s)) if call.name == "csv" && s.starts_with("delimiter=") => {
+                match &s["delimiter=".len()..] {
+                    "\t" => "\"tab\"".to_string(),
+                    "\"" => "'\"'".to_string(),
+                    d => format!("\"{d}\""),
+                }
+            }
+            other => arg_text(other),
+        })
+        .collect();
     format!("{}({})", call.name, args.join("; "))
 }
 
@@ -1014,6 +1113,24 @@ mod tests {
         }
         // The rounded twin prints pointy.
         assert_eq!(rt("/a | \\/*:(*.)"), rt("/a | \\/*:@."));
+    }
+
+    #[test]
+    fn expression_heads_strings_and_chains_round_trip() {
+        // `= 3` is not `| (3)`, which is the capture `$3`
+        assert_eq!(rt("= 3"), "= 3");
+        assert_eq!(rt("= 1 + 2 | $_ * 2"), "= 1 + 2 | $_ * 2");
+        // the rounded hole's opener is escaped inside a string
+        assert_eq!(rt("= 'a(,b'"), r#"= "a\(,b""#);
+        assert_fixpoint(r#"= "a\(,b""#);
+        // grouping prints only where the parse needs it
+        assert_eq!(rt("= (1 + 2) * 3"), "= (1 + 2) * 3");
+        assert_eq!(rt("= 1 + 2 * 3"), "= 1 + 2 * 3");
+        assert_eq!(rt("= 1 - (2 - 3)"), "= 1 - (2 - 3)");
+        assert_eq!(rt("= 1 - 2 - 3"), "= 1 - 2 - 3");
+        assert_eq!(rt("= - (1 + 2)"), "= - (1 + 2)");
+        let chain = format!("= {}", vec!["1"; 70].join(" + "));
+        assert_eq!(rt(&chain), chain);
     }
 
     #[test]

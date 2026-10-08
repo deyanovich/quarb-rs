@@ -84,7 +84,7 @@ fn sample_dispersion() {
     close(&floats("/n/* | :: @| stddev(sample)"), &[2.0]);
     close(&floats("/n/* | :: @| stddev"), &[(8.0f64 / 3.0).sqrt()]);
     close(&floats("/n/* | :: @| variance(sample)"), &[4.0]);
-    // Per group of records, with the ruling #66 projection.
+    // Per group of records, with the group projection.
     assert_eq!(
         values("/g/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(:x; sample)"),
         ["0.5", "0.5"]

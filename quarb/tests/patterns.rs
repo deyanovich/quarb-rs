@@ -145,7 +145,7 @@ fn arrived_edges_round_trip() {
 #[test]
 fn context_and_piped_round_trip() {
     for q in [
-        "/a | .p(((::x div (@*::x @| sum)) * 100 | round))",
+        "/a | .p((::x div (@*::x @| sum) * 100 | round))",
         "/a | %(::n; all = (@*:::name @| sort @| join(\", \")))",
         "/a[@* = null]",
     ] {
@@ -252,8 +252,10 @@ fn resolution_respell_canonicalizes() {
         "/tracks/1::album_id-->::title"
     );
     assert_eq!(canon("/loan::book-->shelf"), "/loan::book-->shelf");
-    assert_eq!(canon("/page::id<--"), "/page::id<--");
-    assert_eq!(canon("/page::id<--cite"), "/page::id<--cite");
+    assert_eq!(canon("/page<--(::id)"), "/page<--(::id)");
+    assert_eq!(canon("/page<--cite(::id)"), "/page<--cite(::id)");
+    assert_eq!(canon("/page<--(/a/*::id)"), "/page<--(/a/*::id)");
+    assert_eq!(canon("/n::a=>(/s/*::b)"), "/n::a=>(/s/*::b)");
     // spacing decides: `< -3` is the comparison and stays so; `<-3`
     // glues the hop to a name and is refused in a comparison seat
     assert_eq!(canon("/x[::a < -3]"), "/x[::a < -3]");
@@ -292,10 +294,10 @@ fn rounded_predicate_alias_canonicalizes() {
 
 #[test]
 fn rounded_family_canonicalizes() {
-    // The second slice of the rounded family (ruling #40): every
+    // The second slice of the rounded family: every
     // alias canonicalizes to its pointy form.
     // reverse arrows
-    assert_eq!(canon("/page::id--:cite"), "/page::id<--cite");
+    assert_eq!(canon("/page--:cite(::id)"), "/page<--cite(::id)");
     assert_eq!(canon("/a-:b"), "/a<-b");
     assert_eq!(canon("/a(-:b)+::name"), canon("/a(<-b)+::name"));
     // the edge accessors are untouched, in either spelling
@@ -507,7 +509,7 @@ fn regex_literal_canonicalizes() {
     assert_eq!(canon("/u[::name !== (/x/)]"), "/u[::name !== (/x/)]");
     assert_eq!(canon("/u[::name !== (/x/)]"), "/u[::name !== (/x/)]");
     // a quoted string after `==` is the pattern without a star —
-    // literal and anchored, never an implicit regex (ruling #91)
+    // literal and anchored, never an implicit regex
     assert_eq!(canon("/u[::name == \"x\"]"), "/u[::name == \"x\"]");
     assert!(refuse("/u[::name = (/x/)]").contains("retired"));
     // a slash in the body escapes on the way out
@@ -683,8 +685,8 @@ fn list_literal_canonicalizes() {
         "/a | %(tags = @(::x; \"y\"); n = 1)"
     );
     assert_eq!(canon("/a | @(/tags/*::)"), "/a | @(/tags/*::)");
-    // the expression head canonicalizes as `^ | …` (exprhead.rs)
-    assert_eq!(canon("= @(1; 2) | count"), "^ | @(1; 2) | count");
+    // the expression head keeps its spelling (exprhead.rs)
+    assert_eq!(canon("= @(1; 2) | count"), "= @(1; 2) | count");
     // the rounded spelling `*(…)` — only where a value can begin
     assert_eq!(canon("/a | *(1; 2)"), "/a | @(1; 2)");
     assert_eq!(canon("/a[::x = *(1; 2)]"), "/a[::x = @(1; 2)]");
@@ -771,10 +773,13 @@ fn tail_colon_aliases_canonicalize() {
         "/tracks/1::album_id-->::title"
     );
     assert_eq!(canon("/a:-b"), "/a->b");
-    // a conditional's glued else-negative is untouched
+    // a conditional's else glued to a negative is the else
+    // written without its space: refused with the pointer, never
+    // read as the tail-colon arrow
+    assert!(refuse("/x | (::a ?= 1 ? 2 :-3)").contains("write ' : '"));
     assert_eq!(
-        canon("/x | (::a ?= 1 ? 2 :-3)"),
-        canon("/x | (::a ?= 1 ? 2 : -3)")
+        canon("/x | (::a ?= 1 ? 2 : -3)"),
+        "/x | (::a ?= 1 ? 2 : -3)"
     );
 }
 

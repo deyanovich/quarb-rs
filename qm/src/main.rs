@@ -275,7 +275,7 @@ fn main() -> anyhow::Result<()> {
                 bail!("internal: expected values");
             };
             // Minimal writer: shell out to sqlite3? No — keep zero
-            // deps: write CSV beside SQLite? Simplest honest form:
+            // deps: write CSV beside SQLite? Simplest form:
             // a .csv the csv adapter reads back.
             let mut out = String::from("from,subject,epoch\n");
             for v in &vs {

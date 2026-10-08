@@ -277,8 +277,7 @@ impl CflAdapter {
             .set("Authorization", &format!("Bearer {}", token.trim()))
             .call()
             .map_err(|e| CflError::Api(format!("logs/received: {e}")))?;
-        let text = resp
-            .into_string()
+        let text = quarb::source::text_from_reader(resp.into_reader())
             .map_err(|e| CflError::Api(format!("logs/received: {e}")))?;
         let recs: Vec<Rec> = text
             .lines()
@@ -345,6 +344,11 @@ impl CflAdapter {
 }
 
 impl AstAdapter for CflAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }

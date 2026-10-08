@@ -45,8 +45,8 @@
 
 mod export;
 pub use export::{
-    Dialect, Partial, Pushdown, export, partial_pushdown, partial_pushdown_explained, pushdown,
-    pushdown_explained,
+    ColumnTypes, Dialect, Partial, Pushdown, export, partial_pushdown, partial_pushdown_explained,
+    partial_pushdown_keyed, pushdown, pushdown_explained,
 };
 
 use std::fmt::Write as _;
@@ -775,7 +775,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 .contains(&w.to_ascii_uppercase().as_str()))
         {
             return Err(SqlError::Unsupported(
-                "more than one JOIN (chain resolutions with '~>' instead)".into(),
+                "more than one JOIN (chain resolutions with '-->' instead)".into(),
             ));
         }
     }

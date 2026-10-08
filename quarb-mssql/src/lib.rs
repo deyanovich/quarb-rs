@@ -18,7 +18,7 @@
 //! null.
 //!
 //! The arbor mapping and the foreign-key reference machinery
-//! (`~>` chains, `->`/`<-` crosslinks, `<~` reverse resolution)
+//! (`-->` chains, `->`/`<-` crosslinks, `<--` reverse resolution)
 //! are documented on the shared model. Read-only: the adapter
 //! only ever issues SELECTs.
 //!
@@ -141,18 +141,18 @@ fn parse_target(target: &str) -> Result<Config, MssqlError> {
     if let Some(rest) = target.strip_prefix("mssql://") {
         let (auth, hostpart) = rest
             .split_once('@')
-            .ok_or_else(|| MssqlError::Target(target.to_string()))?;
+            .ok_or_else(|| MssqlError::Target(quarb::target::redact(target)))?;
         let (user, pass) = auth
             .split_once(':')
-            .ok_or_else(|| MssqlError::Target(target.to_string()))?;
+            .ok_or_else(|| MssqlError::Target(quarb::target::redact(target)))?;
         let (host, db) = hostpart
             .split_once('/')
-            .ok_or_else(|| MssqlError::Target(target.to_string()))?;
+            .ok_or_else(|| MssqlError::Target(quarb::target::redact(target)))?;
         let (host, port) = match host.split_once(':') {
             Some((h, p)) => (
                 h,
                 p.parse::<u16>()
-                    .map_err(|_| MssqlError::Target(target.to_string()))?,
+                    .map_err(|_| MssqlError::Target(quarb::target::redact(target)))?,
             ),
             None => (host, 1433),
         };
@@ -168,7 +168,7 @@ fn parse_target(target: &str) -> Result<Config, MssqlError> {
         config.trust_cert();
         Ok(config)
     } else {
-        Err(MssqlError::Target(target.to_string()))
+        Err(MssqlError::Target(quarb::target::redact(target)))
     }
 }
 
@@ -212,17 +212,18 @@ impl MssqlAdapter {
             Ok::<_, MssqlError>((conn, specs, decodes))
         })?;
         let conn = Rc::new(RefCell::new(conn));
-        let model = RelationalModel::lazy(
+        // One row source with an optional WHERE: the whole read, the
+        // listing under a pushed-down filter, and the keyed read a
+        // hop makes (`WHERE key IN (…)`) all derive from it.
+        let model = RelationalModel::lazy_where(
             specs,
-            Box::new(move |t, spec| {
+            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
                 let mut conn = conn.borrow_mut();
-                let w = filter
-                    .as_ref()
-                    .filter(|(tn, _)| *tn == spec.name)
-                    .map(|(_, w)| w.as_str());
                 rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w))
                     .map_err(|e| e.to_string())
             }),
+            filter,
+            quote,
         );
         Ok(MssqlAdapter { model })
     }
@@ -397,7 +398,7 @@ async fn fetch_rows(
         .iter()
         .enumerate()
         .map(|(i, r)| RowSpec {
-            rowid: i as i64 + 1,
+            rowid: Some(i as i64 + 1),
             values: (0..spec.columns.len())
                 .map(|c| cell(r, c, decodes[c]))
                 .collect(),
@@ -472,6 +473,9 @@ impl AstAdapter for MssqlAdapter {
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.model.children(node)
     }
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        self.model.children_named(node, name)
+    }
     fn name(&self, node: NodeId) -> Option<String> {
         self.model.name(node)
     }
@@ -495,6 +499,38 @@ impl AstAdapter for MssqlAdapter {
     }
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
+    }
+    fn reverse_resolve(
+        &self,
+        node: NodeId,
+        property: Option<&str>,
+        hint: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        self.model.reverse_resolve(node, property, hint)
+    }
+    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
+        self.model.can_refer_to(source, target)
+    }
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.model.prefetch_links(nodes, dir)
+    }
+    fn index_referrers(
+        &self,
+        scope: &str,
+        property: &str,
+        label: Option<&str>,
+        target: NodeId,
+    ) -> Option<Vec<NodeId>> {
+        self.model.index_referrers(scope, property, label, target)
+    }
+    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
+        self.model.reference_properties(source, target)
+    }
+    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
+        self.model.resolve_needs_label(node, property)
+    }
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.model.reverse_label(target)
     }
 }
 

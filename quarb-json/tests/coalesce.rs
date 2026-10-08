@@ -1,4 +1,4 @@
-//! `default` as the coalesce idiom (ruling #21): expression
+//! `default` as the coalesce idiom: expression
 //! fallbacks evaluate against the entry's own node, and an
 //! unmatched path seeds the null that `default` exists to
 //! replace — `(a) | default((b))` never starves.

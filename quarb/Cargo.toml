@@ -20,13 +20,20 @@ default = ["colligo"]
 # useful for minimal builds (e.g. wasm) that can spare the
 # ~1 MB of embedded collation data.
 colligo = ["dep:colligo"]
+# The CJK encodings at the source boundary (`?encoding=gbk`,
+# shift_jis, euc-kr, big5): their tables are the bulk of
+# encoding_rs, so the playground and the extension leave them
+# out; `qua` turns them on. Every other Encoding Standard label
+# is always known.
+cjk = []
 
 [dependencies]
-quarb-trace = { path = "../quarb-trace", version = "0.32.0" }
-kaiv = { version = "0.14.0", default-features = false }
+quarb-trace = { path = "../quarb-trace", version = "0.33.0" }
+kaiv = { version = "0.15.0", default-features = false }
 thiserror.workspace = true
 globset.workspace = true
 regex = "1"
+url = "2"
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
 syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
@@ -35,3 +42,4 @@ serde_json.workspace = true
 serde_yaml_ng = "0.10.0"
 toml = "1.1.2"
 quick-xml.workspace = true
+encoding_rs = "0.8"

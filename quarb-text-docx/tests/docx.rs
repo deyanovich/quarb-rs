@@ -163,7 +163,7 @@ fn declared_header_row_labels_cells() {
           <w:tc><w:p><w:r><w:t>8080</w:t></w:r></w:p></w:tc></w:tr>\
         </w:tbl>";
     let m = parse(&docx(body)).unwrap();
-    // ruling #25's lowering: rows are items, cells carry the
+    // the shared table rule's lowering: rows are items, cells carry the
     // column name as ::lemma
     assert_eq!(
         values(&m, r#"//*<cell>[::lemma = "Port"]::"#),
@@ -434,4 +434,46 @@ fn citation_fields_and_the_sources_part() {
     // paragraph after the field stay.
     assert_eq!(values(&m, "//section::lemma"), ["References"]);
     assert_eq!(values(&m, "//section//paragraph::"), ["Closing words."]);
+}
+
+#[test]
+fn core_properties_declare_the_identity() {
+    let core = "<?xml version=\"1.0\"?>\
+        <cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+        xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\">\
+        <dc:title>Pride and Prejudice</dc:title><dc:creator>Jane Austen</dc:creator>\
+        <dc:description>A novel.</dc:description><dc:subject>Novels</dc:subject>\
+        <cp:keywords>regency; manners</cp:keywords><dc:language>en-GB</dc:language>\
+        <dcterms:created>1813-01-28T00:00:00Z</dcterms:created></cp:coreProperties>";
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("word/document.xml", o).unwrap();
+        z.write_all(b"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>It is a truth universally acknowledged.</w:t></w:r></w:p></w:body></w:document>").unwrap();
+        z.start_file("docProps/core.xml", o).unwrap();
+        z.write_all(core.as_bytes()).unwrap();
+        z.finish().unwrap();
+    }
+    let m = parse(&cursor.into_inner()).unwrap();
+    assert_eq!(values(&m, "^::title"), ["Pride and Prejudice"]);
+    assert_eq!(values(&m, "^::author"), ["Jane Austen"]);
+    assert_eq!(values(&m, "^::description"), ["A novel."]);
+    assert_eq!(values(&m, "^::tags"), ["regency, manners"]);
+    assert_eq!(values(&m, "^::::created"), ["1813-01-28T00:00:00Z"]);
+}
+
+#[test]
+fn a_body_level_bookmark_names_the_block_that_follows() {
+    // pandoc writes a heading's bookmark between the paragraphs,
+    // not inside the heading's.
+    let body = concat!(
+        "<w:bookmarkStart w:id=\"17\" w:name=\"book-the-first\"/>",
+        "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Book the First</w:t></w:r></w:p>",
+        "<w:bookmarkEnd w:id=\"17\"/>",
+        "<w:p><w:r><w:t>Recalled to life.</w:t></w:r></w:p>",
+    );
+    let m = parse(&docx(body)).unwrap();
+    assert_eq!(values(&m, "//section::onym"), ["book-the-first"]);
+    assert_eq!(values(&m, "//paragraph::onym"), [""]);
 }

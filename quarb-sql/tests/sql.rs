@@ -129,7 +129,7 @@ fn differential_against_sqlite() {
     let adapter = quarb_sqlite::SqliteAdapter::load(&conn).unwrap();
 
     // Scalar-column cases: compare flattened value lists. The ''
-    // country row keeps the NULL translations honest — SQL's
+    // country row keeps the NULL translations exact — SQL's
     // IS [NOT] NULL distinguishes '' from NULL, and so must the
     // `= null` / `!= null` forms.
     let cases = [
@@ -264,6 +264,23 @@ fn export_details() {
     assert_eq!(
         x("/albums/* <=> /tracks/*[::album_id = _::id] | %($$1::title)"),
         "SELECT tracks.title FROM albums JOIN tracks ON tracks.album_id = albums.id"
+    );
+    // `<=>?` keeps the unmatched driver rows: a LEFT JOIN, and the
+    // joined expression's own predicates choose the witness, so they
+    // stand in the ON (in a WHERE they would discard the unmatched
+    // rows again).
+    assert_eq!(
+        x("/tracks/* <=>? /albums/*[::id = _::album_id] | %(::title; a = $$1::title)"),
+        "SELECT tracks.title, albums.title AS a FROM tracks LEFT JOIN albums \
+         ON albums.id = tracks.album_id"
+    );
+    assert_eq!(
+        x(
+            "/tracks/* <=>? /albums/*[::id = _::album_id && ::year > 1900] \
+             | %(::title; a = $$1::title)"
+        ),
+        "SELECT tracks.title, albums.title AS a FROM tracks LEFT JOIN albums \
+         ON albums.id = tracks.album_id AND albums.year > 1900"
     );
     // Grouped '| count' counts every member like Quarb does —
     // COUNT(*), never the NULL-skipping COUNT(col).
@@ -521,4 +538,52 @@ fn join_projections_qualify_by_operand_index() {
         pushdown_explained("/albums/* <=> /tracks/*[::album_id = _::id] | %(x = $$2::title)")
             .is_err()
     );
+}
+
+/// Quarb compares by value, SQL by the column's type: a plan
+/// records what it assumes of the columns it compares, and a
+/// numeric-looking text literal does not push at all.
+#[test]
+fn a_plan_records_the_column_types_it_assumes() {
+    let plan = quarb_sql::pushdown(
+        "/books/*[::pages > 300 && ::genre = 'epic'] | ::title",
+        None,
+    )
+    .unwrap();
+    assert_eq!(plan.column_types.numeric, ["pages"]);
+    assert_eq!(plan.column_types.text, ["genre"]);
+    assert_eq!(plan.tables, ["books"]);
+    let catalog = |pages: bool, genre: bool| {
+        vec![
+            ("title".to_string(), false),
+            ("Pages".to_string(), pages),
+            ("genre".to_string(), genre),
+        ]
+    };
+    assert!(plan.column_types.unmet(&catalog(true, false)).is_empty());
+    assert_eq!(plan.column_types.unmet(&catalog(false, false)), ["pages"]);
+    assert_eq!(plan.column_types.unmet(&catalog(true, true)), ["genre"]);
+    // a column the catalog does not list is unmet
+    assert_eq!(plan.column_types.unmet(&[]), ["pages", "genre"]);
+    // the literal on the left, and the prefilter, record the same
+    let plan = quarb_sql::pushdown("/books/*[300 < ::pages] | ::title", None).unwrap();
+    assert_eq!(plan.column_types.numeric, ["pages"]);
+    let partial = quarb_sql::partial_pushdown(
+        "/books/*[::pages > 300] | ::title @| group(::title) | count",
+        None,
+    )
+    .unwrap();
+    assert_eq!(partial.column_types.numeric, ["pages"]);
+    // '150' meets 150 and '150.0' in Quarb, and only '150' in SQL
+    assert!(quarb_sql::pushdown("/books/*[::code = '150'] | ::title", None).is_none());
+    assert!(
+        quarb_sql::partial_pushdown(
+            "/books/*[::code = '150'] | ::title @| group(::title) | count",
+            None
+        )
+        .is_none()
+    );
+    // a column against a column assumes nothing
+    let plan = quarb_sql::pushdown("/books/*[::pages = ::leaves] | ::title", None).unwrap();
+    assert!(plan.column_types.is_empty());
 }

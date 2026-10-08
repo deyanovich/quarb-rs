@@ -138,6 +138,7 @@ fn axis_text(a: &Axis) -> &'static str {
         Axis::BothLink => "--",
         Axis::Resolve { .. } => "-->",
         Axis::ReverseResolve { .. } => "<--",
+        Axis::ValueMatch { .. } => "=>",
     }
 }
 
@@ -358,7 +359,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
             // The evaluator records a crosslink in its STORED
             // direction whichever way it was walked; `against` is
             // walking it from its `to` end.
-            Axis::OutLink | Axis::Resolve { .. } => arrived
+            Axis::OutLink | Axis::Resolve { .. } | Axis::ValueMatch { .. } => arrived
                 .iter()
                 .map(|e| (EdgeKey::Link(e.source, e.label.clone(), e.target), false))
                 .collect(),

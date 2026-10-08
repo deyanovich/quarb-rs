@@ -33,7 +33,7 @@ fn catalog_rows_and_fk_chain() {
     );
     // Reverse resolution.
     assert_eq!(
-        values(&a, "/artists/1::id<--[::secs > 400] @| count"),
+        values(&a, "/artists/1<--(::id)[::secs > 400] @| count"),
         ["0"]
     );
 }

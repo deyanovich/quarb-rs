@@ -16,9 +16,9 @@ use std::collections::BTreeSet;
 const CORPUS: &[&str] = &[
     // descendant axis, traits, expr/index/range predicates, leaf
     // anchor, adapter-metadata projection
-    "//book<block||inline>[::pages > 200][2][1..3]$::::id",
+    "//book<block || inline>[::pages > 200][2][1..3]$::::id",
     // the trait boolean algebra: &&, tight !, parens (CNF inside)
-    "//sec<(a||b) && !deprecated>",
+    "//sec<(a || b) && !deprecated>",
     // union branches, scalar + aggregate stages, literal args
     "/a || /b::x | upper @| join(\", \")",
     // the axis zoo (child, both reaches each way, siblings — one
@@ -27,8 +27,11 @@ const CORPUS: &[&str] = &[
     "/a>>b>>?c>>!d<<e<<?f<<!g",
     // glob and regex matchers
     "/src/*.rs//(/^ch[0-9]+$/)",
-    // resolution axes: with a hint, and reverse without
-    "/loan::book-->shelf/page::id<--",
+    // resolution axes: with a reference label, and reverse without;
+    // the reverse arrow's scope and label, the value match's target
+    "/loan::book-->shelf/page<--(::id)",
+    "/page<--cite(/a/*::id)",
+    "/n::a=>(/s/*::b)",
     // core metadata, and/or/not, a bare truthy operand
     "/x[:::index = 2 && !(::a = 1 || ::b)]",
     // comparison zoo
@@ -129,9 +132,9 @@ const CORPUS: &[&str] = &[
     // the record-field colon and the named-captures record
     // (rulings #47/#48): a field of the topic, of a register, of %+
     "/row | [::name == (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",
-    // the record push, plain and enriched (ruling #49)
+    // the record push, plain and enriched
     "/row | .r%(::x, \"n\", 1) | .%%(\"k\", 2) | $.r:n",
-    // the list literal (ruling #52)
+    // the list literal
     "/row | %(tags = @(::a; ::b); n = 1) | @(1; 2)",
 ];
 
@@ -243,11 +246,13 @@ const VOCABULARY: &[(&str, &[&str])] = &[
         "step",
         &[
             "axis",
-            "hint",
+            "label",
             "leaf",
             "matcher",
             "matcher-kind",
             "property",
+            "scope",
+            "target",
         ],
     ),
     ("subcontext", &["name"]),
@@ -327,7 +332,7 @@ fn spellings_are_locked() {
         collect("step", "axis"),
         set(&[
             "/", "//", "//?", "//!", "\\", "\\\\", "\\\\?", "\\\\!", ">", "<", ">>", ">>?", ">>!",
-            "<<", "<<?", "<<!", "->", "<-", "--", "-->", "<--",
+            "<<", "<<?", "<<!", "->", "<-", "--", "-->", "<--", "=>",
         ])
     );
     assert_eq!(

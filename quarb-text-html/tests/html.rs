@@ -196,7 +196,7 @@ fn vals(model: &TextModel, query: &str) -> Vec<String> {
 
 /// A `dl` mounts as a list whose items carry `::lemma` — dt is
 /// property projection, dd is content; dl/dt/dd itself is just
-/// HTML's serialization of "items with lemmas" (ruling #25).
+/// HTML's serialization of "items with lemmas".
 #[test]
 fn definition_lists_mount_as_lemma_items() {
     let m = quarb_text_html::parse(
@@ -247,7 +247,7 @@ fn row_label_tables_carry_lemmas() {
     );
 }
 
-/// The declared note vocabularies (ruling #35): a noteref callout
+/// The declared note vocabularies: a noteref callout
 /// declares no family and takes its body's; endnote-typed bodies
 /// land in the endnote family, footnote-typed in the footnote one.
 #[test]
@@ -289,7 +289,7 @@ fn marginalia_is_the_aside_family() {
            <aside epub:type="marginalia"><p>See the map.</p></aside>
            <p>A second push<a epub:type="noteref" href="#mg">2</a> followed.</p>
            <aside epub:type="marginalia" id="mg"><p>Contested figure.</p></aside>
-           <div class="sidenote">A Tufte class, honestly unread as apparatus.</div>"##,
+           <div class="sidenote">A Tufte class, left unread as apparatus.</div>"##,
     );
     assert_eq!(
         vals(&m, "//*<deixis>->aside::"),

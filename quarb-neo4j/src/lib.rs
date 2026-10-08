@@ -62,11 +62,22 @@ struct Target {
     /// `?key=PROP[,PROP…]` — the properties that name a node, in
     /// fallback order (first present wins).
     key: Option<String>,
+    /// `neo4j+s://`: the HTTP API over TLS (port 7473 unless given),
+    /// as Neo4j's own `+s` schemes spell it. Credentials ride in a
+    /// Basic header and never leave the machine in clear otherwise.
+    tls: bool,
 }
 
 fn parse_target(target: &str) -> Result<Target, Neo4jError> {
-    let bad = || Neo4jError::Target(target.to_string());
-    let rest = target.strip_prefix("neo4j://").ok_or_else(bad)?;
+    let bad = || Neo4jError::Target(quarb::target::redact(target));
+    let (rest, tls) = match target
+        .strip_prefix("neo4j://")
+        .map(|r| (r, false))
+        .or_else(|| target.strip_prefix("neo4j+s://").map(|r| (r, true)))
+    {
+        Some(x) => x,
+        None => return Err(bad()),
+    };
     let (rest, query) = match rest.split_once('?') {
         Some((r, q)) => (r, Some(q)),
         None => (rest, None),
@@ -89,7 +100,7 @@ fn parse_target(target: &str) -> Result<Target, Neo4jError> {
     };
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().map_err(|_| bad())?),
-        None => (hostport.to_string(), 7474),
+        None => (hostport.to_string(), if tls { 7473 } else { 7474 }),
     };
     if host.is_empty() {
         return Err(bad());
@@ -110,6 +121,7 @@ fn parse_target(target: &str) -> Result<Target, Neo4jError> {
         user,
         pass,
         key,
+        tls,
     })
 }
 
@@ -281,7 +293,13 @@ impl Neo4jAdapter {
             format!("Basic {}", base64(creds.as_bytes()))
         });
         let client = Client {
-            url: format!("http://{}:{}/db/{}/tx/commit", t.host, t.port, t.database),
+            url: format!(
+                "{}://{}:{}/db/{}/tx/commit",
+                if t.tls { "https" } else { "http" },
+                t.host,
+                t.port,
+                t.database
+            ),
             auth,
         };
         // The catalog doubles as the connection probe: errors
@@ -408,10 +426,10 @@ impl Neo4jAdapter {
              RETURN type(r), properties(r), {} ORDER BY type(r), id(m)",
             Self::NODE_ROW
         );
-        let rows = self
-            .client
-            .cypher(&stmt, serde_json::json!({ "eid": eid }))
-            .unwrap_or_default();
+        let rows = quarb::fetched(
+            self.client.cypher(&stmt, serde_json::json!({ "eid": eid })),
+            || format!("neo4j: reading the relationships of {eid}"),
+        );
         rows.iter()
             .filter_map(|row| {
                 let label = row.first()?.as_str()?.to_string();
@@ -467,10 +485,15 @@ impl AstAdapter for Neo4jAdapter {
             bt(&label),
             Self::NODE_ROW
         );
-        let rows = self
-            .client
-            .cypher(&stmt, serde_json::json!({}))
-            .unwrap_or_default();
+        // A failed listing is refused and left uncached, so a
+        // later query reads again instead of meeting an empty label.
+        let rows = match self.client.cypher(&stmt, serde_json::json!({})) {
+            Ok(rows) => rows,
+            Err(e) => {
+                quarb::record_refusal(format!("neo4j: listing label {label}: {e}"));
+                return Vec::new();
+            }
+        };
         let ids: Vec<NodeId> = rows.iter().filter_map(|row| self.intern(row)).collect();
         *self.nodes.borrow()[node.0 as usize].children.borrow_mut() = Some(ids.clone());
         ids
@@ -520,7 +543,10 @@ impl AstAdapter for Neo4jAdapter {
             )),
             (Kind::Label { index }, "n-rows") => {
                 let stmt = format!("MATCH (m:{}) RETURN count(m)", bt(&self.labels[*index]));
-                let rows = self.client.cypher(&stmt, serde_json::json!({})).ok()?;
+                let rows =
+                    quarb::fetched_opt(self.client.cypher(&stmt, serde_json::json!({})), || {
+                        format!("neo4j: counting label {}", self.labels[*index])
+                    })?;
                 rows.first()?.first().map(cell_value)
             }
             (Kind::Label { .. }, "loaded") => Some(Value::Bool(
@@ -537,10 +563,10 @@ impl AstAdapter for Neo4jAdapter {
                     format!("MATCH (n) WHERE elementId(n) = $eid RETURN COUNT {{ (n){arrow}() }}");
                 let eid = eid.clone();
                 drop(nodes);
-                let rows = self
-                    .client
-                    .cypher(&stmt, serde_json::json!({ "eid": eid }))
-                    .ok()?;
+                let rows = quarb::fetched_opt(
+                    self.client.cypher(&stmt, serde_json::json!({ "eid": eid })),
+                    || "neo4j: counting relationships".to_string(),
+                )?;
                 rows.first()?.first().map(cell_value)
             }
             _ => None,
@@ -557,7 +583,20 @@ impl AstAdapter for Neo4jAdapter {
         self.edges(node, true)
     }
 
-    /// Hint-form resolution: `::boss_id~>Person` matches the
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// A property names a node only under a node label
+    /// (`::manager-->Person`): without one there is nothing to
+    /// match the value against.
+    fn resolve_needs_label(&self, _node: NodeId, _property: &str) -> bool {
+        true
+    }
+
+    /// Hint-form resolution: `::boss_id-->Person` matches the
     /// property's value against the target label's `?key=` property
     /// (or, without one, the internal id).
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
@@ -575,10 +614,10 @@ impl AstAdapter for Neo4jAdapter {
             bt(label),
             Self::NODE_ROW
         );
-        let rows = self
-            .client
-            .cypher(&stmt, serde_json::json!({ "v": param }))
-            .ok()?;
+        let rows = quarb::fetched_opt(
+            self.client.cypher(&stmt, serde_json::json!({ "v": param })),
+            || format!("neo4j: resolving into label {label}"),
+        )?;
         self.intern(rows.first()?)
     }
 
@@ -615,10 +654,11 @@ impl AstAdapter for Neo4jAdapter {
              RETURN properties(r) LIMIT 1",
             bt(label)
         );
-        let rows = self
-            .client
-            .cypher(&stmt, serde_json::json!({ "s": s_eid, "t": t_eid }))
-            .ok()?;
+        let rows = quarb::fetched_opt(
+            self.client
+                .cypher(&stmt, serde_json::json!({ "s": s_eid, "t": t_eid })),
+            || format!("neo4j: reading the properties of a {label} relationship"),
+        )?;
         let props: Vec<(String, Value)> = rows
             .first()?
             .first()?
@@ -667,6 +707,20 @@ mod tests {
         assert!(parse_target("bolt://localhost").is_err());
         assert!(parse_target("neo4j://").is_err());
         assert!(parse_target("neo4j://host:port").is_err());
+
+        // `+s`: TLS, on Neo4j's HTTPS port unless one is given
+        let t = parse_target("neo4j+s://ada:pw@db.example/movies").unwrap();
+        assert!(t.tls);
+        assert_eq!(t.port, 7473);
+        assert!(!parse_target("neo4j://localhost").unwrap().tls);
+        // a refused target is quoted without its password
+        let err = parse_target("neo4j://ada:secret@host:port")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ada:***@host") && !err.contains("secret"),
+            "{err}"
+        );
     }
 
     #[test]

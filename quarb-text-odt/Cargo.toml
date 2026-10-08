@@ -1,0 +1,22 @@
+[package]
+name = "quarb-text-odt"
+description = "OpenDocument Text (.odt, .fodt, .sxw) producer for the Quarb text level: the reader's model from declared ODF structure"
+keywords = ["quarb", "odt", "opendocument", "odf", "text"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.33.0" }
+quarb-text = { path = "../quarb-text", version = "0.33.0" }
+quick-xml.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.33.0" }
+zip.workspace = true

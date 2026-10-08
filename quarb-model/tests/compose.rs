@@ -32,11 +32,10 @@ fn use_joins_models_and_locates_their_mounts() {
     let m = parse_model_file(&top).unwrap();
     assert_eq!(m.mounts.len(), 1);
     assert_eq!(m.mounts[0].name, "слова");
-    assert!(
-        m.mounts[0].target.ends_with("sub/words.jsonl"),
-        "{}",
-        m.mounts[0].target
-    );
+    // relative to the using model's directory, which the caller
+    // resolves once (joined to it here, the directory would be
+    // named twice from anywhere but inside it)
+    assert_eq!(m.mounts[0].target, "sub/words.jsonl");
     assert_eq!(
         m.nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
         ["статьи", "копии"]

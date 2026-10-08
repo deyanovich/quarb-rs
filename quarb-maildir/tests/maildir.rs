@@ -49,3 +49,39 @@ fn headers_body_and_thread() {
         ["1783407600"]
     );
 }
+
+#[test]
+fn encoded_word_headers_decode() {
+    let dir = std::env::temp_dir().join("quarb-maildir-words");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("cur")).unwrap();
+    std::fs::create_dir_all(dir.join("new")).unwrap();
+    // Б: "Отчёт" in windows-1251, base64; Q: "Plan für Juni" in utf-8.
+    std::fs::write(
+        dir.join("cur/300.c:2,S"),
+        "From: =?utf-8?Q?J=C3=BCrgen?= <j@x>\nSubject: =?windows-1251?B?zvL3uPI=?= =?utf-8?Q?_f=C3=BCr_Juni?=\n\
+         Message-ID: <e1@x>\nDate: Tue, 7 Jul 2026 11:00:00 +0200\n\nText.\n",
+    )
+    .unwrap();
+    let a = MaildirAdapter::open(&dir).unwrap();
+    assert_eq!(
+        values(&a, "/*[::message-id *= \"e1\"]::subject"),
+        ["Отчёт für Juni"]
+    );
+    assert_eq!(
+        values(&a, "/*[::message-id *= \"e1\"]::from"),
+        ["Jürgen <j@x>"]
+    );
+    // Q text beginning with =XX, and a word folded onto the next line
+    std::fs::write(
+        dir.join("cur/400.d:2,S"),
+        "From: x@x\nSubject: =?utf-8?Q?=D0=98=D0=BB=D0=B8=D0=B0=D0=B4=D0=B0?=\n\
+         \x20=?utf-8?B?INCT0L7QvNC10YDQsA==?=\nMessage-ID: <e2@x>\n\nText.\n",
+    )
+    .unwrap();
+    let a = MaildirAdapter::open(&dir).unwrap();
+    assert_eq!(
+        values(&a, "/*[::message-id *= \"e2\"]::subject"),
+        ["Илиада Гомера"]
+    );
+}

@@ -137,17 +137,17 @@ fn elevated_nodes_answer_derivation_provenance_only() {
 #[test]
 fn reverse_resolve_scans_past_derived_nodes() {
     let a = forum();
-    // `::prop<--` scans every node in the arbor asking "does your
+    // `<--(::prop)` scans every node in the arbor asking "does your
     // prop resolve to me?" — derived nodes (class containers,
     // elevated values) must answer no rather than hand their tagged
     // ids to the base adapter. Anchored on an elevated value the
     // scan finds the rows whose ref resolves there.
     assert_eq!(
-        values(&a, "/ips/ip[:: = 'ip-b']::ip<--::id"),
+        values(&a, "/ips/ip[:: = 'ip-b']<--(::ip)::id"),
         vec!["3", "4"]
     );
     // And a query anchored on a base node completes without panicking.
-    assert_eq!(values(&a, "/posts/1::ip<-- @| count"), vec!["0"]);
+    assert_eq!(values(&a, "/posts/1<--(::ip) @| count"), vec!["0"]);
 }
 
 /// Aliased rows of a table share a name, which is no identity: a

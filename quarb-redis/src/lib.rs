@@ -21,9 +21,9 @@
 //!   children and properties.
 //!
 //! **References.** Values that hold key names are Redis's foreign
-//! keys by convention. Resolve follows them: hint-less `~>` when
-//! the value *is* a full key (`::next~>` on `"user:42"`), hinted
-//! `~>user` when the value is the tail (`42` under the `user:`
+//! keys by convention. Resolve follows them: hint-less `-->` when
+//! the value *is* a full key (`::next-->` on `"user:42"`), hinted
+//! `-->user` when the value is the tail (`42` under the `user:`
 //! prefix).
 //!
 //! `;;;type` names a key's Redis type, `;;;ttl` is a typed
@@ -168,7 +168,7 @@ impl RedisAdapter {
     /// namespace tree (sorted — SCAN order is not deterministic).
     pub fn connect(target: &str) -> Result<Self, RedisError> {
         if !target.starts_with("redis://") && !target.starts_with("rediss://") {
-            return Err(RedisError::Target(target.to_string()));
+            return Err(RedisError::Target(quarb::target::redact(target)));
         }
         let (url, scan) = match target.split_once('?') {
             Some((u, q)) => (
@@ -318,10 +318,10 @@ impl RedisAdapter {
                 }
             }
             "hash" => {
-                let mut pairs: Vec<(String, String)> = redis::cmd("HGETALL")
-                    .arg(key)
-                    .query(&mut conn)
-                    .unwrap_or_default();
+                let mut pairs: Vec<(String, String)> =
+                    quarb::fetched(redis::cmd("HGETALL").arg(key).query(&mut conn), || {
+                        format!("redis: HGETALL {key}")
+                    });
                 pairs.sort_by(|a, b| a.0.cmp(&b.0));
                 Content::Hash(
                     pairs
@@ -331,30 +331,34 @@ impl RedisAdapter {
                 )
             }
             "list" => {
-                let items: Vec<String> = redis::cmd("LRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(-1)
-                    .query(&mut conn)
-                    .unwrap_or_default();
+                let items: Vec<String> = quarb::fetched(
+                    redis::cmd("LRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(-1)
+                        .query(&mut conn),
+                    || format!("redis: LRANGE {key}"),
+                );
                 Content::List(items.iter().map(|s| decode_text(s)).collect())
             }
             "set" => {
-                let mut items: Vec<String> = redis::cmd("SMEMBERS")
-                    .arg(key)
-                    .query(&mut conn)
-                    .unwrap_or_default();
+                let mut items: Vec<String> =
+                    quarb::fetched(redis::cmd("SMEMBERS").arg(key).query(&mut conn), || {
+                        format!("redis: SMEMBERS {key}")
+                    });
                 items.sort();
                 Content::Set(items.iter().map(|s| decode_text(s)).collect())
             }
             "zset" => {
-                let pairs: Vec<(String, f64)> = redis::cmd("ZRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(-1)
-                    .arg("WITHSCORES")
-                    .query(&mut conn)
-                    .unwrap_or_default();
+                let pairs: Vec<(String, f64)> = quarb::fetched(
+                    redis::cmd("ZRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(-1)
+                        .arg("WITHSCORES")
+                        .query(&mut conn),
+                    || format!("redis: ZRANGE {key}"),
+                );
                 Content::ZSet(pairs)
             }
             "stream" => {
@@ -656,10 +660,10 @@ impl AstAdapter for RedisAdapter {
             (Kind::Path { key: Some(k), .. }, "ttl") => {
                 let k = k.clone();
                 drop(nodes);
-                let ttl: i64 = redis::cmd("TTL")
-                    .arg(&k)
-                    .query(&mut self.conn.borrow_mut())
-                    .ok()?;
+                let ttl: i64 = quarb::fetched_opt(
+                    redis::cmd("TTL").arg(&k).query(&mut self.conn.borrow_mut()),
+                    || format!("redis: TTL {k}"),
+                )?;
                 (ttl >= 0).then_some(Value::Duration {
                     secs: ttl,
                     nanos: 0,
@@ -675,8 +679,14 @@ impl AstAdapter for RedisAdapter {
         }
     }
 
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
     /// Key-convention references: the value (hint-less) is a full
-    /// key; hinted, `~>user` prefixes `user:` onto the value.
+    /// key; hinted, `-->user` prefixes `user:` onto the value.
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let value = self
             .property(node, property)

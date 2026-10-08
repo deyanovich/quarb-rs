@@ -6,7 +6,7 @@
 //! code-level read — the outline is the named-node walk,
 //! definition and references are name resolution over the
 //! workspace forest (by identifier, fan-out on ambiguity — the
-//! honest answer, exactly as ruling #31 resolves
+//! plain answer, exactly as the code level resolves
 //! `->definition`), hover is `::signature` + `::doc`.
 //!
 //! This is a READING tool by design: no rename, no completion,
@@ -130,7 +130,7 @@ impl Workspace {
     }
 
     /// Declarations of `word` — the open buffer first (overlay
-    /// wins), then the workspace forest. Fan-out is the honest
+    /// wins), then the workspace forest. Fan-out is the
     /// answer for homonyms.
     pub fn definition(&self, uri: &str, word: &str) -> Vec<Location> {
         let mut out = Vec::new();

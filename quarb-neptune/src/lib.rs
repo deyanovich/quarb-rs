@@ -18,7 +18,7 @@
 //!
 //! Neptune is reachable only inside its VPC; from a workload
 //! there, `qua` and this crate work as anywhere else. Offline,
-//! the protocol is held honest by a bottled endpoint in the
+//! the protocol is held to by a bottled endpoint in the
 //! integration tests.
 //!
 //! **Target**:
@@ -233,7 +233,7 @@ impl NeptuneAdapter {
         let resp = match resp {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
+                let text = quarb::source::text_from_reader(r.into_reader()).unwrap_or_default();
                 let msg = serde_json::from_str::<Json>(&text)
                     .ok()
                     .and_then(|v| {
@@ -345,7 +345,9 @@ impl NeptuneAdapter {
             "MATCH (n){arrow}(m) WHERE id(n) = {} RETURN r, m ORDER BY type(r), id(m)",
             cypher_literal(&Value::Str(nid))
         );
-        let rows = self.cypher(&stmt).unwrap_or_default();
+        let rows = quarb::fetched(self.cypher(&stmt), || {
+            "neptune: reading the relationships of a node".to_string()
+        });
         rows.iter()
             .filter_map(|row| {
                 let edge = row.pointer("/r")?;
@@ -413,7 +415,14 @@ impl AstAdapter for NeptuneAdapter {
             format!("coalesce(m.`{}`, id(m))", self.key.join("`, m.`"))
         };
         let stmt = format!("MATCH (m:`{label}`) RETURN m ORDER BY {order}");
-        let rows = self.cypher(&stmt).unwrap_or_default();
+        // A failed listing is refused and left uncached.
+        let rows = match self.cypher(&stmt) {
+            Ok(rows) => rows,
+            Err(e) => {
+                quarb::record_refusal(format!("neptune: listing label {label}: {e}"));
+                return Vec::new();
+            }
+        };
         let ids: Vec<NodeId> = rows
             .iter()
             .filter_map(|row| self.intern(row.pointer("/m")?))
@@ -458,7 +467,9 @@ impl AstAdapter for NeptuneAdapter {
             (Kind::Label { index }, "n-rows") => {
                 let stmt = format!("MATCH (m:`{}`) RETURN count(m) AS c", self.labels[*index]);
                 drop(nodes);
-                let rows = self.cypher(&stmt).ok()?;
+                let rows = quarb::fetched_opt(self.cypher(&stmt), || {
+                    "neptune: counting a label".to_string()
+                })?;
                 rows.first()?.pointer("/c").map(cell_value)
             }
             (Kind::Entity { nid, .. }, "id") => Some(Value::Str(nid.clone())),
@@ -477,6 +488,19 @@ impl AstAdapter for NeptuneAdapter {
         self.edges(node, true)
     }
 
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
+    }
+
+    /// A property names a node only under a node label
+    /// (`::manager-->Person`): without one there is nothing to
+    /// match the value against.
+    fn resolve_needs_label(&self, _node: NodeId, _property: &str) -> bool {
+        true
+    }
+
     /// Hint-form resolution against the target label's `?key=`
     /// property (or `~id` without one).
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
@@ -487,7 +511,9 @@ impl AstAdapter for NeptuneAdapter {
             None => format!("id(m) = {}", cypher_literal(&value)),
         };
         let stmt = format!("MATCH (m:`{label}`) WHERE {cond} RETURN m LIMIT 1");
-        let rows = self.cypher(&stmt).ok()?;
+        let rows = quarb::fetched_opt(self.cypher(&stmt), || {
+            format!("neptune: resolving into label {label}")
+        })?;
         self.intern(rows.first()?.pointer("/m")?)
     }
 

@@ -58,9 +58,25 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
         "toml" => quarb_toml::parse(input)
             .map_err(|e| format!("parsing TOML: {e}"))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
-        "csv" | "tsv" => {
-            let delim = if format == "tsv" { b'\t' } else { b',' };
-            quarb_csv::CsvAdapter::parse_with_delimiter(input, delim)
+        // `csv` / `tsv`, or `csv;` / `csv;comma` — the delimiter and
+        // the decimal convention after the format's name, as the
+        // mount options say them.
+        f if f == "csv" || f == "tsv" || f.starts_with("csv;") => {
+            let mut parts = f.splitn(3, ';');
+            let kind = parts.next().unwrap_or("csv");
+            let delim = if kind == "tsv" { b'\t' } else { b',' };
+            let options = (|| {
+                let mut options = quarb_csv::CsvOptions::default();
+                if let Some(d) = parts.next().filter(|d| !d.is_empty()) {
+                    options = options.with_delimiter_label(d)?;
+                }
+                if let Some(dec) = parts.next().filter(|d| !d.is_empty()) {
+                    options = options.with_decimal_label(dec)?;
+                }
+                Ok::<_, quarb_csv::CsvError>(options)
+            })();
+            options
+                .and_then(|o| quarb_csv::CsvAdapter::parse_declared(input, delim, o))
                 .map_err(|e| format!("parsing CSV: {e}"))
                 .and_then(|a| go(query, &a, |n| a.locator(n), secs, nanos))
         }
@@ -224,7 +240,7 @@ impl Site {
         let defs = model.defs_text.clone();
         let inner = quarb_model::ModelAdapter::new(site, model);
         inner
-            .check_declared_traits()
+            .check()
             .map_err(|e| JsError::new(&format!("reading the model: {e}")))?;
         Ok(Site { inner, defs })
     }

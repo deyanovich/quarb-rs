@@ -180,6 +180,24 @@ fn source_language(ext: &str) -> Option<&'static str> {
 }
 
 impl AstAdapter for FsAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
+    /// The directory is a tree other trees refer to by path: its
+    /// own absolute path, a base over its files (`b.html` beside
+    /// `a.html` resolves to the sibling file).
+    fn tree_identities(&self) -> Vec<(String, NodeId)> {
+        let root = self.root();
+        let path = self.paths[root.0 as usize].to_string_lossy();
+        let mut identity = quarb::canonical_identity(&path);
+        if !identity.ends_with('/') {
+            identity.push('/');
+        }
+        vec![(identity, root)]
+    }
+
     fn root(&self) -> NodeId {
         self.root
     }

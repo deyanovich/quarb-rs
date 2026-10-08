@@ -249,10 +249,8 @@ impl ObjstoreAdapter {
             Backend::Azure { .. } => {}
             _ => {}
         }
-        req.call()
-            .map_err(|e| e.to_string())?
-            .into_string()
-            .map_err(|e| e.to_string())
+        let resp = req.call().map_err(|e| e.to_string())?;
+        quarb::source::text_from_reader(resp.into_reader())
     }
 
     /// The Azure URL root; SAS tokens are appended by
@@ -430,7 +428,7 @@ impl ObjstoreAdapter {
                 urlencode(&key).replace("%2F", "/")
             )),
         };
-        let text = self.get(&url).ok()?;
+        let text = quarb::fetched_opt(self.get(&url), || format!("objstore: reading {key}"))?;
         *self.nodes.borrow()[node.0 as usize].content.borrow_mut() = Some(text.clone());
         Some(text)
     }
@@ -496,6 +494,11 @@ fn parse_s3_listing(
 }
 
 impl AstAdapter for ObjstoreAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }
@@ -516,7 +519,14 @@ impl AstAdapter for ObjstoreAdapter {
         if is_object {
             return Vec::new();
         }
-        let (prefixes, objects) = self.list(&key).unwrap_or_default();
+        // Refused and left uncached.
+        let (prefixes, objects) = match self.list(&key) {
+            Ok(listing) => listing,
+            Err(e) => {
+                quarb::record_refusal(format!("objstore: listing {key}: {e}"));
+                return Vec::new();
+            }
+        };
         let mut ids = Vec::new();
         for p in prefixes {
             let name = p.rsplit('/').next().unwrap_or(&p).to_string();

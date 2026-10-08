@@ -48,6 +48,8 @@ pub enum TreeSitterError {
     Io(#[from] std::io::Error),
     #[error("tree-sitter: no grammar for extension {0:?}")]
     Language(String),
+    #[error("tree-sitter: {0}")]
+    Encoding(String),
     #[error("tree-sitter: parse produced no tree")]
     Parse,
 }
@@ -143,12 +145,27 @@ impl TreeSitterAdapter {
 
     /// Parse a file, language by extension.
     pub fn open(path: &std::path::Path) -> Result<Self, TreeSitterError> {
+        Self::open_with_decoding(path, &quarb::source::SourceDecoding::default())
+    }
+
+    /// [`open`](Self::open) under a mount's source-boundary rule:
+    /// the file decodes by `?encoding=`, a byte-order mark, else
+    /// strict UTF-8 — refused with the byte offset otherwise.
+    pub fn open_with_decoding(
+        path: &std::path::Path,
+        decoding: &quarb::source::SourceDecoding,
+    ) -> Result<Self, TreeSitterError> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let text = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
+        let name = path.display().to_string();
+        let text = decoding
+            .decode(&name, &bytes)
+            .map_err(|e| TreeSitterError::Encoding(format!("{name}: {e}")))?
+            .text;
         Self::parse(&text, &ext)
     }
 
@@ -241,8 +258,19 @@ fn build(nodes: &mut Vec<Node>, root: tree_sitter::Node<'_>) {
 }
 
 impl AstAdapter for TreeSitterAdapter {
+    /// This source defines no references to resolve.
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {

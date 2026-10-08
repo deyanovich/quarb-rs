@@ -23,12 +23,16 @@
 
 use std::io::Read;
 
+use quarb::source::SourceDecoding;
+
 use quarb_text::{Block, TextModel};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EpubError {
+    #[error("member {name}: {error}")]
+    MemberText { name: String, error: String },
     #[error("not an epub (zip) container: {0}")]
     Zip(#[from] zip::result::ZipError),
     #[error("META-INF/container.xml is missing — not an EPUB")]
@@ -41,16 +45,38 @@ pub enum EpubError {
 
 /// Parse `.epub` bytes into the text-level model.
 pub fn parse(bytes: &[u8]) -> Result<TextModel, EpubError> {
-    Ok(TextModel::build(blocks(bytes)?))
+    parse_with_decoding(bytes, &SourceDecoding::default())
+}
+
+/// [`parse`] under a mount's source-boundary rule: every member
+/// decodes by `?encoding=`, its byte-order mark, its XML
+/// declaration, else strict UTF-8.
+pub fn parse_with_decoding(
+    bytes: &[u8],
+    decoding: &SourceDecoding,
+) -> Result<TextModel, EpubError> {
+    Ok(TextModel::build(blocks_with_decoding(bytes, decoding)?))
 }
 
 /// Lower `.epub` bytes into the block event stream: the spine's
 /// linear chapters, in declared order, through the HTML reading.
 pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, EpubError> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let container = member(&mut zip, "META-INF/container.xml").ok_or(EpubError::NoContainer)?;
+    blocks_with_decoding(bytes, &SourceDecoding::default())
+}
+
+/// [`blocks`] under a mount's source-boundary rule.
+pub fn blocks_with_decoding(
+    bytes: &[u8],
+    decoding: &SourceDecoding,
+) -> Result<Vec<Block>, EpubError> {
+    let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
+    let container = zip
+        .get("META-INF/container.xml")?
+        .ok_or(EpubError::NoContainer)?;
     let opf_path = rootfile(&container).ok_or(EpubError::NoRootfile)?;
-    let opf = member(&mut zip, &opf_path).ok_or_else(|| EpubError::NoPackage(opf_path.clone()))?;
+    let opf = zip
+        .get(&opf_path)?
+        .ok_or_else(|| EpubError::NoPackage(opf_path.clone()))?;
     let base = match opf_path.rfind('/') {
         Some(i) => &opf_path[..=i],
         None => "",
@@ -62,18 +88,52 @@ pub fn blocks(bytes: &[u8]) -> Result<Vec<Block>, EpubError> {
         // error: the spine may name resources this reading has no
         // lowering for (SVG pages), and a broken href should not
         // hide the readable chapters.
-        if let Some(xhtml) = member(&mut zip, &path) {
-            out.extend(quarb_text_html::blocks(&xhtml));
+        if let Some(xhtml) = zip.get(&path)? {
+            out.extend(scoped(quarb_text_html::blocks(&xhtml), &href));
         }
     }
     Ok(out)
 }
 
-fn member(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut f = zip.by_name(name).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+/// The package's members, read under the mount's rule: a member
+/// decodes by `?encoding=`, its byte-order mark, its XML
+/// declaration, else strict UTF-8. A member that decodes under
+/// none is an error naming it, never a part silently missing.
+struct Members<'a> {
+    zip: zip::ZipArchive<std::io::Cursor<&'a [u8]>>,
+    explicit: Option<String>,
+}
+
+impl<'a> Members<'a> {
+    fn new(zip: zip::ZipArchive<std::io::Cursor<&'a [u8]>>, decoding: &SourceDecoding) -> Self {
+        Members {
+            zip,
+            explicit: decoding.explicit.clone(),
+        }
+    }
+
+    /// `None` when the package has no such member.
+    fn get(&mut self, name: &str) -> Result<Option<String>, EpubError> {
+        let Ok(mut f) = self.zip.by_name(name) else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes)
+            .map_err(|e| EpubError::MemberText {
+                name: name.to_string(),
+                error: e.to_string(),
+            })?;
+        let d = quarb::source::decode(
+            &bytes,
+            self.explicit.as_deref(),
+            quarb::source::xml_declared_encoding,
+        )
+        .map_err(|e| EpubError::MemberText {
+            name: name.to_string(),
+            error: e.to_string(),
+        })?;
+        Ok(Some(d.text))
+    }
 }
 
 /// The OPF package path from container.xml's first rootfile.
@@ -131,6 +191,58 @@ fn spine_hrefs(opf: &str) -> Vec<String> {
 }
 
 /// Resolve `href` against the package directory, folding `../`.
+/// A chapter's ids in its own namespace: an `id` reused across
+/// chapters (`n1` in every chapter's notes) names one bearer per
+/// chapter, `<href>#<id>`, and a reference keeps landing in its
+/// own chapter (`#n1`) or the one it names (`ch2.xhtml#n1`),
+/// joined against the chapter's directory as the package does.
+fn scoped(blocks: Vec<Block>, href: &str) -> Vec<Block> {
+    let dir = match href.rfind('/') {
+        Some(i) => &href[..=i],
+        None => "",
+    };
+    blocks
+        .into_iter()
+        .map(|b| match b {
+            Block::Label { onym } => Block::Label {
+                onym: format!("{href}#{onym}"),
+            },
+            Block::Anchor { onym } => Block::Anchor {
+                onym: format!("{href}#{onym}"),
+            },
+            Block::Ref {
+                target,
+                text,
+                internal,
+            } => {
+                let target = if let Some(frag) = target.strip_prefix('#') {
+                    format!("{href}#{frag}")
+                } else if internal || is_in_package(&target) {
+                    match target.split_once('#') {
+                        Some((file, frag)) => format!("{}#{frag}", join(dir, &decode_href(file))),
+                        None => join(dir, &decode_href(&target)),
+                    }
+                } else {
+                    target
+                };
+                let internal = internal || is_in_package(&target);
+                Block::Ref {
+                    target,
+                    text,
+                    internal,
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Whether a link target names a member of the package rather
+/// than the world outside: a relative path, no scheme.
+fn is_in_package(target: &str) -> bool {
+    !target.contains("://") && !target.starts_with("mailto:") && !target.starts_with('/')
+}
+
 fn join(base: &str, href: &str) -> String {
     let mut parts: Vec<&str> = base.split('/').filter(|p| !p.is_empty()).collect();
     for seg in href.split('/') {

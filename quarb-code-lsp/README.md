@@ -6,7 +6,7 @@ find-references, hover, and workspace symbols over Rust, Python,
 JavaScript, and C source, with no resident index. Every answer is
 a code-level query; the lowering tables' LSP SymbolKind column is
 the outline's kind mapping, definition and references resolve by
-declared identifier (fan-out on homonyms — the honest answer), and
+declared identifier (fan-out on homonyms — every candidate), and
 hover is `::signature` + `::doc`.
 
 One core, two codecs:

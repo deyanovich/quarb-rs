@@ -993,6 +993,12 @@ impl AstAdapter for AtrepAdapter {
         NodeId(0)
     }
 
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.node(node).children.clone()
     }
@@ -1176,8 +1182,8 @@ impl AstAdapter for AtrepAdapter {
         self.backrefs.get(&node).cloned().unwrap_or_default()
     }
 
-    /// `::param~>` / `::target~>` follows the node's reference; a
-    /// hint restricts to targets of that name. `::onym~>` on any
+    /// `::param-->` / `::target-->` follows the node's reference; a
+    /// hint restricts to targets of that name. `::onym-->` on any
     /// onym value resolves through the registry.
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let n = self.node(node);

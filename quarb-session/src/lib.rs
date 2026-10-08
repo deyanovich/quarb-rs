@@ -78,7 +78,7 @@ impl Cell {
         match self {
             Cell::Node(s) => s.clone(),
             // The Quarb form for a record or list, bare scalars
-            // (ruling #51) — what qua prints.
+            // — what qua prints.
             Cell::Value(v) => v.display_form(),
         }
     }

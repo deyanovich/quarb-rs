@@ -1,0 +1,20 @@
+[package]
+name = "quarb-text-djvu"
+description = "DjVu reader's-model adapter for Quarb: the text layer's declared zones under the outline's sections, with geometry — no OCR, no guessed structure"
+keywords = ["quarb", "djvu", "text", "outline"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.33.0" }
+djvu-rs = { version = "0.41", default-features = false, features = ["std"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.33.0" }
+djvu-rs = { version = "0.41", default-features = false, features = ["std"] }

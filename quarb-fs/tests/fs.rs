@@ -210,7 +210,7 @@ fn trait_filters() {
         vec!["README.md", "docs/guide.txt"]
     );
     assert_eq!(
-        names("//*<code||text>", &dir),
+        names("//*<code || text>", &dir),
         vec!["README.md", "docs/guide.txt", "src/lib.rs", "src/main.rs"]
     );
     // <file> AND <code> — both required

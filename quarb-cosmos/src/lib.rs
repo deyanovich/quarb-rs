@@ -10,7 +10,7 @@
 //! **References.** Cosmos declares no typed pointers, so `->`
 //! enumerates nothing; resolve with a hint naming the target
 //! container follows by-convention ids —
-//! `::artist_id~>artists` runs one cross-partition
+//! `::artist_id-->artists` runs one cross-partition
 //! `SELECT * FROM c WHERE c.id = @v`. Hint-less resolution tries
 //! the property's `_id` stem, pluralized bare.
 //!
@@ -219,7 +219,7 @@ impl CosmosAdapter {
         let resp = match result {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
+                let text = quarb::source::text_from_reader(r.into_reader()).unwrap_or_default();
                 let msg = serde_json::from_str::<serde_json::Value>(&text)
                     .ok()
                     .and_then(|v| {
@@ -234,8 +234,7 @@ impl CosmosAdapter {
         };
         let continuation = resp.header("x-ms-continuation").map(str::to_string);
         let mut v: serde_json::Value = serde_json::from_str(
-            &resp
-                .into_string()
+            &quarb::source::text_from_reader(resp.into_reader())
                 .map_err(|e| CosmosError::Api(format!("{verb} {path}: reading: {e}")))?,
         )
         .map_err(|e| CosmosError::Api(format!("{verb} {path}: parsing: {e}")))?;
@@ -481,6 +480,12 @@ impl AstAdapter for CosmosAdapter {
             },
             _ => None,
         }
+    }
+
+    /// With no label written, a referrer's property is also read as
+    /// a key into the container the asked-about node stands in.
+    fn reverse_label(&self, target: NodeId) -> Option<String> {
+        self.parent(target).and_then(|p| self.name(p))
     }
 
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {

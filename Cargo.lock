@@ -407,14 +407,15 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atrep"
-version = "0.3.5"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b50b5d6e5e1f9775034316ed5ef2660762c321b9fa6a7475d9f159e23955c72"
+checksum = "5ee6637f185bb9a1123139e81fe05872eb92ed3be823ddc63c1d5899dd69b3d3"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -454,6 +455,21 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "bit-set"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0481a0e032742109b1133a095184ee93d88f3dc9e0d28a5d033dc77a073f44f"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
 
 [[package]]
 name = "bitflags"
@@ -615,6 +631,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -636,6 +658,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
 dependencies = [
  "bzip2-sys",
+ "libbz2-rs-sys",
 ]
 
 [[package]]
@@ -891,7 +914,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bab993b95c65e162cb6476492af00a17d991d73be5655e9fe7b9784895765f4e"
 dependencies = [
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1402,7 +1425,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1547,6 +1570,88 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "djvu-bitmap"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6589fa41ea25996e45daf29644f34dddff5c8deff86c04d3ca65281abb54904b"
+
+[[package]]
+name = "djvu-bzz"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "babe03c9e6ad27b8d8c441dc95200b4903440b0b11be7726b9158282b341346d"
+dependencies = [
+ "djvu-zp",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "djvu-iff"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e94c93ab248b0631a9be416412fe881d0f4da2d1f80eac4d027704eb26fed9fe"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "djvu-iw44"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bb41fada4e75fc592a2f59d4c0245a506e0871bd1c8bcf19fcd040b4e991ac8"
+dependencies = [
+ "djvu-pixmap",
+ "djvu-zp",
+ "thiserror 2.0.21",
+ "wide",
+]
+
+[[package]]
+name = "djvu-jb2"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82723ae3680c03fc6e0b71b70dc6dc170860e85a05861b0fca696e2ef3fb93a7"
+dependencies = [
+ "djvu-bitmap",
+ "djvu-zp",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "djvu-pixmap"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "529f60e82fdc30da1a8bb7655931a1918d6d113857b5046b2d2e053815a4e410"
+
+[[package]]
+name = "djvu-rs"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8afec3db971576d6dc9528f33c152daa9fc8339fcd3a1db5affa9015f3931ea3"
+dependencies = [
+ "djvu-bitmap",
+ "djvu-bzz",
+ "djvu-iff",
+ "djvu-iw44",
+ "djvu-jb2",
+ "djvu-pixmap",
+ "djvu-zp",
+ "png",
+ "thiserror 2.0.21",
+ "wide",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "djvu-zp"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8f7ffd8502a63ec853cfc93196ab269c404041bf59d5dfe89354d5ccedc8496"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1716,6 +1821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1723,6 +1837,17 @@ checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
 dependencies = [
  "cfg-if",
  "libc",
+]
+
+[[package]]
+name = "filetime_creation"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25b5d475550e559de5b0c0084761c65325444e3b6c9e298af9cefe7a9ef3a5f"
+dependencies = [
+ "cfg-if",
+ "filetime",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2069,7 +2194,7 @@ dependencies = [
  "ipnet",
  "jni",
  "rand 0.10.2",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tinyvec",
  "tokio",
  "tracing",
@@ -2090,7 +2215,7 @@ dependencies = [
  "prefix-trie",
  "rand 0.10.2",
  "ring 0.17.14",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "url",
@@ -2117,7 +2242,7 @@ dependencies = [
  "resolv-conf",
  "smallvec",
  "system-configuration",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -2571,7 +2696,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "walkdir",
  "windows-link",
 ]
@@ -2640,9 +2765,9 @@ dependencies = [
 
 [[package]]
 name = "kaiv"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21dcd8f91a3e2786c171510502bc708c0bff092cdd7dbae63a0909b8725cb032"
+checksum = "2c8738919ba75154df48556340b29334bfc617c2729383489c20b38f248c4824"
 
 [[package]]
 name = "kaivrpc"
@@ -2773,10 +2898,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0864a00c8d019e36216b69c2c4ce50b83b7bd966add3cf5ba554ec44f8bebcf5"
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libchm"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4c8e206aaeeee4150ca5615c2ce3e023f5c5ae10f8d21f22dd4e2cce2f58100"
+dependencies = [
+ "bitflags 2.13.1",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "libduckdb-sys"
@@ -2892,7 +3033,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.9",
  "stringprep",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "time",
  "ttf-parser",
  "weezl",
@@ -2931,6 +3072,15 @@ checksum = "297e814c836ae64db86b36cf2a557ba54368d03f6afcd7d947c266692f71115e"
 dependencies = [
  "byteorder",
  "crc",
+]
+
+[[package]]
+name = "lzma-rust"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5baab2bbbd7d75a144d671e9ff79270e903957d92fb7386fd39034c709bd2661"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
@@ -3154,7 +3304,7 @@ dependencies = [
  "stringprep",
  "strsim 0.11.1",
  "take_mut",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-util",
@@ -3274,6 +3424,16 @@ dependencies = [
  "bytecount",
  "memchr",
  "nom 8.0.0",
+]
+
+[[package]]
+name = "nt-time"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2de419e64947cd8830e66beb584acc3fb42ed411d103e3c794dda355d1b374b5"
+dependencies = [
+ "chrono",
+ "time",
 ]
 
 [[package]]
@@ -3673,6 +3833,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "png"
+version = "0.17.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
+dependencies = [
+ "bitflags 1.3.2",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3879,7 +4052,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3889,11 +4062,11 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "clap",
- "kaiv 0.14.0",
+ "kaiv 0.15.0",
  "libc",
  "quarb",
  "quarb-age",
@@ -3955,13 +4128,17 @@ dependencies = [
  "quarb-sql",
  "quarb-sqlite",
  "quarb-text",
+ "quarb-text-djvu",
+ "quarb-text-doc",
  "quarb-text-docx",
  "quarb-text-epub",
  "quarb-text-html",
  "quarb-text-koine",
  "quarb-text-latex",
  "quarb-text-markdown",
+ "quarb-text-odt",
  "quarb-text-pdf",
+ "quarb-text-rtf",
  "quarb-toml",
  "quarb-tree-sitter",
  "quarb-web",
@@ -3971,13 +4148,14 @@ dependencies = [
  "quarb-yaml",
  "rusqlite",
  "syndesmos",
+ "toml",
  "unicode-segmentation",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "quai"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3993,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "quai-wasm"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -4007,139 +4185,149 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "colligo",
+ "encoding_rs",
  "globset",
- "kaiv 0.14.0",
+ "kaiv 0.15.0",
  "quarb-trace",
  "quick-xml 0.39.4",
  "regex",
  "serde_json",
  "serde_yaml_ng",
  "syndesmos",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "toml",
  "unicode-normalization",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]
 name = "quarb-age"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-postgres",
 ]
 
 [[package]]
 name = "quarb-arangodb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-archive"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
+ "bzip2",
  "flate2",
+ "libchm",
+ "lzma-rs",
  "quarb",
+ "quarb-compose",
+ "ruzstd",
+ "sevenz-rust",
  "tar",
- "thiserror 2.0.19",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unrar",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "quarb-athena"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-aws",
  "quarb-relational",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-atrep"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "atrep",
  "quarb",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-aws"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-azlogs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
  "quarb-sql",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-cbor"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "ciborium",
  "quarb",
  "quarb-json",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-cflogs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-code"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-tree-sitter",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-code-lsp"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4155,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -4168,7 +4356,9 @@ dependencies = [
  "quarb-markdown",
  "quarb-text",
  "quarb-text-html",
+ "quarb-text-koine",
  "quarb-text-markdown",
+ "quarb-text-rtf",
  "quarb-toml",
  "quarb-tree-sitter",
  "quarb-xml",
@@ -4178,107 +4368,108 @@ dependencies = [
 
 [[package]]
 name = "quarb-cosmos"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-csv"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "csv",
  "quarb",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-cwlogs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-aws",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-datastore"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-ddlogs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "duckdb",
  "quarb",
  "quarb-relational",
  "quarb-sql",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-dynamodb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-aws",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-falkordb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "redis",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-firebase"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-firestore"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-fs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -4287,55 +4478,55 @@ dependencies = [
 
 [[package]]
 name = "quarb-gcplogs"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-git"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-github"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-gitlab"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-html"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "scraper",
@@ -4344,24 +4535,25 @@ dependencies = [
 
 [[package]]
 name = "quarb-imap"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
- "thiserror 2.0.19",
+ "quarb-maildir",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-jq"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-json"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4369,66 +4561,66 @@ dependencies = [
 
 [[package]]
 name = "quarb-kafka"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "rskafka",
  "rustls 0.23.42",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "webpki-roots 0.26.11",
 ]
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
- "kaiv 0.14.0",
+ "kaiv 0.15.0",
  "quarb",
 ]
 
 [[package]]
 name = "quarb-kubernetes"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-kuzu"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "cxx-build",
  "kuzu",
  "quarb",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "time",
 ]
 
 [[package]]
 name = "quarb-ldap"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "ldap3",
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-lines"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-lsp"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4439,15 +4631,15 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-markdown"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
@@ -4455,30 +4647,31 @@ dependencies = [
 
 [[package]]
 name = "quarb-memgraph"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "neo4rs",
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
 [[package]]
 name = "quarb-metatheca"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "metatheca",
  "quarb",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-model"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
+ "kaiv 0.15.0",
  "quarb",
  "quarb-json",
  "quarb-sqlite",
@@ -4491,16 +4684,16 @@ dependencies = [
 
 [[package]]
 name = "quarb-mongodb"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "mongodb",
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-mount"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-csv",
@@ -4509,11 +4702,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-mssql"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tiberius",
  "tokio",
  "tokio-util",
@@ -4521,81 +4714,81 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
  "sqlx",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-neptune"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-aws",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-objstore"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-aws",
  "quick-xml 0.39.4",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-oracle"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "oracle",
  "quarb",
  "quarb-relational",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-pdf"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "lopdf",
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-postgres"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-postgres",
 ]
 
 [[package]]
 name = "quarb-py"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4650,17 +4843,17 @@ dependencies = [
 
 [[package]]
 name = "quarb-redis"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "redis",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-relational"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4668,18 +4861,18 @@ dependencies = [
 
 [[package]]
 name = "quarb-serve"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
- "kaiv 0.14.0",
+ "kaiv 0.15.0",
  "quarb",
  "quarb-json",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-session"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "quarb",
@@ -4692,62 +4885,70 @@ dependencies = [
  "quarb-html",
  "quarb-json",
  "quarb-kaiv",
+ "quarb-lines",
  "quarb-markdown",
  "quarb-model",
  "quarb-mount",
  "quarb-pdf",
  "quarb-sqlite",
  "quarb-text",
+ "quarb-text-djvu",
+ "quarb-text-doc",
  "quarb-text-docx",
  "quarb-text-epub",
  "quarb-text-html",
  "quarb-text-koine",
  "quarb-text-latex",
  "quarb-text-markdown",
+ "quarb-text-odt",
  "quarb-text-pdf",
+ "quarb-text-rtf",
  "quarb-toml",
  "quarb-trace",
  "quarb-tree-sitter",
+ "quarb-web",
  "quarb-xlsx",
  "quarb-xml",
  "quarb-yaml",
  "syndesmos",
+ "zip 2.4.2",
 ]
 
 [[package]]
 name = "quarb-sparql"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
 name = "quarb-sql"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
  "rusqlite",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-relational",
  "quarb-sql",
  "rusqlite",
- "thiserror 2.0.19",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-text"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "csv",
  "percent-encoding",
@@ -4759,31 +4960,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-text-djvu"
+version = "0.33.0"
+dependencies = [
+ "djvu-rs",
+ "quarb",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-text-doc"
+version = "0.33.0"
+dependencies = [
+ "cfb",
+ "encoding_rs",
+ "quarb",
+ "quarb-text",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "quarb-text-docx"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-text",
  "quick-xml 0.39.4",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "quarb-text-epub"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-text",
  "quarb-text-html",
  "quick-xml 0.39.4",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "quarb-text-html"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "ego-tree",
  "quarb",
@@ -4795,19 +5016,21 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-koine"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "atrep",
+ "flate2",
  "quarb",
  "quarb-text",
+ "quarb-text-docx",
  "quick-xml 0.37.5",
  "regex",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-text-latex"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -4815,7 +5038,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-markdown"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pulldown-cmark",
  "quarb",
@@ -4823,17 +5046,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-text-odt"
+version = "0.33.0"
+dependencies = [
+ "quarb",
+ "quarb-text",
+ "quick-xml 0.39.4",
+ "thiserror 2.0.21",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "quarb-text-pdf"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "lopdf",
  "quarb",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-text-rtf"
+version = "0.33.0"
+dependencies = [
+ "encoding_rs",
+ "quarb",
+ "quarb-text",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-toml"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -4842,15 +5086,15 @@ dependencies = [
 
 [[package]]
 name = "quarb-trace"
-version = "0.32.0"
+version = "0.33.0"
 
 [[package]]
 name = "quarb-tree-sitter"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-javascript",
@@ -4860,7 +5104,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -4882,7 +5126,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-web"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4892,6 +5136,7 @@ dependencies = [
  "percent-encoding",
  "quarb",
  "quarb-archive",
+ "quarb-html",
  "quarb-model",
  "quarb-text",
  "quarb-text-html",
@@ -4907,36 +5152,36 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "calamine",
  "quarb",
  "quarb-relational",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "quarb-xml"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-xpath"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb",
  "quarb-xml",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-yaml"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -4985,7 +5230,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.42",
  "socket2",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "web-time",
@@ -5007,7 +5252,7 @@ dependencies = [
  "rustls 0.23.42",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "web-time",
@@ -5394,7 +5639,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "stringprep",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5429,7 +5674,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
 dependencies = [
  "hashbrown 0.16.1",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5666,10 +5911,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -5914,6 +6177,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sevenz-rust"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26482cf1ecce4540dc782fc70019eba89ffc4d87b3717eb5ec524b5db6fdefef"
+dependencies = [
+ "bit-set",
+ "byteorder",
+ "crc",
+ "filetime_creation",
+ "js-sys",
+ "lzma-rust",
+ "nt-time",
+ "sha2 0.10.9",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6116,7 +6396,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "smallvec",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -6196,7 +6476,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "tracing",
  "whoami 1.6.1",
 ]
@@ -6475,11 +6755,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.19",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -6495,9 +6775,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6895,6 +7175,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+
+[[package]]
 name = "typed-builder"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6976,6 +7262,29 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unrar"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ec61343a630d2b50d13216dea5125e157d3fc180a7d3f447d22fe146b648fc"
+dependencies = [
+ "bitflags 2.13.1",
+ "regex",
+ "unrar_sys",
+ "widestring",
+]
+
+[[package]]
+name = "unrar_sys"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b77675b883cfbe6bf41e6b7a5cd6008e0a83ba497de3d96e41a064bbeead765"
+dependencies = [
+ "cc",
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "unsafe-libyaml"
@@ -7246,6 +7555,16 @@ dependencies = [
  "objc2-system-configuration",
  "wasite 1.0.2",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]
@@ -7657,7 +7976,7 @@ dependencies = [
  "memchr",
  "pbkdf2 0.12.2",
  "sha1 0.10.7",
- "thiserror 2.0.19",
+ "thiserror 2.0.21",
  "time",
  "xz2",
  "zeroize",
@@ -7729,4 +8048,19 @@ checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
 ]

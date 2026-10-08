@@ -16,7 +16,7 @@
 //!   default projection (`::`) is the element's text content;
 //!   `::::tag`, `::::classes`, `::::attrs`, and `::::n-attrs`
 //!   expose adapter metadata.
-//! - An anchor's fragment `href` resolves: `::href~>` follows
+//! - An anchor's fragment `href` resolves: `::href-->` follows
 //!   `#section` to the element with `id="section"`.
 
 use quarb::{AstAdapter, NodeId, Value};
@@ -40,6 +40,138 @@ impl Node {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
     }
+}
+
+/// The encoding an HTML document declares in its head — a `<meta
+/// charset=…>` or a `<meta http-equiv="content-type"
+/// content="…; charset=…">` within the first 1024 bytes, as the
+/// HTML standard's prescan reads them — reported for the engine's
+/// source boundary. The adapter decodes nothing. An XML prologue
+/// on an XHTML page counts too (the XML adapter's rule, applied
+/// here so a page served as text/html still declares). A
+/// `charset=` inside any other attribute's value (a description)
+/// declares nothing.
+pub fn declared_encoding(bytes: &[u8]) -> Option<String> {
+    if let Some(label) = xml_prologue_encoding(bytes) {
+        return Some(label);
+    }
+    let head = &bytes[..bytes.len().min(1024)];
+    let lower: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let mut at = 0;
+    while let Some(i) = find(&lower[at..], b"<meta") {
+        let start = at + i + 5;
+        let end = start + find(&lower[start..], b">").unwrap_or(lower.len() - start);
+        let attrs = meta_attributes(&lower[start..end]);
+        let get = |name: &str| {
+            attrs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        if let Some(label) = get("charset").filter(|l| !l.is_empty()) {
+            return Some(label.to_string());
+        }
+        if get("http-equiv") == Some("content-type")
+            && let Some(content) = get("content")
+            && let Some(p) = content.find("charset=")
+        {
+            let label = content[p + 8..]
+                .trim_matches(|c: char| c == '"' || c == '\'' || c.is_ascii_whitespace())
+                .split([';', ' ', '"', '\''])
+                .next()
+                .unwrap_or("");
+            if !label.is_empty() {
+                return Some(label.to_string());
+            }
+        }
+        at = end;
+    }
+    None
+}
+
+/// `<?xml … encoding="…"?>` at the very start — the one XML rule
+/// the HTML reporter shares, kept local so the crates stay apart.
+/// The target must be `xml` itself (`<?xml-stylesheet …?>` is
+/// another instruction and declares nothing).
+fn xml_prologue_encoding(bytes: &[u8]) -> Option<String> {
+    let head = bytes.strip_prefix(b"<?xml")?;
+    if !head.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    let end = find(head, b"?>")?;
+    let prologue = std::str::from_utf8(&head[..end]).ok()?;
+    let rest = prologue
+        .split_once("encoding")?
+        .1
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start();
+    let quote = rest.chars().next()?;
+    (quote == '"' || quote == '\'')
+        .then(|| {
+            rest[1..]
+                .split(quote)
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|l| !l.is_empty())
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The attributes of a lowercased tag body, as (name, value): a
+/// value quoted or bare, a name without one given the empty value.
+/// Quoted values are skipped as wholes, so nothing inside one is
+/// taken for an attribute.
+fn meta_attributes(tag: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let n = tag.len();
+    while i < n {
+        while i < n && (tag[i].is_ascii_whitespace() || tag[i] == b'/') {
+            i += 1;
+        }
+        let name_start = i;
+        while i < n && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'/' {
+            i += 1;
+        }
+        if i == name_start {
+            break;
+        }
+        let name = String::from_utf8_lossy(&tag[name_start..i]).into_owned();
+        while i < n && tag[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let mut value = String::new();
+        if i < n && tag[i] == b'=' {
+            i += 1;
+            while i < n && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < n && (tag[i] == b'"' || tag[i] == b'\'') {
+                let q = tag[i];
+                i += 1;
+                let v = i;
+                while i < n && tag[i] != q {
+                    i += 1;
+                }
+                value = String::from_utf8_lossy(&tag[v..i]).trim().to_string();
+                i = (i + 1).min(n);
+            } else {
+                let v = i;
+                while i < n && !tag[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                value = String::from_utf8_lossy(&tag[v..i]).to_string();
+            }
+        }
+        out.push((name, value));
+    }
+    out
 }
 
 /// A Quarb adapter over a parsed HTML document.
@@ -247,6 +379,12 @@ impl AstAdapter for HtmlAdapter {
         self.root
     }
 
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes[node.0 as usize].children.clone()
     }
@@ -347,7 +485,12 @@ impl AstAdapter for HtmlAdapter {
     /// document is mounted. Non-web schemes reference nothing
     /// followable. Feeds `::href-->` across documents — the
     /// acquisition arrow.
-    fn external_ref(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<String> {
+    fn external_ref(
+        &self,
+        node: NodeId,
+        property: &str,
+        hint: Option<&str>,
+    ) -> Option<quarb::ExternalRef> {
         if property == "href" && !self.rel_ok(node, hint) {
             return None;
         }
@@ -358,15 +501,20 @@ impl AstAdapter for HtmlAdapter {
         }
         let u = match url::Url::parse(t) {
             Ok(u) => u,
-            Err(url::ParseError::RelativeUrlWithoutBase) => {
-                self.document_url.as_ref()?.join(t).ok()?
-            }
+            // A relative reference: joined against the document's
+            // URL where one is known; else handed over as written,
+            // for the engine to make absolute against the tree the
+            // page stands in (a file beside it in a directory).
+            Err(url::ParseError::RelativeUrlWithoutBase) => match &self.document_url {
+                Some(base) => base.join(t).ok()?,
+                None => return Some(quarb::ExternalRef::uri(t)),
+            },
             Err(_) => return None,
         };
         if u.scheme() != "http" && u.scheme() != "https" {
             return None;
         }
-        Some(u.into())
+        Some(quarb::ExternalRef::uri(u.as_str()))
     }
 
     /// html's fragment landing: the element whose `id` is
@@ -377,6 +525,21 @@ impl AstAdapter for HtmlAdapter {
 
     /// The bare arrow's property: an anchor-family element's
     /// `href`, a frame's `src`.
+    /// An element's properties are its attributes.
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        self.nodes[node.0 as usize]
+            .attrs
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Any attribute may hold a reference (`#id`, an IDREF) to any
+    /// element of the document: the format declares no narrower one.
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
     fn ref_property(&self, node: NodeId) -> Option<String> {
         let n = &self.nodes[node.0 as usize];
         let (prop, tags): (&str, &[&str]) = match n.tag.as_deref() {
@@ -399,5 +562,51 @@ impl AstAdapter for HtmlAdapter {
         let rel = self.nodes[node.0 as usize].attr("rel")?;
         let rel = rel.trim();
         (!rel.is_empty()).then(|| rel.to_string())
+    }
+}
+
+#[cfg(test)]
+mod declared_tests {
+    use super::declared_encoding;
+
+    #[test]
+    fn meta_charset_forms() {
+        assert_eq!(
+            declared_encoding(
+                b"<!DOCTYPE html><html><head><meta charset=\"windows-1251\"><title>x</title>"
+            ),
+            Some("windows-1251".into())
+        );
+        assert_eq!(
+            declared_encoding(b"<html><head><META http-equiv=\"Content-Type\" content=\"text/html; charset=koi8-r\">"),
+            Some("koi8-r".into())
+        );
+        assert_eq!(
+            declared_encoding(b"<html><head><meta charset=utf-8></head>"),
+            Some("utf-8".into())
+        );
+        assert_eq!(
+            declared_encoding(b"<html><head><meta name=\"charset-note\" content=\"x\"></head>"),
+            None
+        );
+        assert_eq!(
+            declared_encoding(b"<?xml version=\"1.0\" encoding=\"ISO-8859-5\"?><html/>"),
+            Some("ISO-8859-5".into())
+        );
+        // a charset= inside another attribute's value declares nothing
+        assert_eq!(
+            declared_encoding(
+                b"<meta name=\"description\" content=\"why charset=koi8-r was used\"><title>x</title>"
+            ),
+            None
+        );
+        // another processing instruction is no prologue
+        assert_eq!(
+            declared_encoding(b"<?xml-stylesheet href=\"a.xsl\" encoding=\"koi8-r\"?><html/>"),
+            None
+        );
+        let mut late = vec![b' '; 1100];
+        late.extend_from_slice(b"<meta charset=\"koi8-r\">");
+        assert_eq!(declared_encoding(&late), None);
     }
 }

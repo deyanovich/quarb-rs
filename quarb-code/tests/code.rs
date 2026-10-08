@@ -69,7 +69,7 @@ fn rust_properties_and_metadata() {
     );
     // &mut self is a declared parameter, as written.
     assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
-    // The escape hatch, and its two-colon alias (ruling #29).
+    // The escape hatch, and its two-colon alias.
     assert_eq!(v(&m, "//lex::::kind"), ["function_item"]);
     assert_eq!(v(&m, "//lex::kind"), ["function_item"]);
     assert_eq!(v(&m, "//lex::::lang"), ["rust"]);
@@ -251,4 +251,49 @@ fn cache_reuse() {
             .unwrap_or(false)
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Finding 22: a source file decodes under the mount's rule
+/// (`?encoding=`, a byte-order mark, else strict UTF-8), refused
+/// with the byte offset otherwise.
+#[test]
+fn a_source_file_decodes_under_the_mounts_rule() {
+    let dir = std::env::temp_dir().join(format!("quarb-code-enc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("ru.py");
+    std::fs::write(&p, b"def f():\n    return \"\xcf\xf0\xe8\xe2\xe5\xf2\"\n").unwrap();
+    let err = match CodeModel::open(&p) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("decoded where a refusal was due"),
+    };
+    assert!(err.contains("?encoding="), "{err}");
+    let d = quarb::source::SourceDecoding::default()
+        .with_option(Some("windows-1251"))
+        .unwrap();
+    let m = CodeModel::open_with_decoding(&p, &d).unwrap();
+    assert!(m.source().contains("Привет"));
+}
+
+/// Finding 15: a qualified callee (`Type::new`, `obj.helper`)
+/// links to the declarations under that qualifier where the file
+/// has them; an unqualified one, or a qualifier nothing answers
+/// to, still fans out to every same-named declaration.
+#[test]
+fn qualified_callees_prefer_their_qualifier() {
+    let src = "struct A; struct B;\n\
+        impl A { fn new() -> A { A } }\n\
+        impl B { fn new() -> B { B } }\n\
+        fn new() {}\n\
+        fn main() { A::new(); B::new(); new(); C::new(); }\n";
+    let m = CodeModel::parse(src, "rs").unwrap();
+    let targets = |call: &str| {
+        v(
+            &m,
+            &format!("/main//call[::callee = \"{call}\"]->definition"),
+        )
+    };
+    assert_eq!(targets("A::new"), ["/A[2]/new"]);
+    assert_eq!(targets("B::new"), ["/B[2]/new"]);
+    assert_eq!(targets("new").len(), 3);
+    assert_eq!(targets("C::new").len(), 3);
 }

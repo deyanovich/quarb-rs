@@ -23,7 +23,7 @@
 //!   projection (`::`) and `::text` are the element's text
 //!   content; `;;;tag`, `;;;id`, `;;;local-name`, `;;;ns-prefix`,
 //!   `;;;n-attrs`, and any `;;;attr` expose metadata.
-//! - An attribute holding an ID reference resolves: `::ref~>`
+//! - An attribute holding an ID reference resolves: `::ref-->`
 //!   follows a bare IDREF value (`book="b1"`) or a fragment
 //!   (`href="#b1"`) to the element with that `id` or `xml:id`.
 //! - Input is UTF-8 text; an `encoding` declaration in the XML
@@ -69,6 +69,18 @@ pub enum XmlError {
     NoRoot,
     #[error("content after the root element")]
     TrailingContent,
+}
+
+/// The encoding an XML document declares in its prologue
+/// (`<?xml version="1.0" encoding="windows-1251"?>`), reported for
+/// the engine's source boundary. The adapter decodes nothing: the
+/// boundary applies the declaration after `?encoding=` and a
+/// byte-order mark have had their say. The prologue is scanned as
+/// ASCII-compatible bytes, as the XML recommendation's appendix F
+/// reads it; a document whose first bytes are not `<?xml` declares
+/// nothing.
+pub fn declared_encoding(bytes: &[u8]) -> Option<String> {
+    quarb::source::xml_declared_encoding(bytes)
 }
 
 /// A Quarb adapter over a parsed XML document.
@@ -249,6 +261,12 @@ impl AstAdapter for XmlAdapter {
         self.root
     }
 
+    /// In memory: an unscoped reverse resolution or value match may
+    /// walk the arbor.
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes[node.0 as usize].children.clone()
     }
@@ -265,6 +283,31 @@ impl AstAdapter for XmlAdapter {
     /// attribute value.
     /// Attributes, by name (`::pages`). Element text is the bare
     /// projection (`::`) — no attribute name is shadowed.
+    /// XML's own reference syntax: XLink's `xlink:href`, else a
+    /// plain `href`. The bare arrows read it.
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let n = &self.nodes[node.0 as usize];
+        ["xlink:href", "href"]
+            .into_iter()
+            .find(|a| n.attr(a).is_some())
+            .map(str::to_string)
+    }
+
+    /// An element's properties are its attributes.
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        self.nodes[node.0 as usize]
+            .attrs
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Any attribute may hold a reference (`#id`, an IDREF) to any
+    /// element of the document: the format declares no narrower one.
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.nodes[node.0 as usize]
             .attr(name)
@@ -304,5 +347,29 @@ impl AstAdapter for XmlAdapter {
         let value = self.nodes[node.0 as usize].attr(property)?;
         let target = value.strip_prefix('#').unwrap_or(value);
         self.ids.get(target).copied()
+    }
+}
+
+#[cfg(test)]
+mod declared_tests {
+    #[test]
+    fn prologue_declaration() {
+        assert_eq!(
+            super::declared_encoding(b"<?xml version='1.0' encoding = 'Windows-1251' ?><a/>"),
+            Some("Windows-1251".into())
+        );
+        assert_eq!(
+            super::declared_encoding(b"<?xml version=\"1.0\"?><a/>"),
+            None
+        );
+        assert_eq!(super::declared_encoding(b"<a encoding=\"x\"/>"), None);
+        assert_eq!(
+            super::declared_encoding(b"<?xml-stylesheet href=\"a.xsl\" encoding=\"koi8-r\"?><r/>"),
+            None
+        );
+        assert_eq!(
+            super::declared_encoding(b"\xef\xbb\xbf<?xml encoding=\"utf-8\"?>"),
+            None
+        );
     }
 }

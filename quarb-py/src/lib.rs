@@ -213,73 +213,12 @@ impl Doc {
 }
 
 /// A boxed adapter behind the one trait — the remote targets'
-/// uniform carrier (no Box blanket impl exists upstream).
+/// uniform carrier, a local type so `Doc` can name it; every
+/// method forwards.
 struct Dyn(Box<dyn AstAdapter>);
 
 impl AstAdapter for Dyn {
-    fn root(&self) -> NodeId {
-        self.0.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.0.children(node)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.0.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.0.parent(node)
-    }
-    fn traits(&self, node: NodeId) -> Vec<String> {
-        self.0.traits(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.0.property(node, name)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.0.children_named(node, name)
-    }
-    fn child_host(&self, node: NodeId) -> NodeId {
-        self.0.child_host(node)
-    }
-    fn non_tree_nodes(&self) -> Vec<NodeId> {
-        self.0.non_tree_nodes()
-    }
-    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
-        self.0.properties(node)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.0.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.0.metadata(node, key)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.0.backlinks(node)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.0.resolve(node, property, hint)
-    }
-    fn link_property(
-        &self,
-        source: NodeId,
-        label: &str,
-        target: NodeId,
-        name: &str,
-    ) -> Option<Value> {
-        self.0.link_property(source, label, target, name)
-    }
-    fn quantifier_bound(&self) -> usize {
-        self.0.quantifier_bound()
-    }
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.0.invocation_instant()
-    }
-    fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        self.0.unit_scale(expr)
-    }
+    quarb::forward_ast_adapter!(0);
 }
 
 /// Open a remote (scheme-prefixed) target, mirroring the qua
@@ -437,7 +376,10 @@ fn mount(paths: Vec<String>, graft: bool, no_graft: bool, descend: bool) -> PyRe
         });
     }
     Ok(Document {
-        doc: Doc::Mount(quarb_mount::MountAdapter::new(mounts)),
+        doc: Doc::Mount(
+            quarb_mount::MountAdapter::try_new(mounts)
+                .map_err(|e| PyValueError::new_err(format!("mount: {e}")))?,
+        ),
         fmt: "mount".into(),
     })
 }
@@ -565,6 +507,10 @@ fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
             .getattr("timedelta")?
             .call1((0, *secs, nanos / 1000))?
             .unbind(),
+        // Python has no value for a stretch of the calendar at a
+        // grain: a period arrives as its ISO-8601 text at reduced
+        // precision (`1899-10`, `1899-10-06T14:30`).
+        Value::Period { .. } => v.to_string().into_py_any(py)?,
         Value::Quantity {
             value,
             base,
