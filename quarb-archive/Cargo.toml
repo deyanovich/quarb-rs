@@ -37,7 +37,10 @@ sevenz-rust = { version = "0.6", default-features = false }
 [dev-dependencies]
 zip.workspace = true
 tempfile.workspace = true
-quarb-compose = { path = "../quarb-compose", version = "0.33.0" }
+# Test-only and path-only: quarb-compose depends on this crate, so a
+# version requirement here would be a cycle crates.io cannot resolve
+# (a dev-dependency without a version is dropped on publish).
+quarb-compose = { path = "../quarb-compose" }
 sevenz-rust = { version = "0.6", features = ["compress"] }
 
 [features]
