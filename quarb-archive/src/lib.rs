@@ -468,9 +468,19 @@ impl ArchiveAdapter {
         Err(ArchiveError::RarUnavailable)
     }
 
+    /// A 7z archive in the browser build: refused, the reader is
+    /// native-only.
+    #[cfg(target_arch = "wasm32")]
+    fn open_7z(_path: &Path, _decoding: SourceDecoding, _limit: u64) -> Result<Self, ArchiveError> {
+        Err(ArchiveError::SevenZ(
+            "the 7z reader is not part of the browser build".into(),
+        ))
+    }
+
     /// A 7z archive: its entries read up front (the format is
     /// solid by default, so members come in one stream), under the
     /// mount's rule like tar's.
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_7z(path: &Path, decoding: SourceDecoding, limit: u64) -> Result<Self, ArchiveError> {
         let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
             .map_err(|e| ArchiveError::SevenZ(e.to_string()))?;

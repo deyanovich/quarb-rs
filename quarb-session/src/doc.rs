@@ -41,6 +41,7 @@ pub struct Options {
     pub bonds: Option<Rc<syndesmos::Syndesmos>>,
 }
 
+#[cfg(feature = "native")]
 /// The session's declaration reporter at the source boundary: an
 /// XML prologue for XML-family names, the HTML prescan for HTML
 /// names, both tried for a name that says nothing.
@@ -57,6 +58,7 @@ fn declared_encoding(name: &str, bytes: &[u8]) -> Option<String> {
     }
 }
 
+#[cfg(feature = "native")]
 /// Read one file at the source boundary: `?encoding=` (the
 /// `explicit` label), then a byte-order mark, then what the bytes
 /// declare, then strict UTF-8 — refused, naming the option, when
@@ -72,6 +74,7 @@ fn read_source(path: &Path, explicit: Option<&str>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
 }
 
+#[cfg(feature = "native")]
 /// Take `?encoding=LABEL` off a plain target (one that is not a
 /// path as written; a reader prefix parses its own options).
 fn take_encoding_option(path: &Path) -> Result<(std::path::PathBuf, Option<String>)> {
@@ -79,6 +82,7 @@ fn take_encoding_option(path: &Path) -> Result<(std::path::PathBuf, Option<Strin
     Ok((p, explicit))
 }
 
+#[cfg(feature = "native")]
 /// The source options off a plain target: `?encoding=`, and for a
 /// delimited file `?delimiter=` / `?decimal=`.
 /// Take `references=STANDARD` off a target's query, wherever it
@@ -116,6 +120,7 @@ fn take_references_option(path: &Path) -> Result<(std::path::PathBuf, Option<Str
     Ok((std::path::PathBuf::from(rebuilt), standard))
 }
 
+#[cfg(feature = "native")]
 fn take_source_options(
     path: &Path,
 ) -> Result<(std::path::PathBuf, Option<String>, quarb_csv::CsvOptions)> {
@@ -297,13 +302,13 @@ impl Doc {
             }
             // BibTeX / BibLaTeX, imported through atrep's
             // bibliogramma: a document of bib entries.
-            #[cfg(feature = "koine")]
+            #[cfg(feature = "native")]
             "text-bibtex" | "bibtex" => quarb_text_koine::parse_bibtex(input)
                 .map(Doc::Text)
                 .map_err(|e| anyhow::anyhow!("{e}")),
             // FictionBook 2 at the text level, through the koine
             // route (atrep's importer).
-            #[cfg(feature = "koine")]
+            #[cfg(feature = "native")]
             "text-fb2" | "fb2" => quarb_text_koine::parse_xml_as(input, "fb2")
                 .map(Doc::Text)
                 .map_err(|e| anyhow::anyhow!("{e}")),
@@ -1294,12 +1299,12 @@ impl Doc {
                 Some("txt") => "text",
                 Some("rtf") => "text-rtf",
                 Some("conllu" | "conllup") => "conllu",
-                #[cfg(feature = "koine")]
+                #[cfg(feature = "native")]
                 Some("bib") => "text-bibtex",
                 // FictionBook by its extension or its namespace.
-                #[cfg(feature = "koine")]
+                #[cfg(feature = "native")]
                 Some("fb2") => "text-fb2",
-                #[cfg(feature = "koine")]
+                #[cfg(feature = "native")]
                 _ if text.trim_start().starts_with('<')
                     && quarb_text_koine::detect_xml_kind(&text) == Some("fb2") =>
                 {
@@ -1572,6 +1577,7 @@ fn is_html(path: &Path, text: &str) -> bool {
         || text.trim_start().starts_with('<')
 }
 
+#[cfg(feature = "native")]
 /// The corpus reading's second half, shared with `lit:`: the
 /// sidecar or command annotation, else the tokenizer with the
 /// session's and the mount's sentence bonds.
@@ -1601,6 +1607,7 @@ fn treebank_options(
     Ok(Doc::Text(model))
 }
 
+#[cfg(feature = "native")]
 fn finish_corpus(
     mut model: quarb_text::TextModel,
     conllu: Option<String>,
