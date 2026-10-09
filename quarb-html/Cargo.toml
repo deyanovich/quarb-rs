@@ -12,5 +12,5 @@ homepage.workspace = true
 
 [dependencies]
 url = "2"
-quarb = { path = "../quarb", version = "0.34.0" }
+quarb = { path = "../quarb", version = "0.34.1" }
 scraper.workspace = true

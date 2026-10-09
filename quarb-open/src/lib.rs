@@ -54,6 +54,7 @@ use quarb_kuzu::KuzuAdapter;
 use quarb_ldap::LdapAdapter;
 use quarb_maildir::MaildirAdapter;
 use quarb_memgraph::MemgraphAdapter;
+#[cfg(unix)]
 use quarb_metatheca::MetathecaAdapter;
 #[cfg(feature = "heavy")]
 use quarb_mongodb::MongodbAdapter;
@@ -2066,6 +2067,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
     }
+    #[cfg(unix)]
     if let Some(s) = p.to_str()
         && let Some(vault) = s
             .strip_prefix("metatheca:")
@@ -2080,6 +2082,14 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         );
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+    }
+    #[cfg(not(unix))]
+    if let Some(s) = p.to_str()
+        && (s.starts_with("metatheca:") || s.starts_with("mt:"))
+    {
+        anyhow::bail!(
+            "metatheca vaults open on unix only (their storage layer locks files the unix way)"
+        );
     }
     if let Some(s) = p.to_str()
         && s.starts_with("firebase://")
