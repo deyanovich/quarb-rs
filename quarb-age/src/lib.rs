@@ -25,6 +25,7 @@
 //! also come from `QUARB_AGE_PASS` or `PGPASSWORD`.
 
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_cypher::{bt, literal as cypher_literal};
 use serde_json::Value as Json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -134,32 +135,6 @@ fn cell_value(v: &Json) -> Value {
     }
 }
 
-/// A value as an inline Cypher literal (AGE's cypher() takes the
-/// statement as a dollar-quoted string, so values are inlined with
-/// string escaping).
-fn cypher_literal(v: &Value) -> String {
-    match v {
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        other => format!(
-            "'{}'",
-            other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
-        ),
-    }
-}
-
-/// The `cypher()` call for a statement. The statement rides as a
-/// dollar-quoted string, and the tag is one the statement does
-/// not contain: a stored property holding `$quarb$` would otherwise
-/// close the quote and whatever followed would run as SQL (the
-/// simple-query protocol runs every statement it is handed).
-/// A label or property name in backticks, the backtick doubled
-/// inside — the one quoting Cypher's grammar gives an identifier.
-fn bt(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
-
 fn cypher_sql(graph: &str, stmt: &str, as_list: &str) -> String {
     let mut tag = String::from("$quarb$");
     let mut n = 0u32;
@@ -204,6 +179,8 @@ pub struct AgeAdapter {
     nodes: RefCell<Vec<Node>>,
     by_gid: RefCell<HashMap<i64, NodeId>>,
     edge_props: RefCell<HashMap<(NodeId, String, NodeId), Vec<(String, Value)>>>,
+    /// A node's relationships once read, per direction.
+    edge_cache: quarb_cypher::EdgeCache,
 }
 
 impl AgeAdapter {
@@ -235,6 +212,7 @@ impl AgeAdapter {
             })
             .map_err(api)?;
         let adapter = AgeAdapter {
+            edge_cache: Default::default(),
             rt,
             client,
             graph: t.graph.clone(),
@@ -377,6 +355,15 @@ impl AgeAdapter {
 
     /// One vertex's edges, outgoing or incoming.
     fn edges(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
+        if let Some(cached) = self.edge_cache.get(node, incoming) {
+            return cached;
+        }
+        let out = self.edges_uncached(node, incoming);
+        self.edge_cache.put(node, incoming, out.clone());
+        out
+    }
+
+    fn edges_uncached(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
         let gid = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Entity { gid, .. } => *gid,
             _ => return Vec::new(),

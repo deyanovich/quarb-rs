@@ -1351,6 +1351,31 @@ pub trait AstAdapter {
     /// `None` means walk. The answer must equal the walk's.
     fn descendants_named(&self, _n: NodeId, _name: &str)
         -> Option<Vec<(NodeId, usize)>> { None }
+    /// The search fast path: one step's plan (axis, name, the
+    /// equality conjuncts the engine lowered, a limit, an order)
+    /// answered from an index -- `None` walks. The default folds
+    /// `children_named` / `descendants_named` / `descendants_where`.
+    fn select(&self, _from: NodeId, _plan: &StepPlan<'_>)
+        -> Option<Selection> { ... }
+    /// The dry-run form of `select`: which conjuncts the adapter
+    /// would apply, from its catalog alone (`scope` is the literal
+    /// path from the root to the step's base); `None` cannot say.
+    fn select_plan(&self, _scope: &[&str], _plan: &StepPlan<'_>)
+        -> Option<Vec<bool>> { None }
+    /// What reaching the step would cost, from the catalog: row and
+    /// byte intervals, requests, a latency class, a confidence
+    /// (a dry run, statistics, a file's size, an arena's count).
+    fn estimate(&self, _scope: &[&str], _plan: &StepPlan<'_>)
+        -> Option<Estimate> { None }
+    /// How many nodes the step reaches, without making them:
+    /// `@| count` right after a bare step asks (SQL's COUNT(*), an
+    /// index bucket's length). `None` walks.
+    fn count(&self, _from: NodeId, _plan: &StepPlan<'_>)
+        -> Option<usize> { None }
+    /// A batching hint before the engine reads the properties
+    /// `names` of every node in `nodes` (the next stage projects
+    /// them): the projection twin of `prefetch_links`.
+    fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}
     /// A batching hint before a link sweep over `nodes`.
     fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
 
@@ -1390,8 +1415,8 @@ Three observations that the filesystem work has already forced:
   filesystem adapter uses an interning arena index).
 
 \item \textbf{New trait methods need their forwarders.} The run
-  path wraps every adapter in decorators (\texttt{WithNow},
-  \texttt{AllowShell}, \texttt{Sourced}), the session in \texttt{Dyn}, mounts in
+  path wraps adapters in layers (the decoding \texttt{Sourced}
+  layer), the session in \texttt{Dyn}, mounts in
   \texttt{MountAdapter}/\texttt{Shared}, models in
   \texttt{ModelAdapter} -- a defaulted method silently answers
   \texttt{None} through any wrapper that does not forward it.
@@ -1428,12 +1453,95 @@ Three observations that the filesystem work has already forced:
   the float, and $-0.0$ keys as $0.0$). Above $2^{53}$ the float
   reading alone would merge neighbours.
 
+\item \textbf{The core is smaller than the crate.} The temporal
+  fragment (instants, durations, periods, time expressions, the
+  calendar names) is the \texttt{quarb-time} crate, re-exported by
+  \texttt{quarb} at its old paths (\texttt{quarb::temporal},
+  \texttt{period}, \texttt{timex}). Three features, on by
+  default, carry what one function needs: \texttt{decode-formats}
+  (the structured readings of \texttt{decode}: serde\_json,
+  serde\_yaml\_ng, toml, quick-xml), \texttt{kaiv} (the kaiv
+  output of \texttt{| kaiv} / \texttt{@| kaiv}), \texttt{desm}
+  (syndesmos as the session's sentence bonds). Off, the function
+  refuses with the feature's name. The sentence bonds themselves
+  are a trait (\texttt{quarb::SentenceBonds}): the engine segments
+  through whatever the tool set, syndesmos or another.
+
+\item \textbf{The plan is read before the run.}
+  \texttt{Query::plan(\&adapter)} (\texttt{quarb::plan}) reads
+  off the syntax tree, per branch and per step, the axis the fast
+  path covers, the literal name, the equality conjuncts lowered,
+  the literal path to the step's base where every step before it
+  was a bare child hop by name, and what the adapter says from its
+  catalog: \texttt{select\_plan} (which conjuncts it would apply)
+  and \texttt{estimate} (rows, bytes, requests, latency,
+  confidence), composed along a branch (\texttt{Estimate::then})
+  and across branches (\texttt{beside}), unknown where no
+  estimator answers. \texttt{Plan::roots} names the first child of
+  every anchored branch -- under a mount table, the mounts the
+  query touches; an unanchored search is every mount. A
+  \texttt{Run} may carry a \texttt{Budget} (rows, bytes,
+  requests; \texttt{strict} refuses an unknown estimate): a query
+  the estimate puts beyond it is refused before anything runs, and
+  the \texttt{Outcome} carries the plan. \texttt{Plan::to\_kaiv}
+  emits it as a \texttt{quarb/plan} payload (\texttt{qua --plan}
+  prints it and stops; \texttt{qua --budget rows=N,bytes=N}).
+  \texttt{Model::reachable\_roots(named)} (quarb-model) closes a
+  set of mounts over the \texttt{ref}, \texttt{rel} and
+  \texttt{tree} declarations, for a replay plan.
+
+\item \textbf{A mount may be latent.} The mount adapter declares a
+  mount by name, target and opener (\texttt{MountAdapter::declare})
+  and opens it the first time a query reaches it: a hop by its
+  name, a listing of the root's children (so an unanchored
+  \texttt{//x} opens every mount before the scope memo is built),
+  a reference landing on a declared identity. \texttt{tree\_identities}
+  answers a latent mount from its declaration with a stand-in root
+  id that opens the mount when touched; the every-mount hints read
+  the active set. A failed opener is a refusal and an empty mount.
+  A live table takes new mounts (\texttt{push}) and identities
+  (\texttt{declare\_identity}).
+
+\item \textbf{The conformance suite is the contract's test.}
+  \texttt{quarb::conformance::check(\&adapter, budget)} walks a
+  sample of an adapter's nodes and names every pair the engine
+  relies on that the sample breaks: a child's \texttt{parent},
+  \texttt{has\_node}, \texttt{answers\_to} its own name,
+  \texttt{children\_named} and a child \texttt{select} finding
+  it, \texttt{has\_trait} over \texttt{traits},
+  \texttt{property\_names} over \texttt{properties},
+  \texttt{provenance\_list}'s first entry, a descendant
+  \texttt{select} against the walk. An adapter's tests call it on
+  a fixture and assert the list is empty (the JSON and HTML
+  adapters do); an index that answers short is caught there, not
+  by a query.
+
 \item \textbf{The shell gate is checked twice.} The static walk
   refuses a query that names \texttt{sh(...)} or a backtick
   command anywhere it can stand (record fields, list items and
   field bases included); the executor refuses the stage again
   when it runs, so a path the walk does not know cannot reach
   the shell without \texttt{--allow-shell}.
+
+\item \textbf{What a run is given is the run's, never the
+  adapter's.} The invocation instant \texttt{now()} denotes, the
+  shell gate, the quantifier bound override, reproducible
+  provenance, the reference targets, the output collation and the
+  sentence bonds travel in a \texttt{quarb::Run}; a tool parses a
+  \texttt{Query} once (data-aware macros expand under the same
+  \texttt{Run}) and runs it as often as it likes, each run
+  answering an \texttt{Outcome} (the result, the closing table
+  taken off for rendering, the unresolved references). The
+  executor reads the options from the run in progress, and a run
+  begun from inside another -- an adapter answering through the
+  engine, a model's constructor queries -- inherits them, so
+  nothing rides on an adapter method or a global. The adapter
+  keeps only \texttt{quantifier\_bound}, the depth its own
+  structures need (metatheca's chain), which a run may override.
+  The convenience entries (\texttt{quarb::run} and its
+  \texttt{\_with\_defs} / \texttt{\_traced} twins) run under the
+  ambient options: the instant the tool pinned, the bonds it set,
+  the gate closed.
 
 \item \textbf{The root may be unnamed.} \texttt{name} returns
   \texttt{Option} precisely so an adapter can leave the root without a
@@ -1632,10 +1740,10 @@ nothing about encodings.
   \texttt{@| csv} and \texttt{@| table} inside a pipeline are
   canonical; when one \emph{closes} the query the tool renders
   it, as it renders \texttt{--csv} and \texttt{--table}:
-  \texttt{quarb::run\_for\_rendering} runs the query with the
+  \texttt{Query::for\_rendering} runs the query with the
   closing stage replaced by an internal stand-in that yields the
-  rows, and hands back the stage's columns and named delimiter
-  (\texttt{ClosingTable}). \texttt{@| json}, \texttt{@| jsonl} and
+  rows, and the \texttt{Outcome} carries the stage's columns and
+  named delimiter (\texttt{ClosingTable}). \texttt{@| json}, \texttt{@| jsonl} and
   \texttt{@| kaiv} stay canonical. A reader
   (\texttt{number}, \texttt{tp}) takes its locale from its argument
   alone, and refuses a locale it has no table for. \texttt{qua --explain} reports the locale and its layer;

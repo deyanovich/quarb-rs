@@ -119,7 +119,7 @@ impl Client {
             "https://bigquery.googleapis.com/bigquery/v2/projects/{}/queries",
             self.project
         );
-        let resp: serde_json::Value = ureq::post(&url)
+        let resp: serde_json::Value = quarb_http::agent().post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .send_json(json!({"query": query, "useLegacySql": false}))
             .map_err(Box::new)?
@@ -201,7 +201,7 @@ impl Client {
         if let Some(p) = page {
             url.push_str(&format!("?pageToken={p}"));
         }
-        ureq::get(&url)
+        quarb_http::agent().get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .call()
             .map_err(Box::new)?

@@ -7,12 +7,12 @@
 //! completions from `quarb::complete` — the same registry the
 //! highlighter and quai read.
 //!
-//! Positions: the engine's parse errors are messages, not spans
-//! (`QuarbError::Parse(String)`). Until the parser carries
-//! offsets, the diagnostic range comes from a heuristic — the
-//! engine consistently backticks the offending token, and the
-//! first occurrence of that token in the text anchors the range.
-//! When nothing anchors, the whole first line is the range.
+//! Positions: a parse error carries the character offset where
+//! the parser stopped (`QuarbError::offset`), which anchors the
+//! range — through the backticked token when the message names
+//! one, else one character. An error with no offset falls back
+//! to the first occurrence of its backticked token in the text,
+//! and when nothing anchors, the whole first line is the range.
 
 use serde::Serialize;
 
@@ -58,7 +58,10 @@ pub fn diagnostics(text: &str) -> Vec<Diag> {
         Ok(_) => Vec::new(),
         Err(e) => {
             let message = e.to_string();
-            let (line, col_start, col_end) = anchor(query, &message);
+            let (line, col_start, col_end) = match e.offset() {
+                Some(at) => anchor_at(query, at, &message),
+                None => anchor(query, &message),
+            };
             vec![Diag {
                 line,
                 col_start,
@@ -67,6 +70,17 @@ pub fn diagnostics(text: &str) -> Vec<Diag> {
             }]
         }
     }
+}
+
+/// The range at a character offset: the backticked token's length
+/// when the text there starts with it, else one character.
+fn anchor_at(text: &str, at: usize, message: &str) -> (u32, u32, u32) {
+    let byte = text.char_indices().nth(at).map_or(text.len(), |(b, _)| b);
+    let (line, col) = line_col(text, byte);
+    let len = backticked(message)
+        .filter(|tok| text[byte..].starts_with(tok))
+        .map_or(1, |tok| tok.chars().count() as u32);
+    (line, col, col + len)
 }
 
 /// Locate the error's backticked token in the text, if any.

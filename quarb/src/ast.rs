@@ -4,6 +4,8 @@
 //! is an axis (which direction to move), a matcher (which name to
 //! keep), and an optional leaf anchor.
 
+pub mod visit;
+
 use crate::value::Value;
 use globset::GlobMatcher;
 use regex::Regex;
@@ -258,6 +260,13 @@ pub enum Arg {
     Lit(Value),
     Expr(Operand),
     Range(Option<i64>, Option<i64>),
+    /// A named option of the call (`csv(";")` carries its
+    /// delimiter as `delimiter`), typed rather than a marker
+    /// string a consumer has to recognise.
+    Named {
+        name: String,
+        value: Value,
+    },
 }
 
 /// The field name an expression carries on its own, for `record(...)`

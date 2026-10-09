@@ -317,12 +317,14 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// Parse JSON text into a [`Value`]: object → record (key order
 /// preserved), array → list, and the scalars map directly. `None`
 /// on malformed JSON — the decode(json) stage nulls it.
+#[cfg(feature = "decode-formats")]
 pub fn json_to_value(text: &str) -> Option<crate::value::Value> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     Some(from_serde(&v))
 }
 
 /// Parse YAML text into a [`Value`] (the JSON data model applies).
+#[cfg(feature = "decode-formats")]
 pub fn yaml_to_value(text: &str) -> Option<crate::value::Value> {
     let v: serde_json::Value = serde_yaml_ng::from_str(text).ok()?;
     Some(from_serde(&v))
@@ -333,6 +335,7 @@ pub fn yaml_to_value(text: &str) -> Option<crate::value::Value> {
 /// surface as an [`Value::Instant`] where the text has an ISO
 /// reading, its text otherwise (local times), never as the
 /// `$__toml_private_datetime` record.
+#[cfg(feature = "decode-formats")]
 pub fn toml_to_value(text: &str) -> Option<crate::value::Value> {
     let v: serde_json::Value = toml::from_str(text).ok()?;
     Some(from_serde_with(&v, true))
@@ -344,6 +347,7 @@ pub fn toml_to_value(text: &str) -> Option<crate::value::Value> {
 /// child elements their tag names (a tag repeated within one
 /// parent collects into a list), and any non-whitespace text a
 /// `#text` key. `None` on malformed XML.
+#[cfg(feature = "decode-formats")]
 pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -446,6 +450,7 @@ pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
 }
 
 /// Fold an element's fields and text into its value.
+#[cfg(feature = "decode-formats")]
 fn frame_to_value(fields: Vec<(String, crate::value::Value)>, text: String) -> crate::value::Value {
     if fields.is_empty() {
         return crate::value::Value::Str(text);
@@ -459,6 +464,7 @@ fn frame_to_value(fields: Vec<(String, crate::value::Value)>, text: String) -> c
 
 /// Add `(key, value)` to a field list, collecting a repeated key
 /// into a list (in document order).
+#[cfg(feature = "decode-formats")]
 fn push_field(
     fields: &mut Vec<(String, crate::value::Value)>,
     key: String,
@@ -483,6 +489,13 @@ pub fn is_structured_format(fmt: &str) -> bool {
     matches!(fmt, "json" | "yaml" | "toml" | "xml")
 }
 
+/// Whether the structured readings are compiled in (the
+/// `decode-formats` feature).
+pub fn structured_formats_available() -> bool {
+    cfg!(feature = "decode-formats")
+}
+
+#[cfg(feature = "decode-formats")]
 fn from_serde(v: &serde_json::Value) -> crate::value::Value {
     from_serde_with(v, false)
 }
@@ -490,6 +503,7 @@ fn from_serde(v: &serde_json::Value) -> crate::value::Value {
 /// [`from_serde`] with the TOML datetime tunnel unwrapped when
 /// `toml` is set (scoped so a JSON document that genuinely holds
 /// the sentinel key is left alone).
+#[cfg(feature = "decode-formats")]
 fn from_serde_with(v: &serde_json::Value, toml: bool) -> crate::value::Value {
     use crate::value::Value;
     match v {
@@ -586,6 +600,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "decode-formats")]
     fn toml_datetime_unwraps_typed() {
         use crate::value::Value;
         // The toml crate's private datetime tunnel must never leak
@@ -605,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "decode-formats")]
     fn xml_rejects_multiple_roots_and_trailing_content() {
         use crate::value::Value;
         assert_eq!(xml_to_value("<a>1</a><b>2</b>"), None);
@@ -614,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "decode-formats")]
     fn decode_round_trips() {
         for s in [b"".as_slice(), b"f", b"fo", b"foobar", &[0xfb, 0xff]] {
             assert_eq!(decode("base64", &base64(s)).as_deref(), Some(s));

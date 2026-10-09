@@ -249,7 +249,9 @@ impl Value {
             Value::Null => "null".to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Int(n) => n.to_string(),
-            Value::Float(f) => format_float(*f),
+            Value::Float(f) if f.is_finite() => format_float(*f),
+            // JSON has no spelling for infinity or NaN.
+            Value::Float(_) => "null".to_string(),
             Value::Str(s) => json_string(s),
             Value::List(l) => {
                 let inner: Vec<String> = l.iter().map(Value::to_json).collect();
@@ -450,7 +452,7 @@ impl SortKey {
         }
     }
 
-    fn cmp_key(&self, other: &SortKey) -> std::cmp::Ordering {
+    pub(crate) fn cmp_key(&self, other: &SortKey) -> std::cmp::Ordering {
         use SortKey::*;
         match (self, other) {
             (Bool(a), Bool(b)) => a.cmp(b),
@@ -590,7 +592,8 @@ pub(crate) fn quantital_pair_with(
 }
 
 /// Render a float the way `Display` does (no trailing `.0` for whole
-/// values); finite by construction everywhere quarb produces floats.
+/// values). Arithmetic minted no infinity or NaN (an overflow is
+/// null); a source that carries one still renders here, as text.
 fn format_float(f: f64) -> String {
     f.to_string()
 }

@@ -149,15 +149,10 @@ pub fn read_source(
     Ok(source_decoding(explicit).and_then(|d| d.decode(name, &bytes)))
 }
 
-/// Names [`quarb_archive::ArchiveAdapter::open`] can take: the
-/// zip family, tar, and gzip (`.gz` alone included — the open
-/// checks magic bytes, and a failure leaves the leaf a leaf).
+/// Whether a leaf's name says archive: the one list quarb-archive
+/// keeps.
 fn archive_name(name: &str) -> bool {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    matches!(
-        ext.as_str(),
-        "zip" | "tar" | "tgz" | "gz" | "7z" | "xz" | "txz" | "bz2" | "tbz2" | "zst" | "tzst"
-    )
+    quarb_archive::archive_extension(name.rsplit('.').next().unwrap_or(""))
 }
 
 /// Parse `content` by `name`'s extension, else by sniffing.
@@ -255,6 +250,44 @@ fn parse_inner(
         return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
     }
     None
+}
+
+/// Whether `parse_inner` could take a leaf of this name: one of the
+/// extensions it reads, a source extension with a grammar, or no
+/// extension at all (then the content decides). The list mirrors
+/// the arms of `parse_inner`.
+fn grafts_by_name(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return true;
+    };
+    let ext = ext.to_ascii_lowercase();
+    if matches!(
+        ext.as_str(),
+        "json"
+            | "jsonl"
+            | "ndjson"
+            | "xml"
+            | "svg"
+            | "xhtml"
+            | "fb2"
+            | "html"
+            | "htm"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "md"
+            | "markdown"
+            | "txt"
+            | "csv"
+            | "tsv"
+    ) {
+        return true;
+    }
+    #[cfg(feature = "source")]
+    if quarb_tree_sitter::supported(&ext) {
+        return true;
+    }
+    false
 }
 
 /// One graft: an inner arbor mounted at an outer leaf.
@@ -515,6 +548,13 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                     inner: Inner::Text(model),
                 });
                 return Some(grafts.len() - 1);
+            }
+            // The name decides first: a leaf whose extension no
+            // reader here takes (an image, a binary, an unknown
+            // suffix) stays a leaf unread — only a known extension,
+            // or none (the content sniff), is worth the bytes.
+            if !grafts_by_name(&name) {
+                return None;
             }
             // Through the path when there is one: the bytes meet
             // the boundary here, under the mount's rule, and the
@@ -1094,6 +1134,45 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         Some(v.into_iter().map(|(t, d)| (self.wrap(g, t), d)).collect())
     }
 
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        match self.split(from) {
+            // Inside a graft: its adapter's own answer, wrapped.
+            Some((g, inner)) => {
+                let sel = self.grafts.borrow()[g]
+                    .inner
+                    .adapter()
+                    .select(inner, plan)?;
+                Some(quarb::Selection {
+                    nodes: sel
+                        .nodes
+                        .into_iter()
+                        .map(|(t, d)| (self.wrap(g, t), d))
+                        .collect(),
+                    applied: sel.applied,
+                })
+            }
+            // Outside: the outer adapter's descendants may cross
+            // into grafts, which the walk handles; a child hop is
+            // this adapter's own `children_named`.
+            None => match plan.axis {
+                quarb::PlanAxis::Child => quarb::adapter::select_by_hooks(self, from, plan),
+                quarb::PlanAxis::Descendant => None,
+            },
+        }
+    }
+
+    fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        self.outer.index_lookup(scope, property, value)
+    }
+
+    fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
+        self.outer.select_plan(scope, plan)
+    }
+
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        self.outer.estimate(scope, plan)
+    }
+
     fn has_node(&self, node: NodeId) -> bool {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().has_node(inner),
@@ -1105,16 +1184,8 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         self.outer.unit_scale(expr)
     }
 
-    fn allow_shell(&self) -> bool {
-        self.outer.allow_shell()
-    }
-
     fn quantifier_bound(&self) -> usize {
         self.outer.quantifier_bound()
-    }
-
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.outer.invocation_instant()
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {

@@ -84,55 +84,64 @@ impl LocalExecutor {
     }
 }
 
-/// Run one query against a `Doc`, rendering its result to [`Cell`]s.
-fn run_doc(
-    doc: &Doc,
-    query: &str,
-    now: (i64, u32),
-    allow_shell: bool,
-) -> anyhow::Result<Vec<Cell>> {
-    let result = doc
-        .run(query, now, allow_shell)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(match result {
+/// Run one query against a `Doc`, rendering its result to [`Cell`]s
+/// and reporting the unresolved references.
+fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<(Vec<Cell>, Vec<String>)> {
+    let out = doc.run(query, run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cells = match out.result {
         QueryResult::Nodes(nodes) => nodes
             .into_iter()
             .map(|n| Cell::Node(doc.render(n)))
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
-    })
+    };
+    Ok((cells, out.refs))
 }
 
 /// [`run_doc`], against a model-enriched view.
 fn run_doc_modeled(
     doc: &Doc,
     query: &str,
-    now: (i64, u32),
-    allow_shell: bool,
+    run: &quarb::Run,
     model: &quarb_model::Model,
-) -> anyhow::Result<Vec<Cell>> {
-    let result = doc
-        .run_modeled(query, now, allow_shell, model)
+) -> anyhow::Result<(Vec<Cell>, Vec<String>)> {
+    let out = doc
+        .run_modeled(query, run, model)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(match result {
+    let cells = match out.result {
         QueryResult::Nodes(nodes) => nodes
             .into_iter()
             .map(|n| Cell::Node(doc.render_modeled(n, model)))
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
-    })
+    };
+    Ok((cells, out.refs))
+}
+
+impl LocalExecutor {
+    /// The options every query of this session runs under: the
+    /// session's instant and shell gate, the registered reference
+    /// targets, the ambient bonds.
+    fn run_opts(&self) -> quarb::Run {
+        quarb::Run {
+            now: Some(self.now),
+            allow_shell: self.allow_shell,
+            ref_targets: self.url_roots.clone(),
+            ..quarb::Run::ambient()
+        }
+    }
 }
 
 impl Executor for LocalExecutor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
-        quarb::set_ref_targets(self.url_roots.clone());
-        let out = if let Some(model) = &self.model {
-            run_doc_modeled(&self.doc, query, self.now, self.allow_shell, model)
+        let run = self.run_opts();
+        let (cells, refs) = if let Some(model) = &self.model {
+            run_doc_modeled(&self.doc, query, &run, model)?
         } else {
-            run_doc(&self.doc, query, self.now, self.allow_shell)
+            run_doc(&self.doc, query, &run)?
         };
-        *self.refs.borrow_mut() = quarb::take_refs();
-        out
+        *self.refs.borrow_mut() = refs;
+        Ok(cells)
     }
 
     fn refs(&self) -> Vec<String> {
@@ -146,7 +155,7 @@ impl Executor for LocalExecutor {
                 [one] if one.name.is_none() => Doc::open(&one.path, opts)?,
                 many => Doc::mount_specs(many, opts)?,
             };
-            return run_doc(&fresh, query, self.now, self.allow_shell);
+            return run_doc(&fresh, query, &self.run_opts()).map(|(cells, _)| cells);
         }
         self.run(query)
     }
@@ -159,6 +168,6 @@ impl Executor for LocalExecutor {
         if self.model.is_some() {
             anyhow::bail!("rendered export over a --model session is not supported yet");
         }
-        self.doc.export(query, self.now, self.allow_shell, kind)
+        self.doc.export(query, &self.run_opts(), kind)
     }
 }

@@ -22,199 +22,6 @@ type Scale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
 /// `@| table` while a tool renders it (see `run_for_rendering`).
 pub(crate) const ROWS_FOR_RENDERING: &str = "\u{1}rows";
 
-const SCALAR: &[&str] = &[
-    "upper",
-    "lower",
-    "title",
-    "trim",
-    "ltrim",
-    "rtrim",
-    "alpha",
-    "digit",
-    "alnum",
-    // `cc` counts codepoints, `bc` UTF-8 bytes, `wc` words.
-    "cc",
-    "bc",
-    "wc",
-    "lc",
-    "sc",
-    "lines",
-    "words",
-    "ngrams",
-    "levenshtein",
-    // Time expressions and the calendar (spec: Time Expressions and
-    // the Timeline).
-    "timex",
-    "time_anchor",
-    "period",
-    "grain",
-    "haversine",
-    // Unicode normalization, the stress apparatus, transliteration.
-    "nfc",
-    "nfd",
-    "vowels",
-    "stress",
-    "stress_at",
-    "unstress",
-    "accent",
-    "translit",
-    "number",
-    "modernize",
-    "gc",
-    "sentences",
-    "split",
-    "substr",
-    "pad",
-    "lpad",
-    "rpad",
-    "repeat",
-    "indent",
-    "round",
-    "floor",
-    "ceil",
-    "abs",
-    // The elementary functions and the keyness statistics (the
-    // statistics round).
-    "log",
-    "log2",
-    "log10",
-    "exp",
-    "sqrt",
-    "pow",
-    "loglik",
-    "chi2",
-    // The collocation measures (the corpus statistics round).
-    "mi",
-    "t_score",
-    "log_dice",
-    "json",
-    "jsonl",
-    "kaiv",
-    "link",
-    "xml",
-    "markdown",
-    "html",
-    "atrep",
-    "conllu",
-    "record",
-    "rec",
-    "default",
-    // The temporal fragment.
-    "datetime",
-    "epoch",
-    "isoformat",
-    "year",
-    "month",
-    "day",
-    "hour",
-    "minute",
-    "second",
-    "weekday",
-    "date",
-    "seconds",
-    "minutes",
-    "hours",
-    "days",
-    "duration",
-    "td",
-    "strptime",
-    "tp",
-    "bibref",
-    "quantity",
-    "convert",
-    "isodate",
-    "isomonth",
-    "isoweek",
-    "strftime",
-    "tfmt",
-    "sh",
-    "sha256",
-    "base64",
-    "base64url",
-    "base32",
-    "crockford32",
-    "hex",
-    "decode",
-    "dec",
-];
-
-const AGGREGATE: &[&str] = &[
-    "count",
-    "sum",
-    "product",
-    "min",
-    "max",
-    "mean",
-    "avg",
-    "median",
-    "percentile",
-    // The dispersion measures: `std` / `var`, with the long spellings
-    // kept as aliases.
-    "std",
-    "var",
-    "stddev",
-    "variance",
-    // Lexical diversity over a stream of counts (`entropy`,
-    // `yule_k`) or of tokens (`mtld`).
-    "entropy",
-    "yule_k",
-    "mtld",
-    // Association between two per-capsa expressions, the distance
-    // and dispersion measures over paired readings, and the
-    // agreement measures over paired labels (the corpus statistics
-    // round).
-    "corr",
-    "spearman",
-    "cosine",
-    "delta",
-    "dp",
-    "kappa",
-    "precision",
-    "recall",
-    "f1",
-    "json",
-    "jsonl",
-    "combinations",
-    "pairs",
-    "triples",
-    "csv",
-    "table",
-    "kaiv",
-    "encoding",
-    "sort",
-    "unique",
-    "reverse",
-    "first",
-    "last",
-    "join",
-    "ungroup",
-    "window",
-    "shift",
-    "zscore",
-    "number",
-    "outline",
-    "timeline",
-];
-
-/// Whether `name` is a whole-context stage that never works per
-/// capsa — it rides `@|` only. (Keyed and reducing aggregates also
-/// take the plain pipe, working per capsa on a group's members.)
-pub fn context_only(name: &str) -> bool {
-    matches!(
-        name,
-        "ungroup"
-            | "window"
-            | "shift"
-            | "zscore"
-            | "number"
-            | "outline"
-            | "timeline"
-            | "csv"
-            | "table"
-            | "encoding"
-    )
-}
-
 /// Records as columns: the named columns in their order, or the
 /// union of the records' fields in first-seen order (a scalar rides
 /// a `value` column). A field a record lacks is an empty cell.
@@ -404,17 +211,20 @@ pub fn outline_numbers(levels: &[Option<i64>]) -> Vec<(usize, String)> {
 /// in the executor like the keyed aggregates; this module holds the
 /// arithmetic ([`associate`]).
 pub fn association(name: &str) -> bool {
-    matches!(
-        name,
-        "corr" | "spearman" | "cosine" | "delta" | "dp" | "kappa" | "precision" | "recall" | "f1"
-    )
+    crate::registry::spec(name)
+        .is_some_and(|s| matches!(s.agg, Some(crate::registry::Agg::Association { .. })))
 }
 
 /// Whether `name` is an agreement measure — an association that
 /// reads its two expressions as labels, not numbers (`kappa(:g; :p)`
 /// over categories, `precision`/`recall`/`f1` over truthiness).
 pub fn agreement(name: &str) -> bool {
-    matches!(name, "kappa" | "precision" | "recall" | "f1")
+    crate::registry::spec(name).is_some_and(|s| {
+        matches!(
+            s.agg,
+            Some(crate::registry::Agg::Association { agreement: true })
+        )
+    })
 }
 
 /// Whether the call carries the bare word `sample` (a string
@@ -482,11 +292,11 @@ pub(crate) fn default_cmp(
     a.compare_with(b, scale)
 }
 
-/// The collator for the output locale's tag, when the tool set
-/// one (`quarb::locale::set_default_collation`).
+/// The collator for the run's collation, when the tool set one
+/// (`Run::collation`, its output locale).
 #[cfg(feature = "colligo")]
 fn default_collator() -> Option<colligo::Collator> {
-    let tag = crate::locale::default_collation()?;
+    let tag = crate::exec::run_option(|o| o.collation.clone())?;
     Some(
         colligo::Collator::builder(&tag)
             .allow_approximate(true)
@@ -499,20 +309,6 @@ fn default_collator() -> Option<colligo::Collator> {
 fn default_collator() -> Option<NeverCollator> {
     None
 }
-
-/// Keyed aggregates reorder or filter the capsae themselves (nodes
-/// and registers preserved), keyed by per-capsa value expressions.
-/// They are evaluated in the executor, which has the adapter at
-/// hand; this module only names them.
-const KEYED: &[&str] = &[
-    "sort_by",
-    "unique_by",
-    "min_by",
-    "max_by",
-    "top",
-    "bottom",
-    "group",
-];
 
 /// The collator for a `sort(LOCALE)` call, where one was given
 /// (the parser validated the tag's shape; root on surprise — a
@@ -528,12 +324,16 @@ pub(crate) fn collator_for(call: &FnCall) -> Option<colligo::Collator> {
         Arg::Lit(l) => Some(l.to_string()),
         _ => None,
     })?;
-    Some(
-        colligo::Collator::builder(&tag)
-            .allow_approximate(true)
-            .build()
-            .unwrap_or_else(|_| colligo::Collator::root()),
-    )
+    match colligo::Collator::builder(&tag)
+        .allow_approximate(true)
+        .build()
+    {
+        Ok(c) => Some(c),
+        Err(_) => {
+            crate::exec::record_refusal(format!("{}: no collation for locale {tag:?}", call.name));
+            None
+        }
+    }
 }
 
 /// Collation compiled out (`colligo` feature off): never a
@@ -560,34 +360,44 @@ pub(crate) fn collator_for(_call: &FnCall) -> Option<NeverCollator> {
 
 /// Whether `name` is a keyed aggregate (for `@|`).
 pub fn known_keyed(name: &str) -> bool {
-    KEYED.contains(&name)
+    crate::registry::spec(name).is_some_and(|s| s.agg == Some(crate::registry::Agg::Keyed))
 }
 
 /// Whether `name` is a per-capsa scalar function (for `|`).
 pub fn known_scalar(name: &str) -> bool {
-    SCALAR.contains(&name)
+    crate::registry::spec(name).is_some_and(|s| s.scalar)
 }
 
 /// Whether `name` is an aggregate function (for `@|`).
 pub fn known_agg(name: &str) -> bool {
-    AGGREGATE.contains(&name) || known_keyed(name)
+    crate::registry::spec(name).is_some_and(|s| s.agg.is_some())
 }
 
 /// The scalar registry, for enumerating consumers (completion,
 /// highlighting): every per-capsa `|` function.
-pub fn scalar_names() -> &'static [&'static str] {
-    SCALAR
+pub fn scalar_names() -> Vec<&'static str> {
+    crate::registry::names(true, None).collect()
 }
 
 /// The aggregate registry: every `@|` reducer (keyed aggregates
 /// are enumerated separately by [`keyed_names`]).
-pub fn aggregate_names() -> &'static [&'static str] {
-    AGGREGATE
+pub fn aggregate_names() -> Vec<&'static str> {
+    use crate::registry::Agg;
+    crate::registry::SPECS
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.agg,
+                Some(Agg::Reducing | Agg::Context | Agg::Association { .. })
+            )
+        })
+        .map(|s| s.name)
+        .collect()
 }
 
 /// The keyed-aggregate registry: `sort_by`, `group`, and friends.
-pub fn keyed_names() -> &'static [&'static str] {
-    KEYED
+pub fn keyed_names() -> Vec<&'static str> {
+    crate::registry::names(false, Some(crate::registry::Agg::Keyed)).collect()
 }
 
 /// The locale argument of `strptime` / `strftime`: the table for
@@ -599,8 +409,9 @@ fn date_names(call: &FnCall) -> Option<&'static crate::datenames::Names> {
         Some(n) => Some(n),
         None => {
             crate::exec::record_refusal(format!(
-                "{}: no month and weekday names for locale {locale:?} (shipped: en, zh, es, ar, pt, ru, ja, de, fr, tr, it)",
-                call.name
+                "{}: no month and weekday names for locale {locale:?} (shipped: {})",
+                call.name,
+                crate::locale::SHIPPED.join(", ")
             ));
             None
         }
@@ -637,8 +448,14 @@ fn whole(n: f64) -> Value {
 /// first argument of `csv` as `delimiter=X`; `table` takes none.
 pub(crate) fn split_csv_delimiter(call: &FnCall) -> (Option<u8>, &[Arg]) {
     if call.name == "csv"
-        && let Some((Arg::Lit(Value::Str(d)), rest)) = call.args.split_first()
-        && let Some(d) = d.strip_prefix("delimiter=")
+        && let Some((
+            Arg::Named {
+                name,
+                value: Value::Str(d),
+            },
+            rest,
+        )) = call.args.split_first()
+        && name == "delimiter"
     {
         return (d.as_bytes().first().copied(), rest);
     }
@@ -682,35 +499,7 @@ pub fn apply_scalar(
         // value; grain)`. Found by the locale's finite lists and
         // nothing else; a locale that carries none is refused. A
         // text with no time expression yields nothing.
-        "timex" => {
-            let locale = arg_str(call, 0, "en");
-            if matches!(topic, Value::Null) {
-                return Vec::new();
-            }
-            let Some(found) = crate::timex::find(&text, locale) else {
-                crate::exec::record_refusal(format!(
-                    "timex: no time-expression lists for locale {locale:?} (carried: {})",
-                    crate::timex::CARRIED
-                ));
-                return Vec::new();
-            };
-            let opt = |s: Option<String>| s.map_or(Value::Null, Value::Str);
-            return found
-                .into_iter()
-                .map(|f| {
-                    Value::Record(vec![
-                        ("text".to_string(), Value::Str(f.text)),
-                        ("at".to_string(), Value::Int(f.at as i64)),
-                        ("kind".to_string(), Value::Str(f.kind.word().to_string())),
-                        ("value".to_string(), opt(f.value)),
-                        (
-                            "grain".to_string(),
-                            opt(f.grain.map(|g| g.word().to_string())),
-                        ),
-                    ])
-                })
-                .collect();
-        }
+        "timex" => timex_scalar(call, topic.clone(), &text),
         // `time_anchor(T)` — a time expression valued against a
         // point: the topic is a `timex` record or its value text,
         // `T` anything with a calendar reading, the result a
@@ -817,42 +606,7 @@ pub fn apply_scalar(
         // 1-based, inclusive, negative counts from the end;
         // out-of-range clamps, a crossed range is the empty
         // string, and 0 refuses — it is no position.
-        "substr" => {
-            let (a, b) = match call.args.first() {
-                Some(Arg::Range(a, b)) => (*a, *b),
-                Some(Arg::Lit(Value::Int(i))) => (Some(*i), Some(*i)),
-                _ => {
-                    crate::exec::record_refusal(
-                        "substr takes a range — substr(1..3), substr(..3), \
-                         substr(2..), substr(-2..) — or one position"
-                            .into(),
-                    );
-                    return vec![Value::Null];
-                }
-            };
-            if a == Some(0) || b == Some(0) {
-                crate::exec::record_refusal(
-                    "substr(0): positions are 1-based — 1 is the first \
-                     character, -1 the last"
-                        .into(),
-                );
-                return vec![Value::Null];
-            }
-            let n = text.chars().count() as i64;
-            let pos = |i: i64| -> i64 { if i < 0 { n + i + 1 } else { i } };
-            let from = pos(a.unwrap_or(1)).max(1);
-            let to = pos(b.unwrap_or(-1)).min(n);
-            if from > to {
-                vec![Value::Str(String::new())]
-            } else {
-                vec![Value::Str(
-                    text.chars()
-                        .skip(from as usize - 1)
-                        .take((to - from + 1) as usize)
-                        .collect(),
-                )]
-            }
-        }
+        "substr" => substr_scalar(call, &text),
         // `pad(n)` centers to n characters (the extra character
         // of an odd split falls right, as Python's center);
         // `lpad(n)` / `rpad(n)` pad one side. Spaces by default
@@ -1022,48 +776,7 @@ pub fn apply_scalar(
         // already marked stays as it is, and ё, which carries its
         // stress in the letter, counts as a vowel but is never
         // marked. `stress(n; "аеиоу")` names the vowel alphabet.
-        "stress" => {
-            let n = match call.args.first() {
-                Some(Arg::Lit(v)) => v.numeric().map(|f| f as i64),
-                _ => None,
-            };
-            let Some(n) = n.filter(|n| *n != 0) else {
-                crate::exec::record_refusal(
-                    "stress takes a vowel position — stress(3), stress(-1); \
-                     positions are 1-based, negative from the end"
-                        .into(),
-                );
-                return vec![Value::Null];
-            };
-            if matches!(topic, Value::Null) {
-                return vec![Value::Null];
-            }
-            let alphabet = arg_str(call, 1, DEFAULT_VOWELS);
-            let chars: Vec<char> = text.nfc().collect();
-            let vowels: Vec<usize> = chars
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| is_vowel(**c, alphabet))
-                .map(|(i, _)| i)
-                .collect();
-            let k = if n < 0 {
-                vowels.len() as i64 + n
-            } else {
-                n - 1
-            };
-            if k < 0 || k as usize >= vowels.len() {
-                return vec![Value::Null];
-            }
-            let at = vowels[k as usize];
-            let mut out = String::with_capacity(text.len() + 2);
-            for (i, c) in chars.iter().enumerate() {
-                out.push(*c);
-                if i == at && !matches!(c, 'ё' | 'Ё') && chars.get(i + 1) != Some(&'\u{301}') {
-                    out.push('\u{301}');
-                }
-            }
-            vec![Value::Str(out)]
-        }
+        "stress" => stress_scalar(call, topic.clone(), &text),
         // `stress_at` — the ordinal of the stressed vowel in a marked
         // form: the vowel before the acute, else a ё, else the one
         // vowel of a monosyllable; null when nothing decides.
@@ -1093,59 +806,7 @@ pub fn apply_scalar(
         // "acute" (the mark, as is), "upper" (the stressed vowel in
         // capitals: замОк), "apostrophe" (an apostrophe after it:
         // замо'к), "none" (unmarked). ё is left as the letter it is.
-        "accent" => {
-            if matches!(topic, Value::Null) {
-                return vec![Value::Null];
-            }
-            let style = arg_str(call, 0, "acute");
-            let alphabet = arg_str(call, 1, DEFAULT_VOWELS);
-            let chars: Vec<char> = text.nfc().collect();
-            let bare: String = chars
-                .iter()
-                .filter(|c| !matches!(c, '\u{301}' | '\u{300}'))
-                .collect();
-            let Some(n) = stress_at(&text, alphabet) else {
-                return vec![Value::Str(bare)];
-            };
-            let bare_chars: Vec<char> = bare.chars().collect();
-            let at = bare_chars
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| is_vowel(**c, alphabet))
-                .nth(n - 1)
-                .map(|(i, _)| i);
-            let Some(at) = at else {
-                return vec![Value::Str(bare)];
-            };
-            let is_yo = matches!(bare_chars[at], 'ё' | 'Ё');
-            let mut out = String::with_capacity(bare.len() + 2);
-            for (i, c) in bare_chars.iter().enumerate() {
-                match style {
-                    "upper" if i == at => out.extend(c.to_uppercase()),
-                    "apostrophe" if i == at => {
-                        out.push(*c);
-                        if !is_yo {
-                            out.push('\'');
-                        }
-                    }
-                    "acute" if i == at => {
-                        out.push(*c);
-                        if !is_yo {
-                            out.push('\u{301}');
-                        }
-                    }
-                    "none" | "upper" | "apostrophe" | "acute" => out.push(*c),
-                    other => {
-                        crate::exec::record_refusal(format!(
-                            "accent takes a style — accent(\"acute\"), accent(\"upper\"), \
-                             accent(\"apostrophe\"), accent(\"none\") — not '{other}'"
-                        ));
-                        return vec![Value::Null];
-                    }
-                }
-            }
-            vec![Value::Str(out)]
-        }
+        "accent" => accent_scalar(call, topic.clone(), &text),
         // `translit(scheme)` — the text in Latin letters under an ISO
         // transliteration scheme; no argument picks each script's own
         // ISO scheme; for Russian the systems in use beside ISO 9
@@ -1203,10 +864,21 @@ pub fn apply_scalar(
             // scalar); the byte encodings decode to text. Malformed
             // input, or non-UTF-8 bytes, become null.
             vec![match scheme {
+                #[cfg(feature = "decode-formats")]
                 "json" => crate::encoding::json_to_value(&text).unwrap_or(Value::Null),
+                #[cfg(feature = "decode-formats")]
                 "yaml" => crate::encoding::yaml_to_value(&text).unwrap_or(Value::Null),
+                #[cfg(feature = "decode-formats")]
                 "toml" => crate::encoding::toml_to_value(&text).unwrap_or(Value::Null),
+                #[cfg(feature = "decode-formats")]
                 "xml" => crate::encoding::xml_to_value(&text).unwrap_or(Value::Null),
+                #[cfg(not(feature = "decode-formats"))]
+                "json" | "yaml" | "toml" | "xml" => {
+                    crate::exec::record_refusal(format!(
+                        "decode({scheme}): the structured readings are not compiled in (feature decode-formats)"
+                    ));
+                    Value::Null
+                }
                 _ => crate::encoding::decode(scheme, &text)
                     .and_then(|b| String::from_utf8(b).ok())
                     .map(Value::Str)
@@ -1337,34 +1009,7 @@ pub fn apply_scalar(
         // duration (`30 | days` = P30D); a duration topic reads in
         // the unit (`P342D | days` = 342, `P1DT12H | days` = 1.5) —
         // the constructor's inverse, decided by the topic's type.
-        "seconds" | "minutes" | "hours" | "days" => {
-            let unit: f64 = match call.name.as_str() {
-                "seconds" => 1.0,
-                "minutes" => 60.0,
-                "hours" => 3600.0,
-                _ => 86400.0,
-            };
-            if let Value::Duration { secs, nanos } = topic {
-                let n = (secs as f64 + nanos as f64 / 1e9) / unit;
-                return vec![if n.fract() == 0.0 && n.abs() < 1e15 {
-                    Value::Int(n as i64)
-                } else {
-                    Value::Float(n)
-                }];
-            }
-            vec![
-                topic
-                    .numeric()
-                    .map(|n| {
-                        let total = n * unit;
-                        Value::Duration {
-                            secs: total.floor() as i64,
-                            nanos: ((total - total.floor()) * 1e9) as u32,
-                        }
-                    })
-                    .unwrap_or(Value::Null),
-            ]
-        }
+        "seconds" | "minutes" | "hours" | "days" => duration_units(call, topic.clone()),
 
         // `duration` (alias `td`) — the span parser, defined via the
         // durational reading: span text (`5d3h5min`, `P5DT3H5M`) or
@@ -1415,36 +1060,7 @@ pub fn apply_scalar(
         // that is no reference answers null, as `strptime` does for
         // a text that is no date; an unknown standard is refused
         // naming the ones this build reads.
-        "bibref" => {
-            let standard = arg_str(call, 0, "").to_string();
-            if !crate::bibref::STANDARDS.contains(&standard.as_str()) {
-                crate::exec::record_refusal(format!(
-                    "bibref: unknown standard {standard:?} — this build reads {}",
-                    crate::bibref::STANDARDS.join(", ")
-                ));
-                return vec![Value::Null];
-            }
-            vec![match &topic {
-                Value::Str(s) => match crate::bibref::parse(&standard, s) {
-                    Ok(Some(r)) => {
-                        let mut rec: Vec<(String, Value)> = r
-                            .fields
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), Value::Str(v.clone())))
-                            .collect();
-                        if let Some(g) = r.genus {
-                            rec.push(("genus".into(), Value::Str(g.into())));
-                        }
-                        if let Some(l) = r.label {
-                            rec.push(("label".into(), Value::Str(l)));
-                        }
-                        Value::Record(rec)
-                    }
-                    _ => Value::Null,
-                },
-                _ => Value::Null,
-            }]
-        }
+        "bibref" => bibref_scalar(call, topic.clone()),
 
         // `quantity` — the unit-text parser, defined via the unital
         // reading: `5km` / `0.2 kW` to a quantity, a quantity
@@ -1472,64 +1088,14 @@ pub fn apply_scalar(
         // convert by name is explicit intent, so `2KiB |
         // convert(B)` needs no separate `| quantity` (the expression head's
         // author-spelling scope).
-        "convert" => {
-            let target = arg_str(call, 0, "").to_string();
-            let lifted;
-            let topic = match &topic {
-                Value::Str(s) => match crate::quantity::parse_unit_text_with(s, scale) {
-                    Some((value, base, wv, wu)) => {
-                        lifted = Value::Quantity {
-                            value,
-                            base,
-                            written: Some((wv, wu)),
-                        };
-                        &lifted
-                    }
-                    None => &topic,
-                },
-                t => t,
-            };
-            vec![match &topic {
-                Value::Quantity { value, base, .. } => match scale(&target) {
-                    Some((factor, tbase)) if &tbase == base => Value::Quantity {
-                        value: *value,
-                        base: base.clone(),
-                        written: Some((*value / factor, target)),
-                    },
-                    _ => Value::Null,
-                },
-                _ => Value::Null,
-            }]
-        }
+        "convert" => convert_scalar(call, topic.clone(), scale),
 
         // Numeric scalars: a non-numeric topic becomes Null. A
         // QUANTITY rounds in its display unit and stays a quantity
         // — `(::speed | convert('km/h')) | round` is a whole
         // number of km/h, not of base meters-per-second.
         "round" | "floor" | "ceil" if matches!(topic, Value::Quantity { .. }) => {
-            let Value::Quantity {
-                value,
-                base,
-                written,
-            } = &topic
-            else {
-                unreachable!()
-            };
-            let (wv, wu) = written.clone().unwrap_or_else(|| (*value, base.clone()));
-            let rounded = match call.name.as_str() {
-                "round" => match round_digits(call) {
-                    Some(d) => round_to(wv, d),
-                    None => wv.round(),
-                },
-                "floor" => wv.floor(),
-                _ => wv.ceil(),
-            };
-            let factor = scale(&wu).map(|(f, _)| f).unwrap_or(1.0);
-            vec![Value::Quantity {
-                value: rounded * factor,
-                base: base.clone(),
-                written: Some((rounded, wu)),
-            }]
+            round_quantity(topic, call, scale)
         }
         // Bare `round` reads to an integer; `round(d)` keeps `d`
         // decimal places and stays a float (`round(0)` included —
@@ -1625,38 +1191,7 @@ pub fn apply_scalar(
         // The collocation measures: the topic is the pair's count,
         // the arguments the two words' counts and the corpus size
         // (`log_dice` needs no size).
-        "mi" | "t_score" | "log_dice" => vec![{
-            let need = if call.name == "log_dice" { 2 } else { 3 };
-            match (
-                topic.numeric(),
-                arg_num(call, 0),
-                arg_num(call, 1),
-                arg_num(call, 2),
-            ) {
-                (Some(fxy), Some(fx), Some(fy), n) if call.args.len() >= need => {
-                    match call.name.as_str() {
-                        "mi" => n.map_or(Value::Null, |n| mi(fxy, fx, fy, n)),
-                        "t_score" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
-                        _ => log_dice(fxy, fx, fy),
-                    }
-                }
-                _ if call.args.len() < need => {
-                    crate::exec::record_refusal(if call.name == "log_dice" {
-                        "log_dice takes the two words' counts — log_dice(fx; fy), \
-                         log_dice(::fxy; ::fx; ::fy)"
-                            .to_string()
-                    } else {
-                        format!(
-                            "{0} takes the two words' counts and the corpus size — \
-                             {0}(fx; fy; n), {0}(::fxy; ::fx; ::fy; ::n)",
-                            call.name
-                        )
-                    });
-                    Value::Null
-                }
-                _ => Value::Null,
-            }
-        }],
+        "mi" | "t_score" | "log_dice" => collocation_measure(call, topic.clone()),
         // `s/pat/repl/mods` — regex substitution on the topic's
         // text. Sed semantics: first occurrence by default, `g`
         // global, `i` case-insensitive; `$1`-style capture
@@ -1685,7 +1220,7 @@ pub fn apply_scalar(
                 .first()
                 .and_then(|a| match a {
                     Arg::Lit(v) => Some(v.clone()),
-                    Arg::Expr(_) | Arg::Range(_, _) => None,
+                    Arg::Expr(_) | Arg::Range(_, _) | Arg::Named { .. } => None,
                 })
                 .unwrap_or(Value::Null),
             other => other,
@@ -1696,15 +1231,362 @@ pub fn apply_scalar(
         "json" | "jsonl" => vec![Value::Str(topic.to_json())],
         // The one-value kaiv document; `@| kaiv` renders the whole
         // stream as one (the serialization family, the kaiv member).
+        #[cfg(feature = "kaiv")]
         "kaiv" => vec![Value::Str(
             crate::kaiv_out::document(std::slice::from_ref(&topic)).unwrap_or_else(|e| e),
         )],
+        #[cfg(not(feature = "kaiv"))]
+        "kaiv" => {
+            crate::exec::record_refusal("kaiv output is not compiled in (feature kaiv)".into());
+            vec![topic]
+        }
         // `| link` reads the capsa's node (the executor, which has
         // the adapter, handles it); a bare value has nothing to
         // link and passes through.
         "link" => vec![topic],
-        _ => vec![topic],
+        other => {
+            // Every name the parser admits has an arm here or in the
+            // executor; reaching this is a registry/dispatch drift,
+            // reported rather than passed through silently.
+            crate::exec::record_refusal(format!("function '{other}' has no implementation"));
+            vec![topic]
+        }
     }
+}
+
+/// `timex(LOCALE)`. `apply_scalar`'s arm.
+fn timex_scalar(call: &FnCall, topic: Value, text: &str) -> Vec<Value> {
+    let locale = arg_str(call, 0, "en");
+    if matches!(topic, Value::Null) {
+        return Vec::new();
+    }
+    let Some(found) = crate::timex::find(&text, locale) else {
+        crate::exec::record_refusal(format!(
+            "timex: no time-expression lists for locale {locale:?} (carried: {})",
+            crate::timex::CARRIED
+        ));
+        return Vec::new();
+    };
+    let opt = |s: Option<String>| s.map_or(Value::Null, Value::Str);
+    return found
+        .into_iter()
+        .map(|f| {
+            Value::Record(vec![
+                ("text".to_string(), Value::Str(f.text)),
+                ("at".to_string(), Value::Int(f.at as i64)),
+                ("kind".to_string(), Value::Str(f.kind.word().to_string())),
+                ("value".to_string(), opt(f.value)),
+                (
+                    "grain".to_string(),
+                    opt(f.grain.map(|g| g.word().to_string())),
+                ),
+            ])
+        })
+        .collect();
+}
+
+/// `substr(range)`. `apply_scalar`'s arm.
+fn substr_scalar(call: &FnCall, text: &str) -> Vec<Value> {
+    let (a, b) = match call.args.first() {
+        Some(Arg::Range(a, b)) => (*a, *b),
+        Some(Arg::Lit(Value::Int(i))) => (Some(*i), Some(*i)),
+        _ => {
+            crate::exec::record_refusal(
+                "substr takes a range — substr(1..3), substr(..3), \
+                     substr(2..), substr(-2..) — or one position"
+                    .into(),
+            );
+            return vec![Value::Null];
+        }
+    };
+    if a == Some(0) || b == Some(0) {
+        crate::exec::record_refusal(
+            "substr(0): positions are 1-based — 1 is the first \
+                 character, -1 the last"
+                .into(),
+        );
+        return vec![Value::Null];
+    }
+    let n = text.chars().count() as i64;
+    let pos = |i: i64| -> i64 { if i < 0 { n + i + 1 } else { i } };
+    let from = pos(a.unwrap_or(1)).max(1);
+    let to = pos(b.unwrap_or(-1)).min(n);
+    if from > to {
+        vec![Value::Str(String::new())]
+    } else {
+        vec![Value::Str(
+            text.chars()
+                .skip(from as usize - 1)
+                .take((to - from + 1) as usize)
+                .collect(),
+        )]
+    }
+}
+
+/// `stress(n)`. `apply_scalar`'s arm.
+fn stress_scalar(call: &FnCall, topic: Value, text: &str) -> Vec<Value> {
+    let n = match call.args.first() {
+        Some(Arg::Lit(v)) => v.numeric().map(|f| f as i64),
+        _ => None,
+    };
+    let Some(n) = n.filter(|n| *n != 0) else {
+        crate::exec::record_refusal(
+            "stress takes a vowel position — stress(3), stress(-1); \
+                 positions are 1-based, negative from the end"
+                .into(),
+        );
+        return vec![Value::Null];
+    };
+    if matches!(topic, Value::Null) {
+        return vec![Value::Null];
+    }
+    let alphabet = arg_str(call, 1, DEFAULT_VOWELS);
+    let chars: Vec<char> = text.nfc().collect();
+    let vowels: Vec<usize> = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| is_vowel(**c, alphabet))
+        .map(|(i, _)| i)
+        .collect();
+    let k = if n < 0 {
+        vowels.len() as i64 + n
+    } else {
+        n - 1
+    };
+    if k < 0 || k as usize >= vowels.len() {
+        return vec![Value::Null];
+    }
+    let at = vowels[k as usize];
+    let mut out = String::with_capacity(text.len() + 2);
+    for (i, c) in chars.iter().enumerate() {
+        out.push(*c);
+        if i == at && !matches!(c, 'ё' | 'Ё') && chars.get(i + 1) != Some(&'\u{301}') {
+            out.push('\u{301}');
+        }
+    }
+    vec![Value::Str(out)]
+}
+
+/// `accent(style)`. `apply_scalar`'s arm.
+fn accent_scalar(call: &FnCall, topic: Value, text: &str) -> Vec<Value> {
+    if matches!(topic, Value::Null) {
+        return vec![Value::Null];
+    }
+    let style = arg_str(call, 0, "acute");
+    let alphabet = arg_str(call, 1, DEFAULT_VOWELS);
+    let chars: Vec<char> = text.nfc().collect();
+    let bare: String = chars
+        .iter()
+        .filter(|c| !matches!(c, '\u{301}' | '\u{300}'))
+        .collect();
+    let Some(n) = stress_at(&text, alphabet) else {
+        return vec![Value::Str(bare)];
+    };
+    let bare_chars: Vec<char> = bare.chars().collect();
+    let at = bare_chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| is_vowel(**c, alphabet))
+        .nth(n - 1)
+        .map(|(i, _)| i);
+    let Some(at) = at else {
+        return vec![Value::Str(bare)];
+    };
+    let is_yo = matches!(bare_chars[at], 'ё' | 'Ё');
+    let mut out = String::with_capacity(bare.len() + 2);
+    for (i, c) in bare_chars.iter().enumerate() {
+        match style {
+            "upper" if i == at => out.extend(c.to_uppercase()),
+            "apostrophe" if i == at => {
+                out.push(*c);
+                if !is_yo {
+                    out.push('\'');
+                }
+            }
+            "acute" if i == at => {
+                out.push(*c);
+                if !is_yo {
+                    out.push('\u{301}');
+                }
+            }
+            "none" | "upper" | "apostrophe" | "acute" => out.push(*c),
+            other => {
+                crate::exec::record_refusal(format!(
+                    "accent takes a style — accent(\"acute\"), accent(\"upper\"), \
+                         accent(\"apostrophe\"), accent(\"none\") — not '{other}'"
+                ));
+                return vec![Value::Null];
+            }
+        }
+    }
+    vec![Value::Str(out)]
+}
+
+/// `seconds` / `minutes` / `hours` / `days`. `apply_scalar`'s arm.
+fn duration_units(call: &FnCall, topic: Value) -> Vec<Value> {
+    let unit: f64 = match call.name.as_str() {
+        "seconds" => 1.0,
+        "minutes" => 60.0,
+        "hours" => 3600.0,
+        _ => 86400.0,
+    };
+    if let Value::Duration { secs, nanos } = topic {
+        let n = (secs as f64 + nanos as f64 / 1e9) / unit;
+        return vec![if n.fract() == 0.0 && n.abs() < 1e15 {
+            Value::Int(n as i64)
+        } else {
+            Value::Float(n)
+        }];
+    }
+    vec![
+        topic
+            .numeric()
+            .map(|n| {
+                let total = n * unit;
+                Value::Duration {
+                    secs: total.floor() as i64,
+                    nanos: ((total - total.floor()) * 1e9) as u32,
+                }
+            })
+            .unwrap_or(Value::Null),
+    ]
+}
+
+/// `bibref(STANDARD)` — a reference read into a record. `apply_scalar`'s arm.
+fn bibref_scalar(call: &FnCall, topic: Value) -> Vec<Value> {
+    let standard = arg_str(call, 0, "").to_string();
+    if !crate::bibref::STANDARDS.contains(&standard.as_str()) {
+        crate::exec::record_refusal(format!(
+            "bibref: unknown standard {standard:?} — this build reads {}",
+            crate::bibref::STANDARDS.join(", ")
+        ));
+        return vec![Value::Null];
+    }
+    vec![match &topic {
+        Value::Str(s) => match crate::bibref::parse(&standard, s) {
+            Ok(Some(r)) => {
+                let mut rec: Vec<(String, Value)> = r
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), Value::Str(v.clone())))
+                    .collect();
+                if let Some(g) = r.genus {
+                    rec.push(("genus".into(), Value::Str(g.into())));
+                }
+                if let Some(l) = r.label {
+                    rec.push(("label".into(), Value::Str(l)));
+                }
+                Value::Record(rec)
+            }
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    }]
+}
+
+/// `convert(unit)`. `apply_scalar`'s arm.
+fn convert_scalar(
+    call: &FnCall,
+    topic: Value,
+    scale: &dyn Fn(&str) -> Option<(f64, String)>,
+) -> Vec<Value> {
+    let target = arg_str(call, 0, "").to_string();
+    let lifted;
+    let topic = match &topic {
+        Value::Str(s) => match crate::quantity::parse_unit_text_with(s, scale) {
+            Some((value, base, wv, wu)) => {
+                lifted = Value::Quantity {
+                    value,
+                    base,
+                    written: Some((wv, wu)),
+                };
+                &lifted
+            }
+            None => &topic,
+        },
+        t => t,
+    };
+    vec![match &topic {
+        Value::Quantity { value, base, .. } => match scale(&target) {
+            Some((factor, tbase)) if &tbase == base => Value::Quantity {
+                value: *value,
+                base: base.clone(),
+                written: Some((*value / factor, target)),
+            },
+            // A unit of another dimension, or one no library
+            // declares: no reading (the recipes rely on a null
+            // here — `bushels = null` beside a weight).
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    }]
+}
+
+/// `round` / `floor` / `ceil` on a quantity. `apply_scalar`'s arm.
+fn round_quantity(
+    topic: Value,
+    call: &FnCall,
+    scale: &dyn Fn(&str) -> Option<(f64, String)>,
+) -> Vec<Value> {
+    let Value::Quantity {
+        value,
+        base,
+        written,
+    } = &topic
+    else {
+        unreachable!()
+    };
+    let (wv, wu) = written.clone().unwrap_or_else(|| (*value, base.clone()));
+    let rounded = match call.name.as_str() {
+        "round" => match round_digits(call) {
+            Some(d) => round_to(wv, d),
+            None => wv.round(),
+        },
+        "floor" => wv.floor(),
+        _ => wv.ceil(),
+    };
+    let factor = scale(&wu).map(|(f, _)| f).unwrap_or(1.0);
+    vec![Value::Quantity {
+        value: rounded * factor,
+        base: base.clone(),
+        written: Some((rounded, wu)),
+    }]
+}
+
+/// `mi`, `t_score`, `log_dice` — the collocation measures. `apply_scalar`'s arm.
+fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
+    vec![{
+        let need = if call.name == "log_dice" { 2 } else { 3 };
+        match (
+            topic.numeric(),
+            arg_num(call, 0),
+            arg_num(call, 1),
+            arg_num(call, 2),
+        ) {
+            (Some(fxy), Some(fx), Some(fy), n) if call.args.len() >= need => {
+                match call.name.as_str() {
+                    "mi" => n.map_or(Value::Null, |n| mi(fxy, fx, fy, n)),
+                    "t_score" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
+                    _ => log_dice(fxy, fx, fy),
+                }
+            }
+            _ if call.args.len() < need => {
+                crate::exec::record_refusal(if call.name == "log_dice" {
+                    "log_dice takes the two words' counts — log_dice(fx; fy), \
+                 log_dice(::fxy; ::fx; ::fy)"
+                        .to_string()
+                } else {
+                    format!(
+                        "{0} takes the two words' counts and the corpus size — \
+                     {0}(fx; fy; n), {0}(::fxy; ::fx; ::fy; ::n)",
+                        call.name
+                    )
+                });
+                Value::Null
+            }
+            _ => Value::Null,
+        }
+    }]
 }
 
 /// Apply `f` to the topic's numeric value, or `Null` when it has
@@ -1718,7 +1600,15 @@ fn numeric_scalar(topic: &Value, f: impl Fn(f64) -> Value) -> Value {
 fn round_digits(call: &FnCall) -> Option<i64> {
     match call.args.first() {
         Some(Arg::Lit(Value::Int(d))) => Some(*d),
-        _ => None,
+        None => None,
+        Some(other) => {
+            crate::exec::record_refusal(format!(
+                "{}: the digits must be an integer, not {}",
+                call.name,
+                arg_kind(other)
+            ));
+            None
+        }
     }
 }
 
@@ -1850,9 +1740,15 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // `/@results`, records as namespaces, lists as arrays,
         // units kept. Provenance rides qua's `--kaiv`, not the
         // stage (the stage sees values, not nodes).
+        #[cfg(feature = "kaiv")]
         "kaiv" => vec![Value::Str(
             crate::kaiv_out::document(&input).unwrap_or_else(|e| e),
         )],
+        #[cfg(not(feature = "kaiv"))]
+        "kaiv" => {
+            crate::exec::record_refusal("kaiv output is not compiled in (feature kaiv)".into());
+            input
+        }
         // The order/selection family over an explicit value list —
         // reached from the per-capsa list reductions (`| last` on a
         // group's list topic); the `@|` forms are capsa-preserving
@@ -1864,15 +1760,34 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // word `atergo` in the a tergo order. Reverse by piping
         // into `| reverse`.
         "sort" => {
-            let mut v = input;
+            // Keys once per value, not two per comparison: the
+            // display form under a text order, the sort key (and
+            // the text, for a collation) under the default.
+            let v = input;
             match text_order(call) {
-                Some(cmp) => v.sort_by(|a, b| cmp(&a.to_string(), &b.to_string())),
+                Some(cmp) => {
+                    let mut keyed: Vec<(String, Value)> =
+                        v.into_iter().map(|x| (x.to_string(), x)).collect();
+                    keyed.sort_by(|a, b| cmp(&a.0, &b.0));
+                    keyed.into_iter().map(|(_, x)| x).collect()
+                }
                 None => {
                     let collate = default_text_order();
-                    v.sort_by(|a, b| default_cmp(a, b, scale, collate.as_deref()))
+                    let mut keyed: Vec<(crate::value::SortKey, Value)> =
+                        v.into_iter().map(|x| (x.sort_key_with(scale), x)).collect();
+                    keyed.sort_by(|a, b| match (collate.as_deref(), &a.0, &b.0, &a.1, &b.1) {
+                        (
+                            Some(c),
+                            crate::value::SortKey::Text(_),
+                            crate::value::SortKey::Text(_),
+                            Value::Str(x),
+                            Value::Str(y),
+                        ) => c(x, y),
+                        _ => a.0.cmp_key(&b.0),
+                    });
+                    keyed.into_iter().map(|(_, x)| x).collect()
                 }
             }
-            v
         }
         "reverse" => {
             let mut v = input;
@@ -1893,7 +1808,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             let mut seen = std::collections::HashSet::new();
             let mut items: Vec<Value> = input
                 .into_iter()
-                .filter(|v| !matches!(v, Value::Null) && seen.insert(v.to_string()))
+                .filter(|v| !matches!(v, Value::Null) && seen.insert(v.sort_key_with(scale)))
                 .collect();
             items.sort_by(|a, b| a.compare_with(b, scale));
             let mut out = Vec::new();
@@ -1913,19 +1828,14 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             }
             out
         }
+        // Distinct under the value comparison (the sort key), as
+        // `unique_by` is: null and "" stay apart, 1 and 1.0 meet.
         "unique" => {
-            let mut seen: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<crate::value::SortKey> =
+                std::collections::HashSet::new();
             input
                 .into_iter()
-                .filter(|v| {
-                    let k = v.to_string();
-                    if seen.contains(&k) {
-                        false
-                    } else {
-                        seen.push(k);
-                        true
-                    }
-                })
+                .filter(|v| seen.insert(v.sort_key_with(scale)))
                 .collect()
         }
         "first" => input.into_iter().next().into_iter().collect(),
@@ -2746,7 +2656,7 @@ fn join(input: &[Value], sep: &str) -> String {
 /// The UAX #29 sentences of a text, trimmed, empties dropped —
 /// with the session's sentence bonds applied when any are loaded.
 fn sentences_of(text: &str) -> Vec<&str> {
-    let raw: Vec<&str> = match crate::sentence_bonds() {
+    let raw: Vec<&str> = match crate::exec::run_option(|o| o.bonds.clone()) {
         Some(b) => b.unicode_sentences(text),
         None => {
             use unicode_segmentation::UnicodeSegmentation;
@@ -2793,17 +2703,55 @@ fn stress_at(text: &str, alphabet: &str) -> Option<usize> {
     (chars.iter().filter(|c| is_vowel(**c, alphabet)).count() == 1).then_some(1)
 }
 
+/// The n-th argument as an integer, `None` when there is none. An
+/// argument that is there but is not an integer refuses the call
+/// — `pad("5")` is a mistake, not a pad to width 0.
 fn arg_int(call: &FnCall, n: usize) -> Option<i64> {
     match call.args.get(n) {
         Some(Arg::Lit(Value::Int(i))) => Some(*i),
-        _ => None,
+        Some(Arg::Lit(Value::Null)) | None => None,
+        Some(other) => {
+            crate::exec::record_refusal(format!(
+                "{}: argument {} must be an integer, not {}",
+                call.name,
+                n + 1,
+                arg_kind(other)
+            ));
+            None
+        }
     }
 }
 
+/// The n-th argument as text, or `default` when there is none. An
+/// argument that is there but is not text refuses the call —
+/// `join(3)` is a mistake, not a join on "".
 fn arg_str<'a>(call: &'a FnCall, n: usize, default: &'a str) -> &'a str {
     match call.args.get(n) {
         Some(Arg::Lit(Value::Str(s))) => s,
-        _ => default,
+        Some(Arg::Lit(Value::Null)) | None => default,
+        Some(other) => {
+            crate::exec::record_refusal(format!(
+                "{}: argument {} must be text, not {}",
+                call.name,
+                n + 1,
+                arg_kind(other)
+            ));
+            default
+        }
+    }
+}
+
+/// What kind of argument this is, for a refusal.
+fn arg_kind(a: &Arg) -> &'static str {
+    match a {
+        Arg::Lit(Value::Int(_)) => "a number",
+        Arg::Lit(Value::Float(_)) => "a number",
+        Arg::Lit(Value::Bool(_)) => "a boolean",
+        Arg::Lit(Value::Str(_)) => "text",
+        Arg::Lit(_) => "a value",
+        Arg::Expr(_) => "an expression",
+        Arg::Range(..) => "a range",
+        Arg::Named { .. } => "an option",
     }
 }
 
@@ -3555,7 +3503,11 @@ mod tests {
             vec![Value::Null; 2]
         );
         assert_eq!(zscores(&[Some(3.0)], false), vec![Value::Null]);
-        assert!(context_only("zscore") && association("spearman"));
+        assert!(
+            crate::registry::spec("zscore")
+                .is_some_and(|s| s.agg == Some(crate::registry::Agg::Context))
+                && association("spearman")
+        );
     }
 
     #[test]

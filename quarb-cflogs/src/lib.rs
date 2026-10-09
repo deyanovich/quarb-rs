@@ -37,6 +37,7 @@
 
 use quarb::temporal::parse_iso;
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_logs::{duration_secs, percent_decode};
 use serde_json::Value as Json;
 use std::cell::RefCell;
 
@@ -81,39 +82,6 @@ pub struct CflAdapter {
     zone: String,
     recs: Vec<Rec>,
     nodes: RefCell<Vec<Node>>,
-}
-
-fn duration_secs(s: &str) -> Option<i64> {
-    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
-    let n: i64 = num.parse().ok()?;
-    Some(match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
-        _ => return None,
-    })
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
-                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            )
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 struct Target {
@@ -273,7 +241,8 @@ impl CflAdapter {
         if let Some(l) = t.limit {
             url.push_str(&format!("&count={l}"));
         }
-        let resp = ureq::get(&url)
+        let resp = quarb_http::agent()
+            .get(&url)
             .set("Authorization", &format!("Bearer {}", token.trim()))
             .call()
             .map_err(|e| CflError::Api(format!("logs/received: {e}")))?;

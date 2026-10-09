@@ -95,6 +95,38 @@ enum Source {
     Tar,
 }
 
+/// Whether an extension names an archive this crate opens: zip and
+/// jar, tar and its compressed forms, 7z, rar. The one list every
+/// front-end and the composed view consult.
+pub fn archive_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "zip"
+            | "jar"
+            | "rar"
+            | "tar"
+            | "tgz"
+            | "gz"
+            | "7z"
+            | "xz"
+            | "txz"
+            | "bz2"
+            | "tbz2"
+            | "zst"
+            | "tzst"
+    )
+}
+
+/// Whether an extension names a document container that is an
+/// archive underneath (a zip of parts, a MIME envelope, a CHM):
+/// opened as an archive when no reader takes the document itself.
+pub fn container_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "docx" | "odt" | "sxw" | "epub" | "mhtml" | "mht" | "chm"
+    )
+}
+
 /// How a tar stream is compressed, told by its magic bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Compression {

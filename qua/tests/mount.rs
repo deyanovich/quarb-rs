@@ -50,7 +50,9 @@ fn mounted_sqlite_grafts_json_columns() {
         )
         .unwrap();
     }
-    let (adapter, _loc) = open_target(path.to_str().unwrap(), &OpenOpts::default()).expect("mount");
+    let adapter = open_target(path.to_str().unwrap(), &OpenOpts::default())
+        .expect("mount")
+        .adapter;
     let adapter = Dyn(adapter);
     let run = |q: &str| -> Vec<String> {
         match quarb::run(q, &adapter).unwrap() {
@@ -81,7 +83,9 @@ fn dir_mount_grafts_only_with_graft() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("cfg.json"), r#"{"port": 8080}"#).unwrap();
 
-    let (a, _) = open_target(dir.to_str().unwrap(), &OpenOpts::default()).expect("mount");
+    let a = open_target(dir.to_str().unwrap(), &OpenOpts::default())
+        .expect("mount")
+        .adapter;
     assert!(
         run_q(&Dyn(a), "/cfg.json/port::").is_empty(),
         "bare dir must !graft"
@@ -91,7 +95,9 @@ fn dir_mount_grafts_only_with_graft() {
         graft: true,
         ..OpenOpts::default()
     };
-    let (a, _) = open_target(dir.to_str().unwrap(), &opts).expect("mount");
+    let a = open_target(dir.to_str().unwrap(), &opts)
+        .expect("mount")
+        .adapter;
     assert_eq!(run_q(&Dyn(a), "/cfg.json/port::"), ["8080"]);
 }
 
@@ -109,7 +115,9 @@ fn archive_no_graft_holds_members_opaque() {
     z.finish().unwrap();
 
     // Composed by default: the member's parsed tree grafts.
-    let (a, _) = open_target(path.to_str().unwrap(), &OpenOpts::default()).expect("mount");
+    let a = open_target(path.to_str().unwrap(), &OpenOpts::default())
+        .expect("mount")
+        .adapter;
     assert_eq!(run_q(&Dyn(a), "/cfg.json/port::"), ["8080"]);
 
     // no_graft: the tar -t view — members listed, sized, opaque.
@@ -117,7 +125,9 @@ fn archive_no_graft_holds_members_opaque() {
         no_graft: true,
         ..OpenOpts::default()
     };
-    let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
+    let a = open_target(path.to_str().unwrap(), &opts)
+        .expect("mount")
+        .adapter;
     let a = Dyn(a);
     assert!(
         run_q(&a, "/cfg.json/port::").is_empty(),
@@ -148,7 +158,9 @@ fn sqlite_no_graft_keeps_columns_flat() {
         no_graft: true,
         ..OpenOpts::default()
     };
-    let (a, _) = open_target(path.to_str().unwrap(), &opts).expect("mount");
+    let a = open_target(path.to_str().unwrap(), &opts)
+        .expect("mount")
+        .adapter;
     let a = Dyn(a);
     // The column stays the server's own scalar: no inner arbor,
     // the text intact.

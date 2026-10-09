@@ -21,9 +21,9 @@
 //! correlation: `E1 <=> E2[…$*1…]` joins two contexts, a predicate
 //! referencing a prior expression's context via `$*N`. It also
 //! resolves cross-references: `::prop-->` maps a reference to its
-//! target node (a JSON adapter follows a `$ref` JSON Pointer). The
-//! reverse resolution `<--` and pattern search `=>` are not built yet.
-//! See `doc/impl.tex`.
+//! target node (a JSON adapter follows a `$ref` JSON Pointer), the
+//! reverse resolution `<--` (who refers here) and the value match
+//! `=>`. See `doc/impl.tex`.
 //!
 //! ```
 //! # use quarb::{AstAdapter, NodeId, QueryResult, run};
@@ -40,10 +40,10 @@
 pub mod adapter;
 mod ast;
 pub mod bibref;
-pub mod datenames;
-mod encoding;
-mod error;
+pub mod encoding;
+pub mod error;
 mod exec;
+#[cfg(feature = "kaiv")]
 pub mod kaiv_out;
 mod lexer;
 pub mod locale;
@@ -58,20 +58,22 @@ pub mod highlight;
 pub mod quantity;
 mod stdlib;
 pub use stdlib::{tabulate, tabulate_in, tabulate_with};
-pub mod period;
+pub mod plan;
+pub mod registry;
+pub use quarb_time::datenames;
+/// The temporal fragment (the `quarb-time` crate, at its old paths).
+pub use quarb_time::{period, temporal, timex};
 pub mod target;
-pub mod temporal;
-pub mod timex;
-mod timexdata;
 pub mod translit;
 mod unparse;
 mod value;
 
 pub use adapter::{
-    AllowShell, AstAdapter, ExternalRef, InstantFrom, LinkDir, NodeId, Provenance, ProvenanceList,
-    QuantifierBound, WithNow,
+    AstAdapter, Confidence, Conjunct, Estimate, ExternalRef, InstantFrom, Latency, LinkDir, NodeId,
+    PlanAxis, Provenance, ProvenanceList, Selection, StepPlan,
 };
-pub use error::{QuarbError, Result};
+pub mod conformance;
+pub use error::{Kind as ErrorKind, QuarbError, Result};
 pub mod koine;
 
 /// The invocation instant, pinned once by the tool layer (`qua
@@ -94,21 +96,42 @@ pub fn set_invocation_instant(secs: i64, nanos: u32) {
     pinned::NOW.with(|c| c.set(Some((secs, nanos))));
 }
 
+/// How a text is cut into sentences: the session's sentence bonds
+/// (a `.desm` set — "Dr." binds to what follows), behind which the
+/// engine does not care what segments. `sentences`, `sc` and the
+/// corpus reading segment with it, so a pipeline and a `corpus:`
+/// mount agree on "Dr. Smith". Without one, UAX #29 alone.
+pub trait SentenceBonds {
+    /// The sentences of `text`, in order, as slices of it.
+    fn unicode_sentences<'a>(&self, text: &'a str) -> Vec<&'a str>;
+    /// The concrete set, for a tool that extends it (`?desm=` on a
+    /// mount adds to the session's).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[cfg(feature = "desm")]
+impl SentenceBonds for syndesmos::Syndesmos {
+    fn unicode_sentences<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        syndesmos::Syndesmos::unicode_sentences(self, text)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 thread_local! {
-    /// The session's sentence bonds (a `.desm` set):
-    /// what `sentences`, `sc` and the corpus reading segment with,
-    /// so a pipeline and a `corpus:` mount agree on "Dr. Smith".
-    static SENTENCE_BONDS: std::cell::RefCell<Option<std::rc::Rc<syndesmos::Syndesmos>>> =
+    /// The session's sentence bonds, set by the tool at open time.
+    static SENTENCE_BONDS: std::cell::RefCell<Option<std::rc::Rc<dyn SentenceBonds>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Set the session's sentence bonds (`qua --desm`, quai's).
-pub fn set_sentence_bonds(bonds: Option<std::rc::Rc<syndesmos::Syndesmos>>) {
+pub fn set_sentence_bonds(bonds: Option<std::rc::Rc<dyn SentenceBonds>>) {
     SENTENCE_BONDS.with(|b| *b.borrow_mut() = bonds);
 }
 
 /// The session's sentence bonds, if any were loaded.
-pub fn sentence_bonds() -> Option<std::rc::Rc<syndesmos::Syndesmos>> {
+pub fn sentence_bonds() -> Option<std::rc::Rc<dyn SentenceBonds>> {
     SENTENCE_BONDS.with(|b| b.borrow().clone())
 }
 
@@ -131,9 +154,9 @@ pub fn now_secs() -> i64 {
     }
 }
 pub use exec::{
-    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, Traced, canonical_identity, fetched,
-    fetched_opt, is_url, name_path, record_refusal, resolved_provenance, set_ref_targets,
-    set_reproducible, take_refs,
+    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, RunOptions as Run, Traced, canonical_identity,
+    canonical_identity_at_open, fetched, fetched_opt, is_url, name_path, record_refusal,
+    resolved_provenance,
 };
 pub use parser::{Defs, parse_scope_path};
 pub use value::Value;
@@ -164,7 +187,7 @@ pub struct StepBody(ast::PathElem);
 pub fn parse_step_body(body: &str) -> Result<StepBody> {
     let q = parser::parse(&lexer::lex(&step_body_query(body))?)?;
     let refuse = |what: &str| {
-        Err(QuarbError::Parse(format!(
+        Err(QuarbError::parse(format!(
             "a trait declaration takes one step's body (a name, a pattern, \
              a trait expression, predicates), not {what}: '{body}'"
         )))
@@ -220,21 +243,35 @@ pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &St
 /// the entry points surface it here.
 fn checked<T>(result: T) -> Result<T> {
     match exec::take_refusal() {
-        Some(msg) => Err(QuarbError::Refused(msg)),
+        Some(msg) => Err(QuarbError::refused(msg)),
         None => Ok(result),
     }
 }
 
-/// Lex, parse, and evaluate `query` against `adapter`.
-///
-/// Returns the [`QueryResult`] — a node set, or scalar values if the
-/// query ends in a projection — or an error if the query is malformed
-/// or uses a feature the engine does not implement yet.
-pub fn run(query: &str, adapter: &impl AstAdapter) -> Result<QueryResult> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval(&ast, adapter))
+impl Run {
+    /// The options an embedder gets without choosing any: `now()`
+    /// from the instant the tool pinned ([`set_invocation_instant`],
+    /// if it did), the sentence bonds it set ([`set_sentence_bonds`]),
+    /// the shell gate closed, every other default.
+    pub fn ambient() -> Run {
+        Run {
+            now: invocation_instant(),
+            bonds: sentence_bonds(),
+            ..Run::default()
+        }
+    }
+}
+
+/// The options a [`run`]-family entry runs under: the enclosing
+/// run's when one is in progress (an adapter answering through the
+/// engine mid-evaluation keeps its caller's instant, bound, gate
+/// and targets), the ambient ones at the top.
+fn inherited() -> Run {
+    if exec::in_run() {
+        exec::run_option(|o| o.clone())
+    } else {
+        Run::ambient()
+    }
 }
 
 /// A query's closing serialization for people — `@| csv` or
@@ -248,63 +285,203 @@ pub struct ClosingTable {
     pub delimiter: Option<u8>,
 }
 
-/// Like [`run`], for a tool that renders under an output locale:
-/// when the query closes with `@| csv` or `@| table`, the rows are
-/// returned as they stand before that stage, with its shape, and the
-/// tool tabulates them itself (`tabulate_in` with its locale's cells
-/// and delimiter). The stage anywhere else, and every other stage,
-/// yields the same values as under [`run`] — a value never depends
-/// on a locale.
+/// What a run leaves for its caller.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    /// A node set, or scalar values if the query ends in a
+    /// projection.
+    pub result: QueryResult,
+    /// The closing `@| csv` / `@| table` taken off for rendering
+    /// ([`Query::for_rendering`]), with the rows standing in
+    /// `result` as they were before it.
+    pub closing: Option<ClosingTable>,
+    /// The unresolved external references: the identifiers of
+    /// documents the query referenced but could not reach (not
+    /// mounted, no tree declared for them).
+    pub refs: Vec<String>,
+    /// The static plan the run was made under, when the run asked
+    /// for it (`Run::plan`) or held it to a budget.
+    pub plan: Option<plan::Plan>,
+}
+
+/// A parsed query, ready to run against an adapter under a
+/// [`Run`]: parse once, run many.
+#[derive(Debug, Clone)]
+pub struct Query {
+    ast: ast::Query,
+    closing: Option<ClosingTable>,
+}
+
+impl Query {
+    /// Lex and parse `text` with the dataset at hand (data-aware
+    /// macros read it at expansion time), under the ambient options.
+    pub fn parse(text: &str, adapter: &impl AstAdapter) -> Result<Query> {
+        Query::parse_with(text, &Defs::default(), adapter, &inherited())
+    }
+
+    /// [`Query::parse`] with a pre-seeded fragment table and the
+    /// options a macro body expands under (its shell gate, its
+    /// instant).
+    pub fn parse_with(
+        text: &str,
+        defs: &Defs,
+        adapter: &impl AstAdapter,
+        run: &Run,
+    ) -> Result<Query> {
+        let _scope = exec::begin_run(Some(run.clone()));
+        let (tokens, spans) = lexer::lex_spanned(text)?;
+        let ast =
+            parser::parse_with_data_spanned(&tokens, Some(&spans), defs.clone(), Some(adapter))?;
+        Ok(Query { ast, closing: None })
+    }
+
+    /// For a tool that renders under an output locale: when the
+    /// query closes with `@| csv` or `@| table`, the run returns the
+    /// rows as they stand before that stage, with its shape in
+    /// [`Outcome::closing`], and the tool tabulates them itself
+    /// (`tabulate_in` with its locale's cells and delimiter). The
+    /// stage anywhere else, and every other stage, yields the same
+    /// values as under a plain run — a value never depends on a
+    /// locale.
+    pub fn for_rendering(mut self) -> Query {
+        if let Some(ast::Stage::Agg(call)) = self.ast.pipeline.last_mut()
+            && matches!(call.name.as_str(), "csv" | "table")
+        {
+            let (delimiter, columns) = stdlib::split_csv_delimiter(call);
+            self.closing = Some(ClosingTable {
+                csv: call.name == "csv",
+                columns: columns
+                    .iter()
+                    .filter_map(|a| match a {
+                        ast::Arg::Lit(Value::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                delimiter,
+            });
+            // The rows, with a node standing for the record of the
+            // columns asked of it, exactly as the stage would read
+            // them.
+            let columns: Vec<ast::Arg> = columns.to_vec();
+            call.name = stdlib::ROWS_FOR_RENDERING.to_string();
+            call.args = columns;
+        }
+        self
+    }
+
+    /// Evaluate against `adapter` under `run`.
+    ///
+    /// Errors: a refusal (a feature the engine does not implement, a
+    /// shell stage with the gate closed, an argument of the wrong
+    /// kind); a malformed query is refused at [`Query::parse`].
+    pub fn run(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Outcome> {
+        exec::gate_shell(&self.ast, run.allow_shell)?;
+        let plan = self.planned(adapter, run)?;
+        let result = checked(exec::eval_with(&self.ast, adapter, Some(run.clone())))?;
+        Ok(Outcome {
+            result,
+            closing: self.closing.clone(),
+            refs: exec::take_refs(),
+            plan,
+        })
+    }
+
+    /// The static plan when the run asks for it, held to the run's
+    /// budget: a query the estimate puts beyond the budget is
+    /// refused here, before anything runs.
+    fn planned(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Option<plan::Plan>> {
+        if !run.plan && run.budget.is_none() {
+            return Ok(None);
+        }
+        let plan = plan::of(&self.ast, adapter);
+        if let Some(budget) = &run.budget
+            && let Some(why) = budget.exceeded_by(&plan)
+        {
+            return Err(QuarbError::refused(why));
+        }
+        Ok(Some(plan))
+    }
+
+    /// Like [`Query::run`], returning the final capsae as `(node,
+    /// topic)` pairs, so each result value still knows which node
+    /// produced it — the provenance-bearing form used by typed
+    /// emission (`qua --daiv`). A `None` topic is a node result.
+    pub fn run_traced(
+        &self,
+        adapter: &impl AstAdapter,
+        run: &Run,
+    ) -> Result<Vec<(NodeId, Option<Value>)>> {
+        Ok(self
+            .run_traced_prov(adapter, run)?
+            .into_iter()
+            .map(|t| (t.node, t.topic))
+            .collect())
+    }
+
+    /// Like [`Query::run_traced`], with each value's provenance: the
+    /// origins of its topic, per field for a record
+    /// ([`exec::Traced`]).
+    pub fn run_traced_prov(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Vec<Traced>> {
+        exec::gate_shell(&self.ast, run.allow_shell)?;
+        checked(exec::eval_traced_prov_with(
+            &self.ast,
+            adapter,
+            Some(run.clone()),
+        ))
+    }
+
+    /// The static plan: what the query will touch, step by step,
+    /// with what `adapter` says it would apply from its catalog —
+    /// no node is read ([`plan::of`]).
+    pub fn plan(&self, adapter: &dyn AstAdapter) -> plan::Plan {
+        plan::of(&self.ast, adapter)
+    }
+
+    /// The query rendered back to canonical text (defs expanded).
+    pub fn canonical(&self) -> String {
+        unparse::unparse(&self.ast)
+    }
+
+    /// The syntax tree.
+    pub fn ast(&self) -> &ast::Query {
+        &self.ast
+    }
+}
+
+/// Lex, parse, and evaluate `query` against `adapter` under the
+/// ambient options ([`Run::ambient`]; inside a run, that run's).
+///
+/// Returns the [`QueryResult`] — a node set, or scalar values if the
+/// query ends in a projection — or an error if the query is malformed
+/// or uses a feature the engine does not implement yet. A tool
+/// choosing its options runs a [`Query`] under a [`Run`].
+pub fn run(query: &str, adapter: &impl AstAdapter) -> Result<QueryResult> {
+    run_with_defs(query, &Defs::default(), adapter)
+}
+
+/// Like [`run`], for a tool that renders under an output locale
+/// ([`Query::for_rendering`]).
 pub fn run_for_rendering(
     query: &str,
     adapter: &impl AstAdapter,
 ) -> Result<(QueryResult, Option<ClosingTable>)> {
-    let tokens = lexer::lex(query)?;
-    let mut ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
-    let mut closing = None;
-    if let Some(ast::Stage::Agg(call)) = ast.pipeline.last_mut()
-        && matches!(call.name.as_str(), "csv" | "table")
-    {
-        let (delimiter, columns) = stdlib::split_csv_delimiter(call);
-        closing = Some(ClosingTable {
-            csv: call.name == "csv",
-            columns: columns
-                .iter()
-                .filter_map(|a| match a {
-                    ast::Arg::Lit(Value::Str(s)) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect(),
-            delimiter,
-        });
-        // The rows, with a node standing for the record of the
-        // columns asked of it, exactly as the stage would read them.
-        let columns: Vec<ast::Arg> = columns.to_vec();
-        call.name = stdlib::ROWS_FOR_RENDERING.to_string();
-        call.args = columns;
-    }
-    exec::gate_shell(&ast, adapter)?;
-    Ok((checked(exec::eval(&ast, adapter))?, closing))
+    let r = inherited();
+    let out = Query::parse_with(query, &Defs::default(), adapter, &r)?
+        .for_rendering()
+        .run(adapter, &r)?;
+    Ok((out.result, out.closing))
 }
 
-/// Like [`run`], but returning the final capsae as `(node, topic)`
-/// pairs, so each result value still knows which node produced it —
-/// the provenance-bearing form used by typed emission (`qua --daiv`).
-/// A `None` topic is a node result.
+/// Like [`run`], returning `(node, topic)` pairs
+/// ([`Query::run_traced`]).
 pub fn run_traced(query: &str, adapter: &impl AstAdapter) -> Result<Vec<(NodeId, Option<Value>)>> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval_traced(&ast, adapter))
+    run_traced_with_defs(query, &Defs::default(), adapter)
 }
 
-/// Like [`run_traced`], with each value's provenance: the origins
-/// of its topic, per field for a record ([`exec::Traced`]).
+/// Like [`run_traced`], with each value's provenance
+/// ([`Query::run_traced_prov`]).
 pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<exec::Traced>> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, Defs::default(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval_traced_prov(&ast, adapter))
+    run_traced_prov_with_defs(query, &Defs::default(), adapter)
 }
 
 /// Parse a definitions file — `def &name(params): body;` statements
@@ -338,10 +515,10 @@ pub fn strip_defs_comments(text: &str) -> String {
 /// Like [`run`], with a pre-seeded fragment table (a `--defs` file);
 /// inline `def` statements extend it.
 pub fn run_with_defs(query: &str, defs: &Defs, adapter: &impl AstAdapter) -> Result<QueryResult> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval(&ast, adapter))
+    let r = inherited();
+    Ok(Query::parse_with(query, defs, adapter, &r)?
+        .run(adapter, &r)?
+        .result)
 }
 
 /// Like [`run_traced`], with a pre-seeded fragment table.
@@ -350,10 +527,8 @@ pub fn run_traced_with_defs(
     defs: &Defs,
     adapter: &impl AstAdapter,
 ) -> Result<Vec<(NodeId, Option<Value>)>> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval_traced(&ast, adapter))
+    let r = inherited();
+    Query::parse_with(query, defs, adapter, &r)?.run_traced(adapter, &r)
 }
 
 /// Like [`run_traced_prov`], with a pre-seeded fragment table.
@@ -362,10 +537,8 @@ pub fn run_traced_prov_with_defs(
     defs: &Defs,
     adapter: &impl AstAdapter,
 ) -> Result<Vec<exec::Traced>> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
-    exec::gate_shell(&ast, adapter)?;
-    checked(exec::eval_traced_prov(&ast, adapter))
+    let r = inherited();
+    Query::parse_with(query, defs, adapter, &r)?.run_traced_prov(adapter, &r)
 }
 
 /// True if `query` (inline defs allowed) opens with an expression
@@ -409,20 +582,26 @@ pub fn expand_first(query: &str, defs: &Defs) -> Result<Vec<String>> {
 }
 
 /// Like [`expand_first`], with the dataset at hand, so data-aware
-/// macros (`&name!`) can read it at expansion time.
+/// macros (`&name!`) can read it at expansion time, under `run`
+/// (their shell gate, their instant).
 pub fn expand_first_with(
     query: &str,
     defs: &Defs,
     adapter: &impl AstAdapter,
+    run: &Run,
 ) -> Result<Vec<String>> {
+    let _scope = exec::begin_run(Some(run.clone()));
     let tokens = lexer::lex(query)?;
     parser::parse_first_steps(&tokens, defs.clone(), Some(adapter))
 }
 
 /// Like [`expand`], with the dataset at hand, so data-aware macros
-/// (`&name!`) can read it at expansion time.
-pub fn expand_with(query: &str, defs: &Defs, adapter: &impl AstAdapter) -> Result<String> {
-    let tokens = lexer::lex(query)?;
-    let ast = parser::parse_with_data(&tokens, defs.clone(), Some(adapter))?;
-    Ok(unparse::unparse(&ast))
+/// (`&name!`) can read it at expansion time, under `run`.
+pub fn expand_with(
+    query: &str,
+    defs: &Defs,
+    adapter: &impl AstAdapter,
+    run: &Run,
+) -> Result<String> {
+    Ok(Query::parse_with(query, defs, adapter, run)?.canonical())
 }

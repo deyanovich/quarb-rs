@@ -22,6 +22,7 @@
 //! **Target**: `kuzu:PATH` — the database directory.
 
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_cypher::bt;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -36,11 +37,6 @@ pub enum KuzuError {
 
 fn api<E: std::fmt::Display>(e: E) -> KuzuError {
     KuzuError::Api(e.to_string())
-}
-
-/// A table name in backticks, backticks doubled.
-fn bt(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
 }
 
 /// A Kùzu value as a Quarb value. Dates and timestamps mint

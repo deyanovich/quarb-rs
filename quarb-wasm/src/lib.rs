@@ -18,13 +18,12 @@
 //! sweep pays for the pages it touches and later queries are
 //! fast.
 //!
-//! The shell stage stays gated: no `AllowShell` wrapper here, so
+//! The shell stage stays gated: the run never opens it, so
 //! `sh()` / backticks fail with the engine's normal gate error.
 //! The invocation instant for `now()` is supplied by the caller
 //! (`Date.now()` in the page) — wasm32-unknown-unknown has no
 //! clock of its own.
 
-use quarb::adapter::WithNow;
 use quarb::{AstAdapter, NodeId, QueryResult};
 use wasm_bindgen::prelude::*;
 
@@ -144,12 +143,14 @@ fn go<A: AstAdapter>(
     secs: i64,
     nanos: u32,
 ) -> Result<Vec<String>, String> {
-    let nowed = WithNow {
-        inner: adapter,
-        secs,
-        nanos,
+    let run = quarb::Run {
+        now: Some((secs, nanos)),
+        ..Default::default()
     };
-    match quarb::run(query, &nowed) {
+    match quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
+        .and_then(|q| q.run(adapter, &run))
+        .map(|o| o.result)
+    {
         Ok(QueryResult::Nodes(nodes)) => Ok(nodes.into_iter().map(render).collect()),
         Ok(QueryResult::Values(values)) => {
             Ok(values.into_iter().map(|v| v.display_form()).collect())

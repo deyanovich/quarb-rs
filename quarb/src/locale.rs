@@ -14,7 +14,6 @@
 
 use crate::datenames::{self, Names};
 use crate::value::Value;
-use std::cell::RefCell;
 
 /// A locale's rendering rules.
 #[derive(Clone, Copy, Debug)]
@@ -49,13 +48,21 @@ const NARROW: &str = "\u{202f}";
 /// table covers (the tool then reports it and stays canonical).
 /// `C`, `POSIX` and the empty tag are canonical and answer `None`
 /// too — the caller treats "no locale" and "canonical" alike.
+/// The locales shipped with tables — rendering rules, month and
+/// weekday names, time expressions — by size of language.
+pub const SHIPPED: &[&str] = &[
+    "en", "zh", "es", "ar", "pt", "ru", "ja", "de", "fr", "tr", "it",
+];
+
+/// The language of a BCP 47 tag (or a POSIX locale name): `ru-RU`,
+/// `ru_RU.UTF-8`, `ru@petr1708` all answer `ru`, lower-cased. The
+/// one tag resolution every table shares; an empty tag is the
+/// empty language, which the tables read as English.
+pub use quarb_time::language;
+
 pub fn for_tag(tag: &str) -> Option<OutputLocale> {
     let trimmed = tag.trim();
-    let lang = trimmed
-        .split(['-', '_', '.', '@'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let lang = language(tag);
     let names = datenames::names(&lang)?;
     let (tag, decimal, group, min_grouping, instant): (
         &'static str,
@@ -231,23 +238,6 @@ impl OutputLocale {
             other => self.display(other),
         }
     }
-}
-
-thread_local! {
-    /// The tag `sort` collates under when a query names none —
-    /// the output locale's, set by the tool for the run; `None`
-    /// is code-point order.
-    static DEFAULT_COLLATION: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Set (or clear) the default collation for `sort` without a
-/// locale argument.
-pub fn set_default_collation(tag: Option<&str>) {
-    DEFAULT_COLLATION.with(|c| *c.borrow_mut() = tag.map(str::to_string));
-}
-
-pub(crate) fn default_collation() -> Option<String> {
-    DEFAULT_COLLATION.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]

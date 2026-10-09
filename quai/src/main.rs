@@ -135,16 +135,12 @@ fn is_schemed(s: &str) -> bool {
         })
 }
 
-/// Open one mount spec: adapter schemes go through qua's dispatch
-/// (the whole fleet — gcl:, kafka:, neo4j://, …), everything else
-/// through the session's file opener.
+/// Open one mount spec through the session's opener (quarb-open:
+/// the whole fleet — files, readings, archives, databases, `gcl:`,
+/// `kafka:`, `neo4j://`, …).
 fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
-    let s = spec.path.to_string_lossy();
-    if is_schemed(&s) {
-        let (adapter, render) = qua::open_target(&s, &qua::OpenOpts::default())?;
-        return Ok((Doc::Boxed(quarb_session::doc::Dyn(adapter), render), true));
-    }
-    Ok((Doc::open(&spec.path, opts)?, false))
+    let schemed = is_schemed(&spec.path.to_string_lossy());
+    Ok((Doc::open(&spec.path, opts)?, schemed))
 }
 
 /// Build the in-process executor over the current mount specs plus
@@ -162,7 +158,7 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         ));
     }
     let mut schemed = false;
-    let doc = match (remount.specs.as_slice(), remount.web.is_empty()) {
+    let mut doc = match (remount.specs.as_slice(), remount.web.is_empty()) {
         ([one], true) if one.name.is_none() => {
             let (doc, sch) = build_doc(one, &remount.opts)?;
             schemed |= sch;
@@ -213,6 +209,7 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         .map(|w| (w.name.clone(), w.url.clone()))
         .collect();
     let roots = doc.url_roots(&urls);
+    doc.declare_identities(&urls);
     // Live re-reads (&N!) re-open through the file path machinery,
     // which scheme targets bypass — and fetched documents are not
     // re-fetched: those sessions read the standing snapshot for
@@ -291,15 +288,6 @@ fn main() -> Result<()> {
         Session::new(executor, store)
     } else {
         let now = bind_now(cli.now.as_deref())?;
-        let refs = match &cli.refs {
-            Some(f) => {
-                let text = std::fs::read_to_string(f)
-                    .with_context(|| format!("reading refs file {}", f.display()))?;
-                quarb_relational::parse_refs(&text)
-                    .map_err(|e| anyhow::anyhow!("parsing refs: {e}"))?
-            }
-            None => Vec::new(),
-        };
         let bonds = if cli.desm.is_empty() {
             None
         } else {
@@ -312,13 +300,17 @@ fn main() -> Result<()> {
             }
             Some(std::rc::Rc::new(b))
         };
-        quarb::set_sentence_bonds(bonds.clone());
+        quarb::set_sentence_bonds(
+            bonds
+                .clone()
+                .map(|b| b as std::rc::Rc<dyn quarb::SentenceBonds>),
+        );
         let opts = Options {
             hidden: cli.hidden,
             respect_ignore: !cli.no_ignore,
             graft: cli.graft,
             no_graft: cli.no_graft,
-            refs: std::rc::Rc::new(refs),
+            refs: cli.refs.clone(),
             allow_shell: cli.allow_shell,
             bonds,
         };

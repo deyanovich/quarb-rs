@@ -788,6 +788,109 @@ impl AstAdapter for RelationalModel {
     /// A child by name without the scan: a table by its name, a row
     /// by its key (`/books/7` reads one row, not the table), a cell
     /// by its column.
+    /// A child hop under a table with one leading equality on a
+    /// column (`/invoices/*[::customer = "Emma"]`): the rows holding
+    /// the value, read by key when the table is not whole, in the
+    /// table's order — the keyed read the model already makes for
+    /// a resolution, offered to the plan.
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let Some((t, None)) = self.entry(from) else {
+            return quarb::adapter::select_by_hooks(self, from, plan);
+        };
+        if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() {
+            return quarb::adapter::select_by_hooks(self, from, plan);
+        }
+        let [quarb::Conjunct::Equals(prop, value)] = plan.conjuncts.as_slice() else {
+            return None;
+        };
+        // Only a text or integer value compares as the engine does
+        // under the keyed read; anything else walks.
+        if !matches!(value, Value::Str(_) | Value::Int(_)) {
+            return None;
+        }
+        let col = self.tables[t].spec.columns.iter().position(|c| c == prop)?;
+        let rows = self.col_lookup(t, col, value);
+        Some(quarb::Selection {
+            nodes: rows
+                .into_iter()
+                .map(|r| (Self::row_node(t, r), 1))
+                .collect(),
+            applied: vec![true],
+        })
+    }
+
+    /// From the catalog: under a table, a child hop's equality on a
+    /// column the table has, with a text or integer value, is the
+    /// keyed read's to apply; anything else is the engine's.
+    fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
+        let [table] = scope else {
+            return None;
+        };
+        let t = self.table_index(table)?;
+        if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() {
+            return Some(vec![false; plan.conjuncts.len()]);
+        }
+        let spec = &self.tables[t].spec;
+        Some(
+            plan.conjuncts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let quarb::Conjunct::Equals(prop, value) = c;
+                    i == 0
+                        && spec.columns.iter().any(|col| col == prop)
+                        && matches!(value, Value::Str(_) | Value::Int(_))
+                })
+                .collect(),
+        )
+    }
+
+    /// A table already read whole knows its rows exactly and pays
+    /// nothing more; a table not yet read is the driver's to
+    /// estimate (a dry run, statistics), which the model does not
+    /// hold: unknown.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let [table] = scope else {
+            return None;
+        };
+        let t = self.table_index(table)?;
+        if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() || !self.is_whole(t) {
+            return None;
+        }
+        let n = self.whole(t).len() as u64;
+        let rows = if plan.conjuncts.is_empty() {
+            (n, n)
+        } else {
+            (0, n)
+        };
+        Some(quarb::Estimate {
+            rows,
+            bytes: None,
+            requests: Some(0),
+            latency: quarb::Latency::Memory,
+            confidence: if plan.conjuncts.is_empty() {
+                quarb::Confidence::Exact
+            } else {
+                quarb::Confidence::Bound
+            },
+        })
+    }
+
+    /// `/table/* @| count` on a table already read whole: its length.
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        let Some((t, None)) = self.entry(from) else {
+            return None;
+        };
+        if plan.axis != quarb::PlanAxis::Child
+            || plan.name.is_some()
+            || !plan.conjuncts.is_empty()
+            || !self.is_whole(t)
+        {
+            return None;
+        }
+        Some(self.whole(t).len())
+    }
+
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         if node.0 == 0 {
             return self

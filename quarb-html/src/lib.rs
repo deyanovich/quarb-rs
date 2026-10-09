@@ -27,10 +27,21 @@ struct Node {
     /// The tag name; `None` for the document root.
     tag: Option<String>,
     attrs: Vec<(String, String)>,
-    /// The element's text content (all descendant text, concatenated).
-    text: String,
+    /// The element's content in document order: its own text
+    /// children as written, its element children by ordinal in
+    /// `children`. The subtree text (the bare projection) is
+    /// concatenated on first use and kept — storing it for every
+    /// element up front cost the depth of the tree per element.
+    pieces: Vec<Piece>,
+    text: std::cell::OnceCell<String>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+}
+
+/// One piece of an element's content.
+enum Piece {
+    Text(String),
+    Child(usize),
 }
 
 impl Node {
@@ -209,13 +220,52 @@ impl HtmlAdapter {
         self.document_url = url::Url::parse(url).ok();
     }
 
+    /// The subtree text of `node` — every descendant text node in
+    /// document order — concatenated on first use and kept. An
+    /// explicit stack, so a document nested twenty thousand
+    /// elements deep does not recurse.
+    fn text_of(&self, node: NodeId) -> &str {
+        self.nodes[node.0 as usize].text.get_or_init(|| {
+            let mut out = String::new();
+            // (element, next piece, where its text starts in `out`):
+            // an element whose pieces are spent keeps its own text,
+            // so a filter over every element of a deep tree reads
+            // each subtree once.
+            let mut stack: Vec<(usize, usize, usize)> = vec![(node.0 as usize, 0, 0)];
+            while let Some(top) = stack.last_mut() {
+                let (cur, at, start) = *top;
+                let n = &self.nodes[cur];
+                if at >= n.pieces.len() {
+                    if cur != node.0 as usize {
+                        let _ = n.text.set(out[start..].to_string());
+                    }
+                    stack.pop();
+                    continue;
+                }
+                top.1 += 1;
+                match &n.pieces[at] {
+                    Piece::Text(t) => out.push_str(t),
+                    Piece::Child(k) => {
+                        let c = n.children[*k].0 as usize;
+                        match self.nodes[c].text.get() {
+                            Some(t) => out.push_str(t),
+                            None => stack.push((c, 0, out.len())),
+                        }
+                    }
+                }
+            }
+            out
+        })
+    }
+
     /// Parse `html` and build the adapter.
     pub fn parse(html: &str) -> Self {
         let document = Html::parse_document(html);
         let mut nodes = vec![Node {
             tag: None,
             attrs: Vec::new(),
-            text: String::new(),
+            pieces: vec![Piece::Child(0)],
+            text: std::cell::OnceCell::new(),
             parent: None,
             children: Vec::new(),
         }];
@@ -223,7 +273,6 @@ impl HtmlAdapter {
         let root = NodeId(0);
 
         let html_node = build(document.root_element(), Some(root), &mut nodes, &mut ids);
-        nodes[0].text = nodes[html_node.0 as usize].text.clone();
         nodes[0].children = vec![html_node];
 
         HtmlAdapter {
@@ -299,7 +348,18 @@ fn build(
             .attrs()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let text: String = el.text().collect();
+        // The element's own content in order: text as written,
+        // element children by ordinal.
+        let mut pieces = Vec::new();
+        let mut ordinal = 0;
+        for child in el.children() {
+            if let Some(t) = child.value().as_text() {
+                pieces.push(Piece::Text(t.to_string()));
+            } else if ElementRef::wrap(child).is_some() {
+                pieces.push(Piece::Child(ordinal));
+                ordinal += 1;
+            }
+        }
 
         if let Some(id) = el.value().id() {
             ids.entry(id.to_string()).or_insert(this);
@@ -308,7 +368,8 @@ fn build(
         nodes.push(Node {
             tag: Some(tag),
             attrs,
-            text,
+            pieces,
+            text: std::cell::OnceCell::new(),
             parent,
             children: Vec::new(),
         });
@@ -429,7 +490,7 @@ impl AstAdapter for HtmlAdapter {
 
     /// The default projection of an element is its text content.
     fn default_value(&self, node: NodeId) -> Option<Value> {
-        Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
+        Some(Value::Str(self.text_of(node).to_string()))
     }
 
     /// `::::tag`, `::::classes` (the class attribute, split),

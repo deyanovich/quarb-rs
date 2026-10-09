@@ -13,7 +13,7 @@
 //! Scope (what the corpus needed): one branch, no correlations, no
 //! marks or pushes; hops on every axis, one-alternative groups
 //! (quantified walks), projections, per-capsa pipeline stages, whole-
-//! context aggregates. Anything else is [`QuarbError::Unsupported`].
+//! context aggregates. Anything else is [`QuarbError::unsupported`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +59,7 @@ impl Default for Options {
 }
 
 fn unsupported(what: impl Into<String>) -> QuarbError {
-    QuarbError::Unsupported(format!("trace: {}", what.into()))
+    QuarbError::unsupported(format!("trace: {}", what.into()))
 }
 
 // ---------------------------------------------------------------
@@ -502,7 +502,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 _ => Err(unsupported("non-hop group bodies")),
             })
             .collect::<Result<_>>()?;
-        let bound = self.adapter.quantifier_bound();
+        let bound = crate::exec::quantifier_bound(self.adapter);
         // Per driver: its frontier, its visited set, its emissions.
         struct Walk {
             driver: Th,
@@ -929,7 +929,7 @@ pub fn trace<A: AstAdapter>(
     let traced_nodes: Vec<Option<NodeId>> = live.iter().map(|t| t.node).collect();
     let eval_nodes: Vec<Option<NodeId>> = caps.iter().map(|c| Some(c.node)).collect();
     if tr.groups.is_empty() && traced_nodes != eval_nodes {
-        return Err(QuarbError::Unsupported(format!(
+        return Err(QuarbError::unsupported(format!(
             "trace diverges from evaluation: {} traced vs {} evaluated positions",
             traced_nodes.len(),
             eval_nodes.len()
@@ -942,8 +942,8 @@ pub fn trace<A: AstAdapter>(
             .map(|c| Some(c.topic.clone().unwrap_or(Value::Null)))
             .collect();
         if traced != evaled {
-            return Err(QuarbError::Unsupported(
-                "trace diverges from evaluation: topics differ".into(),
+            return Err(QuarbError::unsupported(
+                "trace diverges from evaluation: topics differ",
             ));
         }
     }

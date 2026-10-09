@@ -15,6 +15,19 @@
 //! high byte of the `NodeId` (each inner adapter may use ids up to
 //! 2^56 - 1). The synthetic root is id 0 and unnamed; each mount's
 //! root carries the mount name.
+//!
+//! A mount may be *latent*: declared with its name, its target and
+//! an opener ([`Latent`]), and opened the first time a query reaches
+//! it — a hop by its name, a listing of the root's children, a
+//! reference landing on its declared identity. Laziness is
+//! unobservable: an unanchored `//x` or `/*` lists the root's
+//! children and so activates every declared mount before the
+//! engine memoizes anything; a question about "every mount"
+//! (`quantifier_bound`, `unit_scale`, `document_by_ref`) consults
+//! the active ones, since an inactive mount has not been reached.
+//! [`AstAdapter::tree_identities`] answers for a latent mount from
+//! its declaration, with a stand-in root id that resolves to the
+//! real root (opening the mount) when the engine touches it.
 
 use quarb::{AstAdapter, NodeId, Value};
 
@@ -40,7 +53,7 @@ fn mount_identity(target: &str) -> Option<String> {
         return None;
     }
     if quarb::is_url(t) {
-        return Some(quarb::canonical_identity(t));
+        return Some(quarb::canonical_identity_at_open(t));
     }
     let path = match t.split_once(':') {
         Some((prefix, rest))
@@ -59,16 +72,75 @@ fn mount_identity(target: &str) -> Option<String> {
     if !p.exists() {
         return Some(t.to_string());
     }
-    let mut identity = quarb::canonical_identity(path);
+    let mut identity = quarb::canonical_identity_at_open(path);
     if p.is_dir() && !identity.ends_with('/') {
         identity.push('/');
     }
     Some(identity)
 }
 
+/// What opens a latent mount when it is first reached.
+pub type Opener = Box<dyn FnOnce() -> Result<Box<dyn AstAdapter>, String>>;
+
+/// A declared mount, opened when first reached
+/// ([`MountAdapter::declare`]).
+pub struct Latent {
+    pub name: String,
+    pub target: Option<String>,
+    pub opener: Opener,
+}
+
+/// One entry of the table: active (its adapter in the cell) or
+/// latent (its opener waiting).
+struct Entry {
+    name: String,
+    target: Option<String>,
+    /// Identities declared for the root beyond the target's own (a
+    /// page's URL for a file fetched from it).
+    identities: Vec<String>,
+    cell: std::cell::OnceCell<Box<dyn AstAdapter>>,
+    opener: std::cell::RefCell<Option<Opener>>,
+}
+
+impl Entry {
+    fn active(mount: Mount) -> Entry {
+        let cell = std::cell::OnceCell::new();
+        let _ = cell.set(mount.adapter);
+        Entry {
+            name: mount.name,
+            target: mount.target,
+            identities: Vec::new(),
+            cell,
+            opener: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+/// The adapter a latent mount stands on when its opener failed: an
+/// unnamed root with nothing under it (the refusal was recorded).
+struct Empty;
+
+impl AstAdapter for Empty {
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+    fn children(&self, _node: NodeId) -> Vec<NodeId> {
+        Vec::new()
+    }
+    fn name(&self, _node: NodeId) -> Option<String> {
+        None
+    }
+}
+
+/// The inner id standing for a latent mount's root before the
+/// mount is opened (no inner adapter uses it: ids stop at
+/// 2^56 - 2). [`MountAdapter::decode`] resolves it to the real
+/// root, opening the mount.
+const ROOT_ALIAS: u64 = INNER_MASK;
+
 /// A Quarb adapter over a set of named mounts.
 pub struct MountAdapter {
-    mounts: Vec<Mount>,
+    mounts: Vec<Entry>,
 }
 
 // The mount index rides the high byte (bits 56–63); an inner adapter
@@ -99,17 +171,130 @@ impl MountAdapter {
                 mounts.len()
             ));
         }
-        Ok(MountAdapter { mounts })
+        Ok(MountAdapter {
+            mounts: mounts.into_iter().map(Entry::active).collect(),
+        })
+    }
+
+    /// Add an opened mount to a live table (a session acquiring a
+    /// document); its index, or a refusal past [`MAX_MOUNTS`] or on
+    /// a name already mounted.
+    pub fn push(&mut self, mount: Mount) -> Result<usize, String> {
+        self.admit(&mount.name)?;
+        self.mounts.push(Entry::active(mount));
+        Ok(self.mounts.len() - 1)
+    }
+
+    /// Declare a latent mount: named and identified now, opened
+    /// when first reached. Its index, or a refusal as for
+    /// [`push`](Self::push).
+    pub fn declare(&mut self, latent: Latent) -> Result<usize, String> {
+        self.admit(&latent.name)?;
+        self.mounts.push(Entry {
+            name: latent.name,
+            target: latent.target,
+            identities: Vec::new(),
+            cell: std::cell::OnceCell::new(),
+            opener: std::cell::RefCell::new(Some(latent.opener)),
+        });
+        Ok(self.mounts.len() - 1)
+    }
+
+    fn admit(&self, name: &str) -> Result<(), String> {
+        if self.mounts.len() >= MAX_MOUNTS {
+            return Err(format!(
+                "{} mounts; at most {MAX_MOUNTS} can be mounted together",
+                self.mounts.len() + 1
+            ));
+        }
+        if self.mounts.iter().any(|e| e.name == name) {
+            return Err(format!("'{name}' is already mounted"));
+        }
+        Ok(())
+    }
+
+    /// Declare one more identity for the `idx`-th mount's root (a
+    /// page's URL for a file fetched from it): a reference naming it
+    /// lands on the mount, opening it if latent.
+    pub fn declare_identity(&mut self, idx: usize, identity: String) {
+        let e = &mut self.mounts[idx];
+        if !e.identities.contains(&identity) {
+            e.identities.push(identity);
+        }
+    }
+
+    /// How many mounts the table holds, active or latent.
+    pub fn len(&self) -> usize {
+        self.mounts.len()
+    }
+
+    /// Whether the table holds no mounts.
+    pub fn is_empty(&self) -> bool {
+        self.mounts.is_empty()
+    }
+
+    /// Whether the `idx`-th mount has been opened.
+    pub fn is_active(&self, idx: usize) -> bool {
+        self.mounts[idx].cell.get().is_some()
+    }
+
+    /// Open the `idx`-th mount now (a replay plan prefetching what
+    /// the cells name); the opener's error, when it fails — the
+    /// mount then stands on an empty adapter.
+    pub fn activate(&self, idx: usize) -> Result<(), String> {
+        self.open(idx).map(|_| ())
+    }
+
+    /// The `idx`-th mount's adapter, opened on first use; a failed
+    /// opener is reported as a refusal and the mount stands empty.
+    fn adapter(&self, m: usize) -> &dyn AstAdapter {
+        match self.open(m) {
+            Ok(a) => a,
+            Err(_) => self.mounts[m].cell.get().expect("set on failure").as_ref(),
+        }
+    }
+
+    fn open(&self, m: usize) -> Result<&dyn AstAdapter, String> {
+        let e = &self.mounts[m];
+        if let Some(a) = e.cell.get() {
+            return Ok(a.as_ref());
+        }
+        let opened = match e.opener.borrow_mut().take() {
+            Some(open) => open(),
+            None => Ok(Box::new(Empty) as Box<dyn AstAdapter>),
+        };
+        match opened {
+            Ok(a) => {
+                let _ = e.cell.set(a);
+                Ok(e.cell.get().expect("just set").as_ref())
+            }
+            Err(err) => {
+                quarb::record_refusal(format!("mount '{}': {err}", e.name));
+                let _ = e.cell.set(Box::new(Empty));
+                Err(err)
+            }
+        }
+    }
+
+    /// The adapter of an active mount; `None` while latent.
+    fn active(&self, m: usize) -> Option<&dyn AstAdapter> {
+        self.mounts[m].cell.get().map(|a| a.as_ref())
     }
 
     /// Which mount a node belongs to, with the inner id — `None` for
-    /// the synthetic root.
+    /// the synthetic root. A latent mount's stand-in root resolves
+    /// to the real one, opening the mount.
     pub fn decode(&self, node: NodeId) -> Option<(usize, NodeId)> {
         let m = (node.0 >> SHIFT) as usize;
         if m == 0 {
             None
         } else {
-            Some((m - 1, NodeId(node.0 & INNER_MASK)))
+            let inner = NodeId(node.0 & INNER_MASK);
+            if inner.0 == ROOT_ALIAS {
+                Some((m - 1, self.adapter(m - 1).root()))
+            } else {
+                Some((m - 1, inner))
+            }
         }
     }
 
@@ -133,19 +318,19 @@ impl AstAdapter for MountAdapter {
     /// built-in table, so the order only decides collisions between
     /// unit-aware mounts' custom namespaces.
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        self.mounts.iter().find_map(|m| m.adapter.unit_scale(expr))
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m))
+            .find_map(|a| a.unit_scale(expr))
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         match self.decode(node) {
-            None => self
-                .mounts
-                .iter()
-                .enumerate()
-                .map(|(m, mount)| self.encode(m, mount.adapter.root()))
+            // Listing the root reaches every mount: each opens.
+            None => (0..self.mounts.len())
+                .map(|m| self.encode(m, self.adapter(m).root()))
                 .collect(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .children(inner)
                 .into_iter()
                 .map(|c| self.encode(m, c))
@@ -158,28 +343,30 @@ impl AstAdapter for MountAdapter {
     fn child_host(&self, node: NodeId) -> NodeId {
         match self.decode(node) {
             None => node,
-            Some((m, inner)) => self.encode(m, self.mounts[m].adapter.child_host(inner)),
+            Some((m, inner)) => self.encode(m, self.adapter(m).child_host(inner)),
         }
     }
 
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
         match self.decode(node) {
             None => Vec::new(),
-            Some((m, inner)) => self.mounts[m].adapter.properties(inner),
+            Some((m, inner)) => self.adapter(m).properties(inner),
         }
     }
 
     /// The walk is open when every mount opens to it.
     fn walks_for_references(&self) -> bool {
-        self.mounts.iter().all(|m| m.adapter.walks_for_references())
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m))
+            .all(|a| a.walks_for_references())
     }
     /// Within one mount its own declarations answer; across mounts
     /// only a reference property of the source's own can reach.
     fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
         let (m, s) = self.decode(source)?;
         match self.decode(target) {
-            Some((n, t)) if n == m => self.mounts[m].adapter.can_refer_to(s, t),
-            _ => self.mounts[m].adapter.ref_property(s).map(|_| true),
+            Some((n, t)) if n == m => self.adapter(m).can_refer_to(s, t),
+            _ => self.adapter(m).ref_property(s).map(|_| true),
         }
     }
     fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
@@ -187,12 +374,14 @@ impl AstAdapter for MountAdapter {
             return Vec::new();
         };
         match self.decode(target) {
-            Some((n, t)) if n == m => self.mounts[m].adapter.reference_properties(s, t),
-            _ => self.mounts[m].adapter.ref_property(s).into_iter().collect(),
+            Some((n, t)) if n == m => self.adapter(m).reference_properties(s, t),
+            _ => self.adapter(m).ref_property(s).into_iter().collect(),
         }
     }
     fn resolves_references(&self) -> bool {
-        self.mounts.iter().any(|m| m.adapter.resolves_references())
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m))
+            .any(|a| a.resolves_references())
     }
     /// A scope inside the target's own mount (`/db/books/*`) is the
     /// mount's to answer, under its own path.
@@ -210,14 +399,14 @@ impl AstAdapter for MountAdapter {
         if !rest.starts_with('/') {
             return None;
         }
-        let v = self.mounts[m]
-            .adapter
+        let v = self
+            .adapter(m)
             .index_referrers(rest, property, label, inner)?;
         Some(v.into_iter().map(|t| self.encode(m, t)).collect())
     }
     fn reverse_label(&self, target: NodeId) -> Option<String> {
         let (m, inner) = self.decode(target)?;
-        self.mounts[m].adapter.reverse_label(inner)
+        self.adapter(m).reverse_label(inner)
     }
     /// Every mount's own target is an identity of its root,
     /// canonicalized: a file's absolute path, a directory as a base
@@ -227,44 +416,49 @@ impl AstAdapter for MountAdapter {
     fn tree_identities(&self) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         for (m, mount) in self.mounts.iter().enumerate() {
-            let root = self.encode(m, mount.adapter.root());
+            // A latent mount answers from its declaration, its root
+            // the stand-in that opens it when touched.
+            let active = self.active(m);
+            let root = match active {
+                Some(a) => self.encode(m, a.root()),
+                None => self.encode(m, NodeId(ROOT_ALIAS)),
+            };
             if let Some(target) = mount.target.as_deref()
                 && let Some(identity) = mount_identity(target)
             {
                 out.push((identity, root));
             }
-            out.extend(
-                mount
-                    .adapter
-                    .tree_identities()
-                    .into_iter()
-                    .map(|(i, n)| (i, self.encode(m, n))),
-            );
+            out.extend(mount.identities.iter().map(|i| (i.clone(), root)));
+            if let Some(a) = active {
+                out.extend(
+                    a.tree_identities()
+                        .into_iter()
+                        .map(|(i, n)| (i, self.encode(m, n))),
+                );
+            }
         }
         out
     }
     fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
         self.decode(node)
-            .is_some_and(|(m, inner)| self.mounts[m].adapter.resolve_needs_label(inner, property))
+            .is_some_and(|(m, inner)| self.adapter(m).resolve_needs_label(inner, property))
     }
     fn property_names(&self, node: NodeId) -> Vec<String> {
         match self.decode(node) {
-            Some((m, inner)) => self.mounts[m].adapter.property_names(inner),
+            Some((m, inner)) => self.adapter(m).property_names(inner),
             None => Vec::new(),
         }
     }
 
     /// Every mount's non-tree nodes, mount by mount.
     fn non_tree_nodes(&self) -> Vec<NodeId> {
-        self.mounts
-            .iter()
-            .enumerate()
-            .flat_map(|(m, mount)| {
-                mount
-                    .adapter
-                    .non_tree_nodes()
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m).map(|a| (m, a)))
+            .flat_map(|(m, a)| {
+                a.non_tree_nodes()
                     .into_iter()
                     .map(move |n| self.encode(m, n))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -273,15 +467,13 @@ impl AstAdapter for MountAdapter {
     /// by mount name — matching what [`name`](Self::name) reports.
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         match self.decode(node) {
-            None => self
-                .mounts
-                .iter()
-                .enumerate()
-                .filter(|(_, mount)| mount.name == name)
-                .map(|(m, mount)| self.encode(m, mount.adapter.root()))
+            // A hop by name reaches that mount alone: it opens.
+            None => (0..self.mounts.len())
+                .filter(|&m| self.mounts[m].name == name)
+                .map(|m| self.encode(m, self.adapter(m).root()))
                 .collect(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .children_named(inner, name)
                 .into_iter()
                 .map(|c| self.encode(m, c))
@@ -291,44 +483,44 @@ impl AstAdapter for MountAdapter {
 
     fn name(&self, node: NodeId) -> Option<String> {
         let (m, inner) = self.decode(node)?;
-        let mount = &self.mounts[m];
-        if inner == mount.adapter.root() {
-            Some(mount.name.clone())
+        let a = self.adapter(m);
+        if inner == a.root() {
+            Some(self.mounts[m].name.clone())
         } else {
-            mount.adapter.name(inner)
+            a.name(inner)
         }
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         let (m, inner) = self.decode(node)?;
-        let mount = &self.mounts[m];
-        if inner == mount.adapter.root() {
+        let a = self.adapter(m);
+        if inner == a.root() {
             Some(NodeId(0))
         } else {
-            mount.adapter.parent(inner).map(|p| self.encode(m, p))
+            a.parent(inner).map(|p| self.encode(m, p))
         }
     }
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match self.decode(node) {
             None => Vec::new(),
-            Some((m, inner)) => self.mounts[m].adapter.traits(inner),
+            Some((m, inner)) => self.adapter(m).traits(inner),
         }
     }
 
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.property(inner, name)
+        self.adapter(m).property(inner, name)
     }
 
     fn default_value(&self, node: NodeId) -> Option<Value> {
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.default_value(inner)
+        self.adapter(m).default_value(inner)
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.metadata(inner, key)
+        self.adapter(m).metadata(inner, key)
     }
 
     /// Per node, because each mount brings its own list: a git
@@ -336,7 +528,7 @@ impl AstAdapter for MountAdapter {
     /// nothing.
     fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
         match self.decode(node) {
-            Some((m, inner)) => self.mounts[m].adapter.aliased_metadata(inner),
+            Some((m, inner)) => self.adapter(m).aliased_metadata(inner),
             None => &[],
         }
     }
@@ -344,8 +536,8 @@ impl AstAdapter for MountAdapter {
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         match self.decode(node) {
             None => Vec::new(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .links(inner)
                 .into_iter()
                 .map(|(l, t)| (l, self.encode(m, t)))
@@ -356,8 +548,8 @@ impl AstAdapter for MountAdapter {
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         match self.decode(node) {
             None => Vec::new(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .backlinks(inner)
                 .into_iter()
                 .map(|(l, s)| (l, self.encode(m, s)))
@@ -379,14 +571,13 @@ impl AstAdapter for MountAdapter {
         if m != mt {
             return None;
         }
-        self.mounts[m].adapter.link_property(src, label, tgt, name)
+        self.adapter(m).link_property(src, label, tgt, name)
     }
 
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let (m, inner) = self.decode(node)?;
         // Resolution stays within the node's own mount.
-        self.mounts[m]
-            .adapter
+        self.adapter(m)
             .resolve(inner, property, hint)
             .map(|t| self.encode(m, t))
     }
@@ -400,34 +591,32 @@ impl AstAdapter for MountAdapter {
         // The identifier is document-external by definition — no
         // id translation, plain delegation to the node's mount.
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.external_ref(inner, property, hint)
+        self.adapter(m).external_ref(inner, property, hint)
     }
 
     fn ref_property(&self, node: NodeId) -> Option<String> {
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.ref_property(inner)
+        self.adapter(m).ref_property(inner)
     }
 
     fn ref_label(&self, node: NodeId, property: &str) -> Option<String> {
         let (m, inner) = self.decode(node)?;
-        self.mounts[m].adapter.ref_label(inner, property)
+        self.adapter(m).ref_label(inner, property)
     }
 
     fn resolve_fragment(&self, node: NodeId, fragment: &str) -> Option<NodeId> {
         // The fragment lands within the node's own mount.
         let (m, inner) = self.decode(node)?;
-        self.mounts[m]
-            .adapter
+        self.adapter(m)
             .resolve_fragment(inner, fragment)
             .map(|t| self.encode(m, t))
     }
 
     /// The first mount holding a document under `id` answers.
     fn document_by_ref(&self, id: &str) -> Option<NodeId> {
-        self.mounts
-            .iter()
-            .enumerate()
-            .find_map(|(m, mount)| mount.adapter.document_by_ref(id).map(|t| self.encode(m, t)))
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m).map(|a| (m, a)))
+            .find_map(|(m, a)| a.document_by_ref(id).map(|t| self.encode(m, t)))
     }
 
     /// A reverse index answers within the node's own mount; the
@@ -439,15 +628,13 @@ impl AstAdapter for MountAdapter {
         hint: Option<&str>,
     ) -> Option<Vec<NodeId>> {
         let (m, inner) = self.decode(node)?;
-        let v = self.mounts[m]
-            .adapter
-            .reverse_resolve(inner, property, hint)?;
+        let v = self.adapter(m).reverse_resolve(inner, property, hint)?;
         Some(v.into_iter().map(|t| self.encode(m, t)).collect())
     }
 
     fn descendants_named(&self, node: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
         let (m, inner) = self.decode(node)?;
-        let v = self.mounts[m].adapter.descendants_named(inner, name)?;
+        let v = self.adapter(m).descendants_named(inner, name)?;
         Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
     }
 
@@ -459,16 +646,59 @@ impl AstAdapter for MountAdapter {
         value: &Value,
     ) -> Option<Vec<(NodeId, usize)>> {
         let (m, inner) = self.decode(node)?;
-        let v = self.mounts[m]
-            .adapter
+        let v = self
+            .adapter(m)
             .descendants_where(inner, name, property, value)?;
         Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
+    }
+
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        // The mount root's children are the mounts themselves.
+        let Some((m, inner)) = self.decode(from) else {
+            return quarb::adapter::select_by_hooks(self, from, plan);
+        };
+        let sel = self.adapter(m).select(inner, plan)?;
+        Some(quarb::Selection {
+            nodes: sel
+                .nodes
+                .into_iter()
+                .map(|(t, d)| (self.encode(m, t), d))
+                .collect(),
+            applied: sel.applied,
+        })
+    }
+
+    /// The scope names the mount first; an inactive mount cannot
+    /// say (its catalog is not open), and the plan counts the
+    /// conjuncts as the engine's.
+    fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
+        let (first, rest) = scope.split_first()?;
+        let m = (0..self.mounts.len()).find(|&m| self.mounts[m].name == *first)?;
+        self.active(m)?.select_plan(rest, plan)
+    }
+
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let (first, rest) = scope.split_first()?;
+        let m = (0..self.mounts.len()).find(|&m| self.mounts[m].name == *first)?;
+        self.active(m)?.estimate(rest, plan)
+    }
+
+    fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        // The scope names the mount first: `/mount/rest…`.
+        let rest = scope.strip_prefix('/')?;
+        let m = (0..self.mounts.len()).find(|&m| {
+            rest.strip_prefix(self.mounts[m].name.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+        })?;
+        let rest = &rest[self.mounts[m].name.len()..];
+        let v = self.adapter(m).index_lookup(rest, property, value)?;
+        Some(v.into_iter().map(|t| self.encode(m, t)).collect())
     }
 
     fn has_node(&self, node: NodeId) -> bool {
         match self.decode(node) {
             None => node == self.root(),
-            Some((m, inner)) => self.mounts[m].adapter.has_node(inner),
+            Some((m, inner)) => self.adapter(m).has_node(inner),
         }
     }
 
@@ -477,8 +707,8 @@ impl AstAdapter for MountAdapter {
     /// adapter decides; the mount's root answers by its mount name.
     fn answers_to(&self, node: NodeId, name: &str) -> bool {
         match self.decode(node) {
-            Some((m, inner)) if inner != self.mounts[m].adapter.root() => {
-                self.mounts[m].adapter.answers_to(inner, name)
+            Some((m, inner)) if inner != self.adapter(m).root() => {
+                self.adapter(m).answers_to(inner, name)
             }
             _ => self.name(node).as_deref() == Some(name),
         }
@@ -487,7 +717,7 @@ impl AstAdapter for MountAdapter {
     fn has_trait(&self, node: NodeId, name: &str) -> bool {
         match self.decode(node) {
             None => false,
-            Some((m, inner)) => self.mounts[m].adapter.has_trait(inner, name),
+            Some((m, inner)) => self.adapter(m).has_trait(inner, name),
         }
     }
 
@@ -500,7 +730,7 @@ impl AstAdapter for MountAdapter {
         }
         for (m, inner) in by_mount.into_iter().enumerate() {
             if !inner.is_empty() {
-                self.mounts[m].adapter.prefetch_links(&inner, dir);
+                self.adapter(m).prefetch_links(&inner, dir);
             }
         }
     }
@@ -508,9 +738,9 @@ impl AstAdapter for MountAdapter {
     fn quantifier_bound(&self) -> usize {
         // A query spans every mount: the most permissive inner bound
         // must not be silently cut.
-        self.mounts
-            .iter()
-            .map(|m| m.adapter.quantifier_bound())
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m))
+            .map(|a| a.quantifier_bound())
             .max()
             .unwrap_or(32)
     }
@@ -522,8 +752,8 @@ impl AstAdapter for MountAdapter {
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         match self.decode(node) {
             None => quarb::Provenance::default(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .provenance(inner)
                 .or(self.source_fill(m, inner)),
         }
@@ -532,8 +762,8 @@ impl AstAdapter for MountAdapter {
     fn provenance_list(&self, node: NodeId) -> quarb::ProvenanceList {
         match self.decode(node) {
             None => quarb::ProvenanceList::default(),
-            Some((m, inner)) => self.mounts[m]
-                .adapter
+            Some((m, inner)) => self
+                .adapter(m)
                 .provenance_list(inner)
                 .or(self.source_fill(m, inner)),
         }
@@ -558,7 +788,7 @@ impl MountAdapter {
             .map(|d| (d.as_secs() as i64, d.subsec_nanos(), Some(0)));
         quarb::Provenance {
             source: mount.target.clone().or_else(|| Some(mount.name.clone())),
-            path: Some(quarb::name_path(&*mount.adapter, inner)),
+            path: Some(quarb::name_path(self.adapter(m), inner)),
             instant_from: instant.map(|_| quarb::InstantFrom::Source),
             instant,
             dpid: None,

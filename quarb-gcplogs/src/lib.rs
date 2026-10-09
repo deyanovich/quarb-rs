@@ -50,6 +50,7 @@
 
 use quarb::temporal::parse_iso;
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_logs::{Field, decode_json, is_duration, percent_decode, str_value};
 use serde_json::Value as Json;
 use std::cell::RefCell;
 
@@ -63,23 +64,6 @@ pub enum GclError {
          a mount must be bounded — give it since= and/or limit=)"
     )]
     Target(String),
-}
-
-/// One decoded payload node: a JSON attribute tree or a scalar.
-#[derive(Clone)]
-enum Field {
-    Scalar(Value),
-    Map(Vec<(String, Field)>),
-    List(Vec<Field>),
-}
-
-impl Field {
-    fn scalar(&self) -> Option<Value> {
-        match self {
-            Field::Scalar(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
 }
 
 /// One log entry, decoded from the API's JSON.
@@ -162,34 +146,6 @@ fn freshness_secs(s: &str) -> Option<i64> {
         "d" => n * 86_400,
         _ => return None,
     })
-}
-
-/// A gcloud freshness duration: `30m`, `1h`, `2d`.
-fn is_duration(s: &str) -> bool {
-    s.len() >= 2
-        && s.ends_with(['s', 'm', 'h', 'd'])
-        && s[..s.len() - 1].chars().all(|c| c.is_ascii_digit())
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
-                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            )
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The parsed mount target.
@@ -291,35 +247,6 @@ fn compose_filter(t: &Target) -> String {
         clauses.push(format!("timestamp<=\"{u}\""));
     }
     clauses.join(" AND ")
-}
-
-fn decode_json(v: &Json) -> Field {
-    match v {
-        Json::Null => Field::Scalar(Value::Null),
-        Json::Bool(b) => Field::Scalar(Value::Bool(*b)),
-        Json::Number(n) => Field::Scalar(match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        }),
-        Json::String(s) => Field::Scalar(str_value(s)),
-        Json::Array(a) => Field::List(a.iter().map(decode_json).collect()),
-        Json::Object(o) => Field::Map(o.iter().map(|(k, v)| (k.clone(), decode_json(v))).collect()),
-    }
-}
-
-/// Full RFC 3339 timestamps become instants; other strings stay
-/// strings.
-fn str_value(s: &str) -> Value {
-    if s.contains('T')
-        && let Some((secs, nanos, offset_min)) = parse_iso(s)
-    {
-        return Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        };
-    }
-    Value::Str(s.to_string())
 }
 
 fn str_pairs(v: Option<&Json>) -> Vec<(String, String)> {

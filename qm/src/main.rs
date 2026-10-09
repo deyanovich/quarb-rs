@@ -339,12 +339,14 @@ fn main() -> anyhow::Result<()> {
             let since = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            let nowed = quarb::WithNow {
-                inner: &a,
-                secs: since.as_secs() as i64,
-                nanos: since.subsec_nanos(),
+            let run = quarb::Run {
+                now: Some((since.as_secs() as i64, since.subsec_nanos())),
+                ..Default::default()
             };
-            match quarb::run(&q, &nowed)? {
+            match quarb::Query::parse_with(&q, &quarb::Defs::default(), &a, &run)?
+                .run(&a, &run)?
+                .result
+            {
                 QueryResult::Values(vs) => {
                     for v in vs {
                         println!("{v}");

@@ -40,6 +40,7 @@
 
 use quarb::temporal::parse_iso;
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_logs::{Field, decode_json, duration_ms, percent_decode};
 use serde_json::Value as Json;
 use serde_json::json;
 use std::cell::RefCell;
@@ -54,23 +55,6 @@ pub enum CwlError {
          a mount must be bounded — give it since= and/or limit=)"
     )]
     Target(String),
-}
-
-/// One decoded payload node: a JSON attribute tree or a scalar.
-#[derive(Clone)]
-enum Field {
-    Scalar(Value),
-    Map(Vec<(String, Field)>),
-    List(Vec<Field>),
-}
-
-impl Field {
-    fn scalar(&self) -> Option<Value> {
-        match self {
-            Field::Scalar(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
 }
 
 /// One log event, decoded.
@@ -123,41 +107,6 @@ struct Target {
     until_ms: Option<i64>,
     filter: Option<String>,
     limit: Option<u64>,
-}
-
-/// A duration suffix: `30m`, `1h`, `2d`.
-fn duration_ms(s: &str) -> Option<i64> {
-    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
-    let n: i64 = num.parse().ok()?;
-    let mult = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => return None,
-    };
-    Some(n * mult)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
-                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            )
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parse the target; `region`/`endpoint` come back separately so
@@ -224,35 +173,6 @@ fn parse_target(target: &str) -> Result<(Target, Option<String>, Option<String>)
         param("region"),
         param("endpoint"),
     ))
-}
-
-fn decode_json(v: &Json) -> Field {
-    match v {
-        Json::Null => Field::Scalar(Value::Null),
-        Json::Bool(b) => Field::Scalar(Value::Bool(*b)),
-        Json::Number(n) => Field::Scalar(match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        }),
-        Json::String(s) => Field::Scalar(str_value(s)),
-        Json::Array(a) => Field::List(a.iter().map(decode_json).collect()),
-        Json::Object(o) => Field::Map(o.iter().map(|(k, v)| (k.clone(), decode_json(v))).collect()),
-    }
-}
-
-/// Full RFC 3339 timestamps become instants; other strings stay
-/// strings.
-fn str_value(s: &str) -> Value {
-    if s.contains('T')
-        && let Some((secs, nanos, offset_min)) = parse_iso(s)
-    {
-        return Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        };
-    }
-    Value::Str(s.to_string())
 }
 
 /// Decode one FilterLogEvents event.
@@ -346,7 +266,7 @@ impl CwlAdapter {
             &payload,
             &extra,
         );
-        let mut req = ureq::post(&self.endpoint);
+        let mut req = quarb_http::agent().post(&self.endpoint);
         for (k, v) in &headers {
             if k != "host" {
                 req = req.set(k, v);

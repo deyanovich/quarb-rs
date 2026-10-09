@@ -565,12 +565,7 @@ pub static TR: Names = Names {
 /// `ru`, `ru_RU` alike). The locales shipped, by size of language:
 /// en, zh, es, ar, pt, ru, ja, de, fr, tr, it.
 pub fn names(locale: &str) -> Option<&'static Names> {
-    let lang = locale
-        .trim()
-        .split(['-', '_'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let lang = crate::language(locale);
     Some(match lang.as_str() {
         "en" | "" => &EN,
         "zh" => &ZH,

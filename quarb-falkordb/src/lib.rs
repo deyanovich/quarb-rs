@@ -18,6 +18,7 @@
 //! standard Redis client.
 
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_cypher::{bt, literal as cypher_literal};
 use redis::Value as R;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -71,25 +72,6 @@ fn cell_value(v: &R) -> Value {
         R::SimpleString(s) => Value::Str(s.clone()),
         R::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         other => Value::Str(format!("{other:?}")),
-    }
-}
-
-/// A value as an inline Cypher literal.
-/// A label or property name in backticks, the backtick doubled
-/// inside — the one quoting Cypher's grammar gives an identifier.
-fn bt(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
-
-fn cypher_literal(v: &Value) -> String {
-    match v {
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        other => format!(
-            "'{}'",
-            other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
-        ),
     }
 }
 
@@ -164,6 +146,8 @@ pub struct FalkorAdapter {
     nodes: RefCell<Vec<Node>>,
     by_gid: RefCell<HashMap<i64, NodeId>>,
     edge_props: RefCell<HashMap<(NodeId, String, NodeId), Vec<(String, Value)>>>,
+    /// A node's relationships once read, per direction.
+    edge_cache: quarb_cypher::EdgeCache,
 }
 
 impl FalkorAdapter {
@@ -192,6 +176,7 @@ impl FalkorAdapter {
         let client = redis::Client::open(format!("{scheme}://{hostpart}")).map_err(api)?;
         let conn = client.get_connection().map_err(api)?;
         let adapter = FalkorAdapter {
+            edge_cache: Default::default(),
             conn: RefCell::new(conn),
             graph: graph.to_string(),
             key: key
@@ -323,13 +308,20 @@ impl FalkorAdapter {
 
     /// One node's relationships, outgoing or incoming.
     fn edges(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
+        if let Some(cached) = self.edge_cache.get(node, incoming) {
+            return cached;
+        }
+        let out = self.edges_uncached(node, incoming);
+        self.edge_cache.put(node, incoming, out.clone());
+        out
+    }
+
+    fn edges_uncached(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
         let gid = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Entity { gid, .. } => *gid,
             _ => return Vec::new(),
         };
-        let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
-        let stmt =
-            format!("MATCH (n){arrow}(m) WHERE id(n) = {gid} RETURN r, m ORDER BY type(r), id(m)");
+        let stmt = quarb_cypher::edges_stmt(&format!("id(n) = {gid}"), incoming);
         let rows = quarb::fetched(self.cypher(&stmt), || {
             format!("falkordb: reading the relationships of node {gid}")
         });

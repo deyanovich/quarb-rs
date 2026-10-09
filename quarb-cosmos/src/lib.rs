@@ -202,8 +202,8 @@ impl CosmosAdapter {
         let auth = self.auth(verb, resource_type, resource_link, &date);
         let url = format!("{}/{path}", self.endpoint);
         let mut req = match verb {
-            "POST" => ureq::post(&url),
-            _ => ureq::get(&url),
+            "POST" => quarb_http::agent().post(&url),
+            _ => quarb_http::agent().get(&url),
         };
         req = req
             .set("authorization", &auth)

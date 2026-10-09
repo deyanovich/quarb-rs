@@ -756,6 +756,16 @@ impl QueryArbor {
                     }
                     self.intern(Some("span"), props, Some(parent));
                 }
+                Arg::Named { name, value } => {
+                    self.intern(
+                        Some("option"),
+                        vec![
+                            ("name".to_string(), Value::Str(name.clone())),
+                            ("value".to_string(), value.clone()),
+                        ],
+                        Some(parent),
+                    );
+                }
             }
         }
     }
@@ -1240,17 +1250,6 @@ impl AstAdapter for ExpansionAdapter<'_> {
 
     fn quantifier_bound(&self) -> usize {
         self.data.quantifier_bound()
-    }
-
-    fn allow_shell(&self) -> bool {
-        // A data-aware macro body is evaluated here at expansion
-        // time; its `sh(...)` stage clears the same gate the dataset
-        // carries (the `--allow-shell` flag rides on `self.data`).
-        self.data.allow_shell()
-    }
-
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.data.invocation_instant()
     }
 
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {

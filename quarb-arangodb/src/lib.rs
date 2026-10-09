@@ -219,7 +219,7 @@ impl ArangoAdapter {
     }
 
     fn get(&self, path: &str) -> Result<Json, ArangoError> {
-        let mut req = ureq::get(&format!("{}{path}", self.base));
+        let mut req = quarb_http::agent().get(&format!("{}{path}", self.base));
         if let Some(a) = &self.auth {
             req = req.set("Authorization", a);
         }
@@ -231,7 +231,7 @@ impl ArangoAdapter {
 
     /// Run an AQL query (with bind vars), draining the cursor.
     fn aql(&self, query: &str, binds: Json) -> Result<Vec<Json>, ArangoError> {
-        let mut req = ureq::post(&format!("{}/_api/cursor", self.base));
+        let mut req = quarb_http::agent().post(&format!("{}/_api/cursor", self.base));
         if let Some(a) = &self.auth {
             req = req.set("Authorization", a);
         }
@@ -269,7 +269,7 @@ impl ArangoAdapter {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let mut req = ureq::put(&format!("{}/_api/cursor/{id}", self.base));
+            let mut req = quarb_http::agent().put(&format!("{}/_api/cursor/{id}", self.base));
             if let Some(a) = &self.auth {
                 req = req.set("Authorization", a);
             }

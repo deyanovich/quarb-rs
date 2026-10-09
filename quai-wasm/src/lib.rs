@@ -179,6 +179,7 @@ fn site_doc(text: &str) -> Result<Doc, String> {
     Ok(Doc::Boxed(
         quarb_session::doc::Dyn(Box::new(quarb_mount::Shared(a))),
         Box::new(move |n| r.locator(n)),
+        "web",
     ))
 }
 

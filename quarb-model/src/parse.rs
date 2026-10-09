@@ -997,3 +997,66 @@ mod tests {
         assert!(parse_model("rel /errors/error -> /deploys/deploy;").is_err());
     }
 }
+
+/// The first literal segment of a path (`/books/*` → `books`,
+/// `books` → `books`); `None` for an unanchored search (`//x`) or
+/// a wildcard.
+fn first_segment(path: &str) -> Option<String> {
+    let t = path.trim();
+    if t.starts_with("//") {
+        return None;
+    }
+    let t = t.trim_start_matches('/');
+    let end = t
+        .find(|c: char| matches!(c, '/' | '[' | ':' | '(' | '<' | '>' | '*' | ' ' | '-'))
+        .unwrap_or(t.len());
+    let seg = &t[..end];
+    (!seg.is_empty()).then(|| seg.to_string())
+}
+
+impl Model {
+    /// The mounts a query over `named` may reach through the
+    /// model's declarations, named included: a `ref` from a scope
+    /// in one mount to a container or path in another, a `rel`
+    /// from a source to a target, and every mount a `tree`
+    /// declaration stands in (a reference by identity may come from
+    /// anywhere). Pure: a replay plan prefetches these before the
+    /// cells run. Unanchored declarations (`//x`) add nothing they
+    /// cannot name.
+    pub fn reachable_roots(&self, named: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = named.iter().map(|s| s.to_string()).collect();
+        let mut edges: Vec<(Option<String>, Option<String>)> = Vec::new();
+        for r in &self.refs {
+            let to = first_segment(&r.path).or_else(|| first_segment(&r.container));
+            edges.push((first_segment(&r.scope), to));
+        }
+        for r in &self.rels {
+            edges.push((first_segment(&r.source), first_segment(&r.target)));
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (from, to) in &edges {
+                let reached = match from {
+                    Some(f) => out.contains(f),
+                    None => true,
+                };
+                if reached
+                    && let Some(t) = to
+                    && !out.contains(t)
+                {
+                    out.push(t.clone());
+                    changed = true;
+                }
+            }
+        }
+        for t in &self.trees {
+            if let Some(m) = first_segment(&t.path)
+                && !out.contains(&m)
+            {
+                out.push(m);
+            }
+        }
+        out
+    }
+}

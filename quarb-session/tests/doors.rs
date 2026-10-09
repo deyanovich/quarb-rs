@@ -33,7 +33,7 @@ fn fixture() -> std::path::PathBuf {
 }
 
 fn count(doc: &Doc, q: &str) -> String {
-    let Doc::Boxed(a, _) = doc else {
+    let Doc::Boxed(a, _, _) = doc else {
         panic!("a boxed door");
     };
     match quarb::run(q, a).unwrap() {
@@ -57,7 +57,8 @@ fn the_session_opens_lines_web_and_query_files() {
     let query = open(dir.join("q.quarb").display().to_string());
     assert_eq!(count(&query, "//* @| count"), count(&query, "//* @| count"));
     assert_ne!(count(&query, "//* @| count"), "0");
-    // A site store is the command line's run loop: refused by name.
+    // A site store opens through the same door as on the command
+    // line; a database that is not one is refused naming the store.
     let err = Doc::open(
         Path::new(&format!("web:{}", dir.join("site.db").display())),
         &Options::default(),
@@ -65,5 +66,5 @@ fn the_session_opens_lines_web_and_query_files() {
     .err()
     .map(|e| e.to_string())
     .unwrap_or_default();
-    assert!(err.contains("web:"), "{err}");
+    assert!(err.contains("site store"), "{err}");
 }

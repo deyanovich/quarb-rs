@@ -38,6 +38,7 @@
 //! id without it, `/Person/ada` with `?key=name`).
 
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_cypher::bt;
 use serde_json::Value as Json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -163,7 +164,7 @@ impl Client {
         let body = serde_json::json!({
             "statements": [{ "statement": stmt, "parameters": params }]
         });
-        let mut req = ureq::post(&self.url);
+        let mut req = quarb_http::agent().post(&self.url);
         if let Some(a) = &self.auth {
             req = req.set("Authorization", a);
         }
@@ -196,11 +197,6 @@ impl Client {
             })
             .unwrap_or_default())
     }
-}
-
-/// A label name in backticks, backticks doubled.
-fn bt(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
 }
 
 /// A JSON result cell as a Quarb value. Maps (points, temporal
@@ -282,6 +278,10 @@ pub struct Neo4jAdapter {
     /// (source, type, target) → [(name, value)]. Parallel edges
     /// collapse to the first fetched (documented limit).
     edge_props: RefCell<HashMap<(NodeId, String, NodeId), Vec<(String, Value)>>>,
+    /// A node's relationships once read, per direction: `edges`
+    /// answers from here, and `prefetch_links` fills it for a whole
+    /// hop in one statement instead of one per node.
+    edge_cache: RefCell<HashMap<(NodeId, bool), Vec<(String, NodeId)>>>,
 }
 
 impl Neo4jAdapter {
@@ -341,6 +341,7 @@ impl Neo4jAdapter {
             nodes: RefCell::new(nodes),
             by_eid: RefCell::new(HashMap::new()),
             edge_props: RefCell::new(HashMap::new()),
+            edge_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -416,6 +417,9 @@ impl Neo4jAdapter {
     /// One node's relationships, outgoing or incoming, as
     /// `(type, interned target)` pairs.
     fn edges(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
+        if let Some(cached) = self.edge_cache.borrow().get(&(node, incoming)) {
+            return cached.clone();
+        }
         let eid = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Entity { eid, .. } => eid.clone(),
             _ => return Vec::new(),
@@ -426,11 +430,14 @@ impl Neo4jAdapter {
              RETURN type(r), properties(r), {} ORDER BY type(r), id(m)",
             Self::NODE_ROW
         );
-        let rows = quarb::fetched(
+        let Some(rows) = quarb::fetched_opt(
             self.client.cypher(&stmt, serde_json::json!({ "eid": eid })),
             || format!("neo4j: reading the relationships of {eid}"),
-        );
-        rows.iter()
+        ) else {
+            return Vec::new();
+        };
+        let out: Vec<(String, NodeId)> = rows
+            .iter()
             .filter_map(|row| {
                 let label = row.first()?.as_str()?.to_string();
                 let other = self.intern(&row[2..])?;
@@ -450,7 +457,89 @@ impl Neo4jAdapter {
                     .or_insert(props);
                 Some((label, other))
             })
-            .collect()
+            .collect();
+        self.edge_cache
+            .borrow_mut()
+            .insert((node, incoming), out.clone());
+        out
+    }
+
+    /// The relationships of many nodes in one statement per 500,
+    /// into the edge cache — the hop that follows reads them
+    /// without a round trip per node.
+    fn prefetch_edges(&self, nodes: &[NodeId], incoming: bool) {
+        let mut wanted: Vec<(NodeId, String)> = Vec::new();
+        {
+            let cache = self.edge_cache.borrow();
+            let all = self.nodes.borrow();
+            for &n in nodes {
+                if cache.contains_key(&(n, incoming)) {
+                    continue;
+                }
+                if let Kind::Entity { eid, .. } = &all[n.0 as usize].kind {
+                    wanted.push((n, eid.clone()));
+                }
+            }
+        }
+        if wanted.len() < 2 {
+            return;
+        }
+        let arrow = if incoming { "<-[r]-" } else { "-[r]->" };
+        let stmt = format!(
+            "MATCH (n) WHERE elementId(n) IN $eids MATCH (n){arrow}(m) \
+             RETURN elementId(n), type(r), properties(r), {} \
+             ORDER BY elementId(n), type(r), id(m)",
+            Self::NODE_ROW
+        );
+        for chunk in wanted.chunks(500) {
+            let eids: Vec<&str> = chunk.iter().map(|(_, e)| e.as_str()).collect();
+            let Some(rows) = quarb::fetched_opt(
+                self.client
+                    .cypher(&stmt, serde_json::json!({ "eids": eids })),
+                || "neo4j: reading the relationships of a hop".to_string(),
+            ) else {
+                return;
+            };
+            let by_node: HashMap<&str, NodeId> =
+                chunk.iter().map(|(n, e)| (e.as_str(), *n)).collect();
+            let mut found: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
+            for row in &rows {
+                let (Some(src), Some(label)) = (
+                    row.first().and_then(|v| v.as_str()),
+                    row.get(1).and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                let Some(&node) = by_node.get(src) else {
+                    continue;
+                };
+                let Some(other) = self.intern(&row[3..]) else {
+                    continue;
+                };
+                let (source, target) = if incoming {
+                    (other, node)
+                } else {
+                    (node, other)
+                };
+                let props: Vec<(String, Value)> = row
+                    .get(2)
+                    .and_then(|v| v.as_object())
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), cell_value(v))).collect())
+                    .unwrap_or_default();
+                self.edge_props
+                    .borrow_mut()
+                    .entry((source, label.to_string(), target))
+                    .or_insert(props);
+                found
+                    .entry(node)
+                    .or_default()
+                    .push((label.to_string(), other));
+            }
+            let mut cache = self.edge_cache.borrow_mut();
+            for (n, _) in chunk {
+                cache.insert((*n, incoming), found.remove(n).unwrap_or_default());
+            }
+        }
     }
 }
 
@@ -581,6 +670,10 @@ impl AstAdapter for Neo4jAdapter {
     /// Incoming relationships as `(type, source)` crosslinks.
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.edges(node, true)
+    }
+
+    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
+        self.prefetch_edges(nodes, matches!(dir, quarb::LinkDir::In));
     }
 
     /// With no label written, a referrer's property is also read as

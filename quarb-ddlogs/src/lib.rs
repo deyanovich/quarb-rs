@@ -34,6 +34,7 @@
 
 use quarb::temporal::parse_iso;
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_logs::{Field, decode_json, duration_secs, is_duration, percent_decode, str_value};
 use serde_json::Value as Json;
 use serde_json::json;
 use std::cell::RefCell;
@@ -48,23 +49,6 @@ pub enum DdlError {
          a mount must be bounded — give it since= and/or limit=)"
     )]
     Target(String),
-}
-
-/// One decoded attribute node: a JSON tree or a scalar.
-#[derive(Clone)]
-enum Field {
-    Scalar(Value),
-    Map(Vec<(String, Field)>),
-    List(Vec<Field>),
-}
-
-impl Field {
-    fn scalar(&self) -> Option<Value> {
-        match self {
-            Field::Scalar(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
 }
 
 /// One log event, decoded.
@@ -120,47 +104,6 @@ fn status_rank(s: &str) -> i64 {
         "debug" | "trace" => 100,
         _ => 0,
     }
-}
-
-/// A duration suffix in seconds (`30m` → 1800), for resolving a
-/// relative window against the pinned invocation instant.
-fn duration_secs(s: &str) -> Option<i64> {
-    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
-    let n: i64 = num.parse().ok()?;
-    Some(match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
-        _ => return None,
-    })
-}
-
-fn is_duration(s: &str) -> bool {
-    s.len() >= 2
-        && s.ends_with(['s', 'm', 'h', 'd'])
-        && s[..s.len() - 1].chars().all(|c| c.is_ascii_digit())
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
-                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            )
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 struct Target {
@@ -220,33 +163,6 @@ fn parse_target(target: &str) -> Result<Target, DdlError> {
         site: param("site"),
         endpoint: param("endpoint"),
     })
-}
-
-fn decode_json(v: &Json) -> Field {
-    match v {
-        Json::Null => Field::Scalar(Value::Null),
-        Json::Bool(b) => Field::Scalar(Value::Bool(*b)),
-        Json::Number(n) => Field::Scalar(match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        }),
-        Json::String(s) => Field::Scalar(str_value(s)),
-        Json::Array(a) => Field::List(a.iter().map(decode_json).collect()),
-        Json::Object(o) => Field::Map(o.iter().map(|(k, v)| (k.clone(), decode_json(v))).collect()),
-    }
-}
-
-fn str_value(s: &str) -> Value {
-    if s.contains('T')
-        && let Some((secs, nanos, offset_min)) = parse_iso(s)
-    {
-        return Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        };
-    }
-    Value::Str(s.to_string())
 }
 
 /// Decode one v2 log event.
@@ -386,7 +302,8 @@ impl DdlAdapter {
                 page["cursor"] = json!(c);
             }
             let body = json!({ "filter": filter, "page": page, "sort": "timestamp" });
-            let resp = ureq::post(&url)
+            let resp = quarb_http::agent()
+                .post(&url)
                 .set("DD-API-KEY", api_key.trim())
                 .set("DD-APPLICATION-KEY", app_key.trim())
                 .set("Content-Type", "application/json")

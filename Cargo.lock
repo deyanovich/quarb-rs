@@ -4052,7 +4052,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4118,6 +4118,7 @@ dependencies = [
  "quarb-neo4j",
  "quarb-neptune",
  "quarb-objstore",
+ "quarb-open",
  "quarb-oracle",
  "quarb-pdf",
  "quarb-postgres",
@@ -4155,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "quai"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4171,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "quai-wasm"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -4185,12 +4186,13 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "colligo",
  "encoding_rs",
  "globset",
  "kaiv 0.15.0",
+ "quarb-time",
  "quarb-trace",
  "quick-xml 0.39.4",
  "regex",
@@ -4206,9 +4208,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-age"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-cypher",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -4217,9 +4220,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-arangodb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4227,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-archive"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "bzip2",
  "flate2",
@@ -4246,10 +4250,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-athena"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-aws",
+ "quarb-http",
  "quarb-relational",
  "serde_json",
  "thiserror 2.0.21",
@@ -4258,7 +4263,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-atrep"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "atrep",
  "quarb",
@@ -4268,16 +4273,18 @@ dependencies = [
 
 [[package]]
 name = "quarb-aws"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-azlogs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
+ "quarb-logs",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4285,9 +4292,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "quarb-relational",
  "quarb-sql",
  "serde_json",
@@ -4297,7 +4305,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cbor"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ciborium",
  "quarb",
@@ -4308,9 +4316,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-cflogs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
+ "quarb-logs",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4318,7 +4328,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-tree-sitter",
@@ -4327,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code-lsp"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4343,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -4368,9 +4378,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-cosmos"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4378,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-csv"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "csv",
  "quarb",
@@ -4387,20 +4398,30 @@ dependencies = [
 
 [[package]]
 name = "quarb-cwlogs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-aws",
+ "quarb-http",
+ "quarb-logs",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
 ]
 
 [[package]]
-name = "quarb-datastore"
-version = "0.33.0"
+name = "quarb-cypher"
+version = "0.34.0"
 dependencies = [
  "quarb",
+]
+
+[[package]]
+name = "quarb-datastore"
+version = "0.34.0"
+dependencies = [
+ "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4408,9 +4429,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-ddlogs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
+ "quarb-logs",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4418,7 +4441,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "duckdb",
  "quarb",
@@ -4429,10 +4452,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-dynamodb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-aws",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4440,18 +4464,20 @@ dependencies = [
 
 [[package]]
 name = "quarb-falkordb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-cypher",
  "redis",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-firebase"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4459,9 +4485,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-firestore"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4469,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-fs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -4478,16 +4505,17 @@ dependencies = [
 
 [[package]]
 name = "quarb-gcplogs"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-logs",
  "serde_json",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "quarb-git"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.21",
@@ -4495,7 +4523,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-github"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4505,7 +4533,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gitlab"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4515,9 +4543,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "quarb-relational",
  "serde_json",
  "thiserror 2.0.21",
@@ -4526,7 +4555,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-html"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "scraper",
@@ -4534,8 +4563,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-http"
+version = "0.34.0"
+dependencies = [
+ "ureq",
+]
+
+[[package]]
 name = "quarb-imap"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-maildir",
@@ -4544,7 +4580,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-jq"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-json",
@@ -4553,7 +4589,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4561,7 +4597,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kafka"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "rskafka",
@@ -4574,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "kaiv 0.15.0",
  "quarb",
@@ -4582,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kubernetes"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4592,11 +4628,12 @@ dependencies = [
 
 [[package]]
 name = "quarb-kuzu"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "cxx-build",
  "kuzu",
  "quarb",
+ "quarb-cypher",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -4604,7 +4641,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-ldap"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ldap3",
  "quarb",
@@ -4613,14 +4650,22 @@ dependencies = [
 
 [[package]]
 name = "quarb-lines"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
+name = "quarb-logs"
+version = "0.34.0"
+dependencies = [
+ "quarb",
+ "serde_json",
+]
+
+[[package]]
 name = "quarb-lsp"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4631,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.21",
@@ -4639,7 +4684,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-markdown"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
@@ -4647,10 +4692,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-memgraph"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "neo4rs",
  "quarb",
+ "quarb-cypher",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -4658,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-metatheca"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "metatheca",
  "quarb",
@@ -4669,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-model"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "kaiv 0.15.0",
  "quarb",
@@ -4684,7 +4730,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mongodb"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "mongodb",
  "quarb",
@@ -4693,16 +4739,17 @@ dependencies = [
 
 [[package]]
 name = "quarb-mount"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-csv",
+ "quarb-html",
  "quarb-json",
 ]
 
 [[package]]
 name = "quarb-mssql"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4714,7 +4761,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4725,9 +4772,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-cypher",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4735,10 +4784,12 @@ dependencies = [
 
 [[package]]
 name = "quarb-neptune"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-aws",
+ "quarb-cypher",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4746,10 +4797,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-objstore"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-aws",
+ "quarb-http",
  "quick-xml 0.39.4",
  "serde_json",
  "thiserror 2.0.21",
@@ -4757,139 +4809,65 @@ dependencies = [
 ]
 
 [[package]]
-name = "quarb-oracle"
-version = "0.33.0"
+name = "quarb-open"
+version = "0.34.0"
 dependencies = [
- "oracle",
- "quarb",
- "quarb-relational",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "quarb-pdf"
-version = "0.33.0"
-dependencies = [
- "lopdf",
- "quarb",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "quarb-postgres"
-version = "0.33.0"
-dependencies = [
- "quarb",
- "quarb-relational",
- "thiserror 2.0.21",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
-name = "quarb-py"
-version = "0.33.0"
-dependencies = [
- "pyo3",
+ "anyhow",
  "quarb",
  "quarb-age",
  "quarb-arangodb",
  "quarb-archive",
+ "quarb-athena",
+ "quarb-atrep",
+ "quarb-azlogs",
+ "quarb-bigquery",
+ "quarb-cbor",
+ "quarb-cflogs",
  "quarb-code",
  "quarb-compose",
  "quarb-cosmos",
  "quarb-csv",
+ "quarb-cwlogs",
  "quarb-datastore",
+ "quarb-ddlogs",
+ "quarb-duckdb",
  "quarb-dynamodb",
  "quarb-falkordb",
  "quarb-firebase",
  "quarb-firestore",
  "quarb-fs",
+ "quarb-gcplogs",
  "quarb-git",
  "quarb-github",
  "quarb-gitlab",
  "quarb-gsheet",
  "quarb-html",
- "quarb-jq",
+ "quarb-imap",
  "quarb-json",
  "quarb-kafka",
  "quarb-kaiv",
  "quarb-kubernetes",
+ "quarb-kuzu",
  "quarb-ldap",
+ "quarb-lines",
  "quarb-maildir",
  "quarb-markdown",
  "quarb-memgraph",
  "quarb-metatheca",
+ "quarb-mongodb",
  "quarb-mount",
+ "quarb-mssql",
+ "quarb-mysql",
  "quarb-neo4j",
  "quarb-neptune",
  "quarb-objstore",
+ "quarb-oracle",
+ "quarb-pdf",
  "quarb-postgres",
  "quarb-redis",
+ "quarb-relational",
  "quarb-serve",
  "quarb-sparql",
- "quarb-sql",
- "quarb-sqlite",
- "quarb-text",
- "quarb-text-html",
- "quarb-text-markdown",
- "quarb-toml",
- "quarb-tree-sitter",
- "quarb-xlsx",
- "quarb-xml",
- "quarb-xpath",
- "quarb-yaml",
-]
-
-[[package]]
-name = "quarb-redis"
-version = "0.33.0"
-dependencies = [
- "quarb",
- "redis",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "quarb-relational"
-version = "0.33.0"
-dependencies = [
- "quarb",
- "serde_json",
-]
-
-[[package]]
-name = "quarb-serve"
-version = "0.33.0"
-dependencies = [
- "kaiv 0.15.0",
- "quarb",
- "quarb-json",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "quarb-session"
-version = "0.33.0"
-dependencies = [
- "anyhow",
- "quarb",
- "quarb-archive",
- "quarb-code",
- "quarb-compose",
- "quarb-csv",
- "quarb-fs",
- "quarb-git",
- "quarb-html",
- "quarb-json",
- "quarb-kaiv",
- "quarb-lines",
- "quarb-markdown",
- "quarb-model",
- "quarb-mount",
- "quarb-pdf",
  "quarb-sqlite",
  "quarb-text",
  "quarb-text-djvu",
@@ -4904,10 +4882,124 @@ dependencies = [
  "quarb-text-pdf",
  "quarb-text-rtf",
  "quarb-toml",
- "quarb-trace",
  "quarb-tree-sitter",
  "quarb-web",
  "quarb-xlsx",
+ "quarb-xml",
+ "quarb-yaml",
+ "syndesmos",
+]
+
+[[package]]
+name = "quarb-oracle"
+version = "0.34.0"
+dependencies = [
+ "oracle",
+ "quarb",
+ "quarb-relational",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-pdf"
+version = "0.34.0"
+dependencies = [
+ "lopdf",
+ "quarb",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-postgres"
+version = "0.34.0"
+dependencies = [
+ "quarb",
+ "quarb-relational",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "quarb-py"
+version = "0.34.0"
+dependencies = [
+ "pyo3",
+ "quarb",
+ "quarb-code",
+ "quarb-csv",
+ "quarb-html",
+ "quarb-jq",
+ "quarb-json",
+ "quarb-markdown",
+ "quarb-mount",
+ "quarb-open",
+ "quarb-sql",
+ "quarb-text",
+ "quarb-text-html",
+ "quarb-text-markdown",
+ "quarb-toml",
+ "quarb-xml",
+ "quarb-xpath",
+ "quarb-yaml",
+]
+
+[[package]]
+name = "quarb-redis"
+version = "0.34.0"
+dependencies = [
+ "quarb",
+ "redis",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-relational"
+version = "0.34.0"
+dependencies = [
+ "quarb",
+ "serde_json",
+]
+
+[[package]]
+name = "quarb-serve"
+version = "0.34.0"
+dependencies = [
+ "kaiv 0.15.0",
+ "quarb",
+ "quarb-json",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarb-session"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "quarb",
+ "quarb-code",
+ "quarb-csv",
+ "quarb-html",
+ "quarb-json",
+ "quarb-kaiv",
+ "quarb-lines",
+ "quarb-markdown",
+ "quarb-model",
+ "quarb-mount",
+ "quarb-open",
+ "quarb-sqlite",
+ "quarb-text",
+ "quarb-text-doc",
+ "quarb-text-html",
+ "quarb-text-koine",
+ "quarb-text-latex",
+ "quarb-text-markdown",
+ "quarb-text-rtf",
+ "quarb-toml",
+ "quarb-trace",
+ "quarb-web",
  "quarb-xml",
  "quarb-yaml",
  "syndesmos",
@@ -4916,9 +5008,10 @@ dependencies = [
 
 [[package]]
 name = "quarb-sparql"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
+ "quarb-http",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
@@ -4926,7 +5019,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sql"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
@@ -4936,7 +5029,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4948,7 +5041,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "csv",
  "percent-encoding",
@@ -4961,7 +5054,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-djvu"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "djvu-rs",
  "quarb",
@@ -4970,7 +5063,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-doc"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "cfb",
  "encoding_rs",
@@ -4981,7 +5074,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-docx"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -4992,7 +5085,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-epub"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5004,7 +5097,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-html"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ego-tree",
  "quarb",
@@ -5016,7 +5109,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-koine"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "atrep",
  "flate2",
@@ -5030,7 +5123,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-latex"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5038,7 +5131,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-markdown"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "pulldown-cmark",
  "quarb",
@@ -5047,7 +5140,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-odt"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5058,7 +5151,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-pdf"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "lopdf",
  "quarb",
@@ -5067,7 +5160,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-rtf"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "encoding_rs",
  "quarb",
@@ -5076,8 +5169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarb-time"
+version = "0.34.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "quarb-toml"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -5086,11 +5186,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-trace"
-version = "0.33.0"
+version = "0.34.0"
 
 [[package]]
 name = "quarb-tree-sitter"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "tempfile",
@@ -5104,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -5126,7 +5226,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-web"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5152,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "calamine",
  "quarb",
@@ -5163,7 +5263,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xml"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -5172,7 +5272,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xpath"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb",
  "quarb-xml",
@@ -5181,7 +5281,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-yaml"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "quarb-json",
  "serde_json",

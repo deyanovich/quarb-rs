@@ -8,8 +8,9 @@
 //! [`default_value`](AstAdapter::default_value),
 //! [`metadata`](AstAdapter::metadata)). The projection methods have
 //! defaults, so an adapter can implement only what its domain
-//! supports. Crosslink resolution (`-->`) and pattern search (`=>`)
-//! are still planned. See `doc/impl.tex`.
+//! supports. The reference cluster (`->`, `<-`, `-->`, `<--`,
+//! `=>`), the search fast paths and provenance are documented on
+//! the trait, group by group. See `doc/impl.tex`.
 
 use crate::value::Value;
 
@@ -228,12 +229,6 @@ pub enum LinkDir {
     In,
 }
 
-/// The interface a data source implements to be queried by Quarb.
-///
-/// An adapter maps its native structure onto the arbor model: a tree
-/// backbone whose edges carry *names*. The engine drives navigation
-/// purely through this trait, so the same query language runs over
-/// any adapter.
 /// A reference to a document outside the arbor, as an adapter read
 /// it from its own reference syntax: which document, and where in
 /// it. The engine treats both as opaque.
@@ -275,6 +270,260 @@ impl ExternalRef {
     }
 }
 
+/// What one navigation step asks of an adapter, lowered for
+/// [`AstAdapter::select`]: the axis, the name matcher, the
+/// predicate conjuncts the engine can express as plain comparisons,
+/// and — when the stage after the step consumes them — a limit and
+/// an order. An adapter answers from an index what it can and names
+/// what it applied; the engine tests the rest.
+#[derive(Debug, Clone)]
+pub struct StepPlan<'a> {
+    /// The axis: a child hop or a descendant search.
+    pub axis: PlanAxis,
+    /// The name the step matches, when it is one literal name.
+    pub name: Option<&'a str>,
+    /// The leading predicates lowered to comparisons, in order.
+    pub conjuncts: Vec<Conjunct<'a>>,
+    /// How many results the stage after the step keeps, when it
+    /// keeps a prefix (`[..n]`, `@| first(n)`).
+    pub limit: Option<usize>,
+    /// The property the stage after the step orders by, and whether
+    /// ascending.
+    pub order: Option<(&'a str, bool)>,
+}
+
+/// The axis of a [`StepPlan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanAxis {
+    /// `/name`: the children.
+    Child,
+    /// `//name`: the descendants, each with its depth.
+    Descendant,
+}
+
+/// One lowered predicate of a [`StepPlan`].
+#[derive(Debug, Clone)]
+pub enum Conjunct<'a> {
+    /// `[::prop = value]` under the engine's standard equality.
+    Equals(&'a str, &'a Value),
+}
+
+/// What an adapter answers to a [`StepPlan`]: the nodes (each with
+/// its depth from the step's base; children are depth 1) in
+/// document order, and which conjuncts the adapter already applied
+/// (the engine runs the rest).
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    pub nodes: Vec<(NodeId, usize)>,
+    pub applied: Vec<bool>,
+}
+
+/// What reaching one step's nodes would cost, as an adapter can
+/// say before running it ([`AstAdapter::estimate`]): intervals, a
+/// request count, a latency class and how sure the adapter is. A
+/// host composes these along a query ([`crate::plan::Plan`]) and
+/// refuses before running when a budget is exceeded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Estimate {
+    /// The nodes the step yields, from the least to the most.
+    pub rows: (u64, u64),
+    /// The bytes read to yield them, when the adapter can say (a
+    /// warehouse's dry run, a file's size).
+    pub bytes: Option<(u64, u64)>,
+    /// Round trips to a remote, when any.
+    pub requests: Option<u32>,
+    pub latency: Latency,
+    pub confidence: Confidence,
+}
+
+/// Where a step's cost is paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Latency {
+    /// The nodes are in memory.
+    Memory,
+    /// A local file or store.
+    Local,
+    /// A network round trip.
+    Remote,
+}
+
+/// How much an [`Estimate`] is worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// A guess from statistics or defaults.
+    Guess,
+    /// An upper bound (a clustered table's dry run, a partition's
+    /// size): the actual may come in lower.
+    Bound,
+    /// Exact: the catalog or the store knows.
+    Exact,
+}
+
+impl Estimate {
+    /// `self` followed by `next` along one branch: the rows are
+    /// the next step's, the bytes and requests add, the latency is
+    /// the slower, the confidence the weaker.
+    pub fn then(&self, next: &Estimate) -> Estimate {
+        Estimate {
+            rows: next.rows,
+            bytes: match (self.bytes, next.bytes) {
+                (Some(a), Some(b)) => Some((a.0 + b.0, a.1 + b.1)),
+                (a, None) => a,
+                (None, b) => b,
+            },
+            requests: match (self.requests, next.requests) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, None) => a,
+                (None, b) => b,
+            },
+            latency: self.latency.max(next.latency),
+            confidence: self.confidence.min(next.confidence),
+        }
+    }
+
+    /// `self` beside `other` (two branches of one query): rows,
+    /// bytes and requests add.
+    pub fn beside(&self, other: &Estimate) -> Estimate {
+        Estimate {
+            rows: (self.rows.0 + other.rows.0, self.rows.1 + other.rows.1),
+            ..self.then(other)
+        }
+    }
+}
+
+/// [`AstAdapter::select`]'s default, through the individual hooks:
+/// a child hop by `children_named`; a descendant search by
+/// `descendants_where` when the plan leads with an equality the
+/// adapter indexes, else `descendants_named`. A wrapper that
+/// translates node ids forwards `select` to its inner adapter and
+/// falls back to this over its own hooks.
+pub fn select_by_hooks<A: AstAdapter + ?Sized>(
+    adapter: &A,
+    from: NodeId,
+    plan: &StepPlan<'_>,
+) -> Option<Selection> {
+    let name = plan.name?;
+    match plan.axis {
+        PlanAxis::Child => Some(Selection {
+            nodes: adapter
+                .children_named(from, name)
+                .into_iter()
+                .map(|n| (n, 1))
+                .collect(),
+            applied: vec![false; plan.conjuncts.len()],
+        }),
+        PlanAxis::Descendant => {
+            if let Some(Conjunct::Equals(prop, value)) = plan.conjuncts.first()
+                && let Some(nodes) = adapter.descendants_where(from, name, prop, value)
+            {
+                let mut applied = vec![false; plan.conjuncts.len()];
+                applied[0] = true;
+                return Some(Selection { nodes, applied });
+            }
+            let nodes = adapter.descendants_named(from, name)?;
+            Some(Selection {
+                nodes,
+                applied: vec![false; plan.conjuncts.len()],
+            })
+        }
+    }
+}
+
+/// The probe behind [`AstAdapter::has_node`]'s default: run a
+/// closure that may panic on a foreign node id, answering `false`
+/// when it does, without the panic reaching stderr. The process's
+/// hook is wrapped once (the first probe installs the wrapper,
+/// which defers to whatever hook was there) and a thread-local
+/// flag silences it only on the probing thread.
+mod probe {
+    use std::cell::Cell;
+    use std::sync::Once;
+
+    thread_local! {
+        static SILENT: Cell<bool> = const { Cell::new(false) };
+    }
+    static INSTALL: Once = Once::new();
+
+    pub(super) fn silently<R: Default>(f: impl FnOnce() -> R) -> R {
+        INSTALL.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if !SILENT.with(|s| s.get()) {
+                    previous(info);
+                }
+            }));
+        });
+        SILENT.with(|s| s.set(true));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_default();
+        SILENT.with(|s| s.set(false));
+        out
+    }
+}
+
+/// The interface a data source implements to be queried by Quarb.
+///
+/// An adapter maps its native structure onto the arbor model: a tree
+/// backbone whose edges carry *names*. The engine drives navigation
+/// purely through this trait, so the same query language runs over
+/// any adapter. Three methods are required (`root`, `children`,
+/// `name`); every other one has a default an adapter overrides
+/// only where its substrate has more to say. The methods fall into
+/// groups:
+///
+/// - **The tree**: `root`, `children`, `name`, `parent`,
+///   `child_host` (a transparent link lends its target's
+///   children), `non_tree_nodes` (joined by crosslinks alone),
+///   `has_node`.
+/// - **Naming and traits**: `answers_to` (per-node spelling
+///   aliases, consulted wherever a literal name is matched),
+///   `traits`, `has_trait`.
+/// - **Properties and metadata**: `property`, `properties`,
+///   `property_names`, `default_value`, `metadata`,
+///   `aliased_metadata`.
+/// - **References**, three protocols the engine consults in this
+///   order. *Materialized edges*: `links` / `backlinks` (the `->` /
+///   `<-` hops) with `link_property` and the `prefetch_links`
+///   batching hint. *Property resolution* (`::prop-->`, `-->`,
+///   `<--`): `resolve`, `ref_property`, `ref_label`,
+///   `resolve_needs_label`, `reverse_resolve`, `reverse_label`,
+///   `can_refer_to`, `reference_properties`,
+///   `walks_for_references`, `resolves_references`. *Cross-document*
+///   (a reference naming another document): `external_ref`,
+///   `resolve_fragment`, `document_by_ref`, `tree_identities`; the
+///   engine joins the identity against the tree the reference was
+///   written in and lands through the host's registered targets,
+///   then `document_by_ref`, then the identities, and records what
+///   it could not reach. The engine performs no I/O for any of it.
+/// - **Declared indexes** (a model's `index SCOPE::prop;`):
+///   `index_lookup`, `index_referrers`.
+/// - **Search fast paths**: [`select`](Self::select) — one plan
+///   per step (axis, name matcher, the conjuncts the engine can
+///   lower, a limit, an order) an adapter may answer from an index;
+///   its default folds `children_named`, `descendants_named` and
+///   `descendants_where`, which an adapter may still implement
+///   individually. A fast path changes cost, never the answer.
+/// - **Evaluation hints**: `quantifier_bound` (the depth the
+///   adapter's own structures need; a run may override it),
+///   `unit_scale`.
+/// - **Provenance**: `provenance`, `provenance_list`.
+///
+/// Pairs the engine relies on being observationally equal, so an
+/// override must keep them so: `children_named(n, x)` is
+/// `children(n)` filtered by `answers_to(_, x)` (except deliberate
+/// container-scoped aliasing, documented on the method);
+/// `has_trait(n, t)` is `t ∈ traits(n)`; `property_names(n)` covers
+/// the names of `properties(n)`, the `ref_property`, and the child
+/// names; `provenance_list(n)`'s first entry is `provenance(n)`;
+/// `select` answers exactly what the walk would find. The
+/// conformance suite ([`crate::conformance::check`]) tests these
+/// over a sample of an adapter's nodes.
+///
+/// Optional capabilities with a single implementor each — fine to
+/// leave at the default: `unit_scale` (kaiv's units),
+/// `descendants_where` (the corpus reading's positional index),
+/// `child_host` (filesystem symlinks), `aliased_metadata` (git's
+/// closed surface), `provenance_list` (kaiv's layered sources),
+/// `index_lookup` / `index_referrers` (a model's declared indexes).
 pub trait AstAdapter {
     /// The root node — the initial navigation context.
     fn root(&self) -> NodeId;
@@ -668,6 +917,55 @@ pub trait AstAdapter {
         None
     }
 
+    /// The search fast path: the nodes one step reaches from `from`
+    /// under `plan`, answered from an index — `None` keeps the
+    /// engine's walk (the default folds `children_named`,
+    /// `descendants_named` and `descendants_where`:
+    /// [`select_by_hooks`]). `Some` must be exactly what the walk
+    /// would find for the conjuncts it marks applied, under the
+    /// engine's standard equality; the engine tests the remaining
+    /// conjuncts and every other predicate on the nodes returned. A
+    /// child plan's answer is never re-filtered by name (the adapter
+    /// owns the name test, as `children_named` does); a descendant
+    /// plan's nodes still pass the nameless tests.
+    fn select(&self, from: NodeId, plan: &StepPlan<'_>) -> Option<Selection> {
+        select_by_hooks(self, from, plan)
+    }
+    /// The dry-run form of [`select`](Self::select): which of the
+    /// plan's conjuncts the adapter would apply, decided from its
+    /// catalog alone (a column's existence and type, an index's
+    /// presence), with no node in hand. `scope` is the literal path
+    /// from the root to the step's base (`["invoices"]` for
+    /// `/invoices/*[...]`), empty at the root. `None` when the
+    /// adapter cannot say — the static plan then counts every
+    /// conjunct as the engine's.
+    fn select_plan(&self, _scope: &[&str], _plan: &StepPlan<'_>) -> Option<Vec<bool>> {
+        None
+    }
+    /// What reaching one step's nodes would cost, said from the
+    /// catalog with no node in hand (`scope` as for
+    /// [`select_plan`](Self::select_plan)): a warehouse's dry run,
+    /// a table's statistics, a file's size, an arena's count.
+    /// `None` where the adapter has no estimator — the plan then
+    /// reads "unknown" for the step.
+    fn estimate(&self, _scope: &[&str], _plan: &StepPlan<'_>) -> Option<Estimate> {
+        None
+    }
+    /// How many nodes one step reaches from `from` under `plan`,
+    /// without materializing them — `@| count` right after the step
+    /// asks before walking. `None` walks; `Some` must be exactly the
+    /// walk's count for the conjuncts the plan carries (every one of
+    /// them, or none: a count cannot be partially applied). SQL:
+    /// `SELECT COUNT(*)`; a document index: the bucket's length.
+    fn count(&self, _from: NodeId, _plan: &StepPlan<'_>) -> Option<usize> {
+        None
+    }
+    /// A batching hint, the projection twin of `prefetch_links`: the
+    /// engine is about to read the properties `names` of every node
+    /// in `nodes` (the next stage projects them). A remote adapter
+    /// fetches the columns for the frontier in one round trip;
+    /// semantics are unchanged either way.
+    fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}
     /// A batching hint: the engine is about to follow `dir`
     /// crosslinks from every node in `nodes`. An adapter backed by
     /// a store may fetch them in one statement; semantics are
@@ -677,29 +975,12 @@ pub trait AstAdapter {
     /// The quantifier bound N_max: the depth to which open-ended path
     /// quantifiers (`+`, `*`, `{m,}`) expand, and the ceiling of any
     /// explicit `{m,n}` (the effective upper bound is min(n, N_max)).
-    /// An adapter whose natural structures run deep may raise it; the
-    /// CLI overrides it per run (`qua --quantifier-bound`).
+    /// An adapter whose natural structures run deep may raise it; a
+    /// run may override it (`Run::quantifier_bound`, the CLI's
+    /// `--quantifier-bound`). The shell gate and the invocation
+    /// instant are the run's alone (`Run::allow_shell`, `Run::now`).
     fn quantifier_bound(&self) -> usize {
         32
-    }
-
-    /// Whether the `sh(...)` pipeline stage may run external
-    /// commands. False by default — query text stays inert data —
-    /// and enabled per run by the CLI (`qua --allow-shell`) through
-    /// the [`AllowShell`] wrapper.
-    fn allow_shell(&self) -> bool {
-        false
-    }
-
-    /// The invocation instant `now()` denotes (spec: The Temporal
-    /// Fragment, Determinism): one UTC timeline point bound by the
-    /// runner BEFORE evaluation begins — evaluation itself never
-    /// reads a clock. None by default (a library `run` is fully
-    /// deterministic; `now()` reads as null); the CLI binds it at
-    /// startup — pinnable with `qua --now` — through the
-    /// [`WithNow`] wrapper.
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        None
     }
 
     /// The data provenance of `node` — the `:::source` /
@@ -725,14 +1006,11 @@ pub trait AstAdapter {
         if node == self.root() {
             return true;
         }
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.parent(node).is_some() || self.name(node).is_some()
-        }))
-        .unwrap_or(false);
-        std::panic::set_hook(hook);
-        ok
+        // An adapter that indexes its arena panics on a foreign id;
+        // the probe catches that. The panic hook is installed once
+        // for the process and silenced per thread while probing —
+        // never swapped, so other threads keep theirs.
+        probe::silently(|| self.parent(node).is_some() || self.name(node).is_some())
     }
 
     /// The data provenance of `node` as a list — every source the
@@ -757,9 +1035,8 @@ pub trait AstAdapter {
 }
 
 /// Forwards every [`AstAdapter`] method to a wrapped adapter — the
-/// one definition behind the decorators ([`QuantifierBound`],
-/// [`AllowShell`], [`WithNow`], the boxed carrier, the decoding
-/// layer, the mount and model wrappers), so a method added to the
+/// one definition behind the wrappers (the boxed carrier, the
+/// decoding layer, the mount and model wrappers), so a method added to the
 /// trait is forwarded everywhere at once instead of silently
 /// falling back to the trait default in whichever wrapper the
 /// hand-written list missed.
@@ -797,8 +1074,10 @@ macro_rules! forward_ast_adapter {
             aliased_metadata links backlinks resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
-            descendants_where prefetch_links quantifier_bound
-            allow_shell invocation_instant provenance has_node
+            descendants_where select select_plan estimate count
+            prefetch_properties
+            prefetch_links quantifier_bound
+            provenance has_node
             provenance_list unit_scale
         );
     };
@@ -845,10 +1124,13 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [reverse_resolve $($r:ident)*] reverse_resolve) => {};
     (@unless [$i:tt] [descendants_named $($r:ident)*] descendants_named) => {};
     (@unless [$i:tt] [descendants_where $($r:ident)*] descendants_where) => {};
+    (@unless [$i:tt] [select $($r:ident)*] select) => {};
+    (@unless [$i:tt] [select_plan $($r:ident)*] select_plan) => {};
+    (@unless [$i:tt] [estimate $($r:ident)*] estimate) => {};
+    (@unless [$i:tt] [count $($r:ident)*] count) => {};
+    (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
     (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links) => {};
     (@unless [$i:tt] [quantifier_bound $($r:ident)*] quantifier_bound) => {};
-    (@unless [$i:tt] [allow_shell $($r:ident)*] allow_shell) => {};
-    (@unless [$i:tt] [invocation_instant $($r:ident)*] invocation_instant) => {};
     (@unless [$i:tt] [provenance $($r:ident)*] provenance) => {};
     (@unless [$i:tt] [has_node $($r:ident)*] has_node) => {};
     (@unless [$i:tt] [provenance_list $($r:ident)*] provenance_list) => {};
@@ -1099,6 +1381,43 @@ macro_rules! forward_ast_adapter {
                 .descendants_where(node, name, property, value)
         }
     };
+    (@fwd [$i:tt] select) => {
+        fn select(
+            &self,
+            from: $crate::NodeId,
+            plan: &$crate::adapter::StepPlan<'_>,
+        ) -> Option<$crate::adapter::Selection> {
+            $crate::forward_ast_adapter!(@target self $i).select(from, plan)
+        }
+    };
+    (@fwd [$i:tt] select_plan) => {
+        fn select_plan(
+            &self,
+            scope: &[&str],
+            plan: &$crate::adapter::StepPlan<'_>,
+        ) -> Option<Vec<bool>> {
+            $crate::forward_ast_adapter!(@target self $i).select_plan(scope, plan)
+        }
+    };
+    (@fwd [$i:tt] estimate) => {
+        fn estimate(
+            &self,
+            scope: &[&str],
+            plan: &$crate::adapter::StepPlan<'_>,
+        ) -> Option<$crate::adapter::Estimate> {
+            $crate::forward_ast_adapter!(@target self $i).estimate(scope, plan)
+        }
+    };
+    (@fwd [$i:tt] count) => {
+        fn count(&self, from: $crate::NodeId, plan: &$crate::adapter::StepPlan<'_>) -> Option<usize> {
+            $crate::forward_ast_adapter!(@target self $i).count(from, plan)
+        }
+    };
+    (@fwd [$i:tt] prefetch_properties) => {
+        fn prefetch_properties(&self, nodes: &[$crate::NodeId], names: &[&str]) {
+            $crate::forward_ast_adapter!(@target self $i).prefetch_properties(nodes, names)
+        }
+    };
     (@fwd [$i:tt] prefetch_links) => {
         fn prefetch_links(&self, nodes: &[$crate::NodeId], dir: $crate::LinkDir) {
             $crate::forward_ast_adapter!(@target self $i).prefetch_links(nodes, dir)
@@ -1107,16 +1426,6 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] quantifier_bound) => {
         fn quantifier_bound(&self) -> usize {
             $crate::forward_ast_adapter!(@target self $i).quantifier_bound()
-        }
-    };
-    (@fwd [$i:tt] allow_shell) => {
-        fn allow_shell(&self) -> bool {
-            $crate::forward_ast_adapter!(@target self $i).allow_shell()
-        }
-    };
-    (@fwd [$i:tt] invocation_instant) => {
-        fn invocation_instant(&self) -> Option<(i64, u32)> {
-            $crate::forward_ast_adapter!(@target self $i).invocation_instant()
         }
     };
     (@fwd [$i:tt] provenance) => {
@@ -1139,54 +1448,6 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).unit_scale(expr)
         }
     };
-}
-
-/// An adapter view with the quantifier bound overridden (the CLI's
-/// `--quantifier-bound`); every other method forwards to the wrapped
-/// adapter.
-pub struct QuantifierBound<'a, A: AstAdapter> {
-    pub inner: &'a A,
-    pub bound: usize,
-}
-
-impl<A: AstAdapter> AstAdapter for QuantifierBound<'_, A> {
-    crate::forward_ast_adapter!(inner; except quantifier_bound);
-    fn quantifier_bound(&self) -> usize {
-        self.bound
-    }
-}
-
-/// An adapter view with the shell stage enabled (the CLI's
-/// `--allow-shell`); every other method forwards to the wrapped
-/// adapter.
-pub struct AllowShell<'a, A: AstAdapter> {
-    pub inner: &'a A,
-}
-
-impl<A: AstAdapter> AstAdapter for AllowShell<'_, A> {
-    crate::forward_ast_adapter!(inner; except allow_shell);
-    fn allow_shell(&self) -> bool {
-        true
-    }
-}
-
-/// An adapter view with the invocation instant bound (the CLI's
-/// startup clock, pinnable with `--now`); every other method
-/// forwards to the wrapped adapter. Forwarding, not synthesizing:
-/// the pinned invocation instant never becomes a node's
-/// `:::instant` — absence is the true answer for a source that
-/// records no time.
-pub struct WithNow<'a, A: AstAdapter> {
-    pub inner: &'a A,
-    pub secs: i64,
-    pub nanos: u32,
-}
-
-impl<A: AstAdapter> AstAdapter for WithNow<'_, A> {
-    crate::forward_ast_adapter!(inner; except invocation_instant);
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        Some((self.secs, self.nanos))
-    }
 }
 
 impl AstAdapter for Box<dyn AstAdapter> {
@@ -1418,17 +1679,35 @@ mod forwarding {
         ) -> Option<Vec<(NodeId, usize)>> {
             Some(vec![(n(node.0 + int(value)), name.len() + property.len())])
         }
+        fn select(&self, from: NodeId, plan: &StepPlan<'_>) -> Option<Selection> {
+            Some(Selection {
+                nodes: vec![(n(from.0 + plan.conjuncts.len() as u64 + 1), 3)],
+                applied: vec![true; plan.conjuncts.len()],
+            })
+        }
+        fn select_plan(&self, scope: &[&str], plan: &StepPlan<'_>) -> Option<Vec<bool>> {
+            Some(vec![scope.len() == 1; plan.conjuncts.len()])
+        }
+        fn estimate(&self, scope: &[&str], plan: &StepPlan<'_>) -> Option<Estimate> {
+            Some(Estimate {
+                rows: (scope.len() as u64, plan.conjuncts.len() as u64 + 9),
+                bytes: None,
+                requests: Some(1),
+                latency: Latency::Local,
+                confidence: Confidence::Bound,
+            })
+        }
+        fn count(&self, from: NodeId, plan: &StepPlan<'_>) -> Option<usize> {
+            Some(from.0 as usize + plan.conjuncts.len() + 40)
+        }
+        fn prefetch_properties(&self, nodes: &[NodeId], names: &[&str]) {
+            PREFETCHED.with(|p| p.set(nodes.len() * 100 + names.len()));
+        }
         fn prefetch_links(&self, nodes: &[NodeId], dir: LinkDir) {
             PREFETCHED.with(|p| p.set(nodes.len() * 10 + matches!(dir, LinkDir::In) as usize));
         }
         fn quantifier_bound(&self) -> usize {
             77
-        }
-        fn allow_shell(&self) -> bool {
-            true
-        }
-        fn invocation_instant(&self) -> Option<(i64, u32)> {
-            Some((12, 34))
         }
         fn provenance(&self, node: NodeId) -> Provenance {
             Provenance {
@@ -1503,14 +1782,34 @@ mod forwarding {
         same!(reverse_resolve, n(2), Some("pp"), Some("h"));
         same!(descendants_named, n(2), "abc");
         same!(descendants_where, n(2), "abc", "pp", &v);
+        let plan = StepPlan {
+            axis: PlanAxis::Descendant,
+            name: Some("abc"),
+            conjuncts: vec![Conjunct::Equals("pp", &v)],
+            limit: None,
+            order: None,
+        };
+        if !except.contains(&"select") {
+            assert_eq!(
+                w.select(n(2), &plan).map(|s| s.nodes),
+                p.select(n(2), &plan).map(|s| s.nodes),
+                "select"
+            );
+        }
+        same!(count, n(2), &plan);
+        same!(select_plan, &["t"], &plan);
+        same!(estimate, &["t"], &plan);
+        if !except.contains(&"prefetch_properties") {
+            PREFETCHED.with(|p| p.set(0));
+            w.prefetch_properties(&[n(1), n(2), n(3)], &["a", "b"]);
+            assert_eq!(PREFETCHED.with(|p| p.get()), 302, "prefetch_properties");
+        }
         if !except.contains(&"prefetch_links") {
             PREFETCHED.with(|c| c.set(0));
             w.prefetch_links(&[n(1), n(2)], LinkDir::In);
             assert_eq!(PREFETCHED.with(|c| c.get()), 21, "prefetch_links");
         }
         same!(quantifier_bound);
-        same!(allow_shell);
-        same!(invocation_instant);
         same!(provenance, n(2));
         same!(has_node, n(8));
         same!(has_node, n(9));
@@ -1521,24 +1820,6 @@ mod forwarding {
     #[test]
     fn every_wrapper_forwards_every_method() {
         let p = Probe;
-        let w = QuantifierBound {
-            inner: &p,
-            bound: 5,
-        };
-        assert_forwards(&w, &["quantifier_bound"]);
-        assert_eq!(w.quantifier_bound(), 5);
-
-        let w = AllowShell { inner: &p };
-        assert_forwards(&w, &["allow_shell"]);
-
-        let w = WithNow {
-            inner: &p,
-            secs: 1,
-            nanos: 2,
-        };
-        assert_forwards(&w, &["invocation_instant"]);
-        assert_eq!(w.invocation_instant(), Some((1, 2)));
-
         let b: Box<dyn AstAdapter> = Box::new(Probe);
         assert_forwards(&b, &[]);
 

@@ -120,7 +120,7 @@ fn unsupported_operator_errors() {
     let adapter = FsAdapter::new(dir.path()).unwrap();
     // an unknown pipeline function reports "not yet supported"
     let err = quarb::run("//file @| bogus", &adapter).unwrap_err();
-    assert!(matches!(err, quarb::QuarbError::Unsupported(_)));
+    assert_eq!(err.kind(), quarb::error::Kind::Unsupported);
 }
 
 #[test]

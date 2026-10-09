@@ -202,7 +202,7 @@ impl DynamodbAdapter {
             payload.as_bytes(),
             &extra,
         );
-        let mut req = ureq::post(&self.endpoint);
+        let mut req = quarb_http::agent().post(&self.endpoint);
         for (k, v) in &headers {
             if k != "host" {
                 req = req.set(k, v);

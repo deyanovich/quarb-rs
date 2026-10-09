@@ -425,7 +425,7 @@ fn parse_systemd_span(s: &str) -> Option<i128> {
 /// `min`/`h`/`d` keep their engine meaning, and a length like `5m`
 /// resolves to meters (base `m`), fails the seconds check, and
 /// refuses rather than comparing nonsense.
-pub(crate) fn span_from_units(
+pub fn span_from_units(
     s: &str,
     scale: &dyn Fn(&str) -> Option<(f64, String)>,
 ) -> Option<(i64, u32)> {

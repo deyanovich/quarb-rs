@@ -415,7 +415,75 @@ fn scalar_of(value: &Json) -> Value {
     }
 }
 
+impl JsonAdapter {
+    /// The node the literal `scope` names from the root, by child
+    /// names; `None` when a name is missing or ambiguous.
+    fn scope_node(&self, scope: &[&str]) -> Option<NodeId> {
+        let mut at = self.root;
+        for name in scope {
+            let mut hits = self.nodes[at.0 as usize]
+                .children
+                .iter()
+                .copied()
+                .filter(|&c| self.nodes[c.0 as usize].name.as_deref() == Some(*name));
+            at = hits.next()?;
+            if hits.next().is_some() {
+                return None;
+            }
+        }
+        Some(at)
+    }
+
+    /// How many nodes `plan` reaches under `at`, from the arena.
+    fn reach(&self, at: NodeId, plan: &quarb::StepPlan<'_>) -> u64 {
+        let matches = |c: NodeId| {
+            plan.name
+                .is_none_or(|n| self.nodes[c.0 as usize].name.as_deref() == Some(n))
+        };
+        match plan.axis {
+            quarb::PlanAxis::Child => self.nodes[at.0 as usize]
+                .children
+                .iter()
+                .filter(|&&c| matches(c))
+                .count() as u64,
+            quarb::PlanAxis::Descendant => {
+                let mut n = 0;
+                let mut stack = self.nodes[at.0 as usize].children.clone();
+                while let Some(c) = stack.pop() {
+                    if matches(c) {
+                        n += 1;
+                    }
+                    stack.extend(self.nodes[c.0 as usize].children.iter().copied());
+                }
+                n
+            }
+        }
+    }
+}
+
 impl AstAdapter for JsonAdapter {
+    /// The arena knows exactly how many nodes a step reaches; a
+    /// conjunct makes that an upper bound. Nothing is read.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let at = self.scope_node(scope)?;
+        let n = self.reach(at, plan);
+        Some(quarb::Estimate {
+            rows: if plan.conjuncts.is_empty() {
+                (n, n)
+            } else {
+                (0, n)
+            },
+            bytes: None,
+            requests: Some(0),
+            latency: quarb::Latency::Memory,
+            confidence: if plan.conjuncts.is_empty() {
+                quarb::Confidence::Exact
+            } else {
+                quarb::Confidence::Bound
+            },
+        })
+    }
+
     fn root(&self) -> NodeId {
         self.root
     }

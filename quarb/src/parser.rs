@@ -15,6 +15,7 @@
 //! subcontext body `.(…)`.
 
 use crate::adapter::AstAdapter;
+use crate::ast::visit::{self, Visitor as _};
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
     PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef,
@@ -34,26 +35,14 @@ use std::collections::HashMap;
 /// scope compares with a query's by canonical text.
 pub fn parse_scope_path(text: &str) -> Result<ScopePath> {
     let toks = crate::lexer::lex(text)?;
-    let mut p = Parser {
-        toks: &toks,
-        pos: 0,
-        defs: Defs::default(),
-        def_params: Vec::new(),
-        data: None,
-        pattern_depth: 0,
-        predicate_depth: 0,
-        nest_depth: 0,
-        subquery_depth: 0,
-        captures: std::cell::RefCell::new(Vec::new()),
-        first_steps: std::cell::RefCell::new(Vec::new()),
-    };
+    let mut p = Parser::new(&toks, Defs::default(), None);
     let sp = p.scope_path()?;
     if p.pos < toks.len() {
-        return Err(QuarbError::Parse(format!(
+        return Err(QuarbError::parse(format!(
             "a scope path ends with its last step: '{text}'"
         )));
     }
-    sp.ok_or_else(|| QuarbError::Parse(format!("not a scope path: '{text}'")))
+    sp.ok_or_else(|| QuarbError::parse(format!("not a scope path: '{text}'")))
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Query> {
@@ -74,20 +63,30 @@ pub fn parse_with_data(
     defs: Defs,
     data: Option<&dyn AstAdapter>,
 ) -> Result<Query> {
-    let mut p = Parser {
-        toks: tokens,
-        pos: 0,
-        defs,
-        def_params: Vec::new(),
-        data,
-        pattern_depth: 0,
-        predicate_depth: 0,
-        nest_depth: 0,
-        subquery_depth: 0,
-        captures: std::cell::RefCell::new(Vec::new()),
-        first_steps: std::cell::RefCell::new(Vec::new()),
-    };
-    p.parse()
+    parse_with_data_spanned(tokens, None, defs, data)
+}
+
+/// [`parse_with_data`] with the tokens' spans (character offsets
+/// from the lexer, `lex_spanned`): a parse error then says where
+/// in the query it stopped.
+pub fn parse_with_data_spanned(
+    tokens: &[Token],
+    spans: Option<&[(usize, usize)]>,
+    defs: Defs,
+    data: Option<&dyn AstAdapter>,
+) -> Result<Query> {
+    let mut p = Parser::new(tokens, defs, data);
+    let out = p.parse();
+    match (out, spans) {
+        (Err(e), Some(spans)) if e.kind() == crate::error::Kind::Parse && e.offset().is_none() => {
+            let at = p.pos.min(spans.len().saturating_sub(1));
+            match spans.get(at) {
+                Some(&(start, _)) => Err(e.at(start)),
+                None => Err(e),
+            }
+        }
+        (out, _) => out,
+    }
 }
 
 /// Parse fully (so every diagnostic still fires), returning each
@@ -101,19 +100,7 @@ pub fn parse_first_steps(
     defs: Defs,
     data: Option<&dyn AstAdapter>,
 ) -> Result<Vec<String>> {
-    let mut p = Parser {
-        toks: tokens,
-        pos: 0,
-        defs,
-        def_params: Vec::new(),
-        data,
-        pattern_depth: 0,
-        predicate_depth: 0,
-        nest_depth: 0,
-        subquery_depth: 0,
-        captures: std::cell::RefCell::new(Vec::new()),
-        first_steps: std::cell::RefCell::new(Vec::new()),
-    };
+    let mut p = Parser::new(tokens, defs, data);
     p.parse()?;
     Ok(p.first_steps.into_inner())
 }
@@ -121,19 +108,7 @@ pub fn parse_first_steps(
 /// Parse a token stream containing only `def` statements into a
 /// fragment table (the `--defs` file format).
 pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
-    let mut p = Parser {
-        toks: tokens,
-        pos: 0,
-        defs: Defs::default(),
-        def_params: Vec::new(),
-        data: None,
-        pattern_depth: 0,
-        predicate_depth: 0,
-        nest_depth: 0,
-        subquery_depth: 0,
-        captures: std::cell::RefCell::new(Vec::new()),
-        first_steps: std::cell::RefCell::new(Vec::new()),
-    };
+    let mut p = Parser::new(tokens, Defs::default(), None);
     while p.at_def() || p.at_macro() {
         if p.at_def() {
             p.parse_def()?;
@@ -142,7 +117,7 @@ pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
         }
     }
     if let Some(tok) = p.peek() {
-        return Err(QuarbError::Parse(format!(
+        return Err(QuarbError::parse(format!(
             "a definitions file holds only 'def' and 'macro' statements; unexpected {tok:?}"
         )));
     }
@@ -409,7 +384,7 @@ fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
     }
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&Token> {
         self.toks.get(self.pos)
     }
@@ -420,13 +395,48 @@ impl Parser<'_> {
     fn descend(&mut self) -> Result<()> {
         self.nest_depth += 1;
         if self.nest_depth > MAX_NEST {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "query nested more than {MAX_NEST} levels deep"
             )));
         }
         Ok(())
     }
 
+    /// A parser at the top of a query: fresh scopes, depth zero.
+    fn new(toks: &'a [Token], defs: Defs, data: Option<&'a dyn AstAdapter>) -> Parser<'a> {
+        Parser {
+            toks,
+            pos: 0,
+            defs,
+            def_params: Vec::new(),
+            data,
+            pattern_depth: 0,
+            predicate_depth: 0,
+            nest_depth: 0,
+            subquery_depth: 0,
+            captures: std::cell::RefCell::new(Vec::new()),
+            first_steps: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A parser for text this one generated or re-reads (a macro
+    /// expansion, a substitution body, a def body): one level
+    /// deeper (refused past [`MAX_NEST`]), the dataset shared, the
+    /// scopes reset — a caller that inherits a scope sets the field
+    /// after. `defs` is the table the child sees (`self.defs.before`
+    /// for an expansion, a clone for a re-read).
+    fn child<'t>(&self, toks: &'t [Token], defs: Defs) -> Result<Parser<'t>>
+    where
+        'a: 't,
+    {
+        Ok(Parser {
+            nest_depth: self.sub_depth()?,
+            ..Parser::new(toks, defs, self.data)
+        })
+    }
+}
+
+impl Parser<'_> {
     /// The depth a nested parser starts at — one level below this
     /// one, so a hole inside a hole inside a hole (`${"${…}"}`),
     /// a macro expanding inside its own expansion, or generated
@@ -435,7 +445,7 @@ impl Parser<'_> {
     fn sub_depth(&self) -> Result<usize> {
         let depth = self.nest_depth + 1;
         if depth > MAX_NEST {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "query nested more than {MAX_NEST} levels deep"
             )));
         }
@@ -452,7 +462,7 @@ impl Parser<'_> {
 
     fn parse(&mut self) -> Result<Query> {
         if self.toks.is_empty() {
-            return Err(QuarbError::Parse("empty query".into()));
+            return Err(QuarbError::parse("empty query"));
         }
         // Inline definitions precede the query.
         while self.at_def() || self.at_macro() {
@@ -469,11 +479,11 @@ impl Parser<'_> {
             if matches!(tok, Token::Field)
                 && let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 1)
             {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "':{text}' reads a record's field; a node's property is '::{text}'"
                 )));
             }
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "unexpected trailing input at token {tok:?}"
             )));
         }
@@ -509,11 +519,10 @@ impl Parser<'_> {
             };
             let mut entry = self.parse_query()?;
             if !entry.correlations.is_empty() {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a joined expression cannot itself carry a \
                      correlation — chains are flat; splice a \
-                     chain-carrying fragment at driver position"
-                        .into(),
+                     chain-carrying fragment at driver position",
                 ));
             }
             entry.outer = outer;
@@ -550,10 +559,9 @@ impl Parser<'_> {
         // rounding follows the glyph, not the position.
         while matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
             if !pipeline.is_empty() || !correlations.is_empty() {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment carrying a pipeline or a correlation must \
-                     stand alone, not in a union"
-                        .into(),
+                     stand alone, not in a union",
                 ));
             }
             self.pos += 1;
@@ -618,10 +626,9 @@ impl Parser<'_> {
             });
             pipeline.push(Stage::Expr(expr));
             if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "an expression head stands alone; it cannot join a \
-                     union — pipe from it instead: '= expr | …'"
-                        .into(),
+                     union — pipe from it instead: '= expr | …'",
                 ));
             }
             return Ok(());
@@ -637,7 +644,7 @@ impl Parser<'_> {
             }
             let (name, q, quant) = self.invoke_query_fragment()?;
             if quant.is_some() && !splices_as_path(&q) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' carries a pipeline, a correlation, \
                      or an anchor; a quantifier cannot ride it — quantify \
                      plain navigation"
@@ -659,10 +666,9 @@ impl Parser<'_> {
                 return Ok(());
             }
             if (!q.pipeline.is_empty() || !q.correlations.is_empty()) && !alone {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment carrying a pipeline or a correlation must \
-                     stand alone, not in a union"
-                        .into(),
+                     stand alone, not in a union",
                 ));
             }
             branches.extend(q.branches);
@@ -672,30 +678,27 @@ impl Parser<'_> {
             pipeline.extend(q.pipeline);
             correlations.extend(q.correlations);
             if matches!(self.peek(), Some(Token::LBracket)) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment carrying a pipeline, a correlation, or an \
                      anchor does not take trailing predicates; refine it \
-                     with a pipeline filter: '&name | [cond]'"
-                        .into(),
+                     with a pipeline filter: '&name | [cond]'",
                 ));
             }
             if matches!(
                 self.peek(),
                 Some(Token::ColonColon | Token::ColonColonColon | Token::SemiSemiSemi)
             ) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment carrying a pipeline, a correlation, or an \
                      anchor does not take a trailing projection; project \
-                     it through the pipe: '&name | ::key'"
-                        .into(),
+                     it through the pipe: '&name | ::key'",
                 ));
             }
             if matches!(self.peek(), Some(Token::Lt { .. })) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment does not take a trailing trait selector; \
                      put the trait inside a definition: \
-                     'def &errs: /entry<error> ;'"
-                        .into(),
+                     'def &errs: /entry<error> ;'",
                 ));
             }
         } else {
@@ -784,12 +787,12 @@ impl Parser<'_> {
                                 | Stage::RecordPush { .. }
                                 | Stage::FieldsPush
                         ) {
-                            return Err(QuarbError::Parse(
-                                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')".into(),
+                            return Err(QuarbError::parse(
+                                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')",
                             ));
                         }
                         if max.is_some_and(|n| n < min) {
-                            return Err(QuarbError::Parse(format!(
+                            return Err(QuarbError::parse(format!(
                                 "a quantifier's bounds are ordered: {{{min};{}}}",
                                 max.unwrap()
                             )));
@@ -825,10 +828,9 @@ impl Parser<'_> {
                     // Hops are per-thread; `@|` aggregates the
                     // whole context.
                     if self.nav_stage_ahead() {
-                        return Err(QuarbError::Parse(
+                        return Err(QuarbError::parse(
                             "navigation is per-thread; write '| /path' \
-                             ('@|' aggregates the whole context — hops don't take it)"
-                                .into(),
+                             ('@|' aggregates the whole context — hops don't take it)",
                         ));
                     }
                     // `@| [n]` / `@| [a..b]` — positional selection
@@ -841,27 +843,15 @@ impl Parser<'_> {
                                 continue;
                             }
                             Predicate::Expr(_) => {
-                                return Err(QuarbError::Parse(
+                                return Err(QuarbError::parse(
                                     "a condition filters per capsa; write '| [cond]' \
-                                     ('@| [n]' selects positionally)"
-                                        .into(),
+                                     ('@| [n]' selects positionally)",
                                 ));
                             }
                         }
                     }
                     let call = self.func_call()?;
-                    if !crate::stdlib::known_agg(&call.name) {
-                        return Err(QuarbError::Unsupported(format!(
-                            "aggregate function '{}'",
-                            call.name
-                        )));
-                    }
-                    if call.name == "ungroup" && !call.args.is_empty() {
-                        return Err(QuarbError::Parse("'ungroup' takes no arguments".into()));
-                    }
-                    validate_window_shift(&call)?;
-                    validate_keyed(&call)?;
-                    let stage = Stage::Agg(call);
+                    let stage = agg_stage(call)?;
                     mode = stage_mode_out(&stage, mode);
                     pipeline.push(stage);
                 }
@@ -904,12 +894,11 @@ impl Parser<'_> {
                     // start is a hop, and a hop would drop the
                     // live topic.
                     if !matches!(self.peek(), Some(Token::LParen)) {
-                        return Err(QuarbError::Parse(
+                        return Err(QuarbError::parse(
                             "cannot navigate in scalar mode — the topic is live \
                              and a hop would drop it; file it first with '| .' \
                              (or '| .name') and navigation resumes. \
-                             (Parenthesize the path for a value expression.)"
-                                .into(),
+                             (Parenthesize the path for a value expression.)",
                         ));
                     }
                 }
@@ -1009,8 +998,8 @@ impl Parser<'_> {
                     if matches!(self.peek(), Some(Token::LParen)) {
                         let call = self.record_args()?;
                         if call.args.is_empty() {
-                            return Err(QuarbError::Parse(
-                                "an empty %%() adds nothing — the register view is %.".into(),
+                            return Err(QuarbError::parse(
+                                "an empty %%() adds nothing — the register view is %.",
                             ));
                         }
                         validate_record(&call)?;
@@ -1076,7 +1065,7 @@ impl Parser<'_> {
                     && text.len() > 1
                     && !n.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "a push name starts with a letter ('| .name'); quote any other \
                          ('| .\"{n}\"'), and recall a position with $.N or ((.N))"
                     )));
@@ -1098,10 +1087,9 @@ impl Parser<'_> {
                         if !enriched && name.is_none() {
                             return Ok(Stage::FieldsPush);
                         }
-                        return Err(QuarbError::Parse(
+                        return Err(QuarbError::parse(
                             "a record push takes its fields: `.%(…)` or `.name%(…)`; \
-                             the bare `.%` (no name, no parens) spreads the topic record"
-                                .into(),
+                             the bare `.%` (no name, no parens) spreads the topic record",
                         ));
                     }
                     let call = self.record_args()?;
@@ -1160,9 +1148,8 @@ impl Parser<'_> {
                             && n.starts_with('_')
                             && n[1..].chars().all(|c| c.is_ascii_digit())
                     }) {
-                        return Err(QuarbError::Parse(
-                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)"
-                                .into(),
+                        return Err(QuarbError::parse(
+                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)",
                         ));
                     }
                     Ok(Stage::Push(name))
@@ -1177,7 +1164,7 @@ impl Parser<'_> {
                 // Validate the pattern at parse time.
                 let case = if mods.contains('i') { "(?i)" } else { "" };
                 Regex::new(&format!("{case}{pattern}"))
-                    .map_err(|e| QuarbError::Parse(format!("bad substitution pattern: {e}")))?;
+                    .map_err(|e| QuarbError::parse(format!("bad substitution pattern: {e}")))?;
                 let call = FnCall {
                     name: "s".to_string(),
                     args: vec![
@@ -1193,10 +1180,9 @@ impl Parser<'_> {
             // is a whole-context operation and lives on `@|`.
             Some(Token::LBracket) => {
                 let positional = || {
-                    QuarbError::Parse(
+                    QuarbError::parse(
                         "positional selection is whole-context; write '@| [n]' / \
-                         '@| [a..b]' (a plain '| [cond]' filters per capsa)"
-                            .into(),
+                         '@| [a..b]' (a plain '| [cond]' filters per capsa)",
                     )
                 };
                 let mut e = match self.predicate()? {
@@ -1233,40 +1219,12 @@ impl Parser<'_> {
                 let call = self.func_call()?;
                 // `now()` refuses stage position: it takes no topic.
                 if call.name == "now" {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "now() is a call operand (the invocation instant); it takes no \
-                         topic — use it in expression position: [::date > now() - 12h]"
-                            .into(),
+                         topic — use it in expression position: [::date > now() - 12h]",
                     ));
                 }
-                // A keyed aggregate on the plain pipe works per capsa
-                // on a group's members (`@| group(::k) | top(2, ::v)`).
-                if crate::stdlib::known_keyed(&call.name) {
-                    validate_keyed(&call)?;
-                    return Ok(Stage::Func(call));
-                }
-                // Reducing aggregates are also per-capsa list
-                // reductions (`@| group(::k) | mean` averages each
-                // group's list topic). `ungroup`, `window`, and
-                // `shift` read the whole context only.
-                let reducible = crate::stdlib::known_agg(&call.name)
-                    && !crate::stdlib::context_only(&call.name);
-                if !crate::stdlib::known_scalar(&call.name) && !reducible {
-                    if let Some(pointer) = retired_function(&call.name) {
-                        return Err(QuarbError::Parse(pointer));
-                    }
-                    let hint = if crate::stdlib::context_only(&call.name) {
-                        format!(" ('{}' uses '@|')", call.name)
-                    } else {
-                        String::new()
-                    };
-                    return Err(QuarbError::Unsupported(format!(
-                        "pipeline function '{}'{hint}",
-                        call.name
-                    )));
-                }
-                validate_record(&call)?;
-                Ok(Stage::Func(call))
+                func_stage(call)
             }
         }
     }
@@ -1333,7 +1291,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(())
             }
-            _ => Err(QuarbError::Parse(format!("expected '.' after '{sigil}'"))),
+            _ => Err(QuarbError::parse(format!("expected '.' after '{sigil}'"))),
         }
     }
 
@@ -1357,13 +1315,11 @@ impl Parser<'_> {
                 ..
             }) => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a fragment name after 'def &'".into(),
-                ));
+                return Err(QuarbError::parse("expected a fragment name after 'def &'"));
             }
         };
         if self.defs.get(&name).is_some() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' is already defined"
             )));
         }
@@ -1379,9 +1335,7 @@ impl Parser<'_> {
                         ..
                     }) => text.clone(),
                     _ => {
-                        return Err(QuarbError::Parse(
-                            "expected a parameter name after '$'".into(),
-                        ));
+                        return Err(QuarbError::parse("expected a parameter name after '$'"));
                     }
                 };
                 if param == "_"
@@ -1391,7 +1345,7 @@ impl Parser<'_> {
                     || param.starts_with('*')
                     || !param.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "parameter name '${param}' collides with a capsa-scope operand"
                     )));
                 }
@@ -1424,7 +1378,7 @@ impl Parser<'_> {
             // — the splice site's own stages still typecheck.
             self.pipeline_items(&mut stages, PipeMode::Nav)?;
             if stages.is_empty() {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' has an empty body"
                 )));
             }
@@ -1436,7 +1390,7 @@ impl Parser<'_> {
                 Some(Token::Name { text, quoted: false, .. }) if text.starts_with('.'))
                 && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
             {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' body looks like a pipeline stage; \
                      a pipeline fragment starts with its pipe: \
                      'def &{name}: | .push(...) ;'"
@@ -1446,7 +1400,7 @@ impl Parser<'_> {
             // splice site, where the join's shape is known — not
             // here.
             DefBody::Query(self.parse_chain().map_err(|e| {
-                QuarbError::Parse(format!(
+                QuarbError::parse(format!(
                     "in fragment '&{name}' body: {e} (a pipeline \
                      fragment's body starts with its pipe: \
                      'def &{name}: | ...')"
@@ -1488,9 +1442,7 @@ impl Parser<'_> {
                 ..
             }) => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a macro name after 'macro &'".into(),
-                ));
+                return Err(QuarbError::parse("expected a macro name after 'macro &'"));
             }
         };
         // `macro &name!` declares a data-aware macro: its body reads
@@ -1501,7 +1453,7 @@ impl Parser<'_> {
             self.pos += 1;
         }
         if self.defs.get(&name).is_some() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' is already defined"
             )));
         }
@@ -1514,8 +1466,8 @@ impl Parser<'_> {
                     Some(Token::Dollar) => false,
                     Some(Token::At) => true,
                     _ => {
-                        return Err(QuarbError::Parse(
-                            "expected '$name' or a trailing '@rest' parameter".into(),
+                        return Err(QuarbError::parse(
+                            "expected '$name' or a trailing '@rest' parameter",
                         ));
                     }
                 };
@@ -1527,8 +1479,8 @@ impl Parser<'_> {
                         ..
                     }) => text.clone(),
                     _ => {
-                        return Err(QuarbError::Parse(
-                            "expected a parameter name after its sigil".into(),
+                        return Err(QuarbError::parse(
+                            "expected a parameter name after its sigil",
                         ));
                     }
                 };
@@ -1539,15 +1491,14 @@ impl Parser<'_> {
                     || param.starts_with('*')
                     || !param.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "parameter name '{param}' collides with a capsa-scope operand"
                     )));
                 }
                 if data_aware && param == "data" {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "a data-aware macro mounts the dataset as '/data'; \
-                         pick another parameter name"
-                            .into(),
+                         pick another parameter name",
                     ));
                 }
                 if is_rest {
@@ -1565,7 +1516,7 @@ impl Parser<'_> {
         }
         self.expect_separator("':' between the macro name and its body")?;
         if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "a macro body is a query over its expansion arbor; anchor a \
                  non-navigating body at the root: 'macro &{name}: ^ | ...;'"
             )));
@@ -1644,7 +1595,7 @@ impl Parser<'_> {
             // never trips the lint.
             let gr = global.recalls.get(reg).copied().unwrap_or(0);
             if gr > r {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "macro '&{mac}' pushes the register '.{reg}', and the \
                      surrounding query recalls '$.{reg}' — capture must \
                      be invited through an argument: pass '$.{reg}' (or \
@@ -1664,7 +1615,7 @@ impl Parser<'_> {
         let values = self.expand_macro_values(name, def, args)?;
         let text = values.join(" ");
         if text.trim().is_empty() {
-            return Err(QuarbError::Expansion(format!(
+            return Err(QuarbError::expansion(format!(
                 "macro '&{name}' expanded to nothing"
             )));
         }
@@ -1686,7 +1637,7 @@ impl Parser<'_> {
                 .any(|op| t.starts_with(op))
         };
         if values.len() >= 2 && values.iter().all(|v| nav_start(v)) {
-            return Err(QuarbError::Expansion(format!(
+            return Err(QuarbError::expansion(format!(
                 "macro '&{name}' expanded to {} branch-shaped values; \
                  space-joined they would read as one path — join them \
                  into a union (@| join(' || ')) or emit a single group",
@@ -1695,7 +1646,7 @@ impl Parser<'_> {
         }
         let text = values.join(" ");
         if text.trim().is_empty() {
-            return Err(QuarbError::Expansion(format!(
+            return Err(QuarbError::expansion(format!(
                 "macro '&{name}' expanded to nothing"
             )));
         }
@@ -1717,7 +1668,7 @@ impl Parser<'_> {
             None => args.len() == n,
         };
         if !arity_ok {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "macro '&{name}' takes {}{} argument(s), got {}",
                 n,
                 if def.rest.is_some() { "+" } else { "" },
@@ -1770,31 +1721,29 @@ impl Parser<'_> {
         // The body is evaluated *here*, at expansion time, so its
         // shell stage (`sh(...)` or a backtick) must clear the same
         // `--allow-shell` gate the top-level query does — otherwise a
-        // macro body could run a command with no opt-in. The flag
-        // rides on the dataset adapter (`self.data`); the bare
-        // expansion arbor never allows shell on its own.
+        // macro body could run a command with no opt-in. The gate is
+        // the run's (`Run::allow_shell`; parsing outside a run is
+        // gated); the nested evaluation inherits the run's options.
+        let allow_shell = crate::exec::run_option(|o| o.allow_shell);
         let result = if def.data_aware {
             let Some(data) = self.data else {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "macro '&{name}!' is data-aware: its expansion reads \
                      the dataset, so it needs an input (it cannot expand \
                      from query text alone)"
                 )));
             };
             let combined = crate::reflect::ExpansionAdapter::new(arbor, data);
-            crate::exec::gate_shell(&body, &combined)?;
+            crate::exec::gate_shell(&body, allow_shell)?;
             crate::exec::eval(&body, &combined)
-        } else if self.data.is_some_and(|d| d.allow_shell()) {
-            crate::exec::gate_shell(&body, &crate::adapter::AllowShell { inner: &arbor })?;
-            crate::exec::eval(&body, &arbor)
         } else {
-            crate::exec::gate_shell(&body, &arbor)?;
+            crate::exec::gate_shell(&body, allow_shell)?;
             crate::exec::eval(&body, &arbor)
         };
         let values = match result {
             crate::exec::QueryResult::Values(vs) => vs,
             crate::exec::QueryResult::Nodes(_) => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "macro '&{name}' must produce query text; its body \
                      returned nodes (project or interpolate)"
                 )));
@@ -1819,9 +1768,7 @@ impl Parser<'_> {
                 ..
             }) => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a fragment name after '&'".into(),
-                ));
+                return Err(QuarbError::parse("expected a fragment name after '&'"));
             }
         };
         let mut quant = None;
@@ -1864,13 +1811,13 @@ impl Parser<'_> {
     /// invoked as `&name!`, and nothing else may carry the bang.
     fn check_bang(&self, name: &str, def: &Def, bang: bool) -> Result<()> {
         if def.data_aware && !bang {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "macro '&{name}' is data-aware (its expansion reads the \
                  dataset); invoke it as '&{name}!(...)'"
             )));
         }
         if !def.data_aware && bang {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "'!' marks data-aware macros; '&{name}' is pure — invoke \
                  it without the '!'"
             )));
@@ -1886,7 +1833,7 @@ impl Parser<'_> {
         args: Vec<Operand>,
     ) -> Result<HashMap<String, Operand>> {
         if args.len() != params.len() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' takes {} argument(s), got {}",
                 params.len(),
                 args.len()
@@ -1901,7 +1848,7 @@ impl Parser<'_> {
     fn invoke_query_fragment(&mut self) -> Result<(String, Query, Option<Quant>)> {
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
-            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+            return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
         };
         self.check_bang(&name, &def, bang)?;
         let q = match def.body {
@@ -1917,12 +1864,12 @@ impl Parser<'_> {
                 q
             }
             DefBody::Pipeline(_) => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "'&{name}' is a pipeline fragment; invoke it after a pipe"
                 )));
             }
             DefBody::Predicates(_) => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "'&{name}' is a predicate fragment; it refines the \
                      step before it ('/div&{name}') or reads as a \
                      condition ('[&{name}]')"
@@ -1933,11 +1880,12 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
+                        .wrapping(e)
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
                 if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
-                    return Err(QuarbError::Expansion(format!(
+                    return Err(QuarbError::expansion(format!(
                         "macro '&{name}' expanded to a pipeline fragment \
                          ('{text}'); invoke it after a pipe"
                     )));
@@ -1960,10 +1908,10 @@ impl Parser<'_> {
     ) -> Result<()> {
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
-            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+            return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
         };
         if quant.is_some() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "a quantifier doesn't ride the pipe; quantify '&{name}' \
                  at path position"
             )));
@@ -1973,7 +1921,7 @@ impl Parser<'_> {
             DefBody::Pipeline(stages) => {
                 let first = stage_pipe(stages.first().expect("non-empty checked at def time"));
                 if first != pipe {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "fragment '&{name}' begins with '{first}' but was invoked with '{pipe}'"
                     )));
                 }
@@ -1988,14 +1936,14 @@ impl Parser<'_> {
                 }
                 Ok(())
             }
-            DefBody::Query(_) => Err(QuarbError::Parse(format!(
+            DefBody::Query(_) => Err(QuarbError::parse(format!(
                 "'&{name}' is a query fragment; invoke it at path position"
             ))),
             // A predicate fragment on the plain pipe is the guard as
             // a per-capsa filter — `| &vis` ≡ `| [cond]` per predicate.
             DefBody::Predicates(preds) => {
                 if pipe != "|" {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "'@|' aggregates the whole context; the predicate \
                          fragment '&{name}' filters per capsa — invoke it \
                          with '|'"
@@ -2013,7 +1961,7 @@ impl Parser<'_> {
                             pipeline.push(Stage::Filter(e));
                         }
                         _ => {
-                            return Err(QuarbError::Parse(format!(
+                            return Err(QuarbError::parse(format!(
                                 "the predicate fragment '&{name}' holds a \
                                  positional predicate; select positionally \
                                  with '@| [n]'"
@@ -2029,14 +1977,15 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
+                        .wrapping(e)
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
                 let first = match tokens.first() {
                     Some(Token::Pipe) => "|",
                     Some(Token::At) => "@|",
                     _ => {
-                        return Err(QuarbError::Parse(format!(
+                        return Err(QuarbError::parse(format!(
                             "macro '&{name}' expanded to a query fragment \
                              ('{text}'); invoke it at path position — or \
                              have the body emit a leading '| ' to splice \
@@ -2045,28 +1994,16 @@ impl Parser<'_> {
                     }
                 };
                 if first != pipe {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "macro '&{name}' expanded to a '{first}' pipeline \
                          ('{text}') but was invoked with '{pipe}'"
                     )));
                 }
-                let mut p = Parser {
-                    toks: &tokens,
-                    pos: 0,
-                    defs: self.defs.before(&name),
-                    def_params: Vec::new(),
-                    data: self.data,
-                    pattern_depth: 0,
-                    predicate_depth: 0,
-                    nest_depth: self.sub_depth()?,
-                    subquery_depth: 0,
-                    captures: std::cell::RefCell::new(Vec::new()),
-                    first_steps: std::cell::RefCell::new(Vec::new()),
-                };
+                let mut p = self.child(&tokens, self.defs.before(&name))?;
                 let mut stages = Vec::new();
                 p.pipeline_items(&mut stages, PipeMode::Nav).map_err(wrap)?;
                 if p.pos != tokens.len() {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "macro '&{name}' expanded to text with trailing \
                          content ('{text}')"
                     )));
@@ -2169,8 +2106,8 @@ impl Parser<'_> {
         }
 
         if steps.is_empty() && projection.is_none() && anchor == Anchor::Current {
-            return Err(QuarbError::Parse(
-                "a query branch needs at least one step or a projection".into(),
+            return Err(QuarbError::parse(
+                "a query branch needs at least one step or a projection",
             ));
         }
         Ok(Branch {
@@ -2193,13 +2130,13 @@ impl Parser<'_> {
     ) -> Result<Option<Projection>> {
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
-            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+            return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
         };
         self.check_bang(&name, &def, bang)?;
         let q = match def.body {
             DefBody::Predicates(preds) => {
                 if quant.is_some() {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "the predicate fragment '&{name}' refines what \
                          precedes it; a quantifier cannot ride it"
                     )));
@@ -2216,7 +2153,7 @@ impl Parser<'_> {
                 return Ok(None);
             }
             DefBody::Pipeline(_) => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' carries a pipeline; a pipe leaves \
                      navigation — invoke it at branch head or as a \
                      pipeline stage, not inside a walk"
@@ -2244,20 +2181,20 @@ impl Parser<'_> {
         // The category rule at path positions: the body must be pure
         // navigation, continuing the walk from where it stands.
         if !q.correlations.is_empty() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' carries a correlation; a chain \
                  splices at driver position only"
             )));
         }
         if !q.pipeline.is_empty() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' carries a pipeline; a pipe leaves \
                  navigation — invoke it at branch head or as a pipeline \
                  stage, not inside a walk"
             )));
         }
         if q.branches.iter().any(|b| b.anchor != Anchor::Current) {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' re-anchors; mid-path splicing \
                  continues the walk — invoke it at branch head"
             )));
@@ -2284,7 +2221,7 @@ impl Parser<'_> {
             (b.steps, b.projection)
         } else {
             if branches.iter().any(|b| b.projection.is_some()) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' is a projected union; it splices \
                      whole at branch head, not inside a walk"
                 )));
@@ -2315,7 +2252,7 @@ impl Parser<'_> {
         };
         if quant.is_some() || matches!(self.peek(), Some(Token::LBracket)) {
             if projection.is_some() {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' ends in a projection; refinement \
                      cannot follow it — refine through the pipe instead"
                 )));
@@ -2352,13 +2289,13 @@ impl Parser<'_> {
                 )
             );
             if at == SplicePos::GroupAlt {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' ends in a projection; a group \
                      alternative walks on — invoke it where the branch ends"
                 )));
             }
             if continues {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' ends in a projection; navigation \
                      cannot continue past it — invoke it where the branch \
                      ends"
@@ -2377,11 +2314,10 @@ impl Parser<'_> {
                 Some(Token::Name { .. } | Token::Regex(_))
             )
         {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "a fragment does not take a trailing trait selector; \
                  put the trait inside a definition: \
-                 'def &errs: /entry<error> ;'"
-                    .into(),
+                 'def &errs: /entry<error> ;'",
             ));
         }
         Ok((elems, projection))
@@ -2412,21 +2348,20 @@ impl Parser<'_> {
             }
             Some(PathElem::Group(g)) => {
                 if preds.iter().any(|p| !matches!(p, Predicate::Expr(_))) {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "a group takes expression predicates only \
                          (positional selection has no order across \
-                         repetition tiers)"
-                            .into(),
+                         repetition tiers)",
                     ));
                 }
                 g.predicates.extend(preds);
                 Ok(())
             }
-            Some(PathElem::Mark(_) | PathElem::Push { .. }) => Err(QuarbError::Parse(format!(
+            Some(PathElem::Mark(_) | PathElem::Push { .. }) => Err(QuarbError::parse(format!(
                 "the predicate fragment '&{name}' refines a hop or a \
                  group; a mark or a push takes no predicates"
             ))),
-            None => Err(QuarbError::Parse(format!(
+            None => Err(QuarbError::parse(format!(
                 "the predicate fragment '&{name}' refines the step \
                  before it; nothing precedes it here — walk first \
                  ('/div&{name}')"
@@ -2441,29 +2376,19 @@ impl Parser<'_> {
     /// contextual restrictions hand-written text would.
     fn parse_expansion_query(&self, name: &str, text: &str) -> Result<Query> {
         let wrap = |e: QuarbError| {
-            QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
+            QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')")).wrapping(e)
         };
         let tokens = lexer::lex(text).map_err(wrap)?;
         if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
-            return Err(QuarbError::Expansion(format!(
+            return Err(QuarbError::expansion(format!(
                 "macro '&{name}' expanded to a pipeline fragment \
                  ('{text}'); at path position it must expand to \
                  navigation steps"
             )));
         }
-        let mut p = Parser {
-            toks: &tokens,
-            pos: 0,
-            defs: self.defs.before(name),
-            def_params: Vec::new(),
-            data: self.data,
-            pattern_depth: self.pattern_depth,
-            predicate_depth: self.predicate_depth,
-            nest_depth: self.sub_depth()?,
-            subquery_depth: 0,
-            captures: std::cell::RefCell::new(Vec::new()),
-            first_steps: std::cell::RefCell::new(Vec::new()),
-        };
+        let mut p = self.child(&tokens, self.defs.before(name))?;
+        p.pattern_depth = self.pattern_depth;
+        p.predicate_depth = self.predicate_depth;
         p.parse().map_err(wrap)
     }
 
@@ -2487,7 +2412,7 @@ impl Parser<'_> {
                 Anchor::MarkIndex(n) => format!("$$.{n}"),
                 _ => "$$.".to_string(),
             };
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "a mark anchor is a node: write '{spelled}' (single parentheses are the value side)"
             )));
         }
@@ -2606,8 +2531,8 @@ impl Parser<'_> {
         let op = self.additive()?;
         for _ in 0..2 {
             if !matches!(self.peek(), Some(Token::RParen)) {
-                return Err(QuarbError::Parse(
-                    "expected '))' to close the node-id anchor '((!…))'".into(),
+                return Err(QuarbError::parse(
+                    "expected '))' to close the node-id anchor '((!…))'",
                 ));
             }
             self.pos += 1;
@@ -2646,13 +2571,11 @@ impl Parser<'_> {
                 ..
             }) => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a function name after '|'".into(),
-                ));
+                return Err(QuarbError::parse("expected a function name after '|'"));
             }
         };
         if let Some(pointer) = retired_function(&name) {
-            return Err(QuarbError::Parse(pointer));
+            return Err(QuarbError::parse(pointer));
         }
         let mut args = Vec::new();
         if matches!(self.peek(), Some(Token::LParen)) {
@@ -2681,13 +2604,16 @@ impl Parser<'_> {
                             "pipe" => "|".to_string(),
                             t if t.chars().count() == 1 && t.is_ascii() => t.to_string(),
                             _ => {
-                                return Err(QuarbError::Parse(format!(
+                                return Err(QuarbError::parse(format!(
                                     "csv takes one delimiter first: csv(\";\"), csv(\"tab\") \
                                      — not {text:?}"
                                 )));
                             }
                         };
-                        args.push(Arg::Lit(Value::Str(format!("delimiter={delimiter}"))));
+                        args.push(Arg::Named {
+                            name: "delimiter".into(),
+                            value: Value::Str(delimiter.to_string()),
+                        });
                         self.pos += 1;
                     } else {
                         args.push(self.func_arg()?);
@@ -2707,7 +2633,7 @@ impl Parser<'_> {
         if !matches!(name.as_str(), "window" | "substr")
             && args.iter().any(|a| matches!(a, Arg::Range(_, _)))
         {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "'{name}' takes no range argument ('window(a..b)' does)"
             )));
         }
@@ -2812,7 +2738,7 @@ impl Parser<'_> {
 
     fn require_projection_name(&mut self, what: &str) -> Result<String> {
         self.opt_projection_name()
-            .ok_or_else(|| QuarbError::Parse(format!("{what} needs a key")))
+            .ok_or_else(|| QuarbError::parse(format!("{what} needs a key")))
     }
 
     /// Parse one path element: a resolution step, a path-pattern
@@ -2864,7 +2790,7 @@ impl Parser<'_> {
             } else {
                 let n = &text[1..];
                 if !n.chars().next().is_some_and(|c| c.is_alphabetic()) {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "a mark name starts with a letter ('.name'); quote any other \
                          ('.\"{n}\"'), and recall a position with ((.N))"
                     )));
@@ -2900,10 +2826,9 @@ impl Parser<'_> {
                     | Axis::OutLink
                     | Axis::InLink
             ) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a quantifier attaches to a single-hop operator or a \
-                     parenthesized group"
-                        .into(),
+                     parenthesized group",
                 ));
             }
             let hop = Step {
@@ -2963,8 +2888,8 @@ impl Parser<'_> {
                     break Ok(());
                 }
                 _ => {
-                    break Err(QuarbError::Parse(
-                        "expected '|' or ')' in a path-pattern group".into(),
+                    break Err(QuarbError::parse(
+                        "expected '|' or ')' in a path-pattern group",
                     ));
                 }
             }
@@ -3010,11 +2935,10 @@ impl Parser<'_> {
             match self.predicate()? {
                 p @ Predicate::Expr(_) => predicates.push(p),
                 _ => {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "a group takes expression predicates only \
                          (positional selection has no order across \
-                         repetition tiers)"
-                            .into(),
+                         repetition tiers)",
                     ));
                 }
             }
@@ -3035,10 +2959,9 @@ impl Parser<'_> {
                     elems.push(PathElem::Step(self.finish_step(axis.clone(), matcher)?));
                 }
                 _ => {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "the operator before '(' distributes over name \
-                         alternatives; write the strict form '(/p|/div)'"
-                            .into(),
+                         alternatives; write the strict form '(/p|/div)'",
                     ));
                 }
             }
@@ -3068,8 +2991,8 @@ impl Parser<'_> {
             .iter()
             .any(|e| matches!(e, PathElem::Step(_) | PathElem::Group(_)))
         {
-            return Err(QuarbError::Parse(
-                "a path-pattern alternative needs at least one hop".into(),
+            return Err(QuarbError::parse(
+                "a path-pattern alternative needs at least one hop",
             ));
         }
         Ok(elems)
@@ -3126,7 +3049,7 @@ impl Parser<'_> {
             Some(Token::Quant { min, max }) => {
                 let (min, max) = (*min, *max);
                 if max.is_some_and(|n| n < min) {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "quantifier {{{min},{}}} has max below min",
                         max.expect("checked")
                     )));
@@ -3212,13 +3135,13 @@ impl Parser<'_> {
         let property = match self.bump() {
             Some(Token::Name { text, .. }) => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a property name before '-->' or '=>'".into(),
+                return Err(QuarbError::parse(
+                    "expected a property name before '-->' or '=>'",
                 ));
             }
         };
         match self.peek() {
-            Some(Token::ReverseResolve) => Err(QuarbError::Parse(format!(
+            Some(Token::ReverseResolve) => Err(QuarbError::parse(format!(
                 "a property before '<--' has no meaning: the property is the \
                  referring nodes' own and goes in the argument — write \
                  '<--(::{property})', or '<--(/scope/*::{property})' to bound \
@@ -3228,11 +3151,10 @@ impl Parser<'_> {
                 self.pos += 1;
                 let (scope, target) = self.match_argument()?;
                 if scope.is_none() && self.predicate_depth > 0 {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "an unscoped value match '=>(::b)' is not allowed inside a \
                          predicate (it would walk the whole arbor per node); give \
-                         it a scope, '=>(/path/*::b)'"
-                            .into(),
+                         it a scope, '=>(/path/*::b)'",
                     ));
                 }
                 self.finish_step(
@@ -3304,18 +3226,16 @@ impl Parser<'_> {
             (None, RefProp::Default)
         };
         if scope.is_none() && property == RefProp::Any {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "'<--(::*)' asks every property of every node: give it a scope, \
-                 '<--(/path/*::*)'"
-                    .into(),
+                 '<--(/path/*::*)'",
             ));
         }
         if scope.is_none() && self.predicate_depth > 0 {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "an unscoped reverse resolution '<--' is not allowed inside a \
                  predicate (it would walk the whole arbor per node); give it a \
-                 scope, '<--(/path/*::y)', or use an incoming edge '<-'"
-                    .into(),
+                 scope, '<--(/path/*::y)', or use an incoming edge '<-'",
             ));
         }
         self.finish_step(
@@ -3338,10 +3258,9 @@ impl Parser<'_> {
                 Some(Token::Name { text, quoted, .. }) if text == "*" && !quoted => RefProp::Any,
                 Some(Token::Name { text, .. }) => RefProp::Named(text.clone()),
                 _ => {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "the reverse arrow's argument names a property after '::' \
-                         ('<--(::y)', '<--(/scope/*::y)', '<--(/scope/*::*)')"
-                            .into(),
+                         ('<--(::y)', '<--(/scope/*::y)', '<--(/scope/*::*)')",
                     ));
                 }
             }
@@ -3349,15 +3268,14 @@ impl Parser<'_> {
             RefProp::Default
         };
         if !matches!(self.bump(), Some(Token::RParen)) {
-            return Err(QuarbError::Parse(
-                "expected ')' to close the reverse arrow's argument".into(),
+            return Err(QuarbError::parse(
+                "expected ')' to close the reverse arrow's argument",
             ));
         }
         if scope.is_none() && property == RefProp::Default {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "'<--()' is empty: write '<--' for the whole arbor, '<--(::y)' \
-                 for a property, or '<--(/scope/*)' for a scope"
-                    .into(),
+                 for a property, or '<--(/scope/*)' for a scope",
             ));
         }
         Ok((scope, property))
@@ -3367,31 +3285,29 @@ impl Parser<'_> {
     /// `(SCOPE::b)`.
     fn match_argument(&mut self) -> Result<(Option<ScopePath>, String)> {
         if !matches!(self.bump(), Some(Token::LParen)) {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "the value match takes its argument in parentheses: \
-                 '::a=>(/scope/*::b)' or '::a=>(::b)'"
-                    .into(),
+                 '::a=>(/scope/*::b)' or '::a=>(::b)'",
             ));
         }
         let scope = self.scope_path()?;
         if !matches!(self.bump(), Some(Token::ColonColon)) {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "the value match names the property to compare after '::': \
-                 '::a=>(/scope/*::b)'"
-                    .into(),
+                 '::a=>(/scope/*::b)'",
             ));
         }
         let target = match self.bump() {
             Some(Token::Name { text, .. }) if text != "*" => text.clone(),
             _ => {
-                return Err(QuarbError::Parse(
-                    "the value match compares one named property ('::b')".into(),
+                return Err(QuarbError::parse(
+                    "the value match compares one named property ('::b')",
                 ));
             }
         };
         if !matches!(self.bump(), Some(Token::RParen)) {
-            return Err(QuarbError::Parse(
-                "expected ')' to close the value match's argument".into(),
+            return Err(QuarbError::parse(
+                "expected ')' to close the value match's argument",
             ));
         }
         Ok((scope, target))
@@ -3429,10 +3345,9 @@ impl Parser<'_> {
             steps.push(self.path_elem()?);
         }
         if steps.is_empty() {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "the arrow's argument opens with a scope path ('/books/*', '//a') \
-                 or with '::'"
-                    .into(),
+                 or with '::'",
             ));
         }
         Ok(Some(ScopePath(steps)))
@@ -3475,7 +3390,7 @@ impl Parser<'_> {
             // to a float operand whose truthiness keeps every node.
             let digits = text.strip_prefix('-').unwrap_or(text);
             if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "positional index [{text}] is out of range"
                 )));
             }
@@ -3509,7 +3424,7 @@ impl Parser<'_> {
         }) = self.peek()
             && let Some((w, sym)) = BARE_BOOL_WORDS.iter().find(|(w, _)| w == text)
         {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "the bare word '{w}' is retired: write '{sym}' (or the dotted '.{w}.')"
             )));
         }
@@ -3575,7 +3490,7 @@ impl Parser<'_> {
             } else {
                 '<'
             };
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "'{c}' glued to what follows is the sibling hop; the comparison \
                  is spaced: '::x {c} 3'"
             )));
@@ -3590,7 +3505,7 @@ impl Parser<'_> {
             } else {
                 '<'
             };
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "'{c}' is an operator and takes a space on both sides: write ' {c} ' \
                  (the sibling hop is glued to its name: '{c}name')"
             )));
@@ -3602,13 +3517,13 @@ impl Parser<'_> {
             // the pointer.
             match (op, self.peek()) {
                 (CmpOp::Eq, Some(Token::Regex(_))) => {
-                    return Err(QuarbError::Parse(
-                        "'= (/…/)' is retired: the pattern comparison is '== (/…/)'".into(),
+                    return Err(QuarbError::parse(
+                        "'= (/…/)' is retired: the pattern comparison is '== (/…/)'",
                     ));
                 }
                 (CmpOp::Ne, Some(Token::Regex(_))) => {
-                    return Err(QuarbError::Parse(
-                        "'!= (/…/)' is retired: the pattern comparison is '!== (/…/)'".into(),
+                    return Err(QuarbError::parse(
+                        "'!= (/…/)' is retired: the pattern comparison is '!== (/…/)'",
                     ));
                 }
                 _ => {}
@@ -3619,7 +3534,7 @@ impl Parser<'_> {
             {
                 if matches!(op, CmpOp::Eq | CmpOp::Ne) {
                     let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "a pattern literal after '{}' is retired: the pattern comparison is '{eq}' ('{eq} {}')",
                         cmp_text(op),
                         crate::unparse::operand_text(&right)
@@ -3664,11 +3579,10 @@ impl Parser<'_> {
             let Some(tok) = self.peek() else { break };
             let first = segs.is_empty();
             if !first && matches!(tok, Token::Interp(_)) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a pattern segment must be a literal string — \
                      an interpolated \"${...}\" hole cannot glob; \
-                     use == with a path for a dynamic pattern"
-                        .into(),
+                     use == with a path for a dynamic pattern",
                 ));
             }
             if !first && !is_glued(tok) {
@@ -3702,10 +3616,9 @@ impl Parser<'_> {
             if let Some(t) = self.peek()
                 && is_glued(t)
             {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a pattern segment must be a quoted string or the \
-                     glob star"
-                        .into(),
+                     glob star",
                 ));
             }
             return Ok(Some(Operand::Pattern(segs)));
@@ -3735,12 +3648,11 @@ impl Parser<'_> {
         if stars == 1 && lits == 0 {
             // The bare `= *` (and the spaced `= * \"x\"`): a lone
             // star is not a pattern.
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "a lone '*' is not a pattern — attach it to a string \
                  (*\"...\"*, \"...\"*), quote it ('*') to compare \
                  against the literal star, or test existence with the \
-                 bare key"
-                    .into(),
+                 bare key",
             ));
         }
         self.pos = start;
@@ -3805,7 +3717,7 @@ impl Parser<'_> {
             },
             _ => return Ok(()),
         };
-        Err(QuarbError::Parse(format!(
+        Err(QuarbError::parse(format!(
             "'{op}' is an operator and takes a space on both sides: write ' {op} '"
         )))
     }
@@ -3904,7 +3816,7 @@ impl Parser<'_> {
                 other => bare(other),
             };
             if !ok {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "':{body}' reads the register of the capsa standing at a node: write it after a node path (<-link:{body}, \\/*:{body})"
                 )));
             }
@@ -3918,13 +3830,13 @@ impl Parser<'_> {
             self.pos += 1;
             let name = match self.bump() {
                 Some(Token::Name { text, .. }) => text.clone(),
-                _ => return Err(QuarbError::Parse("expected a field name after ':'".into())),
+                _ => return Err(QuarbError::parse("expected a field name after ':'")),
             };
             if let Operand::Rel {
                 projection: None, ..
             } = &o
             {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "':{name}' reads a record's field; a node's property is '::{name}'"
                 )));
             }
@@ -3946,8 +3858,8 @@ impl Parser<'_> {
                     | Operand::Piped { .. }
                     | Operand::PeerReg { .. }
             ) {
-                return Err(QuarbError::Parse(
-                    "':::key' after a value reads its provenance: write it after a register value ($.name), the topic ($_), or a record field".into(),
+                return Err(QuarbError::parse(
+                    "':::key' after a value reads its provenance: write it after a register value ($.name), the topic ($_), or a record field",
                 ));
             }
             self.pos += 1;
@@ -4052,9 +3964,8 @@ impl Parser<'_> {
         if matches!(self.peek(), Some(Token::QuestionEq)) {
             self.pos += 1;
             let PredExpr::Truthy(scrutinee) = cond else {
-                return Err(QuarbError::Parse(
-                    "the value match compares a VALUE: '(x ?= k ? r : else)'                      — a boolean condition belongs to the plain conditional"
-                        .into(),
+                return Err(QuarbError::parse(
+                    "the value match compares a VALUE: '(x ?= k ? r : else)'                      — a boolean condition belongs to the plain conditional",
                 ));
             };
             let mut arms = Vec::new();
@@ -4070,9 +3981,8 @@ impl Parser<'_> {
                     // The first expression not followed by `?` is
                     // the else.
                     if regex {
-                        return Err(QuarbError::Parse(
-                            "a value match needs a final else after the                              regex arm: '(x ?= ~(pat) ? r : else)'"
-                                .into(),
+                        return Err(QuarbError::parse(
+                            "a value match needs a final else after the                              regex arm: '(x ?= ~(pat) ? r : else)'",
                         ));
                     }
                     break test;
@@ -4083,9 +3993,8 @@ impl Parser<'_> {
                 arms.push((test, regex, result));
             };
             if arms.is_empty() {
-                return Err(QuarbError::Parse(
-                    "a value match needs at least one arm:                      '(x ?= k ? r : else)'"
-                        .into(),
+                return Err(QuarbError::parse(
+                    "a value match needs at least one arm:                      '(x ?= k ? r : else)'",
                 ));
             }
             return Ok(Operand::Match {
@@ -4132,11 +4041,10 @@ impl Parser<'_> {
                     | Stage::Subcontext { .. }
                     | Stage::Nav(_)
             ) {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a fragment spliced inside an expression pipe may \
                      not push or navigate (pushes belong to real \
-                     capsae; use it as a pipeline stage instead)"
-                        .into(),
+                     capsae; use it as a pipeline stage instead)",
                 ));
             }
         }
@@ -4156,10 +4064,9 @@ impl Parser<'_> {
             | Stage::ExprPush { .. }
             | Stage::RecordPush { .. }
             | Stage::FieldsPush
-            | Stage::Subcontext { .. } => Err(QuarbError::Parse(
+            | Stage::Subcontext { .. } => Err(QuarbError::parse(
                 "a pipe inside an expression transforms a value; \
-                     pushes belong to real capsae (use a stage)"
-                    .into(),
+                     pushes belong to real capsae (use a stage)",
             )),
             _ => Ok(stage),
         }
@@ -4174,11 +4081,10 @@ impl Parser<'_> {
         // Hops are per-thread; `$|` transforms elements of a list
         // topic in place.
         if self.nav_stage_ahead() {
-            return Err(QuarbError::Parse(
+            return Err(QuarbError::parse(
                 "navigation doesn't ride the map pipe; '$|' transforms \
                  the elements of a list topic — write '| /path' as its \
-                 own stage"
-                    .into(),
+                 own stage",
             ));
         }
         if matches!(self.peek(), Some(Token::LBracket)) {
@@ -4201,26 +4107,14 @@ impl Parser<'_> {
         if matches!(self.peek(), Some(Token::LBracket)) {
             return match self.predicate()? {
                 pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => Ok(Stage::Select(pred)),
-                Predicate::Expr(_) => Err(QuarbError::Parse(
+                Predicate::Expr(_) => Err(QuarbError::parse(
                     "a condition filters per capsa; write '| [cond]' \
-                     ('@| [n]' selects positionally)"
-                        .into(),
+                     ('@| [n]' selects positionally)",
                 )),
             };
         }
         let call = self.func_call()?;
-        if !crate::stdlib::known_agg(&call.name) {
-            return Err(QuarbError::Unsupported(format!(
-                "aggregate function '{}'",
-                call.name
-            )));
-        }
-        if call.name == "ungroup" && !call.args.is_empty() {
-            return Err(QuarbError::Parse("'ungroup' takes no arguments".into()));
-        }
-        validate_window_shift(&call)?;
-        validate_keyed(&call)?;
-        Ok(Stage::Agg(call))
+        agg_stage(call)
     }
 
     /// An operand-position relative path that begins with a
@@ -4273,7 +4167,7 @@ impl Parser<'_> {
     fn parse_hole(&mut self, src: &str) -> Result<InterpSeg> {
         if let Some((idx, which)) = top_level_bash_op(src) {
             if idx == 0 || src[..idx].ends_with(|c: char| c.is_whitespace()) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "in '${{{src}}}': '{which}' glues to its expression \
                      (`${{expr{which}...}}`)"
                 )));
@@ -4287,21 +4181,10 @@ impl Parser<'_> {
                 InterpSeg::Default(expr, self.hole_expr(tail, src)?)
             });
         }
-        let context = |e: QuarbError| QuarbError::Parse(format!("in '${{{src}}}': {e}"));
+        let context = |e: QuarbError| QuarbError::parse(format!("in '${{{src}}}': {e}"));
         let tokens = lexer::lex(src).map_err(context)?;
-        let mut p = Parser {
-            toks: &tokens,
-            pos: 0,
-            defs: self.defs.clone(),
-            def_params: self.def_params.clone(),
-            data: self.data,
-            pattern_depth: 0,
-            predicate_depth: 0,
-            nest_depth: self.sub_depth()?,
-            subquery_depth: 0,
-            captures: std::cell::RefCell::new(Vec::new()),
-            first_steps: std::cell::RefCell::new(Vec::new()),
-        };
+        let mut p = self.child(&tokens, self.defs.clone())?;
+        p.def_params = self.def_params.clone();
         let expr = p.additive().map_err(context)?;
         // A pipe tail: the operand-pipe stages, exactly
         // as a parenthesized `(expr | f @| g)` carries them.
@@ -4333,7 +4216,7 @@ impl Parser<'_> {
             }
         }
         if p.pos != tokens.len() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "in '${{{src}}}': an interpolation hole holds one value \
                  expression (with an optional pipe tail or glued ':?' / ':-')"
             )));
@@ -4352,7 +4235,7 @@ impl Parser<'_> {
     /// no top-level pipe (the operator and a tail combine only with
     /// the piped side parenthesized).
     fn hole_expr(&mut self, part: &str, whole: &str) -> Result<Operand> {
-        let context = |e: QuarbError| QuarbError::Parse(format!("in '${{{whole}}}': {e}"));
+        let context = |e: QuarbError| QuarbError::parse(format!("in '${{{whole}}}': {e}"));
         let tokens = lexer::lex(part).map_err(context)?;
         let mut depth = 0i32;
         for t in &tokens {
@@ -4360,7 +4243,7 @@ impl Parser<'_> {
                 Token::LParen => depth += 1,
                 Token::RParen => depth -= 1,
                 Token::Pipe if depth == 0 => {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "in '${{{whole}}}': a bash operator and a pipe tail \
                          are one or the other in a hole (parenthesize the \
                          piped expression)"
@@ -4369,22 +4252,11 @@ impl Parser<'_> {
                 _ => {}
             }
         }
-        let mut p = Parser {
-            toks: &tokens,
-            pos: 0,
-            defs: self.defs.clone(),
-            def_params: self.def_params.clone(),
-            data: self.data,
-            pattern_depth: 0,
-            predicate_depth: 0,
-            nest_depth: self.sub_depth()?,
-            subquery_depth: 0,
-            captures: std::cell::RefCell::new(Vec::new()),
-            first_steps: std::cell::RefCell::new(Vec::new()),
-        };
+        let mut p = self.child(&tokens, self.defs.clone())?;
+        p.def_params = self.def_params.clone();
         let expr = p.additive().map_err(context)?;
         if p.pos != tokens.len() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "in '${{{whole}}}': each side of ':?' / ':-' holds one \
                  value expression"
             )));
@@ -4532,9 +4404,8 @@ impl Parser<'_> {
                 }
                 let projection = self.projection()?;
                 if steps.is_empty() && projection.is_none() {
-                    return Err(QuarbError::Parse(
-                        "'^' in operand position starts a root-anchored path;                          follow it with steps or a projection"
-                            .into(),
+                    return Err(QuarbError::parse(
+                        "'^' in operand position starts a root-anchored path;                          follow it with steps or a projection",
                     ));
                 }
                 Ok(Operand::Rel {
@@ -4642,8 +4513,8 @@ impl Parser<'_> {
                 let call = self.func_call()?;
                 if call.name == "now" {
                     if !call.args.is_empty() {
-                        return Err(QuarbError::Parse(
-                            "now() takes no arguments (it is the invocation instant)".into(),
+                        return Err(QuarbError::parse(
+                            "now() takes no arguments (it is the invocation instant)",
                         ));
                     }
                     return Ok(Operand::Now);
@@ -4655,10 +4526,10 @@ impl Parser<'_> {
                 // silently re-keys. Refuse rather than re-key; the
                 // pipe form spells the topic-riding meaning outright.
                 if let Some(pointer) = retired_function(&call.name) {
-                    return Err(QuarbError::Parse(pointer));
+                    return Err(QuarbError::parse(pointer));
                 }
                 if matches!(call.name.as_str(), "rec" | "record") {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "'{n}(...)' as an operand would ride its first \
                          field as the topic ('{n}(x, ...)' is \
                          '(x | {n}(...))'), silently re-keying the \
@@ -4671,14 +4542,14 @@ impl Parser<'_> {
                 let first = match args.next() {
                     Some(Arg::Lit(v)) => Operand::Lit(v),
                     Some(Arg::Expr(e)) => e,
-                    Some(Arg::Range(..)) => {
-                        return Err(QuarbError::Parse(format!(
-                            "'{}(...)' as an operand cannot ride a range as its topic",
+                    Some(Arg::Range(..)) | Some(Arg::Named { .. }) => {
+                        return Err(QuarbError::parse(format!(
+                            "'{}(...)' as an operand cannot ride a range or an option as its topic",
                             call.name
                         )));
                     }
                     None => {
-                        return Err(QuarbError::Parse(format!(
+                        return Err(QuarbError::parse(format!(
                             "a call operand needs a first argument to ride as the topic \
                              ('{0}(x)' is '(x | {0})'); only now() is nullary",
                             call.name
@@ -4693,30 +4564,10 @@ impl Parser<'_> {
                     name: call.name,
                     args: args.collect(),
                 };
-                if crate::stdlib::known_keyed(&stage_call.name) {
-                    validate_keyed(&stage_call)?;
-                } else {
-                    let reducible = crate::stdlib::known_agg(&stage_call.name)
-                        && !crate::stdlib::context_only(&stage_call.name);
-                    if !crate::stdlib::known_scalar(&stage_call.name) && !reducible {
-                        if let Some(pointer) = retired_function(&stage_call.name) {
-                            return Err(QuarbError::Parse(pointer));
-                        }
-                        let hint = if crate::stdlib::context_only(&stage_call.name) {
-                            format!(" ('{}' uses '@|')", stage_call.name)
-                        } else {
-                            String::new()
-                        };
-                        return Err(QuarbError::Unsupported(format!(
-                            "pipeline function '{}'{hint}",
-                            stage_call.name
-                        )));
-                    }
-                    validate_record(&stage_call)?;
-                }
+                let stage = func_stage(stage_call)?;
                 Ok(Operand::Piped {
                     expr: Box::new(first),
-                    stages: vec![Stage::Func(stage_call)],
+                    stages: vec![stage],
                 })
             }
             Some(Token::Name { text, quoted, .. }) => {
@@ -4783,8 +4634,8 @@ impl Parser<'_> {
                             Some(Token::Comma | Token::Semi) => self.pos += 1,
                             Some(Token::RParen) => {}
                             _ => {
-                                return Err(QuarbError::Parse(
-                                    "a list literal separates its items with ';': @(a; b)".into(),
+                                return Err(QuarbError::parse(
+                                    "a list literal separates its items with ';': @(a; b)",
                                 ));
                             }
                         }
@@ -4803,8 +4654,8 @@ impl Parser<'_> {
                             projection,
                             Some(Projection::CoreMeta(_) | Projection::AdapterMeta(_))
                         ) {
-                            return Err(QuarbError::Parse(
-                                "an edge carries plain properties only (@-::prop)".into(),
+                            return Err(QuarbError::parse(
+                                "an edge carries plain properties only (@-::prop)",
                             ));
                         }
                         Ok(Operand::Edges { projection })
@@ -4826,10 +4677,9 @@ impl Parser<'_> {
                         let projection = self.projection()?;
                         Ok(Operand::Capsae { projection })
                     }
-                    _ => Err(QuarbError::Parse(
+                    _ => Err(QuarbError::parse(
                         "expected '-' (arrived edges), '.' (register), or '*' \
-                         (the context) after '@' in an operand"
-                            .into(),
+                         (the context) after '@' in an operand",
                     )),
                 }
             }
@@ -4864,7 +4714,7 @@ impl Parser<'_> {
                     match digits {
                         Some(d) => {
                             let k = d.parse::<usize>().map_err(|_| {
-                                QuarbError::Parse(format!("bad join position '$${d}'"))
+                                QuarbError::parse(format!("bad join position '$${d}'"))
                             })?;
                             self.pos += 2;
                             if k == 0 {
@@ -4874,11 +4724,10 @@ impl Parser<'_> {
                             joined = Some(k);
                         }
                         None => {
-                            return Err(QuarbError::Parse(
+                            return Err(QuarbError::parse(
                                 "the capsa is shared: '$.name', '$_' and '$ord' read the same register \
                                  inside a body or a join condition; '_' is the served node, '$$N' a \
-                                 bound node, '$$.name' a mark"
-                                    .into(),
+                                 bound node, '$$.name' a mark",
                             ));
                         }
                     }
@@ -4897,7 +4746,7 @@ impl Parser<'_> {
                             if digits.is_empty() {
                                 None
                             } else {
-                                return Err(QuarbError::Parse(format!(
+                                return Err(QuarbError::parse(format!(
                                     "'$*{digits}' is retired: the join's N-th node is '$${digits}'"
                                 )));
                             }
@@ -4944,9 +4793,7 @@ impl Parser<'_> {
                             quoted: false,
                             ..
                         }) if text == "ordinal" => {
-                            return Err(QuarbError::Parse(
-                                "'$ordinal' is retired: write '$ord'".into(),
-                            ));
+                            return Err(QuarbError::parse("'$ordinal' is retired: write '$ord'"));
                         }
                         // `$1` … `$9` — a regex capture from the last
                         // successful `=~` match in a filter stage.
@@ -4956,11 +4803,11 @@ impl Parser<'_> {
                             ..
                         }) if text.chars().all(|c| c.is_ascii_digit()) => {
                             let n: usize = text.parse().map_err(|_| {
-                                QuarbError::Parse(format!("bad capture reference '${text}'"))
+                                QuarbError::parse(format!("bad capture reference '${text}'"))
                             })?;
                             if n == 0 {
-                                return Err(QuarbError::Parse(
-                                    "capture references are 1-based ('$1')".into(),
+                                return Err(QuarbError::parse(
+                                    "capture references are 1-based ('$1')",
                                 ));
                             }
                             self.pos += 1;
@@ -4979,8 +4826,8 @@ impl Parser<'_> {
                                 projection,
                                 Some(Projection::CoreMeta(_) | Projection::AdapterMeta(_))
                             ) {
-                                return Err(QuarbError::Parse(
-                                    "an edge carries plain properties only ($-::prop)".into(),
+                                return Err(QuarbError::parse(
+                                    "an edge carries plain properties only ($-::prop)",
                                 ));
                             }
                             return Ok(Operand::Edge { projection });
@@ -4997,10 +4844,9 @@ impl Parser<'_> {
                             return Ok(Operand::Param(name));
                         }
                         _ => {
-                            return Err(QuarbError::Parse(
-                            "expected '*N', '.name', '_', '-', or 'ord' after '$' in an operand"
-                                .into(),
-                        ));
+                            return Err(QuarbError::parse(
+                                "expected '*N', '.name', '_', '-', or 'ord' after '$' in an operand",
+                            ));
                         }
                     }
                 };
@@ -5037,7 +4883,7 @@ impl Parser<'_> {
             // any path operand), a piped body under the inline
             // rules, a macro by its expansion.
             Some(Token::Amp) => self.splice_operand_fragment(),
-            other => Err(QuarbError::Parse(format!(
+            other => Err(QuarbError::parse(format!(
                 "expected a value or path in a predicate, found {other:?}"
             ))),
         }
@@ -5047,10 +4893,10 @@ impl Parser<'_> {
     fn splice_operand_fragment(&mut self) -> Result<Operand> {
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
-            return Err(QuarbError::Parse(format!("unknown fragment '&{name}'")));
+            return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
         };
         if quant.is_some() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "a quantifier doesn't ride '&{name}' in operand position; \
                  put the quantified group inside the definition"
             )));
@@ -5066,7 +4912,7 @@ impl Parser<'_> {
                 let mut conj: Option<PredExpr> = None;
                 for pred in preds {
                     let Predicate::Expr(mut e) = pred else {
-                        return Err(QuarbError::Parse(format!(
+                        return Err(QuarbError::parse(format!(
                             "the predicate fragment '&{name}' holds a \
                              positional predicate; a condition operand \
                              needs an expression"
@@ -5081,7 +4927,7 @@ impl Parser<'_> {
                 let conj = conj.expect("a predicate body holds at least one predicate");
                 Ok(Operand::Group(Box::new(conj)))
             }
-            DefBody::Pipeline(_) => Err(QuarbError::Parse(format!(
+            DefBody::Pipeline(_) => Err(QuarbError::parse(format!(
                 "'&{name}' is a pipeline fragment; invoke it after a pipe"
             ))),
             DefBody::Query(mut q) => {
@@ -5099,29 +4945,19 @@ impl Parser<'_> {
                 let invited = invites_of(&args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
                 let wrap = |e: QuarbError| {
-                    QuarbError::Expansion(format!("in expansion of '&{name}' ('{text}'): {e}"))
+                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
+                        .wrapping(e)
                 };
                 let tokens = lexer::lex(&text).map_err(wrap)?;
-                let mut p = Parser {
-                    toks: &tokens,
-                    pos: 0,
-                    defs: self.defs.before(&name),
-                    def_params: Vec::new(),
-                    data: self.data,
-                    // Predicates reset pattern scope; the predicate
-                    // scope itself is inherited, so generated text
-                    // obeys the same restrictions hand-written
-                    // operands would (`<--` stays refused).
-                    pattern_depth: 0,
-                    predicate_depth: self.predicate_depth,
-                    nest_depth: self.sub_depth()?,
-                    subquery_depth: 0,
-                    captures: std::cell::RefCell::new(Vec::new()),
-                    first_steps: std::cell::RefCell::new(Vec::new()),
-                };
+                let mut p = self.child(&tokens, self.defs.before(&name))?;
+                // Predicates reset pattern scope; the predicate
+                // scope itself is inherited, so generated text
+                // obeys the same restrictions hand-written
+                // operands would (`<--` stays refused).
+                p.predicate_depth = self.predicate_depth;
                 let op = p.cond_expr().map_err(wrap)?;
                 if p.pos != tokens.len() {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "macro '&{name}' expanded to text with trailing \
                          content ('{text}')"
                     )));
@@ -5138,7 +4974,7 @@ impl Parser<'_> {
     /// rules.
     fn operand_from_query(&self, name: &str, q: Query) -> Result<Operand> {
         if !q.correlations.is_empty() {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' carries a correlation; a chain \
                  splices at driver position only"
             )));
@@ -5155,7 +4991,7 @@ impl Parser<'_> {
                 .iter()
                 .any(|b| b.anchor != Anchor::Current || b.projection.is_some())
             {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' is a projected or anchored union; \
                      in operand position a union body must be plain \
                      navigation from the current node"
@@ -5185,7 +5021,7 @@ impl Parser<'_> {
             && let Operand::Rel { steps, .. } = &rel
             && walks_reverse_resolve(steps)
         {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "fragment '&{name}' walks reverse resolution '<--', \
                  which is not allowed inside a predicate (it would scan \
                  the whole arbor per node); rewrite as a descending path \
@@ -5205,7 +5041,7 @@ impl Parser<'_> {
                     | Stage::Subcontext { .. }
                     | Stage::Nav(_)
             ) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "fragment '&{name}' carries a pipeline that pushes or \
                      navigates; an operand pipe transforms a value \
                      (pushes belong to real capsae)"
@@ -5260,7 +5096,7 @@ impl Parser<'_> {
             self.pos += 1;
             return Ok(());
         }
-        Err(QuarbError::Parse(format!("expected {what}")))
+        Err(QuarbError::parse(format!("expected {what}")))
     }
 
     /// The conditional's `?` or `:` (spec: Lexical Disambiguation):
@@ -5271,10 +5107,10 @@ impl Parser<'_> {
         let spaced = match self.peek() {
             Some(Token::Question { spaced }) if c == '?' => *spaced,
             Some(Token::Colon { spaced }) if c == ':' => *spaced,
-            _ => return Err(QuarbError::Parse(format!("expected '{c}'"))),
+            _ => return Err(QuarbError::parse(format!("expected '{c}'"))),
         };
         if !spaced {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "'{c}' is an operator and takes a space on both sides: write ' {c} '"
             )));
         }
@@ -5288,10 +5124,10 @@ impl Parser<'_> {
     fn expect_else(&mut self, what: &str) -> Result<()> {
         match self.peek() {
             Some(Token::Colon { .. }) => self.binary_marker(':'),
-            Some(Token::Field) => Err(QuarbError::Parse(
-                "':' is an operator and takes a space on both sides: write ' : '".into(),
+            Some(Token::Field) => Err(QuarbError::parse(
+                "':' is an operator and takes a space on both sides: write ' : '",
             )),
-            _ => Err(QuarbError::Parse(format!("expected {what}"))),
+            _ => Err(QuarbError::parse(format!("expected {what}"))),
         }
     }
 
@@ -5346,7 +5182,7 @@ impl Parser<'_> {
             self.pos += 1;
             Ok(())
         } else {
-            Err(QuarbError::Parse(format!("expected {what}")))
+            Err(QuarbError::parse(format!("expected {what}")))
         }
     }
 
@@ -5458,7 +5294,7 @@ impl Parser<'_> {
                 } else {
                     '<'
                 };
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "'{c}' followed by a space is the comparison; the sibling hop \
                      is glued to its name: '{c}name' ('{c}*' for any)"
                 )));
@@ -5469,7 +5305,7 @@ impl Parser<'_> {
             Some(Token::ArrowIn) => Axis::InLink,
             Some(Token::DashDash) => Axis::BothLink,
             Some(Token::Name { text, .. }) => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "expected a navigation operator before '{text}' \
                      (queries are root-anchored; start with '/', or open \
                      with an expression head: '= expr')"
@@ -5482,13 +5318,13 @@ impl Parser<'_> {
                     Some(Token::Name { text, .. }) => text.clone(),
                     _ => "name".to_string(),
                 };
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "':{name}' reads a record's field; a node's property is '::{name}'"
                 )));
             }
             _ => {
-                return Err(QuarbError::Parse(
-                    "expected a navigation operator ('/', '//', '\\', …)".into(),
+                return Err(QuarbError::parse(
+                    "expected a navigation operator ('/', '//', '\\', …)",
                 ));
             }
         };
@@ -5546,9 +5382,9 @@ impl Parser<'_> {
             }
             Some(Token::Regex(pat)) => Regex::new(pat)
                 .map(Matcher::Regex)
-                .map_err(|e| QuarbError::Parse(format!("bad regex '~({pat})': {e}"))),
-            _ => Err(QuarbError::Parse(
-                "a navigation operator must be followed by a name".into(),
+                .map_err(|e| QuarbError::parse(format!("bad regex '~({pat})': {e}"))),
+            _ => Err(QuarbError::parse(
+                "a navigation operator must be followed by a name",
             )),
         }
     }
@@ -5627,7 +5463,7 @@ fn trait_cnf(e: TExpr) -> Result<Vec<TraitClause>> {
             TExpr::Not(_) => unreachable!("nnf removed compound negation"),
         };
         if out.len() > MAX_TRAIT_CLAUSES {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "trait filter too complex: its normal form exceeds \
                  {MAX_TRAIT_CLAUSES} clauses"
             )));
@@ -5643,6 +5479,59 @@ fn trait_cnf(e: TExpr) -> Result<Vec<TraitClause>> {
 /// Interpret a name token as a predicate literal. A quoted name is
 /// always a string; a bare name is a number, `true`/`false`/`null`, or
 /// else a string.
+/// An `@|` stage: the name must be an aggregate (any family), and
+/// its arguments pass the registry's check.
+fn agg_stage(call: FnCall) -> Result<Stage> {
+    let Some(spec) = crate::registry::spec(&call.name).filter(|s| s.agg.is_some()) else {
+        return Err(QuarbError::unsupported(format!(
+            "aggregate function '{}'",
+            call.name
+        )));
+    };
+    if call.name == "ungroup" && !call.args.is_empty() {
+        return Err(QuarbError::parse("'ungroup' takes no arguments"));
+    }
+    match spec.check {
+        crate::registry::Check::Stage => validate_window_shift(&call)?,
+        crate::registry::Check::Keyed => validate_keyed(&call)?,
+        _ => {}
+    }
+    Ok(Stage::Agg(call))
+}
+
+/// A `|` stage: a scalar, or an aggregate that also works per capsa
+/// — a keyed aggregate on a group's members (`@| group(::k) | top(2,
+/// ::v)`), a reducing one on a list topic (`@| group(::k) | mean`).
+/// A whole-context stage (`ungroup`, `window`, `shift`) never takes
+/// the plain pipe. The arguments pass the registry's check.
+fn func_stage(call: FnCall) -> Result<Stage> {
+    use crate::registry::{Agg, Check};
+    let spec = crate::registry::spec(&call.name);
+    let stands = spec.is_some_and(|s| {
+        s.scalar
+            || matches!(
+                s.agg,
+                Some(Agg::Reducing | Agg::Keyed | Agg::Association { .. })
+            )
+    });
+    if !stands {
+        if let Some(pointer) = retired_function(&call.name) {
+            return Err(QuarbError::parse(pointer));
+        }
+        let err = QuarbError::unsupported(format!("pipeline function '{}'", call.name));
+        return Err(if spec.is_some_and(|s| s.agg == Some(Agg::Context)) {
+            err.with_hint(format!(" ('{}' uses '@|')", call.name))
+        } else {
+            err
+        });
+    }
+    match spec.map(|s| s.check) {
+        Some(Check::Keyed) => validate_keyed(&call)?,
+        _ => validate_record(&call)?,
+    }
+    Ok(Stage::Func(call))
+}
+
 /// Check `record(...)`'s argument shape at parse time: fields come
 /// either as a literal-string name followed by any argument, or as a
 /// projection that names itself (`::href` → `href`); anything else
@@ -5659,7 +5548,7 @@ fn validate_record(call: &FnCall) -> Result<()> {
                 return Ok(());
             }
             [Arg::Lit(v)] => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "decode: '{}' is not a decodable format \
                      (base64, base64url, base32, crockford32, hex, \
                       json, yaml, toml, xml)",
@@ -5667,8 +5556,8 @@ fn validate_record(call: &FnCall) -> Result<()> {
                 )));
             }
             _ => {
-                return Err(QuarbError::Parse(
-                    "decode takes one scheme name, e.g. decode(base64)".into(),
+                return Err(QuarbError::parse(
+                    "decode takes one scheme name, e.g. decode(base64)",
                 ));
             }
         }
@@ -5717,7 +5606,7 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
     if call.args.is_empty() {
         // a record has fields; a grouping has keys
         let noun = if what == "group" { "key" } else { "field" };
-        return Err(QuarbError::Parse(format!(
+        return Err(QuarbError::parse(format!(
             "{what} needs at least one {noun}, e.g. {what}(::name)"
         )));
     }
@@ -5727,7 +5616,7 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
     let mut names: Vec<String> = Vec::new();
     let mut check = |name: &str| -> Result<()> {
         if names.iter().any(|n| n == name) {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "{what} names the field '{name}' twice — name one \
                  explicitly: {what}(\"other-{name}\", ...)"
             )));
@@ -5741,7 +5630,7 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             // A literal string names the following argument.
             Arg::Lit(Value::Str(name)) => {
                 if i + 1 >= call.args.len() {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "{what} has a trailing field name with no value"
                     )));
                 }
@@ -5750,7 +5639,7 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             }
             Arg::Expr(e) => {
                 let Some(name) = crate::ast::auto_field_name(e) else {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "a {what} field needs a name: give a computed value a key, \
                          e.g. %(total = ::price * ::qty)"
                     )));
@@ -5760,7 +5649,7 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
                 i += 1;
             }
             _ => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "a {what} field needs a name: give a computed value a key, \
                      e.g. %(total = ::price * ::qty)"
                 )));
@@ -5808,7 +5697,7 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
         let locale = |v: &Value| -> Result<()> {
             let tag = v.to_string();
             if !valid_locale_tag(&tag) {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "sort: '{tag}' is not a Unicode locale identifier \
                      (try ru-RU, de-DE, zh-Hant, ...)"
                 )));
@@ -5824,11 +5713,10 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
                 return locale(loc);
             }
             _ => {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "sort takes a locale identifier, the word atergo, or both \
                      with the locale first: sort, sort(ru-RU), sort(atergo), \
-                     sort(ru-RU; atergo); keyed sorting is sort_by"
-                        .into(),
+                     sort(ru-RU; atergo); keyed sorting is sort_by",
                 ));
             }
         }
@@ -5844,14 +5732,14 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
     if matches!(call.name.as_str(), "top" | "bottom")
         && !matches!(args.next(), Some(Arg::Lit(Value::Int(n))) if *n >= 0)
     {
-        return Err(QuarbError::Parse(format!(
+        return Err(QuarbError::parse(format!(
             "{} takes a non-negative integer count first: {}(3, ::key)",
             call.name, call.name
         )));
     }
     let mut keys = args.peekable();
     if keys.peek().is_none() || keys.any(|a| matches!(a, Arg::Lit(_))) {
-        return Err(QuarbError::Parse(format!(
+        return Err(QuarbError::parse(format!(
             "{} needs value-expression keys, e.g. {}(::age)",
             call.name, call.name
         )));
@@ -5873,39 +5761,37 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 if let (Some(a), Some(b)) = (a, b)
                     && a > b
                 {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "window({a}..{b}) is empty: the range needs start <= end"
                     )));
                 }
                 Ok(())
             }
             Some((Arg::Lit(Value::Int(n)), rest)) if *n >= 1 && key_ok(rest) => Ok(()),
-            _ => Err(QuarbError::Parse(
+            _ => Err(QuarbError::parse(
                 "window takes an offset range or a count, then an optional \
-                 partition key: window(-2..0), window(3, ::group)"
-                    .into(),
+                 partition key: window(-2..0), window(3, ::group)",
             )),
         },
         "shift" => match call.args.split_first() {
             Some((Arg::Lit(Value::Int(_)), rest)) if key_ok(rest) => Ok(()),
-            _ => Err(QuarbError::Parse(
+            _ => Err(QuarbError::parse(
                 "shift takes an integer distance, then an optional partition \
-                 key: shift(1), shift(1, ::group)"
-                    .into(),
+                 key: shift(1), shift(1, ::group)",
             )),
         },
         // `combinations(n)`, and its two named sizes.
         "combinations" => match call.args.as_slice() {
             [Arg::Lit(Value::Int(n))] if *n >= 1 => Ok(()),
-            _ => Err(QuarbError::Parse(
-                "combinations takes the size of the subset: combinations(2)".into(),
+            _ => Err(QuarbError::parse(
+                "combinations takes the size of the subset: combinations(2)",
             )),
         },
         "pairs" | "triples" => {
             if call.args.is_empty() {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(format!(
+                Err(QuarbError::parse(format!(
                     "'{}' takes no arguments; a subset of another size is combinations(n)",
                     call.name
                 )))
@@ -5913,14 +5799,13 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
         }
         // `csv[(a; b; …)]` / `table[(a; b; …)]` — the columns by name.
         "csv" | "table" => {
-            if call
-                .args
-                .iter()
-                .all(|a| matches!(a, Arg::Lit(Value::Str(_))))
-            {
+            if call.args.iter().all(|a| {
+                matches!(a, Arg::Lit(Value::Str(_)))
+                    || matches!(a, Arg::Named { name, .. } if name == "delimiter")
+            }) {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(format!(
+                Err(QuarbError::parse(format!(
                     "{0} takes column names: {0}, {0}(year; title)",
                     call.name
                 )))
@@ -5930,8 +5815,8 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
         // hand without one.
         "number" => match call.args.as_slice() {
             [] | [Arg::Expr(_)] => Ok(()),
-            _ => Err(QuarbError::Parse(
-                "number takes an optional level expression: number, number(:::depth)".into(),
+            _ => Err(QuarbError::parse(
+                "number takes an optional level expression: number, number(:::depth)",
             )),
         },
         // `timeline[(EXPR[; ANCHOR][; forward])]` — the capsa's time
@@ -5945,11 +5830,10 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
             if args.len() <= 2 && args.iter().all(|a| !matches!(a, Arg::Range(..))) {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(
+                Err(QuarbError::parse(
                     "timeline takes the time expression, an optional anchor, and \
                      the optional word forward: timeline($_), timeline($_; $.d), \
-                     timeline($_; $.d; forward)"
-                        .into(),
+                     timeline($_; $.d; forward)",
                 ))
             }
         }
@@ -5958,10 +5842,9 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
         "outline" => match call.args.as_slice() {
             [] | [Arg::Expr(_), Arg::Expr(_)] => Ok(()),
             [Arg::Expr(_), Arg::Expr(_), Arg::Lit(Value::Str(style))] if style == "1." => Ok(()),
-            _ => Err(QuarbError::Parse(
+            _ => Err(QuarbError::parse(
                 "outline takes a level and a text, then an optional numbering \
-                 style: outline(:::depth; ::lemma), outline(:::depth; ::lemma; \"1.\")"
-                    .into(),
+                 style: outline(:::depth; ::lemma), outline(:::depth; ::lemma; \"1.\")",
             )),
         },
         // `zscore([sample][; key])` — the word `sample` selects the
@@ -5976,10 +5859,9 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
             if ok {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(
+                Err(QuarbError::parse(
                     "zscore takes the word sample and/or a partition key: \
-                     zscore, zscore(sample), zscore($.w), zscore(sample; $.w)"
-                        .into(),
+                     zscore, zscore(sample), zscore($.w), zscore(sample; $.w)",
                 ))
             }
         }
@@ -6007,7 +5889,7 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
             if ok {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(format!(
+                Err(QuarbError::parse(format!(
                     "{0} takes only the word sample: {0}, {0}(sample)",
                     call.name
                 )))
@@ -6021,14 +5903,14 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
                 if crate::source::encoding_for_label(label).is_some() {
                     Ok(())
                 } else {
-                    Err(QuarbError::Parse(format!(
+                    Err(QuarbError::parse(format!(
                         "encoding: unknown label {label:?} (labels are the Encoding \
                          Standard's: utf-8, windows-1251, koi8-r, iso-8859-2, …)"
                     )))
                 }
             }
-            _ => Err(QuarbError::Parse(
-                "encoding takes one label: encoding(windows-1251)".into(),
+            _ => Err(QuarbError::parse(
+                "encoding takes one label: encoding(windows-1251)",
             )),
         },
         "corr" | "spearman" | "cosine" | "delta" | "dp" | "kappa" | "precision" | "recall"
@@ -6036,7 +5918,7 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
             if matches!(call.args.as_slice(), [Arg::Expr(_), Arg::Expr(_)]) {
                 Ok(())
             } else {
-                Err(QuarbError::Parse(format!(
+                Err(QuarbError::parse(format!(
                     "{0} needs two value-expression keys: {0}(:a; :b), {0}(::x; ::y)",
                     call.name
                 )))
@@ -6148,7 +6030,7 @@ fn matcher_for(text: &str, quoted: bool) -> Result<Matcher> {
     }
     if text.contains('*') {
         let glob =
-            Glob::new(text).map_err(|e| QuarbError::Parse(format!("bad glob '{text}': {e}")))?;
+            Glob::new(text).map_err(|e| QuarbError::parse(format!("bad glob '{text}': {e}")))?;
         return Ok(Matcher::Glob(glob.compile_matcher()));
     }
     Ok(Matcher::Name(text.to_string()))
@@ -6346,126 +6228,6 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
     }
 }
 
-/// The largest `$*k` index mentioned under an AST piece — 0 when
-/// none. Backs the driver-first placement rules: correlated
-/// references live on a joined expression's final step (its ON
-/// clause) and in the driver's pipeline, nowhere else.
-fn max_ctx_query(q: &Query) -> usize {
-    q.correlations
-        .iter()
-        .map(max_ctx_query)
-        .chain(
-            q.branches
-                .iter()
-                .flat_map(|b| b.steps.iter().map(max_ctx_elem)),
-        )
-        .chain(q.pipeline.iter().map(max_ctx_stage))
-        .max()
-        .unwrap_or(0)
-}
-
-fn max_ctx_elem(elem: &PathElem) -> usize {
-    match elem {
-        PathElem::Mark(_) => 0,
-        PathElem::Step(s) => max_ctx_step(s),
-        PathElem::Group(g) => g
-            .alts
-            .iter()
-            .flat_map(|alt| alt.iter().map(max_ctx_elem))
-            .chain(g.predicates.iter().map(max_ctx_pred))
-            .max()
-            .unwrap_or(0),
-        PathElem::Push { body, .. } => match body {
-            PushBody::Query(q) => max_ctx_query(q),
-            PushBody::Expr(e) => max_ctx_operand(e),
-        },
-    }
-}
-
-fn max_ctx_step(s: &Step) -> usize {
-    s.predicates.iter().map(max_ctx_pred).max().unwrap_or(0)
-}
-
-fn max_ctx_pred(p: &Predicate) -> usize {
-    match p {
-        Predicate::Expr(e) => max_ctx_pred_expr(e),
-        Predicate::Index(_) | Predicate::Range(_, _) => 0,
-    }
-}
-
-pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
-    match e {
-        PredExpr::Or(a, b) | PredExpr::And(a, b) => max_ctx_pred_expr(a).max(max_ctx_pred_expr(b)),
-        PredExpr::Not(a) => max_ctx_pred_expr(a),
-        PredExpr::Compare(l, _, r) => max_ctx_operand(l).max(max_ctx_operand(r)),
-        PredExpr::Truthy(o) => max_ctx_operand(o),
-    }
-}
-
-fn max_ctx_stage(st: &Stage) -> usize {
-    match st {
-        Stage::Func(call)
-        | Stage::Agg(call)
-        | Stage::RecordWith(call)
-        | Stage::RecordPush { call, .. } => call
-            .args
-            .iter()
-            .map(|a| match a {
-                Arg::Expr(e) => max_ctx_operand(e),
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0),
-        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => max_ctx_operand(e),
-        Stage::Nav(b) => b.steps.iter().map(max_ctx_elem).max().unwrap_or(0),
-        Stage::Subcontext { body, .. } => max_ctx_query(body),
-        Stage::Filter(e) => max_ctx_pred_expr(e),
-        Stage::Select(p) => max_ctx_pred(p),
-        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => max_ctx_stage(inner),
-        Stage::Push(_) | Stage::FieldsPush | Stage::Recall(_) | Stage::Spread { .. } => 0,
-    }
-}
-
-fn max_ctx_operand(o: &Operand) -> usize {
-    match o {
-        Operand::Ctx { index, steps, .. } => index
-            .unwrap_or(0)
-            .max(steps.iter().map(max_ctx_elem).max().unwrap_or(0)),
-        Operand::Rel { steps, .. } => steps.iter().map(max_ctx_elem).max().unwrap_or(0),
-        Operand::Arith { left, right, .. } => max_ctx_operand(left).max(max_ctx_operand(right)),
-        Operand::Neg(inner) | Operand::Outer(inner) => max_ctx_operand(inner),
-        Operand::Group(e) => max_ctx_pred_expr(e),
-        Operand::Piped { expr, stages } => {
-            max_ctx_operand(expr).max(stages.iter().map(max_ctx_stage).max().unwrap_or(0))
-        }
-        Operand::Cond { cond, then, other } => max_ctx_pred_expr(cond)
-            .max(max_ctx_operand(then))
-            .max(max_ctx_operand(other)),
-        Operand::Match {
-            scrutinee,
-            arms,
-            other,
-        } => max_ctx_operand(scrutinee)
-            .max(
-                arms.iter()
-                    .map(|(t, _, r)| max_ctx_operand(t).max(max_ctx_operand(r)))
-                    .max()
-                    .unwrap_or(0),
-            )
-            .max(max_ctx_operand(other)),
-        Operand::Interp(segs) => segs
-            .iter()
-            .map(|seg| match seg {
-                InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => max_ctx_operand(e),
-                InterpSeg::Default(e, f) => max_ctx_operand(e).max(max_ctx_operand(f)),
-                InterpSeg::Text(_) => 0,
-            })
-            .max()
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
-
 /// Enforce the driver-first placement of correlated references:
 /// the first expression drives and cannot mention `$*k`; each
 /// joined expression's ON clause (its final step's brackets) may
@@ -6476,6 +6238,39 @@ fn max_ctx_operand(o: &Operand) -> usize {
 /// plain pipe it works per group, after `@| group`. Without a group
 /// stage before it, it would rank each capsa's single value against
 /// itself and pass everything through — refuse with the pointer.
+/// The highest correlation context (`$*k`) a predicate expression
+/// references, anywhere in it — nested bodies included.
+pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
+    let mut v = MaxCtx(0);
+    v.pred(e);
+    v.0
+}
+
+/// [`max_ctx_pred_expr`] over a path element.
+fn max_ctx_elem(e: &PathElem) -> usize {
+    let mut v = MaxCtx(0);
+    v.elem(e);
+    v.0
+}
+
+/// [`max_ctx_pred_expr`] over a pipeline stage.
+fn max_ctx_stage(s: &Stage) -> usize {
+    let mut v = MaxCtx(0);
+    v.stage(s);
+    v.0
+}
+
+struct MaxCtx(usize);
+
+impl visit::Visitor for MaxCtx {
+    fn operand(&mut self, o: &Operand) {
+        if let Operand::Ctx { index, .. } = o {
+            self.0 = self.0.max(index.unwrap_or(0));
+        }
+        visit::walk_operand(self, o);
+    }
+}
+
 fn validate_keyed_stages(q: &Query) -> Result<()> {
     let mut grouped = false;
     for stage in &q.pipeline {
@@ -6484,7 +6279,7 @@ fn validate_keyed_stages(q: &Query) -> Result<()> {
             // keyed stage on the plain pipe then works per part.
             Stage::Agg(call) if matches!(call.name.as_str(), "group" | "window") => grouped = true,
             Stage::Func(call) if crate::stdlib::known_keyed(&call.name) && !grouped => {
-                return Err(QuarbError::Parse(format!(
+                return Err(QuarbError::parse(format!(
                     "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per group, after '@| group')",
                     n = call.name
                 )));
@@ -6503,11 +6298,10 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
     for b in &q.branches {
         for elem in &b.steps {
             if max_ctx_elem(elem) > 0 {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "the first expression drives the join and cannot \
                      reference '$*k'; join conditions belong on the \
-                     joined expression: 'A <=> B[::x = _::x]'"
-                        .into(),
+                     joined expression: 'A <=> B[::x = _::x]'",
                 ));
             }
         }
@@ -6515,7 +6309,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
     for st in &q.pipeline {
         let m = max_ctx_stage(st);
         if m > n {
-            return Err(QuarbError::Parse(format!(
+            return Err(QuarbError::parse(format!(
                 "the pipeline references '$*{m}', but only {n} \
                  expression(s) are joined"
             )));
@@ -6531,14 +6325,13 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
                     continue;
                 }
                 if j != last || !matches!(elem, PathElem::Step(_)) {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::parse(
                         "join conditions belong in the joined \
-                         expression's final step's brackets"
-                            .into(),
+                         expression's final step's brackets",
                     ));
                 }
                 if m >= k {
-                    return Err(QuarbError::Parse(format!(
+                    return Err(QuarbError::parse(format!(
                         "joined expression #{k} references '$*{m}'; it may \
                          only reference expressions joined before it \
                          ('$*1'..'$*{}') — the driver is '$$'",
@@ -6558,11 +6351,10 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
                             seen_corr = true;
                         }
                         Predicate::Index(_) | Predicate::Range(_, _) if seen_corr => {
-                            return Err(QuarbError::Parse(
+                            return Err(QuarbError::parse(
                                 "positional selection after a join condition \
                                  is ambiguous — select before the join \
-                                 condition, or in the pipeline"
-                                    .into(),
+                                 condition, or in the pipeline",
                             ));
                         }
                         _ => {}
@@ -6572,11 +6364,10 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
         }
         for st in &entry.pipeline {
             if max_ctx_stage(st) > 0 {
-                return Err(QuarbError::Parse(
+                return Err(QuarbError::parse(
                     "a joined expression's own pipeline shapes its context \
                      before the join and cannot reference '$*k'; join \
-                     conditions belong in its final step's brackets"
-                        .into(),
+                     conditions belong in its final step's brackets",
                 ));
             }
         }
@@ -6584,123 +6375,48 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
     Ok(())
 }
 
-/// Whether a predicate expression mentions the invoking capsa
-/// (`$$…`) anywhere — the other half of an ON clause.
+/// Whether a predicate expression reads the invoking capsa — an
+/// outer reference (`$$…`), the register, the topic, the ordinal,
+/// the captures, or a mark-anchored path. The capsa is shared: a
+/// joined expression's predicate that reads it reads the DRIVER's,
+/// so it is an ON condition, evaluated per driving capsa — not once
+/// at materialization.
 pub(crate) fn pred_mentions_outer(e: &PredExpr) -> bool {
-    match e {
-        PredExpr::Or(a, b) | PredExpr::And(a, b) => {
-            pred_mentions_outer(a) || pred_mentions_outer(b)
-        }
-        PredExpr::Not(a) => pred_mentions_outer(a),
-        PredExpr::Compare(l, _, r) => op_mentions_outer(l) || op_mentions_outer(r),
-        PredExpr::Truthy(o) => op_mentions_outer(o),
-    }
+    let mut v = Outer(false);
+    v.pred(e);
+    v.0
 }
 
-fn op_mentions_outer(o: &Operand) -> bool {
-    match o {
-        Operand::Outer(_) => true,
-        // The capsa is shared: a joined expression's predicate that
-        // reads the register, the marks, the captures, the topic or
-        // the ordinal reads the DRIVER's, so it is an ON condition,
-        // evaluated per driving capsa — not once at materialization.
-        Operand::Recall(_)
-        | Operand::Topic
-        | Operand::Ordinal
-        | Operand::Capture(_)
-        | Operand::NamedCaptures => true,
-        Operand::Rel {
-            anchor:
-                Anchor::Mark(_)
-                | Anchor::MarkIndex(_)
-                | Anchor::MarkTop
-                | Anchor::MarksAll
-                | Anchor::MarksNamed(_),
-            ..
-        } => true,
-        Operand::Rel {
-            anchor: Anchor::Id(op),
-            steps,
-            ..
-        } => op_mentions_outer(op) || steps.iter().any(elem_mentions_outer),
-        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => op_mentions_outer(base),
-        Operand::PeerReg { at, .. } => op_mentions_outer(at),
-        Operand::List(items) => items.iter().any(op_mentions_outer),
-        Operand::Ctx { steps, .. } | Operand::Rel { steps, .. } => {
-            steps.iter().any(elem_mentions_outer)
-        }
-        Operand::Arith { left, right, .. } => op_mentions_outer(left) || op_mentions_outer(right),
-        Operand::Neg(inner) => op_mentions_outer(inner),
-        Operand::Group(e) => pred_mentions_outer(e),
-        Operand::Piped { expr, stages } => {
-            op_mentions_outer(expr) || stages.iter().any(stage_mentions_outer)
-        }
-        Operand::Cond { cond, then, other } => {
-            pred_mentions_outer(cond) || op_mentions_outer(then) || op_mentions_outer(other)
-        }
-        Operand::Match {
-            scrutinee,
-            arms,
-            other,
-        } => {
-            op_mentions_outer(scrutinee)
-                || arms
-                    .iter()
-                    .any(|(t, _, r)| op_mentions_outer(t) || op_mentions_outer(r))
-                || op_mentions_outer(other)
-        }
-        Operand::Interp(segs) => segs.iter().any(|seg| match seg {
-            InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => op_mentions_outer(e),
-            InterpSeg::Default(e, f) => op_mentions_outer(e) || op_mentions_outer(f),
-            InterpSeg::Text(_) => false,
-        }),
-        _ => false,
-    }
-}
-
+/// [`pred_mentions_outer`] over a path element.
 pub(crate) fn elem_mentions_outer(e: &PathElem) -> bool {
-    match e {
-        PathElem::Mark(_) => false,
-        PathElem::Step(s) => s.predicates.iter().any(|p| match p {
-            Predicate::Expr(e) => pred_mentions_outer(e),
-            _ => false,
-        }),
-        PathElem::Group(g) => {
-            g.alts.iter().any(|alt| alt.iter().any(elem_mentions_outer))
-                || g.predicates.iter().any(|p| match p {
-                    Predicate::Expr(e) => pred_mentions_outer(e),
-                    _ => false,
-                })
+    let mut v = Outer(false);
+    v.elem(e);
+    v.0
+}
+
+struct Outer(bool);
+
+impl visit::Visitor for Outer {
+    fn operand(&mut self, o: &Operand) {
+        match o {
+            Operand::Outer(_)
+            | Operand::Recall(_)
+            | Operand::Topic
+            | Operand::Ordinal
+            | Operand::Capture(_)
+            | Operand::NamedCaptures => self.0 = true,
+            Operand::Rel {
+                anchor:
+                    Anchor::Mark(_)
+                    | Anchor::MarkIndex(_)
+                    | Anchor::MarkTop
+                    | Anchor::MarksAll
+                    | Anchor::MarksNamed(_),
+                ..
+            } => self.0 = true,
+            _ => visit::walk_operand(self, o),
         }
-        PathElem::Push { body, .. } => match body {
-            PushBody::Query(q) => query_mentions_outer(q),
-            PushBody::Expr(e) => op_mentions_outer(e),
-        },
     }
-}
-
-fn stage_mentions_outer(st: &Stage) -> bool {
-    match st {
-        Stage::Func(call) | Stage::Agg(call) => call.args.iter().any(|a| match a {
-            Arg::Expr(e) => op_mentions_outer(e),
-            _ => false,
-        }),
-        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => op_mentions_outer(e),
-        Stage::Nav(b) => b.steps.iter().any(elem_mentions_outer),
-        Stage::Subcontext { body, .. } => query_mentions_outer(body),
-        Stage::Filter(e) => pred_mentions_outer(e),
-        Stage::Select(Predicate::Expr(e)) => pred_mentions_outer(e),
-        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => stage_mentions_outer(inner),
-        _ => false,
-    }
-}
-
-fn query_mentions_outer(q: &Query) -> bool {
-    q.branches
-        .iter()
-        .any(|b| b.steps.iter().any(elem_mentions_outer))
-        || q.pipeline.iter().any(stage_mentions_outer)
-        || q.correlations.iter().any(query_mentions_outer)
 }
 
 #[cfg(test)]
@@ -7167,8 +6883,8 @@ fn universalize(elem: &mut PathElem) -> Result<()> {
                 s.axis = Axis::Universal;
                 Ok(())
             }
-            _ => Err(QuarbError::Parse(
-                "'*//' searches the whole arbor and takes no reach ('*//?', '*//!')".into(),
+            _ => Err(QuarbError::parse(
+                "'*//' searches the whole arbor and takes no reach ('*//?', '*//!')",
             )),
         }
     }
@@ -7179,17 +6895,16 @@ fn universalize(elem: &mut PathElem) -> Result<()> {
                 match alt.as_mut_slice() {
                     [PathElem::Step(s)] => step(s)?,
                     _ => {
-                        return Err(QuarbError::Parse(
-                            "'*//(…)' takes name alternatives: each a single name or pattern"
-                                .into(),
+                        return Err(QuarbError::parse(
+                            "'*//(…)' takes name alternatives: each a single name or pattern",
                         ));
                     }
                 }
             }
             Ok(())
         }
-        _ => Err(QuarbError::Parse(
-            "'*//' is the universal search: follow it with a name, a pattern, or '*'".into(),
+        _ => Err(QuarbError::parse(
+            "'*//' is the universal search: follow it with a name, a pattern, or '*'",
         )),
     }
 }

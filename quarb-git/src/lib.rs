@@ -108,6 +108,76 @@ pub struct GitAdapter {
     changed: RefCell<HashMap<String, Vec<String>>>,
     /// commit hash → the tag names pointing at it (lazy).
     tag_map: RefCell<Option<HashMap<String, Vec<String>>>>,
+    /// commit hash → the commits that list it as a parent (built
+    /// once from the enumeration; `<--` over every commit is one
+    /// pass, not one scan of the list per commit).
+    children_of: RefCell<Option<HashMap<String, Vec<String>>>>,
+    /// One `git cat-file --batch` (contents) and one `--batch-check`
+    /// (sizes) kept open: a blob per request on a pipe, not a git
+    /// process per blob.
+    blobs: RefCell<Option<Batch>>,
+    sizes: RefCell<Option<Batch>>,
+}
+
+/// A `git cat-file --batch[-check]` child on a pipe.
+struct Batch {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    out: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Batch {
+    fn spawn(repo: &std::path::Path, check: bool) -> std::io::Result<Batch> {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["cat-file", if check { "--batch-check" } else { "--batch" }])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take().expect("piped");
+        let out = std::io::BufReader::new(child.stdout.take().expect("piped"));
+        Ok(Batch { child, stdin, out })
+    }
+
+    /// Ask for `oid`: the header line (`<oid> <type> <size>`), or
+    /// `None` when the object is missing.
+    fn header(&mut self, oid: &str) -> std::io::Result<Option<u64>> {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "{oid}")?;
+        self.stdin.flush()?;
+        let mut line = String::new();
+        self.out.read_line(&mut line)?;
+        let mut parts = line.split_whitespace();
+        let _oid = parts.next();
+        match (parts.next(), parts.next()) {
+            (Some("missing"), _) | (None, _) => Ok(None),
+            (Some(_), Some(size)) => Ok(size.parse().ok()),
+            _ => Ok(None),
+        }
+    }
+
+    /// The object's bytes (after `header`, on a `--batch` child).
+    fn body(&mut self, size: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut buf = vec![0u8; size as usize];
+        self.out.read_exact(&mut buf)?;
+        let mut nl = [0u8; 1];
+        self.out.read_exact(&mut nl)?;
+        Ok(buf)
+    }
+}
+
+impl Drop for GitAdapter {
+    fn drop(&mut self) {
+        for b in [self.blobs.get_mut(), self.sizes.get_mut()] {
+            if let Some(b) = b {
+                let _ = b.child.kill();
+                let _ = b.child.wait();
+            }
+        }
+    }
 }
 
 const ROOT: NodeId = NodeId(0);
@@ -158,6 +228,9 @@ impl GitAdapter {
             enumerated: RefCell::new(false),
             changed: RefCell::new(HashMap::new()),
             tag_map: RefCell::new(None),
+            children_of: RefCell::new(None),
+            blobs: RefCell::new(None),
+            sizes: RefCell::new(None),
         };
         // Probe: is this a repository at all?
         adapter.git(&["rev-parse", "--git-dir"])?;
@@ -200,6 +273,74 @@ impl GitAdapter {
                 e.utf8_error().valid_up_to()
             ))
         })
+    }
+
+    /// A blob's bytes through the open `cat-file --batch` pipe; a
+    /// pipe that fails is dropped and the one-shot command answers.
+    fn blob_bytes(&self, oid: &str) -> Result<Vec<u8>, GitError> {
+        let batched = (|| -> std::io::Result<Option<Vec<u8>>> {
+            let mut slot = self.blobs.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(Batch::spawn(&self.repo, false)?);
+            }
+            let b = slot.as_mut().expect("spawned");
+            match b.header(oid)? {
+                Some(size) => b.body(size).map(Some),
+                None => Ok(None),
+            }
+        })();
+        match batched {
+            Ok(Some(bytes)) => Ok(bytes),
+            Ok(None) => Err(GitError::Git(format!("blob {oid}: missing"))),
+            Err(_) => {
+                *self.blobs.borrow_mut() = None;
+                self.git_bytes(&["cat-file", "blob", oid])
+            }
+        }
+    }
+
+    /// A blob's size through the open `cat-file --batch-check` pipe,
+    /// with the same fallback.
+    fn blob_size(&self, oid: &str) -> Option<u64> {
+        let batched = (|| -> std::io::Result<Option<u64>> {
+            let mut slot = self.sizes.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(Batch::spawn(&self.repo, true)?);
+            }
+            slot.as_mut().expect("spawned").header(oid)
+        })();
+        match batched {
+            Ok(size) => size,
+            Err(_) => {
+                *self.sizes.borrow_mut() = None;
+                self.git(&["cat-file", "-s", oid])
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+            }
+        }
+    }
+
+    /// The commits that list `hash` as a parent, from an index
+    /// built once over the enumeration.
+    fn children_of(&self, hash: &str) -> Vec<String> {
+        self.enumerate_commits();
+        if self.children_of.borrow().is_none() {
+            let mut index: HashMap<String, Vec<String>> = HashMap::new();
+            for (h, info) in self.commits.borrow().iter() {
+                for p in &info.parents {
+                    index.entry(p.clone()).or_default().push(h.clone());
+                }
+            }
+            for v in index.values_mut() {
+                v.sort();
+            }
+            *self.children_of.borrow_mut() = Some(index);
+        }
+        self.children_of
+            .borrow()
+            .as_ref()
+            .and_then(|i| i.get(hash).cloned())
+            .unwrap_or_default()
     }
 
     /// Run git for raw bytes (a blob): the caller decodes.
@@ -713,7 +854,7 @@ impl AstAdapter for GitAdapter {
         }
         // The blob's bytes under the mount's rule; one that decodes
         // under none has no text (the leaf stays a leaf).
-        self.git_bytes(&["cat-file", "blob", &oid])
+        self.blob_bytes(&oid)
             .ok()
             .and_then(|bytes| self.decoding.decode(&oid, &bytes).ok())
             .map(|d| Value::Str(d.text))
@@ -769,11 +910,7 @@ impl AstAdapter for GitAdapter {
             "type" => Some(Value::Str(entry_type)),
             "mode" => Some(Value::Str(mode)),
             "hash" => Some(Value::Str(oid)),
-            "size" => self
-                .git(&["cat-file", "-s", &oid])
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .map(Value::bytes),
+            "size" => self.blob_size(&oid).map(|n| Value::bytes(n as i64)),
             _ => None,
         }
     }
@@ -825,14 +962,17 @@ impl AstAdapter for GitAdapter {
         if property.is_some_and(|p| p != "parent") {
             return Some(Vec::new());
         }
-        self.enumerate_commits();
-        let commits = self.commits.borrow();
-        let mut children: Vec<String> = commits
-            .iter()
-            .filter(|(_, i)| i.parents.first() == Some(&hash))
-            .map(|(h, _)| h.clone())
+        // The index lists every child; `::parent-->` follows the
+        // first parent, so keep the children whose first parent is
+        // here.
+        let children: Vec<String> = self
+            .children_of(&hash)
+            .into_iter()
+            .filter(|h| {
+                self.commit_info(h)
+                    .is_some_and(|i| i.parents.first() == Some(&hash))
+            })
             .collect();
-        children.sort();
         Some(children.iter().map(|h| self.commit_node(h)).collect())
     }
 
@@ -842,16 +982,9 @@ impl AstAdapter for GitAdapter {
         let Some(hash) = self.commit_of(node) else {
             return Vec::new();
         };
-        self.enumerate_commits();
-        let commits = self.commits.borrow();
-        let mut out: Vec<(String, String)> = commits
-            .iter()
-            .filter(|(_, i)| i.parents.contains(&hash))
-            .map(|(h, _)| ("parent".to_string(), h.clone()))
-            .collect();
-        out.sort();
-        out.into_iter()
-            .map(|(l, h)| (l, self.commit_node(&h)))
+        self.children_of(&hash)
+            .into_iter()
+            .map(|h| ("parent".to_string(), self.commit_node(&h)))
             .collect()
     }
 }

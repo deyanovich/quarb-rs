@@ -98,7 +98,7 @@ impl GsheetAdapter {
                 url.push_str(if url.contains('?') { "&" } else { "?" });
                 url.push_str(&format!("key={k}"));
             }
-            let mut req = ureq::get(&url);
+            let mut req = quarb_http::agent().get(&url);
             if let Some(t) = &bearer {
                 req = req.set("Authorization", &format!("Bearer {t}"));
             }

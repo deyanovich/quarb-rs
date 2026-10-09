@@ -122,7 +122,7 @@ impl Client {
             payload.as_bytes(),
             &extra,
         );
-        let mut req = ureq::post(&self.t.endpoint);
+        let mut req = quarb_http::agent().post(&self.t.endpoint);
         for (k, v) in &headers {
             if k != "host" {
                 req = req.set(k, v);

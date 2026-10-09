@@ -27,6 +27,7 @@
 //! region from the standard chain when not given.
 
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_cypher::literal as cypher_literal;
 use serde_json::Value as Json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -56,20 +57,6 @@ fn cell_value(v: &Json) -> Value {
         Json::String(s) => Value::Str(s.clone()),
         Json::Array(items) => Value::list(items.iter().map(cell_value).collect()),
         Json::Object(_) => Value::Str(v.to_string()),
-    }
-}
-
-/// A value as an inline Cypher literal (the endpoint takes whole
-/// statements; strings escape their quotes).
-fn cypher_literal(v: &Value) -> String {
-    match v {
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        other => format!(
-            "'{}'",
-            other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
-        ),
     }
 }
 
@@ -104,6 +91,8 @@ pub struct NeptuneAdapter {
     nodes: RefCell<Vec<Node>>,
     by_nid: RefCell<HashMap<String, NodeId>>,
     edge_props: RefCell<HashMap<(NodeId, String, NodeId), Vec<(String, Value)>>>,
+    /// A node's relationships once read, per direction.
+    edge_cache: quarb_cypher::EdgeCache,
 }
 
 impl NeptuneAdapter {
@@ -141,6 +130,7 @@ impl NeptuneAdapter {
         let region = quarb_aws::region(param("region").as_deref());
         let creds = quarb_aws::load_credentials().ok_or(NeptuneError::NoCredentials)?;
         let adapter = NeptuneAdapter {
+            edge_cache: Default::default(),
             creds,
             region,
             base,
@@ -219,7 +209,7 @@ impl NeptuneAdapter {
             body,
             &extra,
         );
-        let mut req = ureq::request(method, url);
+        let mut req = quarb_http::agent().request(method, url);
         for (k, v) in &headers {
             if k != "host" {
                 req = req.set(k, v);
@@ -336,6 +326,15 @@ impl NeptuneAdapter {
 
     /// One node's relationships, outgoing or incoming.
     fn edges(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
+        if let Some(cached) = self.edge_cache.get(node, incoming) {
+            return cached;
+        }
+        let out = self.edges_uncached(node, incoming);
+        self.edge_cache.put(node, incoming, out.clone());
+        out
+    }
+
+    fn edges_uncached(&self, node: NodeId, incoming: bool) -> Vec<(String, NodeId)> {
         let nid = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Entity { nid, .. } => nid.clone(),
             _ => return Vec::new(),

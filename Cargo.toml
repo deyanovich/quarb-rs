@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "quarb",
+    "quarb-time",
     "quarb-fs",
     "quarb-lsp",
     "quarb-lines",
@@ -56,6 +57,10 @@ members = [
     "quarb-cosmos",
     "quarb-neptune",
     "quarb-mount",
+    "quarb-open",
+    "quarb-logs",
+    "quarb-cypher",
+    "quarb-http",
     "quarb-model",
     "quarb-session",
     "quarb-trace",
@@ -93,7 +98,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.33.0"
+version = "0.34.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

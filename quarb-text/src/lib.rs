@@ -1354,10 +1354,22 @@ impl HeadMeta {
     }
 }
 
+/// What the model derives from its nodes once and keeps while
+/// they do not change: the citation table, the set of prose
+/// blocks and each note body's callout. Every mutating method
+/// drops it (see `mutated`).
+#[derive(Default)]
+struct Caches {
+    cite_table: Vec<(NodeId, u32, NodeId)>,
+    prose_set: std::collections::HashSet<NodeId>,
+    callout_of_body: std::collections::HashMap<NodeId, NodeId>,
+}
+
 /// A Quarb adapter over a text-level document.
 pub struct TextModel {
     nodes: Vec<Node>,
     root: NodeId,
+    caches: std::cell::OnceCell<Caches>,
     /// Every borne name → its bearer (block labels and point
     /// anchors, one namespace, first bearer in document order
     /// wins) — the landing map for `-->` and for a sibling
@@ -1867,6 +1879,7 @@ impl TextModel {
         let mut model = TextModel {
             nodes,
             root,
+            caches: Default::default(),
             onyms,
             document_url: None,
             link_base: None,
@@ -1887,12 +1900,14 @@ impl TextModel {
     /// campus), lowercased keys — the friction remover: a field
     /// authored or queried under any covered name answers.
     pub fn set_bib_aliases(&mut self, map: std::collections::HashMap<String, String>) {
+        self.mutated();
         self.bib_aliases = map;
     }
 
     /// Declare the document's own URL — the base a relative ref
     /// target joins against when `-->` reaches across documents.
     pub fn set_document_url(&mut self, url: &str) {
+        self.mutated();
         self.document_url = url::Url::parse(url).ok();
     }
 
@@ -1900,6 +1915,7 @@ impl TextModel {
     /// — html's `<base href>` — when it differs from the
     /// document's own URL.
     pub fn set_link_base(&mut self, url: &str) {
+        self.mutated();
         self.link_base = url::Url::parse(url).ok();
     }
 
@@ -1907,6 +1923,7 @@ impl TextModel {
     /// no absolute URL of its own: the base `::href` links against
     /// (a mount path, an archive member's path).
     pub fn set_document_path(&mut self, path: &str) {
+        self.mutated();
         self.document_path = Some(path.to_string());
     }
 
@@ -1915,6 +1932,7 @@ impl TextModel {
     /// Leave the note bodies out of the corpus reading's tier
     /// (`?notes=omit`); set before tokenizing.
     pub fn omit_notes(&mut self, omit: bool) {
+        self.mutated();
         self.notes_omitted = omit;
     }
 
@@ -1931,6 +1949,7 @@ impl TextModel {
     /// the number of entries lowered; an unknown standard is an
     /// error naming the known ones.
     pub fn lower_references(&mut self, standard: &str) -> Result<usize, String> {
+        self.mutated();
         if !quarb::bibref::STANDARDS.contains(&standard) {
             return Err(format!(
                 "unknown standard {standard:?} for references= — this build reads {}",
@@ -2079,12 +2098,14 @@ impl TextModel {
     }
 
     pub fn set_cite_scheme(&mut self, scheme: &str) {
+        self.mutated();
         self.cite_scheme = Some(scheme.to_string());
     }
 
     /// The spelling table the tokens fold through:
     /// the mount's `?modernize=`. An unknown table is an error.
     pub fn set_orthography(&mut self, table: &str) -> Result<(), String> {
+        self.mutated();
         quarb::translit::modernize("", table)?;
         self.orthography = Some(table.to_string());
         Ok(())
@@ -2148,8 +2169,33 @@ impl TextModel {
     /// block's start; a container (a section, the document) cites
     /// as the first milestone inside it. Null where no milestone
     /// governs.
+    /// The nodes changed: whatever was derived from them is stale.
+    fn mutated(&mut self) {
+        self.caches = Default::default();
+    }
+
+    /// The derived tables, built on first use.
+    fn caches(&self) -> &Caches {
+        self.caches.get_or_init(|| {
+            let mut callout_of_body = std::collections::HashMap::new();
+            for (i, n) in self.nodes.iter().enumerate() {
+                if n.deixis
+                    && let Some(body) = n.note_edge
+                {
+                    callout_of_body.entry(body).or_insert(NodeId(i as u64));
+                }
+            }
+            Caches {
+                cite_table: self.cite_table(),
+                prose_set: self.prose_blocks().into_iter().collect(),
+                callout_of_body,
+            }
+        })
+    }
+
     fn cite(&self, node: NodeId) -> Option<String> {
-        let table = self.cite_table();
+        let caches = self.caches();
+        let table = &caches.cite_table;
         if table.is_empty() {
             return self.structural_cite(node);
         }
@@ -2167,7 +2213,7 @@ impl TextModel {
                 && n.kind != Kind::Milestone
                 && n.token.is_none()
                 && n.kind != Kind::Sentence
-                && !self.prose_blocks().contains(&node)
+                && !caches.prose_set.contains(&node)
                 && !n.children.is_empty()
                 && n.prose.is_empty());
         if container {
@@ -2194,9 +2240,7 @@ impl TextModel {
             self.note_body_of(node)
         };
         if let Some(body) = body {
-            let callout = (0..self.nodes.len())
-                .find(|&i| self.nodes[i].deixis && self.nodes[i].note_edge == Some(body))
-                .map(|i| NodeId(i as u64));
+            let callout = caches.callout_of_body.get(&body).copied();
             return callout.and_then(|c| self.cite(c));
         }
         // Everything else: its point in the document.
@@ -2371,6 +2415,7 @@ impl TextModel {
     /// Attach what the document declares about itself; the format
     /// adapter reads it from the source's own metadata vocabulary.
     pub fn set_head_meta(&mut self, head: HeadMeta) {
+        self.mutated();
         self.head = head;
     }
 
@@ -2561,6 +2606,7 @@ impl TextModel {
     /// row's id as its `prosopon`, then resolve every mention to
     /// its character.
     pub fn apply_cast(&mut self, rows: &[CastRow]) {
+        self.mutated();
         for row in rows {
             let known = self
                 .nodes
@@ -2674,6 +2720,7 @@ impl TextModel {
     /// names a declared character links to it, and the character
     /// lists it among its mentions.
     fn link_characters(&mut self) {
+        self.mutated();
         let mut by_onym: std::collections::HashMap<String, NodeId> =
             std::collections::HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
@@ -2711,6 +2758,7 @@ impl TextModel {
     /// reaches the place as `->place`, and the place reaches its
     /// mentions back as `<-place`.
     pub fn apply_places(&mut self, rows: &[CastRow]) {
+        self.mutated();
         for row in rows {
             let known = self
                 .nodes
@@ -2773,6 +2821,7 @@ impl TextModel {
     /// declared place links to it, and the place lists it among
     /// its mentions.
     fn link_places(&mut self) {
+        self.mutated();
         let mut by_onym: std::collections::HashMap<String, NodeId> =
             std::collections::HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
@@ -2804,6 +2853,7 @@ impl TextModel {
     }
 
     pub fn tokenize(&mut self) {
+        self.mutated();
         self.tokenize_with(None)
     }
 
@@ -2979,6 +3029,7 @@ impl TextModel {
     /// set (the `syndesmos` crate) whose abbreviations and patterns
     /// undo UAX #29 breaks.
     pub fn tokenize_with(&mut self, bonds: Option<&syndesmos::Syndesmos>) {
+        self.mutated();
         use unicode_segmentation::UnicodeSegmentation;
         self.token_index = Default::default();
         let mut n: u32 = 0;
@@ -3210,6 +3261,7 @@ impl TextModel {
     /// range covers (`->token`), and every token its spans,
     /// outermost first — after the tokens exist.
     fn attribute_spans(&mut self) {
+        self.mutated();
         let spans: Vec<NodeId> = (0..self.nodes.len())
             .filter(|&i| self.nodes[i].kind == Kind::Span && self.nodes[i].at.is_some())
             .map(|i| NodeId(i as u64))
@@ -3272,6 +3324,7 @@ impl TextModel {
     /// the block's own prose is unchanged and the renderers never
     /// see it.
     fn push_derived_sentence(&mut self, block: NodeId, text: &str, ordinal: u32) -> NodeId {
+        self.mutated();
         let node = push(&mut self.nodes, Kind::Sentence, block);
         let s = &mut self.nodes[node.0 as usize];
         s.text = text.trim().to_string();
@@ -3295,6 +3348,7 @@ impl TextModel {
     /// span; an empty node (`8.1`) is not in the text and consumes
     /// none of it.
     pub fn annotate_conllu(&mut self, conllu: &str) -> Result<(), String> {
+        self.mutated();
         if self.is_tokenized() {
             return Err("the document is already tokenized".into());
         }
@@ -3532,6 +3586,7 @@ impl TextModel {
         let mut model = TextModel {
             nodes,
             root,
+            caches: Default::default(),
             onyms: Default::default(),
             document_url: None,
             link_base: None,
@@ -3646,6 +3701,7 @@ impl TextModel {
     /// `<-head`) and the enhanced graph (`->ehead`, `<-ehead`,
     /// the relation as edge data), resolved by CoNLL-U id.
     fn link_sentence(&mut self, made: &[(NodeId, &ConlluToken)]) {
+        self.mutated();
         let find = |id: &str| made.iter().find(|(_, t)| t.id == id).map(|(n, _)| *n);
         for (node, tok) in made {
             if !tok.empty
@@ -3709,6 +3765,7 @@ impl TextModel {
     /// crossing allowed, so a token may fall in several). Each
     /// token records the mentions it falls in.
     fn decode_mentions(&mut self, entity_header: Option<&str>) {
+        self.mutated();
         self.mentions.clear();
         let tokens: Vec<NodeId> = (0..self.nodes.len())
             .filter(|&i| {

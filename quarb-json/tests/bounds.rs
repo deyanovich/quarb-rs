@@ -2,13 +2,12 @@
 //! memory — `repeat` / `indent` past 64 MiB and an outline level
 //! absurdly below the shallowest are refused, never built.
 
-use quarb::QuarbError;
 use quarb_json::JsonAdapter;
 
 fn refusal(q: &str, json: &str) -> String {
     let adapter = JsonAdapter::parse(json).unwrap();
     match quarb::run(q, &adapter) {
-        Err(QuarbError::Refused(msg)) => msg,
+        Err(e) if e.kind() == quarb::error::Kind::Refused => e.message().to_string(),
         other => panic!("expected a refusal, got {other:?}"),
     }
 }

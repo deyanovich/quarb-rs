@@ -1740,6 +1740,48 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         self.base.descendants_where(node, name, property, value)
     }
 
+    fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
+        // A derived container or an alias is the model's to walk.
+        if !self.model.aliases.is_empty()
+            || scope
+                .first()
+                .is_some_and(|c| self.container_by_name(c).is_some())
+        {
+            return None;
+        }
+        self.base.select_plan(scope, plan)
+    }
+
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        if !self.model.aliases.is_empty()
+            || scope
+                .first()
+                .is_some_and(|c| self.container_by_name(c).is_some())
+        {
+            return None;
+        }
+        self.base.estimate(scope, plan)
+    }
+
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        // A child hop sees the derived containers (`children_named`
+        // does); a descendant search is the base's, except from the
+        // root, from a derived node, or under aliases, where the
+        // walk answers.
+        match plan.axis {
+            quarb::PlanAxis::Child => quarb::adapter::select_by_hooks(self, from, plan),
+            quarb::PlanAxis::Descendant => {
+                if self.decode(from).is_some()
+                    || from == self.base.root()
+                    || !self.model.aliases.is_empty()
+                {
+                    return None;
+                }
+                self.base.select(from, plan)
+            }
+        }
+    }
+
     fn has_node(&self, node: NodeId) -> bool {
         self.decode(node).is_some() || self.base.has_node(node)
     }
@@ -1775,12 +1817,6 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     fn quantifier_bound(&self) -> usize {
         self.base.quantifier_bound()
-    }
-    fn allow_shell(&self) -> bool {
-        self.base.allow_shell()
-    }
-    fn invocation_instant(&self) -> Option<(i64, u32)> {
-        self.base.invocation_instant()
     }
     /// The imported libraries first (`units LIBRARY;`), then the
     /// source's own.

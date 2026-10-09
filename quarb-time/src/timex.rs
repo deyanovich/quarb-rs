@@ -667,12 +667,7 @@ pub const CARRIED: &str = "en, zh, es, ar, pt, ru, ja, de, fr, tr, it";
 
 fn compiled(locale: &str) -> Option<&'static Compiled> {
     static TABLE: OnceLock<std::sync::Mutex<HashMap<String, &'static Compiled>>> = OnceLock::new();
-    let lang = locale
-        .trim()
-        .split(['-', '_'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let lang = crate::language(locale);
     let lang = if lang.is_empty() {
         "en".to_string()
     } else {

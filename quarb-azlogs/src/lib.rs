@@ -38,6 +38,7 @@
 
 use quarb::temporal::parse_iso;
 use quarb::{AstAdapter, NodeId, Value};
+use quarb_logs::{Field, decode_json, duration_secs as span_secs, percent_decode, str_value};
 use serde_json::Value as Json;
 use serde_json::json;
 use std::cell::RefCell;
@@ -54,23 +55,6 @@ pub enum AzlError {
          and/or limit=)"
     )]
     Target(String),
-}
-
-/// One decoded cell tree: a JSON attribute tree or a scalar.
-#[derive(Clone)]
-enum Field {
-    Scalar(Value),
-    Map(Vec<(String, Field)>),
-    List(Vec<Field>),
-}
-
-impl Field {
-    fn scalar(&self) -> Option<Value> {
-        match self {
-            Field::Scalar(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
 }
 
 /// One row, decoded against its table's columns.
@@ -107,20 +91,6 @@ pub struct AzlAdapter {
     nodes: RefCell<Vec<Node>>,
 }
 
-/// A `since=` duration in seconds, for resolving a relative
-/// window against the pinned invocation instant.
-fn span_secs(s: &str) -> Option<i64> {
-    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
-    let n: i64 = num.parse().ok()?;
-    Some(match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
-        _ => return None,
-    })
-}
-
 /// A KQL timespan for `since=` durations: `30m` → `PT30M`,
 /// `2d` → `P2D`.
 fn kql_ago(s: &str) -> Option<String> {
@@ -133,27 +103,6 @@ fn kql_ago(s: &str) -> Option<String> {
         "d" => format!("{n}d"),
         _ => return None,
     })
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
-                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            )
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 struct Target {
@@ -272,35 +221,6 @@ fn compose_kql(t: &Target, table: &str) -> String {
     q
 }
 
-fn decode_json(v: &Json) -> Field {
-    match v {
-        Json::Null => Field::Scalar(Value::Null),
-        Json::Bool(b) => Field::Scalar(Value::Bool(*b)),
-        Json::Number(n) => Field::Scalar(match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        }),
-        Json::String(s) => Field::Scalar(str_value(s)),
-        Json::Array(a) => Field::List(a.iter().map(decode_json).collect()),
-        Json::Object(o) => Field::Map(o.iter().map(|(k, v)| (k.clone(), decode_json(v))).collect()),
-    }
-}
-
-/// Full RFC 3339 timestamps become instants; other strings stay
-/// strings.
-fn str_value(s: &str) -> Value {
-    if s.contains('T')
-        && let Some((secs, nanos, offset_min)) = parse_iso(s)
-    {
-        return Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        };
-    }
-    Value::Str(s.to_string())
-}
-
 /// Decode one KQL result table (columns + row arrays) into rows.
 fn decode_table(t: &Json) -> Vec<Row> {
     let cols: Vec<(String, String)> = t
@@ -407,7 +327,8 @@ impl AzlAdapter {
         let mut tables: Vec<(String, Vec<Row>)> = Vec::new();
         for table in &t.tables {
             let body = json!({ "query": compose_kql(&t, table) });
-            let resp = ureq::post(&url)
+            let resp = quarb_http::agent()
+                .post(&url)
                 .set("Authorization", &format!("Bearer {token}"))
                 .set("Content-Type", "application/json")
                 .send_string(&body.to_string())

@@ -235,7 +235,7 @@ impl FirebaseAdapter {
         // Never stringify the ureq error itself: its `Display`
         // splices the full request URL — auth secret and all —
         // into the message. Classify structurally instead.
-        let resp = match ureq::get(url).call() {
+        let resp = match quarb_http::agent().get(url).call() {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, _)) => return Err(GetError::Status(code)),
             Err(ureq::Error::Transport(t)) => {

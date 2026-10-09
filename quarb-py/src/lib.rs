@@ -16,9 +16,9 @@
 //!   through the adapter's pointer/locator).
 //!
 //! Errors surface as Python `ValueError` with the engine's message
-//! — no envelopes. The shell stage stays gated: no `AllowShell`
-//! wrapper here, so `sh()` / backticks fail with the engine's
-//! normal gate error. The native target has a clock, so the
+//! — no envelopes. The shell stage stays gated: the run never
+//! opens it, so `sh()` / backticks fail with the engine's normal
+//! gate error. The native target has a clock, so the
 //! invocation instant for `now()` is `SystemTime::now()` at call
 //! time.
 
@@ -29,7 +29,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList};
-use quarb::adapter::{AstAdapter, WithNow};
+use quarb::AstAdapter;
 use quarb::{NodeId, QueryResult, Value};
 
 /// The invocation instant for `now()`, as (seconds, subsecond
@@ -51,18 +51,6 @@ enum Doc {
     Xml(quarb_xml::XmlAdapter),
     Html(quarb_html::HtmlAdapter),
     Text(quarb_text::TextModel),
-    Sqlite(quarb_sqlite::SqliteAdapter),
-    Kaiv(quarb_kaiv::KaivAdapter),
-    Fs(quarb_fs::FsAdapter),
-    FsDeep(quarb_compose::ComposeAdapter<quarb_fs::FsAdapter>),
-    Git(quarb_git::GitAdapter),
-    Archive(quarb_compose::ComposeAdapter<quarb_archive::ArchiveAdapter>),
-    /// An archive held opaque (`no_graft=True`): the member tree
-    /// with leaves as plain entries — the tar -t view.
-    ArchiveRaw(quarb_archive::ArchiveAdapter),
-    Xlsx(quarb_xlsx::XlsxAdapter),
-    Syntax(quarb_tree_sitter::TreeSitterAdapter),
-    Code(quarb_code::CodeModel),
     Mount(quarb_mount::MountAdapter),
     Remote(Dyn),
 }
@@ -141,16 +129,16 @@ impl Doc {
             // The code level: identifiers as names; the format
             // name carries the language.
             "code-rust" => quarb_code::CodeModel::parse(input, "rs")
-                .map(Doc::Code)
+                .map(Doc::boxed_code)
                 .map_err(|e| format!("parsing Rust at the code level: {e}")),
             "code-python" => quarb_code::CodeModel::parse(input, "py")
-                .map(Doc::Code)
+                .map(Doc::boxed_code)
                 .map_err(|e| format!("parsing Python at the code level: {e}")),
             "code-javascript" => quarb_code::CodeModel::parse(input, "js")
-                .map(Doc::Code)
+                .map(Doc::boxed_code)
                 .map_err(|e| format!("parsing JavaScript at the code level: {e}")),
             "code-c" => quarb_code::CodeModel::parse(input, "c")
-                .map(Doc::Code)
+                .map(Doc::boxed_code)
                 .map_err(|e| format!("parsing C at the code level: {e}")),
             other => Err(format!("unknown format: {other}")),
         }
@@ -158,14 +146,16 @@ impl Doc {
 
     fn execute(&self, query: &str) -> Result<QueryResult, String> {
         let (secs, nanos) = now_parts();
+        let run = quarb::Run {
+            now: Some((secs, nanos)),
+            ..Default::default()
+        };
         macro_rules! go {
             ($a:expr) => {{
-                let nowed = WithNow {
-                    inner: $a,
-                    secs,
-                    nanos,
-                };
-                quarb::run(query, &nowed).map_err(|e| e.to_string())
+                quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
+                    .and_then(|q| q.run($a, &run))
+                    .map(|o| o.result)
+                    .map_err(|e| e.to_string())
             }};
         }
         match self {
@@ -174,16 +164,6 @@ impl Doc {
             Doc::Xml(a) => go!(a),
             Doc::Html(a) => go!(a),
             Doc::Text(a) => go!(a),
-            Doc::Sqlite(a) => go!(a),
-            Doc::Kaiv(a) => go!(a),
-            Doc::Fs(a) => go!(a),
-            Doc::FsDeep(a) => go!(a),
-            Doc::Git(a) => go!(a),
-            Doc::Archive(a) => go!(a),
-            Doc::ArchiveRaw(a) => go!(a),
-            Doc::Xlsx(a) => go!(a),
-            Doc::Syntax(a) => go!(a),
-            Doc::Code(a) => go!(a),
             Doc::Mount(a) => go!(a),
             Doc::Remote(a) => go!(a),
         }
@@ -196,16 +176,6 @@ impl Doc {
             Doc::Xml(a) => a.locator(node),
             Doc::Html(a) => a.locator(node),
             Doc::Text(a) => a.locator(node),
-            Doc::Sqlite(a) => a.locator(node),
-            Doc::Kaiv(a) => a.locator(node),
-            Doc::Fs(a) => a.path(node).display().to_string(),
-            Doc::FsDeep(a) => a.locator(node, |o| a.outer().path(o).display().to_string()),
-            Doc::Git(a) => a.locator(node),
-            Doc::Archive(a) => a.locator(node, |o| a.outer().locator(o)),
-            Doc::ArchiveRaw(a) => a.locator(node),
-            Doc::Xlsx(a) => a.locator(node),
-            Doc::Syntax(a) => a.locator(node),
-            Doc::Code(a) => a.locator(node),
             Doc::Mount(a) => generic_locator(a, node),
             Doc::Remote(a) => generic_locator(a, node),
         }
@@ -217,123 +187,28 @@ impl Doc {
 /// method forwards.
 struct Dyn(Box<dyn AstAdapter>);
 
+impl Doc {
+    /// The code level rides the boxed door (no typed variant).
+    fn boxed_code(m: quarb_code::CodeModel) -> Doc {
+        Doc::Remote(Dyn(Box::new(quarb_mount::Shared(std::rc::Rc::new(m)))))
+    }
+}
+
 impl AstAdapter for Dyn {
     quarb::forward_ast_adapter!(0);
 }
 
-/// Open a remote (scheme-prefixed) target, mirroring the qua
-/// CLI's dispatch for every adapter the Python package bundles.
-/// Deliberately absent: DuckDB / Kuzu / Oracle / MySQL / SQL
-/// Server / MongoDB (heavy builds or client libraries — the
-/// `quarb-full` package ships the complete CLI), and Athena /
-/// BigQuery (bytes-billed services belong behind the CLI's
-/// pushdown, not a scanning library).
-fn open_remote(s: &str) -> Option<Result<Doc, String>> {
-    use std::rc::Rc;
-    macro_rules! arm {
-        ($e:expr) => {
-            Some(
-                $e.map(|a| Doc::Remote(Dyn(Box::new(quarb_mount::Shared(Rc::new(a))))))
-                    .map_err(|e| e.to_string()),
-            )
-        };
-    }
-    if s.starts_with("neo4j://") {
-        arm!(quarb_neo4j::Neo4jAdapter::connect(s))
-    } else if s.starts_with("neptune://") {
-        arm!(quarb_neptune::NeptuneAdapter::connect(s))
-    } else if s.starts_with("arango://") {
-        arm!(quarb_arangodb::ArangoAdapter::connect(s))
-    } else if s.starts_with("sparql:") {
-        arm!(quarb_sparql::SparqlAdapter::connect(s))
-    } else if s.starts_with("dynamodb:") {
-        arm!(quarb_dynamodb::DynamodbAdapter::connect(s))
-    } else if s.starts_with("cosmos://") {
-        arm!(quarb_cosmos::CosmosAdapter::connect(s))
-    } else if s.starts_with("redis://") || s.starts_with("rediss://") {
-        arm!(quarb_redis::RedisAdapter::connect(s))
-    } else if s.starts_with("falkor://") || s.starts_with("falkors://") {
-        arm!(quarb_falkordb::FalkorAdapter::connect(s))
-    } else if s.starts_with("memgraph://") {
-        arm!(quarb_memgraph::MemgraphAdapter::connect(s))
-    } else if s.starts_with("age://") {
-        arm!(quarb_age::AgeAdapter::connect(s))
-    } else if s.starts_with("kafka://") || s.starts_with("kafka:") {
-        arm!(quarb_kafka::KafkaAdapter::connect(s))
-    } else if s.starts_with("postgres://") || s.starts_with("postgresql://") {
-        arm!(quarb_postgres::PostgresAdapter::connect(s))
-    } else if s.starts_with("ldap://") || s.starts_with("ldaps://") {
-        arm!(quarb_ldap::LdapAdapter::connect(s))
-    } else if s.starts_with("firestore://") {
-        arm!(quarb_firestore::FirestoreAdapter::connect(s))
-    } else if s.starts_with("firebase://") {
-        arm!(quarb_firebase::FirebaseAdapter::connect(s))
-    } else if s.starts_with("datastore://") {
-        arm!(quarb_datastore::DatastoreAdapter::connect(s))
-    } else if s.starts_with("gsheet://") {
-        arm!(quarb_gsheet::GsheetAdapter::connect(s))
-    } else if s.starts_with("github:") {
-        arm!(quarb_github::GithubAdapter::connect(s))
-    } else if s.starts_with("gitlab:") {
-        arm!(quarb_gitlab::GitlabAdapter::connect(s))
-    } else if s.starts_with("k8s:") || s.starts_with("kubernetes:") {
-        arm!(quarb_kubernetes::KubernetesAdapter::connect(s))
-    } else if s.starts_with("gs://") || s.starts_with("s3://") || s.starts_with("az://") {
-        arm!(
-            quarb_objstore::ObjstoreAdapter::connect(s)
-                .map(|a| quarb_compose::ComposeAdapter::new(a))
-        )
-    } else if s.starts_with("metatheca:") || s.starts_with("mt:") {
-        #[cfg(unix)]
-        {
-            let vault = s
-                .strip_prefix("metatheca:")
-                .or_else(|| s.strip_prefix("mt:"))
-                .unwrap();
-            return arm!(quarb_metatheca::MetathecaAdapter::open(Path::new(vault)));
-        }
-        #[cfg(not(unix))]
-        {
-            Some(Err("metatheca vaults are unix-only".to_string()))
-        }
-    } else if let Some(mb) = s.strip_prefix("mail:") {
-        arm!(quarb_maildir::MaildirAdapter::open(Path::new(mb)))
-    } else if let Some(cmd) = s.strip_prefix("serve:") {
-        arm!(quarb_serve::ServeAdapter::spawn(cmd))
-    } else {
-        None
-    }
-}
-
-/// Open one source as a boxed, shared adapter — the building block
-/// for a multi-source [`mount`]. Mirrors [`open`]'s kind-dispatch.
+/// Open one source as a boxed adapter — the building block for a
+/// multi-source [`mount`], through quarb-open like [`open`].
 fn open_boxed(path: &str, graft: bool, no_graft: bool) -> Result<Box<dyn AstAdapter>, String> {
-    use std::rc::Rc;
-    let boxed = |d: Document| -> Result<Box<dyn AstAdapter>, String> {
-        Ok(match d.doc {
-            Doc::Json(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Csv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Xml(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Html(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Text(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Sqlite(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Kaiv(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Fs(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::FsDeep(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Git(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Archive(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::ArchiveRaw(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Xlsx(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Syntax(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Code(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Mount(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-            Doc::Remote(a) => Box::new(quarb_mount::Shared(Rc::new(a))),
-        })
+    let opts = quarb_open::OpenOpts {
+        graft,
+        no_graft,
+        ..Default::default()
     };
-    // Reuse open()'s kind-dispatch (it reads/parses), then box the
-    // resulting concrete adapter. Callers hold the GIL.
-    let doc = open(path, graft, no_graft, false).map_err(|e| e.to_string())?;
-    boxed(doc)
+    quarb_open::open_target(path, &opts)
+        .map(|m| m.adapter)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Mount several sources under one root — the multi-source
@@ -671,80 +546,17 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 #[pyo3(signature = (path, graft=false, no_graft=false, descend=false))]
 fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Document> {
     let graft = graft || descend;
-    let err = |e: String| PyValueError::new_err(e);
-    if let Some(remote) = open_remote(path) {
-        let doc = remote.map_err(err)?;
-        return Ok(Document {
-            doc,
-            fmt: "remote".into(),
-        });
-    }
-    if let Some(repo) = path.strip_prefix("git:") {
-        let a = quarb_git::GitAdapter::open(Path::new(repo)).map_err(|e| err(e.to_string()))?;
-        return Ok(Document {
-            doc: Doc::Git(a),
-            fmt: "git".into(),
-        });
-    }
-    let p = PathBuf::from(path);
-    if p.is_dir() {
-        if p.join(".git").exists() && p.extension().is_none() && path.ends_with(".git") {
-            // explicit .git dir
-        }
-        let opts = quarb_fs::FsOptions::default();
-        let a = quarb_fs::FsAdapter::with_options(&p, opts).map_err(|e| err(e.to_string()))?;
-        return Ok(if graft {
-            Document {
-                doc: Doc::FsDeep(quarb_compose::ComposeAdapter::with_source_paths(
-                    a,
-                    |fs, n| Some(fs.path(n)),
-                )),
-                fmt: "fs".into(),
-            }
-        } else {
-            Document {
-                doc: Doc::Fs(a),
-                fmt: "fs".into(),
-            }
-        });
-    }
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let doc = match ext.as_str() {
-        "db" | "sqlite" | "sqlite3" => {
-            Doc::Sqlite(quarb_sqlite::SqliteAdapter::open(&p).map_err(|e| err(e.to_string()))?)
-        }
-        "kaiv" | "daiv" | "raiv" => {
-            // Extension picks the pipeline stage, as in the CLI:
-            // .daiv is canonical, .kaiv compiles first, .raiv
-            // denormalizes its $field references.
-            let text = std::fs::read_to_string(&p)?;
-            let a = match ext.as_str() {
-                "daiv" => quarb_kaiv::KaivAdapter::parse_daiv_at(&text, p.parent()),
-                "raiv" => quarb_kaiv::KaivAdapter::parse_raiv_at(&text, p.parent()),
-                _ => quarb_kaiv::KaivAdapter::parse_kaiv_at(&text, p.parent()),
-            }
-            .map_err(|e| err(e.to_string()))?;
-            Doc::Kaiv(a)
-        }
-        "zip" | "tar" | "tgz" | "gz" | "txz" | "xz" | "zst" => {
-            let a = quarb_archive::ArchiveAdapter::open(&p).map_err(|e| err(e.to_string()))?;
-            if no_graft {
-                Doc::ArchiveRaw(a)
-            } else {
-                Doc::Archive(quarb_compose::ComposeAdapter::new(a))
-            }
-        }
-        "xlsx" => Doc::Xlsx(quarb_xlsx::XlsxAdapter::open(&p).map_err(|e| err(e.to_string()))?),
-        e if quarb_tree_sitter::supported(e) => Doc::Syntax(
-            quarb_tree_sitter::TreeSitterAdapter::open(&p).map_err(|e| err(e.to_string()))?,
-        ),
-        _ => return load(p, None),
+    let opts = quarb_open::OpenOpts {
+        graft,
+        no_graft,
+        ..Default::default()
     };
-    Ok(Document { doc, fmt: ext })
+    let m = quarb_open::open_target(path, &opts)
+        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+    Ok(Document {
+        doc: Doc::Remote(Dyn(m.adapter)),
+        fmt: m.family.to_string(),
+    })
 }
 
 /// Colorize a Quarb query with ANSI escapes — the terminal

@@ -527,7 +527,7 @@ fn after_call_head(tokens: &[Token], glued: bool) -> bool {
 /// spelling, never read as something else.
 fn binary(op: &str, glued: bool, next: Option<char>) -> Result<()> {
     if glued || !next.is_none_or(char::is_whitespace) {
-        return Err(QuarbError::Lex(format!(
+        return Err(QuarbError::lex(format!(
             "'{op}' is an operator and takes a space on both sides: write ' {op} '"
         )));
     }
@@ -536,15 +536,31 @@ fn binary(op: &str, glued: bool, next: Option<char>) -> Result<()> {
 
 /// Tokenize `input` into the subset's token stream.
 pub fn lex(input: &str) -> Result<Vec<Token>> {
+    lex_spanned(input).map(|(tokens, _)| tokens)
+}
+
+/// [`lex`] with each token's span — the character offsets
+/// `(start, end)` of the input it came from — so a parse error can
+/// say where it stopped. Tokens produced together (one glued
+/// sequence) share a span.
+pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
     let chars: Vec<char> = input.chars().collect();
     let mut tokens = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut openers: Vec<Opener> = Vec::new();
     let mut i = 0;
 
     let at = |j: usize| chars.get(j).copied();
 
     let mut spaced = true;
+    let mut start = 0;
     while i < chars.len() {
+        // The tokens the last round produced span from where it
+        // began to where it stopped.
+        while spans.len() < tokens.len() {
+            spans.push((start, i));
+        }
+        start = i;
         let c = chars[i];
         if c.is_whitespace() {
             i += 1;
@@ -559,49 +575,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // `s/pat/repl/mods` directly after a pipe — the
             // substitution stage. `\/` escapes a literal slash.
             's' if at(i + 1) == Some('/') && matches!(tokens.last(), Some(Token::Pipe)) => {
-                i += 2;
-                let mut parts: Vec<String> = vec![String::new()];
-                loop {
-                    match at(i) {
-                        Some('\\') if at(i + 1) == Some('/') => {
-                            parts.last_mut().expect("nonempty").push('/');
-                            i += 2;
-                        }
-                        Some('/') => {
-                            i += 1;
-                            // The third `/` terminates the form.
-                            if parts.len() == 2 {
-                                break;
-                            }
-                            parts.push(String::new());
-                        }
-                        Some(ch) => {
-                            parts.last_mut().expect("nonempty").push(ch);
-                            i += 1;
-                        }
-                        None => {
-                            return Err(QuarbError::Lex(
-                                "unterminated substitution 's/pat/repl/'".into(),
-                            ));
-                        }
-                    }
-                }
-                let mut mods = String::new();
-                while let Some(ch) = at(i) {
-                    if ch.is_ascii_alphabetic() {
-                        mods.push(ch);
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let replacement = parts.pop().expect("two parts");
-                let pattern = parts.pop().expect("two parts");
-                tokens.push(Token::Subst {
-                    pattern,
-                    replacement,
-                    mods,
-                });
+                i = lex_subst(&chars, i, &mut tokens)?
             }
             '/' if at(i + 1) == Some('/') => {
                 tokens.push(Token::SlashSlash);
@@ -686,8 +660,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 if !after_whitespace(&chars, i)
                     && !matches!(tokens.last(), Some(Token::IdAnchorOpen))
                 {
-                    return Err(QuarbError::Parse(
-                        "a list literal follows whitespace: write ' @(…)'".into(),
+                    return Err(QuarbError::lex(
+                        "a list literal follows whitespace: write ' @(…)'",
                     ));
                 }
                 tokens.push(Token::At);
@@ -703,8 +677,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             ) =>
             {
                 if !after_whitespace(&chars, i) && !after_push_dot(&chars, i) {
-                    return Err(QuarbError::Parse(
-                        "a record sigil follows whitespace or a push dot: write ' %(…)' or '.name%(…)'".into(),
+                    return Err(QuarbError::lex(
+                        "a record sigil follows whitespace or a push dot: write ' %(…)' or '.name%(…)'",
                     ));
                 }
                 tokens.push(Token::Percent);
@@ -811,7 +785,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '<' if at(i + 1) == Some('~') => {
-                return Err(QuarbError::Lex("'<~' is retired: write '<--'".into()));
+                return Err(QuarbError::lex("'<~' is retired: write '<--'"));
             }
             '<' if at(i + 1) == Some('=') && at(i + 2) == Some('>') => {
                 tokens.push(Token::Correlate);
@@ -848,9 +822,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             }
             '>' => {
                 if matches!(openers.last(), Some(Opener::RoundedTrait)) {
-                    return Err(QuarbError::Lex(
-                        "a '(:' trait closes with ')', not '>'".into(),
-                    ));
+                    return Err(QuarbError::lex("a '(:' trait closes with ')', not '>'"));
                 }
                 let spaced = at(i + 1).is_none_or(char::is_whitespace);
                 tokens.push(Token::Gt {
@@ -881,8 +853,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '!' if at(i + 1) == Some('~') => {
-                return Err(QuarbError::Lex(
-                    "'!~' is retired: the pattern comparison is '!==' ('!== (/…/)')".into(),
+                return Err(QuarbError::lex(
+                    "'!~' is retired: the pattern comparison is '!==' ('!== (/…/)')",
                 ));
             }
             '!' => {
@@ -905,21 +877,21 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 && at(i + 2) == Some('_')
                 && !at(i + 3).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') =>
             {
-                return Err(QuarbError::Lex(
-                    "'$$_' is retired: the served node is '_' ('_::prop', '_/child')".into(),
+                return Err(QuarbError::lex(
+                    "'$$_' is retired: the served node is '_' ('_::prop', '_/child')",
                 ));
             }
             '$' if at(i + 1) == Some('$') && matches!(at(i + 2), Some(':' | '/')) => {
-                return Err(QuarbError::Lex(
-                    "a bare '$$' is retired: the served node is '_' ('_::prop', '_/child')".into(),
+                return Err(QuarbError::lex(
+                    "a bare '$$' is retired: the served node is '_' ('_::prop', '_/child')",
                 ));
             }
             '$' if at(i + 1) == Some('$')
                 && at(i + 2) == Some('_')
                 && at(i + 3).is_some_and(|c| c.is_ascii_digit()) =>
             {
-                return Err(QuarbError::Lex(
-                    "'$$_N' is retired: the join's N-th node is '$$N'".into(),
+                return Err(QuarbError::lex(
+                    "'$$_N' is retired: the join's N-th node is '$$N'",
                 ));
             }
             // `_` — the served node (the driver): a token of its own
@@ -1026,66 +998,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::Capsa(chars[start..j].iter().collect()));
                 i = j;
             }
-            ':' => {
-                // A single ':' is the definition separator
-                // (`def &name: body;`); '::'/':::'/'::::' are the
-                // projection ladder ('::;' and ';;;' lex as the
-                // deprecated aliases of '::::').
-                if at(i + 1) != Some(':') {
-                    let spaced = !glued && at(i + 1).is_none_or(char::is_whitespace);
-                    tokens.push(Token::Colon { spaced });
-                    i += 1;
-                    continue;
-                }
-                match at(i + 2) {
-                    // '::::' — adapter metadata, canonical: the
-                    // projection ladder by colon count (more colons,
-                    // more meta). Longest match before ':::'.
-                    Some(':') if at(i + 3) == Some(':') => {
-                        tokens.push(Token::SemiSemiSemi);
-                        i += 4;
-                    }
-                    Some(':') => {
-                        tokens.push(Token::ColonColonColon);
-                        i += 3;
-                        // `:::%provenance` / `:::@origin` — the
-                        // record and list shapes of a core key
-                        //: the sigil rides in the key.
-                        if matches!(at(i), Some('%' | '@'))
-                            && at(i + 1).is_some_and(|c| c.is_alphabetic())
-                        {
-                            let start = i;
-                            i += 1;
-                            while at(i).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                            {
-                                i += 1;
-                            }
-                            tokens.push(Token::Name {
-                                text: chars[start..i].iter().collect(),
-                                quoted: false,
-                                glued: true,
-                            });
-                        }
-                    }
-                    // The deprecated alias claims '::;' only when a
-                    // metadata key follows; otherwise the ';' is a
-                    // def separator after a bare '::' projection
-                    // (`def &f: /x::; &f`).
-                    Some(';')
-                        if at(i + 3).is_some_and(|c| {
-                            c.is_alphanumeric() || c == '_' || c == '\'' || c == '"'
-                        }) =>
-                    {
-                        return Err(QuarbError::Lex(
-                            "'::;' is retired: adapter metadata is '::::'".into(),
-                        ));
-                    }
-                    _ => {
-                        tokens.push(Token::ColonColon);
-                        i += 2;
-                    }
-                }
-            }
+            ':' => i = lex_colons(&chars, i, glued, &mut tokens)?,
             '|' if at(i + 1) == Some('|') => {
                 binary("||", glued, at(i + 2))?;
                 tokens.push(Token::PipePipe);
@@ -1113,8 +1026,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 2;
             }
             '=' if at(i + 1) == Some('~') => {
-                return Err(QuarbError::Lex(
-                    "'=~' is retired: the pattern comparison is '==' ('== (/…/)')".into(),
+                return Err(QuarbError::lex(
+                    "'=~' is retired: the pattern comparison is '==' ('== (/…/)')",
                 ));
             }
             // `=>` — the scalar pattern-search hop (spec: Search
@@ -1149,14 +1062,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                     // well-formed predicate; the two spellings do
                     // not mix within one pair.
                     Some(Opener::RoundedPredicate) => {
-                        return Err(QuarbError::Lex(
-                            "a '(?' predicate closes with ')', not ']'".into(),
-                        ));
+                        return Err(QuarbError::lex("a '(?' predicate closes with ')', not ']'"));
                     }
                     Some(Opener::RoundedTrait) => {
-                        return Err(QuarbError::Lex(
-                            "a '(:' trait closes with ')', not ']'".into(),
-                        ));
+                        return Err(QuarbError::lex("a '(:' trait closes with ')', not ']'"));
                     }
                     _ => {}
                 }
@@ -1203,8 +1112,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                             at(k) == Some(')') && at(k + 1) == Some(')')
                         })) =>
             {
-                return Err(QuarbError::Lex(
-                    "'((_))' and '((_N))' are retired: the served node is '((0))', the joined '((N))'".into(),
+                return Err(QuarbError::lex(
+                    "'((_))' and '((_N))' are retired: the served node is '((0))', the joined '((N))'",
                 ));
             }
             // `((!expr))` — the node-id anchor: the
@@ -1289,8 +1198,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 if body.iter().any(|c| c.is_ascii_digit())
                     && body.iter().all(|c| c.is_ascii_digit() || *c == ';')
                 {
-                    return Err(QuarbError::Parse(
-                        "the rounded quantifier is (+m;n) — (;…) is the shell literal".into(),
+                    return Err(QuarbError::lex(
+                        "the rounded quantifier is (+m;n) — (;…) is the shell literal",
                     ));
                 }
                 let mut tmp = body;
@@ -1334,10 +1243,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // separator (in a digit run it is the decimal comma).
             ',' => {
                 if at(i + 1).is_some_and(|c| !c.is_whitespace()) {
-                    return Err(QuarbError::Parse(
+                    return Err(QuarbError::lex(
                         "a comma separator is followed by a space — 'f(a, b)' — \
-                         or write the separator ';' ('f(a; b)')"
-                            .into(),
+                         or write the separator ';' ('f(a; b)')",
                     ));
                 }
                 tokens.push(Token::Comma);
@@ -1396,8 +1304,8 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             ';' if at(i + 1) == Some(';') && at(i + 2) == Some(';') => {
-                return Err(QuarbError::Lex(
-                    "';;;' is retired: adapter metadata is '::::'".into(),
+                return Err(QuarbError::lex(
+                    "';;;' is retired: adapter metadata is '::::'",
                 ));
             }
             // `;;-` / `;-` — the following-siblings reach and the
@@ -1422,17 +1330,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             '~' if at(i + 1) == Some('>') => {
-                return Err(QuarbError::Lex("'~>' is retired: write '-->'".into()));
+                return Err(QuarbError::lex("'~>' is retired: write '-->'"));
             }
             '~' if at(i + 1) == Some('(') => {
-                return Err(QuarbError::Lex(
-                    "'~(…)' is retired: the regex literal is '(/…/)'".into(),
+                return Err(QuarbError::lex(
+                    "'~(…)' is retired: the regex literal is '(/…/)'",
                 ));
             }
             '~' => {
-                return Err(QuarbError::Lex(
-                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'"
-                        .into(),
+                return Err(QuarbError::lex(
+                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'",
                 ));
             }
             '\'' => {
@@ -1475,123 +1382,230 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             // is otherwise a name (`..3` in a range, `...` the
             // spread), so only `..` directly before `/` is the hop;
             // the name lexer breaks on the same shape.
-            c if is_name_char(c) => {
-                let mut text = String::new();
-                while let Some(ch) = at(i) {
-                    // `-` ends the name if it starts a `->` or `--`
-                    // crosslink. A name with a literal double hyphen
-                    // stays reachable quoted, as with `->`.
-                    if ch == '-' && matches!(at(i + 1), Some('>') | Some('-')) {
-                        break;
-                    }
-                    // Likewise the rounded `-:` (arrow) and `-;`
-                    // (sibling hop) — but a dash before a colon run
-                    // stays a name character (`x-::prop`), and a
-                    // leading dash is the accessor case the arms
-                    // above already settled (`$-::prop`).
-                    if ch == '-'
-                        && !text.is_empty()
-                        && (at(i + 1) == Some(';')
-                            || (at(i + 1) == Some(':') && at(i + 2) != Some(':')))
-                    {
-                        break;
-                    }
-                    // `..` before `/` ends a name: the ascending
-                    // hop `../` (`a../b` is `a\b`). A longer dot run
-                    // (`.../`) is the spread, kept whole.
-                    if ch == '.'
-                        && !text.is_empty()
-                        && !text.ends_with('.')
-                        && at(i + 1) == Some('.')
-                        && at(i + 2) == Some('/')
-                    {
-                        break;
-                    }
-                    // `*` ends the name if it starts a `*=` contains
-                    // operator, so a glued `::Name*='x'` reads as key
-                    // `Name` + Contains rather than key `Name*` + `=`.
-                    // A leading `*=` is caught by the top-level arm.
-                    if ch == '*' && at(i + 1) == Some('=') {
-                        break;
-                    }
-                    // A glued dot is a name character, always
-                    // (`/x.rs(...)` keeps its filename, `b.m` is a
-                    // name): the push dot stands after whitespace
-                    //, so no `.(` or `.name(` ever
-                    // splits a name.
-                    // A full ISO instant keeps its colons: once the
-                    // text reads `YYYY-MM-DDT…`, a `:` followed by a
-                    // digit is a time separator, not a projection —
-                    // so `[::at > 2026-07-25T14:16:10Z]` lexes as one
-                    // literal (the temporal reading does the rest).
-                    if ch == ':'
-                        && is_iso_datetime_prefix(&text)
-                        && at(i + 1).is_some_and(|c| c.is_ascii_digit())
-                    {
-                        text.push(ch);
-                        i += 1;
-                        continue;
-                    }
-                    // The decimal comma: in a digit run, `,` followed
-                    // by a digit is the decimal point (`1,5` is 1.5),
-                    // taking precedence over the argument separator —
-                    // which is therefore written with a space after
-                    // it. A second one is a thousands separator, and
-                    // those are spelled `_` (`1_000_000`).
-                    if ch == ','
-                        && is_digit_run(&text)
-                        && at(i + 1).is_some_and(|c| c.is_ascii_digit())
-                    {
-                        if text.contains(['.', ',']) {
-                            return Err(QuarbError::Parse(format!(
-                                "'{text},…': a thousands separator is written '_' (1_000_000); '.' and ',' are the decimal point"
-                            )));
-                        }
-                        text.push(ch);
-                        i += 1;
-                        continue;
-                    }
-                    if is_name_char(ch) {
-                        text.push(ch);
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                // A push dot is never glued to a name character
-                //: `x.(…)` reads as the name `x.` and
-                // a paren, which is never meant — refuse it with the
-                // fix. (`x.m` and `x.rs(` are names, as ever.)
-                if text.len() > 1
-                    && text.ends_with('.')
-                    && !text.ends_with("..")
-                    && at(i) == Some('(')
-                {
-                    return Err(QuarbError::Lex(format!(
-                        "a push dot is never glued to a name: write `{} .(…)` (glued, the dot is part of the name)",
-                        &text[..text.len() - 1]
-                    )));
-                }
-                tokens.push(Token::Name {
-                    text,
-                    quoted: false,
-                    glued,
-                });
-            }
+            c if is_name_char(c) => i = lex_name(&chars, i, glued, &mut tokens)?,
             '{' => {
                 let (min, max, next) = read_quantifier(&chars, i + 1, '}')?;
                 tokens.push(Token::Quant { min, max });
                 i = next;
             }
             other => {
-                return Err(QuarbError::Unsupported(format!(
+                return Err(QuarbError::unsupported(format!(
                     "operator '{other}' is not implemented yet"
                 )));
             }
         }
     }
+    while spans.len() < tokens.len() {
+        spans.push((start, i));
+    }
 
-    Ok(tokens)
+    Ok((tokens, spans))
+}
+
+/// A name (or a number, an instant, a decimal-comma literal): the longest run of name characters, with the operators that end one (`->`, `--`, `-:`, `-;`, `../`, `*=`) and the dot and colon rules.
+fn lex_name(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) -> Result<usize> {
+    let at = |j: usize| chars.get(j).copied();
+    let mut text = String::new();
+    while let Some(ch) = at(i) {
+        // `-` ends the name if it starts a `->` or `--`
+        // crosslink. A name with a literal double hyphen
+        // stays reachable quoted, as with `->`.
+        if ch == '-' && matches!(at(i + 1), Some('>') | Some('-')) {
+            break;
+        }
+        // Likewise the rounded `-:` (arrow) and `-;`
+        // (sibling hop) — but a dash before a colon run
+        // stays a name character (`x-::prop`), and a
+        // leading dash is the accessor case the arms
+        // above already settled (`$-::prop`).
+        if ch == '-'
+            && !text.is_empty()
+            && (at(i + 1) == Some(';') || (at(i + 1) == Some(':') && at(i + 2) != Some(':')))
+        {
+            break;
+        }
+        // `..` before `/` ends a name: the ascending
+        // hop `../` (`a../b` is `a\b`). A longer dot run
+        // (`.../`) is the spread, kept whole.
+        if ch == '.'
+            && !text.is_empty()
+            && !text.ends_with('.')
+            && at(i + 1) == Some('.')
+            && at(i + 2) == Some('/')
+        {
+            break;
+        }
+        // `*` ends the name if it starts a `*=` contains
+        // operator, so a glued `::Name*='x'` reads as key
+        // `Name` + Contains rather than key `Name*` + `=`.
+        // A leading `*=` is caught by the top-level arm.
+        if ch == '*' && at(i + 1) == Some('=') {
+            break;
+        }
+        // A glued dot is a name character, always
+        // (`/x.rs(...)` keeps its filename, `b.m` is a
+        // name): the push dot stands after whitespace
+        //, so no `.(` or `.name(` ever
+        // splits a name.
+        // A full ISO instant keeps its colons: once the
+        // text reads `YYYY-MM-DDT…`, a `:` followed by a
+        // digit is a time separator, not a projection —
+        // so `[::at > 2026-07-25T14:16:10Z]` lexes as one
+        // literal (the temporal reading does the rest).
+        if ch == ':'
+            && is_iso_datetime_prefix(&text)
+            && at(i + 1).is_some_and(|c| c.is_ascii_digit())
+        {
+            text.push(ch);
+            i += 1;
+            continue;
+        }
+        // The decimal comma: in a digit run, `,` followed
+        // by a digit is the decimal point (`1,5` is 1.5),
+        // taking precedence over the argument separator —
+        // which is therefore written with a space after
+        // it. A second one is a thousands separator, and
+        // those are spelled `_` (`1_000_000`).
+        if ch == ',' && is_digit_run(&text) && at(i + 1).is_some_and(|c| c.is_ascii_digit()) {
+            if text.contains(['.', ',']) {
+                return Err(QuarbError::lex(format!(
+                    "'{text},…': a thousands separator is written '_' (1_000_000); '.' and ',' are the decimal point"
+                )));
+            }
+            text.push(ch);
+            i += 1;
+            continue;
+        }
+        if is_name_char(ch) {
+            text.push(ch);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    // A push dot is never glued to a name character
+    //: `x.(…)` reads as the name `x.` and
+    // a paren, which is never meant — refuse it with the
+    // fix. (`x.m` and `x.rs(` are names, as ever.)
+    if text.len() > 1 && text.ends_with('.') && !text.ends_with("..") && at(i) == Some('(') {
+        return Err(QuarbError::lex(format!(
+            "a push dot is never glued to a name: write `{} .(…)` (glued, the dot is part of the name)",
+            &text[..text.len() - 1]
+        )));
+    }
+    tokens.push(Token::Name {
+        text,
+        quoted: false,
+        glued,
+    });
+    Ok(i)
+}
+
+/// The colon ladder: `:` the definition separator, `::` / `:::` / `::::` the projections, `:::%key` / `:::@key` the shaped core keys; `::;` is refused as retired.
+fn lex_colons(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) -> Result<usize> {
+    let at = |j: usize| chars.get(j).copied();
+    // A single ':' is the definition separator
+    // (`def &name: body;`); '::'/':::'/'::::' are the
+    // projection ladder ('::;' and ';;;' lex as the
+    // deprecated aliases of '::::').
+    if at(i + 1) != Some(':') {
+        let spaced = !glued && at(i + 1).is_none_or(char::is_whitespace);
+        tokens.push(Token::Colon { spaced });
+        i += 1;
+        return Ok(i);
+    }
+    match at(i + 2) {
+        // '::::' — adapter metadata, canonical: the
+        // projection ladder by colon count (more colons,
+        // more meta). Longest match before ':::'.
+        Some(':') if at(i + 3) == Some(':') => {
+            tokens.push(Token::SemiSemiSemi);
+            i += 4;
+        }
+        Some(':') => {
+            tokens.push(Token::ColonColonColon);
+            i += 3;
+            // `:::%provenance` / `:::@origin` — the
+            // record and list shapes of a core key
+            //: the sigil rides in the key.
+            if matches!(at(i), Some('%' | '@')) && at(i + 1).is_some_and(|c| c.is_alphabetic()) {
+                let start = i;
+                i += 1;
+                while at(i).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                    i += 1;
+                }
+                tokens.push(Token::Name {
+                    text: chars[start..i].iter().collect(),
+                    quoted: false,
+                    glued: true,
+                });
+            }
+        }
+        // The deprecated alias claims '::;' only when a
+        // metadata key follows; otherwise the ';' is a
+        // def separator after a bare '::' projection
+        // (`def &f: /x::; &f`).
+        Some(';')
+            if at(i + 3)
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\'' || c == '"') =>
+        {
+            return Err(QuarbError::lex(
+                "'::;' is retired: adapter metadata is '::::'",
+            ));
+        }
+        _ => {
+            tokens.push(Token::ColonColon);
+            i += 2;
+        }
+    }
+    Ok(i)
+}
+
+/// The substitution stage `s/pat/repl/mods` after a pipe.
+fn lex_subst(chars: &[char], mut i: usize, tokens: &mut Vec<Token>) -> Result<usize> {
+    let at = |j: usize| chars.get(j).copied();
+    i += 2;
+    let mut parts: Vec<String> = vec![String::new()];
+    loop {
+        match at(i) {
+            Some('\\') if at(i + 1) == Some('/') => {
+                parts.last_mut().expect("nonempty").push('/');
+                i += 2;
+            }
+            Some('/') => {
+                i += 1;
+                // The third `/` terminates the form.
+                if parts.len() == 2 {
+                    break;
+                }
+                parts.push(String::new());
+            }
+            Some(ch) => {
+                parts.last_mut().expect("nonempty").push(ch);
+                i += 1;
+            }
+            None => {
+                return Err(QuarbError::lex("unterminated substitution 's/pat/repl/'"));
+            }
+        }
+    }
+    let mut mods = String::new();
+    while let Some(ch) = at(i) {
+        if ch.is_ascii_alphabetic() {
+            mods.push(ch);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    let replacement = parts.pop().expect("two parts");
+    let pattern = parts.pop().expect("two parts");
+    tokens.push(Token::Subst {
+        pattern,
+        replacement,
+        mods,
+    });
+    Ok(i)
 }
 
 /// Read a `{n}` / `{m,n}` / `{m,}` repetition quantifier after the
@@ -1605,10 +1619,10 @@ fn read_quantifier(
     close: char,
 ) -> Result<(usize, Option<usize>, usize)> {
     let malformed = || {
-        QuarbError::Lex(if close == ')' {
-            "malformed quantifier '(;…)': write (;n), (;m;n), or (;m;)".into()
+        QuarbError::lex(if close == ')' {
+            "malformed quantifier '(;…)': write (;n), (;m;n), or (;m;)"
         } else {
-            "malformed quantifier '{…}': write {n}, {m;n}, or {m;}".into()
+            "malformed quantifier '{…}': write {n}, {m;n}, or {m;}"
         })
     };
     let mut i = start;
@@ -1631,8 +1645,8 @@ fn read_quantifier(
     let min = number(&mut i).ok_or_else(malformed)?;
     match chars.get(i) {
         Some(&c) if c == close => Ok((min, Some(min), i + 1)),
-        Some(',') => Err(QuarbError::Lex(
-            "the comma is retired in a quantifier: write {m;n} (rounded (+m;n))".into(),
+        Some(',') => Err(QuarbError::lex(
+            "the comma is retired in a quantifier: write {m;n} (rounded (+m;n))",
         )),
         // `;` separates the bounds.
         Some(';') => {
@@ -1723,8 +1737,8 @@ fn read_shell_paren(chars: &[char], start: usize) -> Result<(Vec<char>, usize)> 
             }
         }
     }
-    Err(QuarbError::Parse(
-        "unterminated shell literal '(;…)': no balancing ')'".into(),
+    Err(QuarbError::lex(
+        "unterminated shell literal '(;…)': no balancing ')'",
     ))
 }
 
@@ -1786,8 +1800,8 @@ fn read_interpolated_until(
                                         i += 1;
                                     }
                                     None => {
-                                        return Err(QuarbError::Lex(
-                                            "unterminated interpolation '(,…' (missing ')')".into(),
+                                        return Err(QuarbError::lex(
+                                            "unterminated interpolation '(,…' (missing ')')",
                                         ));
                                     }
                                 }
@@ -1798,8 +1812,8 @@ fn read_interpolated_until(
                             i += 1;
                         }
                         None => {
-                            return Err(QuarbError::Lex(
-                                "unterminated interpolation '(,…' (missing ')')".into(),
+                            return Err(QuarbError::lex(
+                                "unterminated interpolation '(,…' (missing ')')",
                             ));
                         }
                     }
@@ -1847,8 +1861,8 @@ fn read_interpolated_until(
                                         i += 1;
                                     }
                                     None => {
-                                        return Err(QuarbError::Lex(
-                                            "unterminated interpolation '${…' (missing '}')".into(),
+                                        return Err(QuarbError::lex(
+                                            "unterminated interpolation '${…' (missing '}')",
                                         ));
                                     }
                                 }
@@ -1859,15 +1873,15 @@ fn read_interpolated_until(
                             i += 1;
                         }
                         None => {
-                            return Err(QuarbError::Lex(
-                                "unterminated interpolation '${…' (missing '}')".into(),
+                            return Err(QuarbError::lex(
+                                "unterminated interpolation '${…' (missing '}')",
                             ));
                         }
                     }
                 }
                 i += 1;
                 if hole.trim().is_empty() {
-                    return Err(QuarbError::Lex("empty interpolation '${}'".into()));
+                    return Err(QuarbError::lex("empty interpolation '${}'"));
                 }
                 parts.push(InterpPart::Hole(hole));
             }
@@ -1877,7 +1891,7 @@ fn read_interpolated_until(
             }
         }
     }
-    Err(QuarbError::Lex("unterminated quoted name (\"…)".into()))
+    Err(QuarbError::lex("unterminated quoted name (\"…)"))
 }
 
 /// Read a quoted name after the opening quote at `start`, up to the
@@ -1892,7 +1906,7 @@ fn read_quoted(chars: &[char], start: usize, quote: char) -> Result<(String, usi
         }
         text.push(ch);
     }
-    Err(QuarbError::Lex(format!(
+    Err(QuarbError::lex(format!(
         "unterminated quoted name ({quote}…)"
     )))
 }

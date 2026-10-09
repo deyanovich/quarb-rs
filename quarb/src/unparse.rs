@@ -479,14 +479,29 @@ pub(crate) fn predicate(p: &Predicate) -> String {
 
 pub(crate) fn pred_expr(e: &PredExpr) -> String {
     match e {
-        PredExpr::Or(a, b) => format!("{} || {}", pred_term(a), pred_term(b)),
-        PredExpr::And(a, b) => format!("{} && {}", pred_term(a), pred_term(b)),
+        // A connective chain is left-associative, so a left operand
+        // of the same connective needs no parentheses: `a || b || c`
+        // prints as written.
+        PredExpr::Or(a, b) => {
+            let left = match a.as_ref() {
+                PredExpr::Or(..) => pred_expr(a),
+                _ => pred_term(a),
+            };
+            format!("{left} || {}", pred_term(b))
+        }
+        PredExpr::And(a, b) => {
+            let left = match a.as_ref() {
+                PredExpr::And(..) => pred_expr(a),
+                _ => pred_term(a),
+            };
+            format!("{left} && {}", pred_term(b))
+        }
         // `!` binds tightest: a negated comparison or connective
         // prints with its parentheses so the text re-parses as
         // written (`.not. ::x > 1` is `!(::x > 1)`).
         PredExpr::Not(a) => match a.as_ref() {
             PredExpr::Truthy(_) | PredExpr::Not(_) => format!("!{}", pred_expr(a)),
-            _ => format!("!({})", pred_expr(a)),
+            _ => format!("!{}", parens(&pred_expr(a))),
         },
         PredExpr::Compare(l, op, r) => {
             // Ruling #33: the canonical spelling of a literal
@@ -527,11 +542,27 @@ pub(crate) fn pred_expr(e: &PredExpr) -> String {
 /// `!` binds tightest, so a negation never needs wrapping.
 fn pred_term(e: &PredExpr) -> String {
     match e {
-        PredExpr::Or(..) | PredExpr::And(..) => {
-            format!("({})", pred_expr(e))
-        }
+        PredExpr::Or(..) | PredExpr::And(..) => parens(&pred_expr(e)),
         _ => pred_expr(e),
     }
+}
+
+/// `inner` in parentheses — with a space after the opening one
+/// when the text starts with a lone `:` or `;` (a register field
+/// `:name`, a shell word), since `(:name` is the rounded sibling
+/// hop and `(;…)` the shell literal to the lexer; `(::` and `(;;;`
+/// lex as themselves.
+fn parens(inner: &str) -> String {
+    if needs_gap(inner) {
+        format!("( {inner})")
+    } else {
+        format!("({inner})")
+    }
+}
+
+fn needs_gap(inner: &str) -> bool {
+    (inner.starts_with(':') && !inner.starts_with("::"))
+        || (inner.starts_with(';') && !inner.starts_with(";;"))
 }
 
 fn cmp(op: CmpOp) -> &'static str {
@@ -562,7 +593,9 @@ fn operand(o: &Operand) -> String {
             arms,
             other,
         } => {
-            let mut out = format!("({} ?=", operand(scrutinee));
+            let head = operand(scrutinee);
+            let gap = if needs_gap(&head) { " " } else { "" };
+            let mut out = format!("({gap}{head} ?=");
             for (test, regex, result) in arms {
                 if *regex {
                     let Operand::Lit(Value::Str(pat)) = test else {
@@ -614,11 +647,11 @@ fn operand(o: &Operand) -> String {
         Operand::Neg(inner) => format!(
             "- {}",
             match **inner {
-                Operand::Arith { .. } => format!("({})", operand(inner)),
+                Operand::Arith { .. } => parens(&operand(inner)),
                 _ => operand(inner),
             }
         ),
-        Operand::Group(e) => format!("({})", pred_expr(e)),
+        Operand::Group(e) => parens(&pred_expr(e)),
         Operand::Recall(r) => reg(r),
         Operand::Topic => "$_".to_string(),
         Operand::Field { base, name } => match **base {
@@ -754,7 +787,7 @@ fn arith_term(o: &Operand, parent: ArithOp, right: bool) -> String {
         Operand::Arith { op, .. } => {
             let (inner, outer) = (arith_precedence(*op), arith_precedence(parent));
             if inner < outer || (right && inner == outer) {
-                format!("({})", operand(o))
+                parens(&operand(o))
             } else {
                 operand(o)
             }
@@ -1024,6 +1057,7 @@ fn arg_text(a: &Arg) -> String {
             a.map(|n| n.to_string()).unwrap_or_default(),
             b.map(|n| n.to_string()).unwrap_or_default()
         ),
+        Arg::Named { name, value } => format!("{name} = {}", literal(value)),
     }
 }
 
@@ -1037,13 +1071,14 @@ fn fn_call(call: &crate::ast::FnCall) -> String {
         .map(|a| match a {
             // `csv(";"; …)`: the delimiter the parser carried as
             // `delimiter=;` reads back as the quoted character.
-            Arg::Lit(Value::Str(s)) if call.name == "csv" && s.starts_with("delimiter=") => {
-                match &s["delimiter=".len()..] {
-                    "\t" => "\"tab\"".to_string(),
-                    "\"" => "'\"'".to_string(),
-                    d => format!("\"{d}\""),
-                }
-            }
+            Arg::Named {
+                name,
+                value: Value::Str(s),
+            } if name == "delimiter" => match s.as_str() {
+                "\t" => "\"tab\"".to_string(),
+                "\"" => "'\"'".to_string(),
+                d => format!("\"{d}\""),
+            },
             other => arg_text(other),
         })
         .collect();
@@ -1084,6 +1119,22 @@ mod tests {
     // Finding: `::::` is the canonical adapter-metadata spelling; the
     // deprecated `::;` alias must parse to the same AST and reprint
     // as `::::`.
+    #[test]
+    fn connective_chains_print_as_written() {
+        // Left-associative: no parentheses on a same-connective
+        // chain, and none that would open `(:` — the rounded
+        // sibling hop to the lexer.
+        assert_eq!(
+            assert_fixpoint("/a | %(fi = 1) | [:fi || :ss || :pp || :mp]"),
+            "/a | %(fi = 1) | [:fi || :ss || :pp || :mp]"
+        );
+        assert_eq!(
+            assert_fixpoint("/a | %(fi = 1) | [:pp && ( :fi || :ss)]"),
+            "/a | %(fi = 1) | [:pp && ( :fi || :ss)]"
+        );
+        assert_fixpoint("/a | %(fi = 1) | [!( :fi || :ss)]");
+    }
+
     #[test]
     fn peer_reads_round_trip() {
         for q in [

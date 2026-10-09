@@ -32,6 +32,8 @@ pub struct Candidate {
     pub text: String,
     /// What kind of thing it names.
     pub kind: Kind,
+    /// One line about it, for a function the registry documents.
+    pub doc: Option<&'static str>,
 }
 
 /// The candidate's kind, for icons/sorting on the consumer side.
@@ -57,6 +59,7 @@ fn push_all(out: &mut Vec<Candidate>, names: &[&str], kind: Kind, prefix: &str) 
             out.push(Candidate {
                 text: (*n).to_string(),
                 kind,
+                doc: crate::registry::spec(n).map(|s| s.doc),
             });
         }
     }
@@ -133,14 +136,14 @@ pub fn complete(text: &str, cursor: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     match context(text, start) {
         Cx::AggPipe => {
-            push_all(&mut out, stdlib::aggregate_names(), Kind::Aggregate, word);
-            push_all(&mut out, stdlib::keyed_names(), Kind::Aggregate, word);
+            push_all(&mut out, &stdlib::aggregate_names(), Kind::Aggregate, word);
+            push_all(&mut out, &stdlib::keyed_names(), Kind::Aggregate, word);
         }
         Cx::Pipe => {
-            push_all(&mut out, stdlib::scalar_names(), Kind::Function, word);
+            push_all(&mut out, &stdlib::scalar_names(), Kind::Function, word);
             // Keyed and reducing aggregates also ride the plain
             // pipe (per capsa on a group's members).
-            push_all(&mut out, stdlib::keyed_names(), Kind::Aggregate, word);
+            push_all(&mut out, &stdlib::keyed_names(), Kind::Aggregate, word);
         }
         Cx::Register => {
             // The `$` is already typed; offer the full spellings.
@@ -148,6 +151,7 @@ pub fn complete(text: &str, cursor: usize) -> Vec<Candidate> {
                 out.push(Candidate {
                     text: (*r).to_string(),
                     kind: Kind::Register,
+                    doc: None,
                 });
             }
         }
@@ -172,6 +176,7 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
                             out.push(Candidate {
                                 text: name,
                                 kind: Kind::Child,
+                                doc: None,
                             });
                         }
                     }
@@ -187,6 +192,7 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
                         out.push(Candidate {
                             text: (*key).to_string(),
                             kind: Kind::Property,
+                            doc: None,
                         });
                     }
                 }
@@ -201,6 +207,7 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
                         out.push(Candidate {
                             text: t,
                             kind: Kind::Trait,
+                            doc: None,
                         });
                     }
                 }

@@ -220,7 +220,7 @@ impl ObjstoreAdapter {
     }
 
     fn get(&self, url: &str) -> Result<String, String> {
-        let mut req = ureq::get(url);
+        let mut req = quarb_http::agent().get(url);
         match &self.backend {
             Backend::Gcs { token: Some(t) } => {
                 req = req.set("Authorization", &format!("Bearer {t}"));

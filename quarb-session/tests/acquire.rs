@@ -193,9 +193,10 @@ fn corpus_prefix_and_format_tokenize() {
     .unwrap();
     let spec = format!("corpus:{}", file.display());
     let doc = Doc::open(std::path::Path::new(&spec), &Options::default()).unwrap();
-    let Doc::Text(model) = doc else {
-        panic!("corpus: opens a text model")
+    let Doc::Boxed(model, _, family) = doc else {
+        panic!("corpus: opens through the boxed door")
     };
+    assert_eq!(family, "text");
     let count = |q: &str| match quarb::run(q, &model).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("values"),
