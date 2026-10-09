@@ -38,6 +38,10 @@ quarb-text-html = { path = "../quarb-text-html", version = "0.34.1" }
 quarb-text-markdown = { path = "../quarb-text-markdown", version = "0.34.1" }
 quarb-mount = { path = "../quarb-mount", version = "0.34.1" }
 quarb-open = { path = "../quarb-open", version = "0.34.1", default-features = false }
+# SQLite vendored into the wheel (rusqlite's bundled build): the
+# Windows runner has no sqlite3.lib to link, and a wheel carries
+# its own engine on every platform.
+quarb-sqlite = { path = "../quarb-sqlite", version = "0.34.1", features = ["bundled"] }
 quarb-code = { path = "../quarb-code", version = "0.34.1" }
 quarb-xpath = { path = "../quarb-xpath", version = "0.34.1" }
 quarb-jq = { path = "../quarb-jq", version = "0.34.1" }

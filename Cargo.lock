@@ -4935,6 +4935,7 @@ dependencies = [
  "quarb-mount",
  "quarb-open",
  "quarb-sql",
+ "quarb-sqlite",
  "quarb-text",
  "quarb-text-html",
  "quarb-text-markdown",
