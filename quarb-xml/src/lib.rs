@@ -30,6 +30,7 @@
 //!   prologue is ignored. Only the five predefined entities and
 //!   numeric character references are resolved.
 
+use quarb::names::Names;
 use quarb::{AstAdapter, NodeId, Value};
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
@@ -37,9 +38,11 @@ use quick_xml::{Decoder, Reader};
 use std::collections::HashMap;
 
 struct Node {
-    /// The tag name as written; `None` for the document root.
-    tag: Option<String>,
-    attrs: Vec<(String, String)>,
+    /// The tag name as written, in the document's name table;
+    /// `None` for the document root.
+    tag: Option<u32>,
+    /// The attributes: the name in the table, the value.
+    attrs: Vec<(u32, String)>,
     /// The element's text content (all descendant text and CDATA,
     /// concatenated in document order).
     text: String,
@@ -48,10 +51,11 @@ struct Node {
 }
 
 impl Node {
-    fn attr(&self, name: &str) -> Option<&str> {
+    fn attr(&self, names: &Names, name: &str) -> Option<&str> {
+        let k = names.key(name)?;
         self.attrs
             .iter()
-            .find(|(k, _)| k == name)
+            .find(|(a, _)| *a == k)
             .map(|(_, v)| v.as_str())
     }
 }
@@ -86,6 +90,8 @@ pub fn declared_encoding(bytes: &[u8]) -> Option<String> {
 /// A Quarb adapter over a parsed XML document.
 pub struct XmlAdapter {
     nodes: Vec<Node>,
+    /// The document's tag and attribute names, each once.
+    names: Names,
     /// `id` / `xml:id` attribute value → the element carrying it.
     ids: HashMap<String, NodeId>,
     root: NodeId,
@@ -106,6 +112,7 @@ impl XmlAdapter {
         let mut ids = HashMap::new();
         let root = NodeId(0);
 
+        let mut names = Names::new();
         let mut reader = Reader::from_str(xml);
         let decoder = reader.decoder();
         // Indices of the currently open elements; the synthetic
@@ -115,11 +122,11 @@ impl XmlAdapter {
         loop {
             match reader.read_event()? {
                 Event::Start(e) => {
-                    let idx = intern(&mut nodes, &mut ids, &stack, decoder, &e)?;
+                    let idx = intern(&mut nodes, &mut names, &mut ids, &stack, decoder, &e)?;
                     stack.push(idx);
                 }
                 Event::Empty(e) => {
-                    intern(&mut nodes, &mut ids, &stack, decoder, &e)?;
+                    intern(&mut nodes, &mut names, &mut ids, &stack, decoder, &e)?;
                 }
                 Event::End(_) => {
                     let closed = stack.pop().expect("end event matches an open element");
@@ -157,8 +164,8 @@ impl XmlAdapter {
 
         if stack.len() > 1 {
             let open = stack.pop().expect("checked non-root");
-            let tag = nodes[open].tag.clone().expect("open elements are tagged");
-            return Err(XmlError::Unclosed(tag));
+            let tag = nodes[open].tag.expect("open elements are tagged");
+            return Err(XmlError::Unclosed(names.get(tag).to_string()));
         }
         match nodes[0].children.len() {
             0 => return Err(XmlError::NoRoot),
@@ -169,7 +176,12 @@ impl XmlAdapter {
         // any stray whitespace around it.
         nodes[0].text = nodes[nodes[0].children[0].0 as usize].text.clone();
 
-        Ok(XmlAdapter { nodes, ids, root })
+        Ok(XmlAdapter {
+            nodes,
+            names,
+            ids,
+            root,
+        })
     }
 
     /// A locator path to `node`, like `/library/book[2]/author`, for
@@ -180,7 +192,7 @@ impl XmlAdapter {
         let mut cur = Some(node);
         while let Some(id) = cur {
             let n = &self.nodes[id.0 as usize];
-            if let Some(tag) = &n.tag {
+            if let Some(tag) = n.tag {
                 segments.push(self.segment(id, tag));
             }
             cur = n.parent;
@@ -189,21 +201,22 @@ impl XmlAdapter {
         format!("/{}", segments.join("/"))
     }
 
-    fn segment(&self, node: NodeId, tag: &str) -> String {
+    fn segment(&self, node: NodeId, tag: u32) -> String {
+        let name = self.names.get(tag);
         let Some(parent) = self.nodes[node.0 as usize].parent else {
-            return tag.to_string();
+            return name.to_string();
         };
         let siblings = &self.nodes[parent.0 as usize].children;
         let same_tag: Vec<NodeId> = siblings
             .iter()
             .copied()
-            .filter(|&s| self.nodes[s.0 as usize].tag.as_deref() == Some(tag))
+            .filter(|&s| self.nodes[s.0 as usize].tag == Some(tag))
             .collect();
         if same_tag.len() > 1 {
             let n = same_tag.iter().position(|&s| s == node).unwrap() + 1;
-            format!("{tag}[{n}]")
+            format!("{name}[{n}]")
         } else {
-            tag.to_string()
+            name.to_string()
         }
     }
 }
@@ -212,6 +225,7 @@ impl XmlAdapter {
 /// the innermost open element, returning its arena index.
 fn intern(
     nodes: &mut Vec<Node>,
+    names: &mut Names,
     ids: &mut HashMap<String, NodeId>,
     stack: &[usize],
     decoder: Decoder,
@@ -219,10 +233,11 @@ fn intern(
 ) -> Result<usize, XmlError> {
     let idx = nodes.len();
     let this = NodeId(idx as u64);
-    let tag = decoder
-        .decode(e.name().as_ref())
-        .map_err(quick_xml::Error::from)?
-        .into_owned();
+    let tag = names.intern(
+        &decoder
+            .decode(e.name().as_ref())
+            .map_err(quick_xml::Error::from)?,
+    );
     let mut attrs = Vec::new();
     for attr in e.attributes() {
         let attr = attr.map_err(quick_xml::Error::from)?;
@@ -234,7 +249,7 @@ fn intern(
         if key == "id" || key == "xml:id" {
             ids.entry(value.clone()).or_insert(this);
         }
-        attrs.push((key, value));
+        attrs.push((names.intern(&key), value));
     }
     let parent = *stack.last().expect("stack holds the root");
     nodes.push(Node {
@@ -257,6 +272,11 @@ fn split_qualified(tag: &str) -> (Option<&str>, &str) {
 }
 
 impl AstAdapter for XmlAdapter {
+    /// The arena knows how many nodes a step reaches; nothing is read.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, None)
+    }
+
     fn root(&self) -> NodeId {
         self.root
     }
@@ -272,7 +292,9 @@ impl AstAdapter for XmlAdapter {
     }
 
     fn name(&self, node: NodeId) -> Option<String> {
-        self.nodes[node.0 as usize].tag.clone()
+        self.nodes[node.0 as usize]
+            .tag
+            .map(|t| self.names.get(t).to_string())
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
@@ -289,7 +311,7 @@ impl AstAdapter for XmlAdapter {
         let n = &self.nodes[node.0 as usize];
         ["xlink:href", "href"]
             .into_iter()
-            .find(|a| n.attr(a).is_some())
+            .find(|a| n.attr(&self.names, a).is_some())
             .map(str::to_string)
     }
 
@@ -298,7 +320,7 @@ impl AstAdapter for XmlAdapter {
         self.nodes[node.0 as usize]
             .attrs
             .iter()
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| self.names.get(*k).to_string())
             .collect()
     }
 
@@ -310,7 +332,7 @@ impl AstAdapter for XmlAdapter {
 
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.nodes[node.0 as usize]
-            .attr(name)
+            .attr(&self.names, name)
             .map(|v| Value::Str(v.to_string()))
     }
 
@@ -325,15 +347,13 @@ impl AstAdapter for XmlAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
-            "tag" => n.tag.clone().map(Value::Str),
+            "tag" => n.tag.map(|t| Value::Str(self.names.get(t).to_string())),
             "local-name" => n
                 .tag
-                .as_deref()
-                .map(|t| Value::Str(split_qualified(t).1.to_string())),
+                .map(|t| Value::Str(split_qualified(self.names.get(t)).1.to_string())),
             "ns-prefix" => n
                 .tag
-                .as_deref()
-                .and_then(|t| split_qualified(t).0)
+                .and_then(|t| split_qualified(self.names.get(t)).0)
                 .map(|p| Value::Str(p.to_string())),
             "n-attrs" => Some(Value::Int(n.attrs.len() as i64)),
             _ => None,
@@ -344,7 +364,7 @@ impl AstAdapter for XmlAdapter {
     /// value (`book="b1"`) or a fragment (`href="#b1"`) — to the
     /// element carrying that `id` or `xml:id`.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
-        let value = self.nodes[node.0 as usize].attr(property)?;
+        let value = self.nodes[node.0 as usize].attr(&self.names, property)?;
         let target = value.strip_prefix('#').unwrap_or(value);
         self.ids.get(target).copied()
     }

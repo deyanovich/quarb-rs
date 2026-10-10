@@ -226,6 +226,11 @@ impl CsvAdapter {
 }
 
 impl AstAdapter for CsvAdapter {
+    /// The arena knows how many nodes a step reaches; nothing is read.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, None)
+    }
+
     /// This source defines no references to resolve.
     fn resolves_references(&self) -> bool {
         false

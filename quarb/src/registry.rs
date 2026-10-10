@@ -151,8 +151,34 @@ pub const SPECS: &[FnSpec] = &[
     scalar("sc", "the count of sentences"),
     scalar("lines", "the lines of the text, one capsa each"),
     scalar("words", "the words of the text, one capsa each"),
-    scalar("ngrams", "the word n-grams of the text: ngrams(N)"),
+    with_check(
+        both(
+            "ngrams",
+            "the word n-grams of the text: ngrams(N); as an aggregate, the \
+             adjacent N-windows of the stream, full windows only",
+        ),
+        Check::Stage,
+    ),
     scalar("levenshtein", "the edit distance to the argument"),
+    scalar(
+        "jaro_winkler",
+        "the Jaro–Winkler similarity to the argument, 0 to 1",
+    ),
+    scalar(
+        "tokens",
+        "the corpus tier's tokens of the text as a list; tokens(word) the \
+         word class alone",
+    ),
+    scalar("casefold", "Unicode case folding (ß to ss, final sigma)"),
+    scalar(
+        "deaccent",
+        "the text without combining marks (NFD, marks stripped); deaccent(ru) \
+         folds ё too",
+    ),
+    scalar(
+        "stem",
+        "the Snowball stem under a language: stem(en), stem(ru), …",
+    ),
     scalar("s", "regex substitution: s/pattern/replacement/mods"),
     scalar(
         "split",
@@ -212,6 +238,9 @@ pub const SPECS: &[FnSpec] = &[
     scalar("mi", "the mutual-information collocation measure"),
     scalar("t_score", "the t-score collocation measure"),
     scalar("log_dice", "the logDice collocation measure"),
+    scalar("logdice", "log_dice, alias"),
+    scalar("tscore", "t_score, alias"),
+    scalar("dice", "the Dice coefficient of a collocation"),
     scalar("haversine", "the great-circle distance to a point"),
     scalar("quantity", "the text read as a quantity with a unit"),
     scalar("convert", "the quantity converted to a unit"),
@@ -308,11 +337,47 @@ pub const SPECS: &[FnSpec] = &[
     ),
     with_check(reducing("stddev", "std, alias"), Check::Stat),
     with_check(reducing("variance", "var, alias"), Check::Stat),
-    reducing("entropy", "the Shannon entropy of a stream of counts"),
+    reducing(
+        "entropy",
+        "the Shannon entropy, bits: of a stream of counts, or of the \
+         distribution of a stream of values",
+    ),
+    reducing("ttr", "the type-token ratio: distinct values over all"),
+    reducing(
+        "hapax",
+        "the values that occur once, in first-occurrence order",
+    ),
+    with_check(
+        reducing(
+            "skipgrams",
+            "the n-grams with up to k skipped positions: skipgrams(n; k)",
+        ),
+        Check::Stage,
+    ),
+    reducing(
+        "jaccard",
+        "the Jaccard similarity of the stream's distinct values to a list",
+    ),
     reducing("yule_k", "Yule's K over a stream of counts"),
     reducing(
         "mtld",
         "the measure of textual lexical diversity over tokens",
+    ),
+    with_check(
+        reducing("bigrams", "the adjacent pairs of the stream (ngrams(2))"),
+        Check::Stage,
+    ),
+    with_check(
+        reducing("trigrams", "the adjacent triples of the stream (ngrams(3))"),
+        Check::Stage,
+    ),
+    with_check(
+        reducing(
+            "frequencies",
+            "each distinct value with its count, most frequent first, as \
+             records (value, n); frequencies(K) keeps the top K",
+        ),
+        Check::Stage,
     ),
     with_check(
         reducing("combinations", "every combination of N capsae"),

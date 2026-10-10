@@ -770,6 +770,8 @@ pub(super) fn apply_step(
                 _ => Vec::new(),
             };
             let plan = StepPlan {
+                traits: Vec::new(),
+                cap: Default::default(),
                 axis: PlanAxis::Child,
                 name: match &step.matcher {
                     Matcher::Name(n) => Some(n),
@@ -1153,6 +1155,8 @@ pub(super) fn descendant_step(
                 _ => Vec::new(),
             };
             let plan = StepPlan {
+                traits: Vec::new(),
+                cap: Default::default(),
                 axis: PlanAxis::Descendant,
                 name: Some(n),
                 conjuncts,
@@ -1873,6 +1877,61 @@ pub(super) fn descendants(
 /// `[::prop = "text"]` — the one predicate shape an adapter's
 /// property index can answer (a named property of the node itself
 /// against a text literal); anything else keeps the walk.
+/// A leading predicate lowered for pricing: `::prop OP literal` on
+/// the current node, any comparison, any literal. Text equalities
+/// are [`indexable_equality`]'s (an index answers them); the rest
+/// are comparisons a listing or a store's statistics may price.
+pub(crate) fn indexable_comparison(e: &PredExpr) -> Option<(&str, crate::adapter::Cmp, &Value)> {
+    use crate::adapter::Cmp;
+    if let Some((p, v)) = indexable_equality(e) {
+        return Some((p, Cmp::Eq, v));
+    }
+    let PredExpr::Compare(l, op, r) = e else {
+        return None;
+    };
+    let Operand::Rel {
+        steps,
+        projection: Some(Projection::Property(Some(prop))),
+        anchor: Anchor::Current,
+    } = l
+    else {
+        return None;
+    };
+    if !steps.is_empty() {
+        return None;
+    }
+    let Operand::Lit(v) = r else {
+        return None;
+    };
+    if matches!(v, Value::Null | Value::List(_)) {
+        return None;
+    }
+    let cmp = match op {
+        CmpOp::Eq => Cmp::Eq,
+        CmpOp::Ne => Cmp::Ne,
+        CmpOp::Lt => Cmp::Lt,
+        CmpOp::Le => Cmp::Le,
+        CmpOp::Gt => Cmp::Gt,
+        CmpOp::Ge => Cmp::Ge,
+        CmpOp::Contains => Cmp::Contains,
+        _ => return None,
+    };
+    Some((prop.as_str(), cmp, v))
+}
+
+/// The step's trait filters as literal names, when every clause
+/// is one plain name.
+pub(crate) fn literal_traits(step: &Step) -> Vec<&str> {
+    let mut out = Vec::new();
+    for clause in &step.traits {
+        match clause.alts.as_slice() {
+            [one] if !one.starts_with('!') && one != "*" => out.push(one.as_str()),
+            _ => return Vec::new(),
+        }
+    }
+    out
+}
+
 pub(crate) fn indexable_equality(e: &PredExpr) -> Option<(&str, &Value)> {
     let PredExpr::Compare(l, CmpOp::Eq, r) = e else {
         return None;

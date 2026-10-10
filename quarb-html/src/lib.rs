@@ -19,14 +19,17 @@
 //! - An anchor's fragment `href` resolves: `::href-->` follows
 //!   `#section` to the element with `id="section"`.
 
+use quarb::names::Names;
 use quarb::{AstAdapter, NodeId, Value};
-use scraper::{ElementRef, Html};
+mod sink;
 use std::collections::HashMap;
 
 struct Node {
-    /// The tag name; `None` for the document root.
-    tag: Option<String>,
-    attrs: Vec<(String, String)>,
+    /// The tag name, in the document's name table; `None` for the
+    /// document root.
+    tag: Option<u32>,
+    /// The attributes: the name in the table, the value.
+    attrs: Vec<(u32, String)>,
     /// The element's content in document order: its own text
     /// children as written, its element children by ordinal in
     /// `children`. The subtree text (the bare projection) is
@@ -45,10 +48,11 @@ enum Piece {
 }
 
 impl Node {
-    fn attr(&self, name: &str) -> Option<&str> {
+    fn attr(&self, names: &Names, name: &str) -> Option<&str> {
+        let k = names.key(name)?;
         self.attrs
             .iter()
-            .find(|(k, _)| k == name)
+            .find(|(a, _)| *a == k)
             .map(|(_, v)| v.as_str())
     }
 }
@@ -188,6 +192,8 @@ fn meta_attributes(tag: &[u8]) -> Vec<(String, String)> {
 /// A Quarb adapter over a parsed HTML document.
 pub struct HtmlAdapter {
     nodes: Vec<Node>,
+    /// The document's tag and attribute names, each once.
+    names: Names,
     /// `id` attribute value → the element carrying it.
     ids: HashMap<String, NodeId>,
     root: NodeId,
@@ -209,7 +215,7 @@ impl HtmlAdapter {
         match hint {
             None | Some("*") => true,
             Some(h) => self.nodes[node.0 as usize]
-                .attr("rel")
+                .attr(&self.names, "rel")
                 .is_some_and(|rel| rel.split_whitespace().any(|w| w.eq_ignore_ascii_case(h))),
         }
     }
@@ -260,7 +266,9 @@ impl HtmlAdapter {
 
     /// Parse `html` and build the adapter.
     pub fn parse(html: &str) -> Self {
-        let document = Html::parse_document(html);
+        use html5ever::tendril::TendrilSink;
+        let sink =
+            html5ever::driver::parse_document(sink::Sink::new(), Default::default()).one(html);
         let mut nodes = vec![Node {
             tag: None,
             attrs: Vec::new(),
@@ -271,12 +279,31 @@ impl HtmlAdapter {
         }];
         let mut ids = HashMap::new();
         let root = NodeId(0);
-
-        let html_node = build(document.root_element(), Some(root), &mut nodes, &mut ids);
-        nodes[0].children = vec![html_node];
+        let sink::Sink {
+            nodes: mut sunk,
+            mut names,
+        } = sink;
+        // The document element: the first element child of the
+        // sink's document.
+        let html_el = sunk[0].kids.iter().find_map(|k| match k {
+            sink::Kid::Node(n) if !sunk[*n].skip => Some(*n),
+            _ => None,
+        });
+        if let Some(html_el) = html_el {
+            let html_node = build(
+                html_el,
+                Some(root),
+                &mut sunk,
+                &mut nodes,
+                &mut names,
+                &mut ids,
+            );
+            nodes[0].children = vec![html_node];
+        }
 
         HtmlAdapter {
             nodes,
+            names,
             ids,
             root,
             document_url: None,
@@ -291,7 +318,7 @@ impl HtmlAdapter {
         let mut cur = Some(node);
         while let Some(id) = cur {
             let n = &self.nodes[id.0 as usize];
-            if let Some(tag) = &n.tag {
+            if let Some(tag) = n.tag {
                 segments.push(self.segment(id, tag));
             }
             cur = n.parent;
@@ -300,71 +327,69 @@ impl HtmlAdapter {
         format!("/{}", segments.join("/"))
     }
 
-    fn segment(&self, node: NodeId, tag: &str) -> String {
+    fn segment(&self, node: NodeId, tag: u32) -> String {
+        let name = self.names.get(tag);
         let Some(parent) = self.nodes[node.0 as usize].parent else {
-            return tag.to_string();
+            return name.to_string();
         };
         let siblings = &self.nodes[parent.0 as usize].children;
         let same_tag: Vec<NodeId> = siblings
             .iter()
             .copied()
-            .filter(|&s| self.nodes[s.0 as usize].tag.as_deref() == Some(tag))
+            .filter(|&s| self.nodes[s.0 as usize].tag == Some(tag))
             .collect();
         if same_tag.len() > 1 {
             let n = same_tag.iter().position(|&s| s == node).unwrap() + 1;
-            format!("{tag}[{n}]")
+            format!("{name}[{n}]")
         } else {
-            tag.to_string()
+            name.to_string()
         }
     }
 }
 
-/// Intern the element `el` (child of `parent`), returning its node id.
-/// Text and comment children are skipped as nodes but captured in the
-/// element's text content.
-///
-/// Iterative (an explicit work stack rather than self-recursion) so
-/// pathologically deep markup cannot overflow the call stack; html5ever
-/// parses such input iteratively, so a recursive interning pass was the
-/// only remaining depth limit. Elements are interned in document
-/// (pre-order) order, so node ids, child ordering, and the
-/// first-occurrence `ids` map are identical to the recursive form.
+/// Intern the sink's element `el` and its subtree into the arena:
+/// text pieces and element children in order, the strings moved
+/// out of the sink. Iterative (an explicit work stack) so deep
+/// markup cannot overflow the call stack; elements are interned in
+/// document (pre-order) order, so node ids, child ordering and the
+/// first-occurrence `ids` map follow the document.
 fn build(
-    el: ElementRef,
+    el: usize,
     parent: Option<NodeId>,
+    sunk: &mut [sink::SinkNode],
     nodes: &mut Vec<Node>,
+    names: &mut Names,
     ids: &mut HashMap<String, NodeId>,
 ) -> NodeId {
     let root_this = NodeId(nodes.len() as u64);
-    // Work stack of (element, parent id), popped in pre-order.
     let mut stack = vec![(el, parent)];
-
     while let Some((el, parent)) = stack.pop() {
         let this = NodeId(nodes.len() as u64);
-
-        let tag = el.value().name().to_string();
-        let attrs: Vec<(String, String)> = el
-            .value()
-            .attrs()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        // The element's own content in order: text as written,
-        // element children by ordinal.
+        let s = &mut sunk[el];
+        let tag = names.intern(&s.name.as_ref().expect("an element").local);
+        let attrs = std::mem::take(&mut s.attrs);
+        let kids = std::mem::take(&mut s.kids);
         let mut pieces = Vec::new();
+        let mut children: Vec<usize> = Vec::new();
         let mut ordinal = 0;
-        for child in el.children() {
-            if let Some(t) = child.value().as_text() {
-                pieces.push(Piece::Text(t.to_string()));
-            } else if ElementRef::wrap(child).is_some() {
-                pieces.push(Piece::Child(ordinal));
-                ordinal += 1;
+        for k in kids {
+            match k {
+                sink::Kid::Text(t) => pieces.push(Piece::Text(t)),
+                sink::Kid::Node(n) => {
+                    if sunk[n].skip {
+                        continue;
+                    }
+                    pieces.push(Piece::Child(ordinal));
+                    ordinal += 1;
+                    children.push(n);
+                }
             }
         }
-
-        if let Some(id) = el.value().id() {
-            ids.entry(id.to_string()).or_insert(this);
+        if let Some(k) = names.key("id")
+            && let Some((_, id)) = attrs.iter().find(|(a, _)| *a == k)
+        {
+            ids.entry(id.clone()).or_insert(this);
         }
-
         nodes.push(Node {
             tag: Some(tag),
             attrs,
@@ -373,22 +398,13 @@ fn build(
             parent,
             children: Vec::new(),
         });
-
-        // Record the child under its parent as it is interned; because
-        // siblings are pushed reversed below, they pop in document order
-        // and so append in document order.
         if let Some(p) = parent {
             nodes[p.0 as usize].children.push(this);
         }
-
-        // Push element children in reverse so the leftmost is popped
-        // (and interned) first — a pre-order DFS.
-        let children: Vec<ElementRef> = el.children().filter_map(ElementRef::wrap).collect();
         for child in children.into_iter().rev() {
             stack.push((child, Some(this)));
         }
     }
-
     root_this
 }
 
@@ -436,6 +452,11 @@ fn is_heading(tag: &str) -> bool {
 }
 
 impl AstAdapter for HtmlAdapter {
+    /// The arena knows how many nodes a step reaches; nothing is read.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, None)
+    }
+
     fn root(&self) -> NodeId {
         self.root
     }
@@ -451,7 +472,9 @@ impl AstAdapter for HtmlAdapter {
     }
 
     fn name(&self, node: NodeId) -> Option<String> {
-        self.nodes[node.0 as usize].tag.clone()
+        self.nodes[node.0 as usize]
+            .tag
+            .map(|t| self.names.get(t).to_string())
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
@@ -462,11 +485,11 @@ impl AstAdapter for HtmlAdapter {
     /// for `h1`–`h6` and `<link>` for an anchor with an `href`.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let n = &self.nodes[node.0 as usize];
-        let Some(tag) = &n.tag else {
+        let Some(tag) = n.tag.map(|t| self.names.get(t)) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if BLOCK.contains(&tag.as_str()) {
+        if BLOCK.contains(&tag) {
             out.push("block".to_string());
         } else {
             out.push("inline".to_string());
@@ -474,7 +497,7 @@ impl AstAdapter for HtmlAdapter {
         if is_heading(tag) {
             out.push("heading".to_string());
         }
-        if tag == "a" && n.attr("href").is_some() {
+        if tag == "a" && n.attr(&self.names, "href").is_some() {
             out.push("link".to_string());
         }
         out
@@ -484,7 +507,7 @@ impl AstAdapter for HtmlAdapter {
     /// projection (`::`) — no attribute name is shadowed.
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.nodes[node.0 as usize]
-            .attr(name)
+            .attr(&self.names, name)
             .map(|v| Value::Str(v.to_string()))
     }
 
@@ -503,8 +526,8 @@ impl AstAdapter for HtmlAdapter {
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
-            "tag" => n.tag.clone().map(Value::Str),
-            "classes" => n.attr("class").map(|c| {
+            "tag" => n.tag.map(|t| Value::Str(self.names.get(t).to_string())),
+            "classes" => n.attr(&self.names, "class").map(|c| {
                 Value::list(
                     c.split_whitespace()
                         .map(|s| Value::Str(s.to_string()))
@@ -512,7 +535,8 @@ impl AstAdapter for HtmlAdapter {
                 )
             }),
             "attrs" => {
-                let mut names: Vec<&str> = n.attrs.iter().map(|(k, _)| k.as_str()).collect();
+                let mut names: Vec<&str> =
+                    n.attrs.iter().map(|(k, _)| self.names.get(*k)).collect();
                 names.sort_unstable();
                 Some(Value::list(
                     names
@@ -532,7 +556,7 @@ impl AstAdapter for HtmlAdapter {
         if property == "href" && !self.rel_ok(node, hint) {
             return None;
         }
-        let value = self.nodes[node.0 as usize].attr(property)?;
+        let value = self.nodes[node.0 as usize].attr(&self.names, property)?;
         let fragment = value.strip_prefix('#')?;
         self.ids.get(fragment).copied()
     }
@@ -555,7 +579,7 @@ impl AstAdapter for HtmlAdapter {
         if property == "href" && !self.rel_ok(node, hint) {
             return None;
         }
-        let value = self.nodes[node.0 as usize].attr(property)?;
+        let value = self.nodes[node.0 as usize].attr(&self.names, property)?;
         let t = value.trim();
         if t.is_empty() || t.starts_with('#') {
             return None;
@@ -591,7 +615,7 @@ impl AstAdapter for HtmlAdapter {
         self.nodes[node.0 as usize]
             .attrs
             .iter()
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| self.names.get(*k).to_string())
             .collect()
     }
 
@@ -603,13 +627,13 @@ impl AstAdapter for HtmlAdapter {
 
     fn ref_property(&self, node: NodeId) -> Option<String> {
         let n = &self.nodes[node.0 as usize];
-        let (prop, tags): (&str, &[&str]) = match n.tag.as_deref() {
+        let (prop, tags): (&str, &[&str]) = match n.tag.map(|t| self.names.get(t)) {
             Some(t) if ["a", "link", "area"].contains(&t) => ("href", &["a", "link", "area"]),
             Some(t) if ["iframe", "frame"].contains(&t) => ("src", &["iframe", "frame"]),
             _ => return None,
         };
         let _ = tags;
-        n.attr(prop).map(|_| prop.to_string())
+        n.attr(&self.names, prop).map(|_| prop.to_string())
     }
 
     /// The relation an href edge carries: the `rel` attribute —
@@ -620,7 +644,7 @@ impl AstAdapter for HtmlAdapter {
         if property != "href" {
             return None;
         }
-        let rel = self.nodes[node.0 as usize].attr("rel")?;
+        let rel = self.nodes[node.0 as usize].attr(&self.names, "rel")?;
         let rel = rel.trim();
         (!rel.is_empty()).then(|| rel.to_string())
     }

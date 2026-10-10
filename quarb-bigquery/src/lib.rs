@@ -26,7 +26,7 @@
 //! `bigquery://PROJECT/DATASET[?account=EMAIL]`.
 
 use quarb::{AstAdapter, NodeId, Value};
-use quarb_relational::{RelationalModel, RowSpec, TableSpec};
+use quarb_relational::{RelationalModel, RowSpec, TableSpec, where_equals};
 use serde_json::json;
 
 /// An error connecting to or querying BigQuery.
@@ -102,6 +102,89 @@ fn token(account: Option<&str>) -> Result<String, BigqueryError> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// What reading `spec`'s rows under `equals` would cost, before
+/// running: the statement's dry run (`jobs.query` with `dryRun`)
+/// gives the bytes BigQuery would process — exact for a plain or
+/// partitioned table, an upper bound for a clustered one, since
+/// cluster pruning happens at execution — and the table's own
+/// statistics (`tables.get`) give its row count, an upper bound
+/// under an equality. One request each; the model remembers the
+/// answer for the run.
+fn estimate_table(
+    client: &Client,
+    dataset: &str,
+    spec: &TableSpec,
+    equals: &[(usize, Value)],
+) -> Result<quarb::Estimate, BigqueryError> {
+    let sql = estimate_sql(dataset, spec, equals);
+    let bytes = client.dry_run(&sql)?;
+    let stats = client.table_stats(dataset, &spec.name)?;
+    let rows = match (stats.rows, equals.is_empty()) {
+        (Some(n), true) => (n, n),
+        (Some(n), false) => (0, n),
+        (None, _) => (0, u64::MAX),
+    };
+    Ok(quarb::Estimate {
+        nodes: rows,
+        bytes: Some((bytes, bytes)),
+        requests: Some(1),
+        latency: quarb::Latency::Remote,
+        confidence: if stats.clustered || !equals.is_empty() {
+            quarb::Confidence::Bound
+        } else {
+            quarb::Confidence::Exact
+        },
+    })
+}
+
+/// The statement a dry run prices: every column of the table,
+/// filtered by the plan's equalities.
+fn estimate_sql(dataset: &str, spec: &TableSpec, equals: &[(usize, Value)]) -> String {
+    let cols: Vec<String> = spec
+        .columns
+        .iter()
+        .map(|c| quarb_relational::quote_backtick(c))
+        .collect();
+    let mut sql = format!(
+        "SELECT {} FROM `{dataset}`.`{}`",
+        cols.join(", "),
+        spec.name
+    );
+    if let Some(w) = where_equals(spec, equals, quarb_relational::quote_backtick) {
+        sql.push_str(" WHERE ");
+        sql.push_str(&w);
+    }
+    sql
+}
+
+/// A table's statistics from `tables.get`.
+struct TableStats {
+    rows: Option<u64>,
+    clustered: bool,
+}
+
+/// The dry run's answer as the API returns it.
+fn dry_run_bytes(resp: &serde_json::Value) -> Result<u64, BigqueryError> {
+    if let Some(err) = resp.pointer("/error/message").and_then(|v| v.as_str()) {
+        return Err(BigqueryError::Api(err.to_string()));
+    }
+    resp.pointer("/totalBytesProcessed")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| BigqueryError::Api("dry run without totalBytesProcessed".into()))
+}
+
+/// A table's statistics as `tables.get` returns them.
+fn table_stats_of(resp: &serde_json::Value) -> TableStats {
+    TableStats {
+        rows: resp
+            .pointer("/numRows")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok()),
+        clustered: resp.pointer("/clustering").is_some(),
+    }
+}
+
 /// A result set: the schema fields `(name, type)` and the rows.
 type ResultSet = (Vec<(String, String)>, Vec<Vec<Value>>);
 
@@ -112,6 +195,43 @@ struct Client {
 }
 
 impl Client {
+    /// `jobs.query` with `dryRun: true`: the bytes the statement
+    /// would process, with nothing run and nothing billed.
+    fn dry_run(&self, query: &str) -> Result<u64, BigqueryError> {
+        let url = format!(
+            "https://bigquery.googleapis.com/bigquery/v2/projects/{}/queries",
+            self.project
+        );
+        let resp: serde_json::Value = quarb_http::agent()
+            .post(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .send_json(json!({"query": query, "useLegacySql": false, "dryRun": true}))
+            .map_err(Box::new)?
+            .into_json()
+            .map_err(|e| BigqueryError::Api(format!("decoding dry run: {e}")))?;
+        dry_run_bytes(&resp)
+    }
+
+    /// `tables.get`: the table's row count and whether it is
+    /// clustered.
+    fn table_stats(&self, dataset: &str, table: &str) -> Result<TableStats, BigqueryError> {
+        let url = format!(
+            "https://bigquery.googleapis.com/bigquery/v2/projects/{}/datasets/{dataset}/tables/{table}",
+            self.project
+        );
+        let resp: serde_json::Value = quarb_http::agent()
+            .get(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .call()
+            .map_err(Box::new)?
+            .into_json()
+            .map_err(|e| BigqueryError::Api(format!("decoding table statistics: {e}")))?;
+        if let Some(err) = resp.pointer("/error/message").and_then(|v| v.as_str()) {
+            return Err(BigqueryError::Api(err.to_string()));
+        }
+        Ok(table_stats_of(&resp))
+    }
+
     /// Run a SQL statement to completion, following result pages;
     /// returns the schema fields `(name, type)` and the rows.
     fn sql(&self, query: &str) -> Result<ResultSet, BigqueryError> {
@@ -119,7 +239,8 @@ impl Client {
             "https://bigquery.googleapis.com/bigquery/v2/projects/{}/queries",
             self.project
         );
-        let resp: serde_json::Value = quarb_http::agent().post(&url)
+        let resp: serde_json::Value = quarb_http::agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .send_json(json!({"query": query, "useLegacySql": false}))
             .map_err(Box::new)?
@@ -201,7 +322,8 @@ impl Client {
         if let Some(p) = page {
             url.push_str(&format!("?pageToken={p}"));
         }
-        quarb_http::agent().get(&url)
+        quarb_http::agent()
+            .get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .call()
             .map_err(Box::new)?
@@ -257,6 +379,8 @@ impl BigqueryAdapter {
         };
         let specs = introspect(&client, &t.dataset)?;
         let dataset = t.dataset.clone();
+        let client = std::rc::Rc::new(client);
+        let (fetch_client, fetch_dataset) = (client.clone(), dataset.clone());
         let model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
@@ -264,9 +388,12 @@ impl BigqueryAdapter {
                     .as_ref()
                     .filter(|(tn, _)| *tn == spec.name)
                     .map(|(_, w)| w.as_str());
-                fetch_rows(&client, &dataset, spec, w).map_err(|e| e.to_string())
+                fetch_rows(&fetch_client, &fetch_dataset, spec, w).map_err(|e| e.to_string())
             }),
-        );
+        )
+        .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
+            estimate_table(&client, &dataset, spec, equals).map_err(|e| e.to_string())
+        }));
         Ok(BigqueryAdapter { model })
     }
 
@@ -476,6 +603,48 @@ fn qualify_tables(sql: &str, dataset: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::qualify_tables;
+    use super::{TableSpec, Value, dry_run_bytes, estimate_sql, table_stats_of};
+
+    #[test]
+    fn the_dry_run_statement_and_answer() {
+        let spec = TableSpec {
+            name: "orders".into(),
+            columns: vec!["id".into(), "customer".into(), "total".into()],
+            pk: Some(0),
+            fks: vec![],
+        };
+        assert_eq!(
+            estimate_sql("shop", &spec, &[]),
+            "SELECT `id`, `customer`, `total` FROM `shop`.`orders`"
+        );
+        assert_eq!(
+            estimate_sql(
+                "shop",
+                &spec,
+                &[(1, Value::Str("Emma".into())), (2, Value::Int(9))]
+            ),
+            "SELECT `id`, `customer`, `total` FROM `shop`.`orders` WHERE `customer` = 'Emma' AND `total` = 9"
+        );
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"kind":"bigquery#queryResponse","totalBytesProcessed":"1048576","jobComplete":true}"#,
+        )
+        .unwrap();
+        assert_eq!(dry_run_bytes(&resp).unwrap(), 1_048_576);
+        let err: serde_json::Value =
+            serde_json::from_str(r#"{"error":{"message":"Not found: Table shop.orders"}}"#)
+                .unwrap();
+        assert!(dry_run_bytes(&err).is_err());
+        let stats = table_stats_of(
+            &serde_json::from_str(
+                r#"{"numRows":"4200","numBytes":"9","clustering":{"fields":["customer"]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(stats.rows, Some(4200));
+        assert!(stats.clustered);
+        let plain = table_stats_of(&serde_json::from_str(r#"{"numRows":"3"}"#).unwrap());
+        assert_eq!((plain.rows, plain.clustered), (Some(3), false));
+    }
 
     #[test]
     fn qualifies_bare_from_and_join() {
@@ -515,69 +684,7 @@ mod tests {
 }
 
 impl AstAdapter for BigqueryAdapter {
-    fn root(&self) -> NodeId {
-        self.model.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.model.children(node)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.model.children_named(node, name)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.model.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.model.parent(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.model.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.model.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.model.metadata(node, key)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.model.resolve(node, property, hint)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.backlinks(node)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.model.reverse_resolve(node, property, hint)
-    }
-    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
-        self.model.can_refer_to(source, target)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.model.prefetch_links(nodes, dir)
-    }
-    fn index_referrers(
-        &self,
-        scope: &str,
-        property: &str,
-        label: Option<&str>,
-        target: NodeId,
-    ) -> Option<Vec<NodeId>> {
-        self.model.index_referrers(scope, property, label, target)
-    }
-    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
-        self.model.reference_properties(source, target)
-    }
-    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
-        self.model.resolve_needs_label(node, property)
-    }
-    fn reverse_label(&self, target: NodeId) -> Option<String> {
-        self.model.reverse_label(target)
-    }
+    // Every trait method, through the relational model: the search
+    // fast paths, the plan and its estimate included.
+    quarb::forward_ast_adapter!(model);
 }

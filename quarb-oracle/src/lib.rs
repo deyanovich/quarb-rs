@@ -185,6 +185,7 @@ impl OracleAdapter {
         // One row source with an optional WHERE: the whole read, the
         // listing under a pushed-down filter, and the keyed read a
         // hop makes (`WHERE key IN (…)`) all derive from it.
+        let conn2 = conn.clone();
         let model = RelationalModel::lazy_where(
             specs,
             std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
@@ -193,7 +194,33 @@ impl OracleAdapter {
             }),
             filter,
             quote,
-        );
+        )
+        // The optimizer's estimate: `EXPLAIN PLAN` fills PLAN_TABLE
+        // with the rows and bytes it expects for the statement.
+        .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
+            let conn = conn2.borrow_mut();
+            let sql = format!(
+                "EXPLAIN PLAN FOR SELECT * FROM {}{}",
+                quote(&spec.name),
+                quarb_relational::where_suffix(spec, equals, quote)
+            );
+            conn.execute(&sql, &[]).map_err(|e| e.to_string())?;
+            let row = conn
+                .query_row(
+                    "SELECT CARDINALITY, BYTES FROM PLAN_TABLE WHERE ID = 0",
+                    &[],
+                )
+                .map_err(|e| e.to_string())?;
+            let rows: i64 = row.get(0).map_err(|e| e.to_string())?;
+            let bytes: i64 = row.get(1).map_err(|e| e.to_string())?;
+            Ok(quarb::Estimate {
+                nodes: (0, rows.max(0) as u64),
+                bytes: Some((0, bytes.max(0) as u64)),
+                requests: Some(1),
+                latency: quarb::Latency::Remote,
+                confidence: quarb::Confidence::Guess,
+            })
+        }));
         Ok(OracleAdapter { model })
     }
 
@@ -400,71 +427,9 @@ pub fn raw_query(
 }
 
 impl AstAdapter for OracleAdapter {
-    fn root(&self) -> NodeId {
-        self.model.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.model.children(node)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.model.children_named(node, name)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.model.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.model.parent(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.model.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.model.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.model.metadata(node, key)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.model.resolve(node, property, hint)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.backlinks(node)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.model.reverse_resolve(node, property, hint)
-    }
-    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
-        self.model.can_refer_to(source, target)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.model.prefetch_links(nodes, dir)
-    }
-    fn index_referrers(
-        &self,
-        scope: &str,
-        property: &str,
-        label: Option<&str>,
-        target: NodeId,
-    ) -> Option<Vec<NodeId>> {
-        self.model.index_referrers(scope, property, label, target)
-    }
-    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
-        self.model.reference_properties(source, target)
-    }
-    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
-        self.model.resolve_needs_label(node, property)
-    }
-    fn reverse_label(&self, target: NodeId) -> Option<String> {
-        self.model.reverse_label(target)
-    }
+    // Every trait method, through the relational model: the search
+    // fast paths, the plan and its estimate included.
+    quarb::forward_ast_adapter!(model);
 }
 
 #[cfg(test)]

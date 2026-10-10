@@ -122,6 +122,73 @@ pub type KeyFetcher =
 pub type WhereFetcher =
     std::rc::Rc<dyn Fn(usize, &TableSpec, Option<&str>) -> Result<Vec<RowSpec>, String>>;
 
+/// The `WHERE` text for a list of column equalities, each column
+/// quoted by `quote`, each value as a portable SQL literal
+/// ([`sql_literal`]); `None` for an empty list or a value with no
+/// literal. The text every SQL driver's estimator puts after
+/// `WHERE` for the plan's conjuncts.
+pub fn where_equals(
+    spec: &TableSpec,
+    equals: &[(usize, Value)],
+    quote: fn(&str) -> String,
+) -> Option<String> {
+    if equals.is_empty() {
+        return None;
+    }
+    let parts: Option<Vec<String>> = equals
+        .iter()
+        .map(|(c, v)| {
+            Some(format!(
+                "{} = {}",
+                quote(spec.columns.get(*c)?),
+                sql_literal(v)?
+            ))
+        })
+        .collect();
+    Some(parts?.join(" AND "))
+}
+
+/// ` WHERE …` for the equalities, or nothing for none: what a
+/// driver appends to the statement it prices.
+pub fn where_suffix(
+    spec: &TableSpec,
+    equals: &[(usize, Value)],
+    quote: fn(&str) -> String,
+) -> String {
+    match where_equals(spec, equals, quote) {
+        Some(w) => format!(" WHERE {w}"),
+        None => String::new(),
+    }
+}
+
+/// The first `key=NUMBER` in a planner's text (`rows=1234`,
+/// `width=8`), for the dialects whose `EXPLAIN` is prose.
+pub fn plan_number(text: &str, key: &str) -> Option<u64> {
+    let i = text.find(key)? + key.len();
+    let digits: String = text[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// An estimate from a planner's row count and average row width —
+/// `EXPLAIN`'s two numbers, in Postgres, MySQL, Oracle and their
+/// kin: the rows a guess (the planner's), the bytes their product.
+pub fn planner_estimate(rows: u64, width: Option<u64>, exact_rows: bool) -> quarb::Estimate {
+    quarb::Estimate {
+        nodes: if exact_rows { (rows, rows) } else { (0, rows) },
+        bytes: width.map(|w| (0, rows.saturating_mul(w))),
+        requests: Some(1),
+        latency: quarb::Latency::Remote,
+        confidence: if exact_rows {
+            quarb::Confidence::Exact
+        } else {
+            quarb::Confidence::Guess
+        },
+    }
+}
+
 /// A value as a SQL literal for a keyed `IN (…)`: numbers bare,
 /// text quoted with its quotes doubled. `None` for what has no
 /// portable literal (a backslash, which some servers read as an
@@ -215,7 +282,20 @@ pub struct RelationalModel {
     /// One table's listing under a pushed-down WHERE: (table index,
     /// reader).
     listing: Option<(usize, Fetcher)>,
+    estimator: Option<Estimator>,
+    /// Estimates already asked of the driver, by table and the
+    /// equalities' text: a plan is read many times per run.
+    estimates: std::cell::RefCell<HashMap<(usize, String), quarb::Estimate>>,
 }
+
+/// The driver's estimator: what reading the rows of a table whose
+/// columns hold the given values (an empty list: the whole table)
+/// would cost, said before reading — a warehouse's dry run, a
+/// planner's `EXPLAIN`, the catalog's row count. The model asks it
+/// for [`quarb::AstAdapter::estimate`] and remembers the answer for
+/// the run. An `Err` leaves the step unknown.
+pub type Estimator =
+    std::rc::Rc<dyn Fn(usize, &TableSpec, &[(usize, Value)]) -> Result<quarb::Estimate, String>>;
 
 /// An identifier in the double-quoted dialects (SQL standard,
 /// Postgres, DuckDB, Athena, SQLite): the quote doubled inside.
@@ -262,6 +342,8 @@ impl RelationalModel {
             }),
             key_fetcher: None,
             listing: None,
+            estimator: None,
+            estimates: Default::default(),
         };
         for (t, (_, rows)) in input.into_iter().enumerate() {
             model.absorb_whole(t, rows);
@@ -283,6 +365,8 @@ impl RelationalModel {
             fetcher,
             key_fetcher: None,
             listing: None,
+            estimator: None,
+            estimates: Default::default(),
         }
     }
 
@@ -341,6 +425,13 @@ impl RelationalModel {
     /// read whole only when a query asks for all of it.
     pub fn with_key_fetcher(mut self, key_fetcher: KeyFetcher) -> Self {
         self.key_fetcher = Some(key_fetcher);
+        self
+    }
+
+    /// Give the model the driver's estimator: the static plan then
+    /// carries what a table read would cost before it runs.
+    pub fn with_estimator(mut self, estimator: Estimator) -> Self {
+        self.estimator = Some(estimator);
         self
     }
 
@@ -835,26 +926,90 @@ impl AstAdapter for RelationalModel {
             plan.conjuncts
                 .iter()
                 .enumerate()
-                .map(|(i, c)| {
-                    let quarb::Conjunct::Equals(prop, value) = c;
-                    i == 0
-                        && spec.columns.iter().any(|col| col == prop)
-                        && matches!(value, Value::Str(_) | Value::Int(_))
+                .map(|(i, c)| match c {
+                    quarb::Conjunct::Equals(prop, value) => {
+                        i == 0
+                            && spec.columns.iter().any(|col| col == prop)
+                            && matches!(value, Value::Str(_) | Value::Int(_))
+                    }
+                    quarb::Conjunct::Compare(..) => false,
                 })
                 .collect(),
         )
     }
 
-    /// A table already read whole knows its rows exactly and pays
-    /// nothing more; a table not yet read is the driver's to
-    /// estimate (a dry run, statistics), which the model does not
-    /// hold: unknown.
+    /// Under a table, a child hop's cost: the driver's estimator
+    /// when the model has one (a warehouse's dry run, a planner's
+    /// `EXPLAIN`), asked once per run for the table and the
+    /// equalities the keyed read would apply; else, a table already
+    /// read whole knows its rows exactly and pays nothing more; a
+    /// table not yet read with no estimator is unknown.
     fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
         let [table] = scope else {
             return None;
         };
         let t = self.table_index(table)?;
-        if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() || !self.is_whole(t) {
+        if plan.axis != quarb::PlanAxis::Child {
+            return None;
+        }
+        // A hop by name under a table is a row by key: at most one,
+        // read keyed. The estimator, when there is one, says what
+        // that read costs; the rows are clamped to the key's.
+        if let Some(name) = plan.name {
+            let spec = &self.tables[t].spec;
+            let whole = self.is_whole(t);
+            let keyed = self.estimator.as_ref().and_then(|est| {
+                let pk = spec.pk?;
+                est(t, spec, &[(pk, Value::Str(name.to_string()))]).ok()
+            });
+            return Some(quarb::Estimate {
+                nodes: (0, 1),
+                bytes: keyed
+                    .as_ref()
+                    .and_then(|e| e.bytes.map(|b| (0, b.1.min(b.1)))),
+                requests: Some(if whole { 0 } else { 1 }),
+                latency: keyed.as_ref().map_or(
+                    if whole {
+                        quarb::Latency::Memory
+                    } else {
+                        quarb::Latency::Local
+                    },
+                    |e| e.latency,
+                ),
+                confidence: quarb::Confidence::Exact,
+            });
+        }
+        if let Some(est) = &self.estimator {
+            let spec = &self.tables[t].spec;
+            let mut equals: Vec<(usize, Value)> = Vec::new();
+            for c in &plan.conjuncts {
+                // An equality on a column, text or number, is what a
+                // store's statistics price; another comparison
+                // leaves the table's count as the bound.
+                let (prop, value) = match c {
+                    quarb::Conjunct::Equals(p, v) => (p, v),
+                    quarb::Conjunct::Compare(p, quarb::Cmp::Eq, v) => (p, v),
+                    quarb::Conjunct::Compare(..) => continue,
+                };
+                let col = spec.columns.iter().position(|c| c == prop)?;
+                equals.push((col, (*value).clone()));
+            }
+            let key = (
+                t,
+                equals
+                    .iter()
+                    .map(|(c, v)| format!("{c}={}", v.to_json()))
+                    .collect::<Vec<_>>()
+                    .join("&"),
+            );
+            if let Some(e) = self.estimates.borrow().get(&key) {
+                return Some(e.clone());
+            }
+            let e = est(t, spec, &equals).ok()?;
+            self.estimates.borrow_mut().insert(key, e.clone());
+            return Some(e);
+        }
+        if !self.is_whole(t) {
             return None;
         }
         let n = self.whole(t).len() as u64;
@@ -864,7 +1019,7 @@ impl AstAdapter for RelationalModel {
             (0, n)
         };
         Some(quarb::Estimate {
-            rows,
+            nodes: rows,
             bytes: None,
             requests: Some(0),
             latency: quarb::Latency::Memory,

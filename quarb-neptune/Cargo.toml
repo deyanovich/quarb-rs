@@ -11,10 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.34.1" }
-quarb-cypher = { path = "../quarb-cypher", version = "0.34.1" }
-quarb-aws = { path = "../quarb-aws", version = "0.34.1" }
+quarb = { path = "../quarb", version = "0.35.0" }
+quarb-cypher = { path = "../quarb-cypher", version = "0.35.0" }
+quarb-aws = { path = "../quarb-aws", version = "0.35.0" }
 serde_json.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
-quarb-http = { path = "../quarb-http", version = "0.34.1" }
+quarb-http = { path = "../quarb-http", version = "0.35.0" }

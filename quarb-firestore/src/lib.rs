@@ -211,7 +211,8 @@ impl FirestoreAdapter {
 
     fn call(&self, method: &str, url: &str, body: Option<Json>) -> Result<Json, FirestoreError> {
         let routing = format!("project_id={}&database_id={}", self.project, self.database);
-        let req = quarb_http::agent().request(method, url)
+        let req = quarb_http::agent()
+            .request(method, url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("x-goog-request-params", &routing);
         let resp = match body {

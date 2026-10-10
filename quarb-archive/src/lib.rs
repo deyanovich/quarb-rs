@@ -160,6 +160,290 @@ impl Compression {
 /// kilobytes on disk.
 pub const MAX_ARCHIVE_BYTES: u64 = 1 << 30;
 
+/// What an archive holds, from its member table alone: a zip's
+/// central directory (members and their uncompressed sizes, exact,
+/// the members untouched); a tar's headers, walked through the
+/// stream (a compressed tar is inflated on the way, nothing kept;
+/// an xz tar's index declares the size without a walk); a 7z, chm
+/// or rar file's size only (its table needs the library's open).
+/// Nothing is extracted. `None` when the file cannot be read.
+/// The walk stops at the first member past `cap` (or past
+/// [`MEMBER_BUDGET`]) and reports a lower bound.
+pub fn catalog(path: &Path, cap: quarb::Cap) -> Option<quarb::Catalog> {
+    catalog_at(path, &[], cap)
+}
+
+/// [`catalog_at`] for a plan's ask: the path, the cap, and the
+/// filters a member table applies before counting — `::size`
+/// comparisons against the uncompressed size, `<file>` / `<dir>`.
+pub fn catalog_for(path: &Path, ask: &quarb::Ask<'_>) -> Option<quarb::Catalog> {
+    let sieve = Sieve::of(ask);
+    let mut c = catalog_with(path, ask.scope, ask.cap, &sieve)?;
+    c.applied = sieve.applied.clone();
+    c.traits_applied = sieve.traits_applied;
+    Some(c)
+}
+
+/// [`catalog_at`] counting through a caller's sieve (quarb-open
+/// shares one sieve between a directory listing and an archive).
+pub fn catalog_sieved(
+    path: &Path,
+    scope: &[&str],
+    cap: quarb::Cap,
+    sieve: &Sieve<'_>,
+) -> Option<quarb::Catalog> {
+    catalog_with(path, scope, cap, sieve)
+}
+
+/// The filters a listing applies while counting: which of the
+/// asked conjuncts it takes (`::size`), and the entry kinds the
+/// traits keep.
+pub struct Sieve<'a> {
+    pub sizes: Vec<(quarb::Cmp, &'a Value)>,
+    pub applied: Vec<bool>,
+    pub files: bool,
+    pub dirs: bool,
+    pub traits_applied: bool,
+}
+
+impl<'a> Sieve<'a> {
+    pub fn none() -> Sieve<'static> {
+        Sieve {
+            sizes: Vec::new(),
+            applied: Vec::new(),
+            files: true,
+            dirs: true,
+            traits_applied: false,
+        }
+    }
+
+    pub fn of(ask: &quarb::Ask<'a>) -> Sieve<'a> {
+        let mut s = Sieve::none();
+        for c in ask.conjuncts {
+            match c {
+                quarb::Conjunct::Compare("size", cmp, v) => {
+                    s.sizes.push((*cmp, v));
+                    s.applied.push(true);
+                }
+                _ => s.applied.push(false),
+            }
+        }
+        s.traits_applied = !ask.traits.is_empty();
+        for t in ask.traits {
+            match *t {
+                "file" => s.dirs = false,
+                "dir" => s.files = false,
+                _ => s.traits_applied = false,
+            }
+        }
+        s
+    }
+
+    /// Whether an entry of `size` bytes (a file) or a directory
+    /// passes.
+    pub fn keeps(&self, is_file: bool, size: u64) -> bool {
+        if is_file && !self.files || !is_file && !self.dirs {
+            return false;
+        }
+        let v = Value::bytes(size as i64);
+        self.sizes.iter().all(|(cmp, lit)| cmp.holds(&v, lit))
+    }
+}
+
+/// How a member's path stands to the literal `scope` the plan
+/// records: the member itself, one under it, or elsewhere.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Placing {
+    Itself,
+    Under,
+    Elsewhere,
+}
+
+fn placing(member: &str, scope: &[&str]) -> Placing {
+    let member = member.trim_start_matches("./").trim_end_matches('/');
+    let mut parts = member.split('/').filter(|p| !p.is_empty());
+    for want in scope {
+        match parts.next() {
+            Some(p) if p == *want => {}
+            _ => return Placing::Elsewhere,
+        }
+    }
+    if parts.next().is_some() {
+        Placing::Under
+    } else {
+        Placing::Itself
+    }
+}
+
+/// [`catalog`] narrowed to the literal path `scope` names inside
+/// the archive: a member (its size, exact) or the members under a
+/// folder. `None` when nothing in the archive answers to the path,
+/// and for the formats whose table is not walked (xz, 7z, chm,
+/// rar) at any path but the root.
+pub fn catalog_at(path: &Path, scope: &[&str], cap: quarb::Cap) -> Option<quarb::Catalog> {
+    catalog_with(path, scope, cap, &Sieve::none())
+}
+
+fn catalog_with(
+    path: &Path,
+    scope: &[&str],
+    cap: quarb::Cap,
+    sieve: &Sieve<'_>,
+) -> Option<quarb::Catalog> {
+    use quarb::{Catalog, Confidence, Latency};
+    let file_size = std::fs::metadata(path).ok()?.len();
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 6];
+    let n = f.read(&mut head).ok()?;
+    let head = &head[..n];
+    let members = |count: u64, bytes: u64, cut: bool| {
+        Catalog::plain(
+            if cut {
+                (count, u64::MAX)
+            } else {
+                (count, count)
+            },
+            Some(if cut {
+                (bytes, u64::MAX)
+            } else {
+                (bytes, bytes)
+            }),
+            Latency::Local,
+            if cut {
+                Confidence::Bound
+            } else {
+                Confidence::Exact
+            },
+        )
+    };
+    // One member named by the path: a document whose node count is
+    // the reading's to say, its bytes exact.
+    let member = |size: u64| {
+        Catalog::plain(
+            (1, u64::MAX),
+            Some((size, size)),
+            Latency::Local,
+            Confidence::Bound,
+        )
+    };
+    let stop = |count: u64, bytes: u64| count >= MEMBER_BUDGET || cap.past(count, bytes);
+    if head.starts_with(b"PK") {
+        let f = std::fs::File::open(path).ok()?;
+        let mut zip = zip::ZipArchive::new(f).ok()?;
+        let (mut count, mut bytes, mut cut, mut seen) = (0u64, 0u64, false, false);
+        for i in 0..zip.len() {
+            let Ok(e) = zip.by_index_raw(i) else {
+                continue;
+            };
+            match placing(e.name(), scope) {
+                Placing::Elsewhere => continue,
+                Placing::Itself if !e.is_dir() => return Some(member(e.size())),
+                Placing::Itself => seen = true,
+                Placing::Under if e.is_dir() => {
+                    seen = true;
+                    if sieve.keeps(false, 0) {
+                        count += 1;
+                    }
+                }
+                Placing::Under => {
+                    seen = true;
+                    if !sieve.keeps(true, e.size()) {
+                        continue;
+                    }
+                    count += 1;
+                    bytes += e.size();
+                    if stop(count, bytes) {
+                        cut = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return seen.then(|| members(count, bytes, cut));
+    }
+    let compression = if head.starts_with(&[0x1f, 0x8b]) {
+        Some(Compression::Gzip)
+    } else if head.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        Some(Compression::Xz)
+    } else if head.starts_with(b"BZh") {
+        Some(Compression::Bzip2)
+    } else if head.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        Some(Compression::Zstd)
+    } else if path.extension().and_then(|e| e.to_str()) == Some("tar") {
+        Some(Compression::None)
+    } else {
+        None
+    };
+    let Some(compression) = compression else {
+        return scope.is_empty().then(|| {
+            Catalog::plain(
+                (0, u64::MAX),
+                Some((0, file_size)),
+                Latency::Local,
+                Confidence::Guess,
+            )
+        });
+    };
+    let f = std::fs::File::open(path).ok()?;
+    let reader: Box<dyn Read> = match compression {
+        Compression::None => Box::new(f),
+        Compression::Gzip => Box::new(flate2::read::GzDecoder::new(f)),
+        Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(f)),
+        Compression::Zstd => Box::new(ruzstd::decoding::StreamingDecoder::new(f).ok()?),
+        Compression::Xz => {
+            if !scope.is_empty() {
+                return None;
+            }
+            let mut f = f;
+            let mut compressed = Vec::new();
+            f.read_to_end(&mut compressed).ok()?;
+            let declared = xz_uncompressed_size(&compressed)?;
+            return Some(Catalog::plain(
+                (0, u64::MAX),
+                Some((0, declared)),
+                Latency::Local,
+                Confidence::Bound,
+            ));
+        }
+    };
+    let mut ar = tar::Archive::new(reader);
+    let (mut count, mut bytes, mut cut, mut seen) = (0u64, 0u64, false, false);
+    for entry in ar.entries().ok()? {
+        let e = entry.ok()?;
+        let name = e.path().ok()?.to_string_lossy().into_owned();
+        let is_file = e.header().entry_type().is_file();
+        match placing(&name, scope) {
+            Placing::Elsewhere => continue,
+            Placing::Itself if is_file => return Some(member(e.header().size().unwrap_or(0))),
+            Placing::Itself => seen = true,
+            Placing::Under if !is_file => {
+                seen = true;
+                if e.header().entry_type().is_dir() && sieve.keeps(false, 0) {
+                    count += 1;
+                }
+            }
+            Placing::Under => {
+                seen = true;
+                let size = e.header().size().unwrap_or(0);
+                if !sieve.keeps(true, size) {
+                    continue;
+                }
+                count += 1;
+                bytes += size;
+                if stop(count, bytes) {
+                    cut = true;
+                    break;
+                }
+            }
+        }
+    }
+    seen.then(|| members(count, bytes, cut))
+}
+
+/// Members a catalog walk counts before it stops: past this many
+/// the count is a lower bound.
+pub const MEMBER_BUDGET: u64 = 200_000;
+
 /// The total uncompressed size an xz file declares: the sum over
 /// its streams (concatenated streams are read from the end, each
 /// footer naming its index, each index its blocks' sizes). `None`
@@ -1244,6 +1528,13 @@ impl TreeBuilder {
 }
 
 impl AstAdapter for ArchiveAdapter {
+    /// The member table knows how many members a step reaches and
+    /// their uncompressed sizes; nothing is decoded.
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let bytes_of = |n: NodeId| self.nodes.get(n.0 as usize)?.size.map(|b| b.max(0) as u64);
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, Some(&bytes_of))
+    }
+
     /// This source defines no references to resolve.
     fn resolves_references(&self) -> bool {
         false

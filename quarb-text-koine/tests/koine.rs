@@ -1071,3 +1071,71 @@ Rome fell slowly @@.@>[(gibbon1776)ch. 15.@@ and Persia was vast \
         ["Rome fell slowly ch. 15 and Persia was vast I.1, as every schoolboy knows twain1876."]
     );
 }
+
+/// Headings are sentences everywhere (the ruling of 2026-10-09):
+/// the title and every heading get one derived sentence under
+/// their node, before the content, counted in sequence; `::::at`
+/// and `::::end` are character coordinates in the block's text.
+#[test]
+fn headings_are_sentences_and_coordinates_survive_resegmentation() {
+    let md = "# The Play\n\nA word here. Another one!\n\n## Act Two\n\nLast words.\n";
+    let mut m = quarb_text_koine::parse_markdown(md).unwrap();
+    m.tokenize_with(None);
+    assert_eq!(
+        values(&m, "//sentence | ::"),
+        [
+            "The Play",
+            "A word here.",
+            "Another one!",
+            "Act Two",
+            "Last words."
+        ]
+    );
+    assert_eq!(values(&m, "//sentence::::n"), ["1", "2", "3", "4", "5"]);
+    assert_eq!(values(&m, "//section[1]/sentence[1]::"), ["The Play"]);
+    assert_eq!(values(&m, "//sentence[3]::::at"), ["13"]);
+    assert_eq!(values(&m, "//sentence[3]::::end"), ["25"]);
+    // Trimmed at both ends: end - at is the character count.
+    assert_eq!(values(&m, "//sentence[2]::::end"), ["12"]);
+    assert_eq!(values(&m, "//sentence[3]/token[2]::::at"), ["21"]);
+    assert_eq!(values(&m, "//sentence[3]/token[2]::::end"), ["24"]);
+    assert_eq!(values(&m, "//token @| count"), ["14"]);
+}
+
+/// A given segmentation: the `.sentences` file's lines aligned to
+/// the text, whitespace-insensitively, headings as lines; the two
+/// refusals name the line and the block.
+#[test]
+fn a_sentences_file_gives_the_segmentation() {
+    let md = "# The Play\n\nA word here. Another\none!\n\n## Act Two\n\nLast words.\n";
+    let mut m = quarb_text_koine::parse_markdown(md).unwrap();
+    m.tokenize_given("The Play\nA word here. Another one!\n\nAct Two\nLast words.\n")
+        .unwrap();
+    assert_eq!(
+        values(&m, "//sentence | ::"),
+        [
+            "The Play",
+            "A word here. Another one!",
+            "Act Two",
+            "Last words."
+        ]
+    );
+    assert_eq!(values(&m, "//sentence[2]/token @| count"), ["7"]);
+    let mut m = quarb_text_koine::parse_markdown(md).unwrap();
+    let err = m
+        .tokenize_given("The Play\nA word there.\nAct Two\nLast words.\n")
+        .unwrap_err();
+    assert!(err.starts_with("sentences line 2 does not match"), "{err}");
+    assert!(err.contains("A word here."), "{err}");
+    let mut m = quarb_text_koine::parse_markdown(md).unwrap();
+    let err = m
+        .tokenize_given("The Play\nA word here. Another one!\n")
+        .unwrap_err();
+    assert!(err.contains("ends before"), "{err}");
+    assert!(err.contains("/section/section"), "{err}");
+    let mut m = quarb_text_koine::parse_markdown(md).unwrap();
+    let err = m
+        .tokenize_given("The Play\nA word here. Another one!\nAct Two\nLast words.\nMore.\n")
+        .unwrap_err();
+    assert!(err.contains("line 5"), "{err}");
+}

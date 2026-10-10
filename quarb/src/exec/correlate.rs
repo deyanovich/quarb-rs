@@ -107,6 +107,8 @@ fn counted(query: &Query, adapter: &impl AstAdapter, start: NodeId) -> Option<us
         _ => return None,
     };
     let plan = StepPlan {
+        traits: Vec::new(),
+        cap: Default::default(),
         axis,
         name,
         conjuncts,
@@ -114,6 +116,220 @@ fn counted(query: &Query, adapter: &impl AstAdapter, start: NodeId) -> Option<us
         order: None,
     };
     adapter.count(adapter.child_host(from), &plan)
+}
+
+/// `@| count` over a plain path, counted as the walk goes: a query
+/// that is one anchored branch of child and descendant steps (any
+/// name, traits and per-node predicates; no positional predicate,
+/// no mark, no projection) closed by `@| count` alone. The lead
+/// steps keep a frontier of node ids; the last step's matches are
+/// tested and counted one at a time, never collected, so a count
+/// over a million nodes costs the walk and nothing per node. The
+/// adapter's index answers the last step's `//name[::prop = lit]`
+/// as it does on the materializing path.
+fn streamed_count(
+    query: &Query,
+    adapter: &impl AstAdapter,
+    start: NodeId,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+) -> Option<usize> {
+    // A nested query (a record's field, a predicate's operand)
+    // evaluates under the invoking capsa's register, marks and
+    // witness; only a top-level count streams.
+    if outer.is_some() || !trace.contexts.is_empty() {
+        return None;
+    }
+    if !query.correlations.is_empty() || query.branches.len() != 1 {
+        return None;
+    }
+    let [Stage::Agg(call)] = query.pipeline.as_slice() else {
+        return None;
+    };
+    if call.name != "count" || !call.args.is_empty() {
+        return None;
+    }
+    let b = &query.branches[0];
+    if b.projection.is_some() {
+        return None;
+    }
+    let from = match b.anchor {
+        Anchor::Current => start,
+        Anchor::Root => adapter.root(),
+        _ => return None,
+    };
+    let steps: Vec<&Step> = b
+        .steps
+        .iter()
+        .map(|e| match e {
+            PathElem::Step(s) => Some(s),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let (last, lead) = steps.split_last()?;
+    let streamable = |step: &Step, last: bool| {
+        (match step.axis {
+            Axis::Child => true,
+            // A descendant lead step would need the frontier
+            // deduplicated across nested bases; the last step
+            // handles that itself.
+            Axis::Descendant(Reach::All) => last,
+            _ => false,
+        }) && step
+            .predicates
+            .iter()
+            .all(|p| matches!(p, Predicate::Expr(_)))
+    };
+    if !lead.iter().all(|s| streamable(s, false)) || !streamable(last, true) {
+        return None;
+    }
+    let edge_of = |n: NodeId| {
+        Some(EdgeCtx {
+            source: adapter.parent(n).unwrap_or(n),
+            label: CHILD.into(),
+            target: n,
+        })
+    };
+    // The lead steps: a frontier of ids, each step's matches
+    // tested and filtered as the walk would, deduplicated.
+    let mut frontier = vec![from];
+    for step in lead {
+        let mut next: Vec<NodeId> = Vec::new();
+        for &at in &frontier {
+            let host = adapter.child_host(at);
+            let found: Vec<NodeId> = match &step.matcher {
+                Matcher::Name(name) if step.traits.is_empty() && !step.leaf => {
+                    adapter.children_named(host, name)
+                }
+                _ => adapter
+                    .children(host)
+                    .into_iter()
+                    .filter(|&c| matches_step(adapter, c, step))
+                    .collect(),
+            };
+            let kept = apply_predicates(
+                adapter,
+                found,
+                step,
+                trace,
+                outer,
+                &[],
+                &[],
+                &[],
+                |&n| n,
+                |&n| edge_of(n),
+            );
+            next.extend(kept);
+        }
+        let mut seen = std::collections::HashSet::new();
+        next.retain(|n| seen.insert(*n));
+        frontier = next;
+        if frontier.is_empty() {
+            return Some(0);
+        }
+    }
+    // The last step, counted one node at a time.
+    let mut count = 0usize;
+    let mut seen: Option<std::collections::HashSet<NodeId>> = (frontier.len() > 1
+        && !matches!(last.axis, Axis::Child))
+    .then(std::collections::HashSet::new);
+    let mut tally = |n: NodeId, step: &Step, count: &mut usize| {
+        if let Some(seen) = seen.as_mut()
+            && !seen.insert(n)
+        {
+            return;
+        }
+        if step.predicates.is_empty() {
+            *count += 1;
+            return;
+        }
+        *count += apply_predicates(
+            adapter,
+            vec![n],
+            step,
+            trace,
+            outer,
+            &[],
+            &[],
+            &[],
+            |&n| n,
+            |&n| edge_of(n),
+        )
+        .len();
+    };
+    for &at in &frontier {
+        match last.axis {
+            Axis::Child => {
+                let host = adapter.child_host(at);
+                for c in adapter.children(host) {
+                    if matches_step(adapter, c, last) {
+                        tally(c, last, &mut count);
+                    }
+                }
+            }
+            _ => {
+                // The adapter's index for `//name[::prop = lit]`,
+                // as the materializing step uses it; the hit list
+                // is ids alone.
+                let mut consumed_first = false;
+                let indexed = match &last.matcher {
+                    Matcher::Name(n) => {
+                        let conjuncts = match last.predicates.first() {
+                            Some(Predicate::Expr(e)) => indexable_equality(e)
+                                .map(|(prop, value)| vec![Conjunct::Equals(prop, value)])
+                                .unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        let plan = StepPlan {
+                            traits: Vec::new(),
+                            cap: Default::default(),
+                            axis: PlanAxis::Descendant,
+                            name: Some(n),
+                            conjuncts,
+                            limit: None,
+                            order: None,
+                        };
+                        adapter.select(at, &plan).map(|sel| {
+                            consumed_first = sel.applied.first().copied().unwrap_or(false);
+                            sel.nodes
+                        })
+                    }
+                    _ => None,
+                };
+                let rest;
+                let step = if consumed_first {
+                    rest = Step {
+                        predicates: last.predicates[1..].to_vec(),
+                        ..(*last).clone()
+                    };
+                    &rest
+                } else {
+                    *last
+                };
+                match indexed {
+                    Some(hits) => {
+                        for (n, _) in hits {
+                            if tests_ok(adapter, n, step) {
+                                tally(n, step, &mut count);
+                            }
+                        }
+                    }
+                    None => {
+                        let mut stack: Vec<NodeId> = adapter.children(at);
+                        stack.reverse();
+                        while let Some(c) = stack.pop() {
+                            if matches_step(adapter, c, step) {
+                                tally(c, step, &mut count);
+                            }
+                            let kids = adapter.children(c);
+                            stack.extend(kids.into_iter().rev());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(count)
 }
 
 pub(crate) fn eval_query_caps(
@@ -136,6 +352,14 @@ pub(super) fn eval_query_caps_outer(
     // adapter that counts (a table's `COUNT(*)`, an index bucket)
     // answers without the nodes being made.
     if let Some(n) = counted(query, adapter, start) {
+        return (
+            vec![Capsa::bare(adapter.root(), Some(Value::Int(n as i64)))],
+            true,
+        );
+    }
+    // Any other `@| count` over a plain path: counted as the walk
+    // goes, the matches never collected.
+    if let Some(n) = streamed_count(query, adapter, start, base, outer) {
         return (
             vec![Capsa::bare(adapter.root(), Some(Value::Int(n as i64)))],
             true,

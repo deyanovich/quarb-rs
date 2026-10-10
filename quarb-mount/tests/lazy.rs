@@ -27,12 +27,14 @@ fn table() -> (MountAdapter, Rc<Cell<usize>>, Rc<Cell<usize>>) {
         name: "a".into(),
         target: Some("/data/a.json".into()),
         opener: counting(r#"{"x": [1, 2]}"#, &na),
+        catalog: None,
     })
     .unwrap();
     m.declare(Latent {
         name: "b".into(),
         target: Some("/data/b.json".into()),
         opener: counting(r#"{"x": [3]}"#, &nb),
+        catalog: None,
     })
     .unwrap();
     (m, na, nb)
@@ -110,6 +112,7 @@ fn a_reference_lands_on_a_latent_mount_through_its_identity() {
                     "<html><body><h1>Guide</h1></body></html>",
                 )) as Box<dyn AstAdapter>)
             }),
+            catalog: None,
         })
         .unwrap();
     m.declare_identity(idx, "https://docs.test/guide.html".into());
@@ -132,6 +135,7 @@ fn a_failed_opener_refuses_and_the_mount_stands_empty() {
         name: "gone".into(),
         target: Some("/data/gone.json".into()),
         opener: Box::new(|| Err("no such file".into())),
+        catalog: None,
     })
     .unwrap();
     let err = quarb::run("/gone/* @| count", &m).unwrap_err();
@@ -164,4 +168,123 @@ fn a_live_table_takes_a_new_mount() {
         .is_err()
     );
     let _ = NodeId(0);
+}
+
+#[test]
+fn a_latent_mount_estimates_from_its_catalog_without_opening() {
+    let (mut m, na, _) = table();
+    m.declare(Latent {
+        name: "shelf".into(),
+        target: Some("/data/shelf.tar".into()),
+        opener: Box::new(|| Err("never opened".into())),
+        catalog: Some(Box::new(|ask| {
+            if !ask.scope.is_empty() {
+                return None;
+            }
+            Some(quarb::Catalog::plain(
+                (4200, 4200),
+                Some((9_000_000, 9_000_000)),
+                quarb::Latency::Local,
+                quarb::Confidence::Exact,
+            ))
+        })),
+    })
+    .unwrap();
+    let plan = quarb::Query::parse("/shelf/*[::title = \"Emma\"] | ::title", &m)
+        .unwrap()
+        .plan(&m);
+    let e = plan.branches[0].steps[1].estimate.clone().unwrap();
+    assert_eq!(e.nodes, (0, 4200));
+    assert_eq!(e.bytes, Some((9_000_000, 9_000_000)));
+    assert_eq!(e.confidence, quarb::Confidence::Bound);
+    let plan = quarb::Query::parse("/shelf//*", &m).unwrap().plan(&m);
+    let e = plan.branches[0].steps[1].estimate.clone().unwrap();
+    assert_eq!(e.nodes, (4200, u64::MAX));
+    assert_eq!(e.confidence, quarb::Confidence::Bound);
+    // A step deeper than the root is a bounded unknown that keeps
+    // the root's bytes.
+    let deep = quarb::Query::parse("/shelf/book/*", &m).unwrap().plan(&m);
+    let e = deep.estimate().unwrap();
+    assert_eq!(e.nodes, (0, u64::MAX));
+    assert_eq!(e.bytes, Some((9_000_000, 9_000_000)));
+    assert!(!m.is_active(2));
+    assert_eq!(na.get(), 0);
+}
+
+#[test]
+fn a_root_step_is_priced_across_the_mounts() {
+    let (mut m, na, nb) = table();
+    let shelf = |n: u64| {
+        Some(quarb::Catalog::plain(
+            (n, n),
+            Some((n * 1000, n * 1000)),
+            quarb::Latency::Local,
+            quarb::Confidence::Exact,
+        ))
+    };
+    m.declare(Latent {
+        name: "c".into(),
+        target: None,
+        opener: Box::new(|| Err("never".into())),
+        catalog: Some(Box::new(move |_| shelf(5))),
+    })
+    .unwrap();
+    // `/*` is the mounts; `//*` across them counts the active ones'
+    // arenas and reads the latent one's catalog.
+    m.activate(0).unwrap();
+    m.activate(1).unwrap();
+    let plan = quarb::Query::parse("/*", &m).unwrap().plan(&m);
+    assert_eq!(plan.estimate().unwrap().nodes, (3, 3));
+    let plan = quarb::Query::parse("//*", &m).unwrap().plan(&m);
+    let e = plan.estimate().unwrap();
+    assert_eq!(e.nodes.0, 5 + 3 + 2);
+    assert_eq!(e.nodes.1, u64::MAX);
+    assert_eq!(e.bytes, Some((5000, 5000)));
+    assert_eq!(e.latency, quarb::Latency::Local);
+    assert_eq!((na.get(), nb.get()), (1, 1));
+    assert!(!m.is_active(2));
+}
+
+#[test]
+fn a_latent_mount_narrows_to_the_path_the_plan_records() {
+    let (mut m, _, _) = table();
+    let shelf = |scope: &[&str]| {
+        let (entries, bytes) = match scope {
+            [] => (3, 9_000),
+            ["verse"] => (1, 2_000),
+            ["verse", "iliad.txt"] => (1, 2_000),
+            _ => return None,
+        };
+        Some(quarb::Catalog::plain(
+            (entries, entries),
+            Some((bytes, bytes)),
+            quarb::Latency::Local,
+            quarb::Confidence::Exact,
+        ))
+    };
+    m.declare(Latent {
+        name: "shelf".into(),
+        target: None,
+        opener: Box::new(|| Err("never".into())),
+        catalog: Some(Box::new(move |ask| shelf(ask.scope))),
+    })
+    .unwrap();
+    // The folder's own listing prices the walk under it.
+    let plan = quarb::Query::parse("/shelf/verse//*", &m).unwrap().plan(&m);
+    let e = plan.estimate().unwrap();
+    assert_eq!(e.nodes, (1, u64::MAX));
+    assert_eq!(e.bytes, Some((2_000, 2_000)));
+    // One member's header prices a reading under it.
+    let plan = quarb::Query::parse("/shelf/verse/iliad.txt//paragraph", &m)
+        .unwrap()
+        .plan(&m);
+    let e = plan.estimate().unwrap();
+    assert_eq!(e.nodes, (0, u64::MAX));
+    assert_eq!(e.bytes, Some((2_000, 2_000)));
+    // A path the catalog cannot place is bounded by the whole.
+    let plan = quarb::Query::parse("/shelf/prose//*", &m).unwrap().plan(&m);
+    let e = plan.estimate().unwrap();
+    assert_eq!(e.nodes, (0, u64::MAX));
+    assert_eq!(e.bytes, Some((9_000, 9_000)));
+    assert!(!m.is_active(2));
 }

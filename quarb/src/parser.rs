@@ -2683,6 +2683,19 @@ impl Parser<'_> {
         // `rec("age", ::Age ? ::Age * 1 : 1912 - $.born)`.
         match self.cond_expr()? {
             Operand::Lit(v) => Ok(Arg::Lit(v)),
+            // `@("a"; "b")` of literals: the list as one literal
+            // (`jaccard(@("cat"; "dog"))`).
+            Operand::List(items) if items.iter().all(|i| matches!(i, Operand::Lit(_))) => {
+                Ok(Arg::Lit(Value::list(
+                    items
+                        .into_iter()
+                        .map(|i| match i {
+                            Operand::Lit(v) => v,
+                            _ => unreachable!(),
+                        })
+                        .collect(),
+                )))
+            }
             expr => Ok(Arg::Expr(expr)),
         }
     }
@@ -5778,6 +5791,36 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
             _ => Err(QuarbError::parse(
                 "shift takes an integer distance, then an optional partition \
                  key: shift(1), shift(1, ::group)",
+            )),
+        },
+        // `ngrams(n)`, and its two named sizes; `frequencies[(k)]`.
+        "ngrams" => match call.args.as_slice() {
+            [Arg::Lit(Value::Int(n))] if *n >= 1 => Ok(()),
+            _ => Err(QuarbError::parse(
+                "ngrams takes the size of the window: ngrams(2)",
+            )),
+        },
+        "bigrams" | "trigrams" => {
+            if call.args.is_empty() {
+                Ok(())
+            } else {
+                Err(QuarbError::parse(format!(
+                    "'{}' takes no arguments; a window of another size is ngrams(n)",
+                    call.name
+                )))
+            }
+        }
+        "skipgrams" => match call.args.as_slice() {
+            [Arg::Lit(Value::Int(n)), Arg::Lit(Value::Int(k))] if *n >= 1 && *k >= 0 => Ok(()),
+            _ => Err(QuarbError::parse(
+                "skipgrams takes the window size and the skips allowed: skipgrams(2; 1)",
+            )),
+        },
+        "frequencies" => match call.args.as_slice() {
+            [] => Ok(()),
+            [Arg::Lit(Value::Int(k))] if *k >= 1 => Ok(()),
+            _ => Err(QuarbError::parse(
+                "frequencies takes nothing, or how many to keep: frequencies(10)",
             )),
         },
         // `combinations(n)`, and its two named sizes.

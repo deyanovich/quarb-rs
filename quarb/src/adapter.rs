@@ -284,12 +284,43 @@ pub struct StepPlan<'a> {
     pub name: Option<&'a str>,
     /// The leading predicates lowered to comparisons, in order.
     pub conjuncts: Vec<Conjunct<'a>>,
+    /// The step's `<trait>` filters, each one literal trait name
+    /// (a clause with alternatives or a negation is not lowered).
+    pub traits: Vec<&'a str>,
     /// How many results the stage after the step keeps, when it
     /// keeps a prefix (`[..n]`, `@| first(n)`).
     pub limit: Option<usize>,
+    /// Where an estimator may stop counting: past this many nodes
+    /// or bytes the answer already exceeds the run's budget, so a
+    /// listing, a header walk or an arena count stops there and
+    /// reports `(counted, u64::MAX)`. Unbounded when no budget.
+    pub cap: Cap,
     /// The property the stage after the step orders by, and whether
     /// ascending.
     pub order: Option<(&'a str, bool)>,
+}
+
+/// Where counting may stop: the most nodes and bytes a budget
+/// allows, so an estimator short-circuits at the first entry past
+/// either ([`StepPlan::cap`], [`Catalog`] producers).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cap {
+    pub nodes: Option<u64>,
+    pub bytes: Option<u64>,
+}
+
+impl Cap {
+    /// No cap: count everything (within the walk's own budget).
+    pub const NONE: Cap = Cap {
+        nodes: None,
+        bytes: None,
+    };
+
+    /// Whether `nodes` counted or `bytes` summed so far already
+    /// pass the cap: the walk may stop.
+    pub fn past(&self, nodes: u64, bytes: u64) -> bool {
+        self.nodes.is_some_and(|max| nodes > max) || self.bytes.is_some_and(|max| bytes > max)
+    }
 }
 
 /// The axis of a [`StepPlan`].
@@ -304,8 +335,67 @@ pub enum PlanAxis {
 /// One lowered predicate of a [`StepPlan`].
 #[derive(Debug, Clone)]
 pub enum Conjunct<'a> {
-    /// `[::prop = value]` under the engine's standard equality.
+    /// `[::prop = value]` under the engine's standard equality, with
+    /// a text value: what an index or a keyed read answers.
     Equals(&'a str, &'a Value),
+    /// `[::prop OP literal]`: a comparison on one property, lowered
+    /// for pricing (a listing's sizes, a store's statistics). An
+    /// adapter never applies it in [`AstAdapter::select`]; the
+    /// engine runs it. `Cmp::Eq` here is an equality on a
+    /// non-text literal.
+    Compare(&'a str, Cmp, &'a Value),
+}
+
+/// A comparison a [`Conjunct::Compare`] lowers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    /// `*=`: the property's text contains the literal.
+    Contains,
+}
+
+impl Cmp {
+    /// The operator as written.
+    pub fn text(self) -> &'static str {
+        match self {
+            Cmp::Eq => "=",
+            Cmp::Ne => "!=",
+            Cmp::Lt => "<",
+            Cmp::Le => "<=",
+            Cmp::Gt => ">",
+            Cmp::Ge => ">=",
+            Cmp::Contains => "*=",
+        }
+    }
+
+    /// Whether `value` stands to `literal` as the operator says,
+    /// under the engine's value ordering.
+    pub fn holds(self, value: &Value, literal: &Value) -> bool {
+        use std::cmp::Ordering::*;
+        match self {
+            Cmp::Contains => match (value, literal) {
+                (Value::Str(a), Value::Str(b)) => a.contains(b.as_str()),
+                _ => false,
+            },
+            _ => {
+                let o = value.compare(literal);
+                match self {
+                    Cmp::Eq => o == Equal,
+                    Cmp::Ne => o != Equal,
+                    Cmp::Lt => o == Less,
+                    Cmp::Le => o != Greater,
+                    Cmp::Gt => o == Greater,
+                    Cmp::Ge => o != Less,
+                    Cmp::Contains => unreachable!(),
+                }
+            }
+        }
+    }
 }
 
 /// What an adapter answers to a [`StepPlan`]: the nodes (each with
@@ -326,7 +416,7 @@ pub struct Selection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
     /// The nodes the step yields, from the least to the most.
-    pub rows: (u64, u64),
+    pub nodes: (u64, u64),
     /// The bytes read to yield them, when the adapter can say (a
     /// warehouse's dry run, a file's size).
     pub bytes: Option<(u64, u64)>,
@@ -359,15 +449,216 @@ pub enum Confidence {
     Exact,
 }
 
+/// What a source knows about itself before it is read: how many
+/// entries it holds (files under a directory, members of an
+/// archive, rows of a table, documents on a shelf) and how many
+/// bytes they come to — from a listing, a central directory, a
+/// `stat`, a store's catalog, never from the contents. A latent
+/// mount answers the plan from it; an [`Unopened`] source is only
+/// it; an opened arena answers from its nodes instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Catalog {
+    /// The entries, from the least to the most. A listing that
+    /// stopped early reports `(counted, u64::MAX)`: unbounded.
+    pub entries: (u64, u64),
+    /// Their bytes, when the listing says.
+    pub bytes: Option<(u64, u64)>,
+    pub latency: Latency,
+    pub confidence: Confidence,
+    /// Which of the asked conjuncts the listing applied before
+    /// counting (empty: none; a catalog that applies filters sets
+    /// one flag per conjunct asked).
+    pub applied: Vec<bool>,
+    /// Whether the asked trait filters were all applied.
+    pub traits_applied: bool,
+}
+
+impl Catalog {
+    /// A catalog that applied nothing.
+    pub fn plain(
+        entries: (u64, u64),
+        bytes: Option<(u64, u64)>,
+        latency: Latency,
+        confidence: Confidence,
+    ) -> Catalog {
+        Catalog {
+            entries,
+            bytes,
+            latency,
+            confidence,
+            applied: Vec::new(),
+            traits_applied: false,
+        }
+    }
+}
+
+/// What a catalog is asked for: the literal path under the source,
+/// where counting may stop, and the step's filters a listing may
+/// apply before counting (it says which in [`Catalog::applied`]).
+pub struct Ask<'a> {
+    pub scope: &'a [&'a str],
+    pub cap: Cap,
+    pub conjuncts: &'a [Conjunct<'a>],
+    pub traits: &'a [&'a str],
+}
+
+impl<'a> Ask<'a> {
+    /// A bare ask: the path and the cap, no filters.
+    pub fn at(scope: &'a [&'a str], cap: Cap) -> Ask<'a> {
+        Ask {
+            scope,
+            cap,
+            conjuncts: &[],
+            traits: &[],
+        }
+    }
+}
+
+/// A source known only by its catalog: a root with nothing under
+/// it, answering the plan's estimate for a step from the root out
+/// of the catalog. A front end plans and budgets a query against
+/// it before paying to open the source — a directory of a hundred
+/// thousand files, a tarball of books — and opens only within
+/// budget.
+pub struct Unopened(pub CatalogLookup);
+
+/// A catalog by literal path from a source's root: `&[]` is the
+/// whole source, `&["shelf", "emma.txt"]` one entry under it (a
+/// folder's own listing, one member's header), `None` where the
+/// path names nothing the catalog can see. The cap says where
+/// counting may stop.
+pub type CatalogLookup = Box<dyn Fn(&Ask<'_>) -> Option<Catalog>>;
+
+impl Unopened {
+    /// A source with one catalog, for its root alone.
+    pub fn fixed(c: Catalog) -> Unopened {
+        Unopened(Box::new(move |ask| ask.scope.is_empty().then(|| c.clone())))
+    }
+}
+
+impl AstAdapter for Unopened {
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+    fn children(&self, _: NodeId) -> Vec<NodeId> {
+        Vec::new()
+    }
+    fn name(&self, _: NodeId) -> Option<String> {
+        None
+    }
+    fn estimate(&self, scope: &[&str], plan: &StepPlan<'_>) -> Option<Estimate> {
+        Estimate::at_catalog(&*self.0, scope, plan)
+    }
+}
+
 impl Estimate {
-    /// `self` followed by `next` along one branch: the rows are
+    /// The estimate a catalog gives a step from the source's root.
+    /// The entries are files or members, the step yields nodes,
+    /// and the two meet only as bounds: a child step reaches at most
+    /// the entries (`/*`, or a named one, a subset), an unfiltered
+    /// descendant step reaches at least every entry (`//*`: each is
+    /// a node, with what the reading finds under it), anything else
+    /// is open. The bytes are the source's: what opening it reads.
+    pub fn from_catalog(c: &Catalog, plan: &StepPlan<'_>) -> Estimate {
+        // Filters the listing applied make the count a bound on the
+        // matches: nothing under an entry answers a listing's
+        // property, so a filtered descendant step is bounded too.
+        let filtered = !plan.conjuncts.is_empty() || !plan.traits.is_empty();
+        let applied = filtered
+            && c.applied.len() == plan.conjuncts.len()
+            && c.applied.iter().all(|&b| b)
+            && (plan.traits.is_empty() || c.traits_applied);
+        let rows = match (plan.axis, plan.name, filtered) {
+            (PlanAxis::Child, _, _) => (0, c.entries.1),
+            (PlanAxis::Descendant, None, false) => (c.entries.0, u64::MAX),
+            (PlanAxis::Descendant, None, true) if applied => (0, c.entries.1),
+            _ => (0, u64::MAX),
+        };
+        Estimate {
+            nodes: rows,
+            bytes: c.bytes,
+            requests: Some(0),
+            latency: c.latency,
+            confidence: c.confidence.min(Confidence::Bound),
+        }
+    }
+
+    /// The estimate a catalogued source gives a step at a literal
+    /// `scope`, narrowing to the path the plan records: a bare hop
+    /// by name is one entry when the catalog finds it (and costs
+    /// nothing; the step that reads under it is priced by that
+    /// entry's own catalog) and may read the whole when it does not
+    /// (a node inside a document); a reading step at a path the
+    /// catalog resolves is priced by it, and one the catalog cannot
+    /// place is a bounded unknown under the source. `None` when the
+    /// source itself has no catalog.
+    pub fn at_catalog(
+        lookup: &dyn Fn(&Ask<'_>) -> Option<Catalog>,
+        scope: &[&str],
+        plan: &StepPlan<'_>,
+    ) -> Option<Estimate> {
+        let whole = |scope: &[&str]| lookup(&Ask::at(scope, plan.cap));
+        let bare =
+            plan.conjuncts.is_empty() && plan.traits.is_empty() && plan.axis == PlanAxis::Child;
+        if bare && let Some(name) = plan.name {
+            let mut sub: Vec<&str> = scope.to_vec();
+            sub.push(name);
+            return Some(match whole(&sub) {
+                Some(c) => Estimate {
+                    nodes: (1, 1),
+                    bytes: None,
+                    requests: Some(0),
+                    latency: c.latency,
+                    confidence: Confidence::Exact,
+                },
+                // Not an entry the catalog sees (a node inside a
+                // document): reaching it from the root may read the
+                // whole; deeper, the whole was charged already.
+                None => {
+                    let whole = whole(&[])?;
+                    if scope.is_empty() {
+                        Estimate::from_catalog(&whole, plan)
+                    } else {
+                        Estimate::beneath_catalog(&whole)
+                    }
+                }
+            });
+        }
+        // A reading step asks with its filters: a listing that can
+        // apply them counts the matches alone.
+        let ask = Ask {
+            scope,
+            cap: plan.cap,
+            conjuncts: &plan.conjuncts,
+            traits: &plan.traits,
+        };
+        Some(match lookup(&ask) {
+            Some(c) => Estimate::from_catalog(&c, plan),
+            None => Estimate::beneath_catalog(&whole(&[])?),
+        })
+    }
+
+    /// The estimate a catalog gives a step deeper than the root:
+    /// nothing is known of the nodes, and the bytes were counted at
+    /// the root (`None` here, so the branch keeps them).
+    pub fn beneath_catalog(c: &Catalog) -> Estimate {
+        Estimate {
+            nodes: (0, u64::MAX),
+            bytes: None,
+            requests: Some(0),
+            latency: c.latency,
+            confidence: Confidence::Bound,
+        }
+    }
+
+    /// `self` followed by `next` along one branch: the nodes are
     /// the next step's, the bytes and requests add, the latency is
     /// the slower, the confidence the weaker.
     pub fn then(&self, next: &Estimate) -> Estimate {
         Estimate {
-            rows: next.rows,
+            nodes: next.nodes,
             bytes: match (self.bytes, next.bytes) {
-                (Some(a), Some(b)) => Some((a.0 + b.0, a.1 + b.1)),
+                (Some(a), Some(b)) => Some((a.0.saturating_add(b.0), a.1.saturating_add(b.1))),
                 (a, None) => a,
                 (None, b) => b,
             },
@@ -381,14 +672,101 @@ impl Estimate {
         }
     }
 
-    /// `self` beside `other` (two branches of one query): rows,
+    /// `self` beside `other` (two branches of one query): nodes,
     /// bytes and requests add.
     pub fn beside(&self, other: &Estimate) -> Estimate {
         Estimate {
-            rows: (self.rows.0 + other.rows.0, self.rows.1 + other.rows.1),
+            nodes: (
+                self.nodes.0.saturating_add(other.nodes.0),
+                self.nodes.1.saturating_add(other.nodes.1),
+            ),
             ..self.then(other)
         }
     }
+}
+
+/// Nodes an arena walk may touch while estimating before it stops
+/// counting: past this many the count is a lower bound.
+pub const ARENA_ESTIMATE_BUDGET: u64 = 2_000_000;
+
+/// An estimate for an adapter whose arbor is in memory (a parsed
+/// document, a walked directory, an archive's member table, a
+/// shelf of documents): the plan's base found by the literal
+/// `scope` from the root (one hit per name, else unknown), then the
+/// step's nodes counted — the children answering to the name, or
+/// the descendants — with `bytes_of` summing what the adapter knows
+/// per node. Exact; a bound under a conjunct or past the walk's
+/// budget. Not the trait's default: for a lazy or remote adapter a
+/// walk is a read.
+pub fn arena_estimate<A: AstAdapter + ?Sized>(
+    adapter: &A,
+    scope: &[&str],
+    plan: &StepPlan<'_>,
+    latency: Latency,
+    bytes_of: Option<&dyn Fn(NodeId) -> Option<u64>>,
+) -> Option<Estimate> {
+    let mut at = adapter.root();
+    for name in scope {
+        let mut hits = adapter.children_named(at, name).into_iter();
+        at = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+    }
+    let matches = |c: NodeId| plan.name.is_none_or(|n| adapter.answers_to(c, n));
+    let mut n: u64 = 0;
+    let mut bytes: u64 = 0;
+    let mut cut = false;
+    // Counts one node; `true` once the cap is passed: stop.
+    let mut count = |c: NodeId| {
+        if matches(c) {
+            n += 1;
+            if let Some(f) = bytes_of {
+                bytes += f(c).unwrap_or(0);
+            }
+        }
+        plan.cap.past(n, bytes)
+    };
+    match plan.axis {
+        PlanAxis::Child => {
+            for c in adapter.children(at) {
+                if count(c) {
+                    cut = true;
+                    break;
+                }
+            }
+        }
+        PlanAxis::Descendant => {
+            let mut visited: u64 = 0;
+            let mut stack = adapter.children(at);
+            while let Some(c) = stack.pop() {
+                visited += 1;
+                if visited > ARENA_ESTIMATE_BUDGET || count(c) {
+                    cut = true;
+                    break;
+                }
+                stack.extend(adapter.children(c));
+            }
+        }
+    }
+    let filtered = !plan.conjuncts.is_empty();
+    Some(Estimate {
+        nodes: if cut {
+            (n, u64::MAX)
+        } else if filtered {
+            (0, n)
+        } else {
+            (n, n)
+        },
+        bytes: bytes_of.map(|_| if cut { (bytes, u64::MAX) } else { (0, bytes) }),
+        requests: Some(0),
+        latency,
+        confidence: if cut || filtered {
+            Confidence::Bound
+        } else {
+            Confidence::Exact
+        },
+    })
 }
 
 /// [`AstAdapter::select`]'s default, through the individual hooks:
@@ -1690,7 +2068,7 @@ mod forwarding {
         }
         fn estimate(&self, scope: &[&str], plan: &StepPlan<'_>) -> Option<Estimate> {
             Some(Estimate {
-                rows: (scope.len() as u64, plan.conjuncts.len() as u64 + 9),
+                nodes: (scope.len() as u64, plan.conjuncts.len() as u64 + 9),
                 bytes: None,
                 requests: Some(1),
                 latency: Latency::Local,
@@ -1783,6 +2161,8 @@ mod forwarding {
         same!(descendants_named, n(2), "abc");
         same!(descendants_where, n(2), "abc", "pp", &v);
         let plan = StepPlan {
+            traits: Vec::new(),
+            cap: Default::default(),
             axis: PlanAxis::Descendant,
             name: Some("abc"),
             conjuncts: vec![Conjunct::Equals("pp", &v)],

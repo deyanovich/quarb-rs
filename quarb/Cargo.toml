@@ -38,14 +38,16 @@ colligo = ["dep:colligo"]
 cjk = []
 
 [dependencies]
-quarb-trace = { path = "../quarb-trace", version = "0.34.1" }
-quarb-time = { path = "../quarb-time", version = "0.34.1" }
+quarb-trace = { path = "../quarb-trace", version = "0.35.0" }
+quarb-time = { path = "../quarb-time", version = "0.35.0" }
 kaiv = { version = "0.15.0", default-features = false, optional = true }
 thiserror.workspace = true
 globset.workspace = true
 regex = "1"
 url = "2"
 unicode-segmentation = "1"
+strsim = "0.11"
+rust-stemmers = "1"
 unicode-normalization = "0.1"
 syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"], optional = true }
 colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }

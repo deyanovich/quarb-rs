@@ -77,6 +77,16 @@ impl Kind {
         }
     }
 
+    fn of_value(v: &Value) -> Kind {
+        match v {
+            Value::Str(_) => Kind::String,
+            Value::Int(_) | Value::Float(_) => Kind::Number,
+            Value::Bool(_) => Kind::Boolean,
+            Value::Null => Kind::Null,
+            _ => Kind::Array,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Kind::Object => "object",
@@ -89,8 +99,16 @@ impl Kind {
     }
 }
 
+/// A node's name: an object key, interned once per document, or
+/// an array position. Fifty thousand records share one `book_id`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Name {
+    Key(u32),
+    Index(u32),
+}
+
 struct Node {
-    name: Option<String>,
+    name: Option<Name>,
     kind: Kind,
     /// The scalar value for a primitive; `Value::Null` for containers.
     /// Under the property reading: the root's own scalar when the
@@ -99,8 +117,8 @@ struct Node {
     parent: Option<NodeId>,
     children: Vec<NodeId>,
     /// Property reading: an object's scalar fields (a list for an
-    /// array of scalars), in document order.
-    fields: Vec<(String, Value)>,
+    /// array of scalars), in document order, keyed into the table.
+    fields: Vec<(u32, Value)>,
     /// Property reading: an array node's scalar elements, with
     /// their positions (the serializers put them back in place).
     items: Vec<(usize, Value)>,
@@ -109,8 +127,369 @@ struct Node {
 /// A Quarb adapter over a parsed JSON document.
 pub struct JsonAdapter {
     nodes: Vec<Node>,
+    /// The distinct object keys of the document, in first-seen
+    /// order; a node's `Name::Key` indexes it.
+    keys: Vec<String>,
+    key_index: std::collections::HashMap<String, u32>,
     root: NodeId,
     reading: Reading,
+}
+
+/// The arena under construction: the nodes and the key table. The
+/// streaming build fills it straight from the deserializer, so no
+/// `serde_json::Value` tree stands at the peak; the tree build (a
+/// YAML or TOML document's, a value handed in) walks a tree into it.
+struct Builder {
+    nodes: Vec<Node>,
+    keys: Vec<String>,
+    key_index: std::collections::HashMap<String, u32>,
+}
+
+impl Builder {
+    fn new() -> Builder {
+        Builder {
+            nodes: Vec::new(),
+            keys: Vec::new(),
+            key_index: std::collections::HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, key: &str) -> u32 {
+        if let Some(&k) = self.key_index.get(key) {
+            return k;
+        }
+        let k = self.keys.len() as u32;
+        self.keys.push(key.to_string());
+        self.key_index.insert(key.to_string(), k);
+        k
+    }
+
+    fn push(
+        &mut self,
+        name: Option<Name>,
+        kind: Kind,
+        scalar: Value,
+        parent: Option<NodeId>,
+    ) -> NodeId {
+        let id = NodeId(self.nodes.len() as u64);
+        self.nodes.push(Node {
+            name,
+            kind,
+            scalar,
+            parent,
+            children: Vec::new(),
+            fields: Vec::new(),
+            items: Vec::new(),
+        });
+        // A placeholder parent (an array node not yet made, see
+        // the property reading's seed) links nothing; `reparent`
+        // sets the edge once the node exists.
+        if let Some(p) = parent
+            && (p.0 as usize) < self.nodes.len()
+        {
+            self.nodes[p.0 as usize].children.push(id);
+        }
+        id
+    }
+
+    fn finish(self, reading: Reading) -> JsonAdapter {
+        JsonAdapter {
+            nodes: self.nodes,
+            keys: self.keys,
+            key_index: self.key_index,
+            root: NodeId(0),
+            reading,
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// The streaming build: a seed per value, fed by the deserializer.
+
+/// What the property reading made of a value: a scalar (its
+/// parent's field), a list of scalars (a field too, under a key),
+/// or a node.
+enum Built {
+    Scalar(Value),
+    List(Vec<Value>),
+    Node(NodeId),
+}
+
+/// The node reading's seed: every value a node under `parent`.
+struct NodeSeed<'b> {
+    b: &'b mut Builder,
+    name: Option<Name>,
+    parent: Option<NodeId>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for NodeSeed<'_> {
+    type Value = NodeId;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<NodeId, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for NodeSeed<'_> {
+    type Value = NodeId;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E>(self, v: bool) -> Result<NodeId, E> {
+        Ok(self
+            .b
+            .push(self.name, Kind::Boolean, Value::Bool(v), self.parent))
+    }
+    fn visit_i64<E>(self, v: i64) -> Result<NodeId, E> {
+        Ok(self
+            .b
+            .push(self.name, Kind::Number, Value::Int(v), self.parent))
+    }
+    fn visit_u64<E>(self, v: u64) -> Result<NodeId, E> {
+        let value = i64::try_from(v)
+            .map(Value::Int)
+            .unwrap_or(Value::Float(v as f64));
+        Ok(self.b.push(self.name, Kind::Number, value, self.parent))
+    }
+    fn visit_f64<E>(self, v: f64) -> Result<NodeId, E> {
+        Ok(self
+            .b
+            .push(self.name, Kind::Number, Value::Float(v), self.parent))
+    }
+    fn visit_str<E>(self, v: &str) -> Result<NodeId, E> {
+        Ok(self.b.push(
+            self.name,
+            Kind::String,
+            Value::Str(v.to_string()),
+            self.parent,
+        ))
+    }
+    fn visit_string<E>(self, v: String) -> Result<NodeId, E> {
+        Ok(self
+            .b
+            .push(self.name, Kind::String, Value::Str(v), self.parent))
+    }
+    fn visit_unit<E>(self) -> Result<NodeId, E> {
+        Ok(self.b.push(self.name, Kind::Null, Value::Null, self.parent))
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<NodeId, E> {
+        self.visit_unit()
+    }
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<NodeId, D::Error> {
+        d.deserialize_any(self)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<NodeId, A::Error> {
+        let this = self
+            .b
+            .push(self.name, Kind::Array, Value::Null, self.parent);
+        let mut i = 0u32;
+        while seq
+            .next_element_seed(NodeSeed {
+                b: self.b,
+                name: Some(Name::Index(i)),
+                parent: Some(this),
+            })?
+            .is_some()
+        {
+            i += 1;
+        }
+        Ok(this)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<NodeId, A::Error> {
+        let this = self
+            .b
+            .push(self.name, Kind::Object, Value::Null, self.parent);
+        while let Some(key) = map.next_key::<String>()? {
+            let k = self.b.intern(&key);
+            map.next_value_seed(NodeSeed {
+                b: self.b,
+                name: Some(Name::Key(k)),
+                parent: Some(this),
+            })?;
+        }
+        Ok(this)
+    }
+}
+
+/// The property reading's seed: a container is a node, a scalar
+/// its parent's field; an array of scalars under a key is a
+/// list-valued field, under an array a node of items; the root is
+/// always a node.
+struct PropSeed<'b> {
+    b: &'b mut Builder,
+    name: Option<Name>,
+    parent: Option<NodeId>,
+    /// The parent is an object: a scalar array here is a field.
+    in_object: bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for PropSeed<'_> {
+    type Value = Built;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Built, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl PropSeed<'_> {
+    fn scalar(self, v: Value) -> Built {
+        if self.parent.is_none() {
+            let kind = Kind::of_value(&v);
+            Built::Node(self.b.push(self.name, kind, v, None))
+        } else {
+            Built::Scalar(v)
+        }
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for PropSeed<'_> {
+    type Value = Built;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E>(self, v: bool) -> Result<Built, E> {
+        Ok(self.scalar(Value::Bool(v)))
+    }
+    fn visit_i64<E>(self, v: i64) -> Result<Built, E> {
+        Ok(self.scalar(Value::Int(v)))
+    }
+    fn visit_u64<E>(self, v: u64) -> Result<Built, E> {
+        Ok(self.scalar(
+            i64::try_from(v)
+                .map(Value::Int)
+                .unwrap_or(Value::Float(v as f64)),
+        ))
+    }
+    fn visit_f64<E>(self, v: f64) -> Result<Built, E> {
+        Ok(self.scalar(Value::Float(v)))
+    }
+    fn visit_str<E>(self, v: &str) -> Result<Built, E> {
+        Ok(self.scalar(Value::Str(v.to_string())))
+    }
+    fn visit_string<E>(self, v: String) -> Result<Built, E> {
+        Ok(self.scalar(Value::Str(v)))
+    }
+    fn visit_unit<E>(self) -> Result<Built, E> {
+        Ok(self.scalar(Value::Null))
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Built, E> {
+        self.visit_unit()
+    }
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Built, D::Error> {
+        d.deserialize_any(self)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Built, A::Error> {
+        // Under a key the array is a field until a container
+        // shows: its scalars wait. Under an array, or at the root,
+        // it is a node from the start.
+        let root = self.parent.is_none();
+        let mut node: Option<NodeId> = if self.in_object && !root {
+            None
+        } else {
+            Some(
+                self.b
+                    .push(self.name, Kind::Array, Value::Null, self.parent),
+            )
+        };
+        let mut pending: Vec<(usize, Value)> = Vec::new();
+        let mut i = 0usize;
+        loop {
+            let built = seq.next_element_seed(PropSeed {
+                b: self.b,
+                name: Some(Name::Index(i as u32)),
+                // The element's parent: the array node once it exists.
+                // An element built before the node exists is a scalar
+                // (a container makes the node first, below).
+                parent: node.or(Some(NodeId(u64::MAX))),
+                in_object: false,
+            });
+            // A container element needs the array node before it
+            // is built: the seed above cannot make it, so a
+            // placeholder parent marks the case and the element is
+            // re-parented here.
+            let Some(built) = built? else {
+                break;
+            };
+            match built {
+                Built::Scalar(v) => pending.push((i, v)),
+                Built::List(vs) => {
+                    // An array of scalars inside an array: a node of
+                    // items (never a field).
+                    let parent = *node.get_or_insert_with(|| {
+                        self.b
+                            .push(self.name, Kind::Array, Value::Null, self.parent)
+                    });
+                    let child = self.b.push(
+                        Some(Name::Index(i as u32)),
+                        Kind::Array,
+                        Value::Null,
+                        Some(parent),
+                    );
+                    self.b.nodes[child.0 as usize].items = vs.into_iter().enumerate().collect();
+                }
+                Built::Node(child) => {
+                    let parent = *node.get_or_insert_with(|| {
+                        self.b
+                            .push(self.name, Kind::Array, Value::Null, self.parent)
+                    });
+                    self.b.reparent(child, parent);
+                }
+            }
+            i += 1;
+        }
+        match node {
+            None => Ok(Built::List(pending.into_iter().map(|(_, v)| v).collect())),
+            Some(n) => {
+                // A scalar-array root carries its list as the
+                // scalar; any other array keeps its scalars as items.
+                if root && self.b.nodes[n.0 as usize].children.is_empty() {
+                    self.b.nodes[n.0 as usize].scalar =
+                        Value::list(pending.into_iter().map(|(_, v)| v).collect());
+                } else {
+                    self.b.nodes[n.0 as usize].items = pending;
+                }
+                Ok(Built::Node(n))
+            }
+        }
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Built, A::Error> {
+        let this = self
+            .b
+            .push(self.name, Kind::Object, Value::Null, self.parent);
+        while let Some(key) = map.next_key::<String>()? {
+            let k = self.b.intern(&key);
+            let built = map.next_value_seed(PropSeed {
+                b: self.b,
+                name: Some(Name::Key(k)),
+                parent: Some(this),
+                in_object: true,
+            })?;
+            match built {
+                Built::Scalar(v) => self.b.nodes[this.0 as usize].fields.push((k, v)),
+                Built::List(vs) => self.b.nodes[this.0 as usize]
+                    .fields
+                    .push((k, Value::list(vs))),
+                Built::Node(_) => {}
+            }
+        }
+        Ok(Built::Node(this))
+    }
+}
+
+impl Builder {
+    /// Move `child` under `parent` (a container element built
+    /// before its array node existed).
+    fn reparent(&mut self, child: NodeId, parent: NodeId) {
+        let old = self.nodes[child.0 as usize].parent;
+        if old == Some(parent) {
+            return;
+        }
+        if let Some(o) = old
+            && (o.0 as usize) < self.nodes.len()
+        {
+            self.nodes[o.0 as usize].children.retain(|&c| c != child);
+        }
+        self.nodes[child.0 as usize].parent = Some(parent);
+        self.nodes[parent.0 as usize].children.push(child);
+    }
 }
 
 /// Decode the percent-escapes of a URI fragment (`%7E` → `~`); a
@@ -139,26 +518,80 @@ fn percent_decode(text: &str) -> String {
 impl JsonAdapter {
     /// Parse `text` as JSON and build the adapter.
     pub fn parse(text: &str) -> serde_json::Result<Self> {
-        Ok(Self::from_json_value(serde_json::from_str(text)?))
+        Self::parse_as(text, Reading::Node)
     }
 
     /// Parse `text` under the given reading (`json2` is
     /// [`Reading::Property`]).
     pub fn parse_as(text: &str, reading: Reading) -> serde_json::Result<Self> {
-        Ok(Self::from_json_value_as(
-            serde_json::from_str(text)?,
-            reading,
-        ))
+        use serde::de::DeserializeSeed;
+        let mut b = Builder::new();
+        let mut d = serde_json::Deserializer::from_str(text);
+        match reading {
+            Reading::Node => {
+                NodeSeed {
+                    b: &mut b,
+                    name: None,
+                    parent: None,
+                }
+                .deserialize(&mut d)?;
+            }
+            Reading::Property => {
+                PropSeed {
+                    b: &mut b,
+                    name: None,
+                    parent: None,
+                    in_object: false,
+                }
+                .deserialize(&mut d)?;
+            }
+        }
+        d.end()?;
+        Ok(b.finish(reading))
     }
 
     /// [`parse_lines`](Self::parse_lines) under the given reading.
     pub fn parse_lines_as(text: &str, reading: Reading) -> serde_json::Result<Self> {
-        let values = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect::<serde_json::Result<Vec<Json>>>()?;
-        Ok(Self::from_json_value_as(Json::Array(values), reading))
+        use serde::de::DeserializeSeed;
+        // The lines are the elements of one array: the root node
+        // first, then each line streamed under it.
+        let mut b = Builder::new();
+        let root = b.push(None, Kind::Array, Value::Null, None);
+        let mut i = 0u32;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let mut d = serde_json::Deserializer::from_str(line);
+            match reading {
+                Reading::Node => {
+                    NodeSeed {
+                        b: &mut b,
+                        name: Some(Name::Index(i)),
+                        parent: Some(root),
+                    }
+                    .deserialize(&mut d)?;
+                }
+                Reading::Property => {
+                    let built = PropSeed {
+                        b: &mut b,
+                        name: Some(Name::Index(i)),
+                        parent: Some(root),
+                        in_object: false,
+                    }
+                    .deserialize(&mut d)?;
+                    match built {
+                        Built::Scalar(v) => b.nodes[root.0 as usize].items.push((i as usize, v)),
+                        Built::List(vs) => {
+                            let child =
+                                b.push(Some(Name::Index(i)), Kind::Array, Value::Null, Some(root));
+                            b.nodes[child.0 as usize].items = vs.into_iter().enumerate().collect();
+                        }
+                        Built::Node(_) => {}
+                    }
+                }
+            }
+            d.end()?;
+            i += 1;
+        }
+        Ok(b.finish(reading))
     }
 
     /// The reading this adapter took.
@@ -172,12 +605,7 @@ impl JsonAdapter {
     /// the equivalent JSON array. This is also the shape `qua`
     /// itself emits, so results pipe back in.
     pub fn parse_lines(text: &str) -> serde_json::Result<Self> {
-        let values = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect::<serde_json::Result<Vec<Json>>>()?;
-        Ok(Self::from_json_value(Json::Array(values)))
+        Self::parse_lines_as(text, Reading::Node)
     }
 
     /// Build the adapter from an already-parsed value. YAML and
@@ -189,20 +617,30 @@ impl JsonAdapter {
 
     /// Build the adapter from a parsed value under the given reading.
     pub fn from_json_value_as(value: Json, reading: Reading) -> Self {
-        let mut nodes = Vec::new();
+        let mut b = Builder::new();
         match reading {
             Reading::Node => {
-                build(&value, None, None, &mut nodes);
+                build(&value, None, None, &mut b);
             }
             Reading::Property => {
-                build_property(&value, None, None, &mut nodes);
+                build_property(&value, None, None, &mut b);
             }
         }
-        JsonAdapter {
-            nodes,
-            root: NodeId(0),
-            reading,
+        b.finish(reading)
+    }
+
+    /// The text of a node's name: the key from the table, or the
+    /// array position.
+    fn name_text(&self, name: Name) -> String {
+        match name {
+            Name::Key(k) => self.keys[k as usize].clone(),
+            Name::Index(i) => i.to_string(),
         }
+    }
+
+    /// The table's key for `name`, when the document has it.
+    fn key(&self, name: &str) -> Option<u32> {
+        self.key_index.get(name).copied()
     }
 
     /// Resolve a reference value by the standards JSON has for
@@ -244,10 +682,11 @@ impl JsonAdapter {
     /// The string a node holds under `property`, in either reading.
     fn string_property(&self, node: NodeId, property: &str) -> Option<String> {
         if self.reading == Reading::Property {
+            let k = self.key(property)?;
             return match self.nodes[node.0 as usize]
                 .fields
                 .iter()
-                .find(|(k, _)| k == property)
+                .find(|(f, _)| *f == k)
             {
                 Some((_, Value::Str(s))) => Some(s.clone()),
                 _ => None,
@@ -269,8 +708,8 @@ impl JsonAdapter {
         let mut cur = Some(node);
         while let Some(id) = cur {
             let n = &self.nodes[id.0 as usize];
-            if let Some(name) = &n.name {
-                parts.push(name.clone());
+            if let Some(name) = n.name {
+                parts.push(self.name_text(name));
             }
             cur = n.parent;
         }
@@ -283,38 +722,24 @@ impl JsonAdapter {
     }
 }
 
-/// Recursively intern `value` (reached under `name` from `parent`).
-fn build(
-    value: &Json,
-    name: Option<String>,
-    parent: Option<NodeId>,
-    nodes: &mut Vec<Node>,
-) -> NodeId {
-    let id = nodes.len();
-    nodes.push(Node {
-        name,
-        kind: Kind::of(value),
-        scalar: scalar_of(value),
-        parent,
-        children: Vec::new(),
-        fields: Vec::new(),
-        items: Vec::new(),
-    });
-    let this = NodeId(id as u64);
-
-    let child_ids = match value {
-        Json::Object(map) => map
-            .iter()
-            .map(|(k, v)| build(v, Some(k.clone()), Some(this), nodes))
-            .collect(),
-        Json::Array(arr) => arr
-            .iter()
-            .enumerate()
-            .map(|(i, v)| build(v, Some(i.to_string()), Some(this), nodes))
-            .collect(),
-        _ => Vec::new(),
-    };
-    nodes[id].children = child_ids;
+/// Recursively intern `value` (reached under `name` from `parent`):
+/// the node reading over a parsed tree.
+fn build(value: &Json, name: Option<Name>, parent: Option<NodeId>, b: &mut Builder) -> NodeId {
+    let this = b.push(name, Kind::of(value), scalar_of(value), parent);
+    match value {
+        Json::Object(map) => {
+            for (k, v) in map {
+                let k = b.intern(k);
+                build(v, Some(Name::Key(k)), Some(this), b);
+            }
+        }
+        Json::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                build(v, Some(Name::Index(i as u32)), Some(this), b);
+            }
+        }
+        _ => {}
+    }
     this
 }
 
@@ -338,65 +763,46 @@ fn property_value(value: &Json) -> Value {
     }
 }
 
-/// The property reading: intern `value` as a node when it is a
-/// container (or the root), its scalar fields and elements kept
-/// as values on it.
+/// The property reading over a parsed tree: intern `value` as a
+/// node when it is a container (or the root), its scalar fields
+/// and elements kept as values on it.
 fn build_property(
     value: &Json,
-    name: Option<String>,
+    name: Option<Name>,
     parent: Option<NodeId>,
-    nodes: &mut Vec<Node>,
+    b: &mut Builder,
 ) -> NodeId {
-    let id = nodes.len();
     let kind = Kind::of(value);
-    nodes.push(Node {
-        name,
-        kind,
-        // A scalar root carries its value; a scalar-array root its list.
-        scalar: if parent.is_none() && is_property_shaped(value) {
-            property_value(value)
-        } else {
-            Value::Null
-        },
-        parent,
-        children: Vec::new(),
-        fields: Vec::new(),
-        items: Vec::new(),
-    });
-    let this = NodeId(id as u64);
-    let mut children = Vec::new();
-    let mut fields = Vec::new();
-    let mut items = Vec::new();
+    // A scalar root carries its value; a scalar-array root its list.
+    let scalar = if parent.is_none() && is_property_shaped(value) {
+        property_value(value)
+    } else {
+        Value::Null
+    };
+    let this = b.push(name, kind, scalar, parent);
     match value {
         Json::Object(map) => {
             for (k, v) in map {
+                let k = b.intern(k);
                 if is_property_shaped(v) {
-                    fields.push((k.clone(), property_value(v)));
+                    b.nodes[this.0 as usize].fields.push((k, property_value(v)));
                 } else {
-                    children.push(build_property(v, Some(k.clone()), Some(this), nodes));
+                    build_property(v, Some(Name::Key(k)), Some(this), b);
                 }
             }
         }
         Json::Array(arr) => {
-            // Only an array holding a container is reached here
-            // under a key (a scalar array is its parent's property);
-            // the root may be either, and a scalar-array root
-            // already carries its list as the scalar.
             let root_list = parent.is_none() && is_property_shaped(value);
             for (i, v) in arr.iter().enumerate() {
                 if matches!(v, Json::Object(_) | Json::Array(_)) {
-                    children.push(build_property(v, Some(i.to_string()), Some(this), nodes));
+                    build_property(v, Some(Name::Index(i as u32)), Some(this), b);
                 } else if !root_list {
-                    items.push((i, scalar_of(v)));
+                    b.nodes[this.0 as usize].items.push((i, scalar_of(v)));
                 }
             }
         }
         _ => {}
     }
-    let n = &mut nodes[id];
-    n.children = children;
-    n.fields = fields;
-    n.items = items;
     this
 }
 
@@ -415,73 +821,11 @@ fn scalar_of(value: &Json) -> Value {
     }
 }
 
-impl JsonAdapter {
-    /// The node the literal `scope` names from the root, by child
-    /// names; `None` when a name is missing or ambiguous.
-    fn scope_node(&self, scope: &[&str]) -> Option<NodeId> {
-        let mut at = self.root;
-        for name in scope {
-            let mut hits = self.nodes[at.0 as usize]
-                .children
-                .iter()
-                .copied()
-                .filter(|&c| self.nodes[c.0 as usize].name.as_deref() == Some(*name));
-            at = hits.next()?;
-            if hits.next().is_some() {
-                return None;
-            }
-        }
-        Some(at)
-    }
-
-    /// How many nodes `plan` reaches under `at`, from the arena.
-    fn reach(&self, at: NodeId, plan: &quarb::StepPlan<'_>) -> u64 {
-        let matches = |c: NodeId| {
-            plan.name
-                .is_none_or(|n| self.nodes[c.0 as usize].name.as_deref() == Some(n))
-        };
-        match plan.axis {
-            quarb::PlanAxis::Child => self.nodes[at.0 as usize]
-                .children
-                .iter()
-                .filter(|&&c| matches(c))
-                .count() as u64,
-            quarb::PlanAxis::Descendant => {
-                let mut n = 0;
-                let mut stack = self.nodes[at.0 as usize].children.clone();
-                while let Some(c) = stack.pop() {
-                    if matches(c) {
-                        n += 1;
-                    }
-                    stack.extend(self.nodes[c.0 as usize].children.iter().copied());
-                }
-                n
-            }
-        }
-    }
-}
-
 impl AstAdapter for JsonAdapter {
     /// The arena knows exactly how many nodes a step reaches; a
     /// conjunct makes that an upper bound. Nothing is read.
     fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
-        let at = self.scope_node(scope)?;
-        let n = self.reach(at, plan);
-        Some(quarb::Estimate {
-            rows: if plan.conjuncts.is_empty() {
-                (n, n)
-            } else {
-                (0, n)
-            },
-            bytes: None,
-            requests: Some(0),
-            latency: quarb::Latency::Memory,
-            confidence: if plan.conjuncts.is_empty() {
-                quarb::Confidence::Exact
-            } else {
-                quarb::Confidence::Bound
-            },
-        })
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, None)
     }
 
     fn root(&self) -> NodeId {
@@ -499,7 +843,7 @@ impl AstAdapter for JsonAdapter {
     }
 
     fn name(&self, node: NodeId) -> Option<String> {
-        self.nodes[node.0 as usize].name.clone()
+        self.nodes[node.0 as usize].name.map(|n| self.name_text(n))
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {
@@ -536,18 +880,19 @@ impl AstAdapter for JsonAdapter {
         if !matches!(n.kind, Kind::Object) {
             return None;
         }
+        let key = self.key(name)?;
         if self.reading == Reading::Property {
             // The scalar fields live on the object itself.
             return n
                 .fields
                 .iter()
-                .find(|(k, _)| k == name)
+                .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.clone());
         }
         let child = n
             .children
             .iter()
-            .find(|&&c| self.nodes[c.0 as usize].name.as_deref() == Some(name))?;
+            .find(|&&c| self.nodes[c.0 as usize].name == Some(Name::Key(key)))?;
         let c = &self.nodes[child.0 as usize];
         match c.kind {
             Kind::Object => None,
@@ -576,7 +921,11 @@ impl AstAdapter for JsonAdapter {
         }
         let n = &self.nodes[node.0 as usize];
         match n.kind {
-            Kind::Object => n.fields.clone(),
+            Kind::Object => n
+                .fields
+                .iter()
+                .map(|(k, v)| (self.keys[*k as usize].clone(), v.clone()))
+                .collect(),
             Kind::Array => n
                 .items
                 .iter()
@@ -646,10 +995,12 @@ impl AstAdapter for JsonAdapter {
     /// arrows (`//x-->`, `t<--`) read it.
     fn ref_property(&self, node: NodeId) -> Option<String> {
         let has = if self.reading == Reading::Property {
-            self.nodes[node.0 as usize]
-                .fields
-                .iter()
-                .any(|(k, v)| k == "$ref" && matches!(v, Value::Str(_)))
+            self.key("$ref").is_some_and(|key| {
+                self.nodes[node.0 as usize]
+                    .fields
+                    .iter()
+                    .any(|(k, v)| *k == key && matches!(v, Value::Str(_)))
+            })
         } else {
             self.children(node).into_iter().any(|c| {
                 self.name(c).as_deref() == Some("$ref")

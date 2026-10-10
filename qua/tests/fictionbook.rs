@@ -86,7 +86,9 @@ fn every_door_reads_fictionbook() {
     assert_eq!(qua(&dir, &["//strophe @| count", "koine:onegin.fb2"]), "2");
     assert_eq!(
         qua(&dir, &["//sentence @| count", "corpus:onegin.fb2"]),
-        "8"
+        // the eight of the prose, and the title and the chapter
+        // heading: headings are sentences
+        "10"
     );
     // the literary reading keeps the emphasis and the identity
     assert_eq!(qua(&dir, &["//emphasis::", "lit:onegin.fb2"]), "начинается");

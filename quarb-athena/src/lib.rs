@@ -348,6 +348,8 @@ impl AthenaAdapter {
         let client = client_for(target)?;
         let specs = introspect(&client)?;
         let db = client.t.database.clone();
+        let client = std::rc::Rc::new(client);
+        let (client2, db2) = (client.clone(), db.clone());
         let model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
@@ -357,7 +359,31 @@ impl AthenaAdapter {
                     .map(|(_, w)| w.as_str());
                 fetch_rows(&client, &db, spec, w).map_err(|e| e.to_string())
             }),
-        );
+        )
+        // Athena prices nothing before running; the table's
+        // properties (a crawler's `numRows` / `totalSize`) are the
+        // bound it offers, one statement away.
+        .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
+            let (_, rows) = client2
+                .sql(&format!("SHOW TBLPROPERTIES {}.{}", db2, spec.name))
+                .map_err(|e| e.to_string())?;
+            let prop = |key: &str| -> Option<u64> {
+                rows.iter().find_map(|r| {
+                    (r.first().map(|v| v.to_string()).as_deref() == Some(key))
+                        .then(|| r.get(1).map(|v| v.to_string())?.trim().parse().ok())
+                        .flatten()
+                })
+            };
+            let n = prop("numRows").ok_or("no numRows property")?;
+            let size = prop("totalSize").or_else(|| prop("rawDataSize"));
+            Ok(quarb::Estimate {
+                nodes: if equals.is_empty() { (n, n) } else { (0, n) },
+                bytes: size.map(|b| (0, b)),
+                requests: Some(1),
+                latency: quarb::Latency::Remote,
+                confidence: quarb::Confidence::Guess,
+            })
+        }));
         Ok(AthenaAdapter { model })
     }
 
@@ -498,72 +524,7 @@ pub fn raw_query(
 }
 
 impl AstAdapter for AthenaAdapter {
-    fn root(&self) -> NodeId {
-        self.model.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.model.children(node)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.model.children_named(node, name)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.model.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.model.parent(node)
-    }
-    fn traits(&self, node: NodeId) -> Vec<String> {
-        self.model.traits(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.model.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.model.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.model.metadata(node, key)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.backlinks(node)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.model.reverse_resolve(node, property, hint)
-    }
-    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
-        self.model.can_refer_to(source, target)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.model.prefetch_links(nodes, dir)
-    }
-    fn index_referrers(
-        &self,
-        scope: &str,
-        property: &str,
-        label: Option<&str>,
-        target: NodeId,
-    ) -> Option<Vec<NodeId>> {
-        self.model.index_referrers(scope, property, label, target)
-    }
-    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
-        self.model.reference_properties(source, target)
-    }
-    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
-        self.model.resolve_needs_label(node, property)
-    }
-    fn reverse_label(&self, target: NodeId) -> Option<String> {
-        self.model.reverse_label(target)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.model.resolve(node, property, hint)
-    }
+    // Every trait method, through the relational model: the search
+    // fast paths, the plan and its estimate included.
+    quarb::forward_ast_adapter!(model);
 }

@@ -658,7 +658,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 // The node-id anchor's opener glues to its list
                 // (`((!@(2; 3)))`), as whitespace would.
                 if !after_whitespace(&chars, i)
-                    && !matches!(tokens.last(), Some(Token::IdAnchorOpen))
+                    && !matches!(
+                        tokens.last(),
+                        Some(Token::IdAnchorOpen | Token::LParen | Token::Semi | Token::Comma)
+                    )
                 {
                     return Err(QuarbError::lex(
                         "a list literal follows whitespace: write ' @(…)'",
@@ -2653,8 +2656,12 @@ mod glued_operator_tests {
                 .contains("whitespace")
         );
         assert!(lex("/a | @(1; 2)").is_ok());
+        // A list literal glues to a call's opener and follows an
+        // argument separator; after a name it is still a stray.
+        assert!(lex("/a | f(@(1))").is_ok());
+        assert!(lex("/a | f(1; @(1))").is_ok());
         assert!(
-            lex("/a | f(@(1))")
+            lex("/a | f(x@(1))")
                 .unwrap_err()
                 .to_string()
                 .contains("whitespace")

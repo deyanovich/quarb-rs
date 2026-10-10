@@ -49,6 +49,8 @@ pub fn check(adapter: &dyn AstAdapter, budget: usize) -> Vec<String> {
                     ));
                 }
                 let plan = StepPlan {
+                    traits: Vec::new(),
+                    cap: Default::default(),
                     axis: PlanAxis::Child,
                     name: Some(&name),
                     conjuncts: Vec::new(),
@@ -103,6 +105,8 @@ fn check_descendant_select(
     findings: &mut Vec<String>,
 ) {
     let plan = StepPlan {
+        traits: Vec::new(),
+        cap: Default::default(),
         axis: PlanAxis::Descendant,
         name: Some(name),
         conjuncts: Vec::new(),

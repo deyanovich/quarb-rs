@@ -88,6 +88,12 @@ pub struct Latent {
     pub name: String,
     pub target: Option<String>,
     pub opener: Opener,
+    /// What the target holds, said without opening it (a listing,
+    /// a central directory, a `stat`), by literal path under the
+    /// mount and told where it may stop counting: the plan's
+    /// estimate for a step under the mount while it is latent.
+    /// `None`: unknown until opened.
+    pub catalog: Option<quarb::CatalogLookup>,
 }
 
 /// One entry of the table: active (its adapter in the cell) or
@@ -100,6 +106,7 @@ struct Entry {
     identities: Vec<String>,
     cell: std::cell::OnceCell<Box<dyn AstAdapter>>,
     opener: std::cell::RefCell<Option<Opener>>,
+    catalog: Option<quarb::CatalogLookup>,
 }
 
 impl Entry {
@@ -112,6 +119,7 @@ impl Entry {
             identities: Vec::new(),
             cell,
             opener: std::cell::RefCell::new(None),
+            catalog: None,
         }
     }
 }
@@ -196,6 +204,7 @@ impl MountAdapter {
             identities: Vec::new(),
             cell: std::cell::OnceCell::new(),
             opener: std::cell::RefCell::new(Some(latent.opener)),
+            catalog: latent.catalog,
         });
         Ok(self.mounts.len() - 1)
     }
@@ -306,6 +315,42 @@ impl MountAdapter {
     fn encode(&self, mount: usize, inner: NodeId) -> NodeId {
         debug_assert!(inner.0 <= INNER_MASK, "inner id exceeds 2^56 - 1");
         NodeId(((mount as u64 + 1) << SHIFT) | inner.0)
+    }
+}
+
+impl MountAdapter {
+    /// [`AstAdapter::estimate`] for a step from the table's root.
+    fn estimate_root(&self, plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let n = self.mounts.len() as u64;
+        if plan.axis == quarb::PlanAxis::Child {
+            return Some(quarb::Estimate {
+                nodes: if plan.name.is_some() { (0, 1) } else { (n, n) },
+                bytes: Some((0, 0)),
+                requests: Some(0),
+                latency: quarb::Latency::Memory,
+                confidence: quarb::Confidence::Exact,
+            });
+        }
+        let mut acc: Option<quarb::Estimate> = None;
+        for m in 0..self.mounts.len() {
+            let e = match self.active(m) {
+                Some(a) => a.estimate(&[], plan)?,
+                None => {
+                    let c = self.mounts[m].catalog.as_ref()?(&quarb::Ask {
+                        scope: &[],
+                        cap: plan.cap,
+                        conjuncts: &plan.conjuncts,
+                        traits: &plan.traits,
+                    })?;
+                    quarb::Estimate::from_catalog(&c, plan)
+                }
+            };
+            acc = Some(match acc {
+                Some(a) => a.beside(&e),
+                None => e,
+            });
+        }
+        acc
     }
 }
 
@@ -677,10 +722,24 @@ impl AstAdapter for MountAdapter {
         self.active(m)?.select_plan(rest, plan)
     }
 
+    /// An open mount answers for itself; a latent one answers from
+    /// its catalog, without opening (a step from its root priced
+    /// by it, a deeper step a bounded unknown). A step from the
+    /// table's root is the mounts side by side: a child step
+    /// reaches the mounts themselves, a descendant step what every
+    /// mount's root step reaches, unknown if any mount's is.
     fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
-        let (first, rest) = scope.split_first()?;
+        let Some((first, rest)) = scope.split_first() else {
+            return self.estimate_root(plan);
+        };
         let m = (0..self.mounts.len()).find(|&m| self.mounts[m].name == *first)?;
-        self.active(m)?.estimate(rest, plan)
+        match self.active(m) {
+            Some(a) => a.estimate(rest, plan),
+            None => {
+                let lookup = self.mounts[m].catalog.as_ref()?;
+                quarb::Estimate::at_catalog(&**lookup, rest, plan)
+            }
+        }
     }
 
     fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {

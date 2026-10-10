@@ -378,8 +378,13 @@ pub(crate) fn apply_stage(
         // reduction consumes the members: they no longer correspond
         // to the topic.
         // (`number` is both: `@| number` numbers an outline, `| number(LOCALE)`
-        // reads text as a number under a locale's conventions.)
-        Stage::Func(call) if stdlib::known_agg(&call.name) && call.name != "number" => {
+        // reads text as a number under a locale's conventions; so is
+        // `ngrams`: `@| ngrams(n)` windows the stream, `| ngrams(n)`
+        // the word n-grams of a text.)
+        Stage::Func(call)
+            if stdlib::known_agg(&call.name)
+                && !matches!(call.name.as_str(), "number" | "ngrams") =>
+        {
             agg_as_func_stage(call, caps, adapter)
         }
         // Per-capsa scalar transform; a function may expand one topic
@@ -1041,14 +1046,27 @@ pub(super) fn order_stage(
             }
             caps = kept;
         }
-        "first" => caps.truncate(1),
+        // `first` / `last`: one capsa, or the first / last n.
+        "first" => {
+            let n = count_arg(call).unwrap_or(1);
+            caps.truncate(n);
+        }
         "last" => {
-            let n = caps.len().saturating_sub(1);
-            caps.drain(..n);
+            let n = count_arg(call).unwrap_or(1);
+            let skip = caps.len().saturating_sub(n);
+            caps.drain(..skip);
         }
         _ => {}
     }
     caps
+}
+
+/// A stage's leading integer argument, as a count.
+fn count_arg(call: &FnCall) -> Option<usize> {
+    match call.args.first() {
+        Some(Arg::Lit(Value::Int(n))) => Some((*n).max(0) as usize),
+        _ => None,
+    }
 }
 
 /// `sh('cmd')` — the shell stage, one command per capsa with the topic as stdin: `apply_stage`'s shell arm.

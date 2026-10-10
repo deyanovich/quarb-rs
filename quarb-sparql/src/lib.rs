@@ -257,7 +257,8 @@ impl SparqlAdapter {
     /// One SELECT, bindings back.
     fn select(&self, query: &str) -> Result<Vec<Json>, SparqlError> {
         let body = format!("query={}", urlencode(query));
-        let resp = quarb_http::agent().post(&self.endpoint)
+        let resp = quarb_http::agent()
+            .post(&self.endpoint)
             .set("content-type", "application/x-www-form-urlencoded")
             .set("accept", "application/sparql-results+json")
             .set("user-agent", "quarb-sparql (https://quarb.org)")

@@ -180,6 +180,13 @@ fn source_language(ext: &str) -> Option<&'static str> {
 }
 
 impl AstAdapter for FsAdapter {
+    /// The walked tree knows how many entries a step reaches;
+    /// nothing is stat'ed again (the directory's catalog, before
+    /// the walk, is where sizes are priced).
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        quarb::adapter::arena_estimate(self, scope, plan, quarb::Latency::Memory, None)
+    }
+
     /// This source defines no references to resolve.
     fn resolves_references(&self) -> bool {
         false

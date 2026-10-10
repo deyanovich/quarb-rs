@@ -58,6 +58,7 @@ pub mod highlight;
 pub mod quantity;
 mod stdlib;
 pub use stdlib::{tabulate, tabulate_in, tabulate_with};
+pub mod names;
 pub mod plan;
 pub mod registry;
 pub use quarb_time::datenames;
@@ -69,8 +70,9 @@ mod unparse;
 mod value;
 
 pub use adapter::{
-    AstAdapter, Confidence, Conjunct, Estimate, ExternalRef, InstantFrom, Latency, LinkDir, NodeId,
-    PlanAxis, Provenance, ProvenanceList, Selection, StepPlan,
+    Ask, AstAdapter, Cap, Catalog, CatalogLookup, Cmp, Confidence, Conjunct, Estimate, ExternalRef,
+    InstantFrom, Latency, LinkDir, NodeId, PlanAxis, Provenance, ProvenanceList, Selection,
+    StepPlan, Unopened,
 };
 pub mod conformance;
 pub use error::{Kind as ErrorKind, QuarbError, Result};
@@ -393,7 +395,10 @@ impl Query {
         if !run.plan && run.budget.is_none() {
             return Ok(None);
         }
-        let plan = plan::of(&self.ast, adapter);
+        let plan = match &run.budget {
+            Some(budget) => plan::of_within(&self.ast, adapter, budget.cap()),
+            None => plan::of(&self.ast, adapter),
+        };
         if let Some(budget) = &run.budget
             && let Some(why) = budget.exceeded_by(&plan)
         {
@@ -435,6 +440,14 @@ impl Query {
     /// no node is read ([`plan::of`]).
     pub fn plan(&self, adapter: &dyn AstAdapter) -> plan::Plan {
         plan::of(&self.ast, adapter)
+    }
+
+    /// The static plan priced under `budget`: every estimator may
+    /// stop at the first entry past it ([`Cap`]), so a listing of
+    /// a hundred thousand files costs a thousand reads under
+    /// `rows=1000`.
+    pub fn plan_within(&self, adapter: &dyn AstAdapter, budget: &plan::Budget) -> plan::Plan {
+        plan::of_within(&self.ast, adapter, budget.cap())
     }
 
     /// The query rendered back to canonical text (defs expanded).

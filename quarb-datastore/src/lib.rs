@@ -231,7 +231,8 @@ impl DatastoreAdapter {
             body["databaseId"] = json!(self.database);
         }
         let routing = format!("project_id={}&database_id={}", self.project, self.database);
-        quarb_http::agent().post(&url)
+        quarb_http::agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("x-goog-request-params", &routing)
             .send_json(body)

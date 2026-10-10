@@ -571,3 +571,57 @@ fn a_directory_of_treebank_files() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A stored sentence answers `::::at` / `::::end` from its rows, a
+/// treebank document's tokens along the sentence surface.
+#[test]
+fn stored_sentences_and_treebank_tokens_have_coordinates() {
+    let dir = std::env::temp_dir().join(format!("qua-conllu-at-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("t.txt"), "Tom ran. Huck sat down.\n").unwrap();
+    std::fs::write(
+        dir.join("h.md"),
+        "# Chapter One\n\nTom ran. Huck sat down.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("t.conllu"),
+        "# text = Tom ran.\n1\tTom\tTom\tPROPN\t_\t_\t2\tnsubj\t_\t_\n2\tran\trun\tVERB\t_\t_\t0\troot\t_\tSpaceAfter=No\n3\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_\n\n# text = Huck sat down.\n1\tHuck\tHuck\tPROPN\t_\t_\t2\tnsubj\t_\t_\n2\tsat\tsit\tVERB\t_\t_\t0\troot\t_\t_\n3\tdown\tdown\tADV\t_\t_\t2\tadvmod\t_\tSpaceAfter=No\n4\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_\n",
+    )
+    .unwrap();
+    let run = |q: &str, target: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args([q, target])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // The sidecar: the sentences' coordinates in the paragraph.
+    let sidecar = "corpus:t.txt?conllu=t.conllu";
+    assert_eq!(run("//sentence | ::::at", sidecar), "0\n9");
+    assert_eq!(run("//sentence | ::::end", sidecar), "8\n23");
+    assert_eq!(run("//sentence[::::at = 9]::", sidecar), "Huck sat down.");
+    // Headings are sentences under the sidecar's tier too, counted
+    // in sequence before the content.
+    let headed = "corpus:h.md?conllu=t.conllu";
+    assert_eq!(
+        run("//sentence | ::", headed),
+        "Chapter One\nTom ran.\nHuck sat down."
+    );
+    assert_eq!(run("//sentence | ::::n", headed), "1\n2\n3");
+    assert_eq!(
+        run("//section[1]/sentence[1]/token | ::::n", headed),
+        "1\n2"
+    );
+    assert_eq!(run("//sentence[2]/token[1]::::n", headed), "3");
+    assert_eq!(run("//sentence[1]::::end", headed), "11");
+    // The treebank as a document: tokens along the surface, the
+    // sentence its own block.
+    let doc = "corpus:t.conllu";
+    assert_eq!(run("//sentence[1]/token | ::::at", doc), "0\n4\n7");
+    assert_eq!(run("//sentence[2] | ::::end", doc), "14");
+}

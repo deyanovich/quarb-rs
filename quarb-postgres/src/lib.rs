@@ -128,6 +128,9 @@ impl PostgresAdapter {
         // One row source with an optional WHERE: the whole read, the
         // listing under a pushed-down filter, and the keyed read a
         // hop makes (`WHERE key IN (…)`) all derive from it.
+        let rt = std::rc::Rc::new(rt);
+        let client = std::rc::Rc::new(client);
+        let (rt2, client2) = (rt.clone(), client.clone());
         let model = RelationalModel::lazy_where(
             specs,
             std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
@@ -136,7 +139,26 @@ impl PostgresAdapter {
             }),
             filter,
             quarb_relational::quote_double,
-        );
+        )
+        // The planner's estimate, with nothing run: `EXPLAIN` gives
+        // the rows it expects and their average width.
+        .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
+            let sql = format!(
+                "EXPLAIN SELECT * FROM {}{}",
+                quarb_relational::quote_double(&spec.name),
+                quarb_relational::where_suffix(spec, equals, quarb_relational::quote_double)
+            );
+            let rows = rt2
+                .block_on(client2.query(sql.as_str(), &[]))
+                .map_err(|e| e.to_string())?;
+            let line: String = rows.first().ok_or("an empty plan")?.get(0);
+            let n = quarb_relational::plan_number(&line, "rows=").ok_or("no row estimate")?;
+            Ok(quarb_relational::planner_estimate(
+                n,
+                quarb_relational::plan_number(&line, "width="),
+                false,
+            ))
+        }));
         Ok(PostgresAdapter { model })
     }
 
@@ -373,69 +395,7 @@ pub fn raw_query(
 }
 
 impl AstAdapter for PostgresAdapter {
-    fn root(&self) -> NodeId {
-        self.model.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.model.children(node)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.model.children_named(node, name)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.model.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.model.parent(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.model.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.model.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.model.metadata(node, key)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.model.resolve(node, property, hint)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.backlinks(node)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.model.reverse_resolve(node, property, hint)
-    }
-    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
-        self.model.can_refer_to(source, target)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.model.prefetch_links(nodes, dir)
-    }
-    fn index_referrers(
-        &self,
-        scope: &str,
-        property: &str,
-        label: Option<&str>,
-        target: NodeId,
-    ) -> Option<Vec<NodeId>> {
-        self.model.index_referrers(scope, property, label, target)
-    }
-    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
-        self.model.reference_properties(source, target)
-    }
-    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
-        self.model.resolve_needs_label(node, property)
-    }
-    fn reverse_label(&self, target: NodeId) -> Option<String> {
-        self.model.reverse_label(target)
-    }
+    // Every trait method, through the relational model: the search
+    // fast paths, the plan and its estimate included.
+    quarb::forward_ast_adapter!(model);
 }

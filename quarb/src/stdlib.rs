@@ -724,6 +724,112 @@ pub fn apply_scalar(
             let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
             vec![Value::Float(2.0 * 6371.0 * a.sqrt().asin())]
         }
+        // `tokens` — the corpus tier's tokenizer over the text: the
+        // word-bound segments, whitespace dropped, words and
+        // punctuation alike, as a list; `tokens(word)` keeps the
+        // word class (a segment with a letter), `tokens(number)`
+        // and `tokens(punct)` the others.
+        "tokens" => {
+            if matches!(topic, Value::Null) {
+                return vec![Value::Null];
+            }
+            let class = arg_str(call, 0, "");
+            if !matches!(class, "" | "word" | "number" | "punct") {
+                crate::exec::record_refusal(
+                    "tokens takes nothing, or a class to keep: tokens(word), tokens(number), \
+                     tokens(punct)"
+                        .into(),
+                );
+                return vec![Value::Null];
+            }
+            use unicode_segmentation::UnicodeSegmentation;
+            // One value per token, as `words` and `sentences`
+            // spread, so the aggregates follow.
+            text.split_word_bounds()
+                .filter(|seg| !seg.chars().all(char::is_whitespace))
+                .filter(|seg| class.is_empty() || token_class(seg) == class)
+                .map(|seg| Value::Str(seg.to_string()))
+                .collect()
+        }
+        // `casefold` — Unicode case folding, where `lower` is the
+        // simple mapping: ß and ẞ fold to ss, a final sigma to σ,
+        // the long s to s, the f-ligatures to their letters.
+        "casefold" => {
+            if matches!(topic, Value::Null) {
+                return vec![Value::Null];
+            }
+            vec![Value::Str(casefold(&text))]
+        }
+        // `deaccent` — the combining marks stripped after NFD:
+        // polytonic Greek to bare letters, diacritics off Latin.
+        // The Cyrillic letters й and ё stand (their breve and
+        // diaeresis are the letter); `deaccent(ru)` folds ё to е,
+        // the orthographic habit.
+        "deaccent" => {
+            if matches!(topic, Value::Null) {
+                return vec![Value::Null];
+            }
+            let mode = arg_str(call, 0, "");
+            if !matches!(mode, "" | "ru") {
+                crate::exec::record_refusal(
+                    "deaccent takes nothing, or ru to fold ё as well: deaccent(ru)".into(),
+                );
+                return vec![Value::Null];
+            }
+            vec![Value::Str(deaccent(&text, mode == "ru"))]
+        }
+        // `stem(LANG)` — the Snowball stem (the rust-stemmers
+        // crate's algorithms); a language it does not ship is
+        // refused naming the shipped ones.
+        "stem" => {
+            if matches!(topic, Value::Null) {
+                return vec![Value::Null];
+            }
+            let lang = arg_str(call, 0, "");
+            let Some(algorithm) = stemmer_for(lang) else {
+                crate::exec::record_refusal(format!(
+                    "stem takes a language the stemmer ships — stem(en), stem(ru); one of {}",
+                    STEMMER_LANGS.join(", ")
+                ));
+                return vec![Value::Null];
+            };
+            // Snowball stems one word: each word of the text is
+            // stemmed in place, the rest of the text untouched.
+            use unicode_segmentation::UnicodeSegmentation;
+            let stemmer = rust_stemmers::Stemmer::create(algorithm);
+            let out: String = text
+                .split_word_bounds()
+                .map(|seg| {
+                    if seg.chars().any(char::is_alphabetic) {
+                        stemmer.stem(seg).into_owned()
+                    } else {
+                        seg.to_string()
+                    }
+                })
+                .collect();
+            vec![Value::Str(out)]
+        }
+        // `jaro_winkler(other)` — the Jaro–Winkler similarity of
+        // the topic's text and the argument's, 0 (nothing shared)
+        // to 1 (the same), for names across lists and spellings.
+        "jaro_winkler" => {
+            let other = match call.args.first() {
+                Some(Arg::Lit(Value::Null)) => return vec![Value::Null],
+                Some(Arg::Lit(v)) => v.to_string(),
+                _ => {
+                    crate::exec::record_refusal(
+                        "jaro_winkler takes the other text — jaro_winkler(\"word\"), \
+                         jaro_winkler(::name)"
+                            .into(),
+                    );
+                    return vec![Value::Null];
+                }
+            };
+            if matches!(topic, Value::Null) {
+                return vec![Value::Null];
+            }
+            vec![Value::Float(strsim::jaro_winkler(&text, &other))]
+        }
         // `levenshtein(other)` — the edit distance between the
         // topic's text and the argument's, in codepoints (insert,
         // delete, substitute, each 1). A null argument gives null.
@@ -1191,7 +1297,9 @@ pub fn apply_scalar(
         // The collocation measures: the topic is the pair's count,
         // the arguments the two words' counts and the corpus size
         // (`log_dice` needs no size).
-        "mi" | "t_score" | "log_dice" => collocation_measure(call, topic.clone()),
+        "mi" | "t_score" | "log_dice" | "tscore" | "logdice" | "dice" => {
+            collocation_measure(call, topic.clone())
+        }
         // `s/pat/repl/mods` — regex substitution on the topic's
         // text. Sed semantics: first occurrence by default, `g`
         // global, `i` case-insensitive; `$1`-style capture
@@ -1556,7 +1664,11 @@ fn round_quantity(
 /// `mi`, `t_score`, `log_dice` — the collocation measures. `apply_scalar`'s arm.
 fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
     vec![{
-        let need = if call.name == "log_dice" { 2 } else { 3 };
+        let need = if matches!(call.name.as_str(), "log_dice" | "logdice" | "dice") {
+            2
+        } else {
+            3
+        };
         match (
             topic.numeric(),
             arg_num(call, 0),
@@ -1566,7 +1678,8 @@ fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
             (Some(fxy), Some(fx), Some(fy), n) if call.args.len() >= need => {
                 match call.name.as_str() {
                     "mi" => n.map_or(Value::Null, |n| mi(fxy, fx, fy, n)),
-                    "t_score" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
+                    "t_score" | "tscore" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
+                    "dice" => dice(fxy, fx, fy),
                     _ => log_dice(fxy, fx, fy),
                 }
             }
@@ -1680,7 +1793,98 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // tokens: McCarthy–Jarvis's measure of textual lexical
         // diversity, the type-token-ratio factor `t` (default 0.72),
         // forward and backward averaged.
-        "entropy" => vec![entropy(&counts(&input))],
+        // Over a stream of counts (every value numeric) the entropy
+        // of those counts; over a stream of values the entropy of
+        // their distribution — the words of a text.
+        "entropy" => {
+            let present: Vec<&Value> = input.iter().filter(|v| !matches!(v, Value::Null)).collect();
+            if !present.is_empty() && present.iter().all(|v| v.numeric().is_some()) {
+                vec![entropy(&counts(&input))]
+            } else {
+                vec![entropy(&distribution(&input, scale))]
+            }
+        }
+        // The type-token ratio: the distinct values over all, nulls
+        // left out; null for an empty stream.
+        "ttr" => {
+            let present: Vec<Value> = input
+                .into_iter()
+                .filter(|v| !matches!(v, Value::Null))
+                .collect();
+            if present.is_empty() {
+                return vec![Value::Null];
+            }
+            let mut seen = std::collections::HashSet::new();
+            let distinct = present
+                .iter()
+                .filter(|v| seen.insert(v.sort_key_with(scale)))
+                .count();
+            vec![Value::Float(distinct as f64 / present.len() as f64)]
+        }
+        // The values that occur once, in first-occurrence order.
+        "hapax" => {
+            let mut counts: std::collections::HashMap<crate::value::SortKey, usize> =
+                std::collections::HashMap::new();
+            for v in &input {
+                if !matches!(v, Value::Null) {
+                    *counts.entry(v.sort_key_with(scale)).or_insert(0) += 1;
+                }
+            }
+            input
+                .into_iter()
+                .filter(|v| !matches!(v, Value::Null) && counts[&v.sort_key_with(scale)] == 1)
+                .collect()
+        }
+        // `skipgrams(n; k)` — the n-grams of the stream with up to
+        // k skipped positions between members, in order of their
+        // first member then of the skips, each a list.
+        "skipgrams" => {
+            let n = arg_int(call, 0).unwrap_or(2).max(1) as usize;
+            let k = arg_int(call, 1).unwrap_or(0).max(0) as usize;
+            let mut out = Vec::new();
+            for start in 0..input.len() {
+                skipgrams_from(&input, start, n, k, &mut Vec::new(), &mut out);
+            }
+            out
+        }
+        // `jaccard(LIST)` — the Jaccard similarity of the stream's
+        // distinct values to the argument's: the intersection over
+        // the union; null when both are empty.
+        "jaccard" => {
+            // The list literal `jaccard(@("a"; "b"))`, or the values
+            // as arguments.
+            let mut other: Vec<Value> = Vec::new();
+            for a in &call.args {
+                match a {
+                    Arg::Lit(Value::List(items)) => other.extend(items.iter().cloned()),
+                    Arg::Lit(v) => other.push(v.clone()),
+                    _ => {
+                        crate::exec::record_refusal(
+                            "jaccard takes the other set as a list — jaccard(@(\"a\"; \"b\"))"
+                                .into(),
+                        );
+                        return vec![Value::Null];
+                    }
+                }
+            }
+            let a: std::collections::HashSet<crate::value::SortKey> = input
+                .iter()
+                .filter(|v| !matches!(v, Value::Null))
+                .map(|v| v.sort_key_with(scale))
+                .collect();
+            let b: std::collections::HashSet<crate::value::SortKey> = other
+                .iter()
+                .filter(|v| !matches!(v, Value::Null))
+                .map(|v| v.sort_key_with(scale))
+                .collect();
+            let union = a.union(&b).count();
+            if union == 0 {
+                return vec![Value::Null];
+            }
+            vec![Value::Float(
+                a.intersection(&b).count() as f64 / union as f64,
+            )]
+        }
         "yule_k" => vec![yule_k(&counts(&input))],
         "mtld" => {
             let t = match call.args.first() {
@@ -1799,6 +2003,54 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // members stand in the values' own order: (a, b) and (b, a)
         // are one combination and one value, so a group counts
         // them together. `pairs` and `triples` are n = 2 and 3.
+        // The adjacent n-windows of the stream, in stream order,
+        // full windows only (`window(n)` keeps the partial ones at
+        // the start); each a list. What is tokenized is chosen
+        // upstream: `//token<word>::lower @| bigrams`.
+        "ngrams" | "bigrams" | "trigrams" => {
+            let n = match call.name.as_str() {
+                "bigrams" => 2,
+                "trigrams" => 3,
+                _ => arg_int(call, 0).unwrap_or(2).max(1) as usize,
+            };
+            input.windows(n).map(|w| Value::list(w.to_vec())).collect()
+        }
+        // Each distinct value (under the value comparison, nulls
+        // left out) with its count, the most frequent first and
+        // equal counts by value, as records; `frequencies(k)` keeps
+        // the top k.
+        "frequencies" => {
+            let keep = arg_int(call, 0).map(|k| k.max(0) as usize);
+            let mut counts: Vec<(Value, i64)> = Vec::new();
+            let mut index: std::collections::HashMap<crate::value::SortKey, usize> =
+                std::collections::HashMap::new();
+            for v in input {
+                if matches!(v, Value::Null) {
+                    continue;
+                }
+                let key = v.sort_key_with(scale);
+                match index.get(&key) {
+                    Some(&i) => counts[i].1 += 1,
+                    None => {
+                        index.insert(key, counts.len());
+                        counts.push((v, 1));
+                    }
+                }
+            }
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.compare_with(&b.0, scale)));
+            if let Some(k) = keep {
+                counts.truncate(k);
+            }
+            counts
+                .into_iter()
+                .map(|(v, n)| {
+                    Value::Record(vec![
+                        ("value".to_string(), v),
+                        ("n".to_string(), Value::Int(n)),
+                    ])
+                })
+                .collect()
+        }
         "combinations" | "pairs" | "triples" => {
             let n = match call.name.as_str() {
                 "pairs" => 2,
@@ -1838,8 +2090,16 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 .filter(|v| seen.insert(v.sort_key_with(scale)))
                 .collect()
         }
-        "first" => input.into_iter().next().into_iter().collect(),
-        "last" => input.into_iter().next_back().into_iter().collect(),
+        // `first` / `last`: one value, or the first / last n.
+        "first" => {
+            let n = arg_int(call, 0).unwrap_or(1).max(0) as usize;
+            input.into_iter().take(n).collect()
+        }
+        "last" => {
+            let n = arg_int(call, 0).unwrap_or(1).max(0) as usize;
+            let skip = input.len().saturating_sub(n);
+            input.into_iter().skip(skip).collect()
+        }
         _ => input,
     }
 }
@@ -2281,6 +2541,130 @@ fn counts(input: &[Value]) -> Vec<f64> {
     readings(input).into_iter().filter(|c| *c > 0.0).collect()
 }
 
+/// The counts of a stream's distinct values (nulls left out).
+fn distribution(input: &[Value], scale: Scale) -> Vec<f64> {
+    let mut counts: std::collections::HashMap<crate::value::SortKey, f64> =
+        std::collections::HashMap::new();
+    for v in input {
+        if !matches!(v, Value::Null) {
+            *counts.entry(v.sort_key_with(scale)).or_insert(0.0) += 1.0;
+        }
+    }
+    counts.into_values().collect()
+}
+
+/// The skip-grams starting at `start`: `chosen` so far, `n` to
+/// choose in all, `k` skips still allowed.
+fn skipgrams_from(
+    input: &[Value],
+    start: usize,
+    n: usize,
+    k: usize,
+    chosen: &mut Vec<Value>,
+    out: &mut Vec<Value>,
+) {
+    chosen.push(input[start].clone());
+    if chosen.len() == n {
+        out.push(Value::list(chosen.clone()));
+    } else {
+        for skip in 0..=k {
+            let next = start + 1 + skip;
+            if next >= input.len() {
+                break;
+            }
+            skipgrams_from(input, next, n, k - skip, chosen, out);
+        }
+    }
+    chosen.pop();
+}
+
+/// The corpus tier's class of a token: a word (a letter in it), a
+/// number (a digit, no letter), else punctuation.
+fn token_class(seg: &str) -> &'static str {
+    if seg.chars().any(char::is_alphabetic) {
+        "word"
+    } else if seg.chars().any(char::is_numeric) {
+        "number"
+    } else {
+        "punct"
+    }
+}
+
+/// Unicode case folding: the simple lowercase mapping plus the
+/// full foldings that change length or letter (CaseFolding.txt's
+/// C + F statuses for the letters a text meets).
+fn casefold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            'ß' | 'ẞ' => out.push_str("ss"),
+            'ς' => out.push('σ'),
+            'ſ' => out.push('s'),
+            'İ' => out.push_str("i\u{307}"),
+            'ﬀ' => out.push_str("ff"),
+            'ﬁ' => out.push_str("fi"),
+            'ﬂ' => out.push_str("fl"),
+            'ﬃ' => out.push_str("ffi"),
+            'ﬄ' => out.push_str("ffl"),
+            'ﬅ' | 'ﬆ' => out.push_str("st"),
+            'ŉ' => out.push_str("\u{2bc}n"),
+            c => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// The text without its combining marks: NFD, the marks (general
+/// category M) dropped, the Cyrillic letters й and ё kept whole
+/// (`ru` folds ё to е).
+fn deaccent(text: &str, ru: bool) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_normalization::char::is_combining_mark;
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            'й' | 'Й' => out.push(c),
+            'ё' if !ru => out.push(c),
+            'Ё' if !ru => out.push(c),
+            'ё' => out.push('е'),
+            'Ё' => out.push('Е'),
+            c => out.extend(c.to_string().nfd().filter(|m| !is_combining_mark(*m))),
+        }
+    }
+    out
+}
+
+/// The languages the stemmer ships, by their two-letter tags.
+const STEMMER_LANGS: &[&str] = &[
+    "ar", "da", "nl", "en", "fi", "fr", "de", "el", "hu", "it", "no", "pt", "ro", "ru", "es", "sv",
+    "ta", "tr",
+];
+
+fn stemmer_for(lang: &str) -> Option<rust_stemmers::Algorithm> {
+    use rust_stemmers::Algorithm::*;
+    Some(match lang {
+        "ar" => Arabic,
+        "da" => Danish,
+        "nl" => Dutch,
+        "en" => English,
+        "fi" => Finnish,
+        "fr" => French,
+        "de" => German,
+        "el" => Greek,
+        "hu" => Hungarian,
+        "it" => Italian,
+        "no" => Norwegian,
+        "pt" => Portuguese,
+        "ro" => Romanian,
+        "ru" => Russian,
+        "es" => Spanish,
+        "sv" => Swedish,
+        "ta" => Tamil,
+        "tr" => Turkish,
+        _ => return None,
+    })
+}
+
 /// Shannon entropy in bits of a distribution given as counts.
 fn entropy(counts: &[f64]) -> Value {
     let total: f64 = counts.iter().sum();
@@ -2575,6 +2959,14 @@ fn chi2(a: f64, na: f64, b: f64, nb: f64) -> Value {
 /// words are seen `fx` and `fy` times in `n` tokens: log₂ of the
 /// observed count over the expected `fx · fy / n`. A zero count or
 /// size, or a pair count above either word's, is null.
+/// The Dice coefficient: 2·fxy / (fx + fy).
+fn dice(fxy: f64, fx: f64, fy: f64) -> Value {
+    if !(fxy > 0.0 && fx > 0.0 && fy > 0.0) || fxy > fx || fxy > fy {
+        return Value::Null;
+    }
+    finite(2.0 * fxy / (fx + fy))
+}
+
 fn mi(fxy: f64, fx: f64, fy: f64, n: f64) -> Value {
     if !(fxy > 0.0 && fx > 0.0 && fy > 0.0 && n > 0.0) || fxy > fx || fxy > fy {
         return Value::Null;

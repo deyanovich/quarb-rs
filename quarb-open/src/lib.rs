@@ -667,45 +667,57 @@ pub fn corpus_level(
     // CoNLL-U from its stdout — under the shell gate, like sh().
     // `?format=conllu` names the reading when no extension can
     // (a pipe, an extensionless file); the sniff covers the rest.
-    let (rest, conllu, annotate, desm, format, cast, places, modernize, notes) = match rest
-        .split_once('?')
-    {
-        Some((p, q)) => {
-            let (
-                mut conllu,
-                mut annotate,
-                mut desm,
-                mut format,
-                mut cast,
-                mut places,
-                mut modernize,
-                mut notes,
-            ) = (None, None, Vec::new(), None, None, None, None, None);
-            for pair in q.split('&') {
-                match pair.split_once('=') {
-                    Some(("conllu", v)) => conllu = Some(v.to_string()),
-                    Some(("annotate", v)) => annotate = Some(v.to_string()),
-                    Some(("desm", v)) => desm.push(v.to_string()),
-                    Some(("cast", v)) => cast = Some(v.to_string()),
-                    Some(("places", v)) => places = Some(v.to_string()),
-                    Some(("modernize", v)) => modernize = Some(v.to_string()),
-                    Some(("notes", v)) => notes = Some(v.to_string()),
-                    Some(("encoding", v)) => set_encoding_option(v, ctx)?,
-                    Some(("format", "conllu")) => format = Some("conllu"),
-                    Some(("format", v)) => anyhow::bail!(
-                        "corpus: format={v} is not a treebank format — format= takes conllu"
-                    ),
-                    _ => anyhow::bail!(
-                        "unknown corpus option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, modernize=, notes=, format=, encoding="
-                    ),
+    let (rest, conllu, annotate, desm, format, cast, places, modernize, notes, sentences) =
+        match rest.split_once('?') {
+            Some((p, q)) => {
+                let (
+                    mut conllu,
+                    mut annotate,
+                    mut desm,
+                    mut format,
+                    mut cast,
+                    mut places,
+                    mut modernize,
+                    mut notes,
+                    mut sentences,
+                ) = (None, None, Vec::new(), None, None, None, None, None, None);
+                for pair in q.split('&') {
+                    match pair.split_once('=') {
+                        Some(("conllu", v)) => conllu = Some(v.to_string()),
+                        Some(("sentences", v)) => sentences = Some(v.to_string()),
+                        Some(("annotate", v)) => annotate = Some(v.to_string()),
+                        Some(("desm", v)) => desm.push(v.to_string()),
+                        Some(("cast", v)) => cast = Some(v.to_string()),
+                        Some(("places", v)) => places = Some(v.to_string()),
+                        Some(("modernize", v)) => modernize = Some(v.to_string()),
+                        Some(("notes", v)) => notes = Some(v.to_string()),
+                        Some(("encoding", v)) => set_encoding_option(v, ctx)?,
+                        Some(("format", "conllu")) => format = Some("conllu"),
+                        Some(("format", v)) => anyhow::bail!(
+                            "corpus: format={v} is not a treebank format — format= takes conllu"
+                        ),
+                        _ => anyhow::bail!(
+                            "unknown corpus option {pair:?} — supported: conllu=, sentences=, annotate=, desm=, cast=, places=, modernize=, notes=, format=, encoding="
+                        ),
+                    }
                 }
+                (
+                    p, conllu, annotate, desm, format, cast, places, modernize, notes, sentences,
+                )
             }
-            (
-                p, conllu, annotate, desm, format, cast, places, modernize, notes,
-            )
-        }
-        None => (rest, None, None, Vec::new(), None, None, None, None, None),
-    };
+            None => (
+                rest,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
     let target = Path::new(rest);
     if is_archive(target) && binary_text_kind(target).is_none() {
         anyhow::bail!(
@@ -801,6 +813,7 @@ pub fn corpus_level(
     finish_corpus(
         model,
         conllu,
+        sentences,
         annotate,
         &desm,
         cast,
@@ -819,6 +832,7 @@ pub fn corpus_level(
 pub fn finish_corpus(
     mut model: quarb_text::TextModel,
     conllu: Option<String>,
+    sentences: Option<String>,
     annotate: Option<String>,
     desm: &[String],
     cast: Option<String>,
@@ -840,6 +854,26 @@ pub fn finish_corpus(
         model
             .set_orthography(table)
             .map_err(|e| anyhow::anyhow!("{level}: {e}"))?;
+    }
+    // A given segmentation: the `.sentences` file replaces the
+    // computed tier on this mount; bonds do not apply.
+    if let Some(file) = sentences {
+        anyhow::ensure!(
+            conllu.is_none() && annotate.is_none(),
+            "{level}: sentences= is a given segmentation of its own; it takes neither conllu= nor annotate="
+        );
+        anyhow::ensure!(
+            desm.is_empty(),
+            "{level}: sentences= gives the sentences as they are; desm= does not apply"
+        );
+        let text = quarb_compose::read_source(Path::new(&file), ctx.encoding().as_deref())
+            .with_context(|| format!("reading {file} as sentences"))?
+            .map_err(|e| anyhow::anyhow!("reading {file} as sentences: {e}"))?
+            .text;
+        model
+            .tokenize_given(&text)
+            .map_err(|e| anyhow::anyhow!("{level}: {file}: {e}"))?;
+        return finish_corpus_tables(model, cast, places, level);
     }
     let conllu_text = match (conllu, annotate) {
         (Some(_), Some(_)) => anyhow::bail!("{level}: takes conllu= or annotate=, not both"),
@@ -877,6 +911,16 @@ pub fn finish_corpus(
             model.tokenize_with(bonds.as_ref());
         }
     }
+    finish_corpus_tables(model, cast, places, level)
+}
+
+/// The cast and places tables, after the tier is in place.
+fn finish_corpus_tables(
+    mut model: quarb_text::TextModel,
+    cast: Option<String>,
+    places: Option<String>,
+    level: &str,
+) -> anyhow::Result<quarb_text::TextModel> {
     if let Some(file) = cast {
         let rows = quarb_text::CastRow::read_csv(&file)
             .map_err(|e| anyhow::anyhow!("{level}: reading the cast table {file}: {e}"))?;
@@ -904,55 +948,69 @@ pub fn lit_level(
     allow_shell: bool,
     ctx: &SourceCtx,
 ) -> anyhow::Result<quarb_text::TextModel> {
-    let (rest, conllu, annotate, desm, format, cast, places, scheme, modernize, notes) = match rest
-        .split_once('?')
-    {
-        Some((p, q)) => {
-            let (
-                mut conllu,
-                mut annotate,
-                mut desm,
-                mut format,
-                mut cast,
-                mut places,
-                mut scheme,
-                mut modernize,
-                mut notes,
-            ) = (None, None, Vec::new(), None, None, None, None, None, None);
-            for pair in q.split('&') {
-                match pair.split_once('=') {
-                    Some(("conllu", v)) => conllu = Some(v.to_string()),
-                    Some(("annotate", v)) => annotate = Some(v.to_string()),
-                    Some(("desm", v)) => desm.push(v.to_string()),
-                    Some(("cast", v)) => cast = Some(v.to_string()),
-                    Some(("places", v)) => places = Some(v.to_string()),
-                    Some(("format", v)) => format = Some(v.to_string()),
-                    Some(("scheme", v)) => scheme = Some(v.to_string()),
-                    Some(("modernize", v)) => modernize = Some(v.to_string()),
-                    Some(("notes", v)) => notes = Some(v.to_string()),
-                    Some(("encoding", v)) => set_encoding_option(v, ctx)?,
-                    _ => anyhow::bail!(
-                        "unknown lit option {pair:?} — supported: conllu=, annotate=, desm=, cast=, places=, format=, scheme=, modernize=, notes=, encoding="
-                    ),
+    let (rest, conllu, annotate, desm, format, cast, places, scheme, modernize, notes, sentences) =
+        match rest.split_once('?') {
+            Some((p, q)) => {
+                let (
+                    mut conllu,
+                    mut annotate,
+                    mut desm,
+                    mut format,
+                    mut cast,
+                    mut places,
+                    mut scheme,
+                    mut modernize,
+                    mut notes,
+                    mut sentences,
+                ) = (
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                for pair in q.split('&') {
+                    match pair.split_once('=') {
+                        Some(("conllu", v)) => conllu = Some(v.to_string()),
+                        Some(("sentences", v)) => sentences = Some(v.to_string()),
+                        Some(("annotate", v)) => annotate = Some(v.to_string()),
+                        Some(("desm", v)) => desm.push(v.to_string()),
+                        Some(("cast", v)) => cast = Some(v.to_string()),
+                        Some(("places", v)) => places = Some(v.to_string()),
+                        Some(("format", v)) => format = Some(v.to_string()),
+                        Some(("scheme", v)) => scheme = Some(v.to_string()),
+                        Some(("modernize", v)) => modernize = Some(v.to_string()),
+                        Some(("notes", v)) => notes = Some(v.to_string()),
+                        Some(("encoding", v)) => set_encoding_option(v, ctx)?,
+                        _ => anyhow::bail!(
+                            "unknown lit option {pair:?} — supported: conllu=, sentences=, annotate=, desm=, cast=, places=, format=, scheme=, modernize=, notes=, encoding="
+                        ),
+                    }
                 }
+                (
+                    p, conllu, annotate, desm, format, cast, places, scheme, modernize, notes,
+                    sentences,
+                )
             }
-            (
-                p, conllu, annotate, desm, format, cast, places, scheme, modernize, notes,
-            )
-        }
-        None => (
-            rest,
-            None,
-            None,
-            Vec::new(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-    };
+            None => (
+                rest,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
     let target = Path::new(rest);
     if is_archive(target) && binary_text_kind(target).is_none() {
         anyhow::bail!(
@@ -1021,6 +1079,7 @@ pub fn lit_level(
     finish_corpus(
         model,
         conllu,
+        sentences,
         annotate,
         &desm,
         cast,
@@ -1499,6 +1558,180 @@ pub struct OpenOpts {
 /// the full adapter-scheme fleet (`gcl:`, `kafka:`, `neo4j://`,
 /// …) — as a boxed adapter plus its locator renderer. The door
 /// session tools use to mount what the CLI mounts.
+/// Entries a directory listing counts before the catalog stops:
+/// past this many the count is a lower bound.
+pub const LISTING_BUDGET: u64 = 200_000;
+
+/// What `target` holds, said without opening it: an archive's
+/// member table ([`quarb_archive::catalog`]), a directory's entries
+/// (files and directories) and the files' sizes from a bounded
+/// listing, a plain file's size (its node count is the reading's,
+/// unknown here). A reading prefix (`text:shelf.tar`,
+/// `corpus:books/`) is looked through to its path and a `?option`
+/// suffix dropped. `None` for a target that is not a path or is a
+/// database file: its own adapter estimates once open. A listing stops at the first entry past
+/// `cap` (or past [`LISTING_BUDGET`]) and reports a lower bound:
+/// under a budget, a directory of a hundred thousand files costs
+/// as many reads as the budget allows, plus one.
+pub fn catalog(target: &str, cap: quarb::Cap) -> Option<quarb::Catalog> {
+    catalog_at(target, &[], cap)
+}
+
+/// [`catalog_at`] for a plan's ask: the path, the cap, and the
+/// filters a listing applies before counting (`::size`, `<file>`,
+/// `<dir>`) — the ready-made [`quarb::CatalogLookup`] for a path
+/// target.
+pub fn catalog_for(target: &str, ask: &quarb::Ask<'_>) -> Option<quarb::Catalog> {
+    let sieve = quarb_archive::Sieve::of(ask);
+    let mut c = catalog_with(target, ask.scope, ask.cap, &sieve)?;
+    c.applied = sieve.applied.clone();
+    c.traits_applied = sieve.traits_applied;
+    Some(c)
+}
+
+/// [`catalog`] narrowed to the literal path `scope` names under
+/// the target: a folder's own listing, one file's size, one
+/// archive member's header. `None` where the path names nothing
+/// the catalog can see (a node inside a document, a database).
+pub fn catalog_at(target: &str, scope: &[&str], cap: quarb::Cap) -> Option<quarb::Catalog> {
+    catalog_with(target, scope, cap, &quarb_archive::Sieve::none())
+}
+
+fn catalog_with(
+    target: &str,
+    scope: &[&str],
+    cap: quarb::Cap,
+    sieve: &quarb_archive::Sieve<'_>,
+) -> Option<quarb::Catalog> {
+    use quarb::{Catalog, Confidence, Latency};
+    let t = target.trim();
+    let t = t.split_once('?').map_or(t, |(p, _)| p);
+    let path = match t.split_once(':') {
+        Some((prefix, rest))
+            if prefix.len() > 1
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+                && !rest.starts_with("//")
+                && Path::new(rest).exists() =>
+        {
+            Path::new(rest)
+        }
+        _ => Path::new(t),
+    };
+    let md = std::fs::metadata(path).ok()?;
+    if md.is_file() {
+        if is_archive(path) {
+            let mut c = quarb_archive::catalog_for(
+                path,
+                &quarb::Ask {
+                    scope,
+                    cap,
+                    conjuncts: &[],
+                    traits: &[],
+                },
+            )?;
+            // The sieve is the archive's own; re-sieve with ours.
+            if !sieve.sizes.is_empty() || !sieve.files || !sieve.dirs {
+                c = quarb_archive::catalog_sieved(path, scope, cap, sieve)?;
+            }
+            return Some(c);
+        }
+        if !scope.is_empty() {
+            return None;
+        }
+        // A database file is its store's to price (its planner,
+        // its statistics), once open.
+        if is_sqlite(path)
+            || path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
+        {
+            return None;
+        }
+        return Some(Catalog::plain(
+            (1, u64::MAX),
+            Some((md.len(), md.len())),
+            Latency::Local,
+            Confidence::Bound,
+        ));
+    }
+    if !md.is_dir() {
+        return None;
+    }
+    // Under a directory the path is a path.
+    let mut at = path.to_path_buf();
+    for name in scope {
+        if name.is_empty() || name.contains('/') || *name == ".." {
+            return None;
+        }
+        at.push(name);
+    }
+    let md = std::fs::metadata(&at).ok()?;
+    if md.is_file() {
+        return Some(Catalog::plain(
+            (1, u64::MAX),
+            Some((md.len(), md.len())),
+            Latency::Local,
+            Confidence::Bound,
+        ));
+    }
+    if !md.is_dir() {
+        return None;
+    }
+    let (mut count, mut bytes, mut cut) = (0u64, 0u64, false);
+    let mut stack = vec![at];
+    'walk: while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(e.path());
+                if !sieve.keeps(false, e.metadata().map(|m| m.len()).unwrap_or(0)) {
+                    continue;
+                }
+                count += 1;
+            } else if ft.is_file() {
+                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if !sieve.keeps(true, size) {
+                    continue;
+                }
+                count += 1;
+                bytes += size;
+            } else {
+                continue;
+            }
+            if count >= LISTING_BUDGET || cap.past(count, bytes) {
+                cut = true;
+                break 'walk;
+            }
+        }
+    }
+    Some(Catalog::plain(
+        if cut {
+            (count, u64::MAX)
+        } else {
+            (count, count)
+        },
+        Some(if cut {
+            (bytes, u64::MAX)
+        } else {
+            (bytes, bytes)
+        }),
+        Latency::Local,
+        if cut {
+            Confidence::Bound
+        } else {
+            Confidence::Exact
+        },
+    ))
+}
+
 pub fn open_target(target: &str, opts: &OpenOpts) -> anyhow::Result<Mounted> {
     open_mount(Path::new(target), opts)
 }

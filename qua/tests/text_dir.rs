@@ -71,13 +71,15 @@ fn a_folder_of_documents_reads_at_the_text_level() {
     // the corpus reading over the same folder: tokens and sentences
     // under every chapter, counted across the whole manuscript
     let corpus = format!("corpus:{}", dir.display());
-    assert_eq!(qua(&["//sentence @| count", &corpus]), "5\n");
+    // five of prose, four headings: headings are sentences
+    assert_eq!(qua(&["//sentence @| count", &corpus]), "9\n");
     assert_eq!(
         qua(&[
             r#"//*[:::name == *".md"] | "${:::name} ${(//token<word> @| count)}""#,
             &corpus
         ]),
-        "01-one.md 6\n02-two.md 8\n03-three.md 3\n"
+        // the headings' words counted too: headings are sentences
+        "01-one.md 8\n02-two.md 9\n03-three.md 4\n"
     );
     assert_eq!(
         qua(&[r#"//token[::lower = "tom"] @| count"#, &corpus]),

@@ -1474,21 +1474,36 @@ Three observations that the filesystem work has already forced:
   the literal path to the step's base where every step before it
   was a bare child hop by name, and what the adapter says from its
   catalog: \texttt{select\_plan} (which conjuncts it would apply)
-  and \texttt{estimate} (rows, bytes, requests, latency,
+  and \texttt{estimate} (nodes, bytes, requests, latency,
   confidence), composed along a branch (\texttt{Estimate::then})
   and across branches (\texttt{beside}), unknown where no
   estimator answers. \texttt{Plan::roots} names the first child of
   every anchored branch -- under a mount table, the mounts the
   query touches; an unanchored search is every mount. A
-  \texttt{Run} may carry a \texttt{Budget} (rows, bytes,
+  \texttt{Run} may carry a \texttt{Budget} (nodes, bytes,
   requests; \texttt{strict} refuses an unknown estimate): a query
   the estimate puts beyond it is refused before anything runs, and
   the \texttt{Outcome} carries the plan. \texttt{Plan::to\_kaiv}
   emits it as a \texttt{quarb/plan} payload (\texttt{qua --plan}
-  prints it and stops; \texttt{qua --budget rows=N,bytes=N}).
+  prints it and stops; \texttt{qua --budget nodes=N,bytes=N}).
   \texttt{Model::reachable\_roots(named)} (quarb-model) closes a
   set of mounts over the \texttt{ref}, \texttt{rel} and
-  \texttt{tree} declarations, for a replay plan.
+  \texttt{tree} declarations, for a replay plan. The relational
+  model takes a driver's \emph{estimator}
+  (\texttt{RelationalModel::with\_estimator}: the table and the
+  plan's column equalities in, an \texttt{Estimate} out, asked
+  once per run per table and equalities): BigQuery prices the
+  statement with a dry run (bytes exact, a bound for a clustered
+  table) and reads the row count from \texttt{tables.get};
+  Postgres, MySQL and Oracle ask their planners
+  (\texttt{EXPLAIN}, \texttt{EXPLAIN FORMAT=JSON}, \texttt{EXPLAIN
+  PLAN}); SQL Server reads \texttt{sys.partitions}; DuckDB its
+  catalog's \texttt{estimated\_size}; Athena the table's
+  crawler properties; SQLite \texttt{sqlite\_stat1} after
+  \texttt{ANALYZE}, unknown without it. The SQL adapters forward
+  the whole trait through \texttt{forward\_ast\_adapter!}, so
+  \texttt{select}, \texttt{count}, \texttt{select\_plan} and
+  \texttt{estimate} reach the model.
 
 \item \textbf{A mount may be latent.} The mount adapter declares a
   mount by name, target and opener (\texttt{MountAdapter::declare})
@@ -1500,7 +1515,57 @@ Three observations that the filesystem work has already forced:
   id that opens the mount when touched; the every-mount hints read
   the active set. A failed opener is a refusal and an empty mount.
   A live table takes new mounts (\texttt{push}) and identities
-  (\texttt{declare\_identity}).
+  (\texttt{declare\_identity}). A declaration may carry a
+  \texttt{catalog} closure: what the target holds before it is
+  opened, so the plan prices a step from the mount's root while
+  the mount is latent.
+
+\item \textbf{A catalog prices a source before it is read.}
+  \texttt{quarb::Catalog} is substrate-neutral — entries and
+  bytes as a range, a latency, a confidence — and every substrate
+  states one cheaply: \texttt{quarb\_archive::catalog} from a
+  zip's central directory or a tar's headers, \texttt{quarb\_open::catalog}
+  from a bounded directory listing or a file's size, a warehouse
+  from its dry run. \texttt{Estimate::from\_catalog} turns it
+  into a root step's estimate as bounds (entries are files or
+  members, the estimate counts nodes: a child step reaches at most the
+  entries, an unfiltered descendant step at least every entry),
+  the catalog is a lookup by literal path
+  (\texttt{CatalogLookup}: a folder's own listing, one member's
+  header), so \texttt{Estimate::at\_catalog} narrows the price
+  to the path the plan records — a bare hop by name is one entry,
+  the reading step under it is priced by that entry's catalog, a
+  path the catalog cannot place (a node inside a document) is a
+  bounded unknown under the whole; a mount table prices a root
+  step across its mounts; a database file is left to its store's
+  estimator once open, and a hop by name under a table is a row
+  by key, at most one. The plan lowers the leading predicate as a
+  comparison (\texttt{Conjunct::Compare}: any operator, any
+  literal; a text equality stays \texttt{Equals}, the index's) and
+  the step's trait filters, and asks the catalog with them
+  (\texttt{Ask}): a listing applies \texttt{::size} and
+  \texttt{<file>}/\texttt{<dir>} before counting and says so
+  (\texttt{Catalog::applied}), a store's statistics price an
+  equality on an indexed column (SQLite: \texttt{sqlite\_stat1}'s
+  rows per key); what a catalog cannot apply leaves the whole
+  count as the bound; \texttt{quarb::Unopened} is an adapter
+  that is only its catalog, for planning and budgeting without
+  opening (\texttt{qua --plan} / \texttt{--budget} price every
+  path input this way first). Once open, an in-memory adapter
+  answers \texttt{estimate} through \texttt{adapter::arena\_estimate},
+  a counted walk of its own nodes (JSON, CSV, XML, HTML, text,
+  fs, archive), bounded past two million nodes. An upper end of
+  \texttt{u64::MAX} means unbounded: a lenient budget passes it, a
+  strict one refuses. The budget's cap (\texttt{Budget::cap},
+  carried as \texttt{StepPlan::cap} and handed to every catalog
+  producer) short-circuits the pricing itself: a listing, a tar
+  header walk or an arena count stops at the first entry past the
+  budget and reports a lower bound that already exceeds it, so
+  pricing a directory of a hundred thousand files under
+  \texttt{nodes=1000} costs a thousand reads and one. Pricing is
+  opt-in: a run with neither \texttt{plan} nor a budget never
+  asks an adapter for an estimate and never reads a catalog, so
+  the default path runs the query straight, at no planning cost.
 
 \item \textbf{The conformance suite is the contract's test.}
   \texttt{quarb::conformance::check(\&adapter, budget)} walks a

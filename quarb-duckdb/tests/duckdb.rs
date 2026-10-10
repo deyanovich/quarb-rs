@@ -122,3 +122,23 @@ fn hops_read_by_key() {
         [r#"%(n = 3; t = true)"#]
     );
 }
+
+#[test]
+fn the_catalog_estimates_a_table_before_any_scan() {
+    let path = fixture();
+    let a = DuckdbAdapter::open(&path).unwrap();
+    let plan = quarb::Query::parse("/tracks/*[::title = \"Mars\"]", &a)
+        .unwrap()
+        .plan(&a);
+    let step = &plan.branches[0].steps[1];
+    assert_eq!(step.pushed, Some(vec![true]));
+    let e = step.estimate.clone().unwrap();
+    assert_eq!(e.nodes, (0, 3));
+    assert_eq!(e.latency, quarb::Latency::Local);
+    let whole = quarb::Query::parse("/tracks/*", &a).unwrap().plan(&a);
+    assert_eq!(whole.estimate().unwrap().nodes, (0, 3));
+    assert_eq!(
+        whole.estimate().unwrap().confidence,
+        quarb::Confidence::Bound
+    );
+}

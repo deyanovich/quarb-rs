@@ -286,6 +286,46 @@ fn fetch_rows_keyed(
     Ok(out)
 }
 
+/// `ANALYZE`'s figure for one value of `column`: the average rows
+/// per distinct key of an index that opens with the column
+/// (`sqlite_stat1.stat`'s second number). An error when no index
+/// opens with it or the statistics are missing.
+fn index_rows_per_key(conn: &Connection, table: &str, column: &str) -> Result<u64, String> {
+    let mut list = conn
+        .prepare(&format!("PRAGMA index_list({})", quote_ident(table)))
+        .map_err(|e| e.to_string())?;
+    let names: Vec<String> = list
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    for idx in names {
+        let first: Option<String> = conn
+            .query_row(
+                &format!("PRAGMA index_info({})", quote_ident(&idx)),
+                [],
+                |r| r.get(2),
+            )
+            .ok();
+        if first.as_deref() != Some(column) {
+            continue;
+        }
+        let stat: String = conn
+            .query_row(
+                "SELECT stat FROM sqlite_stat1 WHERE tbl = ?1 AND idx = ?2",
+                [table, idx.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        return stat
+            .split_whitespace()
+            .nth(1)
+            .and_then(|t| t.parse().ok())
+            .ok_or_else(|| "no per-key figure in sqlite_stat1".to_string());
+    }
+    Err(format!("no index opens with {column}"))
+}
+
 impl SqliteAdapter {
     /// Open a database file (read-only): the catalog now, each
     /// table's rows on first touch (the connection stays owned by
@@ -334,7 +374,7 @@ impl SqliteAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?);
         let specs = specs(&conn, refs)?;
-        let (whole, keyed, listed) = (conn.clone(), conn.clone(), conn);
+        let (whole, keyed, stats, listed) = (conn.clone(), conn.clone(), conn.clone(), conn);
         let mut model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
@@ -344,6 +384,49 @@ impl SqliteAdapter {
         // A hop reads the rows it lands on, by key.
         .with_key_fetcher(Box::new(move |_, spec, col, values| {
             fetch_rows_keyed(&keyed, spec, None, col, values)
+        }))
+        // `ANALYZE`'s statistics, when the file carries them: the
+        // table's row count as the planner knows it. A table with
+        // no index has one row with a null `idx`; an indexed table
+        // has one row per index, each opening with the table's row
+        // count. Without statistics the estimate is unknown — a
+        // count would be the scan.
+        .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
+            let stat: String = stats
+                .query_row(
+                    "SELECT stat FROM sqlite_stat1 WHERE tbl = ?1 \
+                     ORDER BY idx IS NULL DESC LIMIT 1",
+                    [spec.name.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let n: u64 = stat
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse().ok())
+                .ok_or("no row count in sqlite_stat1")?;
+            // An equality on a column some index opens with: the
+            // index's statistics say how many rows one value of it
+            // selects on average, the planner's own figure. The
+            // smallest over the equalities bounds the read.
+            let mut per_key: Option<u64> = None;
+            for (col, _) in equals {
+                let column = &spec.columns[*col];
+                if let Ok(k) = index_rows_per_key(&stats, &spec.name, column) {
+                    per_key = Some(per_key.map_or(k, |p| p.min(k)));
+                }
+            }
+            Ok(quarb::Estimate {
+                nodes: match (equals.is_empty(), per_key) {
+                    (true, _) => (n, n),
+                    (false, Some(k)) => (0, k.min(n)),
+                    (false, None) => (0, n),
+                },
+                bytes: None,
+                requests: Some(0),
+                latency: quarb::Latency::Local,
+                confidence: quarb::Confidence::Guess,
+            })
         }));
         // The pushed-down WHERE filters the table's listing only:
         // hops into it go by key, unfiltered, so they stay exact.
@@ -543,69 +626,7 @@ pub fn raw_query(
 }
 
 impl AstAdapter for SqliteAdapter {
-    fn root(&self) -> NodeId {
-        self.model.root()
-    }
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
-        self.model.children(node)
-    }
-    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
-        self.model.children_named(node, name)
-    }
-    fn name(&self, node: NodeId) -> Option<String> {
-        self.model.name(node)
-    }
-    fn parent(&self, node: NodeId) -> Option<NodeId> {
-        self.model.parent(node)
-    }
-    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.model.property(node, name)
-    }
-    fn default_value(&self, node: NodeId) -> Option<Value> {
-        self.model.default_value(node)
-    }
-    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
-        self.model.metadata(node, key)
-    }
-    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
-        self.model.resolve(node, property, hint)
-    }
-    fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.links(node)
-    }
-    fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        self.model.backlinks(node)
-    }
-    fn reverse_resolve(
-        &self,
-        node: NodeId,
-        property: Option<&str>,
-        hint: Option<&str>,
-    ) -> Option<Vec<NodeId>> {
-        self.model.reverse_resolve(node, property, hint)
-    }
-    fn can_refer_to(&self, source: NodeId, target: NodeId) -> Option<bool> {
-        self.model.can_refer_to(source, target)
-    }
-    fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        self.model.prefetch_links(nodes, dir)
-    }
-    fn index_referrers(
-        &self,
-        scope: &str,
-        property: &str,
-        label: Option<&str>,
-        target: NodeId,
-    ) -> Option<Vec<NodeId>> {
-        self.model.index_referrers(scope, property, label, target)
-    }
-    fn reference_properties(&self, source: NodeId, target: NodeId) -> Vec<String> {
-        self.model.reference_properties(source, target)
-    }
-    fn resolve_needs_label(&self, node: NodeId, property: &str) -> bool {
-        self.model.resolve_needs_label(node, property)
-    }
-    fn reverse_label(&self, target: NodeId) -> Option<String> {
-        self.model.reverse_label(target)
-    }
+    // Every trait method, through the relational model: the search
+    // fast paths, the plan and its estimate included.
+    quarb::forward_ast_adapter!(model);
 }

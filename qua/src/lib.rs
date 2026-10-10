@@ -23,7 +23,7 @@ use quarb_html::HtmlAdapter;
 use quarb_json::JsonAdapter;
 #[cfg(feature = "kuzu")]
 use quarb_kuzu::KuzuAdapter;
-use quarb_mount::{Mount, MountAdapter};
+use quarb_mount::{Latent, Mount, MountAdapter};
 use quarb_mysql::MysqlAdapter;
 use quarb_open::*;
 pub use quarb_open::{Mounted, OpenOpts, SourceCtx, open_target};
@@ -150,7 +150,7 @@ struct Cli {
     plan: bool,
 
     /// Hold the run to a budget, refusing before running when the
-    /// plan's estimate exceeds it: `rows=N`, `bytes=N`,
+    /// plan's estimate exceeds it: `nodes=N`, `bytes=N`,
     /// `requests=N`, comma-separated, and `strict` to refuse an
     /// unknown estimate too.
     #[arg(long, value_name = "BOUNDS")]
@@ -1056,6 +1056,73 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
 
 /// Run one query text against the CLI's inputs, printing results —
 /// the whole adapter dispatch.
+/// The plan against the inputs' catalogs, before any is opened:
+/// printed under --plan (`true`: handled); refused under a --budget
+/// it exceeds; else `false`, and the inputs open as usual (the run
+/// checks the budget again on the opened adapters' own estimates).
+/// `false` too when an input has no catalog — a database, a
+/// service — since its plan is the opened adapter's to price.
+fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
+    let cap = oc.budget.as_ref().map_or(quarb::Cap::NONE, |b| b.cap());
+    let mut catalogs = Vec::new();
+    for (i, p) in cli.paths.iter().enumerate() {
+        let (name, target) = match split_alias(p) {
+            Some(alias) => alias,
+            None => (
+                p.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("doc{i}")),
+                p.clone(),
+            ),
+        };
+        let t = target.to_string_lossy().into_owned();
+        if quarb_open::catalog(&t, cap).is_none() {
+            return Ok(false);
+        }
+        let lookup: quarb::CatalogLookup = Box::new(move |ask| quarb_open::catalog_for(&t, ask));
+        catalogs.push((name, target.display().to_string(), lookup));
+    }
+    if catalogs.is_empty() {
+        return Ok(false);
+    }
+    let run = oc.run_opts();
+    let defs = quarb::Defs::default();
+    let plan = if catalogs.len() >= 2 || cli.paths.iter().any(|p| split_alias(p).is_some()) {
+        let mut m = MountAdapter::new(Vec::new());
+        for (name, target, lookup) in catalogs {
+            m.declare(Latent {
+                name,
+                target: Some(target),
+                opener: Box::new(|| Err("planned, not opened".into())),
+                catalog: Some(lookup),
+            })
+            .map_err(|e| anyhow::anyhow!("mount: {e}"))?;
+        }
+        let q = quarb::Query::parse_with(query, &defs, &m, &run)?;
+        match &oc.budget {
+            Some(b) => q.plan_within(&m, b),
+            None => q.plan(&m),
+        }
+    } else {
+        let a = quarb::Unopened(catalogs.pop().expect("one input").2);
+        let q = quarb::Query::parse_with(query, &defs, &a, &run)?;
+        match &oc.budget {
+            Some(b) => q.plan_within(&a, b),
+            None => q.plan(&a),
+        }
+    };
+    if oc.plan {
+        print!("{}", plan.to_kaiv(query));
+        return Ok(true);
+    }
+    if let Some(budget) = &oc.budget
+        && let Some(why) = budget.exceeded_by(&plan)
+    {
+        return Err(quarb::QuarbError::refused(why).into());
+    }
+    Ok(false)
+}
+
 fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     // The source boundary of this invocation's one target.
     let ctx = &SourceCtx::default();
@@ -1088,6 +1155,13 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                  (SQLite databases and firebase:// do); ignoring it"
             );
         }
+    }
+    // --plan and --budget price the inputs before paying to open
+    // them, when each has a catalog (a file, an archive, a
+    // directory). Anything else is priced once open, by its own
+    // adapter.
+    if (oc.plan || oc.budget.is_some()) && preflight(cli, query, oc)? {
+        return Ok(());
     }
     // Several inputs are mounted as named children of one root; a
     // single `NAME=TARGET` input mounts too, so its name is real.
@@ -1794,7 +1868,13 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
 /// and exit before binding the socket, and a partial pushdown would
 /// bake its WHERE into the standing arbor every later query reuses.
 fn pushdown_applies(cli: &Cli) -> bool {
+    // A planned or budgeted run goes through the engine, whose run
+    // prices the query against the store's estimator and prints or
+    // refuses before anything is read; a pushdown would execute the
+    // SQL outright and drop both flags.
     !cli.no_pushdown
+        && !cli.plan
+        && cli.budget.is_none()
         && !cli.kaiv
         && !cli.expand
         && !cli.expand_1
@@ -2252,21 +2332,53 @@ impl OutputCtx {
     }
 }
 
-/// `--budget rows=N,bytes=N,requests=N[,strict]`.
+/// `--budget nodes=N,bytes=N,requests=N[,strict]`.
 fn parse_budget(text: &str) -> anyhow::Result<quarb::plan::Budget> {
     let mut b = quarb::plan::Budget::default();
     for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         match part.split_once('=') {
-            Some(("rows", n)) => b.rows = Some(n.trim().parse()?),
-            Some(("bytes", n)) => b.bytes = Some(n.trim().parse()?),
-            Some(("requests", n)) => b.requests = Some(n.trim().parse()?),
+            Some(("nodes", n)) => b.nodes = Some(budget_count("nodes", n)?),
+            // The word before the ruling that a step yields nodes.
+            Some(("rows", n)) => b.nodes = Some(budget_count("nodes", n)?),
+            Some(("bytes", n)) => b.bytes = Some(budget_count("bytes", n)?),
+            Some(("requests", n)) => {
+                b.requests = Some(u32::try_from(budget_count("requests", n)?)?)
+            }
             None if part == "strict" => b.strict = true,
             _ => anyhow::bail!(
-                "--budget takes rows=N, bytes=N, requests=N and strict, comma-separated; got '{part}'"
+                "--budget takes nodes=N, bytes=N, requests=N and strict, comma-separated; got '{part}'"
             ),
         }
     }
     Ok(b)
+}
+
+/// A budget figure with an optional unit: `k`/`M`/`G`/`T` decimal,
+/// `Ki`/`Mi`/`Gi`/`Ti` binary, a trailing `B` allowed (`1MB`,
+/// `2GiB`, `50k`).
+fn budget_count(field: &str, text: &str) -> anyhow::Result<u64> {
+    let t = text.trim();
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let unit = t[digits.len()..].trim().trim_end_matches(['B', 'b']);
+    let scale: u64 = match unit {
+        "" => 1,
+        "k" | "K" => 1_000,
+        "M" => 1_000_000,
+        "G" => 1_000_000_000,
+        "T" => 1_000_000_000_000,
+        "Ki" => 1 << 10,
+        "Mi" => 1 << 20,
+        "Gi" => 1 << 30,
+        "Ti" => 1 << 40,
+        _ => anyhow::bail!(
+            "--budget {field}: a count with an optional k/M/G/T or Ki/Mi/Gi/Ti unit; got '{t}'"
+        ),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--budget {field}: a count is needed; got '{t}'"))?;
+    n.checked_mul(scale)
+        .ok_or_else(|| anyhow::anyhow!("--budget {field}: '{t}' is beyond u64"))
 }
 
 /// Execution for one query under the run's options — `run` for the
