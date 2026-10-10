@@ -32,14 +32,14 @@ pub struct Candidate {
     pub text: String,
     /// What kind of thing it names.
     pub kind: Kind,
-    /// One line about it, for a function the registry documents.
+    /// One line about it, for a command the registry documents.
     pub doc: Option<&'static str>,
 }
 
 /// The candidate's kind, for icons/sorting on the consumer side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A `|` scalar function.
+    /// A `|` scalar command.
     Function,
     /// An `@|` aggregate (plain or keyed).
     Aggregate,

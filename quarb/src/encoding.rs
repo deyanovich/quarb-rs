@@ -316,7 +316,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 
 /// Parse JSON text into a [`Value`]: object → record (key order
 /// preserved), array → list, and the scalars map directly. `None`
-/// on malformed JSON — the decode(json) stage nulls it.
+/// on malformed JSON — the decode(json) command nulls it.
 #[cfg(feature = "decode-formats")]
 pub fn json_to_value(text: &str) -> Option<crate::value::Value> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;

@@ -29,7 +29,7 @@ fn locators(q: &str) -> Vec<String> {
 #[test]
 fn structure_and_locators() {
     assert_eq!(locators("/query/branch/step"), vec!["/query/branch/step"]);
-    // two pipelines-of-stages: the pipeline node groups them
+    // two pipelines-of-commands: the pipeline node groups them
     assert_eq!(
         locators("/query/pipeline/*").len(),
         5 // agg(group), func(mean), push, recall, agg(sort_by)
@@ -65,7 +65,7 @@ fn spellings_are_query_syntax() {
 fn default_projections() {
     // bare `::` on a func/agg is its name, on a literal its value
     assert_eq!(
-        values("//func:: || //agg:: @| sort"),
+        values("//cmd:: || //agg:: @| sort"),
         vec![
             Value::Str("group".to_string()),
             Value::Str("mean".to_string()),
@@ -89,7 +89,7 @@ fn predicates_reflect() {
 #[test]
 fn source_metadata_and_introspection_aggregates() {
     assert_eq!(values("^::::source"), vec![Value::Str(QUERY.to_string())]);
-    // "how many stages does this query run?"
+    // "how many commands does this query run?"
     assert_eq!(values("/query/pipeline/* @| count"), vec![Value::Int(5)]);
     // "does it use any descendant hops?" — no
     assert_eq!(

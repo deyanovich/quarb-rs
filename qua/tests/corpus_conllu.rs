@@ -331,7 +331,7 @@ fn the_round_trip() {
         out.contains("\n6.1\tread\tread\tVERB\tVBD\tTense=Past\t_\t_\t2:conj:and\t_\n"),
         "{out}"
     );
-    // Through the pipeline stage, on one sentence.
+    // Through the pipeline command, on one sentence.
     let one = values(&m, "//sentence[3] | conllu");
     assert_eq!(one.len(), 1);
     assert!(

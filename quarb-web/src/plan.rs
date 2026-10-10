@@ -454,7 +454,7 @@ struct Lhs(&'static str, bool);
 
 fn lhs_of(q: &Q, path: NodeId) -> Option<Lhs> {
     // `(<-link @| count)`: a piped operand — the path and its
-    // stages side by side.
+    // commands side by side.
     if q.name(path) == "piped" {
         let kids = q.kids(path);
         if kids.len() != 2 || q.name(kids[0]) != "path" || anchored(q, kids[0]) {
@@ -813,15 +813,15 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
             }
         }
     }
-    // The pipeline: no stage may navigate from the root.
+    // The pipeline: no command may navigate from the root.
     let pipeline = q.kids_named(qn, "pipeline").into_iter().next();
-    let mut stages: Vec<NodeId> = Vec::new();
+    let mut commands: Vec<NodeId> = Vec::new();
     if let Some(p) = pipeline {
-        stages = q.kids(p);
-        for s in &stages {
+        commands = q.kids(p);
+        for s in &commands {
             let name = q.name(*s);
             if matches!(name.as_str(), "subcontext" | "push" | "expr-push") {
-                return Plan::scan(format!("a {name} stage"));
+                return Plan::scan(format!("a {name} command"));
             }
             for n in q.all_below(*s) {
                 if q.name(n) == "path" && anchored(&q, n) {
@@ -898,10 +898,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     // Full: a bare count over the enumeration, everything exact.
     let bare_count = tail.is_empty()
         && q.kids_named(branch, "projection").is_empty()
-        && stages.len() == 1
-        && q.name(stages[0]) == "agg"
-        && q.text(stages[0], "name").as_deref() == Some("count")
-        && q.kids(stages[0]).is_empty();
+        && commands.len() == 1
+        && q.name(commands[0]) == "agg"
+        && q.text(commands[0], "name").as_deref() == Some("count")
+        && q.kids(commands[0]).is_empty();
     if bare_count && all_exact && whole_container {
         return Plan {
             rung: Rung::Full,
@@ -919,7 +919,7 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         && q.kids_named(branch, "projection").is_empty()
         && all_exact
         && whole_container)
-        .then(|| stages.first().and_then(|s| limit_of(&q, *s)))
+        .then(|| commands.first().and_then(|s| limit_of(&q, *s)))
         .flatten();
     if let Some(l) = limit {
         return Plan {
@@ -971,17 +971,17 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
 }
 
 /// `top(n; ::col)` / `bottom(n; ::col)` on a numeric page column.
-fn limit_of(q: &Q, stage: NodeId) -> Option<Limit> {
-    if q.name(stage) != "agg" {
+fn limit_of(q: &Q, command: NodeId) -> Option<Limit> {
+    if q.name(command) != "agg" {
         return None;
     }
-    let name = q.text(stage, "name")?;
+    let name = q.text(command, "name")?;
     let descending = match name.as_str() {
         "top" => true,
         "bottom" => false,
         _ => return None,
     };
-    let kids = q.kids(stage);
+    let kids = q.kids(command);
     if kids.len() != 2 || q.name(kids[0]) != "literal" || q.name(kids[1]) != "path" {
         return None;
     }

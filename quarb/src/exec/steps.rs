@@ -127,7 +127,7 @@ pub(super) fn mark_key(marks: &[Mark]) -> Vec<(Option<String>, u64)> {
 /// paths: their pattern registers have no result capsa to land on
 /// and are discarded.
 /// The scope a nested path's predicates see one scope out. Inside a
-/// capsa (a pipeline stage's operand, `%(n = (^//p[:: < $.v]))`)
+/// capsa (a pipeline command's operand, `%(n = (^//p[:: < $.v]))`)
 /// the path forks from that capsa — its register is seeded from it
 /// and `_::x` / `$$…` read the capsa itself; in a navigation
 /// predicate (no capsa of its own) the invoking scope stays what it
@@ -228,7 +228,7 @@ pub(super) fn navigate_from(
 /// One in-flight expansion path through a path-pattern group: the
 /// current node, every node the path has traversed (the group's
 /// anchor included), the breadcrumbs its pushes have made, and the
-/// edge it most recently walked (the `$-` a pattern stage sees).
+/// edge it most recently walked (the `$-` a pattern command sees).
 /// Simple-path semantics: a hop whose target is already in `visited`
 /// is not taken — which is what makes open quantifiers terminate on
 /// cyclic crosslink data. `visited` is kept sorted (traversal order
@@ -286,7 +286,7 @@ impl GPath {
 }
 
 /// The edge `step` walked from `from` to `succ` — the `$-` referent
-/// a pattern stage sees. Crosslink labels are re-derived from the
+/// a pattern command sees. Crosslink labels are re-derived from the
 /// adapter (first matching edge; the parallel-edge caveat of
 /// `link_property` applies).
 pub(super) fn arrived_edge(
@@ -685,7 +685,7 @@ pub(super) fn expand_elems(
                         prov,
                         site: Origin {
                             node: path.node,
-                            stage: stage_now(),
+                            command: command_now(),
                         },
                         name: name.clone(),
                         value,
@@ -2100,11 +2100,11 @@ pub(super) fn apply_predicates<T>(
                         ..NO_SCOPE
                     };
                     // Under a correlation witness — a pipeline
-                    // stage's operand path, or a nested path in
+                    // command's operand path, or a nested path in
                     // an ON clause — `$*k` is THIS thread's bound
                     // node, and the predicates are evaluated
                     // under it, null-propagating, exactly as the
-                    // stage's own filter is. Re-searching the
+                    // command's own filter is. Re-searching the
                     // trace here would admit a node under
                     // whichever tuple happened to fit — the same
                     // answer for every thread.
@@ -2154,7 +2154,7 @@ pub(super) fn positional<T>(items: Vec<T>, pred: &Predicate) -> Vec<T> {
             }
         }
         // An expression predicate is not positional: both call sites
-        // (the navigation-side `apply_predicates` and the `Stage::
+        // (the navigation-side `apply_predicates` and the `Command::
         // Select` dispatch) route `Predicate::Expr` to per-capsa
         // filtering before it reaches here, so this arm is defensive —
         // it must never silently pass every item through as a filter.
@@ -2234,7 +2234,7 @@ pub(super) fn exists_binding(
 /// currently bound to null — the exprs an outer join's null binding
 /// makes vacuous. A `$*k` reference counts directly or through a
 /// path's nested step predicates (`$*1/sub[$*2::x]`, `./sub[$*1::k
-/// = 1]`); a pipe tail's stages and a push body's query are
+/// = 1]`); a pipe tail's commands and a push body's query are
 /// contexts of their own.
 pub(super) fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool {
     struct NullCtx<'a> {

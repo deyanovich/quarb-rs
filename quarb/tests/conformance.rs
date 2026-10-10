@@ -157,7 +157,7 @@ fn a_counting_adapter_answers_count_without_the_walk() {
     let out = quarb::run("/a @| count", &Counting).unwrap();
     assert!(matches!(out, quarb::QueryResult::Values(v) if v == [Value::Int(42)]));
     // Anything beyond the bare shape walks: a predicate the plan
-    // cannot carry, a projection, a second stage.
+    // cannot carry, a projection, a second command.
     let out = quarb::run("/a[1] @| count", &Counting).unwrap();
     assert!(matches!(out, quarb::QueryResult::Values(v) if v == [Value::Int(1)]));
     let out = quarb::run("/a @| count @| sum", &Counting).unwrap();

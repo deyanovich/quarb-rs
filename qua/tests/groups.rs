@@ -1,7 +1,7 @@
 //! Ruling #84: a group's members are its rows. A relative operand
 //! from a group reads every member's node (as `:field` reads every
-//! member's record), `$_ | …` runs its stages over the members, and
-//! a projection stage after a group is the members' values as a
+//! member's record), `$_ | …` runs its commands over the members, and
+//! a projection command after a group is the members' values as a
 //! list.
 use quarb::{AstAdapter, QueryResult, Value};
 fn doc() -> quarb_json::JsonAdapter {
@@ -87,7 +87,7 @@ fn a_parenthesized_operand_opens_on_a_field() {
             "%(u = \"OF\")"
         ]
     );
-    // a filter stage inside the operand pipe, against a pushed set
+    // a predicate command inside the operand pipe, against a pushed set
     assert_eq!(
         values(
             r#"/rows/* | .s(("the of" | ngrams(1))) | %(w = ::word) | %(hit = (:w | lower | [$_ = $.s] @| count))"#
@@ -117,9 +117,9 @@ fn membership_in_a_large_list_hashes() {
 }
 
 // A record's field holds every value its operand yields (the
-// push rule applied to records), and the stages of a
+// push rule applied to records), and the commands of a
 // parenthesized operand pipe keep a group's keys for the next
-// stage.
+// command.
 #[test]
 fn a_record_field_keeps_every_value() {
     assert_eq!(

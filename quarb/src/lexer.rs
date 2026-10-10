@@ -107,6 +107,11 @@ pub enum Token {
     Comma,
     /// `=`
     Eq,
+    /// The `=` glued to an option's name inside a simple command's
+    /// parentheses (`-n=10`, `--locale=ru`, the void `-=`): binds the
+    /// value as getopt's long form does, exempt from the spacing
+    /// rule a binary `=` obeys.
+    OptEq,
     /// `!=`
     Ne,
     /// `<=`
@@ -188,7 +193,7 @@ pub enum Token {
     /// A double-quoted string with `${...}` holes — an interpolation.
     /// Hole expressions are lexed and parsed at parse time.
     Interp(Vec<InterpPart>),
-    /// A backtick shell literal — sugar for the `sh(...)` stage,
+    /// A backtick shell literal — sugar for the `sh(...)` command,
     /// interpolated like a double-quoted string (Perl's `qx`).
     Shell(Vec<InterpPart>),
 }
@@ -525,6 +530,34 @@ fn after_call_head(tokens: &[Token], glued: bool) -> bool {
 /// the character after it (`None` at the end). Spaced on one side
 /// only, or on neither, the operator is refused with the spaced
 /// spelling, never read as something else.
+/// Whether the tokens end in an option's name as a simple command
+/// spells one: a dash-led word (`-n`, the lone `-` of the void
+/// option) or `--` with a glued word (`--locale`).
+fn option_name_before(tokens: &[Token]) -> bool {
+    match tokens.last() {
+        Some(Token::Name {
+            text,
+            quoted: false,
+            glued,
+        }) => {
+            if text == "-" || is_option_word(text) {
+                return true;
+            }
+            *glued && matches!(tokens.get(tokens.len().wrapping_sub(2)), Some(Token::DashDash))
+        }
+        _ => false,
+    }
+}
+
+/// A short option's spelling: a dash, then a letter, then word
+/// characters (`-n`, `-casefold`). A dash before a digit is minus.
+pub fn is_option_word(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next() == Some('-')
+        && chars.next().is_some_and(|c| c.is_alphabetic())
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+}
+
 fn binary(op: &str, glued: bool, next: Option<char>) -> Result<()> {
     if glued || !next.is_none_or(char::is_whitespace) {
         return Err(QuarbError::lex(format!(
@@ -573,7 +606,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // A `/.../` regex literal on the right of `=~` / `!~`,
             // where `/` cannot be a hop. Elsewhere `/` is navigation.
             // `s/pat/repl/mods` directly after a pipe — the
-            // substitution stage. `\/` escapes a literal slash.
+            // substitution command. `\/` escapes a literal slash.
             's' if at(i + 1) == Some('/') && matches!(tokens.last(), Some(Token::Pipe)) => {
                 i = lex_subst(&chars, i, &mut tokens)?
             }
@@ -1045,6 +1078,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // The expression head `= expr` opens the query and is no
             // binary operator; everywhere else `=` is one.
             '=' => {
+                // Glued to an option's name (`-n=`, `--locale=`, the
+                // void `-=`), the `=` binds the option's value.
+                if glued && option_name_before(&tokens) {
+                    tokens.push(Token::OptEq);
+                    i += 1;
+                    continue;
+                }
                 if !tokens.is_empty() {
                     binary("=", glued, at(i + 1))?;
                 }
@@ -1564,7 +1604,7 @@ fn lex_colons(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>
     Ok(i)
 }
 
-/// The substitution stage `s/pat/repl/mods` after a pipe.
+/// The substitution command `s/pat/repl/mods` after a pipe.
 fn lex_subst(chars: &[char], mut i: usize, tokens: &mut Vec<Token>) -> Result<usize> {
     let at = |j: usize| chars.get(j).copied();
     i += 2;

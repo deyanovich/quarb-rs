@@ -16,7 +16,7 @@
 //!   through the adapter's pointer/locator).
 //!
 //! Errors surface as Python `ValueError` with the engine's message
-//! — no envelopes. The shell stage stays gated: the run never
+//! — no envelopes. The shell command stays gated: the run never
 //! opens it, so `sh()` / backticks fail with the engine's normal
 //! gate error. The native target has a clock, so the
 //! invocation instant for `now()` is `SystemTime::now()` at call
@@ -155,6 +155,76 @@ impl Doc {
                 quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
                     .and_then(|q| q.run($a, &run))
                     .map(|o| o.result)
+                    .map_err(|e| e.to_string())
+            }};
+        }
+        match self {
+            Doc::Json(a) => go!(a),
+            Doc::Csv(a) => go!(a),
+            Doc::Xml(a) => go!(a),
+            Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
+            Doc::Mount(a) => go!(a),
+            Doc::Remote(a) => go!(a),
+        }
+    }
+
+    /// Run `query` with its closing `@| table` taken off: the rows
+    /// (a koine `table` node as its rows' records), the text table,
+    /// and the HTML grid.
+    fn table(&self, query: &str) -> Result<(Vec<Value>, String, String), String> {
+        let (secs, nanos) = now_parts();
+        let run = quarb::Run {
+            now: Some((secs, nanos)),
+            ..Default::default()
+        };
+        macro_rules! go {
+            ($a:expr) => {{
+                let out = quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
+                    .and_then(|q| q.without_closing().run($a, &run))
+                    .map_err(|e| e.to_string())?;
+                let closing = out
+                    .closing
+                    .filter(|c| !c.csv)
+                    .ok_or_else(|| "the query does not close in @| table".to_string())?;
+                let rows: Vec<Value> =
+                    quarb::table_rows_of($a, out.result, &closing.columns, &|n| self.render(n));
+                let columns = (!closing.columns.is_empty()).then_some(closing.columns.as_slice());
+                let text = quarb::tabulate_with(&rows, columns, false, b',');
+                let html = quarb::table_html_plain(&rows, columns);
+                Ok((rows, text, html))
+            }};
+        }
+        match self {
+            Doc::Json(a) => go!(a),
+            Doc::Csv(a) => go!(a),
+            Doc::Xml(a) => go!(a),
+            Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
+            Doc::Mount(a) => go!(a),
+            Doc::Remote(a) => go!(a),
+        }
+    }
+
+    /// The static plan of `query`: every step priced by the
+    /// adapter's own estimate, under the budget's cap when given.
+    fn plan(
+        &self,
+        query: &str,
+        budget: Option<&quarb::plan::Budget>,
+    ) -> Result<quarb::plan::Plan, String> {
+        let (secs, nanos) = now_parts();
+        let run = quarb::Run {
+            now: Some((secs, nanos)),
+            ..Default::default()
+        };
+        macro_rules! go {
+            ($a:expr) => {{
+                quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
+                    .map(|q| match budget {
+                        Some(b) => q.plan_within($a, b),
+                        None => q.plan($a),
+                    })
                     .map_err(|e| e.to_string())
             }};
         }
@@ -413,7 +483,19 @@ struct Document {
 }
 
 impl Document {
-    fn run_query(&self, query: &str) -> PyResult<QueryResult> {
+    fn run_query(&self, query: &str, budget: Option<&str>) -> PyResult<QueryResult> {
+        if let Some(spec) = budget {
+            let b = quarb::plan::Budget::parse(spec).map_err(PyValueError::new_err)?;
+            let plan = self
+                .doc
+                .plan(query, Some(&b))
+                .map_err(PyValueError::new_err)?;
+            if let Some(why) = b.exceeded_by(&plan) {
+                return Err(PyValueError::new_err(
+                    quarb::QuarbError::refused(why).to_string(),
+                ));
+            }
+        }
         self.doc.execute(query).map_err(PyValueError::new_err)
     }
 }
@@ -429,9 +511,17 @@ impl Document {
     /// Execute `query` and return its values, typed: ints, floats,
     /// strings, None, datetimes, timedeltas, Quantity, dicts for
     /// records, lists. A node result renders as pointer/locator
-    /// strings.
-    fn values(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Py<PyAny>>> {
-        match self.run_query(query)? {
+    /// strings. `budget` ("nodes=1M,bytes=2GiB,strict") prices the
+    /// query first and raises `ValueError` when its plan passes the
+    /// bound, before anything is read.
+    #[pyo3(signature = (query, budget=None))]
+    fn values(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        budget: Option<&str>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        match self.run_query(query, budget)? {
             QueryResult::Values(vs) => vs.iter().map(|v| value_to_py(py, v)).collect(),
             QueryResult::Nodes(ns) => ns
                 .into_iter()
@@ -443,8 +533,9 @@ impl Document {
     /// Execute `query` expecting at most one value: the typed
     /// value, or None when the result is empty. More than one
     /// value raises `ValueError` — use `values` for streams.
-    fn value(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
-        let mut vs = self.values(py, query)?;
+    #[pyo3(signature = (query, budget=None))]
+    fn value(&self, py: Python<'_>, query: &str, budget: Option<&str>) -> PyResult<Py<PyAny>> {
+        let mut vs = self.values(py, query, budget)?;
         match vs.len() {
             0 => Ok(py.None()),
             1 => Ok(vs.pop().unwrap()),
@@ -456,8 +547,14 @@ impl Document {
 
     /// Execute `query` expecting record results: a list of dicts.
     /// A non-record value raises `TypeError`.
-    fn records(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Py<PyAny>>> {
-        match self.run_query(query)? {
+    #[pyo3(signature = (query, budget=None))]
+    fn records(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        budget: Option<&str>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        match self.run_query(query, budget)? {
             QueryResult::Values(vs) => vs
                 .iter()
                 .map(|v| match v {
@@ -475,13 +572,67 @@ impl Document {
 
     /// Execute `query` expecting a node result: the matched nodes'
     /// pointers/locators. A value result raises `TypeError`.
-    fn nodes(&self, query: &str) -> PyResult<Vec<String>> {
-        match self.run_query(query)? {
+    #[pyo3(signature = (query, budget=None))]
+    fn nodes(&self, query: &str, budget: Option<&str>) -> PyResult<Vec<String>> {
+        match self.run_query(query, budget)? {
             QueryResult::Nodes(ns) => Ok(ns.into_iter().map(|n| self.doc.render(n)).collect()),
             QueryResult::Values(_) => Err(PyTypeError::new_err(
                 "nodes() expects a node result; the query projected values (use values())",
             )),
         }
+    }
+
+    /// Run a query whose closing command is `@| table` and return
+    /// `(rows, text, html)`: the rows as typed values (records as
+    /// dicts; a document's own table as its rows' records), the
+    /// text table as `qua` prints it, and the HTML grid every
+    /// browser host renders (dress it with `quarb.TABLE_CSS`).
+    /// Raises `ValueError` when the query does not close in
+    /// `@| table`, or when `budget` refuses it.
+    #[pyo3(signature = (query, budget=None))]
+    fn table(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        budget: Option<&str>,
+    ) -> PyResult<(Vec<Py<PyAny>>, String, String)> {
+        if let Some(spec) = budget {
+            let b = quarb::plan::Budget::parse(spec).map_err(PyValueError::new_err)?;
+            let plan = self
+                .doc
+                .plan(query, Some(&b))
+                .map_err(PyValueError::new_err)?;
+            if let Some(why) = b.exceeded_by(&plan) {
+                return Err(PyValueError::new_err(
+                    quarb::QuarbError::refused(why).to_string(),
+                ));
+            }
+        }
+        let (rows, text, html) = self.doc.table(query).map_err(PyValueError::new_err)?;
+        let rows = rows
+            .iter()
+            .map(|v| value_to_py(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((rows, text, html))
+    }
+
+    /// Price `query` before it runs: its static plan as the
+    /// `quarb/plan` kaiv payload — per step the nodes and bytes it
+    /// may reach as ranges (`nodes-min`, `nodes-max`, …), from the
+    /// document's own estimate. With `budget`, the estimators stop
+    /// counting at the budget's cap, as `values(..., budget=)` does
+    /// before refusing.
+    #[pyo3(signature = (query, budget=None))]
+    fn plan(&self, query: &str, budget: Option<&str>) -> PyResult<String> {
+        let b = budget
+            .map(quarb::plan::Budget::parse)
+            .transpose()
+            .map_err(PyValueError::new_err)?;
+        let plan = self
+            .doc
+            .plan(query, b.as_ref())
+            .map_err(PyValueError::new_err)?;
+        Ok(plan.to_kaiv(query))
     }
 
     fn __repr__(&self) -> String {
@@ -635,9 +786,19 @@ fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
     }
 }
 
+/// Whether `query` closes in `@| table` — the rule under which a
+/// result renders as the HTML grid in every browser host, and the
+/// notebook's rich display switches on the same condition.
+#[pyfunction]
+fn closes_with_table(query: &str) -> bool {
+    quarb::closes_with_table(query)
+}
+
 #[pymodule]
 fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("TABLE_CSS", quarb::TABLE_CSS)?;
+    m.add_function(wrap_pyfunction!(closes_with_table, m)?)?;
     m.add_class::<Document>()?;
     m.add_class::<Quantity>()?;
     m.add_function(wrap_pyfunction!(loads, m)?)?;

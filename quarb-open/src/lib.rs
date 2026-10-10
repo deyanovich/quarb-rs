@@ -303,6 +303,14 @@ pub fn is_html(path: Option<&Path>, text: &str) -> bool {
 /// model.
 /// A DjVu by its extension (`.djvu`, `.djv`): the text layer's
 /// reading, at `text:`.
+/// An OFD package (GB/T 33190), the fixed-layout reading's text
+/// level under `text:`; the plain mount reads the zip's members.
+pub fn is_ofd(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ofd"))
+}
+
 pub fn is_djvu(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -323,6 +331,20 @@ pub fn binary_text_kind(path: &Path) -> Option<&'static str> {
         // OpenOffice.org 1.0's; `.ods` is a spreadsheet (xlsx's
         // reading), `.odp` a deck, neither a text.
         "odt" | "fodt" | "sxw" => Some("odt"),
+        // Hangul Word Processor, the OWPML package; the binary
+        // `.hwp` is not read yet.
+        "hwpx" => Some("hwpx"),
+        // Uniform Office Format text: UOF 1.0 one XML, UOF 2.0 a
+        // package; both by the root `uof:UOF`.
+        "uot" | "uof" => std::fs::read(path)
+            .ok()
+            .filter(|b| quarb_text_uof::is_uof(b))
+            .map(|_| "uof"),
+        // HWP 5 by its OLE2 magic and FileHeader stream.
+        "hwp" => std::fs::read(path)
+            .ok()
+            .filter(|b| quarb_text_hwpx::is_hwp5(b))
+            .map(|_| "hwp"),
         // Word 97–2003 by its OLE2 magic; a plain-text file named
         // `.doc` (the kernel's m68k notes) keeps the plain reading.
         "doc" => std::fs::read(path)
@@ -358,6 +380,12 @@ pub fn binary_text_level(
             .map_err(|e| anyhow::anyhow!("as Word: {e}")),
         "odt" => quarb_text_odt::parse_with_decoding(bytes, &current_decoding(ctx)?)
             .map_err(|e| anyhow::anyhow!("as OpenDocument: {e}")),
+        "hwpx" => quarb_text_hwpx::parse_with_decoding(bytes, &current_decoding(ctx)?)
+            .map_err(|e| anyhow::anyhow!("as Hangul Word Processor: {e}")),
+        "hwp" => quarb_text_hwpx::parse_hwp_with_decoding(bytes, &current_decoding(ctx)?)
+            .map_err(|e| anyhow::anyhow!("as Hangul Word Processor 5: {e}")),
+        "uof" => quarb_text_uof::parse_with_decoding(bytes, &current_decoding(ctx)?)
+            .map_err(|e| anyhow::anyhow!("as Uniform Office Format: {e}")),
         "doc" => quarb_text_doc::parse(bytes).map_err(|e| anyhow::anyhow!("as Word 97: {e}")),
         _ => quarb_text_epub::parse_with_decoding(bytes, &current_decoding(ctx)?)
             .map_err(|e| anyhow::anyhow!("as EPUB: {e}")),
@@ -599,6 +627,10 @@ pub fn koine_level_inner(spec: &str, ctx: &SourceCtx) -> anyhow::Result<quarb_te
             "atrep cannot import a PDF — the print reading is text:{}",
             target.display()
         ),
+        Some("ofd") => anyhow::bail!(
+            "atrep cannot import an OFD — the print reading is text:{}",
+            target.display()
+        ),
         _ => anyhow::bail!(
             "no atrep import for this format yet — the native reading is text:{}",
             target.display()
@@ -719,6 +751,11 @@ pub fn corpus_level(
             ),
         };
     let target = Path::new(rest);
+    if is_ofd(target) {
+        anyhow::bail!(
+            "corpus: needs a prose reading, and an OFD's is line geometry — text:{rest} reads its lines"
+        );
+    }
     if is_archive(target) && binary_text_kind(target).is_none() {
         anyhow::bail!(
             "corpus: over an archive is not supported yet — mount it as text:{rest}, or corpus: one member"
@@ -1012,6 +1049,11 @@ pub fn lit_level(
             ),
         };
     let target = Path::new(rest);
+    if is_ofd(target) {
+        anyhow::bail!(
+            "lit: reads TEI, USX, OSIS, USFM, FictionBook, RNC, OpenCorpora, PROIEL and litogramma — {rest} is an OFD, a fixed layout whose lines text:{rest} reads"
+        );
+    }
     if is_archive(target) && binary_text_kind(target).is_none() {
         anyhow::bail!(
             "lit: over an archive is not supported yet — mount it as text:{rest}, or lit: one member"
@@ -1029,6 +1071,8 @@ pub fn lit_level(
             "docx" => "a Word document",
             "doc" => "a Word 97 document",
             "odt" => "an OpenDocument text",
+            "hwpx" | "hwp" => "a Hangul Word Processor document",
+            "uof" => "a Uniform Office Format text",
             _ => "an EPUB",
         };
         anyhow::bail!(
@@ -1503,7 +1547,7 @@ pub fn family_of<A: 'static>() -> &'static str {
     match krate {
         "quarb" => "quarb",
         "quarb_yaml" | "quarb_toml" | "quarb_cbor" => "json",
-        "quarb_text_pdf" | "quarb_text_koine" | "quarb_text_djvu" => "text",
+        "quarb_text_pdf" | "quarb_text_koine" | "quarb_text_djvu" | "quarb_text_ofd" => "text",
         other => Box::leak(
             other
                 .strip_prefix("quarb_")
@@ -1549,7 +1593,7 @@ pub struct OpenOpts {
     /// Disable grafting entirely (the CLI's --no-graft).
     pub no_graft: bool,
     pub refs: Option<PathBuf>,
-    /// Let `sh(...)` / backtick stages run (the CLI's --allow-shell);
+    /// Let `sh(...)` / backtick commands run (the CLI's --allow-shell);
     /// the literary and corpus readings' `annotate=` needs it.
     pub allow_shell: bool,
 }
@@ -1736,7 +1780,7 @@ pub fn open_target(target: &str, opts: &OpenOpts) -> anyhow::Result<Mounted> {
     open_mount(Path::new(target), opts)
 }
 
-/// Mount kaiv text by its extension's pipeline stage: `.kaiv` is
+/// Mount kaiv text by its extension's pipeline command: `.kaiv` is
 /// canonical, `.daiv` is authored (compile + denormalize), `.raiv`
 /// is relational (denormalize). The file's directory anchors the
 /// resolver, so `.!units` / `.!types` imports (and a sibling
@@ -1951,6 +1995,18 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         // per file.
         if target.is_dir() {
             let a = Rc::new(conllu_dir_text(target, ctx)?);
+            let r = a.clone();
+            return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+        }
+        // An OFD is a zip too, read as the fixed-layout document it
+        // is: its pages' text as lines under the outline.
+        if is_ofd(target) {
+            let bytes =
+                std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
+            let a = Rc::new(
+                quarb_text_ofd::parse(&bytes)
+                    .with_context(|| format!("reading {} as OFD", target.display()))?,
+            );
             let r = a.clone();
             return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
         }

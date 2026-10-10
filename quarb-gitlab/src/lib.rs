@@ -1053,7 +1053,7 @@ impl AstAdapter for GitlabAdapter {
                             "ref" => "/ref",
                             "source" => "/source",
                             "duration" => "/duration",
-                            "stage" => "/stage",
+                            "command" => "/command",
                             "size" => "/size",
                             _ => return None,
                         };

@@ -1,0 +1,24 @@
+[package]
+name = "quarb-text-hwpx"
+description = "Hangul Word Processor (.hwpx, OWPML) producer for the Quarb text level: the reader's model from declared structure, in the Word and OpenDocument readings' vocabulary"
+keywords = ["quarb", "hwpx", "hwp", "owpml", "text"]
+categories = ["parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.36.0" }
+quarb-text = { path = "../quarb-text", version = "0.36.0" }
+quick-xml.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+cfb = "0.7"
+flate2.workspace = true
+
+[dev-dependencies]
+quarb = { path = "../quarb", version = "0.36.0" }
+zip.workspace = true

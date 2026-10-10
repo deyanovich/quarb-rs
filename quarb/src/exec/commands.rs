@@ -5,10 +5,10 @@ use super::*;
 /// One field of a record — or of every record in a list, so a
 /// group's member list reads elementwise; anything
 /// else is null.
-/// The properties a stage projects directly on the capsa's node:
+/// The properties a command projects directly on the capsa's node:
 /// every `::name` operand in its expressions (a bare relative path
 /// with no steps and a named projection).
-fn projected_properties(stage: &Stage) -> Vec<String> {
+fn projected_properties(command: &Command) -> Vec<String> {
     struct Props(Vec<String>);
     impl visit::Visitor for Props {
         fn operand(&mut self, o: &Operand) {
@@ -26,22 +26,22 @@ fn projected_properties(stage: &Stage) -> Vec<String> {
             }
             visit::walk_operand(self, o);
         }
-        fn stage(&mut self, s: &Stage) {
-            if !matches!(s, Stage::Subcontext { .. }) {
-                visit::walk_stage(self, s);
+        fn command(&mut self, s: &Command) {
+            if !matches!(s, Command::Subcontext { .. }) {
+                visit::walk_command(self, s);
             }
         }
     }
     let mut v = Props(Vec::new());
-    v.stage(stage);
+    v.command(command);
     v.0
 }
 
-/// Whether a stage's expressions read `@*` (directly or through a
+/// Whether a command's expressions read `@*` (directly or through a
 /// pipe tail) — the trigger for materializing the input snapshot.
-/// Subcontext and push bodies are excluded: their stages get
+/// Subcontext and push bodies are excluded: their commands get
 /// contexts of their own.
-pub(super) fn stage_reads_context(stage: &Stage) -> bool {
+pub(super) fn command_reads_context(command: &Command) -> bool {
     struct Reads(bool);
     impl visit::Visitor for Reads {
         fn operand(&mut self, o: &Operand) {
@@ -51,9 +51,9 @@ pub(super) fn stage_reads_context(stage: &Stage) -> bool {
                 visit::walk_operand(self, o);
             }
         }
-        fn stage(&mut self, s: &Stage) {
-            if !matches!(s, Stage::Subcontext { .. }) {
-                visit::walk_stage(self, s);
+        fn command(&mut self, s: &Command) {
+            if !matches!(s, Command::Subcontext { .. }) {
+                visit::walk_command(self, s);
             }
         }
         fn elem(&mut self, e: &PathElem) {
@@ -69,7 +69,7 @@ pub(super) fn stage_reads_context(stage: &Stage) -> bool {
         }
     }
     let mut v = Reads(false);
-    v.stage(stage);
+    v.command(command);
     v.0
 }
 
@@ -124,16 +124,16 @@ pub(super) fn to_result(caps: Vec<Capsa>, projected: bool) -> QueryResult {
     }
 }
 
-/// Apply one pipeline stage to the capsa context.
-/// Run `stages` in order. `@| group(…)` directly followed by
+/// Apply one pipeline command to the capsa context.
+/// Run `commands` in order. `@| group(…)` directly followed by
 /// `| count` is one fused step: the groups are tallied as they
 /// form, and no group materializes its member list, its
 /// provenance list, or its topic list only for `count` to take
 /// the length. The result — topic, register, provenance — is the
-/// one the two stages produce; a word count over a novel spends
+/// one the two commands produce; a word count over a novel spends
 /// its time on the words instead of on lists it then discards.
-pub(super) fn apply_stages(
-    stages: &[Stage],
+pub(super) fn apply_commands(
+    commands: &[Command],
     offset: usize,
     top: bool,
     mut caps: Vec<Capsa>,
@@ -142,45 +142,46 @@ pub(super) fn apply_stages(
     outer: Option<&Scope<'_>>,
 ) -> Vec<Capsa> {
     let mut i = 0;
-    while i < stages.len() {
+    while i < commands.len() {
         if top {
-            with_run(|s| s.stage = (offset + i) as u32 + 1);
+            with_run(|s| s.command = (offset + i) as u32 + 1);
         }
-        if let (Stage::Agg(call), Some(Stage::Func(next))) = (&stages[i], stages.get(i + 1)) {
+        if let (Command::Agg(call), Some(Command::Func(next))) = (&commands[i], commands.get(i + 1))
+        {
             if call.name == "group" && next.name == "count" && next.args.is_empty() {
                 caps = keyed_agg(call, caps, adapter, trace, outer, None, true);
                 i += 2;
                 continue;
             }
         }
-        caps = apply_stage(&stages[i], caps, adapter, trace, outer);
+        caps = apply_command(&commands[i], caps, adapter, trace, outer);
         i += 1;
     }
     caps
 }
 
-pub(crate) fn apply_stage(
-    stage: &Stage,
+pub(crate) fn apply_command(
+    command: &Command,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
 ) -> Vec<Capsa> {
-    // The `@*` snapshot: materialized only when the stage actually
+    // The `@*` snapshot: materialized only when the command actually
     // reads the context (the scan is cheap; the clone is not).
-    let snapshot = stage_reads_context(stage).then(|| Peers::new(caps.clone()));
+    let snapshot = command_reads_context(command).then(|| Peers::new(caps.clone()));
     let peers = snapshot.as_ref();
-    // The properties this stage projects (`::x`), read on every
+    // The properties this command projects (`::x`), read on every
     // capsa's node: a remote adapter may fetch them for the whole
     // frontier first.
-    let names = projected_properties(stage);
+    let names = projected_properties(command);
     if !names.is_empty() {
         let nodes: Vec<NodeId> = caps.iter().map(|c| c.node).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         adapter.prefetch_properties(&nodes, &names);
     }
-    match stage {
-        // `sh('cmd')` — the shell stage (gated: [`gate_shell`]
+    match command {
+        // `sh('cmd')` — the shell command (gated: [`gate_shell`]
         // refused it long before we got here unless the adapter
         // allows it). The command — one argument, evaluated per
         // capsa, so an interpolated string parameterizes it — runs
@@ -198,11 +199,11 @@ pub(crate) fn apply_stage(
         // quotes, lists, verbatim — whatever vocabulary the
         // adapter speaks); a topic value renders as text. The
         // export button and the pipe are the same verb.
-        Stage::Func(call)
+        Command::Func(call)
             if matches!(call.name.as_str(), "markdown" | "html" | "atrep" | "conllu") =>
         {
             let kind = crate::koine::Render::from_name(&call.name)
-                .expect("stage names are valid render names");
+                .expect("command names are valid render names");
             caps.into_iter()
                 .map(|mut c| {
                     let v = match &c.topic {
@@ -217,7 +218,7 @@ pub(crate) fn apply_stage(
                 })
                 .collect()
         }
-        Stage::Func(call) if call.name == "json" || call.name == "jsonl" => caps
+        Command::Func(call) if call.name == "json" || call.name == "jsonl" => caps
             .into_iter()
             .map(|mut c| {
                 let v = match &c.topic {
@@ -233,11 +234,11 @@ pub(crate) fn apply_stage(
         // adapter's `::link` record (title, href, text), whatever
         // the topic was, so `::lemma | link` still links the
         // section. An adapter with no notion of a link yields null.
-        Stage::Func(call) if call.name == "link" => caps
+        Command::Func(call) if call.name == "link" => caps
             .into_iter()
             .map(|mut c| {
                 c.topic = Some(adapter.property(c.node, "link").unwrap_or(Value::Null));
-                c.prov = Prov::at(c.node, stage_now());
+                c.prov = Prov::at(c.node, command_now());
                 c
             })
             .collect(),
@@ -246,12 +247,12 @@ pub(crate) fn apply_stage(
         // subtree's value form. `@| kaiv` (stdlib) renders the
         // whole stream as one document.
         #[cfg(not(feature = "kaiv"))]
-        Stage::Func(call) if call.name == "kaiv" => {
+        Command::Func(call) if call.name == "kaiv" => {
             record_refusal("kaiv output is not compiled in (feature kaiv)".into());
             caps
         }
         #[cfg(feature = "kaiv")]
-        Stage::Func(call) if call.name == "kaiv" => caps
+        Command::Func(call) if call.name == "kaiv" => caps
             .into_iter()
             .map(|mut c| {
                 let doc = match &c.topic {
@@ -269,7 +270,7 @@ pub(crate) fn apply_stage(
         // XML (record fields → elements, `@name` fields
         // attributes, `#text` the text; a list repeats an <item>);
         // a node context serializes the subtree.
-        Stage::Func(call) if call.name == "xml" => caps
+        Command::Func(call) if call.name == "xml" => caps
             .into_iter()
             .map(|mut c| {
                 let xml = match &c.topic {
@@ -284,12 +285,21 @@ pub(crate) fn apply_stage(
         // The gate again, where the command would run: the scan
         // before evaluation is the early refusal, this is the one
         // no query shape can walk around.
-        Stage::Func(call) if call.name == "sh" && !run_option(|o| o.allow_shell) => {
-            record_refusal("the sh(...) stage runs external commands; pass --allow-shell".into());
+        // An environment command: the host's namespace under the
+        // alias runs it (`sh:tr`, `go:mytool`), per capsa or over
+        // the context by the control operator.
+        Command::Func(call) if crate::env::split_env(&call.name).is_some() => {
+            env_command(call, caps, adapter, trace, outer, peers)
+        }
+        Command::Agg(call) if crate::env::split_env(&call.name).is_some() => {
+            env_agg_command(call, caps, adapter, trace, outer, peers)
+        }
+        Command::Func(call) if call.name == "sh" && !run_option(|o| o.shell_allowed()) => {
+            record_refusal("the sh(...) command runs external commands; pass --allow-shell".into());
             Vec::new()
         }
-        Stage::Func(call) if call.name == "sh" => {
-            shell_stage(call, caps, adapter, trace, outer, peers)
+        Command::Func(call) if call.name == "sh" => {
+            shell_command(call, caps, adapter, trace, outer, peers)
         }
         // `default(fallback)`: the topic when non-null, else the
         // fallback — which may be an expression evaluated against
@@ -297,13 +307,13 @@ pub(crate) fn apply_stage(
         // coalesce idiom (chainable). Literal
         // fallbacks keep working through stdlib for adapter-free
         // callers.
-        Stage::Func(call) if call.name == "default" => {
-            default_stage(call, caps, adapter, trace, outer, peers)
+        Command::Func(call) if call.name == "default" => {
+            default_command(call, caps, adapter, trace, outer, peers)
         }
         // `record(...)` (alias `rec`) builds a record per capsa: expression fields
         // evaluate against the capsa's node, auto-named by their
         // projection or named by a preceding literal.
-        Stage::Func(call) if matches!(call.name.as_str(), "record" | "rec") => caps
+        Command::Func(call) if matches!(call.name.as_str(), "record" | "rec") => caps
             .into_iter()
             .enumerate()
             .map(|(i, mut c)| {
@@ -320,12 +330,12 @@ pub(crate) fn apply_stage(
         // given fields: register fields first (the `%.` layout),
         // the args after in written order, an arg overriding a
         // register field that shares its name.
-        Stage::RecordWith(call) => record_with_stage(call, caps, adapter, trace, outer, peers),
+        Command::RecordWith(call) => record_with_command(call, caps, adapter, trace, outer, peers),
         // A keyed aggregate on the plain pipe works per capsa on the
         // capsa's *members* (a group's rows): reorder or filter them,
         // rebuild the list topic from the survivors. A memberless
         // capsa passes through unchanged.
-        Stage::Func(call) if stdlib::known_keyed(&call.name) => caps
+        Command::Func(call) if stdlib::known_keyed(&call.name) => caps
             .into_iter()
             .map(|mut c| {
                 if c.members.is_empty() {
@@ -359,7 +369,7 @@ pub(crate) fn apply_stage(
         // expressions off each capsa's *members* (a group's rows) —
         // `@| group(::k) | corr(:x; :y)`. A memberless capsa has no
         // pairs to associate: null.
-        Stage::Func(call) if stdlib::association(&call.name) => caps
+        Command::Func(call) if stdlib::association(&call.name) => caps
             .into_iter()
             .map(|mut c| {
                 let members = std::mem::take(&mut c.members);
@@ -381,38 +391,38 @@ pub(crate) fn apply_stage(
         // reads text as a number under a locale's conventions; so is
         // `ngrams`: `@| ngrams(n)` windows the stream, `| ngrams(n)`
         // the word n-grams of a text.)
-        Stage::Func(call)
+        Command::Func(call)
             if stdlib::known_agg(&call.name)
                 && !matches!(call.name.as_str(), "number" | "ngrams") =>
         {
-            agg_as_func_stage(call, caps, adapter)
+            agg_as_func_command(call, caps, adapter)
         }
-        // Per-capsa scalar transform; a function may expand one topic
+        // Per-capsa scalar transform; a command may expand one topic
         // into several (e.g. `lines`), forking the capsa.
-        Stage::Func(call) => func_stage(call, caps, adapter, trace, outer, peers),
-        // The map pipe: the inner stage runs once per element of
+        Command::Func(call) => func_command(call, caps, adapter, trace, outer, peers),
+        // The map pipe: the inner command runs once per element of
         // the topic, per capsa — capsae unchanged, the list
-        // reassembled (an expanding inner stage flattens). Inside,
+        // reassembled (an expanding inner command flattens). Inside,
         // `$_` is the element and `@*` reads the element-context.
         // `.v(body){N}` — the iteration loop: the push
-        // applied round after round, every round a stage of its own
+        // applied round after round, every round a command of its own
         // (its own snapshot, so each capsa reads the previous
         // round's values); exactly N rounds for `{N}`, else at least
         // `min` and on until a round repoints no name and changes
         // no topic, or `max` (the quantifier bound when open).
-        Stage::Repeat {
-            stage: inner,
+        Command::Repeat {
+            command: inner,
             min,
             max,
-        } => repeat_stage(inner, min, max, caps, adapter, trace, outer),
-        Stage::Map(inner) => map_stage(inner, caps, adapter, trace, outer),
+        } => repeat_command(inner, min, max, caps, adapter, trace, outer),
+        Command::Map(inner) => map_command(inner, caps, adapter, trace, outer),
         // The spread: fork a list topic into one thread per
         // element; null forks to nothing, a non-list scalar passes
         // through, a record passes whole. The outer form `...?`
         // differs in one case: where the plain spread would fork
         // to nothing, it emits ONE thread with a null topic — the
         // row survives its empty side (OPTIONAL MATCH).
-        Stage::Spread { outer } => caps
+        Command::Spread { outer } => caps
             .into_iter()
             .flat_map(|c| {
                 let mut values = match c.topic.clone() {
@@ -447,7 +457,7 @@ pub(crate) fn apply_stage(
                 })
             })
             .collect(),
-        // A navigation stage: resume navigation from each capsa's
+        // A navigation command: resume navigation from each capsa's
         // node (or from `^` / its `(name)` mark), registers and
         // marks carried forward — the pipeline spelling of a path
         // continuation. The parser admits it only in navigation
@@ -455,13 +465,13 @@ pub(crate) fn apply_stage(
         // exactly as in the path: same predicate scope law (no
         // capsa of their own), same group/breadcrumb machinery,
         // same (node, register) dedup as a branch union.
-        Stage::Nav(branch) => nav_stage(branch, caps, adapter, trace, outer, peers),
+        Command::Nav(branch) => nav_command(branch, caps, adapter, trace, outer, peers),
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: the shared push spelling is
         // context-typed. A scalar goes to the register, a node to
         // the mark array (anonymously when no name is given — the
         // slot stays `(N)`-addressable); the two never mix.
-        Stage::Push(name) => caps
+        Command::Push(name) => caps
             .into_iter()
             .map(|mut c| {
                 match c.topic.clone() {
@@ -473,7 +483,7 @@ pub(crate) fn apply_stage(
                         prov: c.prov.clone(),
                         site: Origin {
                             node: c.node,
-                            stage: stage_now(),
+                            command: command_now(),
                         },
                         name: name.clone(),
                         value: topic,
@@ -484,33 +494,48 @@ pub(crate) fn apply_stage(
             .collect(),
         // Evaluate the sub-expression from each node, reduce to a
         // scalar, set it as the topic, and push it.
-        Stage::Subcontext { name, body } => {
-            subcontext_stage(name, body, caps, adapter, trace, outer, peers)
+        Command::Subcontext { name, body } => {
+            subcontext_command(name, body, caps, adapter, trace, outer, peers)
         }
         // A value expression against the capsa's node becomes the
         // topic.
-        Stage::Expr(expr) => expr_stage(expr, caps, adapter, trace, outer, peers),
+        Command::Expr(expr) => expr_command(expr, caps, adapter, trace, outer, peers),
         // ... and a pushed one is a computed column.
-        Stage::ExprPush { name, expr } => {
-            expr_push_stage(name, expr, caps, adapter, trace, outer, peers)
+        Command::ExprPush { name, expr } => {
+            expr_push_command(name, expr, caps, adapter, trace, outer, peers)
         }
         // `| .%` — the fields push: each field of the topic record
         // becomes a named regula; the topic stays the record.
-        Stage::FieldsPush => caps
+        Command::FieldsPush => caps
             .into_iter()
             .map(|mut c| {
-                if let Some(Value::Record(fields)) = &c.topic {
-                    for (k, v) in fields.clone() {
-                        c.register.push(Reg {
-                            prov: c.prov.part(&k),
-                            site: Origin {
-                                node: c.node,
-                                stage: stage_now(),
-                            },
-                            name: Some(k),
-                            value: v,
-                        });
+                match &c.topic {
+                    Some(Value::Record(fields)) => {
+                        for (k, v) in fields.clone() {
+                            c.register.push(Reg {
+                                prov: c.prov.part(&k),
+                                site: Origin {
+                                    node: c.node,
+                                    command: command_now(),
+                                },
+                                name: Some(k),
+                                value: v,
+                            });
+                        }
                     }
+                    // A topic that is not a record has no fields to
+                    // file: refused by name, never a silent empty push.
+                    other => record_refusal(format!(
+                        "the fields push '| .%' takes a record topic, not {}; a plain '| .' files any topic as one regula",
+                        match other {
+                            Some(Value::Null) | None => "a node with no topic".to_string(),
+                            Some(Value::Str(_)) => "text".to_string(),
+                            Some(Value::Int(_) | Value::Float(_)) => "a number".to_string(),
+                            Some(Value::Bool(_)) => "a boolean".to_string(),
+                            Some(Value::List(_)) => "a list".to_string(),
+                            Some(_) => "a value".to_string(),
+                        }
+                    )),
                 }
                 c
             })
@@ -518,15 +543,83 @@ pub(crate) fn apply_stage(
         // `.%(...)` / `.name%(...)` — build the record and push it,
         // the topic set to the record (`.%%(...)`: the enriched
         // register view, as `%%(...)` renders it).
-        Stage::RecordPush {
+        Command::RecordPush {
             name,
             call,
             enriched,
-        } => record_push_stage(name, call, enriched, caps, adapter, trace, outer, peers),
+        } => record_push_command(name, call, enriched, caps, adapter, trace, outer, peers),
+        // `@| .name(body)` — the aggregate push: the body runs once
+        // over the context as a whole, and its value is filed under
+        // the name on every capsa; the context passes on unchanged.
+        Command::AggPush { name, body } => {
+            if caps.is_empty() {
+                return caps;
+            }
+            let seed = seed_capsa(&caps, adapter);
+            let scope = seed.scope(None, peers, outer);
+            let (value, o) =
+                capture(|| operand_value(adapter, seed.node, body, trace, &[], scope));
+            let prov = Prov::leaf(o);
+            caps.into_iter()
+                .map(|mut c| {
+                    c.register.push(Reg {
+                        prov: prov.clone(),
+                        site: Origin {
+                            node: c.node,
+                            command: command_now(),
+                        },
+                        name: name.clone(),
+                        value: value.clone(),
+                    });
+                    c
+                })
+                .collect()
+        }
+        // `@| %(…)` — the aggregate record: every field a body over
+        // the context as a whole; one capsa, the record its topic,
+        // the shared regulae its register.
+        Command::AggRecord { call, enriched } => {
+            let seed = seed_capsa(&caps, adapter);
+            let scope = seed.scope(None, peers, outer);
+            let (fields, prov) = if *enriched {
+                let mut fields = named_register_fields(&seed.register);
+                let mut parts = named_register_parts(&seed.register);
+                for (name, value, p) in
+                    record_fields_prov(&call.args, adapter, seed.node, trace, scope)
+                {
+                    match fields.iter_mut().find(|(n, _)| n == &name) {
+                        Some((_, v)) => *v = value,
+                        None => fields.push((name.clone(), value)),
+                    }
+                    match parts.iter_mut().find(|(n, _)| n == &name) {
+                        Some((_, q)) => *q = p,
+                        None => parts.push((name, p)),
+                    }
+                }
+                (fields, Prov::record(parts))
+            } else {
+                split_fields(record_fields_prov(
+                    &call.args, adapter, seed.node, trace, scope,
+                ))
+            };
+            let mut out = seed;
+            out.topic = Some(Value::Record(fields));
+            out.prov = prov;
+            vec![out]
+        }
+        // `@| %.` / `@| $.name` — a register accessor after the
+        // aggregation pipe reads once: the regulae every capsa
+        // shares, as one capsa.
+        Command::AggRecall(r) => {
+            let mut out = seed_capsa(&caps, adapter);
+            out.topic = Some(recall(&out.register, r));
+            out.prov = recall_prov(&out.register, r);
+            vec![out]
+        }
         // `@| ungroup` flattens groups back to their member capsae,
         // each inheriting the group's key registers. A memberless
         // capsa passes through unchanged.
-        Stage::Agg(call) if call.name == "ungroup" => caps
+        Command::Agg(call) if call.name == "ungroup" => caps
             .into_iter()
             .flat_map(|c| {
                 if c.members.is_empty() {
@@ -549,43 +642,43 @@ pub(crate) fn apply_stage(
         // aggregate machinery rolls for free. With a partition key,
         // neighbors are the nearest capsae whose key compares equal,
         // original order preserved.
-        Stage::Agg(call) if call.name == "window" => {
-            window_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if call.name == "window" => {
+            window_command(call, caps, adapter, trace, outer, peers)
         }
         // `@| shift(n[, key])` — each capsa's topic becomes the
         // effective topic of the capsa `n` positions back (negative
         // looks forward; null where none exists). Registers and
         // captures stay the capsa's own.
-        Stage::Agg(call) if call.name == "shift" => {
-            shift_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if call.name == "shift" => {
+            shift_command(call, caps, adapter, trace, outer, peers)
         }
         // `@| zscore([sample][, key])` — each capsa's topic becomes
         // its standard score over the context, or over its
         // partition. Row-aligned like `shift`.
-        Stage::Agg(call) if call.name == "zscore" => {
-            zscore_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if call.name == "zscore" => {
+            zscore_command(call, caps, adapter, trace, outer, peers)
         }
         // `@| number[(level)]` and `@| outline[(level; text[; "1."])]`
         // — each capsa's topic becomes its dotted number in the
         // stream of levels, or its line of the outline. Row-aligned
         // like `shift`.
-        Stage::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
-            outline_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
+            outline_command(call, caps, adapter, trace, outer, peers)
         }
         // `@| timeline(EXPR[; ANCHOR][; forward])` — the narrative
         // point carried from capsa to capsa. Row-aligned like
         // `shift`.
-        Stage::Agg(call) if call.name == "timeline" => {
-            timeline_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if call.name == "timeline" => {
+            timeline_command(call, caps, adapter, trace, outer, peers)
         }
         // `@| corr(:a; :b)` and its kin reduce two per-capsa
         // expressions to one number over the whole context.
-        Stage::Agg(call) if stdlib::association(&call.name) => {
-            association_stage(call, caps, adapter, trace, outer, peers)
+        Command::Agg(call) if stdlib::association(&call.name) => {
+            association_command(call, caps, adapter, trace, outer, peers)
         }
         // Keyed aggregates reorder or filter the capsae themselves,
         // preserving nodes, registers, and topics.
-        Stage::Agg(call) if stdlib::known_keyed(&call.name) => {
+        Command::Agg(call) if stdlib::known_keyed(&call.name) => {
             keyed_agg(call, caps, adapter, trace, outer, peers, false)
         }
         // The order/selection family is capsa-preserving too: it
@@ -593,17 +686,17 @@ pub(crate) fn apply_stage(
         // ride along (making `@| sort_by(…) @| reverse | [..n]`
         // compose). The effective topic is baked in, keeping value
         // outputs identical to a plain reduction's.
-        Stage::Agg(call)
+        Command::Agg(call)
             if matches!(
                 call.name.as_str(),
                 "sort" | "unique" | "reverse" | "first" | "last"
             ) =>
         {
-            order_stage(call, caps, adapter)
+            order_command(call, caps, adapter)
         }
         // Positional selection from the whole context, with the same
         // numbering as the navigation-side predicates.
-        Stage::Select(pred @ (Predicate::Index(_) | Predicate::Range(_, _))) => {
+        Command::Select(pred @ (Predicate::Index(_) | Predicate::Range(_, _))) => {
             positional(caps, pred)
         }
         // An expression predicate in select position — reachable only
@@ -611,16 +704,53 @@ pub(crate) fn apply_stage(
         // which unlike the top-level `@|` does not reject it at parse
         // time — filters per capsa exactly as `| [cond]` does, never a
         // silent pass-through of every item.
-        Stage::Select(Predicate::Expr(e)) => {
-            apply_stage(&Stage::Filter(e.clone()), caps, adapter, trace, outer)
+        Command::Select(Predicate::Expr(e)) => {
+            apply_command(&Command::Filter(e.clone()), caps, adapter, trace, outer)
         }
         // Per-capsa filter: each capsa is kept iff the condition
         // holds against its node.
-        Stage::Filter(cond) => filter_stage(cond, caps, adapter, trace, outer, peers),
+        Command::Filter(cond) => filter_command(cond, caps, adapter, trace, outer, peers),
+        // `jaccard(EXPR)`: the other set from an expression — a
+        // register holding a list, a sub-pipeline's values — read
+        // once, against the first capsa's scope (every capsa of a
+        // context shares the register the set was bound in).
+        Command::Agg(call)
+            if call.name == "jaccard" && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
+        {
+            let resolved = match caps.first() {
+                Some(c) => FnCall {
+                    name: call.name.clone(),
+                    args: call
+                        .args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Expr(e) => {
+                                let mut vs = eval_operand(
+                                    adapter,
+                                    c.node,
+                                    e,
+                                    trace,
+                                    &[],
+                                    c.scope(None, peers, outer),
+                                );
+                                Arg::Lit(if vs.len() == 1 {
+                                    vs.pop().expect("one value")
+                                } else {
+                                    Value::list(vs)
+                                })
+                            }
+                            other => other.clone(),
+                        })
+                        .collect(),
+                },
+                None => call.clone(),
+            };
+            agg_command(&resolved, caps, adapter)
+        }
         // Reduce the whole context's topics to a new context.
-        Stage::Agg(call) => agg_stage(call, caps, adapter),
+        Command::Agg(call) => agg_command(call, caps, adapter),
         // Recall a register value into the topic.
-        Stage::Recall(r) => caps
+        Command::Recall(r) => caps
             .into_iter()
             .map(|mut c| {
                 c.prov = recall_prov(&c.register, r);
@@ -631,8 +761,8 @@ pub(crate) fn apply_stage(
     }
 }
 
-/// `default(x)` — the topic, or `x` where it is null. `apply_stage`'s arm.
-pub(super) fn default_stage(
+/// `default(x)` — the topic, or `x` where it is null. `apply_command`'s arm.
+pub(super) fn default_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -683,8 +813,8 @@ pub(super) fn default_stage(
         .collect()
 }
 
-/// `%(...)` — the record built from the topic. `apply_stage`'s arm.
-pub(super) fn record_with_stage(
+/// `%(...)` — the record built from the topic. `apply_command`'s arm.
+pub(super) fn record_with_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -715,8 +845,8 @@ pub(super) fn record_with_stage(
         .collect()
 }
 
-/// An aggregate name used as a per-capsa function over a list topic. `apply_stage`'s arm.
-pub(super) fn agg_as_func_stage(
+/// An aggregate name used as a per-capsa command over a list topic. `apply_command`'s arm.
+pub(super) fn agg_as_func_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -760,9 +890,9 @@ pub(super) fn agg_as_func_stage(
         .collect()
 }
 
-/// `| repeat(...)` — the iteration stage. `apply_stage`'s arm.
-pub(super) fn repeat_stage(
-    inner: &Stage,
+/// `| repeat(...)` — the iteration command. `apply_command`'s arm.
+pub(super) fn repeat_command(
+    inner: &Command,
     min: &usize,
     max: &Option<usize>,
     caps: Vec<Capsa>,
@@ -805,7 +935,7 @@ pub(super) fn repeat_stage(
         } else {
             Some(signature(&caps))
         };
-        caps = apply_stage(inner, caps, adapter, trace, outer);
+        caps = apply_command(inner, caps, adapter, trace, outer);
         round += 1;
         if let Some(b) = before
             && b == signature(&caps)
@@ -816,8 +946,8 @@ pub(super) fn repeat_stage(
     caps
 }
 
-/// `| (body)` — a subcontext run per capsa. `apply_stage`'s arm.
-pub(super) fn subcontext_stage(
+/// `| (body)` — a subcontext run per capsa. `apply_command`'s arm.
+pub(super) fn subcontext_command(
     name: &Option<String>,
     body: &Query,
     caps: Vec<Capsa>,
@@ -838,7 +968,7 @@ pub(super) fn subcontext_stage(
                 prov: prov.clone(),
                 site: Origin {
                     node: c.node,
-                    stage: stage_now(),
+                    command: command_now(),
                 },
                 name: name.clone(),
                 value: value.clone(),
@@ -852,8 +982,8 @@ pub(super) fn subcontext_stage(
         .collect()
 }
 
-/// `| expr` — an expression over the topic. `apply_stage`'s arm.
-pub(super) fn expr_stage(
+/// `| expr` — an expression over the topic. `apply_command`'s arm.
+pub(super) fn expr_command(
     expr: &Operand,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -891,8 +1021,8 @@ pub(super) fn expr_stage(
         .collect()
 }
 
-/// `.name(expr)` — push an expression's value. `apply_stage`'s arm.
-pub(super) fn expr_push_stage(
+/// `.name(expr)` — push an expression's value. `apply_command`'s arm.
+pub(super) fn expr_push_command(
     name: &Option<String>,
     expr: &Operand,
     caps: Vec<Capsa>,
@@ -911,7 +1041,7 @@ pub(super) fn expr_push_stage(
                 prov: c.prov.clone(),
                 site: Origin {
                     node: c.node,
-                    stage: stage_now(),
+                    command: command_now(),
                 },
                 name: name.clone(),
                 value: value.clone(),
@@ -927,8 +1057,8 @@ pub(super) fn expr_push_stage(
         .collect()
 }
 
-/// `.%(...)` — build the record and push it. `apply_stage`'s arm.
-pub(super) fn record_push_stage(
+/// `.%(...)` — build the record and push it. `apply_command`'s arm.
+pub(super) fn record_push_command(
     name: &Option<String>,
     call: &FnCall,
     enriched: &bool,
@@ -968,7 +1098,7 @@ pub(super) fn record_push_stage(
                 prov: prov.clone(),
                 site: Origin {
                     node: c.node,
-                    stage: stage_now(),
+                    command: command_now(),
                 },
                 name: name.clone(),
                 value: value.clone(),
@@ -980,8 +1110,8 @@ pub(super) fn record_push_stage(
         .collect()
 }
 
-/// The order and selection family (`sort_by`, `reverse`, `first`, …): capsa-preserving, the effective topic baked in. `apply_stage`'s arm.
-pub(super) fn order_stage(
+/// The order and selection family (`sort_by`, `reverse`, `first`, …): capsa-preserving, the effective topic baked in. `apply_command`'s arm.
+pub(super) fn order_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -993,7 +1123,7 @@ pub(super) fn order_stage(
         .into_iter()
         .map(|mut c| {
             if c.topic.is_none() {
-                c.prov = Prov::at(c.node, stage_now());
+                c.prov = Prov::at(c.node, command_now());
             }
             c.topic = Some(
                 c.topic
@@ -1026,51 +1156,58 @@ pub(super) fn order_stage(
             // A dropped duplicate hands its origins to the
             // survivor: the value was read there too.
             let mut kept: Vec<Capsa> = Vec::new();
-            let mut index: HashMap<String, usize> = HashMap::new();
+            let mut by_node: HashMap<NodeId, usize> = HashMap::new();
+            let mut by_value: HashMap<crate::value::SortKey, usize> = HashMap::new();
             // A node is itself, whatever it reads as: two
             // characters with the same (or no) text are two.
-            // A value is one with every equal value.
+            // A value is one with every equal value — equal under
+            // the value comparison (the sort key), the one rule
+            // the reducing `unique` and `unique_by` dedupe by, so
+            // the context command, a list topic and a body's
+            // headless `unique` count alike.
+            let scale = |e: &str| adapter.unit_scale(e);
             for (c, node) in caps.drain(..).zip(is_node.iter()) {
-                let key = if *node {
-                    format!("\u{0}node:{}", c.node.0)
+                let seen = if *node {
+                    by_node.get(&c.node).copied()
                 } else {
-                    topic_of(&c).to_string()
+                    by_value.get(&topic_of(&c).sort_key_with(&scale)).copied()
                 };
-                match index.get(&key) {
-                    Some(&i) => kept[i].prov.origins.union(&c.prov.origins),
+                match seen {
+                    Some(i) => kept[i].prov.origins.union(&c.prov.origins),
                     None => {
-                        index.insert(key, kept.len());
+                        if *node {
+                            by_node.insert(c.node, kept.len());
+                        } else {
+                            by_value.insert(topic_of(&c).sort_key_with(&scale), kept.len());
+                        }
                         kept.push(c);
                     }
                 }
             }
             caps = kept;
         }
-        // `first` / `last`: one capsa, or the first / last n.
+        // `first` / `last`: one capsa, the first / last n, or a rank
+        // band (`first(11..20)`, `last(2..3)`; a negative rank from
+        // the other end).
         "first" => {
-            let n = count_arg(call).unwrap_or(1);
-            caps.truncate(n);
+            let (s, e) = stdlib::rank_span(call.args.first(), caps.len(), false)
+                .unwrap_or((0, caps.len().min(1)));
+            caps.truncate(e);
+            caps.drain(..s);
         }
         "last" => {
-            let n = count_arg(call).unwrap_or(1);
-            let skip = caps.len().saturating_sub(n);
-            caps.drain(..skip);
+            let (s, e) = stdlib::rank_span(call.args.first(), caps.len(), true)
+                .unwrap_or((caps.len().saturating_sub(1), caps.len()));
+            caps.truncate(e);
+            caps.drain(..s);
         }
         _ => {}
     }
     caps
 }
 
-/// A stage's leading integer argument, as a count.
-fn count_arg(call: &FnCall) -> Option<usize> {
-    match call.args.first() {
-        Some(Arg::Lit(Value::Int(n))) => Some((*n).max(0) as usize),
-        _ => None,
-    }
-}
-
-/// `sh('cmd')` — the shell stage, one command per capsa with the topic as stdin: `apply_stage`'s shell arm.
-pub(super) fn shell_stage(
+/// `sh('cmd')` — the shell command, one command per capsa with the topic as stdin: `apply_command`'s shell arm.
+pub(super) fn shell_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -1086,7 +1223,7 @@ pub(super) fn shell_stage(
                 call.args.first().map(|a| match a {
                     Arg::Lit(v) => v.to_string(),
                     Arg::Expr(e) => operand_scalar(adapter, c.node, e, trace, scope).to_string(),
-                    Arg::Range(..) | Arg::Named { .. } => String::new(),
+                    Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } => String::new(),
                 })
             });
             c.topic = Some(match cmd {
@@ -1103,8 +1240,8 @@ pub(super) fn shell_stage(
         .collect()
 }
 
-/// `| f(...)` — a per-capsa function on the topic: `apply_stage`'s function arm.
-pub(super) fn func_stage(
+/// `| f(...)` — a per-capsa command on the topic: `apply_command`'s simple-command arm.
+pub(super) fn func_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -1160,9 +1297,9 @@ pub(super) fn func_stage(
         .collect()
 }
 
-/// `| f -> inner` — the mapped stage over each member: `apply_stage`'s map arm.
-pub(super) fn map_stage(
-    inner: &Stage,
+/// `| f -> inner` — the mapped command over each member: `apply_command`'s map arm.
+pub(super) fn map_command(
+    inner: &Command,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
     trace: &Trace,
@@ -1205,7 +1342,7 @@ pub(super) fn map_stage(
                 })
                 .collect();
             let (mut out, mut provs): (Vec<Value>, Vec<Prov>) =
-                apply_stage(inner, pseudo, adapter, trace, outer)
+                apply_command(inner, pseudo, adapter, trace, outer)
                     .into_iter()
                     .map(|p| (p.topic.unwrap_or(Value::Null), p.prov))
                     .unzip();
@@ -1221,8 +1358,8 @@ pub(super) fn map_stage(
         .collect()
 }
 
-/// `| hop` — a navigation stage from each capsa's pockets: `apply_stage`'s nav arm.
-pub(super) fn nav_stage(
+/// `| hop` — a navigation command from each capsa's pockets: `apply_command`'s nav arm.
+pub(super) fn nav_command(
     branch: &Branch,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -1253,7 +1390,7 @@ pub(super) fn nav_stage(
             ) {
                 out.push(Capsa {
                     prov: if branch.projection.is_some() {
-                        Prov::at(node, stage_now())
+                        Prov::at(node, command_now())
                     } else {
                         Prov::default()
                     },
@@ -1276,8 +1413,8 @@ pub(super) fn nav_stage(
     dedup_merge(out)
 }
 
-/// `| [cond]` as a stage — `apply_stage`'s filter arm.
-pub(super) fn filter_stage(
+/// `| [cond]` as a command — `apply_command`'s filter arm.
+pub(super) fn filter_command(
     cond: &PredExpr,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -1305,7 +1442,7 @@ pub(super) fn filter_stage(
                 return None;
             }
             // A successful `=~` in the filter binds its groups
-            // for later stages ($1 …); a filter without one
+            // for later commands ($1 …); a filter without one
             // leaves earlier captures intact. A NAMED group is
             // a named push: `(?<year>…)` files its
             // text into the register under `year`, read back as
@@ -1323,15 +1460,19 @@ pub(super) fn filter_stage(
         .collect()
 }
 
-/// `@| f(...)` — an aggregate over the whole context (or each partition): `apply_stage`'s aggregate arm.
-pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapter) -> Vec<Capsa> {
+/// `@| f(...)` — an aggregate over the whole context (or each partition): `apply_command`'s aggregate arm.
+pub(super) fn agg_command(
+    call: &FnCall,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+) -> Vec<Capsa> {
     // The output boundary is the tool's: `qua`, `quai` and the
     // session take `@| encoding(LABEL)` off the end of a query
     // and encode what they print. Reaching the executor means
     // it stood somewhere else, or the host does not encode.
     if call.name == "encoding" {
         record_refusal(
-            "the encoding stage stands last: '… @| csv @| encoding(windows-1251)'; \
+            "the encoding command stands last: '… @| csv @| encoding(windows-1251)'; \
                  the tool that prints the output applies it"
                 .into(),
         );
@@ -1376,7 +1517,7 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
     // The combinations family combines values; a node
     // stands in a reduction by its name. Nodes that share one
     // name (a table's rows, a list's same-named fields) would
-    // combine into a silent nothing, so the stage says what
+    // combine into a silent nothing, so the command says what
     // to write instead.
     if matches!(call.name.as_str(), "combinations" | "pairs" | "triples")
         && caps.len() > 1
@@ -1404,7 +1545,7 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
             Some(_) => origins.union(&c.prov.origins),
             None => origins.insert(Origin {
                 node: c.node,
-                stage: stage_now(),
+                command: command_now(),
             }),
         }
     }
@@ -1426,7 +1567,7 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
                     let mut o = Origins::default();
                     o.insert(Origin {
                         node: c.node,
-                        stage: stage_now(),
+                        command: command_now(),
                     });
                     o
                 }
@@ -1436,6 +1577,10 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
         Vec::new()
     };
     let inputs = if selects { topics.clone() } else { Vec::new() };
+    // The reduction keeps the regulae its inputs all share: a
+    // single capsa keeps its whole register across an aggregate,
+    // and what every row filed alike is still readable after.
+    let register = shared_register(&caps);
     stdlib::apply(call, topics, &|e| adapter.unit_scale(e))
         .into_iter()
         .map(|v| Capsa {
@@ -1447,7 +1592,7 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
                     .unwrap_or_else(|| origins.clone()),
             ),
             node,
-            register: Vec::new(),
+            register: register.clone(),
             topic: Some(v),
             members: Vec::new(),
             captures: Vec::new(),
@@ -1459,12 +1604,64 @@ pub(super) fn agg_stage(call: &FnCall, caps: Vec<Capsa>, adapter: &impl AstAdapt
         .collect()
 }
 
+/// The regulae every capsa of the context shares — the first
+/// capsa's register, kept where each other capsa filed the same
+/// name with an equal value. One capsa shares its whole register;
+/// none share nothing.
+pub(super) fn shared_register(caps: &[Capsa]) -> Vec<Reg> {
+    let Some((first, rest)) = caps.split_first() else {
+        return Vec::new();
+    };
+    first
+        .register
+        .iter()
+        .filter(|r| {
+            rest.iter().all(|c| {
+                c.register
+                    .iter()
+                    .any(|q| q.name == r.name && q.value == r.value)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// The seed of a body fed by the aggregation pipe: the context as a
+/// whole — its topic the list of the peers' topics (a node standing
+/// by its name), its provenance theirs, its register the shared
+/// regulae, standing on the first capsa's node (the root when there
+/// is none).
+pub(super) fn seed_capsa(caps: &[Capsa], adapter: &impl AstAdapter) -> Capsa {
+    let (topics, provs): (Vec<Value>, Vec<Prov>) = caps
+        .iter()
+        .map(|c| match &c.topic {
+            Some(t) => (t.clone(), c.prov.clone()),
+            None => (
+                node_scalar(adapter, c.node),
+                Prov::at(c.node, command_now()),
+            ),
+        })
+        .unzip();
+    Capsa {
+        prov: Prov::list(provs),
+        node: caps.first().map_or(adapter.root(), |c| c.node),
+        register: shared_register(caps),
+        topic: Some(Value::list(topics)),
+        members: Vec::new(),
+        captures: Vec::new(),
+        named: Vec::new(),
+        marks: Vec::new(),
+        bindings: Vec::new(),
+        arrived: Vec::new(),
+    }
+}
+
 /// Apply a keyed aggregate: reorder or filter the capsae by keys
 /// evaluated per capsa against its node, preserving nodes,
 /// registers, and topics. Sorting is stable; a composite key
 /// compares lexicographically; a null key sorts like empty text
 /// (consistent with `Value::compare` everywhere else).
-/// `counting`: the fused `group | count` (see [`apply_stages`]) —
+/// `counting`: the fused `group | count` (see [`apply_commands`]) —
 /// each group's topic is its member count, its provenance the
 /// members' origins, and no member is kept.
 pub(super) fn keyed_agg(
@@ -1476,10 +1673,13 @@ pub(super) fn keyed_agg(
     peers: Option<&Peers>,
     counting: bool,
 ) -> Vec<Capsa> {
-    // `top` / `bottom` carry their count as a leading literal.
-    let (count, key_args): (Option<usize>, &[Arg]) = match call.args.split_first() {
-        Some((Arg::Lit(Value::Int(n)), rest)) if matches!(call.name.as_str(), "top" | "bottom") => {
-            (Some((*n).max(0) as usize), rest)
+    // `top` / `bottom` carry their count — or a rank band, `top(11..20;
+    // ::key)`, `top(-10; ::key)` from the far end — as a leading literal.
+    let (count, key_args): (Option<&Arg>, &[Arg]) = match call.args.split_first() {
+        Some((sel @ (Arg::Lit(Value::Int(_)) | Arg::Range(_, _)), rest))
+            if matches!(call.name.as_str(), "top" | "bottom") =>
+        {
+            (Some(sel), rest)
         }
         _ => (None, &call.args),
     };
@@ -1494,7 +1694,7 @@ pub(super) fn keyed_agg(
                     trace,
                     c.scope(Some(i + 1), peers, outer),
                 )),
-                Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } => None,
+                Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => None,
             })
             .collect()
     };
@@ -1525,7 +1725,7 @@ pub(super) fn keyed_agg(
         let mut tally: Vec<(i64, Origins, NodeId)> = Vec::new();
         let member_origins = |c: &Capsa| match &c.topic {
             Some(_) => c.prov.origins.clone(),
-            None => Origins::at(c.node, stage_now()),
+            None => Origins::at(c.node, command_now()),
         };
         // Key → position in `groups`: one probe per capsa, where a
         // scan over the groups formed so far made a word count over
@@ -1579,7 +1779,7 @@ pub(super) fn keyed_agg(
                             prov,
                             site: Origin {
                                 node,
-                                stage: stage_now(),
+                                command: command_now(),
                             },
                             name: Some(name),
                             value,
@@ -1610,7 +1810,7 @@ pub(super) fn keyed_agg(
                         prov,
                         site: Origin {
                             node,
-                            stage: stage_now(),
+                            command: command_now(),
                         },
                         name: Some(name),
                         value,
@@ -1621,7 +1821,7 @@ pub(super) fn keyed_agg(
                         .iter()
                         .map(|m| match &m.topic {
                             Some(_) => m.prov.clone(),
-                            None => Prov::at(m.node, stage_now()),
+                            None => Prov::at(m.node, command_now()),
                         })
                         .collect(),
                 );
@@ -1663,15 +1863,16 @@ pub(super) fn keyed_agg(
             });
         }
         // Descending / ascending, stable, truncated to the count.
-        "top" => {
+        "top" | "bottom" => {
             keyed.retain(|(k, _)| !has_null(k));
-            keyed.sort_by(|(a, _), (b, _)| compare_keys(b, a));
-            keyed.truncate(count.unwrap_or(0));
-        }
-        "bottom" => {
-            keyed.retain(|(k, _)| !has_null(k));
-            keyed.sort_by(|(a, _), (b, _)| compare_keys(a, b));
-            keyed.truncate(count.unwrap_or(0));
+            if call.name == "top" {
+                keyed.sort_by(|(a, _), (b, _)| compare_keys(b, a));
+            } else {
+                keyed.sort_by(|(a, _), (b, _)| compare_keys(a, b));
+            }
+            let (s, e) = stdlib::rank_span(count, keyed.len(), false).unwrap_or((0, 0));
+            keyed.truncate(e);
+            keyed.drain(..s);
         }
         // First capsa per distinct key, in original order.
         "unique_by" => {

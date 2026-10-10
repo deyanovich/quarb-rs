@@ -9,7 +9,7 @@
 //!
 //! - Navigation: `.key` (also `."quoted key"` and `.key?`), `.[]`,
 //!   `.[n]` (0-based; negative from the end), slices `.[a:b]`, and
-//!   pipes between navigation stages (`.a | .b` ≡ `.a.b`).
+//!   pipes between navigation commands (`.a | .b` ≡ `.a.b`).
 //! - Filtering: `select(...)` with comparisons over relative paths,
 //!   `has("key")`, `and`/`or`, and parenthesized groups.
 //! - Functions: `length`, `keys`, `add`, `min`, `max`, `unique`,
@@ -329,7 +329,7 @@ enum State {
     /// A node set; navigation may continue.
     Nodes,
     /// The element nodes of a slice. jq boxes a slice into a new
-    /// array, so the stages that would consume that array (`map`,
+    /// array, so the commands that would consume that array (`map`,
     /// array functions, `length`) must not iterate again.
     Elements,
     /// A value stream still awaiting its `::` projection (after
@@ -409,7 +409,7 @@ impl Parser {
             );
             while self.peek() == Some(&Tok::Pipe) {
                 self.pos += 1;
-                state = self.aggregate_stage(&mut out, state)?;
+                state = self.aggregate_command(&mut out, state)?;
             }
             return Ok(out);
         }
@@ -438,18 +438,18 @@ impl Parser {
         Ok(out)
     }
 
-    /// A pipeline of stages, stopping at `]`, `)`, or end.
+    /// A pipeline of commands, stopping at `]`, `)`, or end.
     fn pipeline(&mut self, out: &mut String) -> Result<State, JqError> {
-        let mut state = self.stage(out, State::Nodes)?;
+        let mut state = self.command(out, State::Nodes)?;
         while self.peek() == Some(&Tok::Pipe) {
             self.pos += 1;
-            state = self.stage(out, state)?;
+            state = self.command(out, state)?;
         }
         Ok(state)
     }
 
-    /// One pipeline stage.
-    fn stage(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
+    /// One pipeline command.
+    fn command(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
         match self.peek() {
             Some(Tok::Dot) => {
                 if state == State::Elements {
@@ -459,7 +459,7 @@ impl Parser {
                 }
                 if state != State::Nodes {
                     return Err(JqError::Unsupported(
-                        "navigation after a value-producing stage".into(),
+                        "navigation after a value-producing command".into(),
                     ));
                 }
                 let sliced = self.nav_path(out)?;
@@ -482,7 +482,7 @@ impl Parser {
                 }
                 if state != State::Nodes {
                     return Err(JqError::Unsupported(
-                        "select after a value-producing stage".into(),
+                        "select after a value-producing command".into(),
                     ));
                 }
                 self.pos += 1;
@@ -495,7 +495,7 @@ impl Parser {
             Some(Tok::Ident(f, true)) if f == "map" => {
                 if !matches!(state, State::Nodes | State::Elements) {
                     return Err(JqError::Unsupported(
-                        "map after a value-producing stage".into(),
+                        "map after a value-producing command".into(),
                     ));
                 }
                 self.pos += 1;
@@ -544,7 +544,7 @@ impl Parser {
             Some(Tok::Ident(f, false)) if f == "keys" => {
                 if state != State::Nodes {
                     return Err(JqError::Unsupported(
-                        "keys after a value-producing stage".into(),
+                        "keys after a value-producing command".into(),
                     ));
                 }
                 self.pos += 1;
@@ -594,7 +594,7 @@ impl Parser {
                 let what = other.map(|t| t.to_string()).unwrap_or_else(|| "end".into());
                 Err(JqError::Syntax(
                     0,
-                    format!("expected a stage, found {what}"),
+                    format!("expected a command, found {what}"),
                 ))
             }
         }
@@ -848,8 +848,8 @@ impl Parser {
         }
     }
 
-    /// A `@|` aggregate stage after an array collect.
-    fn aggregate_stage(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
+    /// A `@|` aggregate command after an array collect.
+    fn aggregate_command(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
         debug_assert_eq!(state, State::Values);
         match self.peek() {
             Some(Tok::Ident(f, false)) if f == "length" => {

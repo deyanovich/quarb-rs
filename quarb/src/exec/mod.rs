@@ -3,13 +3,13 @@
 //! Navigation maps a node context step by step. Once a projection
 //! runs, the context becomes a list of *capsae* — each a node with a
 //! register (breadcrumbs) and a current topic — that the pipeline
-//! stages transform, aggregate, push, and recall.
+//! commands transform, aggregate, push, and recall.
 
 use crate::adapter::{AstAdapter, InstantFrom, NodeId, Provenance, ProvenanceList};
 use crate::ast::visit::{self, Visitor as _};
 use crate::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Stage,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, FnCall, Group, InterpSeg, Matcher, Operand,
+    PatSeg, PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef,
     Step,
 };
 use crate::stdlib;
@@ -19,9 +19,11 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 mod arith;
+mod commands;
 mod compare;
 mod context;
 mod correlate;
+mod environ;
 mod identity;
 mod memo;
 mod operand;
@@ -29,15 +31,16 @@ mod prov;
 mod register;
 mod run;
 mod serialize;
-mod stages;
 mod steps;
 #[cfg(test)]
 mod tests;
 mod text;
 
 use arith::*;
+pub(crate) use commands::*;
 use compare::*;
 use context::*;
+use environ::*;
 pub(crate) use correlate::*;
 pub use identity::*;
 use memo::*;
@@ -46,7 +49,6 @@ pub use prov::*;
 use register::*;
 pub use run::*;
 use serialize::*;
-pub(crate) use stages::*;
 pub use steps::*;
 pub(crate) use text::*;
 
@@ -173,7 +175,7 @@ pub(crate) struct Capsa {
     /// `|` can work per group and `@| ungroup` can flatten back.
     members: Vec<Capsa>,
     /// The groups of the last successful `=~` match in a filter
-    /// stage (`$1` … `$9`); empty until one matches.
+    /// command (`$1` … `$9`); empty until one matches.
     captures: Vec<String>,
     /// The named groups of that match (`%+`), as `(name, text)`.
     named: Vec<(String, String)>,
@@ -182,7 +184,7 @@ pub(crate) struct Capsa {
     marks: Vec<Mark>,
     /// The correlation witness that admitted this capsa (one node
     /// per trace context; null for an outer context no tuple
-    /// admitted), for `$*k` in pipeline stages.
+    /// admitted), for `$*k` in pipeline commands.
     bindings: Vec<Option<NodeId>>,
     /// The edges that reached this node on the walk's final hop —
     /// the `@-` operand, aggregated across merged crossings.
@@ -190,10 +192,10 @@ pub(crate) struct Capsa {
 }
 
 impl Capsa {
-    /// The scope a pipeline stage evaluates this capsa's expressions
+    /// The scope a pipeline command evaluates this capsa's expressions
     /// in: its topic, register, members, captures, marks, witness
-    /// and arrivals, at `ordinal` (1-based) in the stage's input,
-    /// with the stage's snapshot and the invoking scope.
+    /// and arrivals, at `ordinal` (1-based) in the command's input,
+    /// with the command's snapshot and the invoking scope.
     fn scope<'a>(
         &'a self,
         ordinal: Option<usize>,
@@ -219,7 +221,7 @@ impl Capsa {
     }
 
     /// A bare capsa standing at `node` with `topic` — what the
-    /// tracer hands a pipeline stage when it replays one thread.
+    /// tracer hands a pipeline command when it replays one thread.
     pub(crate) fn bare(node: NodeId, topic: Option<Value>) -> Capsa {
         Capsa {
             node,
@@ -257,7 +259,7 @@ const PARENT: &str = "[parent]";
 const NEXT: &str = "[next]";
 const PREV: &str = "[prev]";
 
-/// A stage's input context as its expressions see it (`@*`, the
+/// A command's input context as its expressions see it (`@*`, the
 /// cross-capsa read): the snapshot, and an index of who stands
 /// where, built on first use — `X:.r` over a big context must not
 /// scan every peer per read.
@@ -306,7 +308,7 @@ pub(crate) struct Scope<'a> {
     marks: &'a [Mark],
     /// The correlation witness that admitted this capsa (one node
     /// per trace context; null for an unmatched outer context),
-    /// read back by `$*k` in pipeline stages.
+    /// read back by `$*k` in pipeline commands.
     bindings: &'a [Option<NodeId>],
     /// A group's members: the rows the capsa stands
     /// for. A relative operand from a group reads every member's
@@ -317,8 +319,8 @@ pub(crate) struct Scope<'a> {
     edge: Option<&'a EdgeCtx>,
     /// All final-hop crossings (`@-`), for pipeline scopes.
     arrived: &'a [EdgeCtx],
-    /// The stage's input context (`@*`), where one exists — the
-    /// snapshot rule: a stage is the transition, so "the context"
+    /// The command's input context (`@*`), where one exists — the
+    /// snapshot rule: a command is the transition, so "the context"
     /// during its evaluation is what it received.
     peers: Option<&'a Peers>,
     /// The invoking capsa's scope, one subcontext out (`$.name`,
@@ -519,7 +521,7 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
         ),
         // The shaped keys: `%` the record, `@` the
         // list — of the provenance entries, and of the origin
-        // coordinates. A node's origin is itself, at stage 0.
+        // coordinates. A node's origin is itself, at command 0.
         "%provenance" => Some(prov_record(&resolved_provenance(adapter, node).first())),
         "@provenance" => Some(Value::list(
             resolved_provenance(adapter, node)
@@ -529,8 +531,11 @@ fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value
                 .collect(),
         )),
         "origin" => Some(Value::Int(node.0 as i64)),
-        "%origin" => Some(origin_record(Origin { node, stage: 0 })),
-        "@origin" => Some(Value::list(vec![origin_record(Origin { node, stage: 0 })])),
+        "%origin" => Some(origin_record(Origin { node, command: 0 })),
+        "@origin" => Some(Value::list(vec![origin_record(Origin {
+            node,
+            command: 0,
+        })])),
         "elided" => Some(Value::Int(resolved_provenance(adapter, node).elided as i64)),
         _ => None,
     }

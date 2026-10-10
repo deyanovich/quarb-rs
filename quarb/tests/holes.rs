@@ -2,7 +2,7 @@
 //! `${expr:?}` / `${expr:?message}` (the strict hole, refusing
 //! where a plain hole splices nothing), `${expr:-fallback}` (the
 //! default hole, `default(expr, fallback)` bash-faithfully
-//! spelled), and pipe tails (`${expr | stage ...}`). Bash ops and
+//! spelled), and pipe tails (`${expr | command ...}`). Bash ops and
 //! an unparenthesized pipe tail are one or the other per hole.
 
 use quarb::Defs;
@@ -32,6 +32,14 @@ fn default_hole_round_trips() {
     assert_eq!(canon(r#"= "${::x:-::y}""#), r#"= "${::x:-::y}""#);
     // a projection run before the operator is not the operator
     assert_eq!(canon(r#"= "${::a:-1}""#), r#"= "${::a:-1}""#);
+    // the default is a shell word: a bare word is text, as in
+    // `${var:-word}` (elsewhere in a body a bare word names a
+    // command)
+    assert_eq!(
+        canon(r#"= "${::x:-unrecorded}""#),
+        r#"= "${::x:-"unrecorded"}""#
+    );
+    assert!(refuse(r#"= "${unrecorded:-1}""#).contains("'unrecorded' is not a command"));
 }
 
 #[test]

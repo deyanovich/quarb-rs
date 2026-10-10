@@ -17,8 +17,8 @@ import quarb
 
 BOOKS_JSON = """{
   "books": [
-    {"title": "Sapiens", "price": 25},
-    {"title": "Cosmos",  "price": 18}
+    {"title": "Emma", "price": 25},
+    {"title": "Iliad", "price": 18}
   ]
 }"""
 
@@ -30,7 +30,7 @@ BOOKS_JSON = """{
 
 def test_json_values():
     got = quarb.run('/books/*[/price:: > 20]/title::', BOOKS_JSON, "json")
-    assert got == ["Sapiens"]
+    assert got == ["Emma"]
 
 
 def test_json_nodes_render_as_pointers():
@@ -72,7 +72,7 @@ def test_version():
 def test_run_file_str_and_pathlike(tmp_path):
     p = tmp_path / "books.json"
     p.write_text(BOOKS_JSON)
-    want = ["Sapiens", "Cosmos"]
+    want = ["Emma", "Iliad"]
     assert quarb.run_file("/books/*/title::", str(p)) == want
     assert quarb.run_file("/books/*/title::", pathlib.Path(p)) == want
 
@@ -123,7 +123,7 @@ def test_unknown_format():
 def test_document_values_are_typed():
     doc = quarb.loads(BOOKS_JSON, "json")
     assert doc.values("/books/*/price::") == [25, 18]
-    assert doc.values("/books/*/title::") == ["Sapiens", "Cosmos"]
+    assert doc.values("/books/*/title::") == ["Emma", "Iliad"]
 
 
 def test_document_value_scalar():
@@ -145,11 +145,23 @@ def test_document_value_stream_raises():
 
 def test_document_records_are_dicts():
     doc = quarb.loads(BOOKS_JSON, "json")
-    got = doc.records('/books/* | rec("t", /title::, "p", /price::)')
+    got = doc.records('/books/* | %(t = /title::; p = /price::)')
     assert got == [
-        {"t": "Sapiens", "p": 25},
-        {"t": "Cosmos", "p": 18},
+        {"t": "Emma", "p": 25},
+        {"t": "Iliad","p": 18},
     ]
+
+
+def test_document_plan_and_budget():
+    doc = quarb.loads(BOOKS_JSON, "json")
+    plan = doc.plan("/books/*")
+    assert plan.startswith(".!kaiv")
+    assert "contract=quarb/plan" in plan and "nodes-min=" in plan
+    assert doc.values("/books/*/title::", budget="nodes=100") == ["Emma", "Iliad"]
+    with pytest.raises(ValueError, match="budget allows 1"):
+        doc.values("/books/*/title::", budget="nodes=1")
+    with pytest.raises(ValueError, match="budget takes"):
+        doc.values("/books/*/title::", budget="rows")
 
 
 def test_document_records_rejects_scalars():
@@ -208,3 +220,27 @@ def test_load_infers_format(tmp_path):
 def test_repr():
     doc = quarb.loads("{}", "json")
     assert repr(doc) == "<quarb.Document format='json'>"
+
+
+def test_document_table_is_the_grid_rule():
+    doc = quarb.loads(BOOKS_JSON, "json")
+    q = "/books/* | %(t = /title::; p = /price::) @| table"
+    assert quarb.closes_with_table(q)
+    assert not quarb.closes_with_table("/books/*/title::")
+    rows, text, html = doc.table(q)
+    assert rows == [{"t": "Emma", "p": 25}, {"t": "Iliad", "p": 18}]
+    assert text.splitlines()[0].split() == ["t", "p"]
+    assert html.startswith('<table class="quarb-table">')
+    assert '<td>Emma</td><td class="num">25</td>' in html
+    assert ".quarb-table" in quarb.TABLE_CSS
+    with pytest.raises(ValueError, match="does not close"):
+        doc.table("/books/*/title::")
+    # The notebook result: a grid for the table query, text otherwise.
+    from quarb.session import _result
+
+    r = _result(doc, q)
+    assert r._repr_html_().startswith("<style>")
+    assert "<table class=\"quarb-table\">" in r._repr_html_()
+    assert repr(r) == text
+    r = _result(doc, "/books/*/title::")
+    assert r._repr_html_() is None

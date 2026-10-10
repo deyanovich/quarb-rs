@@ -45,7 +45,7 @@ fn refusals() {
     assert!(err("//book/title::").contains("'//' axis"));
     assert!(err("/books/*<block>/title::").contains("trait"));
     assert!(err("/a <=> /b[::x = _::x]").contains("correlation"));
-    assert!(err("/books/* | .t(/title::) | $.t").contains("stage"));
+    assert!(err("/books/* | .t(/title::) | $.t").contains("command"));
     assert!(err("/books/*.rs/x::").contains("glob"));
 }
 

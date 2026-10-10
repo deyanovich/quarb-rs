@@ -123,7 +123,7 @@ pub fn archive_extension(ext: &str) -> bool {
 pub fn container_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "docx" | "odt" | "sxw" | "epub" | "mhtml" | "mht" | "chm"
+        "docx" | "odt" | "sxw" | "epub" | "mhtml" | "mht" | "chm" | "ofd" | "hwpx"
     )
 }
 

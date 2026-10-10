@@ -223,7 +223,7 @@ fn at_leading_hop_names() {
     assert_eq!(vals("/@servers/*/host:: @| join(\",\")"), vec!["web1,web2"]);
 }
 
-/// The correlation keeps its witness: `$*k` in pipeline stages
+/// The correlation keeps its witness: `$*k` in pipeline commands
 /// projects the joined side into output (`SELECT a.x, b.y`).
 #[test]
 fn join_projection() {

@@ -14,7 +14,7 @@
 //! everything through [`Doc::parse`].
 
 use anyhow::{Context, Result, bail};
-use quarb::{NodeId, Outcome, QueryResult, Run};
+use quarb::{NodeId, Outcome, QueryResult, Run, Value};
 
 #[cfg(feature = "native")]
 use std::path::Path;
@@ -299,6 +299,70 @@ impl Doc {
     pub fn run(&self, query: &str, run: &Run) -> quarb::Result<Outcome> {
         macro_rules! go {
             ($a:expr) => {{ quarb::Query::parse_with(query, &quarb::Defs::default(), $a, run)?.run($a, run) }};
+        }
+        match self {
+            Doc::Json(a) => go!(a),
+            Doc::Csv(a) => go!(a),
+            Doc::Xml(a) => go!(a),
+            Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
+            #[cfg(feature = "sqlite")]
+            Doc::Sqlite(a) => go!(a),
+            Doc::Mount(a) => go!(a),
+            Doc::Boxed(a, _, _) => go!(a),
+        }
+    }
+
+    /// Run `query` with a closing `@| table` taken off
+    /// ([`quarb::Query::without_closing`]): what stands before it in
+    /// the outcome's result, the closing command in `closing`, for a
+    /// host that draws the table itself.
+    pub fn run_rendering(&self, query: &str, run: &Run) -> quarb::Result<Outcome> {
+        macro_rules! go {
+            ($a:expr) => {{
+                quarb::Query::parse_with(query, &quarb::Defs::default(), $a, run)?
+                    .without_closing()
+                    .run($a, run)
+            }};
+        }
+        match self {
+            Doc::Json(a) => go!(a),
+            Doc::Csv(a) => go!(a),
+            Doc::Xml(a) => go!(a),
+            Doc::Html(a) => go!(a),
+            Doc::Text(a) => go!(a),
+            #[cfg(feature = "sqlite")]
+            Doc::Sqlite(a) => go!(a),
+            Doc::Mount(a) => go!(a),
+            Doc::Boxed(a, _, _) => go!(a),
+        }
+    }
+
+    /// The rows of a rendered table ([`quarb::table_rows_of`]): the
+    /// values as they are; a node that is a document's own table as
+    /// its rows' records, any other node as the record of the asked
+    /// columns, else its locator.
+    pub fn table_rows(&self, result: QueryResult, columns: &[String]) -> Vec<Value> {
+        quarb::table_rows_of(self.base_dyn(), result, columns, &|n| self.render(n))
+    }
+
+    /// The static plan of `query` against this document: every
+    /// step priced by the adapter's own estimate, the budget's cap
+    /// (when one is given) stopping the estimators early.
+    pub fn plan(
+        &self,
+        query: &str,
+        run: &Run,
+        budget: Option<&quarb::plan::Budget>,
+    ) -> quarb::Result<quarb::plan::Plan> {
+        macro_rules! go {
+            ($a:expr) => {{
+                let q = quarb::Query::parse_with(query, &quarb::Defs::default(), $a, run)?;
+                Ok(match budget {
+                    Some(b) => q.plan_within($a, b),
+                    None => q.plan($a),
+                })
+            }};
         }
         match self {
             Doc::Json(a) => go!(a),

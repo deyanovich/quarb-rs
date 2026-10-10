@@ -1,7 +1,7 @@
 //! Syntax highlighting for query text — one tokenizer, three emits.
 //!
 //! The [`scan`] tokenizer classifies a query into paths and axes, the
-//! projection sigils, correlation and pipe operators, register
+//! projection sigils, correlation and control operators, register
 //! references, strings, numbers, and unit/span literals. Two thin
 //! renderers consume it: [`highlight_ansi`] for the terminal (SGR
 //! escapes) and [`highlight_html`] for the browser playground
@@ -14,7 +14,7 @@
 //! the spans concatenate back to the exact source.
 
 const RESET: &str = "\x1b[0m";
-const KEYWORD: &str = "\x1b[1;36m"; // bold cyan — stdlib functions, def/macro
+const KEYWORD: &str = "\x1b[1;36m"; // bold cyan — stdlib commands, def/macro
 const STRING: &str = "\x1b[32m"; // green
 const NUMBER: &str = "\x1b[35m"; // magenta — numbers and unit/span literals
 const OPERATOR: &str = "\x1b[33m"; // yellow — sigils, comparisons, pipes
@@ -363,7 +363,7 @@ fn escape_into(out: &mut String, s: &str) {
     }
 }
 
-/// Whether `word` colors as a keyword: a stdlib function (scalar,
+/// Whether `word` colors as a keyword: a stdlib command (scalar,
 /// aggregate, or keyed) or a reuse/logic word.
 fn is_keyword(word: &str) -> bool {
     crate::stdlib::known_scalar(word)

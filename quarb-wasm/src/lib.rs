@@ -18,13 +18,13 @@
 //! sweep pays for the pages it touches and later queries are
 //! fast.
 //!
-//! The shell stage stays gated: the run never opens it, so
+//! The shell command stays gated: the run never opens it, so
 //! `sh()` / backticks fail with the engine's normal gate error.
 //! The invocation instant for `now()` is supplied by the caller
 //! (`Date.now()` in the page) — wasm32-unknown-unknown has no
 //! clock of its own.
 
-use quarb::{AstAdapter, NodeId, QueryResult};
+use quarb::{AstAdapter, NodeId, QueryResult, Value};
 use wasm_bindgen::prelude::*;
 
 /// The engine version shown in the playground footer.
@@ -131,29 +131,54 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
         other => Err(format!("unknown format: {other}")),
     };
     match outcome {
-        Ok(lines) => serde_json::json!({ "ok": true, "lines": lines }).to_string(),
+        Ok((lines, html)) => {
+            serde_json::json!({ "ok": true, "lines": lines, "html": html }).to_string()
+        }
         Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
     }
 }
 
+/// The engine's table stylesheet, scoped under `.quarb-table`: a
+/// host includes it once and every grid it renders is dressed.
+#[wasm_bindgen]
+pub fn table_css() -> String {
+    quarb::TABLE_CSS.to_string()
+}
+
+/// The lines a result prints, and — when the query's closing
+/// command is `@| table` — the HTML grid the host draws instead
+/// ([`quarb::table_html`]); the lines are then the text table.
 fn go<A: AstAdapter>(
     query: &str,
     adapter: &A,
     render: impl Fn(NodeId) -> String,
     secs: i64,
     nanos: u32,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Option<String>), String> {
     let run = quarb::Run {
         now: Some((secs, nanos)),
         ..Default::default()
     };
+    if quarb::closes_with_table(query) {
+        let out = quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
+            .and_then(|q| q.without_closing().run(adapter, &run))
+            .map_err(|e| e.to_string())?;
+        if let Some(closing) = out.closing.filter(|c| !c.csv) {
+            let rows: Vec<Value> =
+                quarb::table_rows_of(adapter, out.result, &closing.columns, &render);
+            let columns = (!closing.columns.is_empty()).then_some(closing.columns.as_slice());
+            let text = quarb::tabulate_with(&rows, columns, false, b',');
+            let html = quarb::table_html_plain(&rows, columns);
+            return Ok((vec![text], Some(html)));
+        }
+    }
     match quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
         .and_then(|q| q.run(adapter, &run))
         .map(|o| o.result)
     {
-        Ok(QueryResult::Nodes(nodes)) => Ok(nodes.into_iter().map(render).collect()),
+        Ok(QueryResult::Nodes(nodes)) => Ok((nodes.into_iter().map(render).collect(), None)),
         Ok(QueryResult::Values(values)) => {
-            Ok(values.into_iter().map(|v| v.display_form()).collect())
+            Ok((values.into_iter().map(|v| v.display_form()).collect(), None))
         }
         Err(e) => Err(e.to_string()),
     }
@@ -262,7 +287,9 @@ impl Site {
         };
         let outcome = go(&query, a, render, secs, nanos);
         match outcome {
-            Ok(lines) => serde_json::json!({ "ok": true, "lines": lines }).to_string(),
+            Ok((lines, html)) => {
+                serde_json::json!({ "ok": true, "lines": lines, "html": html }).to_string()
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
         }
     }

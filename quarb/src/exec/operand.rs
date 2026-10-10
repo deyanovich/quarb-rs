@@ -26,7 +26,7 @@ pub(super) fn record_fields_prov(
                         (v, Prov::leaf(o))
                     }
                     Some(Arg::Lit(v)) => (v.clone(), Prov::default()),
-                    Some(Arg::Range(_, _)) | Some(Arg::Named { .. }) | None => {
+                    Some(Arg::Range(_, _)) | Some(Arg::Named { .. }) | Some(Arg::Opt { .. }) | None => {
                         (Value::Null, Prov::default())
                     }
                 };
@@ -40,7 +40,7 @@ pub(super) fn record_fields_prov(
                 fields.push((name, v, Prov::leaf(o)));
             }
             Arg::Lit(v) => fields.push((String::new(), v.clone(), Prov::default())),
-            Arg::Range(_, _) | Arg::Named { .. } => {}
+            Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => {}
         }
     }
     fields
@@ -86,7 +86,7 @@ pub(super) fn subcontext_traced(
         for c in &caps {
             o.insert(Origin {
                 node: c.node,
-                stage: stage_now(),
+                command: command_now(),
             });
         }
         (Value::Int(caps.len() as i64), Prov::leaf(o))
@@ -375,10 +375,11 @@ pub(super) fn eval_operand(
         ],
         // Capsa-scope operands: a register recall and the topic.
         Operand::Recall(r) => {
-            note_all(&recall_prov(scope.register, r).origins);
+            note_all(&recall_origins(scope.register, r));
             vec![recall(scope.register, r)]
         }
-        Operand::Topic => {
+        // The seed outside a pipe head reads as the topic.
+        Operand::Topic | Operand::Seed => {
             if let Some(p) = scope.prov {
                 note_all(&p.origins);
             }
@@ -400,7 +401,7 @@ pub(super) fn eval_operand(
             let Operand::Recall(r) = base.as_ref() else {
                 unreachable!()
             };
-            note_all(&recall_prov(scope.register, r).part(name).origins);
+            note_all(&recall_field_origins(scope.register, r, name));
             vec![match recall(scope.register, r) {
                 Value::Record(fields) => fields
                     .into_iter()
@@ -456,9 +457,9 @@ pub(super) fn eval_operand(
             eval_operand(adapter, node, taken, trace, bound, scope)
         }
         // `X:.r` — the cross-capsa read: at each node
-        // `at` reaches, the regula of every capsa of the stage's
+        // `at` reaches, the regula of every capsa of the command's
         // input context standing there — the snapshot, so the read
-        // is synchronous within the stage. One value per (node,
+        // is synchronous within the command. One value per (node,
         // capsa), in context order; none where nobody stands; null
         // where no context exists. The value's origins are the
         // regula's own (where it was read), not the node it is
@@ -478,7 +479,7 @@ pub(super) fn eval_operand(
             }
             out
         }
-        // `@*` — the stage's input context: bare, the peers'
+        // `@*` — the command's input context: bare, the peers'
         // topics; projected, the projection over their nodes. Null
         // where no context exists (navigation predicates).
         Operand::Capsae { projection } => {
@@ -508,14 +509,14 @@ pub(super) fn eval_operand(
         }
         // `(expr | f @| g)` — the pipe tail: each value rides a
         // pseudo-capsa (this node and register, the value as topic)
-        // through the ordinary stage machinery, so the semantics
+        // through the ordinary command machinery, so the semantics
         // mirror the pipeline by construction. `@|` sees a single
         // list value as a context of its elements.
-        Operand::Piped { expr, stages } => {
+        Operand::Piped { expr, commands } => {
             // A capsa of the tail: this scope's register, captures,
             // marks, witness and arrivals, standing at `n` with
             // `topic` — or none, for a row that is a node, whose
-            // value is existence but which a stage meets as the
+            // value is existence but which a command meets as the
             // pipeline would: as a node (`@| unique` tells two nodes
             // apart whatever they read as).
             let capsa = |n: NodeId, topic: Option<Value>, prov: Prov| Capsa {
@@ -543,13 +544,28 @@ pub(super) fn eval_operand(
                     .into_iter()
                     .map(|n| {
                         let topic = projection.as_ref().map(|p| project(adapter, n, p));
-                        capsa(n, topic, Prov::at(n, stage_now()))
+                        capsa(n, topic, Prov::at(n, command_now()))
                     })
                     .collect(),
+                // The seed of a headless body: the enclosing capsa
+                // as the pipeline hands it to a command — its topic
+                // on its node, or the node itself when there is no
+                // topic (`| cc` meets a node as the pipeline does).
+                Operand::Seed if scope.members.is_empty() => {
+                    let topic = scope
+                        .topic
+                        .cloned()
+                        .or_else(|| with_run(|s| s.enclosing_topic.last().cloned()));
+                    vec![capsa(
+                        node,
+                        topic,
+                        scope.prov.cloned().unwrap_or_else(|| Prov::at(node, command_now())),
+                    )]
+                }
                 // The topic of a group is its members:
-                // `($_ | ::lower @| join)` runs the stages over the
+                // `($_ | ::lower @| join)` runs the commands over the
                 // rows, each on its own node.
-                Operand::Topic if !scope.members.is_empty() => scope
+                Operand::Topic | Operand::Seed if !scope.members.is_empty() => scope
                     .members
                     .iter()
                     .map(|m| match &m.topic {
@@ -557,7 +573,7 @@ pub(super) fn eval_operand(
                         None => capsa(
                             m.node,
                             Some(node_scalar(adapter, m.node)),
-                            Prov::at(m.node, stage_now()),
+                            Prov::at(m.node, command_now()),
                         ),
                     })
                     .collect(),
@@ -571,18 +587,18 @@ pub(super) fn eval_operand(
                         .collect()
                 }
             };
-            for stage in stages.iter() {
+            for command in commands.iter() {
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
-                // the stage — seed the null it exists to replace,
+                // the command — seed the null it exists to replace,
                 // so `(a) | default$$.b` coalesces missing paths
                 // too.
-                if caps.is_empty() && matches!(stage, Stage::Func(c) if c.name == "default") {
+                if caps.is_empty() && matches!(command, Command::Func(c) if c.name == "default") {
                     caps.push(capsa(node, Some(Value::Null), Prov::default()));
                 }
                 // A lone list value explodes into a context for the
                 // aggregating forms, each item on the list's node.
-                if matches!(stage, Stage::Agg(_) | Stage::Select(_))
+                if matches!(command, Command::Agg(_) | Command::Select(_))
                     && caps.len() == 1
                     && matches!(caps[0].topic, Some(Value::List(_)))
                 {
@@ -594,7 +610,7 @@ pub(super) fn eval_operand(
                         .map(|(i, v)| capsa(whole.node, Some(v), whole.prov.item(i)))
                         .collect();
                 }
-                // A scalar stage's expression arguments read the
+                // A scalar command's expression arguments read the
                 // enclosing capsa, not the piped value: in
                 // `%(g = loglik(:a; :na; :b; :nb))` the fields are
                 // the record's, as `::alt` in `levenshtein(::name;
@@ -602,13 +618,13 @@ pub(super) fn eval_operand(
                 // this pipe, and the inner capsa is not visible to
                 // the query).
                 let resolved;
-                let stage = match stage {
-                    Stage::Func(call)
+                let command = match command {
+                    Command::Func(call)
                         if stdlib::known_scalar(&call.name)
                             && !matches!(call.name.as_str(), "rec" | "record")
                             && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
                     {
-                        resolved = Stage::Func(FnCall {
+                        resolved = Command::Func(FnCall {
                             name: call.name.clone(),
                             args: call
                                 .args
@@ -626,10 +642,10 @@ pub(super) fn eval_operand(
                     other => other,
                 };
                 // Only a row that came in as a node can leave as one:
-                // a stage over values that hands on a capsa without a
+                // a command over values that hands on a capsa without a
                 // topic hands on null.
                 let had_nodes = caps.iter().any(|c| c.topic.is_none());
-                caps = apply_stage(stage, caps, adapter, trace, Some(&scope));
+                caps = apply_command(command, caps, adapter, trace, Some(&scope));
                 if !had_nodes {
                     for c in &mut caps {
                         if c.topic.is_none() {
@@ -752,7 +768,7 @@ pub(super) fn eval_operand(
             // (existential, like any multi-valued operand). An
             // unset anchor yields nothing.
             // In predicates `bound` is the tuple under test; in
-            // pipeline stages it is empty and the capsa's witness
+            // pipeline commands it is empty and the capsa's witness
             // (`scope.bindings`) takes over — the same rule as `$*k`
             // itself. Either way it travels into the path, so its
             // step predicates read `$*k` per thread.
@@ -808,7 +824,7 @@ pub(super) fn eval_operand(
             projection,
         } => {
             // In predicates `bound` carries the tuple under test;
-            // in pipeline stages it is empty and the capsa's
+            // in pipeline commands it is empty and the capsa's
             // correlation *witness* takes over, so `$*k` projects
             // the joined side into output.
             let bound = if bound.is_empty() {

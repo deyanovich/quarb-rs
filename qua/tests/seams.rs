@@ -1,6 +1,6 @@
 //! Seams met in the corpus-recipes round (lang/TODO.md, "Recipes:
 //! the corpus round" and "The corpus reading"), closed on dev: a
-//! nested path in a stage operand forks the capsa (its predicates
+//! nested path in a command operand forks the capsa (its predicates
 //! read the register and `_`), an aggregate in a pipe tail keeps the
 //! nodes it permutes, and glued filters chain on the pipe.
 
@@ -20,7 +20,7 @@ fn values(q: &str) -> Vec<String> {
 #[test]
 fn nested_path_predicate_reads_the_register() {
     // The spec: a body's capsae fork from the invoking capsa — so a
-    // path in an operand sees the push, as the filter stage did.
+    // path in an operand sees the push, as the predicate command did.
     let in_predicate = values("/a/* | .v(::) | %(v = $.v; n = (^/a/*[:: < $.v] @| count))");
     let in_filter = values("/a/* | .v(::) | %(v = $.v; n = (^/a/* | [:: < $.v] @| count))");
     assert_eq!(in_predicate, in_filter);

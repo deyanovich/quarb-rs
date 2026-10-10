@@ -5,13 +5,13 @@
 //! substrate implements, and Quarb can query Quarb:
 //!
 //! ```text
-//! qua '//func::name' report.quarb
+//! qua '//cmd::name' report.quarb
 //! qua '//step[::axis = "//"] @| count' report.quarb
 //! ```
 //!
 //! Node names are the reflection vocabulary (see the spec's
 //! "Reflection: The Query Arbor"): `query`, `branch`, `step`,
-//! `pipeline`, the stage kinds (`func`, `agg`, `push`, `expr`,
+//! `pipeline`, the command kinds (`cmd`, `agg`, `push`, `expr`,
 //! `expr-push`, `subcontext`, `select`, `filter`, `recall`), the
 //! predicate/operand kinds (`predicate`, `and`, `or`, `not`,
 //! `compare`, `path`, `literal`, `arith`, `neg`, `parens`, `topic`,
@@ -38,8 +38,8 @@ use std::cell::RefCell;
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Anchor, Arg, Axis, Branch, Group, Matcher, Operand, PathElem, PredExpr, Predicate, Projection,
-    PushBody, Query, Reach, RefProp, RegRef, Stage, Step, TraitClause,
+    Anchor, Arg, Axis, Branch, Command, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
+    Projection, PushBody, Query, Reach, RefProp, RegRef, Step, TraitClause,
 };
 use crate::error::Result;
 use crate::value::Value;
@@ -146,8 +146,8 @@ impl QueryArbor {
         }
         if !q.pipeline.is_empty() {
             let pipe = self.intern(Some("pipeline"), Vec::new(), Some(id));
-            for stage in &q.pipeline {
-                self.walk_stage(stage, pipe);
+            for command in &q.pipeline {
+                self.walk_command(command, pipe);
             }
         }
         id
@@ -461,6 +461,9 @@ impl QueryArbor {
             Operand::Topic => {
                 self.intern(Some("topic"), Vec::new(), Some(parent));
             }
+            Operand::Seed => {
+                self.intern(Some("seed"), Vec::new(), Some(parent));
+            }
             Operand::Field { base, name } => {
                 let id = self.intern(
                     Some("field"),
@@ -515,11 +518,11 @@ impl QueryArbor {
                     self.walk_projection(p, id);
                 }
             }
-            Operand::Piped { expr, stages } => {
+            Operand::Piped { expr, commands } => {
                 let id = self.intern(Some("piped"), Vec::new(), Some(parent));
                 self.walk_operand(expr, id);
-                for st in stages {
-                    self.walk_stage(st, id);
+                for st in commands {
+                    self.walk_command(st, id);
                 }
             }
             // Children in document order: condition, then, else.
@@ -623,36 +626,43 @@ impl QueryArbor {
         self.intern(Some("projection"), props, Some(parent));
     }
 
-    fn walk_stage(&mut self, stage: &Stage, parent: usize) {
-        match stage {
-            Stage::Func(call) => {
-                let id = self.intern(
-                    Some("func"),
-                    vec![("name".to_string(), Value::Str(call.name.clone()))],
-                    Some(parent),
-                );
+    fn walk_command(&mut self, command: &Command, parent: usize) {
+        match command {
+            Command::Func(call) => {
+                // An environment command carries its alias as `env`.
+                let props = match crate::env::split_env(&call.name) {
+                    Some((alias, name)) => vec![
+                        ("env".to_string(), Value::Str(alias.to_string())),
+                        ("name".to_string(), Value::Str(name.to_string())),
+                    ],
+                    None => vec![("name".to_string(), Value::Str(call.name.clone()))],
+                };
+                let id = self.intern(Some("cmd"), props, Some(parent));
                 self.walk_args(&call.args, id);
             }
-            Stage::Agg(call) => {
-                let id = self.intern(
-                    Some("agg"),
-                    vec![("name".to_string(), Value::Str(call.name.clone()))],
-                    Some(parent),
-                );
+            Command::Agg(call) => {
+                let props = match crate::env::split_env(&call.name) {
+                    Some((alias, name)) => vec![
+                        ("env".to_string(), Value::Str(alias.to_string())),
+                        ("name".to_string(), Value::Str(name.to_string())),
+                    ],
+                    None => vec![("name".to_string(), Value::Str(call.name.clone()))],
+                };
+                let id = self.intern(Some("agg"), props, Some(parent));
                 self.walk_args(&call.args, id);
             }
-            Stage::Nav(b) => {
+            Command::Nav(b) => {
                 let id = self.intern(Some("nav"), Vec::new(), Some(parent));
                 self.walk_branch(b, id);
             }
-            Stage::Push(name) => {
+            Command::Push(name) => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
                     props.push(("name".to_string(), Value::Str(n.clone())));
                 }
                 self.intern(Some("push"), props, Some(parent));
             }
-            Stage::Subcontext { name, body } => {
+            Command::Subcontext { name, body } => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
                     props.push(("name".to_string(), Value::Str(n.clone())));
@@ -660,14 +670,14 @@ impl QueryArbor {
                 let id = self.intern(Some("subcontext"), props, Some(parent));
                 self.walk_query(body, id, None);
             }
-            Stage::Expr(e) => {
+            Command::Expr(e) => {
                 let id = self.intern(Some("expr"), Vec::new(), Some(parent));
                 self.walk_operand(e, id);
             }
-            Stage::FieldsPush => {
+            Command::FieldsPush => {
                 self.intern(Some("fields-push"), Vec::new(), Some(parent));
             }
-            Stage::ExprPush { name, expr } => {
+            Command::ExprPush { name, expr } => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
                     props.push(("name".to_string(), Value::Str(n.clone())));
@@ -675,26 +685,50 @@ impl QueryArbor {
                 let id = self.intern(Some("expr-push"), props, Some(parent));
                 self.walk_operand(expr, id);
             }
-            Stage::Select(p) => {
+            Command::AggPush { name, body } => {
+                let mut props = Vec::new();
+                if let Some(n) = name {
+                    props.push(("name".to_string(), Value::Str(n.clone())));
+                }
+                let id = self.intern(Some("agg-push"), props, Some(parent));
+                self.walk_operand(body, id);
+            }
+            Command::AggRecord { call, enriched } => {
+                let props = if *enriched {
+                    vec![("enriched".to_string(), Value::Bool(true))]
+                } else {
+                    Vec::new()
+                };
+                let id = self.intern(Some("agg-record"), props, Some(parent));
+                self.walk_args(&call.args, id);
+            }
+            Command::AggRecall(r) => {
+                self.intern(
+                    Some("agg-recall"),
+                    vec![("ref".to_string(), Value::Str(reg_spelling(r)))],
+                    Some(parent),
+                );
+            }
+            Command::Select(p) => {
                 let id = self.intern(Some("select"), Vec::new(), Some(parent));
                 self.walk_predicate(p, id);
             }
-            Stage::Filter(e) => {
+            Command::Filter(e) => {
                 let id = self.intern(Some("filter"), Vec::new(), Some(parent));
                 self.walk_pred_expr(e, id);
             }
-            Stage::Recall(r) => {
+            Command::Recall(r) => {
                 self.intern(
                     Some("recall"),
                     vec![("ref".to_string(), Value::Str(reg_spelling(r)))],
                     Some(parent),
                 );
             }
-            Stage::RecordWith(call) => {
+            Command::RecordWith(call) => {
                 let id = self.intern(Some("record-with"), Vec::new(), Some(parent));
                 self.walk_args(&call.args, id);
             }
-            Stage::RecordPush {
+            Command::RecordPush {
                 name,
                 call,
                 enriched,
@@ -709,7 +743,7 @@ impl QueryArbor {
                 let id = self.intern(Some("record-push"), props, Some(parent));
                 self.walk_args(&call.args, id);
             }
-            Stage::Spread { outer } => {
+            Command::Spread { outer } => {
                 let props = if *outer {
                     vec![("outer".to_string(), Value::Bool(true))]
                 } else {
@@ -717,17 +751,17 @@ impl QueryArbor {
                 };
                 self.intern(Some("spread"), props, Some(parent));
             }
-            Stage::Map(inner) => {
+            Command::Map(inner) => {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
-                self.walk_stage(inner, id);
+                self.walk_command(inner, id);
             }
-            Stage::Repeat { stage, min, max } => {
+            Command::Repeat { command, min, max } => {
                 let mut props = vec![("min".to_string(), Value::Int(*min as i64))];
                 if let Some(n) = max {
                     props.push(("max".to_string(), Value::Int(*n as i64)));
                 }
                 let id = self.intern(Some("repeat"), props, Some(parent));
-                self.walk_stage(stage, id);
+                self.walk_command(command, id);
             }
         }
     }
@@ -765,6 +799,19 @@ impl QueryArbor {
                         ],
                         Some(parent),
                     );
+                }
+                // An option as written: its name, and the value
+                // bound to it as one operand child (a switch has
+                // none).
+                Arg::Opt { name, value } => {
+                    let id = self.intern(
+                        Some("option"),
+                        vec![("name".to_string(), Value::Str(name.clone()))],
+                        Some(parent),
+                    );
+                    if let Some(v) = value {
+                        self.walk_operand(v, id);
+                    }
                 }
             }
         }
@@ -1258,11 +1305,12 @@ impl AstAdapter for ExpansionAdapter<'_> {
 }
 
 /// The default projection of each node kind: its most characteristic
-/// scalar, so bare `::` reads naturally (`//func::` is the function
+/// scalar, so bare `::` reads naturally (`//cmd::` is the command
 /// name, `//literal::` the value).
 fn default_key(kind: &str) -> Option<&'static str> {
     match kind {
-        "func" | "agg" | "push" | "expr-push" | "subcontext" => Some("name"),
+        "cmd" | "agg" | "push" | "expr-push" | "subcontext" | "agg-push" => Some("name"),
+        "agg-recall" => Some("ref"),
         "literal" | "predicate" => Some("value"),
         "step" => Some("matcher"),
         "compare" | "arith" => Some("op"),
@@ -1492,7 +1540,7 @@ impl AstAdapter for QueryArbor {
                     chain.push(up);
                 }
                 chain.reverse();
-                // Definition sites, in source order: push stages,
+                // Definition sites, in source order: push commands,
                 // expression pushes, and named subcontexts (all three
                 // bind a regula at runtime). A site buried in a nested
                 // body belongs to the inner scope; a site in an
@@ -1607,10 +1655,10 @@ pub(crate) fn usage_of_query(q: &Query) -> RegUsage {
     collect_usage(&a)
 }
 
-pub(crate) fn usage_of_stages(stages: &[Stage]) -> RegUsage {
+pub(crate) fn usage_of_commands(commands: &[Command]) -> RegUsage {
     let mut a = scratch_arbor();
-    for s in stages {
-        a.walk_stage(s, 0);
+    for s in commands {
+        a.walk_command(s, 0);
     }
     collect_usage(&a)
 }

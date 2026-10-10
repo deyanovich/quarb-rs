@@ -1,5 +1,5 @@
 //! One walk over the syntax tree: a [`Visitor`] sees every query,
-//! stage, path element, predicate expression and operand, and the
+//! command, path element, predicate expression and operand, and the
 //! `walk_*` functions descend into the children — so a question
 //! about a query ("does it name the shell?", "which context index
 //! does it reach?") is a visitor with one or two methods, and the
@@ -10,8 +10,8 @@
 //! not call the walk.
 
 use super::{
-    Anchor, Arg, Branch, FnCall, InterpSeg, Operand, PathElem, PredExpr, Predicate, PushBody,
-    Query, Stage,
+    Anchor, Arg, Branch, Command, FnCall, InterpSeg, Operand, PathElem, PredExpr, Predicate,
+    PushBody, Query,
 };
 
 /// Sees each node of the tree; every method descends by default.
@@ -22,8 +22,8 @@ pub trait Visitor {
     fn branch(&mut self, b: &Branch) {
         walk_branch(self, b);
     }
-    fn stage(&mut self, s: &Stage) {
-        walk_stage(self, s);
+    fn command(&mut self, s: &Command) {
+        walk_command(self, s);
     }
     fn elem(&mut self, e: &PathElem) {
         walk_elem(self, e);
@@ -53,7 +53,7 @@ pub fn walk_query<V: Visitor + ?Sized>(v: &mut V, q: &Query) {
         v.branch(b);
     }
     for s in &q.pipeline {
-        v.stage(s);
+        v.command(s);
     }
 }
 
@@ -74,24 +74,32 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
     for a in &c.args {
         match a {
             Arg::Expr(e) => v.operand(e),
-            Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } => {}
+            Arg::Opt { value: Some(e), .. } => v.operand(e),
+            Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { value: None, .. } => {}
         }
     }
 }
 
-pub fn walk_stage<V: Visitor + ?Sized>(v: &mut V, s: &Stage) {
+pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
     match s {
-        Stage::Func(call)
-        | Stage::Agg(call)
-        | Stage::RecordWith(call)
-        | Stage::RecordPush { call, .. } => v.call(call),
-        Stage::Subcontext { body, .. } => v.query(body),
-        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => v.operand(e),
-        Stage::Select(p) => v.predicate(p),
-        Stage::Filter(e) => v.pred(e),
-        Stage::Nav(b) => v.branch(b),
-        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => v.stage(inner),
-        Stage::Push(_) | Stage::Recall(_) | Stage::Spread { .. } | Stage::FieldsPush => {}
+        Command::Func(call)
+        | Command::Agg(call)
+        | Command::RecordWith(call)
+        | Command::RecordPush { call, .. } => v.call(call),
+        Command::Subcontext { body, .. } => v.query(body),
+        Command::Expr(e) | Command::ExprPush { expr: e, .. } | Command::AggPush { body: e, .. } => {
+            v.operand(e)
+        }
+        Command::AggRecord { call, .. } => v.call(call),
+        Command::Select(p) => v.predicate(p),
+        Command::Filter(e) => v.pred(e),
+        Command::Nav(b) => v.branch(b),
+        Command::Map(inner) | Command::Repeat { command: inner, .. } => v.command(inner),
+        Command::Push(_)
+        | Command::Recall(_)
+        | Command::AggRecall(_)
+        | Command::Spread { .. }
+        | Command::FieldsPush => {}
     }
 }
 
@@ -168,10 +176,10 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                 v.operand(i);
             }
         }
-        Operand::Piped { expr, stages } => {
+        Operand::Piped { expr, commands } => {
             v.operand(expr);
-            for s in stages {
-                v.stage(s);
+            for s in commands {
+                v.command(s);
             }
         }
         Operand::Cond { cond, then, other } => {
@@ -207,6 +215,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         | Operand::Lit(_)
         | Operand::Recall(_)
         | Operand::Topic
+        | Operand::Seed
         | Operand::NamedCaptures
         | Operand::Ordinal
         | Operand::Param(_)

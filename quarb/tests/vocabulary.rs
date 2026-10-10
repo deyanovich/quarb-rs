@@ -19,7 +19,7 @@ const CORPUS: &[&str] = &[
     "//book<block || inline>[::pages > 200][2][1..3]$::::id",
     // the trait boolean algebra: &&, tight !, parens (CNF inside)
     "//sec<(a || b) && !deprecated>",
-    // union branches, scalar + aggregate stages, literal args
+    // union branches, scalar + aggregate commands, literal args
     "/a || /b::x | upper @| join(\", \")",
     // the axis zoo (child, both reaches each way, siblings — one
     // step and the reach family — links)
@@ -64,6 +64,13 @@ const CORPUS: &[&str] = &[
     "/row | \"${::name} is ${::age}\"",
     // the root anchor, semantic in subcontext bodies
     "/row | .t(^/row @| count) | $.t",
+    // the aggregate push, the aggregate record (enriched) and a
+    // once-read register accessor after `@|`
+    "/row | ::fare @| .total(count) @| %%(unique = unique @| count) @| $.total",
+    // environment commands carry their alias as `env`
+    "/row | ::name | sh:tr(a-z; A-Z) @| go:sort(-r)",
+    // a named option (the csv delimiter) reflects as an option node
+    "/row | ::fare @| csv(\";\"; fare)",
     // outer-scope operands (correlated subqueries)
     "/row | .d(::dept) | .m(^/row[::dept = $.d][:::index = $ord] | _::x | _/kid::y)",
     // path patterns: grouping, alternation, nesting, + quantifier
@@ -74,12 +81,12 @@ const CORPUS: &[&str] = &[
     // quantified crosslink, open max, distal suffix; tolerated form
     "//user(->manager_id){2;}! || //body/(p|div)",
     // the arrived-by edge: bare and projected, in edge-hop predicates
-    "/a->e[$-::qty > 1][$- = e]",
+    "/a->e[$-::qty > 1][$- = \"e\"]",
     // pattern pushes (breadcrumbs): expression and sub-query bodies,
     // bare and named — reflecting with the pipeline push kinds
     "/a(->e .($-::qty) .w(//x @| count))+ | @. | product",
     // group predicates: filtered before reach (targeted proximal)
-    "/a(->e)+[::q > 1][$- = e]?",
+    "/a(->e)+[::q > 1][$- = \"e\"]?",
     // the arrived-edges plural: bare and projected
     "/a->e | %(@-; @-::qty)",
     // the context operand and an inline pipe tail
@@ -99,7 +106,7 @@ const CORPUS: &[&str] = &[
     "/movie .m /cast | .n($$.m/tags @| count) | %.",
     // the value match, equality and regex arms (2026-07-11)
     "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
-    // the shell stage, backtick-sugared (2026-07-11; reflects as
+    // the shell command, backtick-sugared (2026-07-11; reflects as
     // an ordinary func named sh)
     "/files/* | `wc -l`",
     // the value-side provenance projection (2026-09-06): `:::key`
@@ -119,9 +126,9 @@ const CORPUS: &[&str] = &[
     // now() and call operands (2026-07-12, the duration-parsing
     // round; f(x, args) reflects as its (x | f(args)) desugaring)
     "/log/*[/at:: > now() - 12h] | (td(5d3h5min)) | (tp(\"02/15/2024\", \"%m/%d/%Y\"))",
-    // navigation stages (2026-07-23, pipeline navigation): plain,
+    // navigation commands (2026-07-23, pipeline navigation): plain,
     // projected, root- and mark-anchored, quantified — a branch in
-    // stage position, wrapped in the nav kind
+    // command position, wrapped in the nav kind
     "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
     "/a .m | /b | ^/c:::name | . | $$.m/d(->e)+::x",
     // the mark array (2026-07-24, marks symmetry): anonymous
@@ -141,7 +148,10 @@ const CORPUS: &[&str] = &[
 /// kind → sorted property keys, as locked. `param` is reserved
 /// (never emitted: reflection sees expanded queries).
 const VOCABULARY: &[(&str, &[&str])] = &[
-    ("agg", &["name"]),
+    ("agg", &["env", "name"]),
+    ("agg-push", &["name"]),
+    ("agg-recall", &["ref"]),
+    ("agg-record", &["enriched"]),
     // v1 additive growth: alt, group (2026-07-08, path patterns).
     ("alt", &[]),
     ("and", &[]),
@@ -167,6 +177,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("capture", &["group"]),
     // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
     ("captures", &[]),
+    ("cmd", &["env", "name"]),
     ("compare", &["op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     ("cond", &[]),
@@ -180,7 +191,6 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("field", &["name"]),
     ("fields-push", &[]),
     ("filter", &[]),
-    ("func", &["name"]),
     // v1 additive growth: group (2026-07-08, path patterns).
     ("group", &["max", "min", "reach"]),
     // v1 additive growth: interp (2026-07-07, interpolation).
@@ -195,7 +205,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // match).
     ("match", &[]),
     // v1 additive growth: nav (2026-07-23, pipeline navigation —
-    // a branch in stage position; its contents reflect with the
+    // a branch in command position; its contents reflect with the
     // ordinary branch kinds).
     ("nav", &[]),
     ("neg", &[]),
@@ -203,6 +213,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: now (2026-07-12, the invocation instant;
     // call operands reflect as their (x | f(args)) desugaring).
     ("now", &[]),
+    ("option", &["name", "value"]),
     ("or", &[]),
     ("ordinal", &[]),
     // v1 additive growth: outer (2026-07-07, correlated subqueries).
@@ -237,6 +248,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: repeat (2026-09-07, the quantified push —
     // the iteration loop).
     ("repeat", &["max", "min"]),
+    ("seed", &[]),
     ("select", &[]),
     ("span", &["from", "kind", "to"]),
     // v1 additive growth: spread (2026-07-11, | ... core syntax);

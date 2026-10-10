@@ -91,7 +91,7 @@ fn edge_properties() {
         vec!["Carol"]
     );
     // bare $- reads the type
-    assert_eq!(values("/Person/2->*[$- = FRIEND]::name"), vec!["Carol"]);
+    assert_eq!(values("/Person/2->*[$- = \"FRIEND\"]::name"), vec!["Carol"]);
     // incoming direction sees the same edge
     assert_eq!(
         values("/Person/5<-FRIEND[$-::since = 2020]::name"),

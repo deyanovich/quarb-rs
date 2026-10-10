@@ -1,7 +1,7 @@
 //! `@| combinations(n)`, `@| pairs`, `@| triples` (lang/TODO.md):
 //! every unordered n-member subset of a stream's distinct values,
 //! each once, as a list in the values' own order — and an operand in
-//! stage position yielding each of its values as a row, so the
+//! command position yielding each of its values as a row, so the
 //! subsets of every group flow on.
 
 use quarb::{QueryResult, Value};
@@ -62,7 +62,7 @@ fn a_pair_counts_the_same_from_either_order() {
 }
 
 #[test]
-fn an_operand_stage_yields_every_value() {
+fn an_operand_command_yields_every_value() {
     assert_eq!(values("/scenes/1 | (/who/*::)"), ["anna", "vronsky"]);
     // one value is that value; none is null, the row kept
     assert_eq!(values("/scenes/3 | (/who/*::)"), ["dolly"]);

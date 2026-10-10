@@ -20,7 +20,7 @@ fn expansion() {
         exp("def &above($col, $min): /row[$col >= $min]; &above(::Fare, 500) | ::Name"),
         "/row[::Fare >= 500] | ::Name"
     );
-    // a pipeline fragment splices its stages, pipes intact
+    // a pipeline fragment splices its commands, pipes intact
     assert_eq!(
         exp("def &cols: | .n(::Name) | %.; /row | &cols"),
         "/row | .n(::Name) | %."
@@ -510,7 +510,7 @@ fn unparse_fixpoint() {
         "/tracks/* | %(::title; artist = ::album_id-->::artist_id-->::name)",
         "/invoices/* | ::qty * ::track_id-->::price @| group(::customer) | sum",
         // Round-trip regressions (2026-07-21 review): constant and
-        // operand stages keep their parens; a quoted dot-leading
+        // operand commands keep their parens; a quoted dot-leading
         // string stays a constant topic; quoted trait names reprint
         // quoted; `<-` keeps its axis before a digit-led matcher; a
         // dash-led name after the sibling hop `<` reprints quoted

@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! parse   := query ('<=>' query)*         -- correlation chain
-//! query   := branch ('||' branch)* stage*
+//! query   := branch ('||' branch)* command*
 //! branch  := '^'? step* projection?
 //! step    := axis matcher trait* pred* '$'?
-//! stage   := '|' (func | push | subcontext | recall) | '@|' func
+//! command   := '|' (func | push | subcontext | recall) | '@|' func
 //! pred    := '[' n ']' | '[' or_expr ']'
 //! ```
 //!
@@ -17,9 +17,9 @@
 use crate::adapter::AstAdapter;
 use crate::ast::visit::{self, Visitor as _};
 use crate::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, FnCall, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef,
-    ScopePath, Stage, Step, TraitClause,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, FnCall, Group, InterpSeg, Matcher, Operand,
+    PatSeg, PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RefProp,
+    RegRef, ScopePath, Step, TraitClause,
 };
 use crate::error::{QuarbError, Result};
 use crate::lexer::{self, Token};
@@ -168,7 +168,7 @@ struct Def {
 }
 
 /// A fragment body: a navigation query (which may carry its own
-/// pipeline), a pipeline fragment (each stage's pipe is implied by
+/// pipeline), a pipeline fragment (each command's pipe is implied by
 /// its variant), a predicate fragment (`def &vis: [cond];` — a
 /// guard, spliced onto the step before it or read as a boolean
 /// operand), or a procedural macro — a query evaluated at expansion
@@ -177,15 +177,19 @@ struct Def {
 #[derive(Debug, Clone)]
 enum DefBody {
     Query(Query),
-    Pipeline(Vec<Stage>),
+    Pipeline(Vec<Command>),
     Predicates(Vec<Predicate>),
     Macro(Query),
 }
 
-/// Which pipe introduces a stage — determined by its variant.
-fn stage_pipe(stage: &Stage) -> &'static str {
-    match stage {
-        Stage::Agg(_) | Stage::Select(_) => "@|",
+/// Which pipe introduces a command — determined by its variant.
+fn command_pipe(command: &Command) -> &'static str {
+    match command {
+        Command::Agg(_)
+        | Command::Select(_)
+        | Command::AggPush { .. }
+        | Command::AggRecord { .. }
+        | Command::AggRecall(_) => "@|",
         _ => "|",
     }
 }
@@ -245,6 +249,12 @@ struct Parser<'a> {
     /// probe spuriously succeed with a root anchor where the value
     /// reading (anchored at the current node) is the meaning.
     subquery_depth: usize,
+    /// How many command parentheses (operand lists) enclose the current
+    /// position. A command's parentheses hold its operands and options, and a
+    /// bare word there is the short spelling of a quoted string
+    /// (`stem(ru)`, `sort(atergo)`); everywhere else — a body —
+    /// a bare word names a command applied to the body's seed.
+    arg_depth: usize,
     /// Ruling #22 (invited capture): the uninvited register pushes
     /// of each macro expansion this parser directly initiated, held
     /// for the end-of-parse sweep. `RefCell` because expansion runs
@@ -339,11 +349,11 @@ fn walks_reverse_resolve(elems: &[PathElem]) -> bool {
     })
 }
 
-/// The static execution mode between pipeline stages (spec:
+/// The static execution mode between pipeline commands (spec:
 /// Execution Modes). Navigation mode: the thread is a node with no
 /// live topic — hops may fan out. Scalar mode: a projection or
-/// function has produced a live topic — a hop would drop it, so
-/// path-shaped stages refuse until a push (`| .`) files the topic
+/// command has produced a live topic — a hop would drop it, so
+/// path-shaped commands refuse until a push (`| .`) files the topic
 /// and returns the thread to navigation mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PipeMode {
@@ -351,36 +361,38 @@ enum PipeMode {
     Scalar,
 }
 
-/// A stage's mode-out given its mode-in. Pushes of every spelling
+/// A command's mode-out given its mode-in. Pushes of every spelling
 /// return to navigation mode (the push files the topic; spec:
 /// "Pushes transition from scalar mode back to navigation mode").
 /// Filters and positional selection preserve the mode; everything
 /// that produces or transforms a topic enters scalar mode; a
-/// navigation stage ends in the mode its optional projection
+/// navigation command ends in the mode its optional projection
 /// implies.
-fn stage_mode_out(stage: &Stage, cur: PipeMode) -> PipeMode {
-    match stage {
-        Stage::Nav(b) => {
+fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
+    match command {
+        Command::Nav(b) => {
             if b.projection.is_some() {
                 PipeMode::Scalar
             } else {
                 PipeMode::Nav
             }
         }
-        Stage::Push(_)
-        | Stage::ExprPush { .. }
-        | Stage::RecordPush { .. }
-        | Stage::FieldsPush
-        | Stage::Subcontext { .. } => PipeMode::Nav,
-        Stage::Filter(_) | Stage::Select(_) => cur,
-        Stage::Func(_)
-        | Stage::Expr(_)
-        | Stage::Agg(_)
-        | Stage::Recall(_)
-        | Stage::RecordWith(_)
-        | Stage::Spread { .. }
-        | Stage::Map(_) => PipeMode::Scalar,
-        Stage::Repeat { stage, .. } => stage_mode_out(stage, cur),
+        Command::Push(_)
+        | Command::ExprPush { .. }
+        | Command::RecordPush { .. }
+        | Command::FieldsPush
+        | Command::Subcontext { .. } => PipeMode::Nav,
+        Command::Filter(_) | Command::Select(_) | Command::AggPush { .. } => cur,
+        Command::Func(_)
+        | Command::Expr(_)
+        | Command::Agg(_)
+        | Command::AggRecord { .. }
+        | Command::AggRecall(_)
+        | Command::Recall(_)
+        | Command::RecordWith(_)
+        | Command::Spread { .. }
+        | Command::Map(_) => PipeMode::Scalar,
+        Command::Repeat { command, .. } => command_mode_out(command, cur),
     }
 }
 
@@ -414,6 +426,7 @@ impl<'a> Parser<'a> {
             predicate_depth: 0,
             nest_depth: 0,
             subquery_depth: 0,
+            arg_depth: 0,
             captures: std::cell::RefCell::new(Vec::new()),
             first_steps: std::cell::RefCell::new(Vec::new()),
         }
@@ -488,7 +501,7 @@ impl Parser<'_> {
             )));
         }
         validate_correlation_refs(&query)?;
-        validate_keyed_stages(&query)?;
+        validate_keyed_commands(&query)?;
         self.sweep_captures(&query)?;
         Ok(query)
     }
@@ -502,7 +515,7 @@ impl Parser<'_> {
     fn parse_chain(&mut self) -> Result<Query> {
         let mut query = self.parse_query()?;
         // The join binds where it is written: after the driver's
-        // stages parsed so far (a spliced chain-carrying fragment
+        // commands parsed so far (a spliced chain-carrying fragment
         // brought its own position along).
         if matches!(self.peek(), Some(Token::Correlate)) && query.correlations.is_empty() {
             query.join_at = query.pipeline.len();
@@ -575,7 +588,7 @@ impl Parser<'_> {
 
         // Pipeline over the whole union. The entering mode is
         // static: a projected branch enters in scalar mode, plain
-        // navigation in navigation mode; stages spliced from a
+        // navigation in navigation mode; commands spliced from a
         // fragment have already advanced it.
         let mut mode = if branches.iter().any(|b| b.projection.is_some()) {
             PipeMode::Scalar
@@ -583,7 +596,7 @@ impl Parser<'_> {
             PipeMode::Nav
         };
         for s in &pipeline {
-            mode = stage_mode_out(s, mode);
+            mode = command_mode_out(s, mode);
         }
         self.pipeline_items(&mut pipeline, mode)?;
         Ok(Query {
@@ -600,7 +613,7 @@ impl Parser<'_> {
     fn union_element(
         &mut self,
         branches: &mut Vec<Branch>,
-        pipeline: &mut Vec<Stage>,
+        pipeline: &mut Vec<Command>,
         correlations: &mut Vec<Query>,
         join_at: &mut usize,
     ) -> Result<()> {
@@ -624,7 +637,7 @@ impl Parser<'_> {
                 projection: None,
                 anchor: Anchor::Root,
             });
-            pipeline.push(Stage::Expr(expr));
+            pipeline.push(Command::Expr(expr));
             if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
                 return Err(QuarbError::parse(
                     "an expression head stands alone; it cannot join a \
@@ -756,13 +769,13 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse pipeline stages onto `pipeline` until something that is
+    /// Parse pipeline commands onto `pipeline` until something that is
     /// not a pipe. Shared by queries and pipeline-fragment bodies.
-    /// `mode` is the static execution mode entering the first stage
+    /// `mode` is the static execution mode entering the first command
     /// (spec: Execution Modes) — it decides whether a path-shaped
-    /// stage is navigation or an error, and each stage's mode-out
+    /// command is navigation or an error, and each command's mode-out
     /// feeds the next.
-    fn pipeline_items(&mut self, pipeline: &mut Vec<Stage>, mut mode: PipeMode) -> Result<()> {
+    fn pipeline_items(&mut self, pipeline: &mut Vec<Command>, mut mode: PipeMode) -> Result<()> {
         loop {
             match self.peek() {
                 Some(Token::Pipe) => {
@@ -771,21 +784,21 @@ impl Parser<'_> {
                         let before = pipeline.len();
                         self.invoke_pipeline_fragment("|", pipeline)?;
                         for s in &pipeline[before..] {
-                            mode = stage_mode_out(s, mode);
+                            mode = command_mode_out(s, mode);
                         }
                         continue;
                     }
-                    let mut stage = self.pipe_item(mode)?;
+                    let mut command = self.pipe_item(mode)?;
                     // `.v(body){N}` — a quantifier on a push repeats
                     // it.
                     if let Some(&Token::Quant { min, max }) = self.peek() {
                         if !matches!(
-                            stage,
-                            Stage::Push(_)
-                                | Stage::ExprPush { .. }
-                                | Stage::Subcontext { .. }
-                                | Stage::RecordPush { .. }
-                                | Stage::FieldsPush
+                            command,
+                            Command::Push(_)
+                                | Command::ExprPush { .. }
+                                | Command::Subcontext { .. }
+                                | Command::RecordPush { .. }
+                                | Command::FieldsPush
                         ) {
                             return Err(QuarbError::parse(
                                 "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')",
@@ -798,21 +811,21 @@ impl Parser<'_> {
                             )));
                         }
                         self.pos += 1;
-                        stage = Stage::Repeat {
-                            stage: Box::new(stage),
+                        command = Command::Repeat {
+                            command: Box::new(command),
                             min,
                             max,
                         };
                     }
-                    mode = stage_mode_out(&stage, mode);
-                    pipeline.push(stage);
+                    mode = command_mode_out(&command, mode);
+                    pipeline.push(command);
                 }
-                // `$| stage` — the map pipe.
+                // `$| command` — the map pipe.
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
-                    let stage = Stage::Map(Box::new(self.map_stage()?));
-                    mode = stage_mode_out(&stage, mode);
-                    pipeline.push(stage);
+                    let command = Command::Map(Box::new(self.map_command()?));
+                    mode = command_mode_out(&command, mode);
+                    pipeline.push(command);
                 }
                 Some(Token::At) => {
                     self.pos += 1;
@@ -821,13 +834,13 @@ impl Parser<'_> {
                         let before = pipeline.len();
                         self.invoke_pipeline_fragment("@|", pipeline)?;
                         for s in &pipeline[before..] {
-                            mode = stage_mode_out(s, mode);
+                            mode = command_mode_out(s, mode);
                         }
                         continue;
                     }
                     // Hops are per-thread; `@|` aggregates the
                     // whole context.
-                    if self.nav_stage_ahead() {
+                    if self.nav_command_ahead() {
                         return Err(QuarbError::parse(
                             "navigation is per-thread; write '| /path' \
                              ('@|' aggregates the whole context — hops don't take it)",
@@ -839,7 +852,7 @@ impl Parser<'_> {
                         match self.predicate()? {
                             pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => {
                                 // Select preserves the mode.
-                                pipeline.push(Stage::Select(pred));
+                                pipeline.push(Command::Select(pred));
                                 continue;
                             }
                             Predicate::Expr(_) => {
@@ -850,10 +863,15 @@ impl Parser<'_> {
                             }
                         }
                     }
+                    if let Some(command) = self.agg_sigil_command()? {
+                        mode = command_mode_out(&command, mode);
+                        pipeline.push(command);
+                        continue;
+                    }
                     let call = self.func_call()?;
-                    let stage = agg_stage(call)?;
-                    mode = stage_mode_out(&stage, mode);
-                    pipeline.push(stage);
+                    let command = agg_command(call)?;
+                    mode = command_mode_out(&command, mode);
+                    pipeline.push(command);
                 }
                 _ => break,
             }
@@ -861,15 +879,15 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Parse one pipeline stage after a `|`: a navigation stage, a
-    /// recall, a push, a subcontext, or a function. `mode` is the
-    /// static execution mode entering this stage: path-shaped
-    /// stages are navigation in navigation mode and an error in
+    /// Parse one pipeline command after a `|`: a navigation command, a
+    /// recall, a push, a subcontext, or a command. `mode` is the
+    /// static execution mode entering this command: path-shaped
+    /// commands are navigation in navigation mode and an error in
     /// scalar mode (a live topic would be dropped — file it first).
-    fn pipe_item(&mut self, mode: PipeMode) -> Result<Stage> {
-        // A stage that opens with a reference arrow — `::p-->`,
+    fn pipe_item(&mut self, mode: PipeMode) -> Result<Command> {
+        // A command that opens with a reference arrow — `::p-->`,
         // `::p=>(…)`, the bare `-->`, `<--(…)` — is a hop like
-        // `->x`: the stage ends on the reached nodes (or on the
+        // `->x`: the command ends on the reached nodes (or on the
         // projection written after them). Only a trailing operator
         // makes it the structural-test expression instead.
         if matches!(mode, PipeMode::Nav)
@@ -879,14 +897,14 @@ impl Parser<'_> {
             let save = self.pos;
             let b = self.branch()?;
             if !self.expr_continues() {
-                return Ok(Stage::Nav(b));
+                return Ok(Command::Nav(b));
             }
             self.pos = save;
-            return Ok(Stage::Expr(self.additive()?));
+            return Ok(Command::Expr(self.additive()?));
         }
-        // A stage that starts like a path is a navigation stage —
+        // A command that starts like a path is a navigation command —
         // the pipeline spelling of a path continuation.
-        if self.nav_stage_ahead() {
+        if self.nav_command_ahead() {
             match mode {
                 PipeMode::Scalar => {
                     // A parenthesized start keeps its expression
@@ -912,21 +930,21 @@ impl Parser<'_> {
                         if let Ok(b) = self.branch()
                             && !self.expr_continues()
                         {
-                            return Ok(Stage::Nav(b));
+                            return Ok(Command::Nav(b));
                         }
                         self.pos = save;
                     } else {
                         // A dangling expression operator after the
-                        // branch (`| /price:: * 2`) means the stage
+                        // branch (`| /price:: * 2`) means the command
                         // was arithmetic all along — keep the
                         // operand reading. A bare path is a hop.
                         let save = self.pos;
                         let b = self.branch()?;
                         if !self.expr_continues() {
-                            return Ok(Stage::Nav(b));
+                            return Ok(Command::Nav(b));
                         }
                         self.pos = save;
-                        return Ok(Stage::Expr(self.additive()?));
+                        return Ok(Command::Expr(self.additive()?));
                     }
                 }
             }
@@ -935,16 +953,16 @@ impl Parser<'_> {
             // `| $.name`, `| $_`, `| $ord`, and any arithmetic over
             // them are value expressions; a plain recall is just the
             // single-operand case.
-            Some(Token::Dollar) => Ok(Stage::Expr(self.additive()?)),
+            Some(Token::Dollar) => Ok(Command::Expr(self.additive()?)),
             // `| _::prop` / `| _/kid::x` — the served node as the
-            // stage's expression.
-            Some(Token::Driver) => Ok(Stage::Expr(self.additive()?)),
+            // command's expression.
+            Some(Token::Driver) => Ok(Command::Expr(self.additive()?)),
             // `| :name` — the topic record's field; `| %+` — the
             // named-captures record.
-            Some(Token::Field | Token::PercentPlus) => Ok(Stage::Expr(self.additive()?)),
-            // `| @(a; b)` — a list literal as the stage's expression.
+            Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.additive()?)),
+            // `| @(a; b)` — a list literal as the command's expression.
             Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
-                Ok(Stage::Expr(self.additive()?))
+                Ok(Command::Expr(self.additive()?))
             }
             Some(Token::At) => {
                 // `| @-::prop` (and arithmetic over it) is a value
@@ -953,13 +971,13 @@ impl Parser<'_> {
                     self.toks.get(self.pos + 1),
                     Some(Token::Name { text, quoted: false, .. }) if text == "-"
                 ) {
-                    return Ok(Stage::Expr(self.additive()?));
+                    return Ok(Command::Expr(self.additive()?));
                 }
                 self.pos += 1;
                 self.expect_dot("@")?;
-                Ok(Stage::Recall(RegRef::Whole))
+                Ok(Command::Recall(RegRef::Whole))
             }
-            // A backtick literal is the sh(...) stage, sugared
+            // A backtick literal is the sh(...) command, sugared
             // (Perl's qx): interpolation holes parameterize the
             // command per capsa.
             Some(Token::Shell(parts)) => {
@@ -979,7 +997,7 @@ impl Parser<'_> {
                     }
                     Arg::Expr(Operand::Interp(segs))
                 };
-                Ok(Stage::Func(FnCall {
+                Ok(Command::Func(FnCall {
                     name: "sh".into(),
                     args: vec![arg],
                 }))
@@ -1003,18 +1021,18 @@ impl Parser<'_> {
                             ));
                         }
                         validate_record(&call)?;
-                        return Ok(Stage::RecordWith(call));
+                        return Ok(Command::RecordWith(call));
                     }
                     self.expect_dot("%%")?;
-                    return Ok(Stage::Recall(RegRef::FullRecord));
+                    return Ok(Command::Recall(RegRef::FullRecord));
                 }
                 if matches!(self.peek(), Some(Token::LParen)) {
                     let call = self.record_args()?;
                     validate_record(&call)?;
-                    return Ok(Stage::Func(call));
+                    return Ok(Command::Func(call));
                 }
                 self.expect_dot("%")?;
-                Ok(Stage::Recall(RegRef::Record))
+                Ok(Command::Recall(RegRef::Record))
             }
             // `| ...` — the spread. Dots are name characters, so
             // the ellipsis arrives as one name; it outranks the
@@ -1031,7 +1049,7 @@ impl Parser<'_> {
                 } else {
                     false
                 };
-                Ok(Stage::Spread { outer })
+                Ok(Command::Spread { outer })
             }
             // `quoted: false`: a quoted string that happens to start
             // with a dot (`| '.gitignore'`) is a constant topic, not
@@ -1085,7 +1103,7 @@ impl Parser<'_> {
                         // The bare `.%` is the fields push: the topic
                         // record's fields, each filed under its name.
                         if !enriched && name.is_none() {
-                            return Ok(Stage::FieldsPush);
+                            return Ok(Command::FieldsPush);
                         }
                         return Err(QuarbError::parse(
                             "a record push takes its fields: `.%(…)` or `.name%(…)`; \
@@ -1094,7 +1112,7 @@ impl Parser<'_> {
                     }
                     let call = self.record_args()?;
                     validate_record(&call)?;
-                    return Ok(Stage::RecordPush {
+                    return Ok(Command::RecordPush {
                         name,
                         call,
                         enriched,
@@ -1114,7 +1132,7 @@ impl Parser<'_> {
                         && matches!(self.peek(), Some(Token::RParen))
                     {
                         self.pos += 1;
-                        return Ok(Stage::Subcontext {
+                        return Ok(Command::Subcontext {
                             name,
                             body: Box::new(body),
                         });
@@ -1126,17 +1144,17 @@ impl Parser<'_> {
                     let expr = self.cond_expr()?;
                     // …and neither does a pipe: `.a($_ | first)` is
                     // `.a(($_ | first))`.
-                    let stages = self.inline_pipe_tail()?;
-                    let expr = if stages.is_empty() {
+                    let commands = self.inline_pipe_tail()?;
+                    let expr = if commands.is_empty() {
                         expr
                     } else {
                         Operand::Piped {
                             expr: Box::new(expr),
-                            stages,
+                            commands,
                         }
                     };
                     self.expect(Token::RParen, "')' to close a subcontext")?;
-                    Ok(Stage::ExprPush { name, expr })
+                    Ok(Command::ExprPush { name, expr })
                 } else {
                     // In navigation mode a bare push marks; marks
                     // may not take numeric names (positions number
@@ -1152,7 +1170,7 @@ impl Parser<'_> {
                             "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)",
                         ));
                     }
-                    Ok(Stage::Push(name))
+                    Ok(Command::Push(name))
                 }
             }
             // `| s/pat/repl/mods` — regex substitution on the topic.
@@ -1174,7 +1192,7 @@ impl Parser<'_> {
                     ],
                 };
                 self.pos += 1;
-                Ok(Stage::Func(call))
+                Ok(Command::Func(call))
             }
             // `| [cond]` — a per-capsa filter. Positional selection
             // is a whole-context operation and lives on `@|`.
@@ -1198,12 +1216,12 @@ impl Parser<'_> {
                         Predicate::Index(_) | Predicate::Range(_, _) => return Err(positional()),
                     }
                 }
-                Ok(Stage::Filter(e))
+                Ok(Command::Filter(e))
             }
-            // A value-expression stage starts with a projection, a
+            // A value-expression command starts with a projection, a
             // parenthesized group, or an interpolated string:
             // `| ::price * ::qty`, `| "${::name} (${::age})"`.
-            // (A bare path start is a navigation stage, handled
+            // (A bare path start is a navigation command, handled
             // above; parenthesized paths remain expressions.)
             Some(
                 Token::ColonColon
@@ -1211,29 +1229,29 @@ impl Parser<'_> {
                 | Token::SemiSemiSemi
                 | Token::LParen
                 | Token::Interp(_),
-            ) => Ok(Stage::Expr(self.additive()?)),
-            // A quoted string is a constant-topic stage (`| 'text'`);
-            // unquoted names remain function calls.
-            Some(Token::Name { quoted: true, .. }) => Ok(Stage::Expr(self.additive()?)),
+            ) => Ok(Command::Expr(self.additive()?)),
+            // A quoted string is a constant-topic command (`| 'text'`);
+            // unquoted names remain command calls.
+            Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.additive()?)),
             _ => {
                 let call = self.func_call()?;
-                // `now()` refuses stage position: it takes no topic.
+                // `now()` refuses command position: it takes no topic.
                 if call.name == "now" {
                     return Err(QuarbError::parse(
                         "now() is a call operand (the invocation instant); it takes no \
                          topic — use it in expression position: [::date > now() - 12h]",
                     ));
                 }
-                func_stage(call)
+                func_command(call)
             }
         }
     }
 
-    /// Whether the next tokens start a navigation stage: an axis
+    /// Whether the next tokens start a navigation command: an axis
     /// token, the root anchor, a `(name)` mark anchor followed by a
     /// path continuation, or an axis-led group (a quantified walk).
     /// A `(` that opens anything else stays an expression.
-    fn nav_stage_ahead(&self) -> bool {
+    fn nav_command_ahead(&self) -> bool {
         let axis = |t: &Token| {
             matches!(
                 t,
@@ -1264,7 +1282,7 @@ impl Parser<'_> {
 
     /// Whether the next token continues a value expression after a
     /// complete operand — an arithmetic operator or a conditional
-    /// `?`. Decides branch-vs-expression for a path-shaped stage.
+    /// `?`. Decides branch-vs-expression for a path-shaped command.
     fn expr_continues(&self) -> bool {
         match self.peek() {
             Some(Token::Name {
@@ -1372,26 +1390,26 @@ impl Parser<'_> {
             }
             DefBody::Predicates(preds)
         } else if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
-            let mut stages = Vec::new();
+            let mut commands = Vec::new();
             // A fragment body's splice-time mode is unknowable at
             // definition time; parse permissively (navigation mode)
-            // — the splice site's own stages still typecheck.
-            self.pipeline_items(&mut stages, PipeMode::Nav)?;
-            if stages.is_empty() {
+            // — the splice site's own commands still typecheck.
+            self.pipeline_items(&mut commands, PipeMode::Nav)?;
+            if commands.is_empty() {
                 return Err(QuarbError::parse(format!(
                     "fragment '&{name}' has an empty body"
                 )));
             }
-            DefBody::Pipeline(stages)
+            DefBody::Pipeline(commands)
         } else {
-            // A stage-shaped body without its pipe is the classic
+            // A command-shaped body without its pipe is the classic
             // slip — point at the spelling instead of the grammar.
             if matches!(self.peek(),
                 Some(Token::Name { text, quoted: false, .. }) if text.starts_with('.'))
                 && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
             {
                 return Err(QuarbError::parse(format!(
-                    "fragment '&{name}' body looks like a pipeline stage; \
+                    "fragment '&{name}' body looks like a pipeline command; \
                      a pipeline fragment starts with its pipe: \
                      'def &{name}: | .push(...) ;'"
                 )));
@@ -1719,12 +1737,12 @@ impl Parser<'_> {
         // A data-aware macro reads the dataset, mounted as `/data`
         // beside the parameters; a pure macro sees the forms alone.
         // The body is evaluated *here*, at expansion time, so its
-        // shell stage (`sh(...)` or a backtick) must clear the same
+        // shell command (`sh(...)` or a backtick) must clear the same
         // `--allow-shell` gate the top-level query does — otherwise a
         // macro body could run a command with no opt-in. The gate is
         // the run's (`Run::allow_shell`; parsing outside a run is
         // gated); the nested evaluation inherits the run's options.
-        let allow_shell = crate::exec::run_option(|o| o.allow_shell);
+        let run = crate::exec::run_option(|o| o.clone());
         let result = if def.data_aware {
             let Some(data) = self.data else {
                 return Err(QuarbError::parse(format!(
@@ -1734,10 +1752,10 @@ impl Parser<'_> {
                 )));
             };
             let combined = crate::reflect::ExpansionAdapter::new(arbor, data);
-            crate::exec::gate_shell(&body, allow_shell)?;
+            crate::exec::gate(&body, &run)?;
             crate::exec::eval(&body, &combined)
         } else {
-            crate::exec::gate_shell(&body, allow_shell)?;
+            crate::exec::gate(&body, &run)?;
             crate::exec::eval(&body, &arbor)
         };
         let values = match result {
@@ -1792,7 +1810,7 @@ impl Parser<'_> {
             self.pos += 1;
             if !matches!(self.peek(), Some(Token::RParen)) {
                 loop {
-                    // Same relaxation as function arguments: a
+                    // Same relaxation as command operands: a
                     // conditional argument stands bare.
                     args.push(self.cond_expr()?);
                     if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
@@ -1904,7 +1922,7 @@ impl Parser<'_> {
     fn invoke_pipeline_fragment(
         &mut self,
         pipe: &'static str,
-        pipeline: &mut Vec<Stage>,
+        pipeline: &mut Vec<Command>,
     ) -> Result<()> {
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
@@ -1918,8 +1936,8 @@ impl Parser<'_> {
         }
         self.check_bang(&name, &def, bang)?;
         match def.body {
-            DefBody::Pipeline(stages) => {
-                let first = stage_pipe(stages.first().expect("non-empty checked at def time"));
+            DefBody::Pipeline(commands) => {
+                let first = command_pipe(commands.first().expect("non-empty checked at def time"));
                 if first != pipe {
                     return Err(QuarbError::parse(format!(
                         "fragment '&{name}' begins with '{first}' but was invoked with '{pipe}'"
@@ -1930,9 +1948,9 @@ impl Parser<'_> {
                     outer: &map,
                     hole: &map,
                 };
-                for mut stage in stages {
-                    subst_stage(&mut stage, &subst);
-                    pipeline.push(stage);
+                for mut command in commands {
+                    subst_command(&mut command, &subst);
+                    pipeline.push(command);
                 }
                 Ok(())
             }
@@ -1958,7 +1976,7 @@ impl Parser<'_> {
                     match pred {
                         Predicate::Expr(mut e) => {
                             subst_pred_expr(&mut e, &subst);
-                            pipeline.push(Stage::Filter(e));
+                            pipeline.push(Command::Filter(e));
                         }
                         _ => {
                             return Err(QuarbError::parse(format!(
@@ -1971,7 +1989,7 @@ impl Parser<'_> {
                 }
                 Ok(())
             }
-            // A macro expands to text; here it must be a stage
+            // A macro expands to text; here it must be a command
             // sequence whose first pipe matches the invocation.
             DefBody::Macro(_) => {
                 let invited = invites_of(&args);
@@ -1989,7 +2007,7 @@ impl Parser<'_> {
                             "macro '&{name}' expanded to a query fragment \
                              ('{text}'); invoke it at path position — or \
                              have the body emit a leading '| ' to splice \
-                             as pipeline stages"
+                             as pipeline commands"
                         )));
                     }
                 };
@@ -2000,16 +2018,21 @@ impl Parser<'_> {
                     )));
                 }
                 let mut p = self.child(&tokens, self.defs.before(&name))?;
-                let mut stages = Vec::new();
-                p.pipeline_items(&mut stages, PipeMode::Nav).map_err(wrap)?;
+                let mut commands = Vec::new();
+                p.pipeline_items(&mut commands, PipeMode::Nav)
+                    .map_err(wrap)?;
                 if p.pos != tokens.len() {
                     return Err(QuarbError::parse(format!(
                         "macro '&{name}' expanded to text with trailing \
                          content ('{text}')"
                     )));
                 }
-                self.record_captures(&name, &invited, crate::reflect::usage_of_stages(&stages));
-                pipeline.extend(stages);
+                self.record_captures(
+                    &name,
+                    &invited,
+                    crate::reflect::usage_of_commands(&commands),
+                );
+                pipeline.extend(commands);
                 Ok(())
             }
         }
@@ -2079,7 +2102,7 @@ impl Parser<'_> {
             if self.peek_word(OR_WORDS) {
                 break;
             }
-            // `$|` at pipeline level is the map pipe — a stage, not a
+            // `$|` at pipeline level is the map pipe — a command, not a
             // path step; end the branch so `pipeline_items` sees it.
             // `finish_step` deliberately leaves this `$` unconsumed
             // (it would otherwise become a spurious leaf anchor).
@@ -2156,7 +2179,7 @@ impl Parser<'_> {
                 return Err(QuarbError::parse(format!(
                     "fragment '&{name}' carries a pipeline; a pipe leaves \
                      navigation — invoke it at branch head or as a \
-                     pipeline stage, not inside a walk"
+                     pipeline command, not inside a walk"
                 )));
             }
             DefBody::Query(mut q) => {
@@ -2190,7 +2213,7 @@ impl Parser<'_> {
             return Err(QuarbError::parse(format!(
                 "fragment '&{name}' carries a pipeline; a pipe leaves \
                  navigation — invoke it at branch head or as a pipeline \
-                 stage, not inside a walk"
+                 command, not inside a walk"
             )));
         }
         if q.branches.iter().any(|b| b.anchor != Anchor::Current) {
@@ -2571,10 +2594,31 @@ impl Parser<'_> {
                 ..
             }) => text.clone(),
             _ => {
-                return Err(QuarbError::parse("expected a function name after '|'"));
+                return Err(QuarbError::parse("expected a command name after '|'"));
             }
         };
-        if let Some(pointer) = retired_function(&name) {
+        // `ALIAS:name` — an environment command: the mount alias as
+        // a prefix glued by a colon (the colon lexes as the field
+        // token before a glued word).
+        let name = match (self.peek(), self.toks.get(self.pos + 1)) {
+            (
+                Some(Token::Field | Token::Colon { spaced: false }),
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                }),
+            ) if is_word(&name) => {
+                let full = format!("{name}:{text}");
+                self.pos += 2;
+                full
+            }
+            _ => name,
+        };
+        let environment = crate::env::split_env(&name).is_some();
+        if !environment
+            && let Some(pointer) = retired_command(&name)
+        {
             return Err(QuarbError::parse(pointer));
         }
         let mut args = Vec::new();
@@ -2584,10 +2628,37 @@ impl Parser<'_> {
             // take `key = value` items and `;` between them as the
             // sigil forms do.
             let convention = is_record_convention(&name);
+            // The parentheses hold the command's operands and options: a bare
+            // word among them is a string, not a command (the
+            // record-convention calls take fields, which are
+            // bodies like the sigil form's).
+            let saved_depth = self.arg_depth;
+            if !convention {
+                self.arg_depth += 1;
+            }
+            let parsed = self.func_args(&name, convention, &mut args);
+            self.arg_depth = saved_depth;
+            parsed?;
+            self.expect(Token::RParen, "')' to close the command's operands")?;
+        }
+        self.finish_call(name, args)
+    }
+
+    /// The argument list of a call, up to (not including) its
+    /// closing parenthesis.
+    fn func_args(&mut self, name: &str, convention: bool, args: &mut Vec<Arg>) -> Result<()> {
+        {
             if !matches!(self.peek(), Some(Token::RParen)) {
                 loop {
+                    // The option segment: the last `;`-field, opened
+                    // by a dash-led word, `--` or the void `-=`; it
+                    // runs to the closing parenthesis.
+                    if self.option_ahead() {
+                        self.option_segment(name, args)?;
+                        break;
+                    }
                     if convention {
-                        self.record_item(&mut args)?;
+                        self.record_item(args)?;
                     } else if name == "csv"
                         && args.is_empty()
                         && let Some(Token::Name {
@@ -2627,11 +2698,146 @@ impl Parser<'_> {
                     }
                 }
             }
-            self.expect(Token::RParen, "')' to close function arguments")?;
         }
-        // A range argument is `window`'s span; nothing else takes one.
-        if !matches!(name.as_str(), "window" | "substr")
-            && args.iter().any(|a| matches!(a, Arg::Range(_, _)))
+        Ok(())
+    }
+
+    /// Whether an option opens here: a dash-led word (`-i`, `-n`),
+    /// `--` glued to a word (`--locale`), or the void option `-=`.
+    /// A dash before a digit, `$` or a sigil stays minus.
+    fn option_ahead(&self) -> bool {
+        match self.peek() {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => {
+                lexer::is_option_word(text)
+                    || (text == "-" && matches!(self.toks.get(self.pos + 1), Some(Token::OptEq)))
+            }
+            Some(Token::DashDash) => matches!(
+                self.toks.get(self.pos + 1),
+                Some(Token::Name {
+                    quoted: false,
+                    glued: true,
+                    ..
+                }) | Some(Token::OptEq)
+            ),
+            _ => false,
+        }
+    }
+
+    /// The option segment of a simple command: whitespace-separated
+    /// options in shell spelling, `=` binding a value (read as an
+    /// operand reads: a bare word is a string). Once entered, every
+    /// dash token is an option (`-9`); a `;` after it is refused,
+    /// since the options stand last.
+    fn option_segment(&mut self, command: &str, args: &mut Vec<Arg>) -> Result<()> {
+        let saved_depth = self.arg_depth;
+        self.arg_depth += 1;
+        let parsed = self.option_items(command, args);
+        self.arg_depth = saved_depth;
+        parsed
+    }
+
+    fn option_items(&mut self, command: &str, args: &mut Vec<Arg>) -> Result<()> {
+        loop {
+            let name = match self.peek() {
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) if text.starts_with('-') => {
+                    let t = text.clone();
+                    self.pos += 1;
+                    t
+                }
+                Some(Token::DashDash) => {
+                    self.pos += 1;
+                    match self.peek() {
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            glued: true,
+                        }) => {
+                            let t = format!("--{text}");
+                            self.pos += 1;
+                            t
+                        }
+                        _ => "--".to_string(),
+                    }
+                }
+                Some(Token::RParen) => return Ok(()),
+                Some(Token::Comma | Token::Semi) => {
+                    return Err(QuarbError::parse(format!(
+                        "the options of '{command}' stand last: write the operands before the \
+                         option segment, '{command}(operand; …; -opt --opt=value)'"
+                    )));
+                }
+                _ => {
+                    return Err(QuarbError::parse(format!(
+                        "in the option segment of '{command}' every token is an option spelled \
+                         as in the shell ('-i', '--name=value'); an operand stands before the segment"
+                    )));
+                }
+            };
+            let value = if matches!(self.peek(), Some(Token::OptEq)) {
+                self.pos += 1;
+                // The void option `-=`: empty name, empty value; it
+                // does nothing but open the segment.
+                if name == "-" {
+                    if matches!(self.peek(), Some(Token::Name { glued: true, .. })) {
+                        return Err(QuarbError::parse(format!(
+                            "the void option '-=' of '{command}' takes no value; it opens the \
+                             segment for a numeric flag ('-= -9')"
+                        )));
+                    }
+                    continue;
+                }
+                // One value, as an operand reads (a bare word a
+                // string, a sigil an expression); the options are
+                // whitespace-separated, so it ends at the space.
+                Some(self.unary()?)
+            } else {
+                None
+            };
+            if name == "-" {
+                return Err(QuarbError::parse(format!(
+                    "a lone '-' in the option segment of '{command}' is the void option and is \
+                     written '-='; a numeric flag follows it ('-= -9')"
+                )));
+            }
+            args.push(Arg::Opt { name, value });
+        }
+    }
+
+    /// A parsed call's shape checks.
+    fn finish_call(&mut self, name: String, args: Vec<Arg>) -> Result<FnCall> {
+        // The options a command declares, as its synopsis lists
+        // them; every other one is refused by name. An environment
+        // command's options are the callee's to judge.
+        let declared: &[&str] = crate::registry::spec(&name).map_or(&[], |s| s.options);
+        for arg in &args {
+            if let Arg::Opt { name: opt, .. } = arg
+                && crate::env::split_env(&name).is_none()
+                && !declared.contains(&opt.as_str())
+            {
+                return Err(QuarbError::parse(if declared.is_empty() {
+                    format!("'{name}' takes no options; its parentheses hold operands ('{opt}' given)")
+                } else {
+                    format!(
+                        "'{name}' has no option '{opt}' (its options: {})",
+                        declared.join(" ")
+                    )
+                }));
+            }
+        }
+        // A range argument is `window`'s span, `substr`'s, or a rank
+        // range on the commands that select by rank.
+        if !matches!(
+            name.as_str(),
+            "window" | "substr" | "frequencies" | "top" | "bottom" | "first" | "last"
+        ) && args.iter().any(|a| matches!(a, Arg::Range(_, _)))
         {
             return Err(QuarbError::parse(format!(
                 "'{name}' takes no range argument ('window(a..b)' does)"
@@ -2642,7 +2848,7 @@ impl Parser<'_> {
         Ok(call)
     }
 
-    /// One function argument: a full value expression; a plain
+    /// One command operand: a full value expression; a plain
     /// literal stays a literal. An offset range (`window(-2..0)`,
     /// either end optional) lexes as a single name token — digits,
     /// `-`, and `.` are all name characters — like the positional
@@ -3103,7 +3309,7 @@ impl Parser<'_> {
         }
         // A trailing `$` anchors the step to leaf nodes — but at
         // pipeline level a `$` glued to a pipe is the map pipe `$|`,
-        // a stage the caller must see; consuming its `$` here would
+        // a command the caller must see; consuming its `$` here would
         // silently reparse `tags $| upper` as `tags$ | upper` (leaf
         // anchor + plain pipe), dropping the map semantics. Inside a
         // path-pattern group (`pattern_depth > 0`) a following `|` is
@@ -3915,15 +4121,15 @@ impl Parser<'_> {
             self.pos += 1;
             let inner = self.cond_expr()?;
             // An operand may carry a pipe tail inside its parens:
-            // `(expr | f @| g)` — stage semantics, mirrored.
-            let stages = self.inline_pipe_tail()?;
+            // `(expr | f @| g)` — command semantics, mirrored.
+            let commands = self.inline_pipe_tail()?;
             self.expect(Token::RParen, "')' to close a group")?;
-            return Ok(if stages.is_empty() {
+            return Ok(if commands.is_empty() {
                 inner
             } else {
                 Operand::Piped {
                     expr: Box::new(inner),
-                    stages,
+                    commands,
                 }
             });
         }
@@ -3939,37 +4145,59 @@ impl Parser<'_> {
     /// The pipe tail an expression may carry inside its own
     /// parentheses — a group's, or a push body's: `| f`, `@| g`,
     /// `$| h`, and fragment invocations, up to the closing paren.
-    fn inline_pipe_tail(&mut self) -> Result<Vec<Stage>> {
-        let mut stages = Vec::new();
+    fn inline_pipe_tail(&mut self) -> Result<Vec<Command>> {
+        let mut commands = Vec::new();
         loop {
             match self.peek() {
                 Some(Token::Pipe) if matches!(self.toks.get(self.pos + 1), Some(Token::Amp)) => {
                     self.pos += 1;
-                    self.invoke_inline_fragment("|", &mut stages)?;
+                    self.invoke_inline_fragment("|", &mut commands)?;
                 }
                 Some(Token::Pipe) => {
                     self.pos += 1;
-                    stages.push(self.inline_stage()?);
+                    commands.push(self.inline_command()?);
                 }
                 Some(Token::At)
                     if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe))
                         && matches!(self.toks.get(self.pos + 2), Some(Token::Amp)) =>
                 {
                     self.pos += 2;
-                    self.invoke_inline_fragment("@|", &mut stages)?;
+                    self.invoke_inline_fragment("@|", &mut commands)?;
                 }
                 Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
-                    stages.push(self.inline_agg_stage()?);
+                    commands.push(self.inline_agg_command()?);
                 }
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
-                    stages.push(Stage::Map(Box::new(self.map_stage()?)));
+                    commands.push(Command::Map(Box::new(self.map_command()?)));
                 }
                 _ => break,
             }
         }
-        Ok(stages)
+        Ok(commands)
+    }
+
+    /// A headless body pipeline: `name` applied to the body's seed
+    /// as `| name` applies to its input, with whatever pipe tail
+    /// follows (`cc`, `unique @| count`).
+    fn headless_body(&mut self, name: String) -> Result<Operand> {
+        if crate::registry::spec(&name).is_none() && retired_command(&name).is_none() {
+            return Err(QuarbError::parse(format!(
+                "'{name}' is not a command; a bare word in a body names one: \
+                 quote a string \"{name}\""
+            )));
+        }
+        let call = FnCall {
+            name,
+            args: Vec::new(),
+        };
+        let mut commands = vec![func_command(call)?];
+        commands.extend(self.inline_pipe_tail()?);
+        Ok(Operand::Piped {
+            expr: Box::new(Operand::Seed),
+            commands,
+        })
     }
 
     fn cond_expr(&mut self) -> Result<Operand> {
@@ -4034,100 +4262,211 @@ impl Parser<'_> {
     }
 
     /// A fragment invocation inside an inline pipe: splice its
-    /// stages, holding them to the inline rules — a pipe inside an
-    /// expression transforms a value, so a spliced stage may not
+    /// commands, holding them to the inline rules — a pipe inside an
+    /// expression transforms a value, so a spliced command may not
     /// push or navigate.
     fn invoke_inline_fragment(
         &mut self,
         pipe: &'static str,
-        stages: &mut Vec<Stage>,
+        commands: &mut Vec<Command>,
     ) -> Result<()> {
-        let before = stages.len();
-        self.invoke_pipeline_fragment(pipe, stages)?;
-        for stage in &stages[before..] {
+        let before = commands.len();
+        self.invoke_pipeline_fragment(pipe, commands)?;
+        for command in &commands[before..] {
             if matches!(
-                stage,
-                Stage::Push(_)
-                    | Stage::ExprPush { .. }
-                    | Stage::RecordPush { .. }
-                    | Stage::FieldsPush
-                    | Stage::Subcontext { .. }
-                    | Stage::Nav(_)
+                command,
+                Command::Push(_)
+                    | Command::ExprPush { .. }
+                    | Command::RecordPush { .. }
+                    | Command::FieldsPush
+                    | Command::Subcontext { .. }
+                    | Command::AggPush { .. }
+                    | Command::Nav(_)
             ) {
                 return Err(QuarbError::parse(
                     "a fragment spliced inside an expression pipe may \
                      not push or navigate (pushes belong to real \
-                     capsae; use it as a pipeline stage instead)",
+                     capsae; use it as a pipeline command instead)",
                 ));
             }
         }
         Ok(())
     }
 
-    /// One `| ...` stage of an inline pipe. The pipeline's own
-    /// stage parser, minus what needs a real capsa: pushes and
+    /// One `| ...` command of an inline pipe. The pipeline's own
+    /// command parser, minus what needs a real capsa: pushes and
     /// subcontexts refuse.
-    fn inline_stage(&mut self) -> Result<Stage> {
+    fn inline_command(&mut self) -> Result<Command> {
         // Expression pipe tails live on the scalar plane; a
-        // path-shaped stage errors in pipe_item before it can
+        // path-shaped command errors in pipe_item before it can
         // become navigation.
-        let stage = self.pipe_item(PipeMode::Scalar)?;
-        match &stage {
-            Stage::Push(_)
-            | Stage::ExprPush { .. }
-            | Stage::RecordPush { .. }
-            | Stage::FieldsPush
-            | Stage::Subcontext { .. } => Err(QuarbError::parse(
+        let command = self.pipe_item(PipeMode::Scalar)?;
+        match &command {
+            Command::Push(_)
+            | Command::ExprPush { .. }
+            | Command::RecordPush { .. }
+            | Command::FieldsPush
+            | Command::Subcontext { .. } => Err(QuarbError::parse(
                 "a pipe inside an expression transforms a value; \
-                     pushes belong to real capsae (use a stage)",
+                     pushes belong to real capsae (use a command)",
             )),
-            _ => Ok(stage),
+            _ => Ok(command),
         }
     }
 
-    /// The stage a `$|` maps over the topic's elements: a
+    /// The command a `$|` maps over the topic's elements: a
     /// positional predicate slices the list, an expression
     /// predicate filters its elements (`$_` = the element), and
-    /// any per-value stage transforms them. Pushes and subcontexts
+    /// any per-value command transforms them. Pushes and subcontexts
     /// refuse, as in inline pipes.
-    fn map_stage(&mut self) -> Result<Stage> {
+    fn map_command(&mut self) -> Result<Command> {
         // Hops are per-thread; `$|` transforms elements of a list
         // topic in place.
-        if self.nav_stage_ahead() {
+        if self.nav_command_ahead() {
             return Err(QuarbError::parse(
                 "navigation doesn't ride the map pipe; '$|' transforms \
                  the elements of a list topic — write '| /path' as its \
-                 own stage",
+                 own command",
             ));
         }
         if matches!(self.peek(), Some(Token::LBracket)) {
             let pred = self.predicate()?;
             return Ok(match pred {
-                Predicate::Expr(e) => Stage::Filter(e),
-                positional => Stage::Select(positional),
+                Predicate::Expr(e) => Command::Filter(e),
+                positional => Command::Select(positional),
             });
         }
-        self.inline_stage()
+        self.inline_command()
     }
 
-    /// One `@| ...` stage of an inline pipe: an aggregate call, or
+    /// One `@| ...` command of an inline pipe: an aggregate call, or
     /// positional selection.
-    fn inline_agg_stage(&mut self) -> Result<Stage> {
+    fn inline_agg_command(&mut self) -> Result<Command> {
         // The same discipline as the top-level `@|`: positional
         // selection only in brackets, known aggregates only, shapes
         // validated — an unchecked inline form would parse queries
         // whose conditions the executor silently ignores.
         if matches!(self.peek(), Some(Token::LBracket)) {
             return match self.predicate()? {
-                pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => Ok(Stage::Select(pred)),
+                pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => Ok(Command::Select(pred)),
                 Predicate::Expr(_) => Err(QuarbError::parse(
                     "a condition filters per capsa; write '| [cond]' \
                      ('@| [n]' selects positionally)",
                 )),
             };
         }
+        match self.agg_sigil_command()? {
+            Some(Command::AggPush { .. }) => {
+                return Err(QuarbError::parse(
+                    "a pipe inside an expression transforms a value; \
+                     pushes belong to real capsae (use a command)",
+                ));
+            }
+            Some(command) => return Ok(command),
+            None => {}
+        }
         let call = self.func_call()?;
-        agg_stage(call)
+        agg_command(call)
+    }
+
+    /// The sigil forms after `@|`: the aggregate push `.name(body)`,
+    /// the aggregate record `%(…)` / `%%(…)`, and the once-read
+    /// register accessors `%.`, `%%.`, `$.name`, `$.`, `$.N`, `@.`.
+    /// `None` when a command name follows instead.
+    fn agg_sigil_command(&mut self) -> Result<Option<Command>> {
+        match self.peek() {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if text.starts_with('.') => {
+                let text = text.clone();
+                self.pos += 1;
+                let mut name = if text == "." {
+                    None
+                } else {
+                    Some(text[1..].to_string())
+                };
+                if name.is_none()
+                    && let Some(Token::Name {
+                        text: q,
+                        quoted: true,
+                        glued: true,
+                    }) = self.peek()
+                {
+                    name = Some(q.clone());
+                    self.pos += 1;
+                }
+                if let Some(n) = &name
+                    && text.len() > 1
+                    && !n.chars().next().is_some_and(|c| c.is_alphabetic())
+                {
+                    return Err(QuarbError::parse(format!(
+                        "a push name starts with a letter ('@| .name(body)'); quote any other \
+                         ('@| .\"{n}\"(body)')"
+                    )));
+                }
+                if !matches!(self.peek(), Some(Token::LParen)) {
+                    return Err(QuarbError::parse(
+                        "the aggregate push takes a body: '@| .name(body)' files the body's \
+                         value on every capsa (a plain '| .name' files each topic)",
+                    ));
+                }
+                self.pos += 1;
+                let expr = self.cond_expr()?;
+                let commands = self.inline_pipe_tail()?;
+                let body = if commands.is_empty() {
+                    expr
+                } else {
+                    Operand::Piped {
+                        expr: Box::new(expr),
+                        commands,
+                    }
+                };
+                self.expect(Token::RParen, "')' to close the aggregate push's body")?;
+                Ok(Some(Command::AggPush { name, body }))
+            }
+            Some(Token::Percent) => {
+                self.pos += 1;
+                let enriched = if matches!(self.peek(), Some(Token::Percent)) {
+                    self.pos += 1;
+                    true
+                } else {
+                    false
+                };
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    let call = self.record_args()?;
+                    validate_record(&call)?;
+                    return Ok(Some(Command::AggRecord { call, enriched }));
+                }
+                self.expect_dot(if enriched { "%%" } else { "%" })?;
+                Ok(Some(Command::AggRecall(if enriched {
+                    RegRef::FullRecord
+                } else {
+                    RegRef::Record
+                })))
+            }
+            Some(Token::Dollar) => {
+                let save = self.pos;
+                match self.additive()? {
+                    Operand::Recall(r) => Ok(Some(Command::AggRecall(r))),
+                    _ => {
+                        self.pos = save;
+                        Err(QuarbError::parse(
+                            "after '@|' a register accessor reads once ('@| $.name', '@| %.'); \
+                             an expression over it belongs to '|' or to a body",
+                        ))
+                    }
+                }
+            }
+            Some(Token::At)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text == ".") =>
+            {
+                self.pos += 2;
+                Ok(Some(Command::AggRecall(RegRef::Whole)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// An operand-position relative path that begins with a
@@ -4175,7 +4514,7 @@ impl Parser<'_> {
     /// and parameter scope. Ruling #34: the hole may carry a glued
     /// bash operator — `expr:?` / `expr:?message` (the strict hole)
     /// or `expr:-fallback` (the default hole) — or a pipe tail
-    /// (`expr | stage ...`); mixing them wants the piped side
+    /// (`expr | command ...`); mixing them wants the piped side
     /// parenthesized.
     fn parse_hole(&mut self, src: &str) -> Result<InterpSeg> {
         if let Some((idx, which)) = top_level_bash_op(src) {
@@ -4185,13 +4524,15 @@ impl Parser<'_> {
                      (`${{expr{which}...}}`)"
                 )));
             }
-            let expr = self.hole_expr(&src[..idx], src)?;
+            let expr = self.hole_expr(&src[..idx], src, false)?;
             let tail = &src[idx + 2..];
             return Ok(if which == ":?" {
                 let msg = tail.trim();
                 InterpSeg::Strict(expr, (!msg.is_empty()).then(|| msg.to_string()))
             } else {
-                InterpSeg::Default(expr, self.hole_expr(tail, src)?)
+                // The default is a shell word, as `${var:-word}`
+                // spells it: a bare word is text, not a command.
+                InterpSeg::Default(expr, self.hole_expr(tail, src, true)?)
             });
         }
         let context = |e: QuarbError| QuarbError::parse(format!("in '${{{src}}}': {e}"));
@@ -4199,31 +4540,31 @@ impl Parser<'_> {
         let mut p = self.child(&tokens, self.defs.clone())?;
         p.def_params = self.def_params.clone();
         let expr = p.additive().map_err(context)?;
-        // A pipe tail: the operand-pipe stages, exactly
+        // A pipe tail: the operand-pipe commands, exactly
         // as a parenthesized `(expr | f @| g)` carries them.
-        let mut stages = Vec::new();
+        let mut commands = Vec::new();
         loop {
             match p.peek() {
                 Some(Token::Pipe) if matches!(p.toks.get(p.pos + 1), Some(Token::Amp)) => {
                     p.pos += 1;
-                    p.invoke_inline_fragment("|", &mut stages)
+                    p.invoke_inline_fragment("|", &mut commands)
                         .map_err(context)?;
                 }
                 Some(Token::Pipe) => {
                     p.pos += 1;
-                    stages.push(p.inline_stage().map_err(context)?);
+                    commands.push(p.inline_command().map_err(context)?);
                 }
                 Some(Token::At)
                     if matches!(p.toks.get(p.pos + 1), Some(Token::Pipe))
                         && matches!(p.toks.get(p.pos + 2), Some(Token::Amp)) =>
                 {
                     p.pos += 2;
-                    p.invoke_inline_fragment("@|", &mut stages)
+                    p.invoke_inline_fragment("@|", &mut commands)
                         .map_err(context)?;
                 }
                 Some(Token::At) if matches!(p.toks.get(p.pos + 1), Some(Token::Pipe)) => {
                     p.pos += 2;
-                    stages.push(p.inline_agg_stage().map_err(context)?);
+                    commands.push(p.inline_agg_command().map_err(context)?);
                 }
                 _ => break,
             }
@@ -4234,12 +4575,12 @@ impl Parser<'_> {
                  expression (with an optional pipe tail or glued ':?' / ':-')"
             )));
         }
-        Ok(InterpSeg::Expr(if stages.is_empty() {
+        Ok(InterpSeg::Expr(if commands.is_empty() {
             expr
         } else {
             Operand::Piped {
                 expr: Box::new(expr),
-                stages,
+                commands,
             }
         }))
     }
@@ -4247,7 +4588,10 @@ impl Parser<'_> {
     /// One side of a hole's bash operator: a value expression with
     /// no top-level pipe (the operator and a tail combine only with
     /// the piped side parenthesized).
-    fn hole_expr(&mut self, part: &str, whole: &str) -> Result<Operand> {
+    /// One side of a hole's bash operator. With `word`, a bare word
+    /// reads as text (the shell's `${var:-word}`), as a command's
+    /// option does.
+    fn hole_expr(&mut self, part: &str, whole: &str, word: bool) -> Result<Operand> {
         let context = |e: QuarbError| QuarbError::parse(format!("in '${{{whole}}}': {e}"));
         let tokens = lexer::lex(part).map_err(context)?;
         let mut depth = 0i32;
@@ -4267,6 +4611,7 @@ impl Parser<'_> {
         }
         let mut p = self.child(&tokens, self.defs.clone())?;
         p.def_params = self.def_params.clone();
+        p.arg_depth = usize::from(word);
         let expr = p.additive().map_err(context)?;
         if p.pos != tokens.len() {
             return Err(QuarbError::parse(format!(
@@ -4509,7 +4854,7 @@ impl Parser<'_> {
                     anchor: Anchor::Current,
                 })
             }
-            // A call operand: a function word glued to `(` — the
+            // A call operand: a command word glued to `(` — the
             // pipe–call duality, `f(x, args) ≡ (x | f(args))`, the
             // first argument riding as the topic. `now()` is the one
             // nullary call (the invocation instant). A bare name
@@ -4538,7 +4883,7 @@ impl Parser<'_> {
                 // topic — the field name becomes data and the record
                 // silently re-keys. Refuse rather than re-key; the
                 // pipe form spells the topic-riding meaning outright.
-                if let Some(pointer) = retired_function(&call.name) {
+                if let Some(pointer) = retired_command(&call.name) {
                     return Err(QuarbError::parse(pointer));
                 }
                 if matches!(call.name.as_str(), "rec" | "record") {
@@ -4555,7 +4900,7 @@ impl Parser<'_> {
                 let first = match args.next() {
                     Some(Arg::Lit(v)) => Operand::Lit(v),
                     Some(Arg::Expr(e)) => e,
-                    Some(Arg::Range(..)) | Some(Arg::Named { .. }) => {
+                    Some(Arg::Range(..)) | Some(Arg::Named { .. }) | Some(Arg::Opt { .. }) => {
                         return Err(QuarbError::parse(format!(
                             "'{}(...)' as an operand cannot ride a range or an option as its topic",
                             call.name
@@ -4570,21 +4915,33 @@ impl Parser<'_> {
                     }
                 };
                 // The duality must hold at parse time too: validate
-                // the stage half exactly as `| f(rest)` would be —
+                // the command half exactly as `| f(rest)` would be —
                 // otherwise `foo(::x)` parses here and its unparse
                 // `(::x | foo)` fails its own reparse.
-                let stage_call = FnCall {
+                let command_call = FnCall {
                     name: call.name,
                     args: args.collect(),
                 };
-                let stage = func_stage(stage_call)?;
+                let command = func_command(command_call)?;
                 Ok(Operand::Piped {
                     expr: Box::new(first),
-                    stages: vec![stage],
+                    commands: vec![command],
                 })
             }
             Some(Token::Name { text, quoted, .. }) => {
                 let value = literal_value(text, *quoted);
+                // In a body a bare word names a command applied to
+                // the body's seed (`.n(cc)`, `%(total = count)`);
+                // an unknown one is refused with its name, never
+                // read as text. A command's own parentheses are the one
+                // exception (`stem(ru)`): there it is the short
+                // spelling of a quoted string.
+                if !*quoted && self.arg_depth == 0 && is_word(text) && matches!(value, Value::Str(_))
+                {
+                    let name = text.clone();
+                    self.pos += 1;
+                    return self.headless_body(name);
+                }
                 self.pos += 1;
                 Ok(Operand::Lit(value))
             }
@@ -4626,7 +4983,7 @@ impl Parser<'_> {
                 validate_record(&call)?;
                 Ok(Operand::Piped {
                     expr: Box::new(Operand::Topic),
-                    stages: vec![Stage::Func(call)],
+                    commands: vec![Command::Func(call)],
                 })
             }
             // `@-` — all arrived-by edges (bare: labels; projected:
@@ -4809,7 +5166,7 @@ impl Parser<'_> {
                             return Err(QuarbError::parse("'$ordinal' is retired: write '$ord'"));
                         }
                         // `$1` … `$9` — a regex capture from the last
-                        // successful `=~` match in a filter stage.
+                        // successful `=~` match in a predicate command.
                         Some(Token::Name {
                             text,
                             quoted: false,
@@ -5044,15 +5401,16 @@ impl Parser<'_> {
         if q.pipeline.is_empty() {
             return Ok(rel);
         }
-        for stage in &q.pipeline {
+        for command in &q.pipeline {
             if matches!(
-                stage,
-                Stage::Push(_)
-                    | Stage::ExprPush { .. }
-                    | Stage::RecordPush { .. }
-                    | Stage::FieldsPush
-                    | Stage::Subcontext { .. }
-                    | Stage::Nav(_)
+                command,
+                Command::Push(_)
+                    | Command::ExprPush { .. }
+                    | Command::RecordPush { .. }
+                    | Command::FieldsPush
+                    | Command::Subcontext { .. }
+                    | Command::AggPush { .. }
+                    | Command::Nav(_)
             ) {
                 return Err(QuarbError::parse(format!(
                     "fragment '&{name}' carries a pipeline that pushes or \
@@ -5063,7 +5421,7 @@ impl Parser<'_> {
         }
         Ok(Operand::Piped {
             expr: Box::new(rel),
-            stages: q.pipeline,
+            commands: q.pipeline,
         })
     }
 
@@ -5492,12 +5850,16 @@ fn trait_cnf(e: TExpr) -> Result<Vec<TraitClause>> {
 /// Interpret a name token as a predicate literal. A quoted name is
 /// always a string; a bare name is a number, `true`/`false`/`null`, or
 /// else a string.
-/// An `@|` stage: the name must be an aggregate (any family), and
+/// An `@|` command: the name must be an aggregate (any family), and
 /// its arguments pass the registry's check.
-fn agg_stage(call: FnCall) -> Result<Stage> {
+fn agg_command(call: FnCall) -> Result<Command> {
+    // An environment command runs once over the context after `@|`.
+    if crate::env::split_env(&call.name).is_some() {
+        return Ok(Command::Agg(call));
+    }
     let Some(spec) = crate::registry::spec(&call.name).filter(|s| s.agg.is_some()) else {
         return Err(QuarbError::unsupported(format!(
-            "aggregate function '{}'",
+            "aggregate command '{}'",
             call.name
         )));
     };
@@ -5505,20 +5867,24 @@ fn agg_stage(call: FnCall) -> Result<Stage> {
         return Err(QuarbError::parse("'ungroup' takes no arguments"));
     }
     match spec.check {
-        crate::registry::Check::Stage => validate_window_shift(&call)?,
+        crate::registry::Check::Command => validate_window_shift(&call)?,
         crate::registry::Check::Keyed => validate_keyed(&call)?,
         _ => {}
     }
-    Ok(Stage::Agg(call))
+    Ok(Command::Agg(call))
 }
 
-/// A `|` stage: a scalar, or an aggregate that also works per capsa
+/// A `|` command: a scalar, or an aggregate that also works per capsa
 /// — a keyed aggregate on a group's members (`@| group(::k) | top(2,
 /// ::v)`), a reducing one on a list topic (`@| group(::k) | mean`).
-/// A whole-context stage (`ungroup`, `window`, `shift`) never takes
+/// A whole-context command (`ungroup`, `window`, `shift`) never takes
 /// the plain pipe. The arguments pass the registry's check.
-fn func_stage(call: FnCall) -> Result<Stage> {
+fn func_command(call: FnCall) -> Result<Command> {
     use crate::registry::{Agg, Check};
+    // An environment command runs once per capsa after `|`.
+    if crate::env::split_env(&call.name).is_some() {
+        return Ok(Command::Func(call));
+    }
     let spec = crate::registry::spec(&call.name);
     let stands = spec.is_some_and(|s| {
         s.scalar
@@ -5528,10 +5894,10 @@ fn func_stage(call: FnCall) -> Result<Stage> {
             )
     });
     if !stands {
-        if let Some(pointer) = retired_function(&call.name) {
+        if let Some(pointer) = retired_command(&call.name) {
             return Err(QuarbError::parse(pointer));
         }
-        let err = QuarbError::unsupported(format!("pipeline function '{}'", call.name));
+        let err = QuarbError::unsupported(format!("pipeline command '{}'", call.name));
         return Err(if spec.is_some_and(|s| s.agg == Some(Agg::Context)) {
             err.with_hint(format!(" ('{}' uses '@|')", call.name))
         } else {
@@ -5542,7 +5908,7 @@ fn func_stage(call: FnCall) -> Result<Stage> {
         Some(Check::Keyed) => validate_keyed(&call)?,
         _ => validate_record(&call)?,
     }
-    Ok(Stage::Func(call))
+    Ok(Command::Func(call))
 }
 
 /// Check `record(...)`'s argument shape at parse time: fields come
@@ -5596,10 +5962,10 @@ fn cmp_text(op: CmpOp) -> &'static str {
     }
 }
 
-/// The retired function names, each with its pointer: `rec` /
+/// The retired command names, each with its pointer: `rec` /
 /// `record` (the record sigil `%(…)`) and `chars`
 /// (the pre-0.25 spelling of `cc`).
-pub(crate) fn retired_function(name: &str) -> Option<String> {
+pub(crate) fn retired_command(name: &str) -> Option<String> {
     match name {
         "rec" | "record" => Some(format!("'{name}(…)' is retired: the record is '%(…)'")),
         "chars" => Some("'chars' is retired: write 'cc'".into()),
@@ -5689,7 +6055,7 @@ fn valid_locale_tag(tag: &str) -> bool {
 }
 
 /// Check a keyed aggregate's argument shape at parse time: every
-/// keyed function needs at least one expression key, and `top` /
+/// keyed command needs at least one expression key, and `top` /
 /// `bottom` take a literal integer count first.
 fn validate_keyed(call: &FnCall) -> Result<()> {
     // `group` follows the record convention for its keys (auto-named
@@ -5743,11 +6109,14 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
     }
     let mut args = call.args.iter();
     if matches!(call.name.as_str(), "top" | "bottom")
-        && !matches!(args.next(), Some(Arg::Lit(Value::Int(n))) if *n >= 0)
+        && !matches!(
+            args.next(),
+            Some(Arg::Lit(Value::Int(_)) | Arg::Range(_, _))
+        )
     {
         return Err(QuarbError::parse(format!(
-            "{} takes a non-negative integer count first: {}(3, ::key)",
-            call.name, call.name
+            "{} takes a count or a rank range first: {}(3; ::key), {}(11..20; ::key), {}(-10; ::key)",
+            call.name, call.name, call.name, call.name
         )));
     }
     let mut keys = args.peekable();
@@ -5818,9 +6187,11 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
         },
         "frequencies" => match call.args.as_slice() {
             [] => Ok(()),
-            [Arg::Lit(Value::Int(k))] if *k >= 1 => Ok(()),
+            [Arg::Lit(Value::Int(k))] if *k != 0 => Ok(()),
+            [Arg::Range(_, _)] => Ok(()),
             _ => Err(QuarbError::parse(
-                "frequencies takes nothing, or how many to keep: frequencies(10)",
+                "frequencies takes nothing, how many to keep, or a rank range: \
+                 frequencies(10), frequencies(11..20), frequencies(-10)",
             )),
         },
         // `combinations(n)`, and its two named sizes.
@@ -5939,7 +6310,7 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
             }
         }
         // `encoding(LABEL)` — the output boundary: one label the
-        // Encoding Standard knows. The stage stands last; the tool
+        // Encoding Standard knows. The command stands last; the tool
         // that prints applies it (the engine has no byte value).
         "encoding" => match call.args.as_slice() {
             [Arg::Lit(Value::Str(label))] => {
@@ -5978,6 +6349,16 @@ fn mark_reach(mark: char) -> Reach {
         '!' => Reach::Distal,
         _ => Reach::All,
     }
+}
+
+/// An identifier-shaped word: a letter or `_` first, then letters,
+/// digits and `_`.
+fn is_word(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn literal_value(text: &str, quoted: bool) -> Value {
@@ -6104,8 +6485,8 @@ fn subst_query(q: &mut Query, map: &Subst<'_>) {
             subst_elem(elem, map);
         }
     }
-    for stage in &mut q.pipeline {
-        subst_stage(stage, map);
+    for command in &mut q.pipeline {
+        subst_command(command, map);
     }
 }
 
@@ -6140,20 +6521,29 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
     }
 }
 
-fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
-    match stage {
-        Stage::Func(call)
-        | Stage::Agg(call)
-        | Stage::RecordWith(call)
-        | Stage::RecordPush { call, .. } => {
+fn subst_command(command: &mut Command, map: &Subst<'_>) {
+    match command {
+        Command::Func(call)
+        | Command::Agg(call)
+        | Command::RecordWith(call)
+        | Command::RecordPush { call, .. } => {
             for arg in &mut call.args {
-                if let Arg::Expr(e) = arg {
+                if let Arg::Expr(e) | Arg::Opt { value: Some(e), .. } = arg {
                     subst_operand(e, map);
                 }
             }
         }
-        Stage::Expr(e) | Stage::ExprPush { expr: e, .. } => subst_operand(e, map),
-        Stage::Nav(b) => {
+        Command::Expr(e) | Command::ExprPush { expr: e, .. } | Command::AggPush { body: e, .. } => {
+            subst_operand(e, map)
+        }
+        Command::AggRecord { call, .. } => {
+            for arg in &mut call.args {
+                if let Arg::Expr(e) | Arg::Opt { value: Some(e), .. } = arg {
+                    subst_operand(e, map);
+                }
+            }
+        }
+        Command::Nav(b) => {
             if let Anchor::Id(op) = &mut b.anchor {
                 subst_operand(op, map);
             }
@@ -6161,15 +6551,16 @@ fn subst_stage(stage: &mut Stage, map: &Subst<'_>) {
                 subst_elem(elem, map);
             }
         }
-        Stage::Subcontext { body, .. } => subst_query(body, map),
-        Stage::Filter(e) => subst_pred_expr(e, map),
-        Stage::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
-        Stage::Map(inner) | Stage::Repeat { stage: inner, .. } => subst_stage(inner, map),
-        Stage::Select(_)
-        | Stage::Push(_)
-        | Stage::FieldsPush
-        | Stage::Recall(_)
-        | Stage::Spread { .. } => {}
+        Command::Subcontext { body, .. } => subst_query(body, map),
+        Command::Filter(e) => subst_pred_expr(e, map),
+        Command::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
+        Command::Map(inner) | Command::Repeat { command: inner, .. } => subst_command(inner, map),
+        Command::Select(_)
+        | Command::Push(_)
+        | Command::FieldsPush
+        | Command::Recall(_)
+        | Command::AggRecall(_)
+        | Command::Spread { .. } => {}
     }
 }
 
@@ -6248,10 +6639,10 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 }
             }
         }
-        Operand::Piped { expr, stages } => {
+        Operand::Piped { expr, commands } => {
             subst_operand(expr, map);
-            for st in stages.iter_mut() {
-                subst_stage(st, map);
+            for st in commands.iter_mut() {
+                subst_command(st, map);
             }
         }
         Operand::Cond { cond, then, other } => {
@@ -6262,6 +6653,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         Operand::Lit(_)
         | Operand::Recall(_)
         | Operand::Topic
+        | Operand::Seed
         | Operand::Ordinal
         | Operand::Edge { .. }
         | Operand::Edges { .. }
@@ -6279,7 +6671,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
 /// A keyed aggregate — `top`, `bottom`, `sort_by`, `unique_by`,
 /// `min_by`, `max_by` — ranks a context, so it rides `@|`; on the
 /// plain pipe it works per group, after `@| group`. Without a group
-/// stage before it, it would rank each capsa's single value against
+/// command before it, it would rank each capsa's single value against
 /// itself and pass everything through — refuse with the pointer.
 /// The highest correlation context (`$*k`) a predicate expression
 /// references, anywhere in it — nested bodies included.
@@ -6296,10 +6688,10 @@ fn max_ctx_elem(e: &PathElem) -> usize {
     v.0
 }
 
-/// [`max_ctx_pred_expr`] over a pipeline stage.
-fn max_ctx_stage(s: &Stage) -> usize {
+/// [`max_ctx_pred_expr`] over a pipeline command.
+fn max_ctx_command(s: &Command) -> usize {
     let mut v = MaxCtx(0);
-    v.stage(s);
+    v.command(s);
     v.0
 }
 
@@ -6314,14 +6706,16 @@ impl visit::Visitor for MaxCtx {
     }
 }
 
-fn validate_keyed_stages(q: &Query) -> Result<()> {
+fn validate_keyed_commands(q: &Query) -> Result<()> {
     let mut grouped = false;
-    for stage in &q.pipeline {
-        match stage {
+    for command in &q.pipeline {
+        match command {
             // `@| group` and `@| window` partition the stream; a
-            // keyed stage on the plain pipe then works per part.
-            Stage::Agg(call) if matches!(call.name.as_str(), "group" | "window") => grouped = true,
-            Stage::Func(call) if crate::stdlib::known_keyed(&call.name) && !grouped => {
+            // keyed command on the plain pipe then works per part.
+            Command::Agg(call) if matches!(call.name.as_str(), "group" | "window") => {
+                grouped = true
+            }
+            Command::Func(call) if crate::stdlib::known_keyed(&call.name) && !grouped => {
                 return Err(QuarbError::parse(format!(
                     "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per group, after '@| group')",
                     n = call.name
@@ -6331,7 +6725,7 @@ fn validate_keyed_stages(q: &Query) -> Result<()> {
         }
     }
     for c in &q.correlations {
-        validate_keyed_stages(c)?;
+        validate_keyed_commands(c)?;
     }
     Ok(())
 }
@@ -6350,7 +6744,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
         }
     }
     for st in &q.pipeline {
-        let m = max_ctx_stage(st);
+        let m = max_ctx_command(st);
         if m > n {
             return Err(QuarbError::parse(format!(
                 "the pipeline references '$*{m}', but only {n} \
@@ -6406,7 +6800,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
             }
         }
         for st in &entry.pipeline {
-            if max_ctx_stage(st) > 0 {
+            if max_ctx_command(st) > 0 {
                 return Err(QuarbError::parse(
                     "a joined expression's own pipeline shapes its context \
                      before the join and cannot reference '$*k'; join \
@@ -6467,16 +6861,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_arrow_opens_a_navigation_stage() {
-        // A stage ending on a reference arrow is a hop — the reached
+    fn an_arrow_opens_a_navigation_command() {
+        // A command ending on a reference arrow is a hop — the reached
         // nodes are the capsae, as after `| ->x` — with or without a
         // projection after it; a trailing operator makes it the
         // structural-test expression, as parentheses always do.
         let first = |q: &str| {
             let p = parse(&lexer::lex(q).unwrap()).unwrap().pipeline;
             match &p[0] {
-                Stage::Nav(_) => "nav",
-                Stage::Expr(_) => "expr",
+                Command::Nav(_) => "nav",
+                Command::Expr(_) => "expr",
                 _ => "other",
             }
         };
@@ -6596,7 +6990,7 @@ mod tests {
                 "def &j: /a/* <=> /b/*[::x = _::x]; /d/* || &j",
                 "stand alone",
             ),
-            // a stage-shaped def body points at the leading pipe
+            // a command-shaped def body points at the leading pipe
             ("def &p: .x(::a); /r/*", "starts with its pipe"),
             // spliced pushes stay out of inline pipes
             (
@@ -6677,7 +7071,7 @@ mod tests {
 
     #[test]
     fn bare_conditionals_in_delimited_positions() {
-        // A push body, a function argument, and a fragment argument
+        // A push body, a command operand, and a fragment parameter
         // are already parenthesized — a conditional inside them
         // needs no second pair.
         for q in [
@@ -6689,7 +7083,7 @@ mod tests {
             "/r/* | .kind(/em ? \"has\" : \"none\")",
             // a pipe-tail branch inside the bare conditional
             "/r/* | .y(::quarter ? (::quarter | s/ Q.*$//) * 1 : 0)",
-            // function arguments: rec named field, group key
+            // command operands: rec named field, group key
             "/r/* | %(age = ::Age ? ::Age * 1 : 0)",
             "/r/* @| group(\"src\", ::Age ? \"manifest\" : \"records\") | count",
             // fragment argument
@@ -6711,10 +7105,63 @@ mod tests {
     }
 
     #[test]
-    fn bare_inf_and_nan_are_string_literals() {
+    fn options_close_a_simple_commands_parentheses() {
+        let refuse = |q: &str| parse(&lexer::lex(q).unwrap()).unwrap_err().to_string();
+        // No built-in declares an option yet: each is refused by
+        // name, which also shows the segment parsed.
+        assert!(refuse("/x | upper(-i)").contains("'upper' takes no options"), "{}", refuse("/x | upper(-i)"));
+        let e = refuse("/x | ::n @| sort(::name; --locale=ru)");
+        assert!(e.contains("'--locale' given"), "{e}");
+        let e = refuse("/x | upper(--casefold -i)");
+        assert!(e.contains("'--casefold' given"), "{e}");
+        // Once in the segment every dash token is an option; the
+        // void option opens a segment for a numeric flag.
+        let e = refuse("/x | upper(-T=4 -9)");
+        assert!(e.contains("'-T' given"), "{e}");
+        let e = refuse("/x | upper(-= -9)");
+        assert!(e.contains("'-9' given"), "{e}");
+        // The options stand last.
+        let e = refuse("/x | upper(a; -n=10; b)");
+        assert!(e.contains("stand last"), "{e}");
+        // A dash before a digit, `$` or a sigil is minus.
+        parse(&lexer::lex("/x | ::n | round(-2)").unwrap()).unwrap();
+        parse(&lexer::lex("/x | ::n | substr(-3..)").unwrap()).unwrap();
+        // The canonical spelling: operands, then the segment; the
+        // void option re-emitted where the segment would not open.
+        let call = |args: Vec<Arg>| FnCall {
+            name: "f".into(),
+            args,
+        };
+        let opt = |n: &str, v: Option<Operand>| Arg::Opt {
+            name: n.into(),
+            value: v,
+        };
+        assert_eq!(
+            crate::unparse::fn_call_text(&call(vec![
+                Arg::Lit(Value::Str("a".into())),
+                opt("-n", Some(Operand::Lit(Value::Int(10)))),
+                opt("--locale", Some(Operand::Lit(Value::Str("ru".into())))),
+                opt("-i", None),
+            ])),
+            "f(\"a\"; -n=10 --locale=ru -i)"
+        );
+        assert_eq!(
+            crate::unparse::fn_call_text(&call(vec![opt("-9", None)])),
+            "f(-= -9)"
+        );
+    }
+
+
+    #[test]
+    fn bare_inf_and_nan_are_not_numbers() {
         // Rust's f64 parser accepts the words; the query language
-        // does not — a bare word is text.
+        // does not — a bare word in a body names a command, and
+        // `inf` is none, so it is refused rather than read as a
+        // number (or, as before, as text).
         let toks = lexer::lex("/x[::status = inf]").unwrap();
+        let err = parse(&toks).unwrap_err().to_string();
+        assert!(err.contains("'inf' is not a command"), "got {err}");
+        let toks = lexer::lex("/x[::status = \"inf\"]").unwrap();
         let q = parse(&toks).unwrap();
         let dbg = format!("{q:?}");
         assert!(dbg.contains("Str(\"inf\")"), "got {dbg}");
@@ -6734,8 +7181,8 @@ mod tests {
         let toks = lexer::lex("/data/tags $| upper").unwrap();
         let q = parse(&toks).unwrap();
         assert!(
-            q.pipeline.iter().any(|s| matches!(s, Stage::Map(_))),
-            "expected a map stage, got {:?}",
+            q.pipeline.iter().any(|s| matches!(s, Command::Map(_))),
+            "expected a map command, got {:?}",
             q.pipeline
         );
         assert!(
@@ -6757,7 +7204,7 @@ mod tests {
 
     #[test]
     fn macro_body_shell_is_gated_without_allow_shell() {
-        // A macro body's shell stage is evaluated at expansion (parse)
+        // A macro body's shell command is evaluated at expansion (parse)
         // time; with no --allow-shell context it must be refused before
         // the command ever runs.
         let toks = lexer::lex("macro &m: ^ | `echo hi`; &m").unwrap();

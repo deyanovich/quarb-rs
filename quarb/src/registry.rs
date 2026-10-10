@@ -1,4 +1,4 @@
-//! The function registry: every name a pipeline may call, with the
+//! The command registry: every name a pipeline may call, with the
 //! positions it stands in, the family that evaluates it, and a line
 //! of documentation — one table behind the parser's validation, the
 //! executor's dispatch, completion and highlighting.
@@ -8,7 +8,7 @@
 //! on `@|`. The aggregates divide by what they do with the capsae:
 //! a [`Agg::Reducing`] aggregate folds them to a value (and so also
 //! works per capsa on a group's list members: `@| group(::k) |
-//! mean`); a [`Agg::Context`] stage reads the whole context only and
+//! mean`); a [`Agg::Context`] command reads the whole context only and
 //! never takes the plain pipe; a [`Agg::Keyed`] aggregate reorders or
 //! filters the capsae themselves by per-capsa keys; an
 //! [`Agg::Association`] reduces two per-capsa expressions to one
@@ -42,11 +42,11 @@ pub enum Check {
     /// A keyed aggregate: expression keys, the count of `top` /
     /// `bottom`, the collation words of `sort`, `group`'s keys.
     Keyed,
-    /// A whole-context stage's own shape: `window` / `shift` (an
+    /// A whole-context command's own shape: `window` / `shift` (an
     /// offset range or distance, then a key), the sizes of
     /// `combinations` / `pairs` / `triples`, the columns of `csv` /
     /// `table`, `number`, `timeline`, `outline`, `zscore`.
-    Stage,
+    Command,
     /// `decode` / `dec`: one reversible scheme name.
     Decode,
     /// The statistics round: `sample` for the dispersion measures,
@@ -54,7 +54,7 @@ pub enum Check {
     Stat,
 }
 
-/// One registered function.
+/// One registered command.
 #[derive(Debug, Clone, Copy)]
 pub struct FnSpec {
     pub name: &'static str,
@@ -66,6 +66,11 @@ pub struct FnSpec {
     pub check: Check,
     /// One line for people: completion, the manual.
     pub doc: &'static str,
+    /// The options the command declares, as a utility's synopsis
+    /// lists them (`-i`, `--locale`); any other option in its
+    /// segment is refused by name. No built-in declares one yet:
+    /// the syntax stands empty for the shell-function round.
+    pub options: &'static [&'static str],
 }
 
 const fn scalar(name: &'static str, doc: &'static str) -> FnSpec {
@@ -75,6 +80,7 @@ const fn scalar(name: &'static str, doc: &'static str) -> FnSpec {
         agg: None,
         check: Check::None,
         doc,
+        options: &[],
     }
 }
 
@@ -85,6 +91,7 @@ const fn reducing(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Reducing),
         check: Check::None,
         doc,
+        options: &[],
     }
 }
 
@@ -95,6 +102,7 @@ const fn context(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Context),
         check: Check::None,
         doc,
+        options: &[],
     }
 }
 
@@ -105,6 +113,7 @@ const fn keyed(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Keyed),
         check: Check::Keyed,
         doc,
+        options: &[],
     }
 }
 
@@ -115,6 +124,7 @@ const fn assoc(name: &'static str, agreement: bool, doc: &'static str) -> FnSpec
         agg: Some(Agg::Association { agreement }),
         check: Check::Stat,
         doc,
+        options: &[],
     }
 }
 
@@ -125,6 +135,7 @@ const fn both(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Reducing),
         check: Check::None,
         doc,
+        options: &[],
     }
 }
 
@@ -132,7 +143,7 @@ const fn with_check(spec: FnSpec, check: Check) -> FnSpec {
     FnSpec { check, ..spec }
 }
 
-/// Every function, in the order the manual lists them.
+/// Every command, in the order the manual lists them.
 pub const SPECS: &[FnSpec] = &[
     // Text.
     scalar("upper", "the text in upper case"),
@@ -157,7 +168,7 @@ pub const SPECS: &[FnSpec] = &[
             "the word n-grams of the text: ngrams(N); as an aggregate, the \
              adjacent N-windows of the stream, full windows only",
         ),
-        Check::Stage,
+        Check::Command,
     ),
     scalar("levenshtein", "the edit distance to the argument"),
     scalar(
@@ -214,8 +225,9 @@ pub const SPECS: &[FnSpec] = &[
         name: "number",
         scalar: true,
         agg: Some(Agg::Context),
-        check: Check::Stage,
+        check: Check::Command,
         doc: "the numeric reading of text (per capsa), or the running number of each capsa (@|)",
+        options: &[],
     },
     scalar("round", "the number rounded to N digits"),
     scalar("floor", "the number rounded down"),
@@ -352,7 +364,7 @@ pub const SPECS: &[FnSpec] = &[
             "skipgrams",
             "the n-grams with up to k skipped positions: skipgrams(n; k)",
         ),
-        Check::Stage,
+        Check::Command,
     ),
     reducing(
         "jaccard",
@@ -365,11 +377,11 @@ pub const SPECS: &[FnSpec] = &[
     ),
     with_check(
         reducing("bigrams", "the adjacent pairs of the stream (ngrams(2))"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         reducing("trigrams", "the adjacent triples of the stream (ngrams(3))"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         reducing(
@@ -377,14 +389,17 @@ pub const SPECS: &[FnSpec] = &[
             "each distinct value with its count, most frequent first, as \
              records (value, n); frequencies(K) keeps the top K",
         ),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         reducing("combinations", "every combination of N capsae"),
-        Check::Stage,
+        Check::Command,
     ),
-    with_check(reducing("pairs", "every pair of capsae"), Check::Stage),
-    with_check(reducing("triples", "every triple of capsae"), Check::Stage),
+    with_check(reducing("pairs", "every pair of capsae"), Check::Command),
+    with_check(
+        reducing("triples", "every triple of capsae"),
+        Check::Command,
+    ),
     with_check(
         reducing(
             "sort",
@@ -419,41 +434,41 @@ pub const SPECS: &[FnSpec] = &[
     ),
     assoc("recall", true, "recall of a prediction against a truth"),
     assoc("f1", true, "the F1 score of a prediction against a truth"),
-    // Whole-context stages.
+    // Whole-context commands.
     context("ungroup", "the groups' members as the context again"),
     with_check(
         context(
             "window",
             "each capsa with its neighbours: window(-2..0), window(3)",
         ),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context("shift", "each capsa's value from N capsae back"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context("zscore", "each value standardized over the context"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context("outline", "the context as a nested outline"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context("timeline", "the context ordered on its time anchors"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context("csv", "the records as CSV (closing: the tool renders it)"),
-        Check::Stage,
+        Check::Command,
     ),
     with_check(
         context(
             "table",
             "the records as an aligned table (closing: the tool renders it)",
         ),
-        Check::Stage,
+        Check::Command,
     ),
     context(
         "encoding",
@@ -469,12 +484,12 @@ pub const SPECS: &[FnSpec] = &[
     keyed("group", "the capsae grouped by keys"),
 ];
 
-/// The registered function called `name`.
+/// The registered command called `name`.
 pub fn spec(name: &str) -> Option<&'static FnSpec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
-/// The functions that may stand in a position, for enumeration
+/// The commands that may stand in a position, for enumeration
 /// (completion, the manual).
 pub fn names(scalar: bool, agg: Option<Agg>) -> impl Iterator<Item = &'static str> {
     SPECS

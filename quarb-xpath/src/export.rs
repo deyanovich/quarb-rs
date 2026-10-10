@@ -107,16 +107,16 @@ impl Exporter {
         let mut out = paths.join(" | ");
 
         if let Some(pipe) = self.kid(q, "pipeline") {
-            let stages = self.arbor.children(pipe);
-            if stages.len() != 1 {
+            let commands = self.arbor.children(pipe);
+            if commands.len() != 1 {
                 return Err(XPathError::Unsupported(
-                    "a multi-stage pipeline (XPath 1.0 has no pipeline)".into(),
+                    "a multi-step pipeline (XPath 1.0 has no pipeline)".into(),
                 ));
             }
-            let s = stages[0];
+            let s = commands[0];
             if self.kind(s) != "agg" {
                 return Err(XPathError::Unsupported(format!(
-                    "the '{}' stage (XPath 1.0 has no pipeline)",
+                    "the '{}' command (XPath 1.0 has no pipeline)",
                     self.kind(s)
                 )));
             }

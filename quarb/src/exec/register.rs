@@ -59,6 +59,46 @@ pub(super) fn recall(register: &[Reg], r: &RegRef) -> Value {
     )
 }
 
+/// The origins a register reference recalls — what a read of it
+/// notes — without cloning the regula's provenance tree: a list
+/// pushed from a sub-pipeline carries a part per item, and `[$_ =
+/// $.set]` reads the register once per value of the stream.
+pub(super) fn recall_origins(register: &[Reg], r: &RegRef) -> Origins {
+    let union = |items: Vec<Origins>| {
+        let mut o = Origins::default();
+        for i in &items {
+            o.union(i);
+        }
+        o
+    };
+    recall_part(
+        register,
+        r,
+        |r| &r.prov.origins,
+        Origins::default(),
+        union,
+        |fields| union(fields.into_iter().map(|(_, o)| o).collect()),
+    )
+}
+
+/// The origins of one field of a recalled record (`$.r:name`): that
+/// part's own, the rest of the tree untouched.
+pub(super) fn recall_field_origins(register: &[Reg], r: &RegRef, name: &str) -> Origins {
+    let reg = match r {
+        RegRef::Top => register.last(),
+        RegRef::Index(n) => register.get(n.saturating_sub(1)),
+        RegRef::Named(key) => register
+            .iter()
+            .rev()
+            .find(|r| r.name.as_deref() == Some(key.as_str())),
+        _ => None,
+    };
+    match reg {
+        Some(reg) => reg.prov.part(name).origins,
+        None => recall_prov(register, r).part(name).origins,
+    }
+}
+
 /// The provenance a register reference recalls: the regula's own,
 /// or, for the views, a record/list of the regulae's.
 pub(super) fn recall_prov(register: &[Reg], r: &RegRef) -> Prov {
@@ -114,6 +154,45 @@ pub(super) type RoundState = (NodeId, Option<Value>, Vec<(String, Value)>);
 pub(super) fn reg_key(register: &[Reg]) -> RegKey {
     register
         .iter()
-        .map(|r| (r.name.clone(), r.value.to_string()))
+        .map(|r| (r.name.clone(), value_key(&r.value)))
         .collect()
+}
+
+/// A value's text for the key — except a large list, whose text
+/// would be rendered once per capsa per command: a list pushed from
+/// a sub-pipeline is shared by every capsa of the context, so its
+/// key is a digest of its items computed once per list (equal lists
+/// digest equal, so the dedup is unchanged).
+fn value_key(v: &Value) -> String {
+    match v {
+        Value::List(items) if items.len() >= 16 => {
+            format!("@list:{}:{:016x}", items.len(), list_digest(items))
+        }
+        _ => v.to_string(),
+    }
+}
+
+fn list_digest(items: &std::sync::Arc<Vec<Value>>) -> u64 {
+    use std::cell::RefCell;
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static DIGEST: RefCell<Option<(std::sync::Weak<Vec<Value>>, u64)>> =
+            const { RefCell::new(None) };
+    }
+    DIGEST.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some((w, d)) = slot.as_ref()
+            && w.upgrade()
+                .is_some_and(|a| std::sync::Arc::ptr_eq(&a, items))
+        {
+            return *d;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for item in items.iter() {
+            item.to_string().hash(&mut h);
+        }
+        let d = h.finish();
+        *slot = Some((std::sync::Arc::downgrade(items), d));
+        d
+    })
 }

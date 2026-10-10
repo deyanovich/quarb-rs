@@ -1,0 +1,54 @@
+/* The Quarb table: the grid a result closing in `@| table` renders
+   as in every browser host (the notebook cell, the playground, the
+   extension's panel, quarb.org/search). Scoped under the class so a
+   host's own theme never fights it; colours come from the host's
+   variables where it sets them, else from neutral defaults that
+   read in light and dark alike. Pandas is the model. */
+.quarb-table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-family: var(--quarb-font, inherit);
+  font-size: var(--quarb-table-size, 0.92em);
+  line-height: 1.35;
+  color: var(--quarb-fg, inherit);
+  background: var(--quarb-bg, transparent);
+}
+.quarb-table th,
+.quarb-table td {
+  padding: 0.3em 0.75em;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  border-bottom: 1px solid var(--quarb-rule, rgba(128, 128, 128, 0.25));
+}
+.quarb-table thead th {
+  font-weight: 600;
+  border-bottom: 2px solid var(--quarb-rule-strong, rgba(128, 128, 128, 0.55));
+}
+.quarb-table th.num,
+.quarb-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.quarb-table tbody tr:nth-child(even) {
+  background: var(--quarb-zebra, rgba(128, 128, 128, 0.07));
+}
+.quarb-table tbody tr:hover {
+  background: var(--quarb-hover, rgba(128, 128, 128, 0.16));
+}
+.quarb-table td.null::after {
+  content: "null";
+  opacity: 0.45;
+}
+.quarb-table td.nested,
+.quarb-table td.time {
+  font-family: var(--quarb-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.95em;
+}
+.quarb-table caption {
+  caption-side: bottom;
+  padding-top: 0.4em;
+  text-align: left;
+  font-size: 0.9em;
+  opacity: 0.6;
+}

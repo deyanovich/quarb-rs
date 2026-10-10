@@ -119,10 +119,33 @@ pub trait Executor {
         anyhow::bail!("this session's executor does not support rendered export")
     }
 
+    /// A query whose closing command is `@| table`, run with that
+    /// command taken off: the table's text as one cell, and the
+    /// HTML grid ([`quarb::table_html`]) the browser hosts render
+    /// — the rule being that such a result is the grid everywhere a
+    /// page can draw one. The default runs the query as it stands
+    /// and renders no grid (a daemon prints text).
+    fn run_table(&self, query: &str) -> anyhow::Result<(Vec<Cell>, Option<String>)> {
+        Ok((self.run(query)?, None))
+    }
+
+    /// The static plan of a query, priced by the standing arbor —
+    /// each step's estimate from the opened adapters (a parsed
+    /// arbor counts its nodes, a store asks its statistics); under
+    /// a budget the estimators stop counting at its cap. Unsupported
+    /// by default: a daemon runs the query where it stands.
+    fn plan(
+        &self,
+        _query: &str,
+        _budget: Option<&quarb::plan::Budget>,
+    ) -> anyhow::Result<quarb::plan::Plan> {
+        anyhow::bail!("this session's executor does not plan")
+    }
+
     /// Tab-completion candidates at a byte cursor. The default
     /// answers the syntax tier (the stdlib registry needs no
     /// adapter), so even a daemon-backed session completes
-    /// function names; executors with a live arbor override this
+    /// command names; executors with a live arbor override this
     /// with the data tier — real children, real annotations.
     fn complete(&self, text: &str, cursor: usize) -> Vec<quarb::complete::Candidate> {
         quarb::complete::complete(text, cursor)

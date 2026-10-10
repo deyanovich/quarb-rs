@@ -83,7 +83,7 @@ fn functions() {
 
 #[test]
 fn slice_composition() {
-    // a slice streams elements, so consuming stages must not
+    // a slice streams elements, so consuming commands must not
     // re-iterate
     assert_eq!(values(".users[0:2] | map(.name)"), vec!["Ada", "Bo"]);
     assert_eq!(values(".users[1:] | length"), vec!["2"]);

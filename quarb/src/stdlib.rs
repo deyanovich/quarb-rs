@@ -1,10 +1,10 @@
 //! The pipeline standard library.
 //!
-//! Functions come in two families, matching the two pipe operators:
+//! Functions come in two families, matching the two control operators:
 //!
-//! - **Scalar** functions (`|`) transform one capsa's topic; some
+//! - **Scalar** commands (`|`) transform one capsa's topic; some
 //!   expand it into several values (e.g. `lines`).
-//! - **Aggregate** functions (`@|`) reduce the whole context's topics
+//! - **Aggregate** commands (`@|`) reduce the whole context's topics
 //!   to a new list.
 
 use crate::ast::{Arg, FnCall};
@@ -55,29 +55,7 @@ pub fn tabulate_in(
     delimiter: u8,
     cell: &dyn Fn(&Value) -> String,
 ) -> String {
-    let columns: Vec<String> = match named {
-        Some(names) => names.to_vec(),
-        None => {
-            let mut columns: Vec<String> = Vec::new();
-            let mut has_scalar = false;
-            for v in values {
-                match v {
-                    Value::Record(fields) => {
-                        for (k, _) in fields {
-                            if !columns.contains(k) {
-                                columns.push(k.clone());
-                            }
-                        }
-                    }
-                    _ => has_scalar = true,
-                }
-            }
-            if has_scalar || columns.is_empty() {
-                columns.push("value".to_string());
-            }
-            columns
-        }
-    };
+    let columns = crate::table::table_columns(values, named);
     let rows: Vec<Vec<String>> = values
         .iter()
         .map(|v| match v {
@@ -165,7 +143,7 @@ pub fn tabulate_in(
 pub const MAX_REPEAT_BYTES: usize = 64 << 20;
 
 /// `text` repeated `n` times within [`MAX_REPEAT_BYTES`], else a
-/// refusal naming the function and the size it would have built.
+/// refusal naming the command and the size it would have built.
 fn bounded_repeat(text: &str, n: usize, what: &str) -> Value {
     match text.len().checked_mul(n) {
         Some(bytes) if bytes <= MAX_REPEAT_BYTES => Value::Str(text.repeat(n)),
@@ -363,18 +341,18 @@ pub fn known_keyed(name: &str) -> bool {
     crate::registry::spec(name).is_some_and(|s| s.agg == Some(crate::registry::Agg::Keyed))
 }
 
-/// Whether `name` is a per-capsa scalar function (for `|`).
+/// Whether `name` is a per-capsa scalar command (for `|`).
 pub fn known_scalar(name: &str) -> bool {
     crate::registry::spec(name).is_some_and(|s| s.scalar)
 }
 
-/// Whether `name` is an aggregate function (for `@|`).
+/// Whether `name` is an aggregate command (for `@|`).
 pub fn known_agg(name: &str) -> bool {
     crate::registry::spec(name).is_some_and(|s| s.agg.is_some())
 }
 
 /// The scalar registry, for enumerating consumers (completion,
-/// highlighting): every per-capsa `|` function.
+/// highlighting): every per-capsa `|` command.
 pub fn scalar_names() -> Vec<&'static str> {
     crate::registry::names(true, None).collect()
 }
@@ -462,8 +440,8 @@ pub(crate) fn split_csv_delimiter(call: &FnCall) -> (Option<u8>, &[Arg]) {
     (None, call.args.as_slice())
 }
 
-/// Apply a per-capsa scalar function to a single topic. May return
-/// several values (an expanding function like `lines`).
+/// Apply a per-capsa scalar command to a single topic. May return
+/// several values (an expanding command like `lines`).
 pub fn apply_scalar(
     call: &FnCall,
     topic: Value,
@@ -1328,7 +1306,7 @@ pub fn apply_scalar(
                 .first()
                 .and_then(|a| match a {
                     Arg::Lit(v) => Some(v.clone()),
-                    Arg::Expr(_) | Arg::Range(_, _) | Arg::Named { .. } => None,
+                    Arg::Expr(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => None,
                 })
                 .unwrap_or(Value::Null),
             other => other,
@@ -1356,7 +1334,7 @@ pub fn apply_scalar(
             // Every name the parser admits has an arm here or in the
             // executor; reaching this is a registry/dispatch drift,
             // reported rather than passed through silently.
-            crate::exec::record_refusal(format!("function '{other}' has no implementation"));
+            crate::exec::record_refusal(format!("command '{other}' has no implementation"));
             vec![topic]
         }
     }
@@ -1920,7 +1898,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         "csv" | "table" => {
             // `csv(";"; year; title)`: a quoted first argument is the
             // delimiter (a bare word is a column, so no collision).
-            // The stage is a value like any other and never
+            // The command is a value like any other and never
             // depends on a locale: a tool that prints under one
             // takes a closing `@| csv` / `@| table` off the query
             // and renders it itself (`run_for_rendering`).
@@ -1943,7 +1921,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // The stream as one kaiv document: results under
         // `/@results`, records as namespaces, lists as arrays,
         // units kept. Provenance rides qua's `--kaiv`, not the
-        // stage (the stage sees values, not nodes).
+        // command (the command sees values, not nodes).
         #[cfg(feature = "kaiv")]
         "kaiv" => vec![Value::Str(
             crate::kaiv_out::document(&input).unwrap_or_else(|e| e),
@@ -2020,7 +1998,6 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // equal counts by value, as records; `frequencies(k)` keeps
         // the top k.
         "frequencies" => {
-            let keep = arg_int(call, 0).map(|k| k.max(0) as usize);
             let mut counts: Vec<(Value, i64)> = Vec::new();
             let mut index: std::collections::HashMap<crate::value::SortKey, usize> =
                 std::collections::HashMap::new();
@@ -2038,8 +2015,11 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 }
             }
             counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.compare_with(&b.0, scale)));
-            if let Some(k) = keep {
-                counts.truncate(k);
+            // The rows asked for: the first k, a rank band
+            // (`11..20`), or from the bottom (`-10`, `-20..-11`).
+            if let Some((s, e)) = rank_span(call.args.first(), counts.len(), false) {
+                counts.truncate(e);
+                counts.drain(..s);
             }
             counts
                 .into_iter()
@@ -3098,6 +3078,45 @@ fn stress_at(text: &str, alphabet: &str) -> Option<usize> {
 /// The n-th argument as an integer, `None` when there is none. An
 /// argument that is there but is not an integer refuses the call
 /// — `pad("5")` is a mistake, not a pad to width 0.
+/// The ranks a count or range argument selects over `len` items, as
+/// a half-open index span: `k` the first k, `-k` the last k, `a..b`
+/// the 1-based ranks a to b inclusive, a negative rank counted from
+/// the end (`-1` the last), either end of the range open. With
+/// `from_end` (for `last`) the ranks run the other way: positive
+/// from the end, negative from the start. None when the argument is
+/// not a count or a range.
+pub(crate) fn rank_span(arg: Option<&Arg>, len: usize, from_end: bool) -> Option<(usize, usize)> {
+    let n = len as i64;
+    // A rank to its 1-based position from the start.
+    let pos = |i: i64| -> i64 {
+        match (i >= 0, from_end) {
+            (true, false) => i,
+            (true, true) => n + 1 - i,
+            (false, false) => n + 1 + i,
+            (false, true) => -i,
+        }
+    };
+    let (a, b) = match arg? {
+        Arg::Lit(Value::Int(0)) => return Some((0, 0)),
+        Arg::Lit(Value::Int(k)) if *k > 0 => (1, *k),
+        Arg::Lit(Value::Int(k)) => (*k, -1),
+        Arg::Range(a, b) => (a.unwrap_or(1), b.unwrap_or(n)),
+        _ => return None,
+    };
+    // The band's ends as positions; `last` runs the ranks the other
+    // way, so its ends swap. A band past the items is empty.
+    let (lo, hi) = if from_end {
+        (pos(b), pos(a))
+    } else {
+        (pos(a), pos(b))
+    };
+    let (lo, hi) = (lo.max(1), hi.min(n));
+    if hi < lo {
+        return Some((0, 0));
+    }
+    Some(((lo - 1) as usize, hi as usize))
+}
+
 fn arg_int(call: &FnCall, n: usize) -> Option<i64> {
     match call.args.get(n) {
         Some(Arg::Lit(Value::Int(i))) => Some(*i),
@@ -3143,7 +3162,7 @@ fn arg_kind(a: &Arg) -> &'static str {
         Arg::Lit(_) => "a value",
         Arg::Expr(_) => "an expression",
         Arg::Range(..) => "a range",
-        Arg::Named { .. } => "an option",
+        Arg::Named { .. } | Arg::Opt { .. } => "an option",
     }
 }
 
@@ -3359,7 +3378,7 @@ mod tests {
     /// trims, and the count family (cc codepoints, bc bytes, wc
     /// words, lc lines; `chars` the pre-0.25 alias of cc).
     #[test]
-    fn text_round_functions() {
+    fn text_round_commands() {
         use crate::ast::Arg;
         let s = |t: &str| Value::Str(t.to_string());
         let int = |n: i64| Arg::Lit(Value::Int(n));

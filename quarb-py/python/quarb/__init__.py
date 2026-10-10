@@ -14,16 +14,16 @@ Quick start::
 
     doc = quarb.loads('''{
       "books": [
-        {"title": "Sapiens", "price": 22.5},
-        {"title": "Dune", "price": 9.99}
+        {"title": "Emma", "price": 22.5},
+        {"title": "Iliad", "price": 9.99}
       ]
     }''', "json")
 
-    doc.values('/books/*/title::')        # ['Sapiens', 'Dune']
+    doc.values('/books/*/title::')        # ['Emma', 'Iliad']
     doc.values('/books/*/price::')        # [22.5, 9.99] — floats
     doc.value('/books/*/price:: @| mean') # 16.245
     doc.records('/books/* | rec("t", /title::)')
-    #                                # [{'t': 'Sapiens'}, {'t': 'Dune'}]
+    #                                # [{'t': 'Emma'}, {'t': 'Iliad'}]
 
 ``loads(text, format)`` / ``load(path)`` parse once into a
 :class:`Document`, queried many times; results come back *typed* —
@@ -32,6 +32,20 @@ dicts for records, ``None`` for null. ``run`` / ``run_file`` are
 the low-level layer: result lines as strings, exactly as the
 ``qua`` CLI renders them. Errors raise ``ValueError`` with the
 engine's message.
+
+``doc.plan(query)`` prices a query before it runs: the static plan
+as a kaiv payload (per step, the nodes and bytes it may reach as
+ranges), and ``budget="nodes=1M,bytes=2GiB"`` on ``values`` /
+``value`` / ``records`` / ``nodes`` refuses a query whose plan
+passes the bound before anything is read (``strict`` refuses an
+unknown estimate too) — the ``qua --plan`` / ``--budget`` pair.
+
+A query whose closing command is ``@| table`` has a second form:
+``doc.table(query)`` returns ``(rows, text, html)`` — the rows as
+typed values, the text table as ``qua`` prints it, and the HTML
+grid every browser host renders, dressed with ``quarb.TABLE_CSS``.
+In a notebook the :class:`quarb.QuarbResult` of such a query
+displays as that grid; everything else displays as text.
 
 ``quarb.open(path)`` dispatches on the path's kind — directories
 (``graft=True`` grafts parseable leaves), SQLite, kaiv/daiv
@@ -58,6 +72,8 @@ open = _ext.open
 mount = _ext.mount
 translate = _ext.translate
 highlight = _ext.highlight
+closes_with_table = _ext.closes_with_table
+TABLE_CSS = _ext.TABLE_CSS
 parse_defs = _ext.parse_defs
 
 # The string-faithful layer: the qua CLI's exact rendering.

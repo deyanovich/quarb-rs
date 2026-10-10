@@ -118,7 +118,7 @@ fn no_match_is_empty() {
 fn unsupported_operator_errors() {
     let dir = sample_tree();
     let adapter = FsAdapter::new(dir.path()).unwrap();
-    // an unknown pipeline function reports "not yet supported"
+    // an unknown pipeline command reports "not yet supported"
     let err = quarb::run("//file @| bogus", &adapter).unwrap_err();
     assert_eq!(err.kind(), quarb::error::Kind::Unsupported);
 }
@@ -181,7 +181,7 @@ fn predicates() {
     assert_eq!(names("//*[::::size > 1000]", &dir), vec!["src/big.rs"]);
     // extension equality (bare-name literal)
     assert_eq!(
-        names("//*[::::extension = rs]", &dir),
+        names("//*[::::extension = \"rs\"]", &dir),
         vec!["src/big.rs", "src/small.rs"]
     );
     // regex match on the name

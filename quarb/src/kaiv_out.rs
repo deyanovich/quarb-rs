@@ -1,6 +1,6 @@
 //! kaiv emission of result values — the `| kaiv` / `@| kaiv`
-//! output stages, and the shared machinery behind qua's `--kaiv`
-//! emitter. The stages see values only, so the documents they
+//! output commands, and the shared machinery behind qua's `--kaiv`
+//! emitter. The commands see values only, so the documents they
 //! build carry no provenance; qua's emitter, which sees each
 //! value's origins, layers per-field provenance over the same
 //! placement rules (records open namespaces, lists open arrays,
@@ -235,7 +235,7 @@ pub fn kaiv_put(
 
 /// The `@| kaiv` document: every value under `/@results`, a record
 /// spreading as its namespace's fields, anything else as `::value`.
-/// No provenance — the stage sees values, not their nodes; qua's
+/// No provenance — the command sees values, not their nodes; qua's
 /// `--kaiv` is the provenance-rich emitter.
 pub fn document(items: &[Value]) -> Result<String, String> {
     let mut b = kaiv::KaivBuilder::new();

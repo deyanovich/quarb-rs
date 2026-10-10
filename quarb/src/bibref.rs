@@ -1364,7 +1364,7 @@ pub fn resolve_author_year<'a>(
         .map(|(onym, _, _)| onym.as_str())
 }
 
-/// The field census for the record a function answers: an alias
+/// The field census for the record a command answers: an alias
 /// map so `:author` and `:auctor` meet.
 pub fn alias_map() -> HashMap<&'static str, &'static str> {
     let mut m = HashMap::new();

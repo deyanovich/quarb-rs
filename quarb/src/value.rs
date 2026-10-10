@@ -19,7 +19,7 @@ pub enum Value {
     Float(f64),
     /// A string (e.g. `:::name`, file content).
     Str(String),
-    /// A list of values (produced by aggregating pipeline functions).
+    /// A list of values (produced by aggregating pipeline commands).
     /// Shared behind an `Arc`: a register read or a group's topic
     /// copies a pointer, not the elements, so a large list used as a
     /// set operand costs its construction once.

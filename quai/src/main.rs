@@ -51,7 +51,7 @@ struct Cli {
     #[arg(long = "no-graft", conflicts_with = "graft")]
     no_graft: bool,
 
-    /// Allow the `sh(...)` pipeline stage to run external commands.
+    /// Allow the `sh(...)` pipeline command to run external commands.
     #[arg(long)]
     allow_shell: bool,
 
@@ -98,6 +98,14 @@ struct Cli {
     /// and daemon are layers, not alternatives.
     #[arg(long)]
     cache: bool,
+
+    /// Hold every line to a budget before it runs: `nodes=N`,
+    /// `bytes=N`, `requests=N` and `strict`, comma-separated (a
+    /// figure takes k/M/G or Ki/Mi/Gi; see `qua --help`). A line
+    /// whose plan passes the bound is refused unrun; `:plan QUERY`
+    /// prints a line's plan. In-process sessions only.
+    #[arg(long, value_name = "SPEC")]
+    budget: Option<String>,
 }
 
 /// What an in-session `:mount` needs to rebuild the executor; absent
@@ -107,6 +115,8 @@ struct Remount {
     opts: Options,
     now: (i64, u32),
     allow_shell: bool,
+    /// The environments mounted from the command line.
+    environments: Vec<quarb::Environment>,
     /// The `--model` view, reapplied on every rebuild.
     model: Option<quarb_model::Model>,
     /// `:follow` rounds per line: 0 = off (the default — refs are
@@ -154,6 +164,7 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         let doc = Doc::parse("{}", "json").map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok(Box::new(
             LocalExecutor::new(doc, remount.now, remount.allow_shell)
+                .with_environments(remount.environments.clone())
                 .with_model(remount.model.clone()),
         ));
     }
@@ -229,6 +240,7 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
             remount.specs.clone(),
             remount.opts.clone(),
         )
+        .with_environments(remount.environments.clone())
         .with_model(remount.model.clone()),
     ))
 }
@@ -253,6 +265,16 @@ fn main() -> Result<()> {
             let base_dir = path.parent();
             for mt in m.mounts.iter().rev() {
                 let target = quarb_model::resolve_mount_target(&mt.target, base_dir);
+                // An environment is mounted from the command line
+                // only: a model file mounts sources, never code.
+                if quarb::Environment::is_environment_target(&target) {
+                    anyhow::bail!(
+                        "model {}: mount '{}' names an environment ({target}); environments \
+                         are mounted from the command line only",
+                        path.display(),
+                        mt.name
+                    );
+                }
                 cli.paths.insert(0, format!("{}={}", mt.name, target));
             }
             Some(m)
@@ -262,8 +284,36 @@ fn main() -> Result<()> {
     if cli.paths.is_empty() && cli.daemon {
         anyhow::bail!("--daemon needs at least one source (a directory, a document, or git:PATH)");
     }
-    let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
+    // The raw inputs go to a daemon as written (qua takes its own
+    // environment mounts off them); the local session takes them
+    // off here, from the command line only.
     let raw_paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
+    let mut environments: Vec<quarb::Environment> = Vec::new();
+    let mut kept = Vec::new();
+    for p in std::mem::take(&mut cli.paths) {
+        match quarb::Environment::parse_mount(&p) {
+            None => kept.push(p),
+            Some(Ok(e)) => {
+                if environments.iter().any(|x| x.alias == e.alias) {
+                    anyhow::bail!("two environments mounted as '{}'; give each its own alias", e.alias);
+                }
+                environments.push(e);
+            }
+            Some(Err(e)) => anyhow::bail!("{e}"),
+        }
+    }
+    cli.paths = kept;
+    if cli.allow_shell && !environments.iter().any(|e| e.alias == "sh") {
+        environments.push(quarb::Environment {
+            alias: "sh".to_string(),
+            kind: quarb::EnvKind::Shell,
+            target: String::new(),
+        });
+    }
+    if environments.iter().any(|e| e.kind == quarb::EnvKind::Shell) {
+        cli.allow_shell = true;
+    }
+    let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
     let mut remount: Option<Remount> = None;
     let session = if cli.daemon {
         // The daemon holds the arbor (via `qua --resident`); the store
@@ -319,6 +369,7 @@ fn main() -> Result<()> {
             opts,
             now,
             allow_shell: cli.allow_shell,
+            environments,
             model: model.clone(),
             // Batteries included: the arrow in a hand-typed line is
             // the consent, so an interactive session follows refs
@@ -343,6 +394,10 @@ fn main() -> Result<()> {
         let text =
             std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
         session.borrow_mut().seed_defs(&text)?;
+    }
+    if let Some(spec) = &cli.budget {
+        let b = quarb::plan::Budget::parse(spec).map_err(|e| anyhow::anyhow!("--{e}"))?;
+        session.borrow_mut().set_budget(Some(b));
     }
     let sources = if cli.paths.is_empty() {
         "a bare root — calculator session; lines open with '= expr', :mount adds sources"
@@ -554,7 +609,7 @@ fn fetch_web(url: &str) -> Result<(String, String)> {
 /// Prefix the query's leading path opener with `prefix` — needed
 /// when a follow turns a single path-bare source into named
 /// children. Only the leading opener moves: a path after the
-/// arrow or inside a stage is relative to its context, not the
+/// arrow or inside a command is relative to its context, not the
 /// root (a multi-branch join may need a hand adjustment — the
 /// note prints exactly what re-ran).
 fn rebase(q: &str, prefix: &str) -> String {
@@ -783,6 +838,15 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
         }
         return false;
     }
+    if let Some(arg) = line.strip_prefix(":plan ").map(str::trim)
+        && !arg.is_empty()
+    {
+        match session.plan_text(arg) {
+            Ok(text) => print!("{text}"),
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+        return false;
+    }
     if line == ":follow" || line.starts_with(":follow ") {
         let arg = line.strip_prefix(":follow").unwrap_or_default().trim();
         match remount {
@@ -831,6 +895,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  def &x: …;    add a named fragment to the session\n  \
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
+                 :plan QUERY   price a query before it runs: its static plan as kaiv (--budget sets the bound)\n  \
                  :history      show the macro table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"

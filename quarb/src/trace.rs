@@ -4,7 +4,7 @@
 //!
 //! The trace is built by *replaying* the query one hop per thread
 //! with the evaluator's own navigation ([`exec::navigate_paths`] for
-//! a hop, [`exec::apply_stage`] for a pipeline stage), so nothing in
+//! a hop, [`exec::apply_command`] for a pipeline command), so nothing in
 //! the evaluator changes and the payload cannot disagree with it in
 //! kind — and it is checked against a plain evaluation at the end,
 //! so it cannot disagree in fact either. The corpus in the
@@ -12,7 +12,7 @@
 //!
 //! Scope (what the corpus needed): one branch, no correlations, no
 //! marks or pushes; hops on every axis, one-alternative groups
-//! (quantified walks), projections, per-capsa pipeline stages, whole-
+//! (quantified walks), projections, per-capsa pipeline commands, whole-
 //! context aggregates. Anything else is [`QuarbError::unsupported`].
 
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ use quarb_trace as qt;
 
 use crate::adapter::{AstAdapter, NodeId};
 use crate::ast::{
-    Anchor, Axis, Group, Matcher, PathElem, Predicate, Projection, Query, Stage, Step,
+    Anchor, Axis, Command, Group, Matcher, PathElem, Predicate, Projection, Query, Step,
 };
 use crate::error::{QuarbError, Result};
 use crate::exec::{self, Correlation};
@@ -69,7 +69,7 @@ enum PKind {
     Hop(Step),
     Group(Group),
     Projection(Projection),
-    Stage(Stage),
+    Command(Command),
 }
 
 struct PStep {
@@ -115,8 +115,8 @@ fn plan(q: &Query) -> Result<Vec<PStep>> {
     }
     for st in &q.pipeline {
         out.push(PStep {
-            kind: PKind::Stage(st.clone()),
-            expr: unparse::stage(st),
+            kind: PKind::Command(st.clone()),
+            expr: unparse::command(st),
         });
     }
     Ok(out)
@@ -208,20 +208,20 @@ fn step_record(i: usize, p: &PStep, staged: bool) -> qt::Step {
             r.projection = Some(name);
             r.projectionkind = Some(kind.into());
         }
-        PKind::Stage(st) => match st {
-            Stage::Filter(e) => {
+        PKind::Command(st) => match st {
+            Command::Filter(e) => {
                 r.kind = "filter".into();
                 r.predicate = Some(unparse::pred_expr(e));
             }
-            Stage::Agg(call) => {
+            Command::Agg(call) => {
                 r.kind = "agg".into();
                 r.name = Some(call.name.clone());
             }
-            Stage::Func(call) => {
-                r.kind = "stage".into();
+            Command::Func(call) => {
+                r.kind = "command".into();
                 r.name = Some(call.name.clone());
             }
-            _ => r.kind = "stage".into(),
+            _ => r.kind = "command".into(),
         },
     }
     r
@@ -646,17 +646,17 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         Ok(next)
     }
 
-    fn stage(&mut self, at: i64, prev: &[Th], st: &Stage) -> Result<Vec<Th>> {
+    fn command(&mut self, at: i64, prev: &[Th], st: &Command) -> Result<Vec<Th>> {
         let trace = Correlation::default();
         match st {
-            Stage::Filter(_) => {
+            Command::Filter(_) => {
                 let mut next = Vec::new();
                 for (i, th) in prev.iter().enumerate() {
                     let Some(u) = th.node else {
                         return Err(unsupported("a filter after an aggregate"));
                     };
                     let caps = vec![exec::Capsa::bare(u, th.topic.clone())];
-                    let out = exec::apply_stage(st, caps, self.adapter, &trace, None);
+                    let out = exec::apply_command(st, caps, self.adapter, &trace, None);
                     let kept = !out.is_empty();
                     self.look.push(Look {
                         at: at - 1,
@@ -677,7 +677,34 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 }
                 Ok(next)
             }
-            Stage::Agg(call) => {
+            // The aggregate push reads the whole context once and
+            // files on every thread; the threads go on unchanged.
+            Command::AggPush { .. } => {
+                let caps: Vec<exec::Capsa> = prev
+                    .iter()
+                    .map(|th| match th.node {
+                        Some(u) => Ok(exec::Capsa::bare(u, th.topic.clone())),
+                        None => Err(unsupported("an aggregate push after an aggregate")),
+                    })
+                    .collect::<Result<_>>()?;
+                let out = exec::apply_command(st, caps, self.adapter, &trace, None);
+                Ok(prev
+                    .iter()
+                    .zip(out)
+                    .map(|(th, c)| Th {
+                        topic: c.topic,
+                        ..th.clone()
+                    })
+                    .collect())
+            }
+            Command::Agg(_) | Command::AggRecord { .. } | Command::AggRecall(_) => {
+                let name = match st {
+                    Command::Agg(call) => call.name.clone(),
+                    Command::AggRecord { enriched: true, .. } => "%%(…)".to_string(),
+                    Command::AggRecord { .. } => "%(…)".to_string(),
+                    Command::AggRecall(r) => unparse::reg(r),
+                    _ => unreachable!(),
+                };
                 let caps: Vec<exec::Capsa> = prev
                     .iter()
                     .map(|th| match th.node {
@@ -685,11 +712,10 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                         None => Err(unsupported("an aggregate of an aggregate")),
                     })
                     .collect::<Result<_>>()?;
-                let out = exec::apply_stage(st, caps, self.adapter, &trace, None);
+                let out = exec::apply_command(st, caps, self.adapter, &trace, None);
                 if out.len() != 1 {
                     return Err(unsupported(format!(
-                        "aggregate `{}` yielding {} capsae",
-                        call.name,
+                        "aggregate `{name}` yielding {} capsae",
                         out.len()
                     )));
                 }
@@ -701,7 +727,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 self.groups.push(Agg {
                     id: id.clone(),
                     at,
-                    name: call.name.clone(),
+                    name,
                     members,
                 });
                 let topic = out.into_iter().next().and_then(|c| c.topic);
@@ -717,10 +743,10 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 let mut next = Vec::new();
                 for th in prev {
                     let Some(u) = th.node else {
-                        return Err(unsupported("a stage after an aggregate"));
+                        return Err(unsupported("a command after an aggregate"));
                     };
                     let caps = vec![exec::Capsa::bare(u, th.topic.clone())];
-                    let out = exec::apply_stage(other, caps, self.adapter, &trace, None);
+                    let out = exec::apply_command(other, caps, self.adapter, &trace, None);
                     match out.len() {
                         0 => self.end(&th.id, at, "filtered"),
                         1 => next.push(Th {
@@ -729,7 +755,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                         }),
                         n => {
                             return Err(unsupported(format!(
-                                "a stage forking one thread into {n}"
+                                "a command forking one thread into {n}"
                             )));
                         }
                     }
@@ -915,7 +941,7 @@ pub fn trace<A: AstAdapter>(
             PKind::Hop(s) => tr.hop(at, &live, s)?,
             PKind::Group(g) => tr.group(at, &live, g)?,
             PKind::Projection(pr) => tr.projection(&live, pr)?,
-            PKind::Stage(st) => tr.stage(at, &live, st)?,
+            PKind::Command(st) => tr.command(at, &live, st)?,
         };
         tr.snaps.push(Snap {
             at,

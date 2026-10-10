@@ -30,6 +30,37 @@ pub struct Budget {
 }
 
 impl Budget {
+    /// A budget from its text: `nodes=N`, `bytes=N`, `requests=N`
+    /// and `strict`, comma-separated; a figure takes a unit —
+    /// `k`/`M`/`G`/`T` decimal, `Ki`/`Mi`/`Gi`/`Ti` binary, a
+    /// trailing `B` allowed (`1MB`, `2GiB`, `50k`). `rows=N` reads
+    /// as `nodes=N`, the word before the ruling that a step yields
+    /// nodes. The hosts (`qua --budget`, `quai --budget`, the Python
+    /// package's `budget=`) all read this one grammar.
+    pub fn parse(text: &str) -> Result<Budget, String> {
+        let mut b = Budget::default();
+        for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            match part.split_once('=') {
+                Some(("nodes", n)) => b.nodes = Some(budget_count("nodes", n)?),
+                Some(("rows", n)) => b.nodes = Some(budget_count("nodes", n)?),
+                Some(("bytes", n)) => b.bytes = Some(budget_count("bytes", n)?),
+                Some(("requests", n)) => {
+                    b.requests = Some(
+                        u32::try_from(budget_count("requests", n)?)
+                            .map_err(|_| format!("budget requests: '{n}' is beyond u32"))?,
+                    )
+                }
+                None if part == "strict" => b.strict = true,
+                _ => {
+                    return Err(format!(
+                        "budget takes nodes=N, bytes=N, requests=N and strict, comma-separated; got '{part}'"
+                    ));
+                }
+            }
+        }
+        Ok(b)
+    }
+
     /// Where the estimators may stop counting under this budget.
     pub fn cap(&self) -> Cap {
         Cap {
@@ -200,12 +231,12 @@ impl BranchPlan {
 }
 
 /// The plan of a query: its correlations (each a query of its own),
-/// its branches, and how many pipeline stages follow.
+/// its branches, and how many pipeline commands follow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub correlations: Vec<Plan>,
     pub branches: Vec<BranchPlan>,
-    pub stages: usize,
+    pub commands: usize,
 }
 
 impl Plan {
@@ -352,7 +383,7 @@ fn write_estimate(w: &mut String, e: &Estimate) {
 /// A value line's text. The payload is a verbatim document
 /// (`.!verbatim`): what stands between `=` and end-of-line is the
 /// value, no quoting, no escapes, `$` a plain character. A value is
-/// one line, so a query written one stage per line is folded, a
+/// one line, so a query written one command per line is folded, a
 /// space per line break.
 fn kaiv_str(s: &str) -> String {
     s.chars()
@@ -414,7 +445,7 @@ pub fn of_within(query: &Query, adapter: &dyn AstAdapter, cap: Cap) -> Plan {
                 }
             })
             .collect(),
-        stages: query.pipeline.len(),
+        commands: query.pipeline.len(),
     }
 }
 
@@ -504,4 +535,32 @@ fn plan_steps(
         };
     }
     out
+}
+
+/// A budget figure with an optional unit (see [`Budget::parse`]).
+fn budget_count(field: &str, text: &str) -> Result<u64, String> {
+    let t = text.trim();
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let unit = t[digits.len()..].trim().trim_end_matches(['B', 'b']);
+    let scale: u64 = match unit {
+        "" => 1,
+        "k" | "K" => 1_000,
+        "M" => 1_000_000,
+        "G" => 1_000_000_000,
+        "T" => 1_000_000_000_000,
+        "Ki" => 1 << 10,
+        "Mi" => 1 << 20,
+        "Gi" => 1 << 30,
+        "Ti" => 1 << 40,
+        _ => {
+            return Err(format!(
+                "budget {field}: a count with an optional k/M/G/T or Ki/Mi/Gi/Ti unit; got '{t}'"
+            ));
+        }
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| format!("budget {field}: a count is needed; got '{t}'"))?;
+    n.checked_mul(scale)
+        .ok_or_else(|| format!("budget {field}: '{t}' is beyond u64"))
 }

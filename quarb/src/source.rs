@@ -256,7 +256,7 @@ fn decode_with(bytes: &[u8], enc: &'static Encoding, decided_by: DecidedBy) -> D
 
 /// What the output boundary does with a character the encoding
 /// cannot hold: refuse the whole output, or write the escape the
-/// stage before it provides (`@| json` → `\uXXXX`).
+/// command before it provides (`@| json` → `\uXXXX`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Escape {
     #[default]
@@ -279,7 +279,7 @@ pub fn decode_label(bytes: &[u8], label: &str) -> Option<String> {
     Some(decode_with(bytes, enc, DecidedBy::Declaration).text)
 }
 
-/// [`encode`] with the escape the preceding stage provides for a
+/// [`encode`] with the escape the preceding command provides for a
 /// character the encoding lacks.
 pub fn encode_with(text: &str, label: &str, escape: Escape) -> Result<Vec<u8>, String> {
     let enc = encoding_for_label(label)

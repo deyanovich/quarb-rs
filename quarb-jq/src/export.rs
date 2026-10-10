@@ -104,8 +104,8 @@ impl Exporter {
         let mut out = paths.join(", ");
 
         if let Some(pipe) = self.kid(q, "pipeline") {
-            for stage in self.arbor.children(pipe) {
-                out = self.stage(stage, out)?;
+            for command in self.arbor.children(pipe) {
+                out = self.command(command, out)?;
             }
         }
         Ok(out)
@@ -343,7 +343,7 @@ impl Exporter {
         }
     }
 
-    fn stage(&mut self, s: NodeId, input: String) -> Result<String, JqError> {
+    fn command(&mut self, s: NodeId, input: String) -> Result<String, JqError> {
         match self.kind(s).as_str() {
             "filter" => {
                 let cond = self.pred_expr_children(s)?;
@@ -354,7 +354,7 @@ impl Exporter {
                 let e = self.operand(kids[0])?;
                 Ok(format!("{input} | {e}"))
             }
-            "func" => {
+            "cmd" => {
                 let name = self.prop_s(s, "name");
                 match name.as_str() {
                     "upper" => Ok(format!("{input} | ascii_upcase")),
@@ -364,7 +364,7 @@ impl Exporter {
                         Ok(format!("{input} | {{{fields}}}"))
                     }
                     other => Err(JqError::Unsupported(format!(
-                        "the '{other}' pipeline function"
+                        "the '{other}' pipeline command"
                     ))),
                 }
             }
@@ -408,7 +408,7 @@ impl Exporter {
                 Ok(format!("[{input}] | .{pos}"))
             }
             other => Err(JqError::Unsupported(format!(
-                "the '{other}' stage (registers and grouping are Quarb-side state)"
+                "the '{other}' command (registers and grouping are Quarb-side state)"
             ))),
         }
     }

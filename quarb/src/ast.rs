@@ -11,16 +11,16 @@ use globset::GlobMatcher;
 use regex::Regex;
 
 /// A parsed query: a union of navigation branches, then a pipeline of
-/// stages applied to the union.
+/// commands applied to the union.
 #[derive(Debug, Clone)]
 pub struct Query {
     /// Prior expressions joined by `<=>`, evaluated into the context
     /// trace before this query's body; empty for a plain query.
     pub correlations: Vec<Query>,
     pub branches: Vec<Branch>,
-    pub pipeline: Vec<Stage>,
+    pub pipeline: Vec<Command>,
     /// Where the correlations bind: the number of the driver's
-    /// pipeline stages written before the first `<=>`. Those stages
+    /// pipeline commands written before the first `<=>`. Those commands
     /// run first, the join binds against the capsae as they then
     /// stand (register, marks, node), and the rest of the pipeline
     /// follows — a join forks the capsa it leaves, as a hop does.
@@ -34,7 +34,7 @@ pub struct Query {
     pub outer: bool,
 }
 
-/// Where a navigation (a branch, a navigation stage, or an operand
+/// Where a navigation (a branch, a navigation command, or an operand
 /// path) starts. The parenthesized mark anchors mirror the
 /// register's sigil law on the node side: `(name)` one mark by
 /// name, `(N)` one by 1-based position, `(.)` the latest, `(@)`
@@ -112,12 +112,12 @@ pub struct Branch {
     pub anchor: Anchor,
 }
 
-/// A pipeline stage.
+/// A pipeline command.
 ///
 /// The execution unit here is the *capsa* — a node with a register
 /// (its breadcrumbs) and a current topic (the scalar being worked on).
 #[derive(Debug, Clone)]
-pub enum Stage {
+pub enum Command {
     /// `| f` — a per-capsa scalar transform of the topic.
     Func(FnCall),
     /// `| .` or `| .name` — push the topic onto the register.
@@ -141,6 +141,22 @@ pub enum Stage {
     /// `top`, `bottom`) instead reorder or filter the capsae
     /// themselves, preserving nodes and registers.
     Agg(FnCall),
+    /// `@| .name(body)` — the aggregate push: the body is a
+    /// subcontext fed the context as a whole (its seed topic the
+    /// list of the peers' topics, its register the regulae every
+    /// capsa shares), and its value is filed under the name on EVERY
+    /// capsa; the context passes on unchanged, so a later body
+    /// reads the same stream and the regula just filed.
+    AggPush { name: Option<String>, body: Operand },
+    /// `@| %(…)` / `@| %%(…)` — the aggregate record: the
+    /// constructor's fields are bodies fed the context as a whole,
+    /// and the result is one capsa whose topic is the record (the
+    /// enriched form opens with the shared named regulae).
+    AggRecord { call: FnCall, enriched: bool },
+    /// `@| %.`, `@| $.name`, `@| @.` — a register accessor after the
+    /// aggregation pipe reads once: the regulae every capsa shares,
+    /// as one capsa.
+    AggRecall(RegRef),
     /// `@| [n]` / `@| [a..b]` — positional selection of capsae from
     /// the whole context, with the same numbering as the
     /// navigation-side index and range predicates.
@@ -170,7 +186,7 @@ pub enum Stage {
         enriched: bool,
     },
     /// `| ...` — the spread: fork a list topic into one thread per
-    /// element (Cypher's UNWIND). Core syntax, not a function — it
+    /// element (Cypher's UNWIND). Core syntax, not a command — it
     /// computes nothing, it changes how many threads exist. Null
     /// forks to nothing; a non-list scalar passes through; a record
     /// passes whole. The outer form `| ...?` differs in exactly one
@@ -183,7 +199,7 @@ pub enum Stage {
     /// `%.`, which reads the named regulae as a record. (`| .`
     /// files the record as ONE regula; the bare `.%` spreads it.)
     FieldsPush,
-    /// `| /path…` — a navigation stage: resume navigation from each
+    /// `| /path…` — a navigation command: resume navigation from each
     /// capsa's node (or from `^` / a `(name)` mark), fanning out
     /// into one capsa per result with registers and marks carried
     /// forward — the pipeline spelling of a path continuation. The
@@ -195,14 +211,14 @@ pub enum Stage {
     /// mode exactly like a branch projection. Refused under `@|`
     /// and `$|`: hops are per-thread.
     Nav(Branch),
-    /// `$| stage` — the iteration pipe, the scope-dual of `@|`: where
-    /// `@|` hands its stage ALL topics at once (the context), `$|`
+    /// `$| command` — the iteration pipe, the scope-dual of `@|`: where
+    /// `@|` hands its command ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per
     /// capsa, capsae unchanged. `$| f` maps, `$| [cond]` filters
     /// elements (`$_` = the element; a comprehension's WHERE),
     /// `$| [a..b]` slices. Null maps to null; a non-list topic is
-    /// a singleton; an expanding inner stage flattens.
-    Map(Box<Stage>),
+    /// a singleton; an expanding inner command flattens.
+    Map(Box<Command>),
     /// `.v(body){N}` — a quantified push: the push
     /// applied to the context again and again, each round reading
     /// the previous round's values (the snapshot rule) and filing
@@ -212,7 +228,7 @@ pub enum Stage {
     /// no topic) or at n; `{m;}` likewise up to the quantifier
     /// bound.
     Repeat {
-        stage: Box<Stage>,
+        command: Box<Command>,
         min: usize,
         max: Option<usize>,
     },
@@ -244,14 +260,14 @@ pub enum RegRef {
     FullRecord,
 }
 
-/// A pipeline-stage function call: `name` or `name(arg, …)`.
+/// A simple command: `name` or `name(operand; …)`.
 #[derive(Debug, Clone)]
 pub struct FnCall {
     pub name: String,
     pub args: Vec<Arg>,
 }
 
-/// One function argument: a literal, a value expression evaluated
+/// One command operand: a literal, a value expression evaluated
 /// per capsa against its node (the key of a keyed aggregate like
 /// `sort_by(::age)`), or an offset range (`window(-2..0)`, either
 /// end optional).
@@ -266,6 +282,16 @@ pub enum Arg {
     Named {
         name: String,
         value: Value,
+    },
+    /// An option of a simple command, spelled as in the shell in
+    /// the one option segment that closes the parentheses
+    /// (`upper(-i)`, `sort(::name; --locale=ru)`): the name as
+    /// written with its dashes, and the value `=` bound to it (a
+    /// switch has none). The void option `-=` opens a segment and
+    /// is not kept.
+    Opt {
+        name: String,
+        value: Option<Operand>,
     },
 }
 
@@ -515,7 +541,7 @@ pub enum Operand {
     ValueMeta { base: Box<Operand>, key: String },
     /// `X:.r` — the cross-capsa read: `at` is a node
     /// path (a `Rel`, a `Ctx`, or the served node); at each node it
-    /// reaches, the regula `reg` of every capsa of the stage's
+    /// reaches, the regula `reg` of every capsa of the command's
     /// *input* context standing there (the `@*` snapshot rule), one
     /// value per (node, capsa), in context order. No values where
     /// nobody stands; null outside a pipeline context.
@@ -537,7 +563,7 @@ pub enum Operand {
     /// form. Never reaches the executor.
     Param(String),
     /// `$1` … `$9` — a regex capture: the group captured by the last
-    /// successful `=~` match in a per-capsa filter stage. Null until
+    /// successful `=~` match in a per-capsa predicate command. Null until
     /// a filter has matched (and in navigation predicates, where no
     /// capsa exists).
     Capture(usize),
@@ -550,26 +576,33 @@ pub enum Operand {
     /// thread most recently walked. Bare, it reads as the edge's
     /// label; projected (`$-::prop`), as the edge's own property
     /// (adapter-provided). Null where no edge has been walked — an
-    /// edge-hop's own predicates and pattern stages after an edge
+    /// edge-hop's own predicates and pattern commands after an edge
     /// hop are the defined scopes.
     Edge { projection: Option<Projection> },
-    /// `@*` — the current context: every capsa of the stage's
-    /// INPUT (the snapshot rule — a stage is the transition, so
+    /// `@*` — the current context: every capsa of the command's
+    /// INPUT (the snapshot rule — a command is the transition, so
     /// "the context" during its evaluation is what it received).
     /// Bare, the peers' topics as a list; projected (`@*::prop`,
     /// `:::`, `;;;`), the projection mapped over the peers' nodes.
     /// Null where no context exists (navigation predicates).
     Capsae { projection: Option<Projection> },
-    /// `(expr | f @| g ...)` — an operand with a pipe tail. Stage
+    /// The seed of a subcontext body: the enclosing capsa as the
+    /// control operator that feeds the body hands it to a command
+    /// — the topic (`$_`) on its node, the register readable. It
+    /// stands only as the head of a headless body pipeline:
+    /// `.n(cc)` is `Piped { Seed, [cc] }`, a command applied to
+    /// the seed exactly as `| cc` applies to its input.
+    Seed,
+    /// `(expr | f @| g ...)` — an operand with a pipe tail. Command
     /// semantics mirror the pipeline exactly: each value rides a
     /// pseudo-capsa (the enclosing node and register, the value as
-    /// topic) through the ordinary stage machinery. `@|` treats a
+    /// topic) through the ordinary command machinery. `@|` treats a
     /// single list value as a context of its elements. Pushes and
     /// subcontexts refuse (a pipe inside an expression transforms a
     /// value; pushes belong to real capsae).
     Piped {
         expr: Box<Operand>,
-        stages: Vec<Stage>,
+        commands: Vec<Command>,
     },
     /// `now()` — the invocation instant (spec: The Temporal
     /// Fragment, Determinism): one timeline point bound by the

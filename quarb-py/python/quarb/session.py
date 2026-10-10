@@ -16,12 +16,13 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-from html import escape
 from pathlib import Path
 
 from . import (
+    TABLE_CSS,
     Document,
     Quantity,
+    closes_with_table as _closes_with_table,
     mount as _mount,
     open as _open,
     parse_defs as _parse_defs,
@@ -29,11 +30,21 @@ from . import (
 
 
 class QuarbResult:
-    """A query result that displays well and converts willingly."""
+    """A query result that displays well and converts willingly.
 
-    def __init__(self, values, records):
+    The rule every browser host follows holds here too: a result
+    whose closing command is ``@| table`` renders as the engine's
+    HTML grid (``html``, dressed with ``quarb.TABLE_CSS``), and
+    everything else stays text — the notebook's rich display
+    switches on the same condition, no toggle. ``text`` is the
+    table as ``qua`` prints it.
+    """
+
+    def __init__(self, values, records, html=None, text=None):
         self.values = values
         self._records = records
+        self.html = html
+        self.text = text
 
     @property
     def records(self):
@@ -46,36 +57,17 @@ class QuarbResult:
         return len(self.values)
 
     def __repr__(self):
+        if self.text is not None:
+            return self.text
         return "\n".join(str(v) for v in self.values)
 
     def _repr_html_(self):
-        if not self._records:
-            body = "<br>".join(escape(str(v)) for v in self.values)
-            return f'<div style="font-family:monospace">{body}</div>'
-        cols: list[str] = []
-        for r in self._records:
-            for k in r:
-                if k not in cols:
-                    cols.append(k)
-        head = "".join(
-            f'<th style="text-align:left;border-bottom:2px solid #8a2434;'
-            f'padding:2px 10px">{escape(c)}</th>'
-            for c in cols
-        )
-        rows = "".join(
-            "<tr>"
-            + "".join(
-                f'<td style="padding:2px 10px;border-bottom:1px solid #ddd">'
-                f'{escape(str(r.get(c, "")))}</td>'
-                for c in cols
-            )
-            + "</tr>"
-            for r in self._records
-        )
-        return (
-            '<table style="border-collapse:collapse;font-size:0.9em">'
-            f"<thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>"
-        )
+        # Only a result closing in ``@| table`` has a rich form; the
+        # stylesheet travels with it, so a saved notebook keeps the
+        # grid dressed.
+        if self.html is None:
+            return None
+        return f"<style>{TABLE_CSS}</style>\n{self.html}"
 
     @property
     def df(self):
@@ -100,6 +92,10 @@ class QuarbResult:
 
 
 def _result(doc: Document, query: str) -> QuarbResult:
+    if _closes_with_table(query):
+        rows, text, html = doc.table(query)
+        records = [r for r in rows if isinstance(r, dict)]
+        return QuarbResult(rows, records, html=html, text=text)
     values = doc.values(query)
     if values and isinstance(values[0], dict):
         return QuarbResult(values, values)

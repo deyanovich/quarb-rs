@@ -1,6 +1,6 @@
-//! Navigation stages: round-trips and the mode discipline.
+//! Navigation commands: round-trips and the mode discipline.
 //!
-//! `| /path` is a branch in stage position — the pipeline spelling
+//! `| /path` is a branch in command position — the pipeline spelling
 //! of a path continuation. Legal only in navigation mode; a push
 //! returns a scalar-mode thread to navigation mode (spec:
 //! Execution Modes).
@@ -17,7 +17,7 @@ fn refuse(q: &str) -> String {
 }
 
 #[test]
-fn nav_stages_round_trip() {
+fn nav_commands_round_trip() {
     for q in [
         // plain hop, descent, projection endings
         "/teams/* | /members/*",
@@ -26,7 +26,7 @@ fn nav_stages_round_trip() {
         "/teams/* | .team(::name) | .floor(::floor) \
          | /members/* | .who(::name) | .role(::role) | %.",
         // anchors: root, mark; arrows; a quantified walk in
-        // stage position
+        // command position
         "/a/b | ^/c",
         "/a .m | /b | $$.m/c",
         "/x | ->ref",
@@ -64,7 +64,7 @@ fn mark_anchors_round_trip() {
 
 #[test]
 fn arithmetic_paths_stay_expressions() {
-    // A dangling operator after the path means the stage was a
+    // A dangling operator after the path means the command was a
     // value expression all along — the operand reading survives
     // (null-propagating arithmetic over child values).
     assert_eq!(

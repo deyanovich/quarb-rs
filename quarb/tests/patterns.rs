@@ -616,14 +616,15 @@ fn operand_paths_ascend_and_step_sideways() {
     // A path operand may ascend and step sideways, as a branch may.
     assert_eq!(canon("/a/b[\\*::x = 1]"), "/a/b[\\::x = 1]");
     assert_eq!(canon("/a/b[\\\\?c::x = 1]"), "/a/b[\\\\?c::x = 1]");
-    // (a bare key is a string; canonical output quotes it)
+    // (a key in the flat form is a quoted string — a bare word in
+    // a body names a command; canonical output bares the key)
     assert_eq!(
-        canon("/p | %(dir; \\*:::name; me; ::city)"),
+        canon("/p | %(\"dir\"; \\*:::name; \"me\"; ::city)"),
         "/p | %(dir = \\:::name; me = ::city)"
     );
     assert_eq!(canon("/a[;-*::x = 1]"), "/a[>*::x = 1]");
     assert_eq!(canon("/a[>>?*::x = 1]"), "/a[>>?*::x = 1]");
-    assert_eq!(canon("/a | %(up; /..::n)"), "/a | %(up = \\::n)");
+    assert_eq!(canon("/a | %(\"up\"; /..::n)"), "/a | %(up = \\::n)");
 }
 
 #[test]
@@ -643,7 +644,14 @@ fn record_convention_canonicalizes() {
         canon("/a | %(n = ::age, city = /profile::city)"),
         "/a | %(n = ::age; city = /profile::city)"
     );
-    assert_eq!(canon("/a | %(n; ::age)"), "/a | %(n = ::age)");
+    assert_eq!(canon("/a | %(\"n\"; ::age)"), "/a | %(n = ::age)");
+    // a bare word in a field body names a command; an unknown one
+    // is refused by name, never read as text
+    assert!(
+        refuse("/a | %(n; ::age)").contains("'n' is not a command"),
+        "{}",
+        refuse("/a | %(n; ::age)")
+    );
     // auto-named values mix with keyed ones
     assert_eq!(
         canon("/a | %(::name; kb = ::size)"),
@@ -718,8 +726,8 @@ fn decimal_comma_and_group_underscores_canonicalize() {
     assert_eq!(canon("/f/* | (;wc -l)"), "/f/* | `wc -l`");
     assert_eq!(canon("/a(->b){2;}"), "/a(->b){2;}");
     assert_eq!(canon("/a(->b)(+2;)"), "/a(->b){2;}");
-    // the join binds where it is written: the driver's stages before
-    // `<=>` stay before it, and a served-node stage prints bare
+    // the join binds where it is written: the driver's commands before
+    // `<=>` stay before it, and a served-node command prints bare
     assert_eq!(
         canon("/a | .t(::x) <=> /b[::y = $.t] | %(::z)"),
         "/a | .t(::x) <=> /b[::y = $.t] | %(::z)"

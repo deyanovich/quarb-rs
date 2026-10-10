@@ -1,5 +1,5 @@
 //! Printing an outline (lang/TODO.md): `indent` per value, and the
-//! row-aligned context stages `number` and `outline` over a stream
+//! row-aligned context commands `number` and `outline` over a stream
 //! of levels.
 
 use quarb::{QueryResult, Value};
@@ -80,7 +80,7 @@ fn the_shallowest_level_is_the_top_and_a_skipped_one_counts_once() {
 }
 
 #[test]
-fn outline_stages_ride_the_context_pipe_only() {
+fn outline_commands_ride_the_context_pipe_only() {
     assert!(quarb::run("/toc/* | outline(::depth; ::title)", &doc()).is_err());
     assert!(quarb::run("/toc/* @| outline(::depth)", &doc()).is_err());
     assert!(quarb::run(r#"/toc/* @| outline(::depth; ::title; "i.")"#, &doc()).is_err());

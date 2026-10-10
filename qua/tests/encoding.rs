@@ -210,7 +210,7 @@ fn the_output_boundary() {
     );
     assert!(ok, "{err}");
     assert_eq!(out, cp1251("Гнев, богиня, воспой\nСон\n"));
-    // a serialization stage before it, bytes as the encoding has them
+    // a serialization command before it, bytes as the encoding has them
     let (out, _, ok) = qua(
         &dir,
         &[

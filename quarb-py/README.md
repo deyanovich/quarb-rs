@@ -64,6 +64,10 @@ doc.value('/books/*/price:: @| mean')
 
 doc.records('/books/* | %(t = /title::; p = /price::)')
 # [{'t': 'The Odyssey', 'p': 25}, {'t': 'The Iliad', 'p': 18}]
+
+doc.plan('/books/*')                 # the static plan, as kaiv
+doc.values('/books/*/title::', budget='nodes=1')
+# ValueError: refused: the plan estimates 2 nodes; the budget allows 1
 ```
 
 `loads(text, format)` / `load(path)` parse once into a

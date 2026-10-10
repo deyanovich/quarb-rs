@@ -19,7 +19,7 @@ fn refuse(q: &str) -> String {
 fn head_desugars_to_root_anchor() {
     // The head and its spelled-out form canonicalize identically.
     assert_eq!(canon("= 2 + 2"), canon("^ | (2 + 2)"));
-    // Pipe from the head — stages compose.
+    // Pipe from the head — commands compose.
     canon("= 2 + 2 | %(answer = $_)");
     // Parenthesized sub-expressions stay ordinary operands.
     canon("= (2 + 2) * 3");
@@ -29,7 +29,7 @@ fn head_desugars_to_root_anchor() {
 
 #[test]
 fn head_composes_with_fragments() {
-    // A stage fragment applies to the head's row.
+    // A command fragment applies to the head's row.
     canon("def &twice: | ($_ * 2); = 21 | &twice");
     // A query fragment may itself be expression-headed.
     canon("def &four: = 2 + 2; &four");

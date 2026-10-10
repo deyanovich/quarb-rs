@@ -6,20 +6,20 @@ use super::*;
 /// count grows (`Origins::more`).
 pub const ORIGIN_CAP: usize = 8;
 
-/// Where a value was read: a node, and the pipeline stage (1-based
-/// ordinal of the top-level stage; 0 = branch level) during which
+/// Where a value was read: a node, and the pipeline command (1-based
+/// ordinal of the top-level command; 0 = branch level) during which
 /// it was read. The coordinate a capsa's provenance is made of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Origin {
     pub node: NodeId,
-    pub stage: u32,
+    pub command: u32,
 }
 
 impl Default for Origin {
     fn default() -> Self {
         Origin {
             node: NodeId(0),
-            stage: 0,
+            command: 0,
         }
     }
 }
@@ -38,9 +38,12 @@ pub struct Origins {
 }
 
 impl Origins {
-    pub fn at(node: NodeId, stage: u32) -> Origins {
+    pub fn at(node: NodeId, command: u32) -> Origins {
         Origins {
-            known: vec![Origin { node, stage }],
+            known: vec![Origin {
+                node,
+                command: command,
+            }],
             more: 0,
         }
     }
@@ -77,24 +80,28 @@ impl Origins {
 /// list — one part per field (by field name) or item (by decimal
 /// index), so a field keeps its own origins through a record and
 /// out again.
+/// The parts are shared, never copied: a register holding a list
+/// pushed from a sub-pipeline carries a part per item, and every
+/// capsa of the context clones the register at every command, so
+/// a clone of the tree is a reference count, not a walk.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Prov {
     pub origins: Origins,
-    pub parts: Vec<(String, Prov)>,
+    pub parts: std::sync::Arc<Vec<(String, Prov)>>,
 }
 
 impl Prov {
-    pub fn at(node: NodeId, stage: u32) -> Prov {
+    pub fn at(node: NodeId, command: u32) -> Prov {
         Prov {
-            origins: Origins::at(node, stage),
-            parts: Vec::new(),
+            origins: Origins::at(node, command),
+            parts: Default::default(),
         }
     }
 
     pub fn leaf(origins: Origins) -> Prov {
         Prov {
             origins,
-            parts: Vec::new(),
+            parts: Default::default(),
         }
     }
 
@@ -104,7 +111,10 @@ impl Prov {
         for (_, p) in &parts {
             origins.union(&p.origins);
         }
-        Prov { origins, parts }
+        Prov {
+            origins,
+            parts: std::sync::Arc::new(parts),
+        }
     }
 
     /// A list's provenance: parts keyed by decimal index.
@@ -291,11 +301,11 @@ pub(super) fn prov_record(p: &Provenance) -> Value {
     ])
 }
 
-/// An origin coordinate as a record: `%(id; stage)`.
+/// An origin coordinate as a record: `%(id; command)`.
 pub(super) fn origin_record(o: Origin) -> Value {
     Value::Record(vec![
         ("id".to_string(), Value::Int(o.node.0 as i64)),
-        ("stage".to_string(), Value::Int(o.stage as i64)),
+        ("command".to_string(), Value::Int(o.command as i64)),
     ])
 }
 

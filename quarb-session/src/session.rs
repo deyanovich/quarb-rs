@@ -25,6 +25,9 @@ pub struct Session {
     snapshots: HashMap<usize, Vec<Cell>>,
     /// The next line's number — the `&N` a fresh line will claim.
     line_no: usize,
+    /// A bound every line is held to before it runs: the executor
+    /// plans the line and a plan past the bound is refused unrun.
+    budget: Option<quarb::plan::Budget>,
 }
 
 impl Session {
@@ -39,7 +42,46 @@ impl Session {
             defs_text: state.defs_text,
             snapshots: HashMap::new(),
             line_no,
+            budget: None,
         }
+    }
+
+    /// Hold every line to a budget (`None` lifts it): the executor
+    /// plans the line first, and a line whose estimate passes the
+    /// bound is refused before anything is read.
+    pub fn set_budget(&mut self, budget: Option<quarb::plan::Budget>) {
+        self.budget = budget;
+    }
+
+    /// The budget the session holds its lines to, if any.
+    pub fn budget(&self) -> Option<&quarb::plan::Budget> {
+        self.budget.as_ref()
+    }
+
+    /// The static plan of a line — history refs resolved as in
+    /// [`eval`](Self::eval) — priced by the executor, under the
+    /// session's budget when one is set.
+    pub fn plan(&self, line: &str) -> Result<quarb::plan::Plan> {
+        self.executor
+            .plan(&self.combined(line), self.budget.as_ref())
+    }
+
+    /// The plan of a line as its kaiv payload, the line as its
+    /// `query` value.
+    pub fn plan_text(&self, line: &str) -> Result<String> {
+        Ok(self.plan(line)?.to_kaiv(line))
+    }
+
+    /// The budget's check of a combined query: nothing to do without
+    /// one; with one, the plan past the bound is the refusal.
+    fn within_budget(&self, query: &str) -> Result<()> {
+        if let Some(b) = &self.budget {
+            let plan = self.executor.plan(query, Some(b))?;
+            if let Some(why) = b.exceeded_by(&plan) {
+                return Err(quarb::QuarbError::refused(why).into());
+            }
+        }
+        Ok(())
     }
 
     /// Swap the executor under a running session — an in-session
@@ -82,7 +124,23 @@ impl Session {
     /// Evaluate a line against the standing arbor (`&N`). Pure —
     /// history is not touched (a failed line commits nothing).
     pub fn eval(&self, line: &str) -> Result<Vec<Cell>> {
-        self.executor.run(&self.combined(line))
+        let q = self.combined(line);
+        self.within_budget(&q)?;
+        self.executor.run(&q)
+    }
+
+    /// Evaluate a line, and when its closing command is `@| table`,
+    /// hand back the HTML grid beside the cells (the text table as
+    /// one cell) — the browser hosts' path; see
+    /// [`crate::Executor::run_table`].
+    pub fn eval_table(&self, line: &str) -> Result<(Vec<Cell>, Option<String>)> {
+        let q = self.combined(line);
+        self.within_budget(&q)?;
+        if quarb::closes_with_table(&q) {
+            self.executor.run_table(&q)
+        } else {
+            Ok((self.executor.run(&q)?, None))
+        }
     }
 
     /// The unresolved external references the last evaluation
@@ -95,7 +153,9 @@ impl Session {
     /// Evaluate a line against a freshly re-materialized source — the
     /// `&N!` live reading, which sees current data.
     pub fn eval_fresh(&self, line: &str) -> Result<Vec<Cell>> {
-        self.executor.run_fresh(&self.combined(line))
+        let q = self.combined(line);
+        self.within_budget(&q)?;
+        self.executor.run_fresh(&q)
     }
 
     /// Run a line and render its results as exportable markup

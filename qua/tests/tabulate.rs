@@ -61,7 +61,7 @@ fn scalars_ride_a_value_column() {
 }
 
 #[test]
-fn the_stages_ride_the_context_pipe_only() {
+fn the_commands_ride_the_context_pipe_only() {
     assert!(quarb::run("/books/* | %(::title) | csv", &doc()).is_err());
     assert!(quarb::run("/books/* | %(::title) @| csv(::title)", &doc()).is_err());
 }

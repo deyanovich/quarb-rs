@@ -273,7 +273,7 @@ impl ExternalRef {
 /// What one navigation step asks of an adapter, lowered for
 /// [`AstAdapter::select`]: the axis, the name matcher, the
 /// predicate conjuncts the engine can express as plain comparisons,
-/// and — when the stage after the step consumes them — a limit and
+/// and — when the command after the step consumes them — a limit and
 /// an order. An adapter answers from an index what it can and names
 /// what it applied; the engine tests the rest.
 #[derive(Debug, Clone)]
@@ -287,7 +287,7 @@ pub struct StepPlan<'a> {
     /// The step's `<trait>` filters, each one literal trait name
     /// (a clause with alternatives or a negation is not lowered).
     pub traits: Vec<&'a str>,
-    /// How many results the stage after the step keeps, when it
+    /// How many results the command after the step keeps, when it
     /// keeps a prefix (`[..n]`, `@| first(n)`).
     pub limit: Option<usize>,
     /// Where an estimator may stop counting: past this many nodes
@@ -295,7 +295,7 @@ pub struct StepPlan<'a> {
     /// listing, a header walk or an arena count stops there and
     /// reports `(counted, u64::MAX)`. Unbounded when no budget.
     pub cap: Cap,
-    /// The property the stage after the step orders by, and whether
+    /// The property the command after the step orders by, and whether
     /// ascending.
     pub order: Option<(&'a str, bool)>,
 }
@@ -1340,7 +1340,7 @@ pub trait AstAdapter {
     }
     /// A batching hint, the projection twin of `prefetch_links`: the
     /// engine is about to read the properties `names` of every node
-    /// in `nodes` (the next stage projects them). A remote adapter
+    /// in `nodes` (the next command projects them). A remote adapter
     /// fetches the columns for the frontier in one round trip;
     /// semantics are unchanged either way.
     fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}

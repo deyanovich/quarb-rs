@@ -1,7 +1,7 @@
 //! Rulings #33, #34, and #38, end to end over a JSON mount:
 //! pattern literals match (and push down elsewhere — see
 //! quarb-sql), the strict hole refuses, the default hole
-//! coalesces, pipe tails run stages inside `${...}`, and the
+//! coalesces, pipe tails run commands inside `${...}`, and the
 //! record sigil builds and enriches records.
 
 use quarb::{AstAdapter, QueryResult, Value};

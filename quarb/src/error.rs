@@ -173,10 +173,10 @@ mod tests {
             "parse error: x (at character 5)"
         );
         assert_eq!(
-            QuarbError::unsupported("pipeline function 'f'")
+            QuarbError::unsupported("pipeline command 'f'")
                 .with_hint(" ('f' uses '@|')")
                 .to_string(),
-            "not yet supported: pipeline function 'f' ('f' uses '@|')"
+            "not yet supported: pipeline command 'f' ('f' uses '@|')"
         );
         let e =
             QuarbError::expansion("in expansion of '&m' ('/a')").wrapping(QuarbError::lex("bad"));

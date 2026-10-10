@@ -2,13 +2,12 @@
 
 use super::*;
 
-/// Run one shell command for the `sh(...)` stage: `cmd` under
+/// Run one shell command for the `sh(...)` command: `cmd` under
 /// `sh -c`, the topic's text on stdin, stdout (one trailing newline
 /// trimmed) as the result. A failing spawn or exit status is `None`
-/// (the stage nulls it); stderr is inherited so diagnostics stay
+/// (the command nulls it); stderr is inherited so diagnostics stay
 /// visible.
 pub(super) fn run_shell(cmd: &str, topic: Option<&Value>) -> Option<Value> {
-    use std::io::Write;
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
@@ -17,21 +16,17 @@ pub(super) fn run_shell(cmd: &str, topic: Option<&Value>) -> Option<Value> {
         .spawn()
         .ok()?;
     if let Some(v) = topic
-        && let Some(mut stdin) = child.stdin.take()
+        && let Some(stdin) = child.stdin.take()
     {
-        let text = v.to_string();
-        // Feed stdin from a separate thread so the parent drains
-        // stdout concurrently: a command that echoes its input
-        // (cat, jq, sort, …) over a topic larger than the OS pipe
-        // buffer would otherwise deadlock — parent blocked writing
-        // stdin, child blocked writing stdout. The thread drops
-        // stdin on completion, giving the child EOF.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(text.as_bytes());
-            if !text.ends_with('\n') {
-                let _ = stdin.write_all(b"\n");
-            }
-        });
+        let mut text = v.to_string();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        // Fed from a thread of its own, SIGPIPE blocked there (see
+        // `env::feed_stdin`): the parent drains stdout meanwhile,
+        // and a command that stops reading early cannot kill the
+        // process.
+        crate::env::feed_stdin(stdin, text);
     }
     // Any stdin handle not moved into the writer thread (the
     // topicless case) is dropped so the child still sees EOF.
@@ -52,7 +47,7 @@ thread_local! {
     /// and recompiling one pattern for every candidate made a
     /// workspace-wide regex filter ~10x its equality twin; a
     /// query's patterns are few, so the memo stays tiny. The
-    /// `s///` stage shares it: a Unicode class such as `\p{L}`
+    /// `s///` command shares it: a Unicode class such as `\p{L}`
     /// compiles in about a millisecond, which over the seventy
     /// thousand words of a novel was a hundred seconds. `None`
     /// remembers a bad pattern (it never matches — no point

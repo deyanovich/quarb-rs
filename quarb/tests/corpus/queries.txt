@@ -1685,3 +1685,10 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 //песнь | :: @| encoding(windows-1251)
 //песнь | :: @| encoding(windows-1251) @| count
 //песнь | :: @| encoding(latin1)
+//p | words | .n(cc) | %.
+//p | words | %(w = $_; n = cc)
+//p | words @| .total(count) @| .unique(unique @| count) @| %.
+//p | words @| %(total = count; unique = unique @| count)
+//p | words @| .total(count) @| unique @| count | %(unique = $_; total = $.total)
+//p | words @| $.total
+//p | words @| %%(n = count)

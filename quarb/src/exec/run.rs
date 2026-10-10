@@ -5,7 +5,7 @@ use super::*;
 /// The state of one run — what used to live in a thread-local
 /// each: the first refusal, the enclosing topics of the value
 /// capsae being navigated, the unresolved external references, the
-/// provenance read frames and the stage counter, the scope memo,
+/// provenance read frames and the command counter, the scope memo,
 /// the last link lists, the children memo. One per run, on a stack:
 /// a query evaluated from inside another (an adapter that answers
 /// through the engine, as the model's tree identities do) gets its
@@ -20,7 +20,7 @@ pub struct RunOptions {
     /// before evaluation (never a clock read during it); `None` when
     /// the runner bound none, and `now()` is null.
     pub now: Option<(i64, u32)>,
-    /// Whether the `sh(...)` stage and backtick commands may run
+    /// Whether the `sh(...)` command and backtick commands may run
     /// (`qua --allow-shell`). Off: query text stays inert data.
     pub allow_shell: bool,
     /// The bound on open path quantifiers and iterations
@@ -50,6 +50,27 @@ pub struct RunOptions {
     /// Report the static plan in the [`crate::Outcome`] (always
     /// reported when a budget is set).
     pub plan: bool,
+    /// The environments the host mounted (`go=exec:~/go/bin`,
+    /// `sh=shell:`): the namespaces `ALIAS:name(…)` reaches. The
+    /// mount is the opt-in, so this comes from the host only.
+    pub environments: Vec<crate::env::Environment>,
+}
+
+impl RunOptions {
+    /// Whether `sh(...)` may run: `--allow-shell`, or a `shell:`
+    /// environment mounted (the flag is that mount's older name).
+    pub fn shell_allowed(&self) -> bool {
+        self.allow_shell
+            || self
+                .environments
+                .iter()
+                .any(|e| e.kind == crate::env::EnvKind::Shell)
+    }
+
+    /// The mounted environment under `alias`.
+    pub fn environment(&self, alias: &str) -> Option<&crate::env::Environment> {
+        self.environments.iter().find(|e| e.alias == alias)
+    }
 }
 
 #[derive(Default)]
@@ -73,15 +94,15 @@ pub(super) struct RunState {
     /// not reach because they are not mounted. The engine performs
     /// no IO — the host may acquire these, remount, and re-run.
     pub(super) refs: std::collections::BTreeSet<String>,
-    /// The read frames: while a stage evaluates a value, the
+    /// The read frames: while a command evaluates a value, the
     /// innermost frame collects the origins of every node read.
     /// No frame, no cost — navigation predicates and filters
     /// record nothing.
     pub(super) reads: Vec<Origins>,
-    /// The 1-based ordinal of the top-level pipeline stage in
+    /// The 1-based ordinal of the top-level pipeline command in
     /// progress (0 during navigation and at the branch level);
     /// the second coordinate of an origin.
-    pub(super) stage: u32,
+    pub(super) command: u32,
     pub(super) scopes: HashMap<(usize, String), std::rc::Rc<ScopeMemo>>,
     pub(super) last_out: LastLinks,
     pub(super) last_in: LastLinks,
@@ -192,9 +213,12 @@ pub(super) fn discard<T>(f: impl FnOnce() -> T) -> T {
 /// Record a node read into the innermost frame, if any.
 pub(super) fn note(node: NodeId) {
     with_run(|s| {
-        let stage = s.stage;
+        let command = s.command;
         if let Some(top) = s.reads.last_mut() {
-            top.insert(Origin { node, stage });
+            top.insert(Origin {
+                node,
+                command: command,
+            });
         }
     });
 }
@@ -208,8 +232,8 @@ pub(super) fn note_all(o: &Origins) {
     });
 }
 
-pub(super) fn stage_now() -> u32 {
-    with_run(|s| s.stage)
+pub(super) fn command_now() -> u32 {
+    with_run(|s| s.command)
 }
 
 pub(super) fn record_ref(id: String) {
@@ -288,7 +312,7 @@ pub fn take_refusal() -> Option<String> {
 }
 
 /// Evaluate `query` from the root.
-/// Refuse a query that uses the `sh(...)` stage unless the adapter
+/// Refuse a query that uses the `sh(...)` command unless the adapter
 /// allows it (`qua --allow-shell`). Query text stays inert data by
 /// default — a `.quarb` file, a defs file, or a macro can never run
 /// a command without the explicit per-run opt-in.
@@ -297,26 +321,56 @@ pub(crate) fn quantifier_bound(adapter: &impl AstAdapter) -> usize {
     run_option(|o| o.quantifier_bound).unwrap_or_else(|| adapter.quantifier_bound())
 }
 
-pub(crate) fn gate_shell(query: &Query, allow_shell: bool) -> crate::Result<()> {
-    if uses_shell_query(query) && !allow_shell {
+pub(crate) fn gate(query: &Query, run: &RunOptions) -> crate::Result<()> {
+    if uses_shell_query(query) && !run.shell_allowed() {
         return Err(crate::QuarbError::unsupported(
-            "the sh(...) stage runs external commands; pass --allow-shell",
+            "the sh(...) command runs external commands; pass --allow-shell",
         ));
+    }
+    // Every environment a command names must be mounted: the mount
+    // is the opt-in, granted from the host's side.
+    for alias in environments_named(query) {
+        if run.environment(&alias).is_none() {
+            return Err(crate::QuarbError::unsupported(format!(
+                "environment '{alias}' is not mounted; mount it from the command line \
+                 ('{alias}=exec:DIR', '{alias}=shell:')"
+            )));
+        }
     }
     Ok(())
 }
 
-/// Whether the query names the shell anywhere a stage can stand
+/// The environment aliases the query's commands carry
+/// (`sh:tr(…)` → `sh`), each once, in order of first use.
+pub(super) fn environments_named(q: &Query) -> Vec<String> {
+    struct Envs(Vec<String>);
+    impl visit::Visitor for Envs {
+        fn command(&mut self, s: &Command) {
+            if let Command::Func(c) | Command::Agg(c) = s
+                && let Some((alias, _)) = crate::env::split_env(&c.name)
+                && !self.0.iter().any(|a| a == alias)
+            {
+                self.0.push(alias.to_string());
+            }
+            visit::walk_command(self, s);
+        }
+    }
+    let mut v = Envs(Vec::new());
+    v.query(q);
+    v.0
+}
+
+/// Whether the query names the shell anywhere a command can stand
 /// (`sh(...)` or a backtick command), down to record fields, list
 /// items, interpolation holes and macro-expanded bodies.
 pub(super) fn uses_shell_query(q: &Query) -> bool {
     struct Shell(bool);
     impl visit::Visitor for Shell {
-        fn stage(&mut self, s: &Stage) {
-            if matches!(s, Stage::Func(c) | Stage::Agg(c) if c.name == "sh") {
+        fn command(&mut self, s: &Command) {
+            if matches!(s, Command::Func(c) | Command::Agg(c) if c.name == "sh") {
                 self.0 = true;
             }
-            visit::walk_stage(self, s);
+            visit::walk_command(self, s);
         }
     }
     let mut v = Shell(false);

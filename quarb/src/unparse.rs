@@ -9,8 +9,8 @@
 //! (`unparse(parse(unparse(q))) == unparse(q)`).
 
 use crate::ast::{
-    Arg, ArithOp, Axis, Branch, CmpOp, Group, InterpSeg, Matcher, Operand, PatSeg, PathElem,
-    PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Stage, Step,
+    Arg, ArithOp, Axis, Branch, CmpOp, Command, Group, InterpSeg, Matcher, Operand, PatSeg,
+    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Step,
     TraitClause,
 };
 use crate::value::Value;
@@ -28,17 +28,17 @@ pub fn unparse(query: &Query) -> String {
         && branch.projection.is_none()
         && matches!(branch.anchor, crate::ast::Anchor::Root)
         && query.correlations.is_empty()
-        && let Some((Stage::Expr(head), rest)) = query.pipeline.split_first()
+        && let Some((Command::Expr(head), rest)) = query.pipeline.split_first()
     {
         let mut out = format!("= {}", operand(head));
-        for stage_ast in rest {
+        for command_ast in rest {
             out.push(' ');
-            out.push_str(&stage(stage_ast));
+            out.push_str(&command(command_ast));
         }
         return out;
     }
     let n = query.correlations.len();
-    // The join prints where it binds: the driver's stages before
+    // The join prints where it binds: the driver's commands before
     // `join_at` precede the `<=>` entries, the rest follow them.
     let at = if n == 0 {
         0
@@ -46,8 +46,8 @@ pub fn unparse(query: &Query) -> String {
         query.join_at.min(query.pipeline.len())
     };
     let (pre, post) = query.pipeline.split_at(at);
-    let main_pipes = post.first().is_some_and(|s| stage(s).starts_with('|'));
-    let pre_pipes = pre.first().is_some_and(|s| stage(s).starts_with('|'));
+    let main_pipes = post.first().is_some_and(|s| command(s).starts_with('|'));
+    let pre_pipes = pre.first().is_some_and(|s| command(s).starts_with('|'));
     let mut out = branches_join(
         query,
         if at > 0 {
@@ -56,9 +56,9 @@ pub fn unparse(query: &Query) -> String {
             n == 0 && main_pipes
         },
     );
-    for stage_ast in pre {
+    for command_ast in pre {
         out.push(' ');
-        out.push_str(&stage(stage_ast));
+        out.push_str(&command(command_ast));
     }
     for (i, corr) in query.correlations.iter().enumerate() {
         out.push_str(if corr.outer { " <=>? " } else { " <=> " });
@@ -66,17 +66,17 @@ pub fn unparse(query: &Query) -> String {
         let own_pipes = corr
             .pipeline
             .first()
-            .is_some_and(|s| stage(s).starts_with('|'));
+            .is_some_and(|s| command(s).starts_with('|'));
         out.push_str(&branches_join(corr, followed_by_main_pipe || own_pipes));
         // A non-final entry may retain its own pre-join pipeline.
-        for stage_ast in &corr.pipeline {
+        for command_ast in &corr.pipeline {
             out.push(' ');
-            out.push_str(&stage(stage_ast));
+            out.push_str(&command(command_ast));
         }
     }
-    for stage_ast in post {
+    for command_ast in post {
         out.push(' ');
-        out.push_str(&stage(stage_ast));
+        out.push_str(&command(command_ast));
     }
     out
 }
@@ -654,6 +654,9 @@ fn operand(o: &Operand) -> String {
         Operand::Group(e) => parens(&pred_expr(e)),
         Operand::Recall(r) => reg(r),
         Operand::Topic => "$_".to_string(),
+        // The seed never stands alone in parsed text; a headless
+        // body pipeline prints without it (see `body_text`).
+        Operand::Seed => "$_".to_string(),
         Operand::Field { base, name } => match **base {
             Operand::Topic => format!(":{name}"),
             _ => format!("{}:{name}", operand(base)),
@@ -664,7 +667,7 @@ fn operand(o: &Operand) -> String {
         }
         Operand::NamedCaptures => "%+".to_string(),
         Operand::List(items) => {
-            let inner: Vec<String> = items.iter().map(operand).collect();
+            let inner: Vec<String> = items.iter().map(body_text).collect();
             format!("@({})", inner.join("; "))
         }
         Operand::Now => "now()".to_string(),
@@ -680,8 +683,11 @@ fn operand(o: &Operand) -> String {
             Some(p) => format!("@*{}", projection(p)),
             None => "@*".to_string(),
         },
-        Operand::Piped { expr, stages } => {
-            let tail: Vec<String> = stages.iter().map(stage).collect();
+        Operand::Piped { expr, commands } if matches!(**expr, Operand::Seed) => {
+            parens(&headless(commands))
+        }
+        Operand::Piped { expr, commands } => {
+            let tail: Vec<String> = commands.iter().map(command).collect();
             let mut head = operand(expr);
             // The same `$`-then-`|` hazard as at query level: a
             // path operand ending in a bare leaf anchor regroups
@@ -825,10 +831,10 @@ fn literal(v: &Value) -> String {
     }
 }
 
-pub(crate) fn stage(st: &Stage) -> String {
+pub(crate) fn command(st: &Command) -> String {
     match st {
         // `s/pat/repl/mods` keeps its substitution spelling.
-        Stage::Func(call)
+        Command::Func(call)
             if call.name == "s"
                 && call.args.len() == 3
                 && call.args.iter().all(|a| matches!(a, Arg::Lit(_))) =>
@@ -848,10 +854,10 @@ pub(crate) fn stage(st: &Stage) -> String {
                 lit(&call.args[2])
             )
         }
-        // The sh stage canonicalizes to its backtick sugar when it
+        // The sh command canonicalizes to its backtick sugar when it
         // has the sugarable shape (one literal or interpolated
         // command).
-        Stage::Func(call)
+        Command::Func(call)
             if call.name == "sh"
                 && call.args.len() == 1
                 && matches!(
@@ -905,14 +911,14 @@ pub(crate) fn stage(st: &Stage) -> String {
         }
         // `%(...)` is the record constructor's canonical spelling
         //; `rec` / `record` are its aliases.
-        Stage::Func(call) if is_record_call(&call.name) => {
+        Command::Func(call) if is_record_call(&call.name) => {
             format!("| %{}", record_args(call, "; "))
         }
-        Stage::Func(call) => format!("| {}", fn_call(call)),
+        Command::Func(call) => format!("| {}", fn_call(call)),
         // `%%(...)`: the record sigil's enriched register view.
-        Stage::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
+        Command::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
         // `.%(...)` / `.name%(...)`: the record push, sigil-spelled.
-        Stage::RecordPush {
+        Command::RecordPush {
             name,
             call,
             enriched,
@@ -926,12 +932,14 @@ pub(crate) fn stage(st: &Stage) -> String {
         }
         // `group(...)` follows the record convention: its keys print
         // as a record's do.
-        Stage::Agg(call) if call.name == "group" => format!("@| group{}", record_args(call, "; ")),
-        Stage::Agg(call) => format!("@| {}", fn_call(call)),
-        Stage::Spread { outer: false } => "| ...".to_string(),
-        Stage::Spread { outer: true } => "| ...?".to_string(),
-        Stage::Repeat {
-            stage: inner,
+        Command::Agg(call) if call.name == "group" => {
+            format!("@| group{}", record_args(call, "; "))
+        }
+        Command::Agg(call) => format!("@| {}", fn_call(call)),
+        Command::Spread { outer: false } => "| ...".to_string(),
+        Command::Spread { outer: true } => "| ...?".to_string(),
+        Command::Repeat {
+            command: inner,
             min,
             max,
         } => {
@@ -940,10 +948,10 @@ pub(crate) fn stage(st: &Stage) -> String {
                 Some(n) => format!("{{{min};{n}}}"),
                 None => format!("{{{min};}}"),
             };
-            format!("{}{quant}", stage(inner))
+            format!("{}{quant}", command(inner))
         }
-        Stage::Map(inner) => {
-            let body = stage(inner);
+        Command::Map(inner) => {
+            let body = command(inner);
             let body = body
                 .strip_prefix("@| ")
                 .or_else(|| body.strip_prefix("| "))
@@ -951,11 +959,11 @@ pub(crate) fn stage(st: &Stage) -> String {
                 .to_string();
             format!("$| {body}")
         }
-        Stage::Nav(b) => format!("| {}", branch(b)),
-        Stage::Push(None) => "| .".to_string(),
-        Stage::Push(Some(n)) => format!("| .{}", push_name(n)),
-        Stage::FieldsPush => "| .%".to_string(),
-        Stage::Subcontext { name, body } => match name {
+        Command::Nav(b) => format!("| {}", branch(b)),
+        Command::Push(None) => "| .".to_string(),
+        Command::Push(Some(n)) => format!("| .{}", push_name(n)),
+        Command::FieldsPush => "| .%".to_string(),
+        Command::Subcontext { name, body } => match name {
             Some(n) => format!("| .{}({})", push_name(n), unparse(body)),
             None => format!("| .({})", unparse(body)),
         },
@@ -963,10 +971,10 @@ pub(crate) fn stage(st: &Stage) -> String {
         // (the starts pipe_item's expression arms accept: a paren,
         // a quoted string, a projection, the `$` family, `@-`);
         // everything else — `(3)`, `(now())`, `(@*)`, `(^/a)` —
-        // must keep parens, or the reparse reads it as a function
+        // must keep parens, or the reparse reads it as a command
         // name. A bare PATH must keep parens too: unparenthesized
-        // it would reparse as a navigation stage.
-        Stage::Expr(e) => {
+        // it would reparse as a navigation command.
+        Command::Expr(e) => {
             let text = operand(e);
             let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
                 || text.starts_with("@-")
@@ -977,13 +985,23 @@ pub(crate) fn stage(st: &Stage) -> String {
                 format!("| ({text})")
             }
         }
-        Stage::ExprPush { name, expr } => match name {
-            Some(n) => format!("| .{}({})", push_name(n), operand(expr)),
-            None => format!("| .({})", operand(expr)),
+        Command::ExprPush { name, expr } => match name {
+            Some(n) => format!("| .{}({})", push_name(n), body_text(expr)),
+            None => format!("| .({})", body_text(expr)),
         },
-        Stage::Select(p) => format!("@| {}", predicate(p)),
-        Stage::Filter(e) => format!("| [{}]", pred_expr(e)),
-        Stage::Recall(r) => format!("| {}", reg(r)),
+        Command::AggPush { name, body } => match name {
+            Some(n) => format!("@| .{}({})", push_name(n), body_text(body)),
+            None => format!("@| .({})", body_text(body)),
+        },
+        Command::AggRecord { call, enriched } => format!(
+            "@| {}{}",
+            if *enriched { "%%" } else { "%" },
+            record_args(call, "; ")
+        ),
+        Command::AggRecall(r) => format!("@| {}", reg(r)),
+        Command::Select(p) => format!("@| {}", predicate(p)),
+        Command::Filter(e) => format!("| [{}]", pred_expr(e)),
+        Command::Recall(r) => format!("| {}", reg(r)),
     }
 }
 
@@ -1048,17 +1066,56 @@ fn record_args(call: &crate::ast::FnCall, sep: &str) -> String {
     format!("({})", out.join(sep))
 }
 
+/// A headless body pipeline's text: the commands with the first
+/// one's pipe dropped (`cc`, `unique @| count`).
+fn headless(commands: &[crate::ast::Command]) -> String {
+    let tail: Vec<String> = commands.iter().map(command).collect();
+    let text = tail.join(" ");
+    text.trim_start_matches("| ").to_string()
+}
+
+/// An operand standing as a whole body — a push's, a record
+/// field's, a list item's: a headless pipeline prints bare, since
+/// the body's own parentheses delimit it (`.n(cc)`, not `.n((cc))`,
+/// which the reparse would read as a path group).
+pub(crate) fn body_text(op: &Operand) -> String {
+    match op {
+        Operand::Piped { expr, commands } if matches!(**expr, Operand::Seed) => headless(commands),
+        _ => operand(op),
+    }
+}
+
 fn arg_text(a: &Arg) -> String {
     match a {
         Arg::Lit(v) => literal(v),
-        Arg::Expr(e) => operand(e),
+        Arg::Expr(e) => body_text(e),
         Arg::Range(a, b) => format!(
             "{}..{}",
             a.map(|n| n.to_string()).unwrap_or_default(),
             b.map(|n| n.to_string()).unwrap_or_default()
         ),
         Arg::Named { name, value } => format!("{name} = {}", literal(value)),
+        // An option's string value prints bare when the shell
+        // spelling admits it (`--locale=ru`), quoted otherwise.
+        Arg::Opt { name, value } => match value {
+            Some(Operand::Lit(Value::Str(s)))
+                if !s.is_empty()
+                    && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-')
+                    && !matches!(s.as_str(), "true" | "false" | "null") =>
+            {
+                format!("{name}={s}")
+            }
+            Some(v) => format!("{name}={}", operand(v)),
+            None => name.clone(),
+        },
     }
+}
+
+/// [`fn_call`] for the parser's tests.
+#[cfg(test)]
+pub(crate) fn fn_call_text(call: &crate::ast::FnCall) -> String {
+    fn_call(call)
 }
 
 fn fn_call(call: &crate::ast::FnCall) -> String {
@@ -1082,10 +1139,28 @@ fn fn_call(call: &crate::ast::FnCall) -> String {
             other => arg_text(other),
         })
         .collect();
-    format!("{}({})", call.name, args.join("; "))
+    // The operands first, then the one option segment; a segment
+    // whose first option would not open one (a dash before a
+    // digit) opens with the void option.
+    let (operands, options): (Vec<_>, Vec<_>) = args
+        .into_iter()
+        .zip(call.args.iter())
+        .partition(|(_, a)| !matches!(a, Arg::Opt { .. }));
+    let mut fields: Vec<String> = operands.into_iter().map(|(t, _)| t).collect();
+    if !options.is_empty() {
+        let mut segment: Vec<String> = options.into_iter().map(|(t, _)| t).collect();
+        let opens = segment[0] == "--"
+            || segment[0].starts_with("--")
+            || crate::lexer::is_option_word(segment[0].split('=').next().unwrap_or(""));
+        if !opens {
+            segment.insert(0, "-=".to_string());
+        }
+        fields.push(segment.join(" "));
+    }
+    format!("{}({})", call.name, fields.join("; "))
 }
 
-fn reg(r: &RegRef) -> String {
+pub(crate) fn reg(r: &RegRef) -> String {
     match r {
         RegRef::Top => "$.".to_string(),
         RegRef::Index(n) => format!("$.{n}"),
@@ -1153,8 +1228,8 @@ mod tests {
             "/a | $.v:::%provenance",
             "/a | $.v:::@origin:::source",
         ] {
-            // A path-headed expression stage prints parenthesized,
-            // as every such stage does; the spelling inside is the
+            // A path-headed expression command prints parenthesized,
+            // as every such command does; the spelling inside is the
             // written one.
             let canon = assert_fixpoint(q);
             assert!(

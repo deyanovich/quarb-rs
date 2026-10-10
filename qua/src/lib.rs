@@ -243,7 +243,7 @@ struct Cli {
     #[arg(long, value_name = "N")]
     quantifier_bound: Option<usize>,
 
-    /// Allow the sh(...) pipeline stage to run external commands.
+    /// Allow the sh(...) pipeline command to run external commands.
     /// Off by default: query text stays inert data — a .quarb
     /// file, a defs file, or a macro can never run a command
     /// without this explicit per-run opt-in.
@@ -318,7 +318,7 @@ enum Output {
 /// Everything that shapes how a query's result comes out, decided
 /// once from the command line and carried to the run chain — no
 /// thread-local, so a resident session can build one per query (the
-/// output stage is each query's own; the instant too unless --now
+/// output command is each query's own; the instant too unless --now
 /// pinned it) and nothing of one query leaks into the next.
 #[derive(Clone)]
 struct OutputCtx {
@@ -334,6 +334,10 @@ struct OutputCtx {
     /// --quantifier-bound.
     quant_bound: Option<usize>,
     allow_shell: bool,
+    /// The environments mounted from the command line
+    /// (`go=exec:~/go/bin`, `sh=shell:`; `--allow-shell` is
+    /// `sh=shell:` under its older name).
+    environments: Vec<quarb::Environment>,
     /// --reproducible: provenance without the machine-dependent
     /// instant rungs.
     reproducible: bool,
@@ -435,6 +439,11 @@ pub fn cli_main() -> anyhow::Result<()> {
     }
 
     let mut cli = Cli::parse();
+    // Environment mounts (`ALIAS=SCHEME:TARGET` with an environment
+    // scheme) are taken off the inputs here, from the command line
+    // only: mounting one is the opt-in that lets `ALIAS:name(…)`
+    // run code outside the query.
+    let environments = take_environments(&mut cli)?;
     let locale = set_output_locale(&cli)?;
     let output = if cli.json {
         Output::Json
@@ -594,6 +603,16 @@ pub fn cli_main() -> anyhow::Result<()> {
         let base_dir = model_path.parent();
         for m in &model.mounts {
             let target = quarb_model::resolve_mount_target(&m.target, base_dir);
+            // An environment is mounted from the command line only:
+            // a model file mounts sources, never code.
+            if quarb::Environment::is_environment_target(&target) {
+                anyhow::bail!(
+                    "model {}: mount '{}' names an environment ({target}); environments \
+                     are mounted from the command line only",
+                    model_path.display(),
+                    m.name
+                );
+            }
             cli.paths
                 .insert(0, PathBuf::from(format!("{}={}", m.name, target)));
         }
@@ -648,6 +667,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         save: cli.save.as_ref().map(|p| (p.clone(), cli.save_as.clone())),
         quant_bound: cli.quantifier_bound,
         allow_shell: cli.allow_shell,
+        environments: environments.clone(),
         reproducible: cli.reproducible,
         now,
         explain: cli.explain,
@@ -952,7 +972,7 @@ fn resident_serve_loop<A: AstAdapter>(
                     continue;
                 }
                 let query = String::from_utf8_lossy(&qbytes).into_owned();
-                // The output stage is each query's own: taken off
+                // The output command is each query's own: taken off
                 // and reset here, never inherited from the last.
                 let (query, encoding) = match take_output_encoding(&query) {
                     Ok(q) => q,
@@ -1123,10 +1143,46 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// Take the environment mounts off the inputs: `go=exec:~/go/bin`,
+/// `sh=shell:`. `--allow-shell` mounts `sh=shell:`, and a `shell:`
+/// mount opens the shell gate: the two are one opt-in. Two
+/// environments may not share an alias.
+fn take_environments(cli: &mut Cli) -> anyhow::Result<Vec<quarb::Environment>> {
+    let mut environments: Vec<quarb::Environment> = Vec::new();
+    let mut kept = Vec::new();
+    for p in std::mem::take(&mut cli.paths) {
+        match quarb::Environment::parse_mount(&p.to_string_lossy()) {
+            None => kept.push(p),
+            Some(Ok(e)) => {
+                if environments.iter().any(|x| x.alias == e.alias) {
+                    anyhow::bail!(
+                        "two environments mounted as '{}'; give each its own alias",
+                        e.alias
+                    );
+                }
+                environments.push(e);
+            }
+            Some(Err(e)) => anyhow::bail!("{e}"),
+        }
+    }
+    cli.paths = kept;
+    if cli.allow_shell && !environments.iter().any(|e| e.alias == "sh") {
+        environments.push(quarb::Environment {
+            alias: "sh".to_string(),
+            kind: quarb::EnvKind::Shell,
+            target: String::new(),
+        });
+    }
+    if environments.iter().any(|e| e.kind == quarb::EnvKind::Shell) {
+        cli.allow_shell = true;
+    }
+    Ok(environments)
+}
+
 fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     // The source boundary of this invocation's one target.
     let ctx = &SourceCtx::default();
-    // `--expand` shows the query whole; otherwise the output stage
+    // `--expand` shows the query whole; otherwise the output command
     // comes off the end here, for the sink to apply.
     let (query, encoding) = if cli.expand || cli.expand_1 {
         (query.to_string(), None)
@@ -1816,7 +1872,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         }
         // kaiv documents — the typed arbor whose namepaths ARE
         // quarb paths, so --kaiv output re-mounts (graft and join
-        // over typed results). Extension picks the pipeline stage:
+        // over typed results). Extension picks the pipeline command:
         // .kaiv is canonical, .daiv compiles first, .raiv
         // denormalizes its $field references.
         if matches!(ext, "daiv" | "kaiv" | "raiv") {
@@ -2068,8 +2124,8 @@ impl std::io::Write for OutSink {
 
 /// Take `@| encoding(LABEL)` off the end of a query: the output
 /// boundary is the tool's, not the engine's (it has no byte
-/// value). The stage anywhere else reaches the executor and is
-/// refused there. The stage before it decides what a character
+/// value). The command anywhere else reaches the executor and is
+/// refused there. The command before it decides what a character
 /// the encoding lacks becomes: after `@| json` / `@| jsonl` the
 /// format's `\u` escape; after anything else the output is
 /// refused at the first such character.
@@ -2101,7 +2157,9 @@ fn take_output_encoding(query: &str) -> anyhow::Result<(String, OutputEncoding)>
     })?;
     let rest = rest.trim_end();
     let escape = match rest.rsplit("@|").next().map(str::trim) {
-        Some(stage) if stage == "json" || stage == "jsonl" || stage.starts_with("json(") => {
+        Some(command)
+            if command == "json" || command == "jsonl" || command.starts_with("json(") =>
+        {
             quarb::source::Escape::Json
         }
         _ => quarb::source::Escape::Refuse,
@@ -2311,6 +2369,7 @@ impl OutputCtx {
         quarb::Run {
             now: Some(self.now),
             allow_shell: self.allow_shell,
+            environments: self.environments.clone(),
             quantifier_bound: self.quant_bound,
             reproducible: self.reproducible,
             collation: self.locale.map(|(l, _)| l.tag.to_string()),
@@ -2334,51 +2393,7 @@ impl OutputCtx {
 
 /// `--budget nodes=N,bytes=N,requests=N[,strict]`.
 fn parse_budget(text: &str) -> anyhow::Result<quarb::plan::Budget> {
-    let mut b = quarb::plan::Budget::default();
-    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        match part.split_once('=') {
-            Some(("nodes", n)) => b.nodes = Some(budget_count("nodes", n)?),
-            // The word before the ruling that a step yields nodes.
-            Some(("rows", n)) => b.nodes = Some(budget_count("nodes", n)?),
-            Some(("bytes", n)) => b.bytes = Some(budget_count("bytes", n)?),
-            Some(("requests", n)) => {
-                b.requests = Some(u32::try_from(budget_count("requests", n)?)?)
-            }
-            None if part == "strict" => b.strict = true,
-            _ => anyhow::bail!(
-                "--budget takes nodes=N, bytes=N, requests=N and strict, comma-separated; got '{part}'"
-            ),
-        }
-    }
-    Ok(b)
-}
-
-/// A budget figure with an optional unit: `k`/`M`/`G`/`T` decimal,
-/// `Ki`/`Mi`/`Gi`/`Ti` binary, a trailing `B` allowed (`1MB`,
-/// `2GiB`, `50k`).
-fn budget_count(field: &str, text: &str) -> anyhow::Result<u64> {
-    let t = text.trim();
-    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let unit = t[digits.len()..].trim().trim_end_matches(['B', 'b']);
-    let scale: u64 = match unit {
-        "" => 1,
-        "k" | "K" => 1_000,
-        "M" => 1_000_000,
-        "G" => 1_000_000_000,
-        "T" => 1_000_000_000_000,
-        "Ki" => 1 << 10,
-        "Mi" => 1 << 20,
-        "Gi" => 1 << 30,
-        "Ti" => 1 << 40,
-        _ => anyhow::bail!(
-            "--budget {field}: a count with an optional k/M/G/T or Ki/Mi/Gi/Ti unit; got '{t}'"
-        ),
-    };
-    let n: u64 = digits
-        .parse()
-        .map_err(|_| anyhow::anyhow!("--budget {field}: a count is needed; got '{t}'"))?;
-    n.checked_mul(scale)
-        .ok_or_else(|| anyhow::anyhow!("--budget {field}: '{t}' is beyond u64"))
+    quarb::plan::Budget::parse(text).map_err(|e| anyhow::anyhow!("--{e}"))
 }
 
 /// Execution for one query under the run's options — `run` for the
@@ -2545,8 +2560,8 @@ fn emit_values(
     Ok(())
 }
 
-/// Records as columns, as the `@| table` and `@| csv` stages print
-/// them: `--table` and `--csv` are the query with the stage appended.
+/// Records as columns, as the `@| table` and `@| csv` commands print
+/// them: `--table` and `--csv` are the query with the command appended.
 fn write_table(
     out: &mut impl std::io::Write,
     values: &[Value],
@@ -2792,7 +2807,7 @@ fn emit_kaiv(
     // order: the row's own, then its value's origins, tree-walked.
     fn origin_nodes(p: &Prov, out: &mut Vec<NodeId>) {
         out.extend(p.origins.nodes());
-        for (_, q) in &p.parts {
+        for (_, q) in p.parts.iter() {
             origin_nodes(q, out);
         }
     }
@@ -3133,7 +3148,7 @@ mod tests {
             for &n in ns {
                 o.insert(Origin {
                     node: NodeId(n),
-                    stage: 1,
+                    command: 1,
                 });
             }
             Prov::leaf(o)
@@ -3149,7 +3164,7 @@ mod tests {
         let mut prov = Prov::record(vec![("v".into(), at(&[1])), ("n".into(), at(&[1, 2]))]);
         // A field with no origin of its own (a literal) rides the
         // row's node.
-        prov.parts.push(("k".into(), Prov::default()));
+        std::sync::Arc::make_mut(&mut prov.parts).push(("k".into(), Prov::default()));
         let rows = vec![quarb::Traced {
             node: NodeId(3),
             topic: Some(rec),
@@ -3198,7 +3213,7 @@ mod tests {
         for n in 1..=12 {
             o.insert(Origin {
                 node: NodeId(n),
-                stage: 1,
+                command: 1,
             });
         }
         assert_eq!(o.more, 12 - quarb::ORIGIN_CAP as u32);

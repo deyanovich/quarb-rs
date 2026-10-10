@@ -3,11 +3,11 @@
 use super::*;
 
 /// The provenance of a capsa's effective topic: the topic's, else
-/// the node read at this stage.
+/// the node read at this command.
 pub(super) fn effective_prov(c: &Capsa) -> Prov {
     match &c.topic {
         Some(_) => c.prov.clone(),
-        None => Prov::at(c.node, stage_now()),
+        None => Prov::at(c.node, command_now()),
     }
 }
 
@@ -92,7 +92,7 @@ pub(super) fn window_args(call: &FnCall) -> (Option<i64>, Option<i64>, Option<&O
 /// reachable neighbors at offsets within the span (0 = self; an open
 /// end runs to the partition edge; a short edge window holds what
 /// exists), and set the list topic from their effective topics.
-pub(super) fn window_stage(
+pub(super) fn window_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -143,7 +143,7 @@ pub(super) fn window_stage(
 /// effective topic of the capsa `n` positions back in its partition
 /// (negative `n` looks forward; null past the edge). Consumes any
 /// members — they no longer correspond to the topic.
-pub(super) fn shift_stage(
+pub(super) fn shift_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -201,7 +201,7 @@ pub(super) fn shift_stage(
 /// `when` (the period, or null) and `from` (the `$ord` of the capsa
 /// whose result was the point, 0 for the anchor, null for a
 /// complete date or an unvalued one). Consumes any members.
-pub(super) fn timeline_stage(
+pub(super) fn timeline_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -220,7 +220,7 @@ pub(super) fn timeline_stage(
         .map(|(i, c)| {
             let read = |a: &Arg| match a {
                 Arg::Lit(v) => v.clone(),
-                Arg::Range(..) | Arg::Named { .. } => Value::Null,
+                Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } => Value::Null,
                 Arg::Expr(e) => operand_scalar(
                     adapter,
                     c.node,
@@ -277,7 +277,7 @@ pub(super) fn timeline_stage(
         .zip(out)
         .map(|((mut c, (expr, _)), (when, from))| {
             if c.topic.is_none() {
-                c.prov = Prov::at(c.node, stage_now());
+                c.prov = Prov::at(c.node, command_now());
             }
             let mut fields = match expr {
                 Value::Record(fields) => fields,
@@ -301,7 +301,7 @@ pub(super) fn timeline_stage(
 /// number when the style `"1."` is given. Bare `outline` reads the
 /// fields `depth` and `title` of a record stream. Consumes any
 /// members.
-pub(super) fn outline_stage(
+pub(super) fn outline_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -376,7 +376,7 @@ pub(super) fn outline_stage(
         .zip(numbers)
         .map(|((mut c, (_, text)), (depth, number))| {
             if c.topic.is_none() {
-                c.prov = Prov::at(c.node, stage_now());
+                c.prov = Prov::at(c.node, command_now());
             }
             let line = if !lines {
                 number
@@ -396,7 +396,7 @@ pub(super) fn outline_stage(
 /// standard score of its numeric reading over its partition (the
 /// whole context without a key); a capsa with no reading, or a
 /// partition with no spread, scores null. Consumes any members.
-pub(super) fn zscore_stage(
+pub(super) fn zscore_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -535,7 +535,7 @@ pub(super) fn associate_caps(
 
 /// `@| corr(:a; :b)` over the whole context: one capsa whose topic
 /// is the association and whose origins are every input's.
-pub(super) fn association_stage(
+pub(super) fn association_command(
     call: &FnCall,
     caps: Vec<Capsa>,
     adapter: &impl AstAdapter,
@@ -550,7 +550,7 @@ pub(super) fn association_stage(
             Some(_) => origins.union(&c.prov.origins),
             None => origins.insert(Origin {
                 node: c.node,
-                stage: stage_now(),
+                command: command_now(),
             }),
         }
     }

@@ -338,6 +338,54 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   the text layer only (no OCR). The plain mount of a \texttt{.djvu}
   names the reading. Depends on \texttt{quarb} and
   \texttt{djvu-rs} (pure Rust, MIT). \\
+\texttt{quarb-text-ofd} & The OFD text-level adapter
+  (\texttt{text:invoice.ofd}; GB/T~33190, China's fixed-layout
+  format), by the PDF reading's doctrine: the \texttt{Outlines}
+  tree is the heading ladder (a section's extent from its
+  destination --- a page and a top, or a named bookmark --- to the
+  next entry's; front matter at the root; every listed page as
+  \texttt{page/*} without one); a \texttt{line} is the text codes
+  a page shows at one declared baseline in \texttt{x} order (a gap
+  between two codes' extents a space; no \texttt{paragraph}
+  minted); \texttt{::::page}, the bounding box
+  \texttt{::::x}/\texttt{y}/\texttt{width}/\texttt{height} in
+  the page's millimetres, \texttt{::::baseline}; a page's template
+  pages join its lines; \texttt{DocInfo} (title, author, subject,
+  abstract, keywords, dates, creator, custom data) as the document
+  node's properties. Attachments and signatures read under the
+  plain mount, which opens the package as a zip. Depends on
+  \texttt{quarb}, \texttt{quick-xml} and \texttt{zip}. \\
+\texttt{quarb-text-hwpx} & The Hangul Word Processor text-level
+  adapter (\texttt{text:report.hwpx}; KS~X~6101, OWPML — the zip of
+  XML Hancom's office writes), in the Word and OpenDocument readings'
+  vocabulary from declared structure alone: a heading is a paragraph
+  whose paragraph property declares an outline level (style names
+  never matched), a list the run of paragraphs declaring a numbering
+  or bullet, nested by level; tables through the shared table rule
+  (\texttt{header="1"} cells the header, column spans padded); foot-
+  and endnotes as callout and document-end body; hyperlink fields
+  as \texttt{ref}s, bookmark fields as anchors; tracked changes as
+  the accepted view; headers, footers, pictures, drawings and
+  equations not carried; the package file's metadata as the
+  identity. The binary HWP~5 is not read yet; the plain mount of an
+  \texttt{.hwpx} is the zip of its XML. Depends on \texttt{quarb},
+  \texttt{quarb-text}, \texttt{quick-xml} and \texttt{zip}. \\
+\texttt{quarb-text-uof} & The Uniform Office Format text-level
+  adapter (\texttt{text:report.uot}; GB/T~20916, UOF~1.0 one XML,
+  UOF~2.0 a zip package, both by the root \texttt{uof:UOF}), in the
+  Word and OpenDocument readings' vocabulary from declared structure
+  alone, the Chinese element names matched as written: a heading is
+  a paragraph declaring an outline level (on itself or through its
+  paragraph style), a list the run of paragraphs naming an automatic
+  numbering (a bullet at its first level unordered), nested by the
+  declared level; tables with their declared header rows; foot- and
+  endnotes as callout and document-end body; hyperlink regions
+  resolved through the link set, bookmark regions through the
+  bookmark set; tracked changes as the accepted view; anchored
+  objects, comments and formatting not carried; the metadata as the
+  identity. The spreadsheet and presentation modules are not read.
+  Depends on \texttt{quarb}, \texttt{quarb-text}, \texttt{quick-xml}
+  and \texttt{zip}. \\
 \texttt{quarb-xml} & The XML adapter (qualified tags as names,
   attributes as properties, \texttt{id}/\texttt{xml:id} references
   resolve; strict well-formedness, no traits). Depends on
@@ -594,7 +642,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   evaluator: one hop per live thread through the evaluator's own
   \texttt{navigate\_paths} (candidates with the predicates
   stripped, survivors with them --- the fork, the verdicts, the
-  walked edges), \texttt{apply\_stage} per thread for filters and
+  walked edges), \texttt{apply\_command} per thread for filters and
   over the whole context for aggregates, a hand-iterated walk for
   quantified groups (one frame per depth), then checks the final
   context against a plain evaluation. A staged suffix marks the
@@ -1007,11 +1055,11 @@ root-anchored sequence of hops, each an axis followed by a name:
     positional index and range (negative counts from the end) \\
 \texttt{::price * ::qty}, \texttt{7 div 2}, \texttt{idiv}, \texttt{mod}
   & \live value expressions: arithmetic over numeric readings, in
-    predicates, pipeline stages (\texttt{| ::a * ::b}), and pushes
+    predicates, pipeline commands (\texttt{| ::a * ::b}), and pushes
     (\texttt{| .total(::a * ::b)} — a computed column); null
     propagation, exact integers, overflow to float \\
 \texttt{//a || //b}, \texttt{| count}, \texttt{| sort | join(",")}
-  & \live union, and pipelines over a standard-library function set \\
+  & \live union, and pipelines over the standard library's command set \\
 \texttt{->target}, \texttt{<-target}, \texttt{->*}
   & \live crosslink navigation (filesystem: symlinks) \\
 \texttt{(/ul/li)+}, \texttt{(/p|/div)}, \texttt{(->mgr)\{1,3\}!},
@@ -1035,7 +1083,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     positional selection, and per-capsa filters \\
 \texttt{@| group(::k) | top(2, ::v) @| ungroup}, \texttt{\$ord}
   & \live value-keyed grouping (list topics + member capsae, keys as
-    named regs), per-group keyed stages on the plain pipe,
+    named regs), per-group keyed commands on the plain pipe,
     \texttt{ungroup} flattening, and the \texttt{\$ordinal} operand
     (position in the current context, scope-threaded into filters) \\
 \texttt{| \%.}, \texttt{qua q.quarb}
@@ -1055,9 +1103,46 @@ root-anchored sequence of hops, each an axis followed by a name:
     chains and inline-pipe splices as bodies;
     \texttt{rec}/\texttt{group} field-name collisions are parse
     errors (\texttt{validate\_record\_convention}) \\
+\texttt{| .n(cc)}, \texttt{@| .total(count) @| \%.},
+\texttt{@| \%(total = count; unique = unique @| count)},
+\texttt{sort(::name; --locale=ru)}
+  & \live subcontext bodies: every parenthesis not after a command
+    name is a pipeline fed by its control operator; a headless first
+    command applies to the body's seed (\texttt{Operand::Seed}), a
+    bare word names a command (unknown refused by name), a command's
+    own parentheses hold operands then one option segment
+    (\texttt{Arg::Opt}, shell spelling, \texttt{-=} the void
+    option; undeclared options refused against the registry's
+    \texttt{options}); the aggregate push files once on every capsa
+    and passes the context on, \texttt{@| \%(\ldots)} and
+    \texttt{@| \%.} read the context as a whole, every reduction
+    keeps the regulae its inputs share (\texttt{shared\_register});
+    reflection kinds \texttt{cmd} (né \texttt{func}),
+    \texttt{agg-push}, \texttt{agg-record}, \texttt{agg-recall},
+    \texttt{seed}, \texttt{option} \\
+\texttt{qua '…| sh:tr(a-z; A-Z) @| go:sort(-r)' go=exec:~/go/bin sh=shell:}
+  & \live environment commands (\texttt{quarb::env}): an
+    environment is a namespace of commands the host mounts beside
+    the built-ins, \texttt{ALIAS=SCHEME:TARGET} from the command
+    line only (never a model file, a defs file or query text;
+    \texttt{--allow-shell} is \texttt{sh=shell:} under its older
+    name); the kinds \texttt{exec:} (a directory of programs or one
+    program) and \texttt{shell:} (the user's shell) with the text
+    framing (\texttt{|}: once per capsa, the topic's text on stdin,
+    stdout minus one newline the value, a failed call null;
+    \texttt{@|}: once over the context, one line per capsa on stdin,
+    scalars as text and records or lists as their JSON line, every
+    stdout line a capsa carrying the shared regulae, a failed call a
+    refusal); operands as words in order, options first in shell
+    form, the void option onto nothing; an unknown name refused with
+    the alias (\texttt{Environment::resolve}; the shell's 127); the
+    gate (\texttt{exec::gate}) refuses an unmounted alias before the
+    run; reflection \texttt{cmd}/\texttt{agg} carry the alias as
+    \texttt{env}; \texttt{python:} is named and refused until the
+    native framing lands \\
 \texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | \%(k = \$1)},
 \texttt{quai}
-  & \live match captures (filter-stage \texttt{=\textasciitilde}
+  & \live match captures (filter-command \texttt{=\textasciitilde}
     binds groups onto the capsa) and the interactive session
     (living-query lines with rollback, session defs,
     \texttt{:show}/\texttt{:undo}; retired from \texttt{qua} in
@@ -1105,9 +1190,9 @@ root-anchored sequence of hops, each an axis followed by a name:
     \texttt{\$\$::prop} / \texttt{\$\$/child::x} re-anchors on the
     invoking capsa's node; stacking \texttt{\$\$\$} steps further)
     — wide crosstabs, groupwise transforms; and the correlation
-    keeps its \emph{witness}, so \texttt{\$*k} in pipeline stages
+    keeps its \emph{witness}, so \texttt{\$*k} in pipeline commands
     projects the joined side into output (\texttt{SELECT a.x, b.y});
-    the witness travels into every path a stage's operand or pipe
+    the witness travels into every path a command's operand or pipe
     hop navigates, so a nested step predicate
     (\texttt{(\^{}/c/*[::b\_id = \$\$1::id])}) reads the same
     thread's binding rather than re-searching the trace
@@ -1137,7 +1222,7 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{\$.r:::provenance}, \texttt{:::\%provenance},
 \texttt{:::@origin}, \texttt{--reproducible}
   & \live value provenance (2026-09-06/07): every value carries
-    its \emph{origins} (node, stage; \texttt{Origins} bounded at
+    its \emph{origins} (node, command; \texttt{Origins} bounded at
     eight, the rest counted) and the provenance entries of the
     nodes it was read from, kept in lockstep with record fields and
     list items (\texttt{Prov} in \texttt{exec.rs}, thread-local
@@ -1146,7 +1231,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     (kaiv text), the shaped keys \texttt{\%provenance} /
     \texttt{@provenance} (record / list: source, path, instant,
     instant-from, dpid), \texttt{origin} / \texttt{\%origin} /
-    \texttt{@origin} (node ids with the stage), \texttt{path},
+    \texttt{@origin} (node ids with the command), \texttt{path},
     \texttt{elided}. \texttt{resolved\_provenance} fills the
     name-path within the source and completes the instant ladder
     node $\to$ source (mount target mtime) $\to$ access
@@ -1157,7 +1242,7 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{X:.r}, \texttt{X:@.}, \texttt{X:\%.}, \texttt{X:(*.)}
   & \live cross-capsa reads (2026-09-07): the register of the capsa
     \emph{standing at} the node \texttt{X} reaches, read from the
-    stage's input snapshot (\texttt{Operand::PeerReg}, a lazy
+    command's input snapshot (\texttt{Operand::PeerReg}, a lazy
     \texttt{Peers} index by node); location, not lineage --- after
     a fork nothing stands at the fork node, its children do; null
     outside a pipeline context. What lets one push read its
@@ -1172,9 +1257,9 @@ root-anchored sequence of hops, each an axis followed by a name:
     id). Ids must be deterministic across runs --- minted from the
     node's identity in the source, never from walk order \\
 \texttt{| .v(body)\{20\}}, \texttt{\{1;\}}, \texttt{\{m;n\}}
-  & \live the quantified push (2026-09-07): \texttt{Stage::Repeat}
-    wraps a push-family stage (push, expression push, subcontext,
-    record and fields push); each round is one \texttt{apply\_stage}
+  & \live the quantified push (2026-09-07): \texttt{Command::Repeat}
+    wraps a push-family command (push, expression push, subcontext,
+    record and fields push); each round is one \texttt{apply\_command}
     over the whole context, so a round reads the previous round's
     snapshot; \texttt{\{N\}} exact, \texttt{\{m;n\}} /
     \texttt{\{m;\}} at least \texttt{m} then stop at a fixpoint (no
@@ -1373,7 +1458,7 @@ pub trait AstAdapter {
     fn count(&self, _from: NodeId, _plan: &StepPlan<'_>)
         -> Option<usize> { None }
     /// A batching hint before the engine reads the properties
-    /// `names` of every node in `nodes` (the next stage projects
+    /// `names` of every node in `nodes` (the next command projects
     /// them): the projection twin of `prefetch_links`.
     fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}
     /// A batching hint before a link sweep over `nodes`.
@@ -1584,9 +1669,22 @@ Three observations that the filesystem work has already forced:
 \item \textbf{The shell gate is checked twice.} The static walk
   refuses a query that names \texttt{sh(...)} or a backtick
   command anywhere it can stand (record fields, list items and
-  field bases included); the executor refuses the stage again
+  field bases included); the executor refuses the command again
   when it runs, so a path the walk does not know cannot reach
   the shell without \texttt{--allow-shell}.
+
+\item \textbf{A child's standard input is fed from a thread
+  with SIGPIPE blocked.} The shell command and the environment
+  commands write the topic (or the context's lines) to the child
+  from a thread of their own, so the parent drains the child's
+  output meanwhile (\texttt{env::feed\_stdin}). A child that stops
+  reading early~--- \texttt{head}, a program that fails~--- closes
+  the pipe under the writer; with the signal blocked on that
+  thread the write fails with EPIPE and the call takes its proper
+  outcome (null, or a refusal over the context), where the
+  default disposition \texttt{qua} restores for its own stdout
+  would kill the whole process silently (exit 141). Found by
+  feeding \texttt{@| u:head(-n=3)} a novel.
 
 \item \textbf{What a run is given is the run's, never the
   adapter's.} The invocation instant \texttt{now()} denotes, the
@@ -1706,7 +1804,7 @@ nothing about encodings.
   canonical form, so every reading downstream agrees.
   \texttt{| number(LOCALE)} reads text under a locale's convention
   from a small embedded table; \texttt{@| csv(";"; …)} takes the
-  delimiter as a quoted first argument (the parser carries it as
+  delimiter as a quoted first operand (the parser carries it as
   \texttt{delimiter=;}).
 \item \textbf{Dates in a locale's words}: \texttt{strptime(fmt;
   LOCALE)} / \texttt{tp} and \texttt{strftime(fmt; LOCALE)} /
@@ -1734,11 +1832,11 @@ nothing about encodings.
   periods are equal, disjoint ones ordered. A period has its
   own sort key (start, then the coarser first), no equality key
   (a search takes the scan), no numeric reading (arithmetic is
-  null), and reads as its first instant wherever a function
+  null), and reads as its first instant wherever a command
   goes through the temporal reading. \texttt{period([GRAIN])}
-  and \texttt{grain} are scalar functions.
+  and \texttt{grain} are scalar commands.
   \texttt{timex(LOCALE)} (\texttt{quarb::timex}) is an
-  expanding scalar function like \texttt{words}: one record
+  expanding scalar command like \texttt{words}: one record
   per expression. Recognition is a list of templates per
   locale (\texttt{timexdata.rs}, the eleven locales of the
   date names), each a regular expression over slots
@@ -1762,7 +1860,7 @@ nothing about encodings.
   finer than the day, a weekday offset and a time of
   day ask for a day or finer, a date with fields left out
   takes them from the anchor (under \texttt{forward}, the
-  first such date at or after it). \texttt{timeline\_stage}
+  first such date at or after it). \texttt{timeline\_command}
   is row-aligned like \texttt{shift}: it evaluates the
   expression and the anchor per capsa, folds the point over
   the context (a change of anchor value starts a chain), and
@@ -1801,26 +1899,26 @@ nothing about encodings.
   when asked (\texttt{--grouping}, \texttt{QUARB\_GROUPING=1},
   \texttt{[output] grouping = true}): a year is not
   \texttt{1,876}. The engine itself never renders under a locale.
-  A stage is a value, the same wherever the query runs, so
+  A command is a value, the same wherever the query runs, so
   \texttt{@| csv} and \texttt{@| table} inside a pipeline are
   canonical; when one \emph{closes} the query the tool renders
   it, as it renders \texttt{--csv} and \texttt{--table}:
   \texttt{Query::for\_rendering} runs the query with the
-  closing stage replaced by an internal stand-in that yields the
-  rows, and the \texttt{Outcome} carries the stage's columns and
+  closing command replaced by an internal stand-in that yields the
+  rows, and the \texttt{Outcome} carries the command's columns and
   named delimiter (\texttt{ClosingTable}). \texttt{@| json}, \texttt{@| jsonl} and
   \texttt{@| kaiv} stay canonical. A reader
-  (\texttt{number}, \texttt{tp}) takes its locale from its argument
+  (\texttt{number}, \texttt{tp}) takes its locale from its operand
   alone, and refuses a locale it has no table for. \texttt{qua --explain} reports the locale and its layer;
   the gates run with the environment's locale cleared. The session
   and wasm doors have no locale yet (the browser's
   \texttt{navigator.language} would be their system layer).
 \item \textbf{Encoding} (\texttt{source::encode}): \texttt{@|
   encoding(LABEL)} is the output boundary and stands last. The
-  engine has no byte value, so the tool takes the stage off the
+  engine has no byte value, so the tool takes the command off the
   end of the query, runs the rest and encodes what it would have
   printed (\texttt{qua}'s \texttt{OutSink}); met anywhere else it
-  is refused by the executor. The stage before it decides what a
+  is refused by the executor. The command before it decides what a
   character the encoding cannot hold becomes: after \texttt{@|
   json} / \texttt{@| jsonl} the format's \texttt{\textbackslash
   u} escape (\texttt{source::Escape::Json}); after anything else
@@ -1833,7 +1931,7 @@ nothing about encodings.
   \texttt{bibref(STANDARD)} (\texttt{quarb::bibref}) reads one
   reference text under a citation standard — \texttt{gost},
   \texttt{gb7714}, \texttt{cmos}, \texttt{ams}, an open tag set
-  the function refuses outside of, naming it — into a record of
+  the command refuses outside of, naming it — into a record of
   the fields the grammar places without doubt (English names:
   \texttt{author}, \texttt{title}, \texttt{year},
   \texttt{journal}, \texttt{pages}, \ldots), its \texttt{genus}

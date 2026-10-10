@@ -244,7 +244,7 @@ fn export_refusals() {
     // SUM(*) is not SQL: bare-row aggregates beyond count refuse.
     assert!(err("/t/* @| sum").contains("project a column"));
     // The fixed SELECT shape orders before LIMIT and dedups before
-    // LIMIT; stage orders it cannot render refuse rather than
+    // LIMIT; command orders it cannot render refuse rather than
     // silently reordering.
     assert!(err("/t/* @| [..5] @| sort_by(::c) | ::c").contains("before LIMIT"));
     assert!(err("/t/* @| [..5] | ::c @| unique").contains("DISTINCT before LIMIT"));

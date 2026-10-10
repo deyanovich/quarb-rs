@@ -25,10 +25,10 @@ pub(super) fn eval_query_outer(
     outer: Option<&Scope<'_>>,
 ) -> QueryResult {
     // Whether the query is value-typed is a static property: it holds
-    // if any branch projects (`::`) or any pipeline stage produces
+    // if any branch projects (`::`) or any pipeline command produces
     // values. This must not depend on how many nodes matched\,---\,
     // `//a::text` over a document with no `<a>` is still an (empty)
-    // list of values, not a node set. Node-preserving stages
+    // list of values, not a node set. Node-preserving commands
     // (positional selection, keyed aggregates) keep a node context a
     // node context.
     let (caps, projected) = eval_query_caps_outer(query, adapter, start, base, outer);
@@ -46,7 +46,7 @@ fn counted(query: &Query, adapter: &impl AstAdapter, start: NodeId) -> Option<us
     if !query.correlations.is_empty() || query.branches.len() != 1 {
         return None;
     }
-    let [Stage::Agg(call)] = query.pipeline.as_slice() else {
+    let [Command::Agg(call)] = query.pipeline.as_slice() else {
         return None;
     };
     if call.name != "count" || !call.args.is_empty() {
@@ -121,7 +121,8 @@ fn counted(query: &Query, adapter: &impl AstAdapter, start: NodeId) -> Option<us
 /// `@| count` over a plain path, counted as the walk goes: a query
 /// that is one anchored branch of child and descendant steps (any
 /// name, traits and per-node predicates; no positional predicate,
-/// no mark, no projection) closed by `@| count` alone. The lead
+/// no mark; a projection allowed, since `count` counts its inputs
+/// and a null value is one) closed by `@| count` alone. The lead
 /// steps keep a frontier of node ids; the last step's matches are
 /// tested and counted one at a time, never collected, so a count
 /// over a million nodes costs the walk and nothing per node. The
@@ -133,7 +134,7 @@ fn streamed_count(
     start: NodeId,
     trace: &Trace,
     outer: Option<&Scope<'_>>,
-) -> Option<usize> {
+) -> Option<(usize, Origins)> {
     // A nested query (a record's field, a predicate's operand)
     // evaluates under the invoking capsa's register, marks and
     // witness; only a top-level count streams.
@@ -143,16 +144,20 @@ fn streamed_count(
     if !query.correlations.is_empty() || query.branches.len() != 1 {
         return None;
     }
-    let [Stage::Agg(call)] = query.pipeline.as_slice() else {
+    let [Command::Agg(call)] = query.pipeline.as_slice() else {
         return None;
     };
     if call.name != "count" || !call.args.is_empty() {
         return None;
     }
     let b = &query.branches[0];
-    if b.projection.is_some() {
-        return None;
-    }
+    // A projected path (`//token<word>::lower @| count`) counts its
+    // nodes too — `count` is the number of inputs, a null value
+    // among them — so the value is never made; what a projection
+    // changes is the provenance: a computed reduction over values
+    // keeps the union of their origins, so the counted nodes are
+    // recorded (bounded, as every origins set is).
+    let projected = b.projection.is_some();
     let from = match b.anchor {
         Anchor::Current => start,
         Anchor::Root => adapter.root(),
@@ -167,15 +172,13 @@ fn streamed_count(
         })
         .collect::<Option<_>>()?;
     let (last, lead) = steps.split_last()?;
-    let streamable = |step: &Step, last: bool| {
-        (match step.axis {
-            Axis::Child => true,
-            // A descendant lead step would need the frontier
-            // deduplicated across nested bases; the last step
-            // handles that itself.
-            Axis::Descendant(Reach::All) => last,
-            _ => false,
-        }) && step
+    let streamable = |step: &Step, _last: bool| {
+        // A descendant lead step walks its subtree for the frontier
+        // (the adapter's name index where it has one); nested bases
+        // are deduplicated there, and the last step's tally
+        // deduplicates its own matches across them.
+        matches!(step.axis, Axis::Child | Axis::Descendant(Reach::All))
+            && step
             .predicates
             .iter()
             .all(|p| matches!(p, Predicate::Expr(_)))
@@ -197,15 +200,44 @@ fn streamed_count(
         let mut next: Vec<NodeId> = Vec::new();
         for &at in &frontier {
             let host = adapter.child_host(at);
-            let found: Vec<NodeId> = match &step.matcher {
-                Matcher::Name(name) if step.traits.is_empty() && !step.leaf => {
-                    adapter.children_named(host, name)
+            let found: Vec<NodeId> = match step.axis {
+                Axis::Child => match &step.matcher {
+                    Matcher::Name(name) if step.traits.is_empty() && !step.leaf => {
+                        adapter.children_named(host, name)
+                    }
+                    _ => adapter
+                        .children(host)
+                        .into_iter()
+                        .filter(|&c| matches_step(adapter, c, step))
+                        .collect(),
+                },
+                // `//paragraph//token @| count`: the lead's
+                // descendants by the adapter's name index where it
+                // keeps one, else a walk of the subtree in document
+                // order, matching as the step would — ids only, so
+                // a million-token subtree costs the walk.
+                _ => {
+                    let indexed = match &step.matcher {
+                        Matcher::Name(name) if step.traits.is_empty() && !step.leaf => adapter
+                            .descendants_named(host, name)
+                            .map(|v| v.into_iter().map(|(n, _)| n).collect::<Vec<_>>()),
+                        _ => None,
+                    };
+                    indexed.unwrap_or_else(|| {
+                        let mut out = Vec::new();
+                        let mut stack: Vec<NodeId> = adapter.children(host);
+                        stack.reverse();
+                        while let Some(n) = stack.pop() {
+                            if matches_step(adapter, n, step) {
+                                out.push(n);
+                            }
+                            let mut kids = adapter.children(adapter.child_host(n));
+                            kids.reverse();
+                            stack.extend(kids);
+                        }
+                        out
+                    })
                 }
-                _ => adapter
-                    .children(host)
-                    .into_iter()
-                    .filter(|&c| matches_step(adapter, c, step))
-                    .collect(),
             };
             let kept = apply_predicates(
                 adapter,
@@ -225,37 +257,46 @@ fn streamed_count(
         next.retain(|n| seen.insert(*n));
         frontier = next;
         if frontier.is_empty() {
-            return Some(0);
+            return Some((0, Origins::default()));
         }
     }
     // The last step, counted one node at a time.
     let mut count = 0usize;
+    let mut origins = Origins::default();
+    let command = command_now();
     let mut seen: Option<std::collections::HashSet<NodeId>> = (frontier.len() > 1
         && !matches!(last.axis, Axis::Child))
     .then(std::collections::HashSet::new);
-    let mut tally = |n: NodeId, step: &Step, count: &mut usize| {
+    let mut tally = |n: NodeId, step: &Step, count: &mut usize, origins: &mut Origins| {
         if let Some(seen) = seen.as_mut()
             && !seen.insert(n)
         {
             return;
         }
-        if step.predicates.is_empty() {
-            *count += 1;
-            return;
+        let kept = if step.predicates.is_empty() {
+            1
+        } else {
+            apply_predicates(
+                adapter,
+                vec![n],
+                step,
+                trace,
+                outer,
+                &[],
+                &[],
+                &[],
+                |&n| n,
+                |&n| edge_of(n),
+            )
+            .len()
+        };
+        *count += kept;
+        if projected && kept > 0 {
+            origins.insert(Origin {
+                node: n,
+                command: command,
+            });
         }
-        *count += apply_predicates(
-            adapter,
-            vec![n],
-            step,
-            trace,
-            outer,
-            &[],
-            &[],
-            &[],
-            |&n| n,
-            |&n| edge_of(n),
-        )
-        .len();
     };
     for &at in &frontier {
         match last.axis {
@@ -263,7 +304,7 @@ fn streamed_count(
                 let host = adapter.child_host(at);
                 for c in adapter.children(host) {
                     if matches_step(adapter, c, last) {
-                        tally(c, last, &mut count);
+                        tally(c, last, &mut count, &mut origins);
                     }
                 }
             }
@@ -310,7 +351,7 @@ fn streamed_count(
                     Some(hits) => {
                         for (n, _) in hits {
                             if tests_ok(adapter, n, step) {
-                                tally(n, step, &mut count);
+                                tally(n, step, &mut count, &mut origins);
                             }
                         }
                     }
@@ -319,7 +360,7 @@ fn streamed_count(
                         stack.reverse();
                         while let Some(c) = stack.pop() {
                             if matches_step(adapter, c, step) {
-                                tally(c, step, &mut count);
+                                tally(c, step, &mut count, &mut origins);
                             }
                             let kids = adapter.children(c);
                             stack.extend(kids.into_iter().rev());
@@ -329,7 +370,7 @@ fn streamed_count(
             }
         }
     }
-    Some(count)
+    Some((count, origins))
 }
 
 pub(crate) fn eval_query_caps(
@@ -359,11 +400,12 @@ pub(super) fn eval_query_caps_outer(
     }
     // Any other `@| count` over a plain path: counted as the walk
     // goes, the matches never collected.
-    if let Some(n) = streamed_count(query, adapter, start, base, outer) {
-        return (
-            vec![Capsa::bare(adapter.root(), Some(Value::Int(n as i64)))],
-            true,
-        );
+    if let Some((n, origins)) = streamed_count(query, adapter, start, base, outer) {
+        let mut c = Capsa::bare(adapter.root(), Some(Value::Int(n as i64)));
+        if !origins.is_empty() {
+            c.prov = Prov::leaf(origins);
+        }
+        return (vec![c], true);
     }
     let first_new = base.contexts.len();
     let mut contexts = base.contexts.clone();
@@ -389,19 +431,19 @@ pub(super) fn eval_query_caps_outer(
         join_keys: Default::default(),
     };
     let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
-    // The join binds where it was written: the driver's stages
+    // The join binds where it was written: the driver's commands
     // before the first `<=>` run first, the gate binds against the
     // capsae as they then stand, and the rest of the pipeline
     // follows.
     let at = query.join_at.min(query.pipeline.len());
-    // The stage ordinal is the origin coordinate: set at the top
-    // level only (a body's stages inherit the stage that runs it).
+    // The command ordinal is the origin coordinate: set at the top
+    // level only (a body's commands inherit the command that runs it).
     let top = outer.is_none();
-    caps = apply_stages(&query.pipeline[..at], 0, top, caps, adapter, &trace, outer);
+    caps = apply_commands(&query.pipeline[..at], 0, top, caps, adapter, &trace, outer);
     if !query.correlations.is_empty() {
         caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
     }
-    caps = apply_stages(&query.pipeline[at..], at, top, caps, adapter, &trace, outer);
+    caps = apply_commands(&query.pipeline[at..], at, top, caps, adapter, &trace, outer);
     (caps, pipeline_projected(query))
 }
 
@@ -637,26 +679,26 @@ pub(super) fn bind_entries(
     false
 }
 
-/// Whether a pipeline stage turns the context value-typed. Positional
+/// Whether a pipeline command turns the context value-typed. Positional
 /// selection, per-capsa filters, and keyed aggregates reorder or
-/// filter capsae without producing values; every other stage does.
-pub(super) fn stage_projects(stage: &Stage) -> bool {
-    match stage {
-        Stage::Select(_) | Stage::Filter(_) => false,
+/// filter capsae without producing values; every other command does.
+pub(super) fn command_projects(command: &Command) -> bool {
+    match command {
+        Command::Select(_) | Command::Filter(_) => false,
         // A bare push leaves the topic as it was — the runtime
         // any-topic check in [`to_result`] carries the typing —
         // and in node context it MARKS, which must not value-type
         // the query. (The computed pushes set the topic and stay
         // value-typing, in the default arm.)
-        Stage::Push(_) => false,
-        // A navigation stage re-types by its own projection —
+        Command::Push(_) => false,
+        // A navigation command re-types by its own projection —
         // handled in the [`pipeline_projected`] fold (it can also
         // RESET a projected pipeline back to nodes).
-        Stage::Nav(b) => b.projection.is_some(),
+        Command::Nav(b) => b.projection.is_some(),
         // `group` produces list topics (value-typed); the other keyed
         // aggregates only reorder or filter. (`ungroup` is handled by
         // the fold in [`pipeline_projected`].)
-        Stage::Agg(call) => !stdlib::known_keyed(&call.name) || call.name == "group",
+        Command::Agg(call) => !stdlib::known_keyed(&call.name) || call.name == "group",
         _ => true,
     }
 }
@@ -664,25 +706,25 @@ pub(super) fn stage_projects(stage: &Stage) -> bool {
 /// The query's static value-vs-node typing, folded over the pipeline.
 /// `@| group` and `@| window` set it (list topics); `@| ungroup`
 /// restores whatever held before the matching member-maker — its
-/// members carry the context as it was then. Other stages set it per
-/// [`stage_projects`] and never clear it.
+/// members carry the context as it was then. Other commands set it per
+/// [`command_projects`] and never clear it.
 pub(super) fn pipeline_projected(query: &Query) -> bool {
     let mut projected = query.branches.iter().any(|b| b.projection.is_some());
     let mut before_group: Vec<bool> = Vec::new();
-    for stage in &query.pipeline {
-        match stage {
-            Stage::Agg(call) if matches!(call.name.as_str(), "group" | "window") => {
+    for command in &query.pipeline {
+        match command {
+            Command::Agg(call) if matches!(call.name.as_str(), "group" | "window") => {
                 before_group.push(projected);
                 projected = true;
             }
-            Stage::Agg(call) if call.name == "ungroup" => {
+            Command::Agg(call) if call.name == "ungroup" => {
                 projected = before_group.pop().unwrap_or(false);
             }
-            // A navigation stage rebuilds the capsae: without a
+            // A navigation command rebuilds the capsae: without a
             // projection the context is node-typed again no matter
             // what came before; with one it is value-typed.
-            Stage::Nav(b) => projected = b.projection.is_some(),
-            s => projected = projected || stage_projects(s),
+            Command::Nav(b) => projected = b.projection.is_some(),
+            s => projected = projected || command_projects(s),
         }
     }
     projected
@@ -730,7 +772,7 @@ pub(super) fn union_branches(
             ) {
                 caps.push(Capsa {
                     prov: if branch.projection.is_some() {
-                        Prov::at(node, stage_now())
+                        Prov::at(node, command_now())
                     } else {
                         Prov::default()
                     },

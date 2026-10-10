@@ -774,13 +774,13 @@ fn group_predicates_filter_before_reach() {
     // farthest satisfying
     assert_eq!(run("//x.rs(->mgr)+[:::name == (/rs/)]!", &t), vec![7]);
     // no survivor anywhere: empty, not an error
-    assert!(run("//x.rs(->mgr)+[:::name = nope]?", &t).is_empty());
+    assert!(run("//x.rs(->mgr)+[:::name = \"nope\"]?", &t).is_empty());
     // an unquantified group takes predicates too — endpoints of
     // different-length alternatives, filtered uniformly
     let s = MockTree::sample();
     assert_eq!(run("/b/(z.rs|deep/w.rs)[:::name = w.rs]", &s), vec![7]);
     // zero repetitions: the anchor itself must pass
-    assert_eq!(run("/a(/x.rs)*[:::name = a]", &s), vec![1]);
+    assert_eq!(run("/a(/x.rs)*[:::name = \"a\"]", &s), vec![1]);
     // the walked edge is in scope for the group's predicate
     let w = MockTree::weighted();
     assert_eq!(run("//a(->e)+[$-::qty = 12]", &w), vec![6]);
@@ -821,7 +821,7 @@ fn arrived_edges_aggregate() {
         vals("//a(->e .(1))->e | .(@-::qty)", &t),
         vec![Value::list(vec![Value::Int(12), Value::Int(5)])]
     );
-    // stage form: `| @-::prop` sets the topic directly, and
+    // command form: `| @-::prop` sets the topic directly, and
     // `each` forks it
     assert_eq!(
         vals("//a->e->e | @-::qty | ... @| sum", &t),
@@ -842,7 +842,7 @@ fn context_accessor_and_inline_pipes() {
         ]
     );
     // The snapshot rule: a filter's own predicate reads the
-    // stage's INPUT (all three), not the shrinking output.
+    // command's INPUT (all three), not the shrinking output.
     assert_eq!(
         vals("//*.rs | [(@*:::name @| count) = 3] @| count", &t),
         vec![Value::Int(3)]
@@ -987,12 +987,12 @@ fn edge_accessor() {
     // a's heavy outgoing edges only.
     assert_eq!(run("//a->e[$-::qty > 1]", &t), vec![2]);
     // Bare `$-` reads the label.
-    assert_eq!(run("//a->*[$- = e]", &t), vec![2, 3]);
+    assert_eq!(run("//a->*[$- = \"e\"]", &t), vec![2, 3]);
     // Incoming direction: the walked edge points into the node.
     assert_eq!(run("//deep<-e[$-::qty = 12]", &t), vec![2]);
     // Null where no edge is in scope: nothing has walked one.
     assert!(run("/a[$-::qty = 4]", &t).is_empty());
-    // Edge property in a projection-bearing filter stage after
+    // Edge property in a projection-bearing predicate command after
     // the hop is NOT in scope (the edge belongs to the hop).
     assert_eq!(
         vals("//a->e[$-::qty > 1]:::name", &t),
@@ -1006,7 +1006,7 @@ fn pattern_breadcrumbs() {
     // Push the walked edge's property; read it back per path.
     // a -4-> x.rs -12-> deep: one path, register [4, 12].
     assert_eq!(
-        vals("//a(->e .($-::qty))+ | [:::name = deep] | @. | product", &t),
+        vals("//a(->e .($-::qty))+ | [:::name = \"deep\"] | @. | product", &t),
         vec![Value::Int(48)]
     );
     // Bare $- pushes the label; tree hops push [child].
@@ -1035,7 +1035,7 @@ fn per_path_results() {
     let t = MockTree::diamond();
     assert_eq!(
         vals(
-            "//a(->e .(:::name))+ | [:::name = deep] | @. | join(\"-\")",
+            "//a(->e .(:::name))+ | [:::name = \"deep\"] | @. | join(\"-\")",
             &t
         ),
         vec![
@@ -1044,7 +1044,7 @@ fn per_path_results() {
         ]
     );
     // Without pushes the same walk dedups by node, as before.
-    assert_eq!(run("//a(->e)+ | [:::name = deep]", &t), vec![6]);
+    assert_eq!(run("//a(->e)+ | [:::name = \"deep\"]", &t), vec![6]);
 }
 
 #[test]
@@ -1086,11 +1086,11 @@ fn registers_and_subcontexts() {
     // subcontext: count of .rs descendants per top-level dir
     // a has x.rs (1 rs); b has z.rs and w.rs (2 rs)
     assert_eq!(
-        vals("/*[:::name = a] | .(//*.rs @| count)", &t),
+        vals("/*[:::name = \"a\"] | .(//*.rs @| count)", &t),
         vec![Value::Int(1)]
     );
     assert_eq!(
-        vals("/*[:::name = b] | .(//*.rs @| count)", &t),
+        vals("/*[:::name = \"b\"] | .(//*.rs @| count)", &t),
         vec![Value::Int(2)]
     );
     // push then recall a named breadcrumb
@@ -1257,10 +1257,10 @@ fn value_expressions() {
     );
 }
 
-/// Value expressions as pipeline stages: computed topics and
+/// Value expressions as pipeline commands: computed topics and
 /// computed (pushed) columns.
 #[test]
-fn value_expression_stages() {
+fn value_expression_commands() {
     let t = MockTree::sample();
     // computed topic on one node: x.rs is child 1 of a
     assert_eq!(vals("/a/x.rs | :::index * 2", &t), vec![Value::Int(2)]);
@@ -1270,7 +1270,7 @@ fn value_expression_stages() {
         vals("/* | .double(:::index * 2) @| sum", &t),
         vec![Value::Int(6)]
     );
-    // grouped expression stage
+    // grouped expression command
     assert_eq!(
         vals("/a/x.rs | (:::index + 1) * 3", &t),
         vec![Value::Int(6)]
@@ -1278,17 +1278,17 @@ fn value_expression_stages() {
 }
 
 /// Keyed aggregates reorder or filter capsae by per-capsa keys,
-/// preserving node identity so later stages keep working.
+/// preserving node identity so later commands keep working.
 /// `@| group(k) | count` runs fused (no member lists built);
-/// it must answer exactly as the two stages do — same counts,
+/// it must answer exactly as the two commands do — same counts,
 /// same key fields for recall, same order — whether the count
-/// is the result or feeds a later stage.
+/// is the result or feeds a later command.
 #[test]
-fn fused_group_count_matches_the_two_stages() {
+fn fused_group_count_matches_the_two_commands() {
     let t = MockTree::sample();
     let fused = vals("//* @| group(d = :::depth) | count", &t);
     // The unfused route: the group's list topic, counted inside
-    // an operand, so no `| count` stage follows the group.
+    // an operand, so no `| count` command follows the group.
     let unfused = vals("//* @| group(d = :::depth) | %(n = ($_ @| count)) | :n", &t);
     assert_eq!(fused, unfused);
     assert!(fused.len() > 1);
@@ -1363,10 +1363,10 @@ fn keyed_aggregates() {
 }
 
 /// Positional selection (`@| [n]`, whole-context) and per-capsa
-/// filters (`| [cond]`) as pipeline stages, each on its
+/// filters (`| [cond]`) as pipeline commands, each on its
 /// doctrinally correct pipe.
 #[test]
-fn positional_and_filter_stages() {
+fn positional_and_filter_commands() {
     let t = MockTree::sample();
     assert_eq!(run("//*.rs @| [1]", &t), vec![2]);
     assert_eq!(run("//*.rs @| [-1]", &t), vec![7]);
@@ -1389,7 +1389,7 @@ fn positional_and_filter_stages() {
     assert!(parse(&lex("//a | ((::x @| bogus))").unwrap()).is_err());
 }
 
-/// The `@*` snapshot must materialize wherever the stage reads
+/// The `@*` snapshot must materialize wherever the command reads
 /// it: inside conditional/match operands, and in keyed-aggregate
 /// keys (a silent `peers: None` there made `@*` null — and a
 /// null key excludes every capsa).
@@ -1552,7 +1552,7 @@ fn marks() {
         Vec::<u64>::new()
     );
     assert_eq!(run("//deep .d /w.rs[$$.d:::name = \"deep\"]", &t), vec![7]);
-    // Recall in a pipeline stage operand.
+    // Recall in a pipeline command operand.
     assert_eq!(
         vals("//w.rs .w \\\\!* | $$.w:::name", &t),
         vec![Value::Str("w.rs".into())]
@@ -1583,7 +1583,7 @@ fn marks() {
 }
 
 #[test]
-fn shell_stage() {
+fn shell_command() {
     let t = MockTree::sample();
     // Gated: without allow_shell the run family refuses.
     let q = "/a/x.rs | :::name | `tr a-z A-Z`";
@@ -1883,9 +1883,9 @@ fn contains_and_regex_null_propagate() {
 }
 
 #[test]
-fn nav_stage_resumes_navigation() {
+fn nav_command_resumes_navigation() {
     let t = MockTree::sample();
-    // A path-shaped stage fans out per thread — the pipeline
+    // A path-shaped command fans out per thread — the pipeline
     // spelling of a path continuation.
     assert_eq!(run("/* | /*", &t), vec![2, 3, 5, 6]);
     // The register rides across the hop: collect at both
@@ -1901,19 +1901,19 @@ fn nav_stage_resumes_navigation() {
         "first column is the ancestor's push"
     );
     assert_eq!(fields[1], ("file".to_string(), Value::Str("x.rs".into())));
-    // A trailing projection ends the stage in scalar mode,
+    // A trailing projection ends the command in scalar mode,
     // exactly like a branch projection.
     assert_eq!(
         vals("/a | /*:::name", &t),
         vec![Value::Str("x.rs".into()), Value::Str("y.txt".into())]
     );
-    // `^` — the anchored stage navigates from the root.
+    // `^` — the anchored command navigates from the root.
     assert_eq!(run("/a/x.rs | ^/b", &t), vec![4]);
     // `(m)` — anchor on the thread's own pebble; both the
     // path-side and the pipe-side mark spellings feed it.
     assert_eq!(run("/a .m /x.rs | $$.m/y.txt", &t), vec![3]);
     assert_eq!(run("/a | .m | /x.rs | $$.m/y.txt", &t), vec![3]);
-    // Arrows hop crosslinks as stages too.
+    // Arrows hop crosslinks as commands too.
     assert_eq!(run("/a/x.rs | ->ref", &t), vec![7]);
     // File-first: a projection enters scalar mode, the push
     // returns to navigation mode, and the hop is legal again.
@@ -1921,7 +1921,7 @@ fn nav_stage_resumes_navigation() {
 }
 
 #[test]
-fn nav_stage_mode_discipline() {
+fn nav_command_mode_discipline() {
     let refuse = |q: &str| {
         parse(&lex(q).unwrap())
             .expect_err("should refuse")
@@ -2121,7 +2121,7 @@ fn mark_array_symmetry() {
     // which is now the register file).
     let t = MockTree::sample();
     // Bare `.` pockets the node anonymously — mid-path and as
-    // a pipe stage — and `(N)` / `(.)` recall positionally.
+    // a pipe command — and `(N)` / `(.)` recall positionally.
     assert_eq!(run("/a . /x.rs | ((.1))/y.txt", &t), vec![3]);
     assert_eq!(run("/a . /x.rs | $$./y.txt", &t), vec![3]);
     assert_eq!(run("/a | . | /x.rs | ((.1))/y.txt", &t), vec![3]);
@@ -2199,7 +2199,7 @@ fn origins(known: &[(u64, u32)]) -> Origins {
             .iter()
             .map(|&(n, s)| Origin {
                 node: NodeId(n),
-                stage: s,
+                command: s,
             })
             .collect(),
         more: 0,
@@ -2233,15 +2233,15 @@ fn provenanced() -> MockTree {
 }
 
 #[test]
-fn push_records_the_read_node_and_stage() {
+fn push_records_the_read_node_and_command() {
     let t = MockTree::sample();
-    // A push at stage 1 reads the node it stands at.
+    // A push at command 1 reads the node it stands at.
     let rows = traced("/a/* | .n(:::name)", &t);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].node, NodeId(2));
     assert_eq!(rows[0].prov.origins, origins(&[(2, 1)]));
     assert_eq!(rows[1].prov.origins, origins(&[(3, 1)]));
-    // A branch-level projection is stage 0.
+    // A branch-level projection is command 0.
     let rows = traced("/a/x.rs:::name", &t);
     assert_eq!(rows[0].prov.origins, origins(&[(2, 0)]));
 }
@@ -2250,7 +2250,7 @@ fn push_records_the_read_node_and_stage() {
 fn expression_unions_its_operands_origins() {
     let t = MockTree::sample();
     // The recall carries the push's coordinate; the fresh read
-    // is at the current node and stage.
+    // is at the current node and command.
     let rows = traced("/a/x.rs | .n(:::index) | ->ref | $.n + :::index", &t);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].node, NodeId(7));
@@ -2270,6 +2270,37 @@ fn selection_aggregate_keeps_the_winners_origins() {
         all[0].prov.origins.known.len() > 1,
         "a computed reduction keeps the union"
     );
+}
+
+#[test]
+fn a_projected_count_streams_and_keeps_the_counted_nodes() {
+    let t = MockTree::sample();
+    // The streamed count over a projection is the node count (a
+    // null value is an input too), and its origins are the nodes.
+    let plain = traced("/a/* @| count", &t);
+    let projected = traced("/a/*:::index @| count", &t);
+    assert_eq!(plain[0].topic, projected[0].topic);
+    let Some(Value::Int(n)) = projected[0].topic else {
+        panic!("{projected:?}")
+    };
+    assert_eq!(projected[0].prov.origins.known.len(), n as usize);
+    let missing = traced("/a/*::no-such-property @| count", &t);
+    assert_eq!(missing[0].topic, projected[0].topic);
+}
+
+#[test]
+fn a_count_behind_a_descendant_lead_step_streams_and_agrees() {
+    let t = MockTree::sample();
+    // `//paragraph//token @| count`: a descendant lead step walks
+    // its subtree for the frontier, and nested bases count a node
+    // once — the same figure the materializing walk gives.
+    let streamed = vals("//*//* @| count", &t);
+    let walked = vals("//*//* @| unique @| count", &t);
+    assert_eq!(streamed, walked);
+    let streamed = vals("//a//x.rs @| count", &t);
+    let walked = vals("//a//x.rs @| unique @| count", &t);
+    assert_eq!(streamed, walked);
+    assert_ne!(streamed, vec![Value::Int(0)]);
 }
 
 #[test]
@@ -2492,10 +2523,10 @@ fn value_side_provenance_projection() {
         vec![Value::Str("/a/y.txt".into())]
     );
     assert_eq!(vals("/a/y.txt:::instant", &t), vec![Value::Null]);
-    let coord = |id: i64, stage: i64| {
+    let coord = |id: i64, command: i64| {
         Value::Record(vec![
             ("id".into(), Value::Int(id)),
-            ("stage".into(), Value::Int(stage)),
+            ("command".into(), Value::Int(command)),
         ])
     };
     assert_eq!(vals(&format!("{q} | $_:::origin"), &t), vec![Value::Int(2)]);
@@ -2600,9 +2631,9 @@ fn peer_read_is_by_location() {
 fn peer_read_sees_the_input_snapshot() {
     let t = MockTree::sample();
     // A round that both reads a peer's value and repoints the
-    // same name: every capsa reads the value the stage
+    // same name: every capsa reads the value the command
     // received, whatever the evaluation order — x.rs and w.rs
-    // swap through the link in one stage.
+    // swap through the link in one command.
     let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
     let vs = vals(
         &format!(
@@ -2611,7 +2642,7 @@ fn peer_read_sees_the_input_snapshot() {
         &t,
     );
     // x.rs (evaluated first) takes w.rs's 9; w.rs takes x.rs's 5
-    // — the value the stage received, not the 9 x.rs just
+    // — the value the command received, not the 9 x.rs just
     // filed.
     assert_eq!(vs, vec![Value::Int(9), Value::Int(5)]);
     // Two rounds: x.rs files a from w.rs's v, w.rs then reads
@@ -2673,7 +2704,7 @@ fn peer_read_answers_every_capsa_standing_there() {
 fn peer_read_carries_the_regula_provenance() {
     let t = MockTree::sample();
     // The value read from w.rs's capsa keeps where w.rs read it
-    // (node 7, stage 1); the node it is read at is not an
+    // (node 7, command 1); the node it is read at is not an
     // origin, nor is the navigation.
     let pair = "//*<file>[:::name = \"x.rs\" || :::name = \"w.rs\"]";
     let rows = traced(&format!("{pair} | .v(:::index) | ->ref:.v"), &t);

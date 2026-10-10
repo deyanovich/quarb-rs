@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(values(&a, "/trip[::length = 42000]::length"), ["42 km"]);
         assert_eq!(values(&a, "/trip | ::length + 500m"), ["42500 m"]);
         // The kW criterion against a W-minted value, and the
-        // explicit conversion stage.
+        // explicit conversion command.
         assert_eq!(values(&a, "/rig[::power > 0.2kW]::power"), ["290 W"]);
         assert_eq!(values(&a, "/rig | ::power | convert(kW)"), ["0.29 kW"]);
         // Dimension mismatch: the comparison fails, never lies.

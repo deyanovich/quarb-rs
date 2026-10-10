@@ -318,11 +318,11 @@ fn item_lemma_flattens_inline() {
     assert_eq!(values(&m, "//unordered-item::lemma"), vec!["emu"]);
 }
 
-/// The serialization stages: `| markdown` / `| html` / `| atrep`
+/// The serialization commands: `| markdown` / `| html` / `| atrep`
 /// render a node's subtree through the koine renderer — the
 /// export button and the pipe are the same verb.
 #[test]
-fn serialization_stages_render_subtrees() {
+fn serialization_commands_render_subtrees() {
     let m = TextModel::build(vec![
         Block::Heading {
             level: 2,

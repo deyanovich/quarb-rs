@@ -8,6 +8,7 @@
 use crate::doc::Doc;
 use crate::{Cell, Executor};
 use quarb::QueryResult;
+use quarb::Value;
 
 pub struct LocalExecutor {
     doc: Doc,
@@ -23,6 +24,9 @@ pub struct LocalExecutor {
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
+    /// The environments the host mounted (`go=exec:DIR`,
+    /// `sh=shell:`), the namespaces `ALIAS:name(…)` reaches.
+    environments: Vec<quarb::Environment>,
     /// A `--model` file enriching the source with derived structure
     /// (wasm-safe — the playground uses it too).
     model: Option<quarb_model::Model>,
@@ -42,10 +46,24 @@ impl LocalExecutor {
             refs: Default::default(),
             now,
             allow_shell,
+            environments: Vec::new(),
             #[cfg(feature = "native")]
             respec: None,
             model: None,
         }
+    }
+
+    /// The environments mounted for the session; a `shell:` one
+    /// opens the shell gate as `--allow-shell` does.
+    pub fn with_environments(mut self, environments: Vec<quarb::Environment>) -> Self {
+        if environments
+            .iter()
+            .any(|e| e.kind == quarb::EnvKind::Shell)
+        {
+            self.allow_shell = true;
+        }
+        self.environments = environments;
+        self
     }
 
     /// Register the reference targets (identifier → mounted root)
@@ -78,6 +96,7 @@ impl LocalExecutor {
             refs: Default::default(),
             now,
             allow_shell,
+            environments: Vec::new(),
             respec: Some((specs, opts)),
             model: None,
         }
@@ -126,6 +145,7 @@ impl LocalExecutor {
         quarb::Run {
             now: Some(self.now),
             allow_shell: self.allow_shell,
+            environments: self.environments.clone(),
             ref_targets: self.url_roots.clone(),
             ..quarb::Run::ambient()
         }
@@ -162,6 +182,46 @@ impl Executor for LocalExecutor {
 
     fn complete(&self, text: &str, cursor: usize) -> Vec<quarb::complete::Candidate> {
         quarb::complete::complete_with(text, cursor, self.doc.base_dyn())
+    }
+
+    fn run_table(&self, query: &str) -> anyhow::Result<(Vec<Cell>, Option<String>)> {
+        if self.model.is_some() {
+            return Ok((self.run(query)?, None));
+        }
+        let run = self.run_opts();
+        let out = self
+            .doc
+            .run_rendering(query, &run)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        *self.refs.borrow_mut() = out.refs;
+        let Some(closing) = out.closing.filter(|c| !c.csv) else {
+            // Not a table after all (a csv, or no closing command):
+            // the rows as the run would have printed them.
+            let cells = match out.result {
+                QueryResult::Nodes(nodes) => nodes
+                    .into_iter()
+                    .map(|n| Cell::Node(self.doc.render(n)))
+                    .collect(),
+                QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
+            };
+            return Ok((cells, None));
+        };
+        let rows = self.doc.table_rows(out.result, &closing.columns);
+        let columns = (!closing.columns.is_empty()).then_some(closing.columns.as_slice());
+        let text = quarb::tabulate_with(&rows, columns, false, b',');
+        let html = quarb::table_html_plain(&rows, columns);
+        Ok((vec![Cell::Value(Value::Str(text))], Some(html)))
+    }
+
+    fn plan(
+        &self,
+        query: &str,
+        budget: Option<&quarb::plan::Budget>,
+    ) -> anyhow::Result<quarb::plan::Plan> {
+        if self.model.is_some() {
+            anyhow::bail!("planning over a --model session is not supported yet");
+        }
+        Ok(self.doc.plan(query, &self.run_opts(), budget)?)
     }
 
     fn export(&self, query: &str, kind: &str) -> anyhow::Result<String> {

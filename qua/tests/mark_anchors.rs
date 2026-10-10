@@ -1,5 +1,5 @@
 //! A mark anchor (`$$.name`) is a node wherever it stands: bare
-//! as a navigation stage, and with an arrow glued to it.
+//! as a navigation command, and with an arrow glued to it.
 
 use std::path::{Path, PathBuf};
 

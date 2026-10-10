@@ -1748,21 +1748,21 @@ impl Exporter {
         let Some(pipe) = self.kid(q, "pipeline") else {
             return Ok(());
         };
-        let stages: Vec<NodeId> = self.arbor.children(pipe);
+        let commands: Vec<NodeId> = self.arbor.children(pipe);
         let mut i = 0;
         // A pending per-row value (`| ::col`) feeding an aggregate.
         let mut pending_col: Option<String> = None;
         // After a grouped reduction: (key, agg_sql, alias).
         let mut grouped: Option<(String, String, String)> = None;
 
-        while i < stages.len() {
-            let s = stages[i];
+        while i < commands.len() {
+            let s = commands[i];
             match self.kind(s).as_str() {
                 "expr" => {
                     let kids = self.arbor.children(s);
                     pending_col = Some(self.operand(kids[0], join.map(|(l, _)| l))?);
                 }
-                "func" => {
+                "cmd" => {
                     let name = self.prop_s(s, "name");
                     match name.as_str() {
                         "rec" | "record" => {
@@ -1802,7 +1802,7 @@ impl Exporter {
                                 )));
                             }
                             return Err(SqlError::Unsupported(format!(
-                                "the '{other}' pipeline function"
+                                "the '{other}' pipeline command"
                             )));
                         }
                     }
@@ -1990,7 +1990,7 @@ impl Exporter {
                 }
                 other => {
                     return Err(SqlError::Unsupported(format!(
-                        "the '{other}' stage (windows, subcontexts, and registers are \
+                        "the '{other}' command (windows, subcontexts, and registers are \
                          Quarb-side state)"
                     )));
                 }

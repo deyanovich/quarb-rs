@@ -83,7 +83,7 @@ pub struct Edge {
 #[derive(Debug, Clone, Default)]
 pub struct Step {
     pub step: i64,
-    /// hop | projection | agg | group | filter | stage
+    /// hop | projection | agg | group | filter | command
     pub kind: String,
     pub expr: String,
     pub axis: Option<String>,

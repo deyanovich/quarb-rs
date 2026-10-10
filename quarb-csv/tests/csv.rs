@@ -102,7 +102,7 @@ fn keyed_aggregates() {
         values("/row @| unique_by(::dept) | ::dept"),
         vec!["eng", "sales", "ops, misc"]
     );
-    // keyed stages compose with positional selection and projection
+    // keyed commands compose with positional selection and projection
     assert_eq!(
         values("/row @| sort_by(::age) @| [..2] | ::name"),
         vec!["Bo", "Ada"]
@@ -134,7 +134,7 @@ fn records_and_json() {
 }
 
 /// Value-keyed grouping: list topics, keys as recallable regs,
-/// reductions as separate per-capsa stages.
+/// reductions as separate per-capsa commands.
 #[test]
 fn grouping() {
     // value_counts
@@ -188,7 +188,7 @@ fn group_members() {
             "%(dept = \"ops, misc\"; name = \"Dee\"; salary = null)"
         ]
     );
-    // a keyed stage on `|` rebuilds the list topic from the
+    // a keyed command on `|` rebuilds the list topic from the
     // surviving members, so reductions see the trimmed group
     assert_eq!(
         values("/row::salary @| group(::dept) | top(1, $_) | sum | %($.dept; max = $_)"),
@@ -209,7 +209,7 @@ fn group_members() {
         values("/row::name @| group(::dept) | top(1, ::age) @| ungroup"),
         vec!["Cy", "Bo", "Dee"]
     );
-    // a keyed stage on the plain pipe with no group before it is
+    // a keyed command on the plain pipe with no group before it is
     // refused with a pointer (2026-08-27): it would rank each
     // capsa's single value against itself and pass everything
     // through, silently.
@@ -238,7 +238,7 @@ fn ordinal() {
         values("/row | [$ord mod 2 = 1] | ::name"),
         vec!["Ada", "Cy"]
     );
-    // the ordinal is the position in the context at that stage:
+    // the ordinal is the position in the context at that command:
     // after a filter, survivors renumber
     assert_eq!(
         values("/row | [::dept = \"eng\"] | $ord + 0"),
@@ -431,13 +431,27 @@ fn window_shapes() {
     assert!(err("/row @| window(2..1)").contains("start <= end"));
     assert!(err("/row @| window(0)").contains("offset range or a count"));
     assert!(err("/row @| shift()").contains("integer distance"));
-    // a range argument belongs to window alone
-    assert!(err("/row @| top(1..2, ::age)").contains("no range argument"));
+    // a range argument is window's span or a rank band on the
+    // commands that select by rank; a reduction takes none
+    assert!(err("/row @| sum(1..2)").contains("no range argument"));
+    let adapter = CsvAdapter::parse(DOC).unwrap();
+    assert!(quarb::run("/row @| top(1..2; ::age)", &adapter).is_ok());
 }
 
 /// `%.` — the register as a record: the named view, one field per
 /// name in first-push order, latest value per name; unnamed regs
 /// are invisible to it.
+#[test]
+fn the_fields_push_takes_a_record() {
+    let adapter = CsvAdapter::parse(DOC).unwrap();
+    let err = quarb::run("/row | ::age | .% | %.", &adapter)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("the fields push '| .%' takes a record topic, not text"), "{err}");
+    let err = quarb::run("/row | .% | %.", &adapter).unwrap_err().to_string();
+    assert!(err.contains("not a node with no topic"), "{err}");
+}
+
 #[test]
 fn register_record_view() {
     // multi-column output: pushes become fields
@@ -512,7 +526,7 @@ fn fragments() {
 }
 
 /// `$1` … `$9` — regex captures: a successful `=~` in a filter
-/// stage binds its groups for the rest of the pipeline.
+/// command binds its groups for the rest of the pipeline.
 #[test]
 fn captures() {
     // extract, then use as fields (Perl's match-then-harvest)

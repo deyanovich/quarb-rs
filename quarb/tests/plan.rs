@@ -50,7 +50,7 @@ fn plan(q: &str) -> Plan {
 #[test]
 fn a_root_anchored_branch_names_its_scope_step_by_step() {
     let p = plan("/t/*[::k = \"x\"][::n > 1]/c @| count");
-    assert_eq!(p.stages, 1);
+    assert_eq!(p.commands, 1);
     assert_eq!(p.correlations.len(), 0);
     let steps = &p.branches[0].steps;
     assert_eq!(steps.len(), 3);
@@ -189,7 +189,7 @@ fn the_plan_is_a_kaiv_document() {
     assert!(k.contains("[/plan/@steps]"), "{k}");
     assert!(k.contains("scope=/t"), "{k}");
     assert!(k.contains("conjunct=::k = \"x\" (pushed)\n"), "{k}");
-    // A query written one stage per line folds to one value line;
+    // A query written one command per line folds to one value line;
     // a dollar stays a dollar.
     let k = p.to_kaiv("/t/*[::k = $_::k]\n  | ::k");
     assert!(k.contains("query=/t/*[::k = $_::k]   | ::k\n"), "{k}");

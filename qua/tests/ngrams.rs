@@ -67,3 +67,70 @@ fn the_text_function_is_unchanged() {
         ["the cat"]
     );
 }
+
+#[test]
+fn a_rank_range_or_a_negative_rank_selects_rows_of_the_table() {
+    // the 3, cat 2, end 1, on 1, sat 1
+    assert_eq!(
+        values("/words/* | :: @| frequencies(2..3)"),
+        ["%(value = \"cat\"; n = 2)", "%(value = \"end\"; n = 1)"]
+    );
+    assert_eq!(
+        values("/words/* | :: @| frequencies(-2)"),
+        ["%(value = \"on\"; n = 1)", "%(value = \"sat\"; n = 1)"]
+    );
+    assert_eq!(
+        values("/words/* | :: @| frequencies(-3..-2)"),
+        ["%(value = \"end\"; n = 1)", "%(value = \"on\"; n = 1)"]
+    );
+    assert_eq!(
+        values("/words/* | :: @| frequencies(4..) | :value"),
+        ["on", "sat"]
+    );
+    assert_eq!(
+        values("/words/* | :: @| frequencies(..1) | :value"),
+        ["the"]
+    );
+    assert_eq!(values("/words/* | :: @| frequencies(9..) @| count"), ["0"]);
+}
+
+#[test]
+fn first_last_top_and_bottom_take_a_rank_range_too() {
+    assert_eq!(values("/words/* | :: @| first(2..3)"), ["cat", "sat"]);
+    assert_eq!(values("/words/* | :: @| first(-2)"), ["the", "end"]);
+    // `last` counts from the end: ranks 2..3 are the two before
+    // the last, in stream order; a negative rank from the start.
+    assert_eq!(values("/words/* | :: @| last(2..3)"), ["cat", "the"]);
+    assert_eq!(values("/words/* | :: @| last(-2)"), ["the", "cat"]);
+    assert_eq!(values("/words/* | :: @| last(2)"), ["the", "end"]);
+    assert_eq!(values("/words/* | :: @| first"), ["the"]);
+    // 3, 1, 3, 2, null, 1, 3: descending 3 3 3 2 1 1.
+    assert_eq!(values("/n/* | :: @| top(2..3; $_)"), ["3", "3"]);
+    assert_eq!(values("/n/* | :: @| top(-2; $_)"), ["1", "1"]);
+    assert_eq!(values("/n/* | :: @| bottom(3..4; $_)"), ["2", "3"]);
+    assert_eq!(values("/n/* | :: @| top(3; $_)"), ["3", "3", "3"]);
+}
+
+#[test]
+fn jaccard_takes_the_other_set_from_any_list_value() {
+    // {the, cat, sat, on, end} against {the, cat, dog}: 2 of 6.
+    let third = |vs: Vec<String>| {
+        let v: f64 = vs[0].parse().unwrap();
+        (v - 1.0 / 3.0).abs() < 1e-9
+    };
+    assert!(third(values(
+        "/words/* | .b(@(\"the\"; \"cat\"; \"dog\")) | :: @| jaccard($.b)"
+    )));
+    assert!(third(values(
+        "/words/* | :: @| jaccard(@(\"the\"; \"cat\"; \"dog\"))"
+    )));
+    // A sub-pipeline's values: the other text's distinct words.
+    assert_eq!(
+        values("/words/* | :: @| jaccard((^/short/* | :: @| unique))"),
+        ["0"]
+    );
+    assert_eq!(
+        values("/words/* | :: @| unique @| jaccard((^/words/* | :: @| unique))"),
+        ["1"]
+    );
+}

@@ -41,6 +41,7 @@ pub mod adapter;
 mod ast;
 pub mod bibref;
 pub mod encoding;
+pub mod env;
 pub mod error;
 mod exec;
 #[cfg(feature = "kaiv")]
@@ -58,6 +59,11 @@ pub mod highlight;
 pub mod quantity;
 mod stdlib;
 pub use stdlib::{tabulate, tabulate_in, tabulate_with};
+pub mod table;
+pub use table::{
+    TABLE_CSS, table_cells, table_columns, table_html, table_html_plain, table_node_records,
+    table_rows_of,
+};
 pub mod names;
 pub mod plan;
 pub mod registry;
@@ -161,6 +167,7 @@ pub use exec::{
     resolved_provenance,
 };
 pub use parser::{Defs, parse_scope_path};
+pub use env::{EnvKind, Environment};
 pub use value::Value;
 
 /// The universal search over a step body: `*//BODY`, with the
@@ -277,7 +284,7 @@ fn inherited() -> Run {
 }
 
 /// A query's closing serialization for people — `@| csv` or
-/// `@| table` as the last stage — taken off for the tool to render.
+/// `@| table` as the last command — taken off for the tool to render.
 #[derive(Debug, Clone)]
 pub struct ClosingTable {
     pub csv: bool,
@@ -314,6 +321,21 @@ pub struct Query {
     closing: Option<ClosingTable>,
 }
 
+/// Whether `text` is a query whose closing command is `@| table` —
+/// the browser hosts' rule: such a result renders as the HTML grid
+/// ([`table_html`]), everything else stays text. A query that does
+/// not parse closes with nothing.
+pub fn closes_with_table(text: &str) -> bool {
+    lexer::lex(text)
+        .and_then(|tokens| parser::parse(&tokens))
+        .ok()
+        .and_then(|q| match q.pipeline.last() {
+            Some(ast::Command::Agg(call)) => Some(call.name == "table"),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 impl Query {
     /// Lex and parse `text` with the dataset at hand (data-aware
     /// macros read it at expansion time), under the ambient options.
@@ -339,14 +361,14 @@ impl Query {
 
     /// For a tool that renders under an output locale: when the
     /// query closes with `@| csv` or `@| table`, the run returns the
-    /// rows as they stand before that stage, with its shape in
+    /// rows as they stand before that command, with its shape in
     /// [`Outcome::closing`], and the tool tabulates them itself
     /// (`tabulate_in` with its locale's cells and delimiter). The
-    /// stage anywhere else, and every other stage, yields the same
+    /// command anywhere else, and every other command, yields the same
     /// values as under a plain run — a value never depends on a
     /// locale.
     pub fn for_rendering(mut self) -> Query {
-        if let Some(ast::Stage::Agg(call)) = self.ast.pipeline.last_mut()
+        if let Some(ast::Command::Agg(call)) = self.ast.pipeline.last_mut()
             && matches!(call.name.as_str(), "csv" | "table")
         {
             let (delimiter, columns) = stdlib::split_csv_delimiter(call);
@@ -362,7 +384,7 @@ impl Query {
                 delimiter,
             });
             // The rows, with a node standing for the record of the
-            // columns asked of it, exactly as the stage would read
+            // columns asked of it, exactly as the command would read
             // them.
             let columns: Vec<ast::Arg> = columns.to_vec();
             call.name = stdlib::ROWS_FOR_RENDERING.to_string();
@@ -371,13 +393,44 @@ impl Query {
         self
     }
 
+    /// For a host that draws the table itself (the HTML grid of the
+    /// browser hosts): when the query closes with `@| table`, the
+    /// closing command is taken off entirely, its shape kept in
+    /// [`Outcome::closing`], and the run yields what stands before
+    /// it — a node set when the query selected nodes (a document's
+    /// own table, say), values when it projected them. Unlike
+    /// [`for_rendering`](Self::for_rendering), no stand-in command
+    /// turns the nodes into their names; [`table_rows_of`] reads
+    /// them into rows. A query closing with `@| csv`, or with any
+    /// other command, runs as it stands.
+    pub fn without_closing(mut self) -> Query {
+        if let Some(ast::Command::Agg(call)) = self.ast.pipeline.last()
+            && call.name == "table"
+        {
+            let (delimiter, columns) = stdlib::split_csv_delimiter(call);
+            self.closing = Some(ClosingTable {
+                csv: false,
+                columns: columns
+                    .iter()
+                    .filter_map(|a| match a {
+                        ast::Arg::Lit(Value::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                delimiter,
+            });
+            self.ast.pipeline.pop();
+        }
+        self
+    }
+
     /// Evaluate against `adapter` under `run`.
     ///
     /// Errors: a refusal (a feature the engine does not implement, a
-    /// shell stage with the gate closed, an argument of the wrong
+    /// shell command with the gate closed, an argument of the wrong
     /// kind); a malformed query is refused at [`Query::parse`].
     pub fn run(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Outcome> {
-        exec::gate_shell(&self.ast, run.allow_shell)?;
+        exec::gate(&self.ast, run)?;
         let plan = self.planned(adapter, run)?;
         let result = checked(exec::eval_with(&self.ast, adapter, Some(run.clone())))?;
         Ok(Outcome {
@@ -427,7 +480,7 @@ impl Query {
     /// origins of its topic, per field for a record
     /// ([`exec::Traced`]).
     pub fn run_traced_prov(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Vec<Traced>> {
-        exec::gate_shell(&self.ast, run.allow_shell)?;
+        exec::gate(&self.ast, run)?;
         checked(exec::eval_traced_prov_with(
             &self.ast,
             adapter,

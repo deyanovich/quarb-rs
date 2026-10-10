@@ -7,7 +7,7 @@
 //! mounts, atrep documents, and anything else emitting the
 //! vocabulary; kinds outside it degrade to a paragraph of their
 //! prose. Powers the `| markdown` / `| html` / `| atrep`
-//! pipeline stages, the extension's export buttons, and the
+//! pipeline commands, the extension's export buttons, and the
 //! notebook renderers.
 
 use crate::adapter::AstAdapter;

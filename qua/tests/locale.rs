@@ -229,7 +229,7 @@ fn the_layers_nearest_wins() {
 
 #[test]
 fn a_closing_table_renders_and_the_value_never_changes() {
-    let dir = fixture("stages");
+    let dir = fixture("commands");
     let ru = ["--locale", "ru-RU"];
     let q = |tail: &str| format!("/rows/* | %(::city; ::n) {tail}");
     // a closing @| csv / @| table renders as the flags do
@@ -260,7 +260,7 @@ fn a_closing_table_renders_and_the_value_never_changes() {
         ),
         "w\n6 окт. 1899 г., 14:30:00"
     );
-    // anywhere else the stage is a value, the same under every locale
+    // anywhere else the command is a value, the same under every locale
     let mid = q("@| csv | sha256");
     assert_eq!(
         ok(&dir, &[], &[ru[0], ru[1], &mid, "sales.json"]),

@@ -23,6 +23,13 @@ pub fn highlight(query: &str) -> String {
 }
 
 /// The engine version string, for the playground footer.
+/// The engine's table stylesheet, scoped under `.quarb-table`: a
+/// host includes it once and every grid it renders is dressed.
+#[wasm_bindgen]
+pub fn table_css() -> String {
+    quarb::TABLE_CSS.to_string()
+}
+
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -213,9 +220,25 @@ fn envelope_refs(
     error: Option<String>,
     refs: Vec<String>,
 ) -> String {
+    envelope_html(label, lines, note, error, refs, None)
+}
+
+/// [`envelope_refs`], carrying the HTML grid of a result whose
+/// closing command is `@| table` (`html`, null otherwise): the
+/// host draws it in place of the lines, dressed by
+/// [`table_css`] once.
+fn envelope_html(
+    label: &str,
+    lines: Vec<String>,
+    note: Option<String>,
+    error: Option<String>,
+    refs: Vec<String>,
+    html: Option<String>,
+) -> String {
     json!({
         "label": label,
         "lines": lines,
+        "html": html,
         "note": note,
         "error": error,
         "refs": refs,
@@ -352,8 +375,8 @@ impl QuaiSession {
             };
         }
         let label = format!("&{}", self.session.line_no());
-        match self.session.eval(t) {
-            Ok(cells) => {
+        match self.session.eval_table(t) {
+            Ok((cells, html)) => {
                 let refs = self.session.refs();
                 let lines = cells.iter().map(|c| c.display()).collect();
                 let note = if self.session.commit(t, cells) {
@@ -361,7 +384,7 @@ impl QuaiSession {
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope_refs(&label, lines, note, None, refs)
+                envelope_html(&label, lines, note, None, refs, html)
             }
             Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
         }
@@ -425,12 +448,12 @@ impl QuaiSession {
         };
 
         let result = if fresh {
-            self.session.eval_fresh(&query)
+            self.session.eval_fresh(&query).map(|cells| (cells, None))
         } else {
-            self.session.eval(&query)
+            self.session.eval_table(&query)
         };
         match result {
-            Ok(cells) => {
+            Ok((cells, html)) => {
                 let refs = self.session.refs();
                 let lines = cells.iter().map(|c| c.display()).collect();
                 let note = if self.session.commit(&query, cells) {
@@ -438,7 +461,7 @@ impl QuaiSession {
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope_refs(&label, lines, note, None, refs)
+                envelope_html(&label, lines, note, None, refs, html)
             }
             Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
         }
