@@ -39,9 +39,12 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13"]
+        # Linux on the 22.04 runners (glibc 2.35): the wheel is tagged
+        # manylinux_2_35, the oldest glibc the binary runs on, since the
+        # host build cannot be audited (it links the host's libpython).
         platform:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-14, target: aarch64-apple-darwin }
           - { os: macos-latest, target: x86_64-apple-darwin }
           # windows-msvc parked: the tree is not Windows-portable
@@ -58,7 +61,10 @@ jobs:
       # is tagged for that version: one build per interpreter. The
       # manylinux images' Pythons ship no shared libpython, so the
       # build runs on the host's setup-python interpreters (built
-      # --enable-shared) and the wheel is tagged for the host's glibc.
+      # --enable-shared); PyPI refuses the native linux tag, so the
+      # Linux wheels carry manylinux_2_35 (the 22.04 runners' glibc)
+      # with the audit skipped: it would flag libpython, which the
+      # reader's Python provides.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -78,6 +84,8 @@ jobs:
             --strip
             --manifest-path qua/Cargo.toml
             --interpreter python${{ matrix.python }}
+            --compatibility manylinux_2_35
+            --skip-auditwheel
             --out dist
           manylinux: off
 
