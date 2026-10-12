@@ -1,7 +1,7 @@
 [package]
 name = "quarb-lib-sklearn"
 description = "A Quarb command library wrapping scikit-learn through an embedded Python: principal components, k-means, tf-idf and topic models over the stream, as declared commands under the sklearn: prefix"
-keywords = ["quarb", "scikit-learn", "pca", "clustering", "tfidf", "command-library"]
+keywords = ["quarb", "scikit-learn", "pca", "clustering", "tfidf"]
 categories = ["science", "mathematics"]
 version.workspace = true
 edition.workspace = true
