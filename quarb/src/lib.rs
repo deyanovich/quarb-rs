@@ -47,6 +47,7 @@ mod exec;
 #[cfg(feature = "kaiv")]
 pub mod kaiv_out;
 mod lexer;
+pub mod library;
 pub mod locale;
 pub mod number;
 mod parser;
@@ -161,14 +162,15 @@ pub fn now_secs() -> i64 {
             .unwrap_or(0),
     }
 }
+pub use env::{EnvKind, Environment};
 pub use exec::{
     ORIGIN_CAP, Origin, Origins, Prov, QueryResult, RunOptions as Run, Traced, canonical_identity,
     canonical_identity_at_open, fetched, fetched_opt, is_url, name_path, record_refusal,
     resolved_provenance,
 };
+pub use library::CommandLibrary;
 pub use parser::{Defs, parse_scope_path};
-pub use env::{EnvKind, Environment};
-pub use value::Value;
+pub use value::{Foreign, ForeignValue, Value, Table};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or
@@ -330,7 +332,7 @@ pub fn closes_with_table(text: &str) -> bool {
         .and_then(|tokens| parser::parse(&tokens))
         .ok()
         .and_then(|q| match q.pipeline.last() {
-            Some(ast::Command::Agg(call)) => Some(call.name == "table"),
+            Some(ast::Command::Agg(call)) => Some(matches!(call.name.as_str(), "table" | "pretty")),
             _ => None,
         })
         .unwrap_or(false)
@@ -369,7 +371,7 @@ impl Query {
     /// locale.
     pub fn for_rendering(mut self) -> Query {
         if let Some(ast::Command::Agg(call)) = self.ast.pipeline.last_mut()
-            && matches!(call.name.as_str(), "csv" | "table")
+            && matches!(call.name.as_str(), "csv" | "table" | "pretty")
         {
             let (delimiter, columns) = stdlib::split_csv_delimiter(call);
             self.closing = Some(ClosingTable {
@@ -405,7 +407,7 @@ impl Query {
     /// other command, runs as it stands.
     pub fn without_closing(mut self) -> Query {
         if let Some(ast::Command::Agg(call)) = self.ast.pipeline.last()
-            && call.name == "table"
+            && matches!(call.name.as_str(), "table" | "pretty")
         {
             let (delimiter, columns) = stdlib::split_csv_delimiter(call);
             self.closing = Some(ClosingTable {

@@ -33,20 +33,17 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build wheels (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    name: Build wheels (${{ matrix.platform.target }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        platform:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
           # windows-msvc parked: the tree is not Windows-portable
           # yet (apotheca uses unix-only file locking; qua's
           # --edit tempfile path calls libc::dup2). Restore the
@@ -56,37 +53,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      # The Python command libraries embed CPython (pyo3), so the
+      # binary links the libpython it is built against and the wheel
+      # is tagged for that version: one build per interpreter. The
+      # manylinux images' Pythons ship no shared libpython, so the
+      # build runs on the host's setup-python interpreters (built
+      # --enable-shared) and the wheel is tagged for the host's glibc.
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform.target }}
           args: >-
             --release
             --strip
             --manifest-path qua/Cargo.toml
+            --interpreter python${{ matrix.python }}
             --out dist
-          # 2_28, not auto: the manylinux2014 image's gcc uses the
-          # legacy C++ ABI, which DuckDB refuses to build under
-          # ("does not provide extensions for this (legacy) CXX
-          # ABI"). The 2_28 image's toolchain uses the modern ABI.
-          # (maturin-action takes no python-version input; the
-          # wheel is a `bin` build and needs none.)
-          manylinux: 2_28
+          manylinux: off
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.target }}
+          name: wheels-${{ matrix.platform.target }}-py${{ matrix.python }}
           path: dist/*.whl
 
   build-sdist:

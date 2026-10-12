@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyList};
+use quarb_pyvalue::{Quantity, value_to_py};
 use quarb::AstAdapter;
 use quarb::{NodeId, QueryResult, Value};
 
@@ -349,126 +349,6 @@ fn format_of(path: &Path) -> Option<&'static str> {
         Some("txt") => Some("text"),
         _ => None,
     }
-}
-
-/// A value on a dimension: the magnitude scaled to the dimension's
-/// SI-base expansion (`unit`, e.g. `m`, `kg*m^2/s^3`), with the
-/// authored form kept for display (`written`, e.g. `42 km`) when
-/// the source carried one.
-#[pyclass(frozen, module = "quarb", from_py_object)]
-#[derive(Clone, PartialEq)]
-struct Quantity {
-    #[pyo3(get)]
-    magnitude: f64,
-    #[pyo3(get)]
-    unit: String,
-    #[pyo3(get)]
-    written: Option<String>,
-}
-
-#[pymethods]
-impl Quantity {
-    fn __repr__(&self) -> String {
-        match &self.written {
-            Some(w) => format!(
-                "Quantity(magnitude={}, unit={:?}, written={:?})",
-                self.magnitude, self.unit, w
-            ),
-            None => format!(
-                "Quantity(magnitude={}, unit={:?})",
-                self.magnitude, self.unit
-            ),
-        }
-    }
-
-    fn __str__(&self) -> String {
-        match &self.written {
-            Some(w) => w.clone(),
-            None => format!("{} {}", self.magnitude, self.unit),
-        }
-    }
-
-    fn __eq__(&self, other: &Quantity) -> bool {
-        self == other
-    }
-}
-
-/// Convert an engine [`Value`] to its natural Python object:
-/// null → None, booleans/ints/floats/strings to their Python
-/// selves, lists → list, records → dict (insertion-ordered),
-/// instants → tz-aware `datetime`, durations → `timedelta`,
-/// quantities → [`Quantity`].
-fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
-    Ok(match v {
-        Value::Null => py.None(),
-        Value::Bool(b) => b.into_py_any(py)?,
-        Value::Int(i) => i.into_py_any(py)?,
-        Value::Float(f) => f.into_py_any(py)?,
-        Value::Str(s) => s.into_py_any(py)?,
-        Value::List(items) => {
-            let list = PyList::empty(py);
-            for item in items.iter() {
-                list.append(value_to_py(py, item)?)?;
-            }
-            list.unbind().into()
-        }
-        Value::Record(fields) => {
-            let dict = PyDict::new(py);
-            for (k, val) in fields {
-                dict.set_item(k, value_to_py(py, val)?)?;
-            }
-            dict.unbind().into()
-        }
-        Value::Instant {
-            secs,
-            nanos,
-            offset_min,
-        } => {
-            // datetime is microsecond-precision; nanos round down.
-            // No source offset means the UTC timeline — the result
-            // is tz-aware either way.
-            let datetime = py.import("datetime")?;
-            let tz = match offset_min {
-                Some(m) => {
-                    let delta = datetime
-                        .getattr("timedelta")?
-                        .call1((0, i64::from(*m) * 60))?;
-                    datetime.getattr("timezone")?.call1((delta,))?
-                }
-                None => datetime.getattr("timezone")?.getattr("utc")?,
-            };
-            datetime
-                .getattr("datetime")?
-                .call_method1("fromtimestamp", (*secs, &tz))?
-                .call_method(
-                    "replace",
-                    (),
-                    Some(&[("microsecond", nanos / 1000)].into_py_dict(py)?),
-                )?
-                .unbind()
-        }
-        Value::Duration { secs, nanos } => py
-            .import("datetime")?
-            .getattr("timedelta")?
-            .call1((0, *secs, nanos / 1000))?
-            .unbind(),
-        // Python has no value for a stretch of the calendar at a
-        // grain: a period arrives as its ISO-8601 text at reduced
-        // precision (`1899-10`, `1899-10-06T14:30`).
-        Value::Period { .. } => v.to_string().into_py_any(py)?,
-        Value::Quantity {
-            value,
-            base,
-            written,
-        } => Quantity {
-            magnitude: *value,
-            unit: base.clone(),
-            written: written.as_ref().map(|(m, u)| format!("{m} {u}")),
-        }
-        .into_pyobject(py)?
-        .into_any()
-        .unbind(),
-    })
 }
 
 /// A parsed document: parse once with [`loads`] / [`load`], query

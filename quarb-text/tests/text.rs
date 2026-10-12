@@ -215,7 +215,7 @@ fn tables_denormalize_to_nested_lists() {
             vec!["Bob".into(), "".into()],
         ],
     }]);
-    assert_eq!(nodes(&m, "//*<table>"), vec!["/ordered-list"]);
+    assert_eq!(nodes(&m, "//*<tabula>"), vec!["/ordered-list"]);
     assert_eq!(values(&m, "/ordered-list::lemma"), vec!["Crew"]);
     assert_eq!(values(&m, "//ordered-item::taxis"), vec!["1", "2"]);
     assert_eq!(

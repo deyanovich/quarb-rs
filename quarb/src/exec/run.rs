@@ -54,6 +54,10 @@ pub struct RunOptions {
     /// `sh=shell:`): the namespaces `ALIAS:name(…)` reaches. The
     /// mount is the opt-in, so this comes from the host only.
     pub environments: Vec<crate::env::Environment>,
+    /// The command libraries the host linked (`morph:`), reached by
+    /// their declared prefix with no mount; the standard library is
+    /// the prefix-less one and is not listed.
+    pub libraries: Vec<std::sync::Arc<dyn crate::library::CommandLibrary>>,
 }
 
 impl RunOptions {
@@ -70,6 +74,14 @@ impl RunOptions {
     /// The mounted environment under `alias`.
     pub fn environment(&self, alias: &str) -> Option<&crate::env::Environment> {
         self.environments.iter().find(|e| e.alias == alias)
+    }
+
+    /// The linked command library declared under `prefix`.
+    pub fn library(&self, prefix: &str) -> Option<&dyn crate::library::CommandLibrary> {
+        self.libraries
+            .iter()
+            .find(|l| l.prefix() == prefix)
+            .map(|l| l.as_ref())
     }
 }
 
@@ -327,35 +339,56 @@ pub(crate) fn gate(query: &Query, run: &RunOptions) -> crate::Result<()> {
             "the sh(...) command runs external commands; pass --allow-shell",
         ));
     }
-    // Every environment a command names must be mounted: the mount
-    // is the opt-in, granted from the host's side.
-    for alias in environments_named(query) {
-        if run.environment(&alias).is_none() {
+    // Every prefix a command carries names a linked library or a
+    // mounted environment. A library's commands are checked against
+    // their synopsis here, before the run, and the library's
+    // run-time requirement once; an environment must be mounted,
+    // the mount being the opt-in granted from the host's side.
+    let mut checked: Vec<String> = Vec::new();
+    for (call, agg) in prefixed_calls(query) {
+        let (prefix, name) = crate::env::split_env(&call.name).expect("prefixed");
+        if let Some(lib) = run.library(prefix) {
+            if !checked.iter().any(|p| p == prefix) {
+                lib.available().map_err(|why| {
+                    crate::QuarbError::unsupported(format!(
+                        "library '{prefix}' is not usable here: {why}"
+                    ))
+                })?;
+                checked.push(prefix.to_string());
+            }
+            crate::library::check(lib, name, &call, agg).map_err(crate::QuarbError::unsupported)?;
+        } else if run.environment(prefix).is_none() {
+            // Not a linked library either: the same refusal names
+            // the mount, which is the opt-in a user can grant; a
+            // library's absence is the build's.
             return Err(crate::QuarbError::unsupported(format!(
-                "environment '{alias}' is not mounted; mount it from the command line \
-                 ('{alias}=exec:DIR', '{alias}=shell:')"
+                "environment '{prefix}' is not mounted; mount it from the command line \
+                 ('{prefix}=exec:DIR', '{prefix}=shell:')"
             )));
         }
     }
     Ok(())
 }
 
-/// The environment aliases the query's commands carry
-/// (`sh:tr(…)` → `sh`), each once, in order of first use.
-pub(super) fn environments_named(q: &Query) -> Vec<String> {
-    struct Envs(Vec<String>);
-    impl visit::Visitor for Envs {
+/// Every prefixed command of the query (`lib:name(…)`), with whether
+/// it stands after the aggregation pipe.
+pub(super) fn prefixed_calls(q: &Query) -> Vec<(FnCall, bool)> {
+    struct Calls(Vec<(FnCall, bool)>);
+    impl visit::Visitor for Calls {
         fn command(&mut self, s: &Command) {
-            if let Command::Func(c) | Command::Agg(c) = s
-                && let Some((alias, _)) = crate::env::split_env(&c.name)
-                && !self.0.iter().any(|a| a == alias)
-            {
-                self.0.push(alias.to_string());
+            match s {
+                Command::Func(c) if crate::env::split_env(&c.name).is_some() => {
+                    self.0.push((c.clone(), false))
+                }
+                Command::Agg(c) if crate::env::split_env(&c.name).is_some() => {
+                    self.0.push((c.clone(), true))
+                }
+                _ => {}
             }
             visit::walk_command(self, s);
         }
     }
-    let mut v = Envs(Vec::new());
+    let mut v = Calls(Vec::new());
     v.query(q);
     v.0
 }

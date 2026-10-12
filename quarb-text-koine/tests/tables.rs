@@ -1,7 +1,7 @@
 //! The table model (litogramma's `table` / `row` / `header-row` /
 //! `cell` sims, `hspan` / `vspan` as monosims first inside a cell):
 //! rows are records, cells fields named by their column — the
-//! shared table rule's shape, so `<table>` / `<row>` / `<cell>`
+//! shared table rule's shape, so `<tabula>` / `<row>` / `<cell>`
 //! answer as over every other adapter.
 
 use std::path::Path;
@@ -67,8 +67,8 @@ Twain
 #[test]
 fn rows_are_records_and_cells_fields_named_by_their_column() {
     let m = quarb_text_koine::parse_str(DOC, Path::new(".")).unwrap();
-    assert_eq!(values(&m, "//*<table> @| count"), ["1"]);
-    assert_eq!(values(&m, "//*<table>::lemma"), ["Books"]);
+    assert_eq!(values(&m, "//*<tabula> @| count"), ["1"]);
+    assert_eq!(values(&m, "//*<tabula>::lemma"), ["Books"]);
     assert_eq!(values(&m, "//*<row> @| count"), ["3"]);
     assert_eq!(
         values(&m, "//*<row>[::taxis = 1]/*/*::"),

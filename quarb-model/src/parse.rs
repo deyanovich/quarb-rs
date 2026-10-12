@@ -532,6 +532,17 @@ fn parse_ref_target(s: &str) -> Result<(String, String, Option<String>, Option<S
                 ));
             }
             let key = lhs.trim().trim_start_matches("::").trim().to_string();
+            // The key is a property of the target node, read by name:
+            // a navigation there would be looked up as a property
+            // called `//creation/date::when` and match nothing.
+            if key.contains('/') || key.contains("::") {
+                return Err(format!(
+                    "ref target condition names a property of the target node, \
+                     '[::PROP = $]', not a path: '{s}' (aim the ref at the node \
+                     that carries the property and climb from there, \
+                     '->ROLE | \\?NAME')"
+                ));
+            }
             (path, (!key.is_empty()).then_some(key))
         }
         None => (s.trim().to_string(), None),
@@ -1058,5 +1069,22 @@ impl Model {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod ref_condition_tests {
+    use super::parse_model;
+
+    /// The condition of a ref target names a property of the target
+    /// node, read by name; a navigation there is refused at parse
+    /// time rather than looked up as a property and matching nothing.
+    #[test]
+    fn a_ref_target_condition_is_a_property_not_a_path() {
+        assert!(parse_model("ref /a/*::when --> /b/c[::when = $];").is_ok());
+        let e = parse_model("ref /a/*::when --> /b/c[//d/date::when = $];").unwrap_err();
+        assert!(e.contains("not a path") && e.contains("climb"), "{e}");
+        let e = parse_model("ref /a/*::when --> /b/c[/d::when = $];").unwrap_err();
+        assert!(e.contains("not a path"), "{e}");
     }
 }

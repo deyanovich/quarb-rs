@@ -70,6 +70,12 @@ members = [
     "qua",
     "quai",
     "quarb-py",
+    "quarb-pyvalue",
+    "quarb-lib-morph",
+    "quarb-lib-scipy",
+    "quarb-lib-sklearn",
+    "quarb-lib-numpy",
+    "quarb-lib-pandas",
     "quarb-mysql",
     "quarb-neo4j",
     "quarb-objstore",
@@ -101,7 +107,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.36.0"
+version = "0.37.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]

@@ -75,10 +75,10 @@ fn lists_tables_notes_links_bookmarks_and_the_accepted_view() {
         ["First", "Second"]
     );
     assert_eq!(
-        values("//*<table>//*<cell> | ::lemma", &m),
+        values("//*<tabula>//*<cell> | ::lemma", &m),
         ["title", "price"]
     );
-    assert_eq!(values("//*<table>//*<cell> | ::body", &m), ["Emma", "25"]);
+    assert_eq!(values("//*<tabula>//*<cell> | ::body", &m), ["Emma", "25"]);
     assert_eq!(
         values("//footnote<note>::", &m),
         ["A large and populous village."]

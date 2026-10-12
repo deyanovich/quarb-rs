@@ -40,7 +40,7 @@
 //!   the atrep model, where these are universal affordances of a
 //!   block rather than privileges of particular kinds.
 //! - Tables denormalize into nested lists: an `ordered-list`
-//!   carrying the `<table>` trait (`::lemma` = the caption), one
+//!   carrying the `<tabula>` trait (`::lemma` = the caption), one
 //!   `ordered-item` per row (`::taxis` = row number, `<row>`
 //!   trait), one `unordered-item` per cell (`<cell>` trait) whose
 //!   `::lemma` is the column name — from the header row in grids,
@@ -4113,7 +4113,7 @@ impl AstAdapter for TextModel {
             }
         }
         if n.table {
-            out.push("table".to_string());
+            out.push("tabula".to_string());
         }
         if n.row {
             out.push("row".to_string());

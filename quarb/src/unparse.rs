@@ -670,6 +670,49 @@ fn operand(o: &Operand) -> String {
             let inner: Vec<String> = items.iter().map(body_text).collect();
             format!("@({})", inner.join("; "))
         }
+        Operand::Coalesce { left, right } => {
+            format!("{} ?? {}", body_text(left), body_text(right))
+        }
+        Operand::Index { base, rows, cols } => {
+            let spec = |s: &crate::ast::IndexSpec| match s {
+                crate::ast::IndexSpec::At(n) => n.to_string(),
+                crate::ast::IndexSpec::Range(a, b) => format!(
+                    "{}..{}",
+                    a.map(|x| x.to_string()).unwrap_or_default(),
+                    b.map(|x| x.to_string()).unwrap_or_default()
+                ),
+                crate::ast::IndexSpec::Name(n) => literal(&Value::Str(n.clone())),
+            };
+            match cols {
+                Some(c) => format!("{}[{}; {}]", body_text(base), spec(rows), spec(c)),
+                None => format!("{}[{}]", body_text(base), spec(rows)),
+            }
+        }
+        Operand::Table { header, rows } => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(h) = header {
+                parts.push(format!("@({})", h.join("; ")));
+            }
+            for row in rows {
+                parts.push(match row {
+                    crate::ast::TableRow::List(items) => {
+                        let inner: Vec<String> = items.iter().map(body_text).collect();
+                        format!("@({})", inner.join("; "))
+                    }
+                    crate::ast::TableRow::Record(items) => {
+                        let inner: Vec<String> = items
+                            .iter()
+                            .map(|(n, e)| match n {
+                                Some(n) => format!("{n} = {}", body_text(e)),
+                                None => body_text(e),
+                            })
+                            .collect();
+                        format!("%({})", inner.join("; "))
+                    }
+                });
+            }
+            format!("#({})", parts.join("; "))
+        }
         Operand::Now => "now()".to_string(),
         Operand::Edge { projection: p } => match p {
             Some(p) => format!("$-{}", projection(p)),
@@ -1100,7 +1143,8 @@ fn arg_text(a: &Arg) -> String {
         Arg::Opt { name, value } => match value {
             Some(Operand::Lit(Value::Str(s)))
                 if !s.is_empty()
-                    && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && s.chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
                     && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-')
                     && !matches!(s.as_str(), "true" | "false" | "null") =>
             {

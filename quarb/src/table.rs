@@ -228,7 +228,7 @@ pub fn table_rows_of(
 /// (`::body`). The header row itself yields no record. None when the
 /// node is not a table.
 pub fn table_node_records(adapter: &dyn AstAdapter, node: NodeId) -> Option<Vec<Value>> {
-    if !adapter.has_trait(node, "table") {
+    if !adapter.has_trait(node, "tabula") {
         return None;
     }
     let text = |n: NodeId, key: &str| -> Value {

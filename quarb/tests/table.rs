@@ -79,7 +79,7 @@ fn text_is_escaped_and_nested_values_are_marked() {
 fn the_rule_is_the_closing_command() {
     assert!(closes_with_table("/books/* | %(t = /title::) @| table"));
     assert!(closes_with_table("/books/* @| table(title; price)"));
-    assert!(closes_with_table("//*<table> @| table"));
+    assert!(closes_with_table("//*<tabula> @| table"));
     assert!(closes_with_table(
         "//a[::href] | %(t = ::; h = ::href) @| table"
     ));

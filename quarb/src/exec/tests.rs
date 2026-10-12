@@ -1006,7 +1006,10 @@ fn pattern_breadcrumbs() {
     // Push the walked edge's property; read it back per path.
     // a -4-> x.rs -12-> deep: one path, register [4, 12].
     assert_eq!(
-        vals("//a(->e .($-::qty))+ | [:::name = \"deep\"] | @. | product", &t),
+        vals(
+            "//a(->e .($-::qty))+ | [:::name = \"deep\"] | @. | product",
+            &t
+        ),
         vec![Value::Int(48)]
     );
     // Bare $- pushes the label; tree hops push [child].
@@ -1242,10 +1245,10 @@ fn value_expressions() {
         run("/*[9007199254740993 + 0 = 9007199254740993]", &t),
         vec![1, 4]
     );
-    // division by zero and non-numeric operands are null, and
-    // null is falsy
-    assert_eq!(run("/*[1 div 0]", &t), Vec::<u64>::new());
-    assert_eq!(run("/*[1 idiv 0]", &t), Vec::<u64>::new());
+    // division by zero gives inf or nan, both truthy as IEEE floats;
+    // non-numeric operands are null, and null is falsy
+    assert_eq!(run("/*[1 div 0]", &t), run("/*", &t));
+    assert_eq!(run("/*[1 idiv 0]", &t), run("/*", &t));
     assert_eq!(run("/*[:::name * 2]", &t), Vec::<u64>::new());
     // a glued minus stays a name character: no such property,
     // so the comparison selects nothing (but parses)
@@ -1381,8 +1384,9 @@ fn positional_and_filter_commands() {
         run("//*.rs @| sort_by(:::name) | [:::depth > 2]", &t),
         vec![7]
     );
-    // the wrong pipe is a parse error pointing at the right one
-    assert!(parse(&lex("//* | [1]").unwrap()).is_err());
+    // `| [1]` parses (it is a row of a table, spec: The Table Kind)
+    // and refuses at the run on anything else, pointing at `@| [n]`
+    assert!(parse(&lex("//* | [1]").unwrap()).is_ok());
     assert!(parse(&lex("//* @| [:::is-leaf]").unwrap()).is_err());
     // ...and the inline `@|` enforces the same discipline
     assert!(parse(&lex("//a | ((::x @| [:::is-leaf] @| count))").unwrap()).is_err());
@@ -2089,7 +2093,7 @@ fn json_and_jsonl_over_the_stream() {
 fn record_push_in_one_step() {
     // Ruling #49: `.%(...)` builds and pushes; `.name%(...)` names it.
     let t = MockTree::sample();
-    let ones = vals("/a/* | .r%(:::name, \"n\", 1) | $.r:n", &t);
+    let ones = vals("/a/* | .r%(:::name; n = 1) | $.r:n", &t);
     assert!(
         !ones.is_empty() && ones.iter().all(|v| matches!(v, Value::Int(1))),
         "{ones:?}"
@@ -2101,13 +2105,13 @@ fn record_push_in_one_step() {
             .all(|v| matches!(v, Value::Record(f) if f.len() == 1 && f[0].0 == "r")),
         "{views:?}"
     );
-    let anon = vals("/a/* | .%(:::name, \"n\", 2) | $.:n", &t);
+    let anon = vals("/a/* | .%(:::name; n = 2) | $.:n", &t);
     assert!(
         !anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))),
         "{anon:?}"
     );
     // the enriched form carries the register's named regulae
-    let rich = vals("/a/* | .k(:::name) | .%%(\"n\", 3) | :k", &t);
+    let rich = vals("/a/* | .k(:::name) | .%%(n = 3) | :k", &t);
     assert!(
         !rich.is_empty() && rich.iter().all(|v| matches!(v, Value::Str(_))),
         "{rich:?}"

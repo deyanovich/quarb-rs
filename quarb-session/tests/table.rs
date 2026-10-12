@@ -47,7 +47,7 @@ fn a_documents_own_table_renders_through_the_same_path() {
             .or_else(|_| Doc::parse(md, "markdown"))
             .unwrap(),
     );
-    let (cells, html) = s.eval_table("//*<table> @| table").unwrap();
+    let (cells, html) = s.eval_table("//*<tabula> @| table").unwrap();
     let html = html.expect("a koine table node renders as the grid");
     assert!(html.contains("<th>title</th>"), "{html}");
     assert!(html.contains("<td>Emma</td>"), "{html}");

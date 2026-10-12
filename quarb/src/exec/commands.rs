@@ -75,6 +75,8 @@ pub(super) fn command_reads_context(command: &Command) -> bool {
 
 pub(super) fn record_field(v: Value, name: &str) -> Value {
     match v {
+        // A frame's column by name, as a list; an array has none.
+        Value::Table(t) => t.column(name).unwrap_or(Value::Null),
         Value::Record(fields) => fields
             .into_iter()
             .find(|(k, _)| k == name)
@@ -391,9 +393,35 @@ pub(crate) fn apply_command(
         // reads text as a number under a locale's conventions; so is
         // `ngrams`: `@| ngrams(n)` windows the stream, `| ngrams(n)`
         // the word n-grams of a text.)
+        // `| #` on a node: a `tabula` node read as a table (spec: The
+        // Table); on a value, the table reading of the value.
+        Command::Func(call) if call.name == "#" && caps.iter().any(|c| c.topic.is_none()) => caps
+            .into_iter()
+            .map(|mut c| {
+                let v = match c.topic.take() {
+                    Some(t) => stdlib::apply_scalar(call, t, &|e| adapter.unit_scale(e))
+                        .into_iter()
+                        .next()
+                        .unwrap_or(Value::Null),
+                    None => match super::tabula::node_table(adapter, c.node) {
+                        Ok(t) => Value::table(t),
+                        Err(why) => {
+                            record_refusal(format!("#: {why}"));
+                            Value::Null
+                        }
+                    },
+                };
+                c.prov = effective_prov(&c);
+                c.topic = Some(v);
+                c
+            })
+            .collect(),
         Command::Func(call)
             if stdlib::known_agg(&call.name)
-                && !matches!(call.name.as_str(), "number" | "ngrams") =>
+                && !matches!(
+                    call.name.as_str(),
+                    "number" | "ngrams" | "csv" | "table" | "pretty"
+                ) =>
         {
             agg_as_func_command(call, caps, adapter)
         }
@@ -1482,7 +1510,7 @@ pub(super) fn agg_command(
     // named columns are the nodes' properties, as they are a
     // record's fields — a node stands for the record of the
     // columns asked of it.
-    let columns: Vec<&str> = if matches!(call.name.as_str(), "csv" | "table")
+    let columns: Vec<&str> = if matches!(call.name.as_str(), "csv" | "table" | "pretty")
         || call.name == stdlib::ROWS_FOR_RENDERING
     {
         stdlib::split_csv_delimiter(call)
@@ -1500,6 +1528,10 @@ pub(super) fn agg_command(
         .iter()
         .map(|c| match &c.topic {
             Some(t) => t.clone(),
+            // `@| #` over nodes: a node contributes the record of its
+            // properties (a CSV row its columns), so `/* @| #` is the
+            // frame; a node with none stands by its scalar (a sample).
+            None if call.name == "#" => super::serialize::node_to_json(adapter, c.node),
             None if !columns.is_empty() => Value::Record(
                 columns
                     .iter()

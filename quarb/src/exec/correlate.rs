@@ -179,9 +179,9 @@ fn streamed_count(
         // deduplicates its own matches across them.
         matches!(step.axis, Axis::Child | Axis::Descendant(Reach::All))
             && step
-            .predicates
-            .iter()
-            .all(|p| matches!(p, Predicate::Expr(_)))
+                .predicates
+                .iter()
+                .all(|p| matches!(p, Predicate::Expr(_)))
     };
     if !lead.iter().all(|s| streamable(s, false)) || !streamable(last, true) {
         return None;

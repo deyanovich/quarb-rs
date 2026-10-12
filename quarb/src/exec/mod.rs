@@ -31,6 +31,7 @@ mod prov;
 mod register;
 mod run;
 mod serialize;
+mod tabula;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -40,8 +41,8 @@ use arith::*;
 pub(crate) use commands::*;
 use compare::*;
 use context::*;
-use environ::*;
 pub(crate) use correlate::*;
+use environ::*;
 pub use identity::*;
 use memo::*;
 pub(crate) use operand::*;

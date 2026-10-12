@@ -8,6 +8,97 @@ use super::*;
 /// a computed push): one value itself, several as a list, none as
 /// null — so `%(where = (//token->place::lemma @| unique))` holds
 /// the list and an aggregate is not needed to keep it.
+/// Build the table a literal describes (spec: The Table Kind, the
+/// laws of the literal), `cell` evaluating one item.
+pub(super) fn table_literal(
+    mut header: Option<Vec<String>>,
+    rows: &[crate::ast::TableRow],
+    mut cell: impl FnMut(&Operand) -> Value,
+) -> Result<crate::Table, String> {
+    use crate::ast::TableRow;
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    let mut width: Option<usize> = header.as_ref().map(Vec::len);
+    for (i, row) in rows.iter().enumerate() {
+        let n = i + 1;
+        let mut values: Vec<Value> = match row {
+            TableRow::List(items) => items.iter().map(&mut cell).collect(),
+            TableRow::Record(items) => {
+                // Without a header: named rows infer it from the
+                // first row's names; positional rows are the array
+                // face, the positions naming the columns.
+                if header.is_none() && out.is_empty() && items.iter().any(|(name, _)| name.is_some()) {
+                    let names: Vec<String> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(j, (name, _))| {
+                            name.clone().ok_or_else(|| {
+                                format!("row {n}: item {} has no name while the others name their columns", j + 1)
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    width = Some(names.len());
+                    header = Some(names);
+                }
+                let Some(h) = header.as_ref() else {
+                    if let Some((name, _)) = items.iter().find(|(name, _)| name.is_some()) {
+                        return Err(format!(
+                            "row {n}: '{}' names no column of an array (its columns are positions); write the header first",
+                            name.as_deref().unwrap_or("")
+                        ));
+                    }
+                    let values: Vec<Value> = items.iter().map(|(_, e)| cell(e)).collect();
+                    let w = *width.get_or_insert(values.len());
+                    if values.len() > w {
+                        return Err(format!("row {n} has {} values, the table {w} columns", values.len()));
+                    }
+                    let mut values = values;
+                    values.resize(w, Value::Null);
+                    out.push(values);
+                    continue;
+                };
+                let mut values = vec![Value::Null; h.len()];
+                let mut next = 0;
+                for (name, e) in items {
+                    let v = cell(e);
+                    match name {
+                        Some(name) => match h.iter().position(|c| c == name) {
+                            Some(p) => values[p] = v,
+                            None => {
+                                return Err(format!(
+                                    "row {n}: '{name}' is not a column of the table (the header: {})",
+                                    h.join(", ")
+                                ));
+                            }
+                        },
+                        None => {
+                            if next >= h.len() {
+                                return Err(format!(
+                                    "row {n} has {} values, the header {} columns",
+                                    items.len(),
+                                    h.len()
+                                ));
+                            }
+                            values[next] = v;
+                            next += 1;
+                        }
+                    }
+                }
+                values
+            }
+        };
+        let w = *width.get_or_insert(values.len());
+        if values.len() > w {
+            return Err(format!(
+                "row {n} has {} values, the table {w} columns",
+                values.len()
+            ));
+        }
+        values.resize(w, Value::Null);
+        out.push(values);
+    }
+    Ok(crate::Table { header, rows: out })
+}
+
 pub(super) fn record_fields_prov(
     args: &[Arg],
     adapter: &impl AstAdapter,
@@ -26,9 +117,10 @@ pub(super) fn record_fields_prov(
                         (v, Prov::leaf(o))
                     }
                     Some(Arg::Lit(v)) => (v.clone(), Prov::default()),
-                    Some(Arg::Range(_, _)) | Some(Arg::Named { .. }) | Some(Arg::Opt { .. }) | None => {
-                        (Value::Null, Prov::default())
-                    }
+                    Some(Arg::Range(_, _))
+                    | Some(Arg::Named { .. })
+                    | Some(Arg::Opt { .. })
+                    | None => (Value::Null, Prov::default()),
                 };
                 fields.push((name.clone(), value, prov));
             }
@@ -408,14 +500,19 @@ pub(super) fn eval_operand(
                     .find(|(k, _)| k == name)
                     .map(|(_, v)| v)
                     .unwrap_or(Value::Null),
+                Value::Table(t) => t.column(name).unwrap_or(Value::Null),
                 _ => Value::Null,
             }]
         }
         // `value:::key` — the value's provenance over the origins it
         // was read from; the answer's own origins are those.
         Operand::ValueMeta { base, key } => {
-            let (_, o) = capture(|| eval_operand(adapter, node, base, trace, bound, scope));
+            let (values, o) = capture(|| eval_operand(adapter, node, base, trace, bound, scope));
             note_all(&o);
+            // A table's shape, `@(rows; columns)`, is its own.
+            if key == "shape" && let [Value::Table(t)] = values.as_slice() {
+                return vec![t.shape()];
+            }
             vec![origins_meta(adapter, &o, key).unwrap_or(Value::Null)]
         }
         // A field read on a list of records reads each:
@@ -432,6 +529,43 @@ pub(super) fn eval_operand(
                 .flat_map(|item| eval_operand(adapter, node, item, trace, bound, scope))
                 .collect(),
         )],
+        // `a ?? b` — the null default: the left side once, the right
+        // only where the left is null (false, 0 and "" stay).
+        Operand::Coalesce { left, right } => {
+            let v = operand_value(adapter, node, left, trace, bound, scope);
+            if matches!(v, Value::Null) {
+                eval_operand(adapter, node, right, trace, bound, scope)
+            } else {
+                vec![v]
+            }
+        }
+        // `value[i]` / `table[i; j]` — the index of a value (spec:
+        // Indexing a Value); a refusal where the value has no such
+        // index.
+        Operand::Index { base, rows, cols } => {
+            let v = operand_value(adapter, node, base, trace, bound, scope);
+            match crate::stdlib::index_value(v, rows, cols.as_ref()) {
+                Ok(v) => vec![v],
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    vec![Value::Null]
+                }
+            }
+        }
+        // `#(…)` — the table literal: the rows to the header's width
+        // (a short row filled with holes, a long one refused), a
+        // named item by its column, a header inferred from the first
+        // full record where none is written.
+        Operand::Table { header, rows } => {
+            let cell = |e: &Operand| operand_value(adapter, node, e, trace, bound, scope);
+            match table_literal(header.clone(), rows, cell) {
+                Ok(t) => vec![Value::table(t)],
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    vec![Value::Null]
+                }
+            }
+        },
         // `%+` — the named groups of the last match, as a record.
         Operand::NamedCaptures => vec![Value::Record(
             scope
@@ -559,7 +693,10 @@ pub(super) fn eval_operand(
                     vec![capsa(
                         node,
                         topic,
-                        scope.prov.cloned().unwrap_or_else(|| Prov::at(node, command_now())),
+                        scope
+                            .prov
+                            .cloned()
+                            .unwrap_or_else(|| Prov::at(node, command_now())),
                     )]
                 }
                 // The topic of a group is its members:
@@ -717,7 +854,7 @@ pub(super) fn eval_operand(
                         let v = operand_scalar_bound(adapter, node, e, trace, bound, scope);
                         out.push_str(&v.to_string());
                     }
-                    // Ruling #34: the strict hole refuses instead of
+                    // Ruling #34: the strict expansion refuses instead of
                     // splicing nothing (the ruling-#24 refusal cell,
                     // so the runner reports it as a refusal).
                     InterpSeg::Strict(e, msg) => {
@@ -726,7 +863,7 @@ pub(super) fn eval_operand(
                             record_refusal(match msg {
                                 Some(m) => m.clone(),
                                 None => format!(
-                                    "the strict hole '${{{}:?}}' produced nothing",
+                                    "the strict expansion '${{{}:?}}' produced nothing",
                                     crate::unparse::operand_text(e)
                                 ),
                             });

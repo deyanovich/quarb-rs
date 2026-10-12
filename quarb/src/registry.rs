@@ -106,6 +106,15 @@ const fn context(name: &'static str, doc: &'static str) -> FnSpec {
     }
 }
 
+/// A closing renderer: an aggregate the tool takes off and renders
+/// (`@| csv`, `@| pretty`), and a scalar command after a value
+/// (`| pretty` after a table).
+const fn rendering(name: &'static str, doc: &'static str) -> FnSpec {
+    let mut s = context(name, doc);
+    s.scalar = true;
+    s
+}
+
 const fn keyed(name: &'static str, doc: &'static str) -> FnSpec {
     FnSpec {
         name,
@@ -256,6 +265,68 @@ pub const SPECS: &[FnSpec] = &[
     scalar("haversine", "the great-circle distance to a point"),
     scalar("quantity", "the text read as a quantity with a unit"),
     scalar("convert", "the quantity converted to a unit"),
+    // The two readings of a table (spec: Command Libraries, "A
+    // library value") and the reshapes that need no algorithm.
+    both(
+        "@",
+        "the row reading: a library value as its rows, a record of lists as a list of records",
+    ),
+    both(
+        "%",
+        "the column reading: a library value as its columns, a list of records as a record of lists",
+    ),
+    both(
+        "transpose",
+        "a list of lists with its rows and columns exchanged",
+    ),
+    both(
+        "#",
+        "the table reading: a list of records as a frame, a list of lists as an array, a list of values as a sample",
+    ),
+    both(
+        "rows",
+        "the row reading of a table or a library value, as '| @'",
+    ),
+    both(
+        "columns",
+        "the column reading of a table or a library value, as '| %'",
+    ),
+    both(
+        "header",
+        "a table's header, the list of column names (null on the array face)",
+    ),
+    both(
+        "dim",
+        "a table's shape, @(rows; columns)",
+    ),
+    both(
+        "[]",
+        "a row of a table by position, or a slice of its rows (written '| [n]', '| [a..b]')",
+    ),
+    both(
+        "cell",
+        "one cell of a table: cell(i; j), the row by position, the column by position or name",
+    ),
+    both(
+        "row-to-header",
+        "the first row lifted into the header",
+    ),
+    both(
+        "header-to-row",
+        "the header lowered into the first row (as text), the table then an array",
+    ),
+    both(
+        "pivot",
+        "long to wide: pivot(row; column; value) makes one record per row key with a field per column key",
+    ),
+    FnSpec {
+        name: "melt",
+        scalar: true,
+        agg: Some(Agg::Reducing),
+        check: Check::None,
+        doc: "wide to long: melt(id; …) makes one record per other field, as name and value",
+        options: &["--name", "--value"],
+    },
     // Serializations.
     both("json", "the topic (per capsa) or the context (@|) as JSON"),
     both(
@@ -460,13 +531,20 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        context("csv", "the records as CSV (closing: the tool renders it)"),
+        rendering("csv", "the records as CSV (closing: the tool renders it); after a table value, the table as CSV"),
         Check::Command,
     ),
     with_check(
-        context(
+        rendering(
+            "pretty",
+            "the records as an aligned table (closing: the tool renders it); after a value, the value pretty-printed: a table the grid, a record one field per line, a list one item per line",
+        ),
+        Check::Command,
+    ),
+    with_check(
+        rendering(
             "table",
-            "the records as an aligned table (closing: the tool renders it)",
+            "the aligned table, as 'pretty' (accepted through 0.37; retired after)",
         ),
         Check::Command,
     ),

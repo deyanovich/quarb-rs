@@ -11,7 +11,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.36.0" }
+quarb = { path = "../quarb", version = "0.37.0" }
 # Every format a reliable pure-Rust library covers, so the crate
 # builds for wasm32: zip members deflate / deflate64 / bzip2 (the
 # bzip2 crate's default backend is libbz2-rs-sys, pure Rust) /

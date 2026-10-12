@@ -1333,11 +1333,45 @@ pub fn document_folder(
     )
 }
 
+thread_local! {
+    /// What a run's readings could not read, for `--explain`: one
+    /// line per folder leaf a reading knew but refused.
+    static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a line for `--explain`.
+pub fn note(line: String) {
+    NOTES.with(|n| n.borrow_mut().push(line));
+}
+
+/// Take the lines the readings left for `--explain` (the folder
+/// leaves a reading refused), clearing them.
+pub fn take_notes() -> Vec<String> {
+    NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
+/// A folder leaf the reading knows but refuses stays a document:
+/// its declared fields answer null, and the refusal rides into
+/// `--explain`, so one unreadable file does not refuse the shelf.
+/// The same file mounted alone is refused with the reason.
+fn refused_leaf(level: &str, path: &Path, e: &anyhow::Error) -> quarb_text::TextModel {
+    note(format!(
+        "{level}: {} not read, its fields answer null: {}",
+        path.display(),
+        e.root_cause()
+    ));
+    let mut m = quarb_text::TextModel::parse_plain("");
+    m.set_document_path(&path.display().to_string());
+    m
+}
+
 /// The reader a folder mount hands its document leaves to, by the
 /// prefix's reading: `text` (the formats the composed view does not
-/// parse itself), `corpus` (every prose format, with its tokens and
+/// parse itself, and the XML vocabularies by their declared
+/// identity), `corpus` (every prose format, with its tokens and
 /// sentences), `lit` (the marked-up editions). A file the reading
-/// does not take, or cannot read, stays a plain leaf.
+/// does not take stays a plain leaf; one it takes but cannot read
+/// becomes a document with null fields ([`refused_leaf`]).
 pub fn folder_reader(
     level: &'static str,
     opts: Option<String>,
@@ -1359,7 +1393,15 @@ pub fn folder_reader(
             None => path.display().to_string(),
         };
         let edition = matches!(ext.as_str(), "atd" | "atk" | "usfm" | "sfm" | "fb2");
-        match level {
+        // An `.xml` leaf is the reading's where it declares an
+        // identity the koine route knows (TEI, OSIS, DocBook, …);
+        // one declaring none is left to the default grafting, its
+        // markup as a DOM.
+        if ext == "xml" && quarb_text_koine::detect_xml_kind(&read_prose(path, ctx).ok()?).is_none()
+        {
+            return None;
+        }
+        let read: Option<anyhow::Result<quarb_text::TextModel>> = match level {
             "corpus" => {
                 let prose = matches!(
                     ext.as_str(),
@@ -1374,27 +1416,36 @@ pub fn folder_reader(
                         | "rtf"
                 ) || edition
                     || binary_text_kind(path).is_some();
-                prose
-                    .then(|| corpus_level(&spec, allow_shell, ctx).ok())
-                    .flatten()
+                prose.then(|| corpus_level(&spec, allow_shell, ctx))
             }
-            "lit" => (edition || ext == "xml")
-                .then(|| lit_level(&spec, allow_shell, ctx).ok())
-                .flatten(),
+            "lit" => (edition || ext == "xml").then(|| lit_level(&spec, allow_shell, ctx)),
             _ => {
                 if edition {
-                    koine_level(&spec, ctx).ok()
+                    Some(koine_level(&spec, ctx))
                 } else if let Some(kind) = binary_text_kind(path) {
-                    binary_text_level(kind, &std::fs::read(path).ok()?, path, ctx).ok()
-                } else if matches!(ext.as_str(), "tex" | "rst" | "org" | "rtf") {
-                    let mut m = text_level(&read_prose(path, ctx).ok()?, Some(path), ctx).ok()?;
-                    m.set_document_path(&path.display().to_string());
-                    Some(m)
+                    Some(
+                        std::fs::read(path)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|bytes| binary_text_level(kind, &bytes, path, ctx)),
+                    )
+                } else if matches!(ext.as_str(), "tex" | "rst" | "org" | "rtf" | "xml") {
+                    Some(
+                        read_prose(path, ctx)
+                            .and_then(|text| text_level(&text, Some(path), ctx))
+                            .map(|mut m| {
+                                m.set_document_path(&path.display().to_string());
+                                m
+                            }),
+                    )
                 } else {
                     None
                 }
             }
-        }
+        };
+        Some(match read? {
+            Ok(m) => m,
+            Err(e) => refused_leaf(level, path, &e),
+        })
     })
 }
 
@@ -1464,7 +1515,7 @@ pub fn text_level_inner(text: &str, path: Option<&Path>) -> anyhow::Result<quarb
             Some(kind) => quarb_text_koine::parse_xml_as(text, kind)
                 .map_err(|e| anyhow::anyhow!("reading {kind} through the koine route: {e}"))?,
             None => anyhow::bail!(
-                "the file declares no XML identity the text level knows (no namespace, \
+                "the file declares no XML identity the text model knows (no namespace, \
                  DOCTYPE, or unambiguous root) — name the vocabulary with \
                  koine:FILE?format=tei|docbook|jats|usx|osis|fb2|rnc|opencorpora|proiel, \
                  or read the markup itself with xml:FILE"
@@ -2134,7 +2185,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         }
         let a = Rc::new(
             quarb_code::CodeModel::open_with_decoding(target, &current_decoding(ctx)?)
-                .with_context(|| format!("parsing {} at the code level", target.display()))?,
+                .with_context(|| format!("parsing {} through the code model", target.display()))?,
         );
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
@@ -2505,7 +2556,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     }
     if is_djvu(p) {
         anyhow::bail!(
-            "{}: a DjVu reads at the text level — text:{}",
+            "{}: a DjVu reads through the text model — text:{}",
             p.display(),
             p.display()
         );

@@ -106,3 +106,99 @@ fn a_folder_of_editions_reads_at_the_literary_level() {
     assert_eq!(qua(&["//token @| count", &text]), "0\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn qua_full(args: &[&str]) -> (bool, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A leaf whose declared identity the reading knows but whose import
+/// it refuses stays a document: its declared fields answer null and
+/// the refusal rides into --explain, so one unreadable file does not
+/// refuse the shelf. The same file mounted alone is refused with the
+/// reason. An `.xml` declaring no identity the readings know is left
+/// to the default grafting, its markup as a DOM.
+#[test]
+fn an_unreadable_leaf_answers_null_with_the_reason_in_explain() {
+    let dir = std::env::temp_dir().join(format!("quarb-letters-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("good.xml"),
+        r#"<TEI xmlns="http://www.tei-c.org/ns/1.0">
+<text><body>
+<div type="chapter"><head>The fence</head>
+<p>Tom painted the fence.</p>
+<p>Ben watched.</p></div>
+</body></text></TEI>"#,
+    )
+    .unwrap();
+    // An inline the importer does not take (atrep is strict by the
+    // user's rule: litogramma says what it can say and refuses the
+    // rest): `<sub>`, as some Tolstoy Digital letters carry it.
+    std::fs::write(
+        dir.join("bad.xml"),
+        r#"<TEI xmlns="http://www.tei-c.org/ns/1.0">
+<teiHeader><fileDesc><titleStmt><title>A letter</title></titleStmt></fileDesc></teiHeader>
+<text><body><p>Dear friend, H<sub>2</sub>O.</p></body></text></TEI>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plain.xml"),
+        "<things><p>no identity declared</p></things>\n",
+    )
+    .unwrap();
+    for level in ["text", "corpus", "lit"] {
+        let mount = format!("{level}:{}", dir.display());
+        // the paragraphs of the readable TEI, none from the refused
+        // leaf, none from the undeclared markup
+        assert_eq!(qua(&["//paragraph @| count", &mount]), "2\n", "{level}");
+        // the refused leaf is a document with nothing under it
+        assert_eq!(
+            qua(&[r#"//*[:::name = "bad.xml"]//* @| count"#, &mount]),
+            "0\n",
+            "{level}"
+        );
+        assert_eq!(
+            qua(&[r#"//*[:::name = "bad.xml"] | %(::lemma)"#, &mount]),
+            "%(lemma = null)\n",
+            "{level}"
+        );
+        // the shelf still lists it
+        assert_eq!(
+            qua(&["/* | :::name", &mount]),
+            "bad.xml\ngood.xml\nplain.xml\n",
+            "{level}"
+        );
+        // the reason rides into --explain, and only there
+        let (ok, out, err) = qua_full(&["--explain", "//paragraph @| count", &mount]);
+        assert!(ok && out == "2\n", "{level}: {out} {err}");
+        assert!(
+            err.contains("bad.xml") && err.contains("answer null") && err.contains("sub"),
+            "{level}: {err}"
+        );
+        let (_, _, err) = qua_full(&["//paragraph @| count", &mount]);
+        assert!(!err.contains("answer null"), "{level}: {err}");
+        // mounted alone, the same file is refused with the reason
+        let (ok, _, err) = qua_full(&[
+            "//paragraph @| count",
+            &format!("{level}:{}", dir.join("bad.xml").display()),
+        ]);
+        assert!(!ok && err.contains("sub"), "{level}: {err}");
+    }
+    // the undeclared markup keeps its DOM under text:
+    assert_eq!(
+        qua(&["//p::", &format!("text:{}", dir.display())]),
+        "no identity declared\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -116,7 +116,7 @@ fn recall_resolution_is_scope_aware() {
     // A site buried in a subcontext body binds the *inner* scope:
     // the outer `$.2` numbers past it to `.b`, while the body's own
     // `$.tmp` still resolves inside.
-    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | .b(::w * 1) | %("n"; $.2)"#;
+    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | .b(::w * 1) | %(n = $.2)"#;
     assert_eq!(
         vals(src, "//recall[::ref = \"$.2\"]::ref-->::name"),
         vec![Value::Str("b".to_string())]
@@ -127,7 +127,7 @@ fn recall_resolution_is_scope_aware() {
     );
     // `$.` means the latest preceding site *in scope* — the
     // subcontext itself, not the last site inside its body.
-    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | %("z"; $.)"#;
+    let src = r#"/row | .s(/y | .tmp(::z * 1) | $.tmp) | %(z = $.)"#;
     assert_eq!(
         vals(src, "//recall[::ref = \"$.\"]::ref-->::name @| last"),
         vec![Value::Str("s".to_string())]
@@ -155,14 +155,14 @@ fn recalls_resolve_to_expr_push_sites() {
     // Expression pushes bind a regula at runtime exactly as plain
     // pushes and named subcontexts do, so they must count as
     // definition sites — both for name lookup and `$.N` numbering.
-    let a = QueryArbor::parse(r#"/row | .total(::price * ::qty) | %("t"; $.total)"#).unwrap();
+    let a = QueryArbor::parse(r#"/row | .total(::price * ::qty) | %(t = $.total)"#).unwrap();
     let resolved = match quarb::run("//recall::ref-->::name", &a).unwrap() {
         QueryResult::Values(vs) => vs,
         QueryResult::Nodes(_) => panic!("expected values"),
     };
     assert_eq!(resolved, vec![Value::Str("total".to_string())]);
 
-    let a = QueryArbor::parse(r#"/row | .a(::x * 1) | .b(::y) | %("n"; $.1)"#).unwrap();
+    let a = QueryArbor::parse(r#"/row | .a(::x * 1) | .b(::y) | %(n = $.1)"#).unwrap();
     let resolved = match quarb::run("//recall::ref-->::name", &a).unwrap() {
         QueryResult::Values(vs) => vs,
         QueryResult::Nodes(_) => panic!("expected values"),

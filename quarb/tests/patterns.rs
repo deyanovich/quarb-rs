@@ -587,12 +587,12 @@ fn keyed_aggregates_refuse_the_plain_pipe() {
     assert!(canon("/a *__ top(3, ::x)").contains("@| top"));
     // a field of the topic record is a key like any other
     for q in [
-        "/a | %(::n, \"t\", ::t) @| sort_by(:t)",
-        "/a | %(::n, \"t\", ::t) @| unique_by(:t)",
-        "/a | %(::n, \"t\", ::t) @| min_by(:t)",
-        "/a | %(::n, \"t\", ::t) @| max_by(:t)",
-        "/a | %(::n, \"t\", ::t) @| top(2, :t)",
-        "/a | %(::n, \"t\", ::t) @| group(:t) | top(1, :n)",
+        "/a | %(::n; t = ::t) @| sort_by(:t)",
+        "/a | %(::n; t = ::t) @| unique_by(:t)",
+        "/a | %(::n; t = ::t) @| min_by(:t)",
+        "/a | %(::n; t = ::t) @| max_by(:t)",
+        "/a | %(::n; t = ::t) @| top(2, :t)",
+        "/a | %(::n; t = ::t) @| group(:t) | top(1, :n)",
     ] {
         assert!(canon(q).contains("(:"), "{q}: {}", canon(q));
     }
@@ -602,7 +602,7 @@ fn keyed_aggregates_refuse_the_plain_pipe() {
 fn record_push_canonicalizes() {
     // Ruling #49: the record push in one step, anonymous or named,
     // plain or enriched; the sigil spelling is canonical.
-    assert_eq!(canon("/a | .%(::x, \"n\", 1)"), "/a | .%(::x; n = 1)");
+    assert_eq!(canon("/a | .%(::x; n = 1)"), "/a | .%(::x; n = 1)");
     assert_eq!(canon("/a | .r%(::x)"), "/a | .r%(::x)");
     assert_eq!(canon("/a | .r%%(::x)"), "/a | .r%%(::x)");
     assert_eq!(canon("/a | .r%(::x) | $.r:x"), "/a | .r%(::x) | $.r:x");
@@ -619,12 +619,12 @@ fn operand_paths_ascend_and_step_sideways() {
     // (a key in the flat form is a quoted string — a bare word in
     // a body names a command; canonical output bares the key)
     assert_eq!(
-        canon("/p | %(\"dir\"; \\*:::name; \"me\"; ::city)"),
+        canon("/p | %(dir = \\*:::name; me = ::city)"),
         "/p | %(dir = \\:::name; me = ::city)"
     );
     assert_eq!(canon("/a[;-*::x = 1]"), "/a[>*::x = 1]");
     assert_eq!(canon("/a[>>?*::x = 1]"), "/a[>>?*::x = 1]");
-    assert_eq!(canon("/a | %(\"up\"; /..::n)"), "/a | %(up = \\::n)");
+    assert_eq!(canon("/a | %(up = /..::n)"), "/a | %(up = \\::n)");
 }
 
 #[test]
@@ -644,7 +644,7 @@ fn record_convention_canonicalizes() {
         canon("/a | %(n = ::age, city = /profile::city)"),
         "/a | %(n = ::age; city = /profile::city)"
     );
-    assert_eq!(canon("/a | %(\"n\"; ::age)"), "/a | %(n = ::age)");
+    assert_eq!(canon("/a | %(n = ::age)"), "/a | %(n = ::age)");
     // a bare word in a field body names a command; an unknown one
     // is refused by name, never read as text
     assert!(

@@ -663,7 +663,7 @@ fn translate_text_reach(q: &Q, path: NodeId, sql: &mut Sql) -> Option<Conj> {
             tests.join(" AND ")
         ),
         exact: false,
-        note: "the text-level reach".to_string(),
+        note: "the text-model reach".to_string(),
     })
 }
 
@@ -938,7 +938,7 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     }
     // Below a directory the walk is already narrow; a candidate
     // set pays only when it spares the text level.
-    let text_reach = conjs.iter().any(|c| c.note == "the text-level reach");
+    let text_reach = conjs.iter().any(|c| c.note == "the text-model reach");
     if !whole_container && !text_reach {
         return Plan::scan("a subtree prefix: the walk is narrow already");
     }

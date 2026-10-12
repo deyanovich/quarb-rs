@@ -7,7 +7,17 @@ Rust toolchain, no compile:
 pip install quarb-full
 qua '/torvalds/linux::stars' github:
 qua '/gitlab-org//*<project>::name' gitlab:
+qua '/* | %(::species; ::bill_length_mm; ::flipper_length_mm) @| sklearn:cluster.KMeans.fit_predict(3)' penguins.csv
 ```
+
+The Python command libraries come along: `np:`, `pd:`, `sp:`,
+`sklearn:` and `morph:` (numpy, pandas, scipy, scikit-learn,
+pymorphy3) are linked in, and the packages they wrap are
+dependencies of this wheel, so one `pip install` gives a `qua`
+that runs them in a stateless call, no notebook, no script. The
+binary embeds the CPython it was built for (the wheel is tagged
+per version) and finds the packages where pip put them: in the
+same environment as the wheel, or in an active virtualenv.
 
 Part of [Quarb](https://quarb.org), a query language for
 *arbors* — tree-spanned graphs. This package ships the full

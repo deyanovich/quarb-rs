@@ -34,6 +34,13 @@ impl Decimal {
 /// when the text has integer form, a finite `Float` otherwise,
 /// `None` when it has no reading.
 pub fn read(text: &str, decimal: Decimal) -> Option<Value> {
+    // The three floats Python spells by name read back by it.
+    match text.trim() {
+        "nan" => return Some(Value::Float(f64::NAN)),
+        "inf" => return Some(Value::Float(f64::INFINITY)),
+        "-inf" => return Some(Value::Float(f64::NEG_INFINITY)),
+        _ => {}
+    }
     let canonical = canonical(text.trim(), decimal)?;
     if let Ok(n) = canonical.parse::<i64>() {
         return Some(Value::Int(n));
@@ -214,8 +221,13 @@ mod tests {
         assert_eq!(r("1,"), None);
         assert_eq!(r("abc"), None);
         assert_eq!(r("1_000"), None);
-        assert_eq!(r("inf"), None);
         assert_eq!(r(""), None);
+        // the three floats Python spells by name, and only those
+        assert!(matches!(r("inf"), Some(Value::Float(f)) if f == f64::INFINITY));
+        assert!(matches!(r("-inf"), Some(Value::Float(f)) if f == f64::NEG_INFINITY));
+        assert!(matches!(r("nan"), Some(Value::Float(f)) if f.is_nan()));
+        assert_eq!(r("Infinity"), None);
+        assert_eq!(r("NaN"), None);
     }
 
     #[test]

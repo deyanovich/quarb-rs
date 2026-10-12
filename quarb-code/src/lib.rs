@@ -81,7 +81,7 @@ pub fn supported(ext: &str) -> bool {
 pub enum CodeError {
     #[error("code: {0}")]
     Io(#[from] std::io::Error),
-    #[error("code: no code-level support for extension {0:?} (rs, py, js, mjs, cjs, jsx, c, h)")]
+    #[error("code: the code model has no reading for extension {0:?} (rs, py, js, mjs, cjs, jsx, c, h)")]
     Language(String),
     #[error(transparent)]
     Backend(#[from] quarb_tree_sitter::TreeSitterError),

@@ -119,12 +119,12 @@ fn verbatim() {
 /// as lemma, `Header: value` cells, empty cell skipped.
 #[test]
 fn table_denormalizes() {
-    assert_eq!(values("//*<table>::lemma"), vec!["Crew"]);
+    assert_eq!(values("//*<tabula>::lemma"), vec!["Crew"]);
     assert_eq!(
-        values("//*<table>//unordered-item::"),
+        values("//*<tabula>//unordered-item::"),
         vec!["Name: Alice", "Role: captain", "Name: Bob"]
     );
-    assert_eq!(nodes("//*<table>").len(), 1);
+    assert_eq!(nodes("//*<tabula>").len(), 1);
 }
 
 /// The round trip: render the text-level reading to HTML, re-parse
@@ -175,9 +175,9 @@ fn infobox_row_labels() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };
-    assert_eq!(vals("//*<table>::lemma"), vec!["Emu War"]);
+    assert_eq!(vals("//*<tabula>::lemma"), vec!["Emu War"]);
     assert_eq!(
-        vals("//*<table>//unordered-item::"),
+        vals("//*<tabula>//unordered-item::"),
         vec![
             "A man holding an emu",
             "Date: 2 November 1932",
@@ -236,7 +236,7 @@ fn row_label_tables_carry_lemmas() {
              <tr><th>Result</th><td>Emu victory</td></tr>
            </table>"#,
     );
-    assert_eq!(vals(&m, "//*<table>::lemma"), vec!["Emu War"]);
+    assert_eq!(vals(&m, "//*<tabula>::lemma"), vec!["Emu War"]);
     assert_eq!(
         vals(&m, "//*<cell>[::lemma = \"Result\"]::"),
         vec!["Result: Emu victory"]

@@ -106,7 +106,7 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         Value::Null => ("null", String::new()),
         Value::Bool(b) => ("bool", b.to_string()),
         Value::Int(n) => ("int", n.to_string()),
-        Value::Float(f) => ("float", f.to_string()),
+        Value::Float(f) => ("float", crate::value::format_float(*f)),
         Value::Str(s) => ("str", s.clone()),
         Value::List(_) | Value::Record(_) => ("str", v.to_json()),
         // The fallback route: instants normally emit typed
@@ -116,7 +116,9 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         Value::Instant { .. }
         | Value::Duration { .. }
         | Value::Period { .. }
-        | Value::Quantity { .. } => ("str", v.to_string()),
+        | Value::Quantity { .. }
+        | Value::Foreign(_)
+        | Value::Table(_) => ("str", v.to_string()),
     }
 }
 

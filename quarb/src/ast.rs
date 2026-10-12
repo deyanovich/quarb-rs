@@ -487,6 +487,24 @@ pub enum PatSeg {
 }
 
 /// An operand: a value relative to the current node, or a literal.
+/// One index of a value (spec: Indexing a Value): a position
+/// (1-based, negative from the end), a range with either end open,
+/// or a column's name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexSpec {
+    At(i64),
+    Range(Option<i64>, Option<i64>),
+    Name(String),
+}
+
+/// One row of a table literal: a list row, or a record row whose
+/// items are named or positional.
+#[derive(Debug, Clone)]
+pub enum TableRow {
+    List(Vec<Operand>),
+    Record(Vec<(Option<String>, Operand)>),
+}
+
 #[derive(Debug, Clone)]
 pub enum Operand {
     /// A pattern literal — `*"sub"*`, `"app"*`, `*".gz"`,
@@ -553,6 +571,25 @@ pub enum Operand {
     /// contributes every value it yields, so `@(/tags/*::)` gathers
     /// a path's values into one list. `@()` is the empty list.
     List(Vec<Operand>),
+    /// `#(...)` — the table literal (spec: The Table Kind): an
+    /// optional header list of names, then rows, each a list
+    /// (`@(1; 2)`, an array) or a record (`%("Braund"; 22)`, a
+    /// frame; an unnamed item is positional in header order, a
+    /// named one matches the header by name).
+    Table {
+        header: Option<Vec<String>>,
+        rows: Vec<TableRow>,
+    },
+    /// `value[i]`, `value[a..b]`, `table[i; j]` — brackets glued to a
+    /// value expression index the value (spec: Indexing a Value): on
+    /// a list the item or the sublist, on a table the row, the rows,
+    /// or with a second index the cell, a column slice, a row slice
+    /// or a sub-table. Brackets on a path step stay the predicate.
+    Index {
+        base: Box<Operand>,
+        rows: IndexSpec,
+        cols: Option<IndexSpec>,
+    },
     /// `$ordinal` / `$ord` — the capsa's 1-based position in the
     /// current context. Ephemeral order (it changes with every
     /// sort, filter, and group), unlike the stable tree fact
@@ -622,6 +659,15 @@ pub enum Operand {
         then: Box<Operand>,
         other: Box<Operand>,
     },
+    /// `a ?? b` — the null default (spec: The Conditional, "The null
+    /// default"): `a` unless it is null, then `b`; null alone is
+    /// tested, so false, 0 and "" stay. The left side evaluates once,
+    /// the right only when needed; `a ?? b ?? c` groups to the right.
+    /// Below arithmetic and comparison, above the conditional.
+    Coalesce {
+        left: Box<Operand>,
+        right: Box<Operand>,
+    },
     /// `@-` — ALL the edges that reached this capsa on the walk's
     /// final hop, as a list (the sigil law: `$` one, `@` all). Bare,
     /// the labels; projected (`@-::prop`), each edge's property.
@@ -663,7 +709,7 @@ pub enum Operand {
 pub enum InterpSeg {
     Text(String),
     Expr(Operand),
-    /// `${expr:?}` / `${expr:?message}` — the strict hole (ruling
+    /// `${expr:?}` / `${expr:?message}` — the strict expansion (ruling
     /// #34): refuses when the hole would splice nothing, with the
     /// optional message. Bash's own spelling for "error if unset".
     Strict(Operand, Option<String>),

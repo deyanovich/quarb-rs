@@ -67,7 +67,7 @@ const CORPUS: &[&str] = &[
     // the aggregate push, the aggregate record (enriched) and a
     // once-read register accessor after `@|`
     "/row | ::fare @| .total(count) @| %%(unique = unique @| count) @| $.total",
-    // environment commands carry their alias as `env`
+    // environment commands carry their alias as `lib`
     "/row | ::name | sh:tr(a-z; A-Z) @| go:sort(-r)",
     // a named option (the csv delimiter) reflects as an option node
     "/row | ::fare @| csv(\";\"; fare)",
@@ -140,7 +140,7 @@ const CORPUS: &[&str] = &[
     // (rulings #47/#48): a field of the topic, of a register, of %+
     "/row | [::name == (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",
     // the record push, plain and enriched
-    "/row | .r%(::x, \"n\", 1) | .%%(\"k\", 2) | $.r:n",
+    "/row | .r%(::x; n = 1) | .%%(k = 2) | $.r:n",
     // the list literal
     "/row | %(tags = @(::a; ::b); n = 1) | @(1; 2)",
 ];
@@ -148,7 +148,7 @@ const CORPUS: &[&str] = &[
 /// kind → sorted property keys, as locked. `param` is reserved
 /// (never emitted: reflection sees expanded queries).
 const VOCABULARY: &[(&str, &[&str])] = &[
-    ("agg", &["env", "name"]),
+    ("agg", &["lib", "name"]),
     ("agg-push", &["name"]),
     ("agg-recall", &["ref"]),
     ("agg-record", &["enriched"]),
@@ -177,7 +177,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("capture", &["group"]),
     // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
     ("captures", &[]),
-    ("cmd", &["env", "name"]),
+    ("cmd", &["lib", "name"]),
     ("compare", &["op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     ("cond", &[]),

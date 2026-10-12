@@ -6,7 +6,8 @@ use super::*;
 /// Arithmetic). Operands combine via their numeric readings; a
 /// missing reading yields null, and null propagates. Integer
 /// results that overflow promote to floats; `div` is always a
-/// float; division (of any flavor) by zero is null.
+/// float; division by zero gives inf, -inf or nan as IEEE 754 does,
+/// idiv and mod by zero nan.
 /// Temporal arithmetic (spec: The Temporal Fragment). A TYPED
 /// temporal operand (Instant or Duration) activates it — two plain
 /// numbers or strings never reach here, so the numeric fragment's
@@ -296,16 +297,12 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
                 .checked_mul(b)
                 .map(Value::Int)
                 .unwrap_or_else(|| promoted(|x, y| x * y)),
-            ArithOp::Div => {
-                if b == 0 {
-                    Value::Null
-                } else {
-                    Value::Float(a as f64 / b as f64)
-                }
-            }
+            // A zero divisor gives what IEEE 754 gives: inf, -inf,
+            // nan (spec: the float values nan, inf, -inf).
+            ArithOp::Div => Value::Float(a as f64 / b as f64),
             ArithOp::IDiv => {
                 if b == 0 {
-                    Value::Null
+                    Value::Float(f64::NAN)
                 } else {
                     // The one overflow (i64::MIN idiv -1) promotes.
                     a.checked_div(b)
@@ -315,7 +312,7 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
             }
             ArithOp::Mod => {
                 if b == 0 {
-                    Value::Null
+                    Value::Float(f64::NAN)
                 } else {
                     // i64::MIN mod -1 is mathematically 0.
                     Value::Int(a.checked_rem(b).unwrap_or(0))
@@ -326,21 +323,15 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
     let (Some(a), Some(b)) = (l.numeric(), r.numeric()) else {
         return Value::Null;
     };
-    // Overflow to infinity, or an indeterminate form, is no
-    // reading: null, never a float that cannot be written back.
-    let finite = |x: f64| {
-        if x.is_finite() {
-            Value::Float(x)
-        } else {
-            Value::Null
-        }
-    };
+    // Overflow to infinity and the indeterminate forms are the
+    // floats IEEE 754 gives, inf, -inf and nan: they print as Python
+    // prints them and read back (spec: the float values).
     match op {
-        ArithOp::Add => finite(a + b),
-        ArithOp::Sub => finite(a - b),
-        ArithOp::Mul => finite(a * b),
-        ArithOp::Div | ArithOp::IDiv | ArithOp::Mod if b == 0.0 => Value::Null,
-        ArithOp::Div => finite(a / b),
+        ArithOp::Add => Value::Float(a + b),
+        ArithOp::Sub => Value::Float(a - b),
+        ArithOp::Mul => Value::Float(a * b),
+        ArithOp::IDiv | ArithOp::Mod if b == 0.0 => Value::Float(f64::NAN),
+        ArithOp::Div => Value::Float(a / b),
         ArithOp::IDiv => {
             let t = (a / b).trunc();
             if t >= i64::MIN as f64 && t <= i64::MAX as f64 {
@@ -349,6 +340,6 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
                 Value::Float(t)
             }
         }
-        ArithOp::Mod => finite(a % b),
+        ArithOp::Mod => Value::Float(a % b),
     }
 }

@@ -500,6 +500,11 @@ impl AstAdapter for HtmlAdapter {
         if tag == "a" && n.attr(&self.names, "href").is_some() {
             out.push("link".to_string());
         }
+        // A table in every substrate carries `tabula` (spec: The
+        // Table): `//*<tabula>` finds it, `| #` reads it.
+        if tag == "table" {
+            out.push("tabula".to_string());
+        }
         out
     }
 

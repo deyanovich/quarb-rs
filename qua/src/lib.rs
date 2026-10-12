@@ -108,7 +108,7 @@ struct Cli {
     /// columns (the union of their fields, in first-seen order),
     /// scalars a `value` column; widths count grapheme clusters, so
     /// stressed words align.
-    #[arg(long, conflicts_with_all = ["json", "jsonl", "kaiv", "csv"])]
+    #[arg(long = "pretty", alias = "table", conflicts_with_all = ["json", "jsonl", "kaiv", "csv"])]
     table: bool,
 
     /// Print the results as CSV (RFC 4180), a header row first; the
@@ -338,6 +338,9 @@ struct OutputCtx {
     /// (`go=exec:~/go/bin`, `sh=shell:`; `--allow-shell` is
     /// `sh=shell:` under its older name).
     environments: Vec<quarb::Environment>,
+    /// The command libraries this build links (`morph:` under the
+    /// `morph` feature), reached by their prefix with no mount.
+    libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>>,
     /// --reproducible: provenance without the machine-dependent
     /// instant rungs.
     reproducible: bool,
@@ -668,6 +671,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         quant_bound: cli.quantifier_bound,
         allow_shell: cli.allow_shell,
         environments: environments.clone(),
+        libraries: linked_libraries(),
         reproducible: cli.reproducible,
         now,
         explain: cli.explain,
@@ -1147,13 +1151,38 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
 /// `sh=shell:`. `--allow-shell` mounts `sh=shell:`, and a `shell:`
 /// mount opens the shell gate: the two are one opt-in. Two
 /// environments may not share an alias.
+/// The command libraries compiled into this binary, by feature.
+fn linked_libraries() -> Vec<std::sync::Arc<dyn quarb::CommandLibrary>> {
+    #[allow(unused_mut)]
+    let mut libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>> = Vec::new();
+    #[cfg(feature = "morph")]
+    libraries.push(std::sync::Arc::new(quarb_lib_morph::Morph));
+    #[cfg(feature = "scipy")]
+    libraries.push(std::sync::Arc::new(quarb_lib_scipy::Scipy));
+    #[cfg(feature = "sklearn")]
+    libraries.push(std::sync::Arc::new(quarb_lib_sklearn::Sklearn));
+    #[cfg(feature = "numpy")]
+    libraries.push(std::sync::Arc::new(quarb_lib_numpy::Numpy));
+    #[cfg(feature = "pandas")]
+    libraries.push(std::sync::Arc::new(quarb_lib_pandas::Pandas));
+    libraries
+}
+
 fn take_environments(cli: &mut Cli) -> anyhow::Result<Vec<quarb::Environment>> {
+    let libraries = linked_libraries();
     let mut environments: Vec<quarb::Environment> = Vec::new();
     let mut kept = Vec::new();
     for p in std::mem::take(&mut cli.paths) {
         match quarb::Environment::parse_mount(&p.to_string_lossy()) {
             None => kept.push(p),
             Some(Ok(e)) => {
+                if libraries.iter().any(|l| l.prefix() == e.alias) {
+                    anyhow::bail!(
+                        "'{}' is the prefix of a linked command library; an environment \
+                         takes another alias",
+                        e.alias
+                    );
+                }
                 if environments.iter().any(|x| x.alias == e.alias) {
                     anyhow::bail!(
                         "two environments mounted as '{}'; give each its own alias",
@@ -2370,6 +2399,7 @@ impl OutputCtx {
             now: Some(self.now),
             allow_shell: self.allow_shell,
             environments: self.environments.clone(),
+            libraries: self.libraries.clone(),
             quantifier_bound: self.quant_bound,
             reproducible: self.reproducible,
             collation: self.locale.map(|(l, _)| l.tag.to_string()),
@@ -2379,13 +2409,18 @@ impl OutputCtx {
         }
     }
 
-    /// --explain: the unresolved references a run left.
+    /// --explain: the unresolved references a run left, and the
+    /// folder leaves a reading refused (they answer null).
     fn explain_refs(&self, refs: &[String]) {
+        let notes = quarb_open::take_notes();
         if self.explain {
             for r in refs {
                 eprintln!(
                     "unresolved external reference: {r} (mount it, or declare a tree for it)"
                 );
+            }
+            for n in notes {
+                eprintln!("{n}");
             }
         }
     }
@@ -2529,6 +2564,29 @@ fn emit_values(
     mode: Output,
     oc: &OutputCtx,
 ) -> anyhow::Result<()> {
+    // A library value prints as its own text; every other output
+    // form serializes its rows, each a value of the output.
+    let values = match mode {
+        Output::Quarb => values,
+        _ => {
+            let mut rows = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    Value::Foreign(f) => match f.rows() {
+                        Ok(Value::List(items)) => rows.extend(items.iter().cloned()),
+                        Ok(other) => rows.push(other),
+                        Err(_) => rows.push(Value::Str(f.display())),
+                    },
+                    Value::Table(t) => match t.rows_value() {
+                        Value::List(items) => rows.extend(items.iter().cloned()),
+                        other => rows.push(other),
+                    },
+                    other => rows.push(other),
+                }
+            }
+            rows
+        }
+    };
     match mode {
         // The Quarb form: a scalar bare, a record `%(k = v; …)`, a
         // list `@(a; b)` — text that reads back as a query; under

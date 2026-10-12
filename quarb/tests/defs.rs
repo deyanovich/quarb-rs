@@ -56,7 +56,7 @@ fn expansion_errors() {
 /// The record convention breaks the call-operand duality — a
 /// leading field name would ride as the topic and silently re-key
 /// the record — so `rec`/`record` refuse operand position (found
-/// porting `aif`: `&f(%("seen"; ::Fare))` reflected && ran as
+/// porting `aif`: `&f(%(seen = ::Fare))` reflected && ran as
 /// `('seen' | %(::Fare))`, keying the record `Fare`).
 #[test]
 fn rec_refuses_call_operand_position() {

@@ -1,0 +1,16 @@
+[package]
+name = "quarb-lib-numpy"
+description = "A Quarb command library reflecting numpy through an embedded Python: every function and array method under the np: prefix, the stream as an ndarray, arrays kept as library values between commands"
+keywords = ["quarb", "numpy", "arrays", "command-library"]
+categories = ["science", "mathematics"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.37.0" }
+quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.37.0" }
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"] }

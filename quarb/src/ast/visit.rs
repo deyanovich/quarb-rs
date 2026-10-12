@@ -169,11 +169,33 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         }
         Operand::Neg(inner) | Operand::Outer(inner) => v.operand(inner),
         Operand::Group(e) => v.pred(e),
-        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } => v.operand(base),
+        Operand::Field { base, .. } | Operand::ValueMeta { base, .. } | Operand::Index { base, .. } => {
+            v.operand(base)
+        }
+        Operand::Coalesce { left, right } => {
+            v.operand(left);
+            v.operand(right);
+        }
         Operand::PeerReg { at, .. } => v.operand(at),
         Operand::List(items) => {
             for i in items {
                 v.operand(i);
+            }
+        }
+        Operand::Table { rows, .. } => {
+            for row in rows {
+                match row {
+                    crate::ast::TableRow::List(items) => {
+                        for i in items {
+                            v.operand(i);
+                        }
+                    }
+                    crate::ast::TableRow::Record(items) => {
+                        for (_, i) in items {
+                            v.operand(i);
+                        }
+                    }
+                }
             }
         }
         Operand::Piped { expr, commands } => {

@@ -110,26 +110,28 @@ fn pipe_tails_in_holes() {
 /// spelling (`rec`/`record` are aliases); `%%(...)` is the named
 /// register view enriched with the args — registers first in the
 /// `%.` layout, args after, an arg overriding a register field
-/// that shares its name.
+/// that shares its name. A field is `key = value` or an auto-named
+/// projection; the leading string that named the field after it
+/// is retired (2026-10-11).
 #[test]
 fn record_sigil_builds_and_enriches() {
     // constructor == rec, explicit and auto-named fields
     assert_eq!(
-        values(r#"/items/0 | %("n", ::name, ::name)"#),
+        values(r#"/items/0 | %(n = ::name; ::name)"#),
         ["%(n = \"app-web\"; name = \"app-web\")"]
     );
     assert_eq!(
-        values(r#"/items/0 | %("n"; ::name)"#),
-        values(r#"/items/0 | %("n", ::name)"#)
+        values(r#"/items/0 | %(n = ::name)"#),
+        values(r#"/items/0 | %(n = (::name))"#)
     );
     // enrichment: register fields first, args after
     assert_eq!(
-        values(r#"/items/0 | .n(::name) | %%("upper", (::name | upper))"#),
+        values(r#"/items/0 | .n(::name) | %%(upper = (::name | upper))"#),
         ["%(n = \"app-web\"; upper = \"APP-WEB\")"]
     );
     // an arg overrides the register field sharing its name
     assert_eq!(
-        values(r#"/items/0 | .n(::name) | %%("n", "won")"#),
+        values(r#"/items/0 | .n(::name) | %%(n = "won")"#),
         ["%(n = \"won\")"]
     );
 }
@@ -141,6 +143,17 @@ fn record_sigil_refusals() {
     let e = quarb::run("/items/* | %%()", &doc()).unwrap_err();
     assert!(e.to_string().contains("the register view is %."), "{e}");
     // the duplicate-name check covers the sigil spellings too
-    let e = quarb::run(r#"/items/* | %("a", 1, "a", 2)"#, &doc()).unwrap_err();
+    let e = quarb::run(r#"/items/* | %(a = 1; a = 2)"#, &doc()).unwrap_err();
     assert!(e.to_string().contains("twice"), "{e}");
+    // a leading string no longer names the field after it: the key
+    // is written, as for a computed value
+    for q in [r#"/items/* | %("Braund"; 22)"#, r#"/items/* | %("seen"; $_)"#, r#"/items/* | %%("n", "won")"#] {
+        let e = quarb::run(q, &doc()).unwrap_err().to_string();
+        assert!(
+            e.contains("needs a name") && e.contains("retired") && e.contains("age = 22"),
+            "{q}: {e}"
+        );
+    }
+    // a grouping key keeps its spelling
+    assert!(quarb::run(r#"/items/* @| group("k"; ::name) @| count"#, &doc()).is_ok());
 }

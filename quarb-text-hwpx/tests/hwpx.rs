@@ -161,9 +161,9 @@ fn tables_notes_links_and_the_accepted_view() {
     ]
     .concat();
     let m = quarb_text_hwpx::parse(&package(&section)).unwrap();
-    assert_eq!(values("//*<table>//*<cell> | ::body", &m), ["Emma", "25"]);
+    assert_eq!(values("//*<tabula>//*<cell> | ::body", &m), ["Emma", "25"]);
     assert_eq!(
-        values("//*<table>//*<cell> | ::lemma", &m),
+        values("//*<tabula>//*<cell> | ::lemma", &m),
         ["title", "price"]
     );
     // The body (`<note>`) at the document end; the callout

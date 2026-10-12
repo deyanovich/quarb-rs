@@ -61,11 +61,17 @@ pub enum Token {
     /// `?=` — the value-match marker inside a parenthesized
     /// conditional: `(x ?= k ? r : else)`.
     QuestionEq,
+    /// `??` — the null default: `a ?? b` is `a` unless `a` is null
+    /// (spec: The Conditional, "The null default"); spaced on both
+    /// sides like every binary operator.
+    Coalesce,
     /// `!` — distal suffix.
     Bang,
     /// `^` — root anchor; or its rounded spelling, the empty double
     /// pair `(())`.
     Caret,
+    /// `#(` — the table literal's sigil (spec: The Table Kind).
+    Hash,
     /// `$` — leaf anchor.
     Dollar,
     /// `::` — property projection.
@@ -543,7 +549,11 @@ fn option_name_before(tokens: &[Token]) -> bool {
             if text == "-" || is_option_word(text) {
                 return true;
             }
-            *glued && matches!(tokens.get(tokens.len().wrapping_sub(2)), Some(Token::DashDash))
+            *glued
+                && matches!(
+                    tokens.get(tokens.len().wrapping_sub(2)),
+                    Some(Token::DashDash)
+                )
         }
         _ => false,
     }
@@ -686,6 +696,12 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::At);
                 i += 1;
             }
+            // `#(…)` — the table literal: a header list and rows;
+            // bare after a pipe, the table reading of the stream.
+            '#' => {
+                tokens.push(Token::Hash);
+                i += 1;
+            }
             // `@(a; b)` — the list literal — follows whitespace.
             '@' if at(i + 1) == Some('(') => {
                 // The node-id anchor's opener glues to its list
@@ -712,7 +728,16 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 (Some('('), _) | (Some('%'), Some('('))
             ) =>
             {
-                if !after_whitespace(&chars, i) && !after_push_dot(&chars, i) {
+                // A row of a table literal, or an argument, glues to
+                // the opener or the separator before it, as a list
+                // literal does.
+                if !after_whitespace(&chars, i)
+                    && !after_push_dot(&chars, i)
+                    && !matches!(
+                        tokens.last(),
+                        Some(Token::LParen | Token::Semi | Token::Comma)
+                    )
+                {
                     return Err(QuarbError::lex(
                         "a record sigil follows whitespace or a push dot: write ' %(…)' or '.name%(…)'",
                     ));
@@ -868,7 +893,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 1;
             }
             '?' => {
-                if chars.get(i + 1) == Some(&'=') {
+                if chars.get(i + 1) == Some(&'?') {
+                    binary("??", glued, at(i + 2))?;
+                    tokens.push(Token::Coalesce);
+                    i += 2;
+                } else if chars.get(i + 1) == Some(&'=') {
                     binary("?=", glued, at(i + 2))?;
                     tokens.push(Token::QuestionEq);
                     i += 2;
@@ -990,7 +1019,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // colon glued to a name on its right. Spaced on the
             // right, a colon is the else of a conditional or a
             // definition's separator, as ever (`? 2 : 0`, `: -3`).
-            ':' if at(i + 1).is_some_and(|c| c.is_alphabetic() || c == '_') => {
+            ':' if at(i + 1).is_some_and(|c| c.is_alphabetic() || c == '_' || c.is_ascii_digit()) => {
+                // A digit after the colon is a column of the array
+                // face (`t:2`, `| :2`); the else of a conditional is
+                // spaced on both sides, so `:3` is never that.
                 tokens.push(Token::Field);
                 i += 1;
             }
@@ -2689,8 +2721,12 @@ mod glued_operator_tests {
         assert!(lex("/a | %(::x)").is_ok());
         assert!(lex("/a | .r%(::x)").is_ok());
         assert!(lex("/a | .%%(::x)").is_ok());
+        // A record glues to a call's opener and follows a separator
+        // (a table literal's rows: `#(%(…); %(…))`), like a list.
+        assert!(lex("/a | f(%(::x))").is_ok());
+        assert!(lex("#(@(a; b); %(1; 2))").is_ok());
         assert!(
-            lex("/a | f(%(::x))")
+            lex("/a | f(x%(::x))")
                 .unwrap_err()
                 .to_string()
                 .contains("whitespace")

@@ -275,6 +275,22 @@ impl AstAdapter for CsvAdapter {
         self.cell(node, name).map(|c| Value::Str(self.canonical(c)))
     }
 
+    /// A row's cells by header, in column order (an empty cell
+    /// missing): the record a row stands for where one is wanted
+    /// (`@| #`, `| json`).
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if node.0 == 0 {
+            return Vec::new();
+        }
+        self.columns
+            .iter()
+            .filter_map(|c| {
+                self.cell(node, c)
+                    .map(|v| (c.clone(), Value::Str(self.canonical(v))))
+            })
+            .collect()
+    }
+
     /// `::::columns` (root), `::::n-rows` (root), `::::delimiter` and
     /// `::::decimal` (root, as decided), `::::n-fields` (row), and any
     /// column by name.

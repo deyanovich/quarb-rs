@@ -1,0 +1,19 @@
+[package]
+name = "quarb-lib-morph"
+description = "A Quarb command library wrapping pymorphy3, the Russian morphological analyser, through an embedded Python: lemma, parse, tag and inflect as declared commands under the morph: prefix"
+keywords = ["quarb", "pymorphy3", "morphology", "russian", "command-library"]
+categories = ["text-processing"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.37.0" }
+quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.37.0" }
+# `auto-initialize`: the engine embeds CPython and starts it on the
+# first call; the host links against the local Python at build
+# time, behind the host's feature.
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"] }

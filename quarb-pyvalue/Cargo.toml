@@ -1,0 +1,15 @@
+[package]
+name = "quarb-pyvalue"
+description = "Quarb values as Python objects and back: the one pyo3 mapping the Python bindings (quarb-py) and the Python-wrapping command libraries share"
+keywords = ["quarb", "python", "pyo3"]
+categories = ["api-bindings"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.37.0" }
+pyo3 = { version = "0.28", features = ["abi3-py38"] }

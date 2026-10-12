@@ -79,9 +79,11 @@ fn a_glob_with_an_empty_literal_steps_by_character() {
 }
 
 #[test]
-fn an_overflowing_float_is_null_and_json_stays_valid() {
+fn an_overflowing_float_is_inf_and_json_stays_valid() {
+    // Overflow is inf, as IEEE 754 has it (spec: the float values);
+    // JSON, which cannot spell it, writes null.
     let a = Items(vec![Value::Float(1e308)]);
-    assert_eq!(values("= 1e308 * 10", &a), [Value::Null]);
+    assert_eq!(values("= 1e308 * 10", &a), [Value::Float(f64::INFINITY)]);
     assert_eq!(
         values("= 1e308 * 10 @| json", &a),
         [Value::Str("[null]".into())]

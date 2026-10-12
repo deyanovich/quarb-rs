@@ -30,7 +30,7 @@ fn translations() {
     assert_eq!(x("/books/*/price:: @| sum"), "[.books[].price] | add");
     assert_eq!(x("/books/*[2..3]/title::"), ".books[1:3][].title");
     assert_eq!(
-        x(r#"/books/* | %("t"; /title::; "p"; /price::)"#),
+        x(r#"/books/* | %(t = /title::; p = /price::)"#),
         ".books[] | {t: .title, p: .price}"
     );
     assert_eq!(

@@ -1,0 +1,16 @@
+[package]
+name = "quarb-lib-pandas"
+description = "A Quarb command library reflecting pandas through an embedded Python: every function and DataFrame or Series method under the pd: prefix, the stream of records as a frame with its labels as the index, frames kept as library values between commands"
+keywords = ["quarb", "pandas", "dataframe", "command-library"]
+categories = ["science", "database"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quarb = { path = "../quarb", version = "0.37.0" }
+quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.37.0" }
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"] }

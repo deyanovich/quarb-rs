@@ -36,7 +36,9 @@ fn a_headless_first_command_applies_to_the_seed() {
     // `.n(cc)` pushes the word's length: `cc` applied to `$_`.
     assert_eq!(
         values("/w/* | :: | .n(cc) | %."),
-        vec!["%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 4)"]
+        vec![
+            "%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 3)", "%(n = 4)"
+        ]
     );
     // ... and in a record field.
     assert_eq!(
@@ -44,7 +46,10 @@ fn a_headless_first_command_applies_to_the_seed() {
         vec!["%(w = \"tom\"; n = 3)"]
     );
     // A headless command with a tail: `cc` then arithmetic.
-    assert_eq!(values("/w/* | :: @| [-1] | .n(cc | ($_ * 2)) | $.n"), vec!["8"]);
+    assert_eq!(
+        values("/w/* | :: @| [-1] | .n(cc | ($_ * 2)) | $.n"),
+        vec!["8"]
+    );
     // In a list item.
     assert_eq!(values("/w/* | :: @| [1] | @(cc; upper)"), vec!["3, TOM"]);
 }
@@ -97,14 +102,19 @@ fn the_aggregate_push_files_once_on_every_capsa_and_passes_the_context_on() {
         vec!["%(total = 6; unique = 3)"]
     );
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| .share(unique @| count | ($_ div $.total)) @| $.share"),
+        values(
+            "/w/* | :: @| .total(count) @| .share(unique @| count | ($_ div $.total)) @| $.share"
+        ),
         vec!["0.5"]
     );
     // The body's seed is the list of the peers' topics: a node
     // context stands by its names.
     assert_eq!(values("/w/* @| .n(count) @| $.n"), vec!["6"]);
     // Nothing to file on an empty context.
-    assert_eq!(values("/w/*[:: = \"none\"] | :: @| .n(count) @| count"), vec!["0"]);
+    assert_eq!(
+        values("/w/*[:: = \"none\"] | :: @| .n(count) @| count"),
+        vec!["0"]
+    );
 }
 
 #[test]
@@ -133,7 +143,10 @@ fn the_aggregate_record_builds_from_the_context_as_a_whole() {
 #[test]
 fn register_accessors_after_the_aggregation_pipe_read_once() {
     assert_eq!(values("/w/* | :: @| .total(count) @| $.total"), vec!["6"]);
-    assert_eq!(values("/w/* | :: @| .total(count) @| %."), vec!["%(total = 6)"]);
+    assert_eq!(
+        values("/w/* | :: @| .total(count) @| %."),
+        vec!["%(total = 6)"]
+    );
     // After `|` they read per capsa, as before.
     assert_eq!(
         values("/w/* | :: @| .total(count) | $.total @| count"),
@@ -157,7 +170,10 @@ fn a_reduction_keeps_the_regulae_its_inputs_share() {
         vec!["%(unique = 3; total = 6)"]
     );
     // A single capsa keeps its whole register across an aggregate.
-    assert_eq!(values("/n/* | :: | .seven @| count | %."), vec!["%(seven = 7)"]);
+    assert_eq!(
+        values("/n/* | :: | .seven @| count | %."),
+        vec!["%(seven = 7)"]
+    );
     assert_eq!(values("/n/* | :: | .seven @| sum | $.seven"), vec!["7"]);
     // Rows that filed different values share nothing under the name.
     assert_eq!(

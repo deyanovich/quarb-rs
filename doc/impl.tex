@@ -1138,8 +1138,119 @@ root-anchored sequence of hops, each an axis followed by a name:
     the alias (\texttt{Environment::resolve}; the shell's 127); the
     gate (\texttt{exec::gate}) refuses an unmounted alias before the
     run; reflection \texttt{cmd}/\texttt{agg} carry the alias as
-    \texttt{env}; \texttt{python:} is named and refused until the
+    \texttt{lib} (spelled \texttt{env} in 0.36.0); \texttt{python:} is named and refused until the
     native framing lands \\
+\texttt{| morph:lemma}, \texttt{| morph:parse(-n=1)},
+\texttt{@| morph:lemma}, \texttt{cargo build -p qua --features morph}
+  & \live command libraries (\texttt{quarb::library}): the
+    \texttt{CommandLibrary} trait (prefix, declared commands, call,
+    run-time requirements and their availability), a
+    \texttt{Synopsis} per command (operands in order with accepted
+    values, options with short and long names and whether a value
+    follows, the pipe or pipes, the input slot by position or option
+    name, the return), checked by \texttt{exec::gate} before the run
+    with the synopsis quoted in every refusal; the input slot filled
+    by the pipe unless \texttt{\$\_} places it; options as keyword
+    arguments; after \texttt{@|} the stream is the value and a
+    returned list is one capsa per element with the shared regulae;
+    a failed call null after \texttt{|} (text on stderr once) and a
+    refusal after \texttt{@|}; a node crosses as the record of its
+    name, text and properties. The pilot \texttt{quarb-lib-morph}
+    (pymorphy3 through pyo3 \texttt{auto-initialize}, feature
+    \texttt{morph} on qua, a Python-free default) with
+    \texttt{quarb-pyvalue}, the value mapping shared with
+    \texttt{quarb-py}; linked libraries are listed in
+    \texttt{RunOptions::libraries}, and a library's prefix refuses
+    an environment mount of the same alias \\
+\texttt{@| scipy:mannwhitneyu}, \texttt{@| scipy:linkage(--pairs)},
+\texttt{@| sklearn:pca(-n=2)}, \texttt{--features scipy,sklearn}
+  & \live the stream as a table (\texttt{quarb-lib-scipy},
+    \texttt{quarb-lib-sklearn}): the glue reads a list of numbers as
+    a sample, a list of records as a matrix (numeric readings per
+    value as the columns in record order, the first text field the
+    row label carried back on every returned row), a list of lists as
+    rows; a k-sample test splits one label and one value per record
+    into samples in the order the labels first appear; \texttt{--pairs}
+    reads two text fields and one numeric by position as row, column,
+    entry; a hole (a column missing in one record, a value with no
+    numeric reading, a null) refuses by name unless
+    \texttt{--nan-policy=omit}; every test returns
+    \texttt{\%(statistic; pvalue; …)} and the other fields keep
+    scipy's and scikit-learn's names (\texttt{df}, \texttt{dof},
+    \texttt{rvalue}, \texttt{n\_components}); \texttt{--digits}
+    rounds to significant digits; the shared call plumbing
+    (\texttt{quarb\_pyvalue::PyGlue}: the module compiled once, the
+    slot filled, options as keyword arguments with \texttt{-} spelled
+    \texttt{\_}, a Python exception a failed call) also carries
+    \texttt{quarb-lib-morph} \\
+\texttt{@| pd:describe | pd:round(2)}, \texttt{@| np:percentile(90)},
+\texttt{@| sp:stats.norm.cdf}, \texttt{sklearn:cluster.KMeans.fit\_predict(3)},
+\texttt{| @}, \texttt{| \%}, \texttt{@| pivot(row; column; value)}
+  & \live reflected commands and library values: a library that
+    reflects its package (\texttt{quarb\_pyvalue::Reflective}:
+    \texttt{quarb-lib-numpy} \texttt{np:}, \texttt{quarb-lib-pandas}
+    \texttt{pd:}, and the undeclared names of \texttt{sp:} and
+    \texttt{sklearn:}) resolves a dotted name through the package
+    when the gate first meets it (\texttt{CommandLibrary::resolve}),
+    the synopsis built from \texttt{inspect.signature} and leaked for
+    the process: required positionals are operands, defaulted
+    parameters options, \texttt{*args} the operand \texttt{...},
+    \texttt{**kwargs} the option \texttt{*} that opens the gate; a
+    method's \texttt{self} is the input; a class on the path is
+    constructed with the options its constructor declares, an
+    intermediate object (\texttt{groupby}, \texttt{rolling}) takes
+    its method, an attribute of a result is read during the run. The
+    input is constructed once (a frame with the first text field as
+    index, or the matrix of numeric fields) and a result that is not
+    plain data is \texttt{Value::Foreign} (the \texttt{Foreign} trait:
+    kind, display, rows, columns; \texttt{PyForeign} holds the
+    object), equal only to itself, handed back whole to the next
+    library command, printed by its own \texttt{str()}, exported by
+    its rows in every output form and by the stdlib commands
+    \texttt{@} (rows) and \texttt{\%} (columns), refused by kind
+    elsewhere; \texttt{transpose}, \texttt{pivot}, \texttt{melt} are
+    the stdlib's reshapes \\
+\texttt{= \#(@(name; age); \%("Braund"; 22))}, \texttt{\#(\%(1; 2); \%(3; 4))}, \texttt{@| \#},
+\texttt{| :age}, \texttt{\$\_:::shape},
+\texttt{fit((\textasciicircum{}/* | ::label))}
+  & \live the table kind and the operand rule: \texttt{Value::Table}
+    (\texttt{quarb::Table}: an optional header and rows of one width,
+    \texttt{null} the hole; a frame with a header, an array without)
+    written \texttt{\#(...)} (\texttt{Token::Hash},
+    \texttt{Operand::Table}, the laws of the literal in
+    \texttt{exec::operand::table\_literal}), printed as its literal,
+    read by \texttt{@}/\texttt{rows} (each row as the table has it)
+    and \texttt{\%}/\texttt{columns} (a record of lists, keyed by
+    the header or by position), made by \texttt{\#} (the table
+    reading of a stream, \texttt{stdlib::table\_reading}), a row by
+    \texttt{| [n]} and a slice by \texttt{| [a..b]} (the plain pipe's
+    positional bracket now parses and refuses at the run on anything
+    but a table), \texttt{header} and \texttt{dim} beside them, a
+    column by the value accessor (\texttt{:2} lexes for the array
+    face), printed on the result line with each row on its own line,
+    exported by its rows, crossing into a library command as its
+    rows; \texttt{Operand::Index} (\texttt{v[2]}, \texttt{t[2; "age"]},
+    ranges in either position; \texttt{stdlib::index\_value} behind it,
+    \texttt{| [n]} and \texttt{cell(i; j)}), \texttt{row-to-header} and
+    \texttt{header-to-row}; \texttt{pretty} the renderer (a
+    \texttt{rendering} registry spec: a closing aggregate the tool
+    takes off, and a scalar command after a value;
+    \texttt{stdlib::pretty\_value}, \texttt{tabulate\_table}; \texttt{table}
+    and \texttt{--table} aliases through 0.37); the trait \texttt{tabula} on every
+    substrate's table (the text model's lowered table, renamed from
+    \texttt{table}; HTML and XML \texttt{table} elements) and
+    \texttt{exec::tabula::node\_table} behind \texttt{| \#} on such a
+    node (lemma-keyed frame for the text model, declared header rows
+    and spans for a grid); a DataFrame or a two-dimensional ndarray coming back is a
+    table (the index the first column unless positional, NaN/NA a
+    hole), a one-dimensional array or a positional Series a list
+    (\texttt{quarb\_pyvalue::foreign::as\_table}). An operand of a library
+    command keeps its kind: every positional argument of a reflected
+    call goes through the same construction as the input, the input
+    fills the first parameter named as data (\texttt{InputSlot},
+    \texttt{OperandOrSelf} for a class-rooted path whose instance on
+    the pipe is the receiver), a bare constructor without a data
+    parameter is built from its options alone \\
 \texttt{| [::x =\textasciitilde{} /(\textbackslash{}w+)/] | \%(k = \$1)},
 \texttt{quai}
   & \live match captures (filter-command \texttt{=\textasciitilde}

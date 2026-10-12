@@ -497,6 +497,32 @@ impl QueryArbor {
                     self.walk_operand(item, id);
                 }
             }
+            Operand::Index { base, .. } => {
+                let id = self.intern(Some("index"), Vec::new(), Some(parent));
+                self.walk_operand(base, id);
+            }
+            Operand::Coalesce { left, right } => {
+                let id = self.intern(Some("coalesce"), Vec::new(), Some(parent));
+                self.walk_operand(left, id);
+                self.walk_operand(right, id);
+            }
+            Operand::Table { rows, .. } => {
+                let id = self.intern(Some("table"), Vec::new(), Some(parent));
+                for row in rows {
+                    match row {
+                        crate::ast::TableRow::List(items) => {
+                            for item in items {
+                                self.walk_operand(item, id);
+                            }
+                        }
+                        crate::ast::TableRow::Record(items) => {
+                            for (_, item) in items {
+                                self.walk_operand(item, id);
+                            }
+                        }
+                    }
+                }
+            }
             Operand::Now => {
                 self.intern(Some("now"), Vec::new(), Some(parent));
             }
@@ -574,7 +600,7 @@ impl QueryArbor {
                             );
                         }
                         crate::ast::InterpSeg::Expr(e) => self.walk_operand(e, id),
-                        // Ruling #34 wrappers: the strict hole and
+                        // Ruling #34 wrappers: the strict expansion and
                         // the default hole, each holding its operand
                         // subtree (the default's fallback second).
                         crate::ast::InterpSeg::Strict(e, msg) => {
@@ -629,10 +655,12 @@ impl QueryArbor {
     fn walk_command(&mut self, command: &Command, parent: usize) {
         match command {
             Command::Func(call) => {
-                // An environment command carries its alias as `env`.
+                // An environment command carries its alias as `lib`: the
+                // library it calls into (a mounted environment, or a
+                // static library's declared prefix).
                 let props = match crate::env::split_env(&call.name) {
                     Some((alias, name)) => vec![
-                        ("env".to_string(), Value::Str(alias.to_string())),
+                        ("lib".to_string(), Value::Str(alias.to_string())),
                         ("name".to_string(), Value::Str(name.to_string())),
                     ],
                     None => vec![("name".to_string(), Value::Str(call.name.clone()))],
@@ -643,7 +671,7 @@ impl QueryArbor {
             Command::Agg(call) => {
                 let props = match crate::env::split_env(&call.name) {
                     Some((alias, name)) => vec![
-                        ("env".to_string(), Value::Str(alias.to_string())),
+                        ("lib".to_string(), Value::Str(alias.to_string())),
                         ("name".to_string(), Value::Str(name.to_string())),
                     ],
                     None => vec![("name".to_string(), Value::Str(call.name.clone()))],
@@ -1351,6 +1379,8 @@ fn type_name(v: &Value) -> &'static str {
         Value::Duration { .. } => "duration",
         Value::Period { .. } => "period",
         Value::Quantity { .. } => "quantity",
+        Value::Foreign(_) => "library",
+        Value::Table(_) => "table",
     }
 }
 

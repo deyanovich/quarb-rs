@@ -28,6 +28,12 @@ pub enum Value {
     /// Scalar). Constructed by `record(...)`; field order is
     /// significant, matching kaiv namespaces and JSON key order.
     Record(Vec<(String, Value)>),
+    /// A table (spec: The Table Kind): rows of one width, with a
+    /// header naming the columns (a frame) or without one (an
+    /// array). The reading a list of same-shaped records admits,
+    /// written `#(...)`; a hole is `null`. Shared behind an `Arc`
+    /// like a list.
+    Table(std::sync::Arc<Table>),
     /// A point on the UTC timeline (spec: The Temporal Fragment).
     /// `offset_min` preserves the source's UTC offset for display
     /// only — comparison is always on the timeline. Displays as
@@ -64,12 +70,260 @@ pub enum Value {
         /// display in the base.
         written: Option<(f64, String)>,
     },
+    /// A library value (spec: Command Libraries, "A library
+    /// value"): what a command library built and keeps in its own
+    /// form — a frame, an array, an object — so that its next
+    /// command takes it as it is, with no crossing into records and
+    /// lists between two commands. The engine knows its kind for
+    /// messages, its text (the object's own display), and its two
+    /// exports, the row reading (`| @`) and the column reading
+    /// (`| %`); anything else done with one is refused by kind.
+    /// Two library values are equal only when they are the same
+    /// object.
+    Foreign(ForeignValue),
+}
+
+/// A table: rows of one width, each cell a value, `null` the hole.
+/// With a header it is a frame (the columns named, `t:age` a
+/// column); without one an array (`#(%(1; 2); %(3; 4))`, the positions
+/// its columns). One kind,
+/// two faces: an ndarray and a DataFrame are its two boundary forms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Table {
+    pub header: Option<Vec<String>>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+impl Table {
+    /// The number of columns: the header's width, else the first
+    /// row's (every row is padded or refused to that width).
+    pub fn width(&self) -> usize {
+        match &self.header {
+            Some(h) => h.len(),
+            None => self.rows.first().map_or(0, Vec::len),
+        }
+    }
+
+    /// `@(rows; columns)`.
+    pub fn shape(&self) -> Value {
+        Value::list(vec![
+            Value::Int(self.rows.len() as i64),
+            Value::Int(self.width() as i64),
+        ])
+    }
+
+    /// The kind, for messages: `a frame 3×2`, `an array 2×2`.
+    pub fn kind(&self) -> String {
+        format!(
+            "{} {}×{}",
+            if self.header.is_some() { "a frame" } else { "an array" },
+            self.rows.len(),
+            self.width()
+        )
+    }
+
+    /// Whether the table is a sample: one column and no header, the
+    /// reading a list of values admits, which reads back to it.
+    pub fn is_sample(&self) -> bool {
+        self.header.is_none() && self.width() == 1
+    }
+
+    /// The row reading: a frame's rows as records, an array's as
+    /// lists, a sample's as its values.
+    pub fn rows_value(&self) -> Value {
+        Value::list(self.rows.iter().map(|r| self.row_value(r)).collect())
+    }
+
+    fn row_value(&self, row: &[Value]) -> Value {
+        match &self.header {
+            Some(h) => Value::Record(h.iter().cloned().zip(row.iter().cloned()).collect()),
+            None if self.width() == 1 => row.first().cloned().unwrap_or(Value::Null),
+            None => Value::list(row.to_vec()),
+        }
+    }
+
+    /// The row at `i` (1-based), as the row reading gives it.
+    pub fn row(&self, i: usize) -> Option<Value> {
+        (i >= 1).then(|| self.rows.get(i - 1)).flatten().map(|r| self.row_value(r))
+    }
+
+    /// The column reading: a record of lists, keyed by the header,
+    /// or by position (`1`, `2`, …) on the array face.
+    pub fn columns_value(&self) -> Value {
+        let cols: Vec<Value> = (0..self.width()).map(|j| self.column_at(j)).collect();
+        let keys: Vec<String> = match &self.header {
+            Some(h) => h.clone(),
+            None => (1..=self.width()).map(|j| j.to_string()).collect(),
+        };
+        Value::Record(keys.into_iter().zip(cols).collect())
+    }
+
+    /// The header as a list of names; null on the array face.
+    pub fn header_value(&self) -> Value {
+        match &self.header {
+            Some(h) => Value::list(h.iter().cloned().map(Value::Str).collect()),
+            None => Value::Null,
+        }
+    }
+
+    /// The rows `a..b` (1-based, inclusive, either end open) as a
+    /// table under the same header.
+    pub fn slice(&self, a: Option<i64>, b: Option<i64>) -> Table {
+        let n = self.rows.len() as i64;
+        let from = a.unwrap_or(1).clamp(1, n + 1) - 1;
+        let to = b.unwrap_or(n).clamp(0, n);
+        Table {
+            header: self.header.clone(),
+            rows: if from < to {
+                self.rows[from as usize..to as usize].to_vec()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// The output form: the literal with the header and each row on
+    /// a line of its own, so it pastes back as the constructor.
+    pub fn to_quarb_lines(&self) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(self.rows.len() + 1);
+        if let Some(h) = &self.header {
+            let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
+            parts.push(format!("@({})", names.join("; ")));
+        }
+        for r in &self.rows {
+            let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
+            parts.push(format!("%({})", cells.join("; ")));
+        }
+        if parts.len() <= 1 {
+            return format!("#({})", parts.join(""));
+        }
+        format!("#({})", parts.join(";\n  "))
+    }
+
+    fn column_at(&self, j: usize) -> Value {
+        Value::list(
+            self.rows
+                .iter()
+                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                .collect(),
+        )
+    }
+
+    /// A column by name, as a list: the header's name on a frame, the
+    /// position's text (`"2"`) on the array face, where the positions
+    /// are the column names.
+    pub fn column(&self, name: &str) -> Option<Value> {
+        match &self.header {
+            Some(h) => h.iter().position(|c| c == name).map(|j| self.column_at(j)),
+            None => name
+                .parse::<usize>()
+                .ok()
+                .filter(|j| *j >= 1 && *j <= self.width())
+                .map(|j| self.column_at(j - 1)),
+        }
+    }
+
+    /// The rows and columns exchanged: an array's transpose.
+    pub fn transposed(&self) -> Table {
+        let w = self.width();
+        Table {
+            header: None,
+            rows: (0..w)
+                .map(|j| {
+                    self.rows
+                        .iter()
+                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// The literal that reads back: `#(@(name; age); %("Braund";
+    /// 22))` for a frame, `#(%(1; 2); %(3; 4))` for an array: every row a
+    /// record, the header the one list.
+    pub fn to_quarb(&self) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(self.rows.len() + 1);
+        if let Some(h) = &self.header {
+            let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
+            parts.push(format!("@({})", names.join("; ")));
+        }
+        for r in &self.rows {
+            let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
+            parts.push(format!("%({})", cells.join("; ")));
+        }
+        format!("#({})", parts.join("; "))
+    }
+}
+
+/// What a command library implements for the values it keeps in
+/// its own form; see [`Value::Foreign`].
+pub trait Foreign: Send + Sync {
+    /// The kind, for messages: `DataFrame 17×3`, `ndarray (17, 3)
+    /// float64`.
+    fn kind(&self) -> String;
+    /// The object's own text (its display).
+    fn display(&self) -> String;
+    /// The row reading (`| @`): a frame as a list of records with
+    /// its index as the first field, an array as nested lists, a
+    /// series as a list. `Err` names why there is none.
+    fn rows(&self) -> Result<Value, String>;
+    /// The column reading (`| %`): a frame as a record of columns,
+    /// each a record keyed by the index; a series on a named index
+    /// as one record. `Err` names why there is none (an array has
+    /// no names).
+    fn columns(&self) -> Result<Value, String>;
+    /// The object itself, for the library that made it.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A shared library value; equal to another only as the same object.
+#[derive(Clone)]
+pub struct ForeignValue(pub std::sync::Arc<dyn Foreign>);
+
+impl ForeignValue {
+    pub fn new(f: impl Foreign + 'static) -> ForeignValue {
+        ForeignValue(std::sync::Arc::new(f))
+    }
+
+    /// The refusal for a command that has no reading of a library
+    /// value, naming the kind and the two exports.
+    pub fn refusal(&self, command: &str) -> String {
+        format!(
+            "{command}: {} is a library value; '| @' exports its rows, '| %' its columns",
+            self.0.kind()
+        )
+    }
+}
+
+impl std::ops::Deref for ForeignValue {
+    type Target = dyn Foreign;
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl PartialEq for ForeignValue {
+    fn eq(&self, other: &ForeignValue) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for ForeignValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Foreign({})", self.0.kind())
+    }
 }
 
 impl Value {
     /// A list value from its elements.
     pub fn list(items: Vec<Value>) -> Value {
         Value::List(std::sync::Arc::new(items))
+    }
+
+    /// A table value (shared like a list).
+    pub fn table(t: Table) -> Value {
+        Value::Table(std::sync::Arc::new(t))
     }
 
     /// The elements of a list value, taken out of their sharing
@@ -107,10 +361,17 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::List(l) => !l.is_empty(),
             Value::Record(o) => !o.is_empty(),
+            Value::Table(t) => !t.rows.is_empty(),
             Value::Instant { .. } => true,
             Value::Duration { secs, nanos } => *secs != 0 || *nanos != 0,
             Value::Period { .. } => true,
             Value::Quantity { value, .. } => *value != 0.0,
+            // No truth value: a predicate on a library value is
+            // refused by kind, and false.
+            Value::Foreign(f) => {
+                crate::exec::record_refusal(f.refusal("a predicate"));
+                false
+            }
         }
     }
 
@@ -227,6 +488,9 @@ impl Value {
                     .collect();
                 format!("%({})", inner.join("; "))
             }
+            Value::Table(t) => t.to_quarb(),
+            // A library value has no Quarb form that reads back; its
+            // text is the object's own display.
             other => other.to_string(),
         }
     }
@@ -236,6 +500,7 @@ impl Value {
     pub fn display_form(&self) -> String {
         match self {
             Value::List(_) | Value::Record(_) => self.to_quarb(),
+            Value::Table(t) => t.to_quarb_lines(),
             other => other.to_string(),
         }
     }
@@ -268,6 +533,14 @@ impl Value {
             | Value::Duration { .. }
             | Value::Period { .. }
             | Value::Quantity { .. } => json_string(&self.to_string()),
+            // The row reading, serialized.
+            Value::Table(t) => t.rows_value().to_json(),
+            // The row reading, serialized; its text where the object
+            // has no rows.
+            Value::Foreign(f) => match f.rows() {
+                Ok(rows) => rows.to_json(),
+                Err(_) => json_string(&f.display()),
+            },
         }
     }
 
@@ -486,6 +759,11 @@ fn sort_key(v: &Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey
         }
         Value::Period { start, grain } => SortKey::Period(*start, *grain as u8),
         Value::Quantity { value, .. } => SortKey::line(*value),
+        // A library value keys by identity: equal only to itself,
+        // ordered after lists and records.
+        Value::Foreign(x) => SortKey::RecordText(format!("\u{0}foreign:{:p}", std::sync::Arc::as_ptr(&x.0))),
+        // A table keys by its literal, after lists and records.
+        Value::Table(t) => SortKey::RecordText(format!("\u{0}table:{}", t.to_quarb())),
         // A string has at most one reading — numeric text carries
         // no unit, unital text excludes pure time (that is span
         // territory), span text needs its span grammar, ISO text
@@ -517,7 +795,7 @@ impl fmt::Display for Value {
             Value::Null => Ok(()),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(n) => write!(f, "{n}"),
-            Value::Float(x) => write!(f, "{x}"),
+            Value::Float(x) => write!(f, "{}", format_float(*x)),
             Value::Str(s) => write!(f, "{s}"),
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
@@ -557,6 +835,8 @@ impl fmt::Display for Value {
                 Some((v, u)) => write!(f, "{} {}", format_float(*v), u),
                 None => write!(f, "{} {}", format_float(*value), base),
             },
+            Value::Foreign(x) => write!(f, "{}", x.display()),
+            Value::Table(t) => write!(f, "{}", t.to_quarb()),
         }
     }
 }
@@ -594,8 +874,35 @@ pub(crate) fn quantital_pair_with(
 /// Render a float the way `Display` does (no trailing `.0` for whole
 /// values). Arithmetic minted no infinity or NaN (an overflow is
 /// null); a source that carries one still renders here, as text.
-fn format_float(f: f64) -> String {
-    f.to_string()
+/// A float's text (spec: The Numeric Fragment): the shortest digit
+/// string that reads back to the same double, as Python, JavaScript,
+/// jq and PostgreSQL print it, in exponent form when the decimal
+/// exponent is below -4 or at least 16, exactly Python's repr
+/// (`2.89e-82`, `1e-05`, `1.2345678901234568e+29`), positional
+/// otherwise (`0.001`, `1234567890123456`); a whole double prints
+/// without a fraction (`3`), the engine's policy since the first
+/// release. NaN and the infinities as Rust spells them.
+pub(crate) fn format_float(f: f64) -> String {
+    if f.is_nan() {
+        return "nan".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    if f == 0.0 {
+        return f.to_string();
+    }
+    let sci = format!("{f:e}");
+    let (mantissa, exponent) = sci.split_once('e').expect("an exponent");
+    let exponent: i32 = exponent.parse().expect("a decimal exponent");
+    if (-4..16).contains(&exponent) {
+        return f.to_string();
+    }
+    format!(
+        "{mantissa}e{}{:02}",
+        if exponent < 0 { '-' } else { '+' },
+        exponent.abs()
+    )
 }
 
 /// JSON-quote a string (the escapes JSON requires; forward slash
@@ -643,6 +950,26 @@ impl From<&str> for Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn floats_print_as_python_prints_them() {
+        for (f, want) in [
+            (2.89e-82, "2.89e-82"),
+            (0.00001, "1e-05"),
+            (1e16, "1e+16"),
+            (1.2345678901234568e29, "1.2345678901234568e+29"),
+            (0.001, "0.001"),
+            (0.0001, "0.0001"),
+            (1234567890123456.0, "1234567890123456"),
+            (3.0, "3"),
+            (-5e-8, "-5e-08"),
+            (0.0, "0"),
+        ] {
+            assert_eq!(format_float(f), want, "{f}");
+            assert_eq!(Value::Float(f).to_string(), want);
+        }
+        assert_eq!(Value::Float(2.89e-82).to_json(), "2.89e-82");
+    }
+
     use super::*;
 
     /// The hashable sort key partitions exactly as `compare_with`

@@ -297,6 +297,21 @@ impl AstAdapter for XmlAdapter {
             .map(|t| self.names.get(t).to_string())
     }
 
+    /// A `table` element (TEI, DocBook, HTML in XML) carries
+    /// `tabula`, the one trait a table has in every substrate (spec:
+    /// The Table): `//*<tabula>` finds it, `| #` reads it.
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        let local = self
+            .name(node)
+            .map(|n| n.rsplit(':').next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        if local == "table" {
+            vec!["tabula".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.nodes[node.0 as usize].parent
     }

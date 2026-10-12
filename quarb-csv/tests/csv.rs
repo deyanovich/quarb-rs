@@ -117,7 +117,7 @@ fn keyed_aggregates() {
 fn records_and_json() {
     // auto-named projections plus a named computed field
     assert_eq!(
-        values(r#"/row[::dept = "eng"] | %(::name; "monthly"; ::salary div 12)"#),
+        values(r#"/row[::dept = "eng"] | %(::name; monthly = ::salary div 12)"#),
         vec![
             "%(name = \"Ada\"; monthly = 10000)",
             "%(name = \"Cy\"; monthly = 7916.666666666667)"
@@ -347,7 +347,7 @@ fn interpolation() {
     assert_eq!(values(r#"/row[::dept = "eng"] @| count"#), vec!["2"]);
     // interpolations work as function arguments
     assert_eq!(
-        values(r#"/row[1] | %("who"; "${::name}/${::dept}")"#),
+        values(r#"/row[1] | %(who = "${::name}/${::dept}")"#),
         vec!["%(who = \"Ada/eng\")"]
     );
 }
@@ -531,7 +531,7 @@ fn fragments() {
 fn captures() {
     // extract, then use as fields (Perl's match-then-harvest)
     assert_eq!(
-        values(r#"/row | [::dept == (/^(\w+)s$/)] | %("stem"; $1; ::name)"#),
+        values(r#"/row | [::dept == (/^(\w+)s$/)] | %(stem = $1; ::name)"#),
         vec!["%(stem = \"sale\"; name = \"Bo\")"]
     );
     // captures reach pushes, %., and later filters
@@ -554,7 +554,7 @@ fn captures() {
     // a later filter without == keeps earlier captures; an
     // unreferenced group index is null
     assert_eq!(
-        values(r#"/row | [::name == (/^(\w+)$/)] | [::age > 30] | %("who"; $1; "g2"; $2)"#),
+        values(r#"/row | [::name == (/^(\w+)$/)] | [::age > 30] | %(who = $1; g2 = $2)"#),
         vec![
             "%(who = \"Ada\"; g2 = null)",
             "%(who = \"Cy\"; g2 = null)",

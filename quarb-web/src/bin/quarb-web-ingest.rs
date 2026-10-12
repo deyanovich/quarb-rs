@@ -22,7 +22,7 @@ use quarb_web::{SiteId, WebStore};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "quarb-web-ingest", version, about = "Fill a web-level store")]
+#[command(name = "quarb-web-ingest", version, about = "Fill a web-model store")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

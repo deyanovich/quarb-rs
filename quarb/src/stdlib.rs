@@ -7,7 +7,7 @@
 //! - **Aggregate** commands (`@|`) reduce the whole context's topics
 //!   to a new list.
 
-use crate::ast::{Arg, FnCall};
+use crate::ast::{IndexSpec, Arg, FnCall};
 use crate::value::Value;
 use std::cmp::Ordering;
 use unicode_normalization::UnicodeNormalization;
@@ -447,6 +447,83 @@ pub fn apply_scalar(
     topic: Value,
     scale: &dyn Fn(&str) -> Option<(f64, String)>,
 ) -> Vec<Value> {
+    // The two readings and the reshapes take the topic whole; a
+    // library value is read by them and by the serializations, and
+    // refused by kind anywhere else (spec: Command Libraries, "A
+    // library value").
+    match call.name.as_str() {
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
+        | "row-to-header" | "header-to-row" => {
+            return vec![refusing(call, match call.name.as_str() {
+                "@" | "rows" => rows_reading(topic),
+                "%" | "columns" => columns_reading(topic),
+                "#" => table_reading(topic),
+                "header" => table_meta(topic, "header"),
+                "dim" => table_meta(topic, "dim"),
+                "[]" => table_rows_at(call, topic),
+                "cell" => table_cell(call, topic),
+                "row-to-header" | "header-to-row" => header_shift(call, topic),
+                _ => transpose_reading(topic),
+            })];
+        }
+        "pivot" | "melt" => {
+            let items = match topic {
+                Value::List(_) => topic.into_items().unwrap_or_default(),
+                other => vec![other],
+            };
+            return vec![Value::list(apply(call, items, scale))];
+        }
+        // `| pretty` pretty-prints the value; `| csv` and `| table`
+        // after a table value render it (spec: output forms).
+        "pretty" => {
+            // `| pretty(year; title)` after a table selects and
+            // orders the columns as the stream form does.
+            if let Value::Table(t) = &topic {
+                let (delimiter, args) = split_csv_delimiter(call);
+                let columns = column_names(args);
+                return vec![Value::Str(tabulate_table(
+                    t,
+                    false,
+                    columns.as_deref(),
+                    delimiter.unwrap_or(b','),
+                ))];
+            }
+            return vec![Value::Str(pretty_value(&topic))];
+        }
+        "csv" | "table" => {
+            let (delimiter, args) = split_csv_delimiter(call);
+            let columns = column_names(args);
+            return vec![refusing(call, match &topic {
+                Value::Table(t) => Ok(Value::Str(tabulate_table(
+                    t,
+                    call.name == "csv",
+                    columns.as_deref(),
+                    delimiter.unwrap_or(b','),
+                ))),
+                other => Err(format!(
+                    "on the plain pipe '{}' renders a table value, not {}; over a stream of records write '@| {}'",
+                    call.name,
+                    kind_of(other),
+                    call.name
+                )),
+            })];
+        }
+        _ => {}
+    }
+    let kept = match &topic {
+        Value::Foreign(f) => Some(f.refusal(&call.name)),
+        Value::Table(t) => Some(table_refusal(t, &call.name)),
+        _ => None,
+    };
+    if let Some(refusal) = kept {
+        match call.name.as_str() {
+            "json" | "jsonl" | "kaiv" | "csv" | "table" => {}
+            _ => {
+                crate::exec::record_refusal(refusal);
+                return vec![Value::Null];
+            }
+        }
+    }
     let text = topic.to_string();
     match call.name.as_str() {
         // `number(LOCALE)` — the numeric reading of text under the
@@ -1317,9 +1394,10 @@ pub fn apply_scalar(
         "json" | "jsonl" => vec![Value::Str(topic.to_json())],
         // The one-value kaiv document; `@| kaiv` renders the whole
         // stream as one (the serialization family, the kaiv member).
+        // A library value rides as its rows.
         #[cfg(feature = "kaiv")]
         "kaiv" => vec![Value::Str(
-            crate::kaiv_out::document(std::slice::from_ref(&topic)).unwrap_or_else(|e| e),
+            crate::kaiv_out::document(&exported(vec![topic])).unwrap_or_else(|e| e),
         )],
         #[cfg(not(feature = "kaiv"))]
         "kaiv" => {
@@ -1724,11 +1802,77 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// `last`) and the keyed aggregates are capsa-preserving and live in
 /// the executor instead.
 pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
+    // A library value in the stream: read by the two readings,
+    // serialized by its rows, counted and ordered as one value,
+    // refused by kind anywhere else.
+    if let Some(refusal) = input.iter().find_map(|v| match v {
+        Value::Foreign(f) => Some(f.refusal(&call.name)),
+        Value::Table(t) => Some(table_refusal(t, &call.name)),
+        _ => None,
+    }) && !matches!(
+        call.name.as_str(),
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell" | "row-to-header" | "header-to-row" | "json" | "jsonl" | "kaiv" | "csv" | "table" | "pretty" | "count" | "first" | "last" | "reverse"
+    ) {
+        crate::exec::record_refusal(refusal);
+        return vec![Value::Null];
+    }
+    let input = match call.name.as_str() {
+        "json" | "jsonl" | "kaiv" | "csv" | "table" | "pretty" => exported(input),
+        _ => input,
+    };
     match call.name.as_str() {
         // What `run_for_rendering` leaves where a closing `@| csv` /
         // `@| table` stood: the rows themselves, for the tool to
         // tabulate. Not a name a query can write.
         ROWS_FOR_RENDERING => input,
+        // The stream as a table, read by rows or by columns, or
+        // reshaped (spec: Command Libraries, "A library value";
+        // the reshapes): one library value reads as itself, a
+        // stream of records as the list of them.
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
+        | "row-to-header" | "header-to-row" => {
+            // One library value, or one record (a record of lists
+            // after `|`, whose items the executor hands here), is
+            // the whole; anything else is the stream as a list.
+            let whole = match input.as_slice() {
+                [Value::Foreign(_)] | [Value::Table(_)] | [Value::Record(_)] => {
+                    input.into_iter().next().expect("one")
+                }
+                // `| [n]` indexes the one topic as it stands (a list,
+                // a table, or a scalar that refuses).
+                [_] if call.name == "[]" => input.into_iter().next().expect("one"),
+                _ => Value::list(input),
+            };
+            let out = refusing(call, match call.name.as_str() {
+                "@" | "rows" => rows_reading(whole),
+                "%" | "columns" => columns_reading(whole),
+                "#" => table_reading(whole),
+                "header" => table_meta(whole, "header"),
+                "dim" => table_meta(whole, "dim"),
+                "[]" => table_rows_at(call, whole),
+                "cell" => table_cell(call, whole),
+                "row-to-header" | "header-to-row" => header_shift(call, whole),
+                _ => transpose_reading(whole),
+            });
+            match out {
+                Value::List(_) => out.into_items().unwrap_or_default(),
+                other => vec![other],
+            }
+        }
+        "pivot" => match pivot(call, input) {
+            Ok(rows) => rows,
+            Err(why) => {
+                crate::exec::record_refusal(why);
+                vec![Value::Null]
+            }
+        },
+        "melt" => match melt(call, input) {
+            Ok(rows) => rows,
+            Err(why) => {
+                crate::exec::record_refusal(why);
+                vec![Value::Null]
+            }
+        },
         "count" => vec![Value::Int(input.len() as i64)],
         "sum" => vec![sum(&input, scale)],
         "product" => vec![product(&input)],
@@ -1895,7 +2039,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // table: a header and a row per value, the header never
         // apart from its rows. Named columns select and order the
         // fields; without them, every field.
-        "csv" | "table" => {
+        "csv" | "table" | "pretty" => {
             // `csv(";"; year; title)`: a quoted first argument is the
             // delimiter (a bare word is a column, so no collision).
             // The command is a value like any other and never
@@ -3115,6 +3259,768 @@ pub(crate) fn rank_span(arg: Option<&Arg>, len: usize, from_end: bool) -> Option
         return Some((0, 0));
     }
     Some(((lo - 1) as usize, hi as usize))
+}
+
+// ── The two readings of a table, and the reshapes ─────────────────
+// (spec: Command Libraries, "A library value"; the reshapes carry
+// no algorithm: what rearranges a table is here, what computes over
+// one is a library's.)
+
+/// A refused reading is a refusal and a null topic.
+fn refusing(call: &FnCall, r: Result<Value, String>) -> Value {
+    match r {
+        Ok(v) => v,
+        Err(why) => {
+            crate::exec::record_refusal(format!("{}: {why}", call.name));
+            Value::Null
+        }
+    }
+}
+
+/// The values with every library value replaced by its rows, each
+/// row a value of the stream — what a serialization reads.
+fn exported(input: Vec<Value>) -> Vec<Value> {
+    if !input.iter().any(|v| matches!(v, Value::Foreign(_) | Value::Table(_))) {
+        return input;
+    }
+    let mut out = Vec::with_capacity(input.len());
+    for v in input {
+        match v {
+            Value::Foreign(f) => match f.rows() {
+                Ok(Value::List(rows)) => out.extend(rows.iter().cloned()),
+                Ok(other) => out.push(other),
+                Err(_) => out.push(Value::Str(f.display())),
+            },
+            Value::Table(t) => match t.rows_value() {
+                Value::List(rows) => out.extend(rows.iter().cloned()),
+                other => out.push(other),
+            },
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A value's kind, for a reshape's refusal.
+fn kind_of(v: &Value) -> String {
+    match v {
+        Value::Null => "null".into(),
+        Value::Bool(_) => "a boolean".into(),
+        Value::Int(_) | Value::Float(_) => "a number".into(),
+        Value::Str(_) => "text".into(),
+        Value::List(_) => "a list".into(),
+        Value::Record(_) => "a record".into(),
+        Value::Instant { .. } => "an instant".into(),
+        Value::Duration { .. } => "a duration".into(),
+        Value::Period { .. } => "a period".into(),
+        Value::Quantity { .. } => "a quantity".into(),
+        Value::Foreign(f) => f.kind(),
+        Value::Table(t) => t.kind(),
+    }
+}
+
+/// The column names among a renderer's arguments (`csv(year;
+/// title)`), `None` when none is written.
+fn column_names(args: &[Arg]) -> Option<Vec<String>> {
+    let columns: Vec<String> = args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Lit(Value::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    (!columns.is_empty()).then_some(columns)
+}
+
+/// A table as the aligned grid or as CSV: its rows as records, the
+/// array face keyed by position; `columns` selects and orders them.
+pub(crate) fn tabulate_table(
+    t: &crate::Table,
+    csv: bool,
+    columns: Option<&[String]>,
+    delimiter: u8,
+) -> String {
+    let keys: Vec<String> = match &t.header {
+        Some(h) => h.clone(),
+        None => (1..=t.width()).map(|j| j.to_string()).collect(),
+    };
+    let rows: Vec<Value> = t
+        .rows
+        .iter()
+        .map(|r| {
+            Value::Record(
+                keys.iter()
+                    .cloned()
+                    .zip(r.iter().cloned().chain(std::iter::repeat(Value::Null)))
+                    .collect(),
+            )
+        })
+        .collect();
+    tabulate_with(&rows, columns, csv, delimiter)
+}
+
+/// `| pretty` — a value pretty-printed: a table as the grid, a record
+/// one field per line, a list one item per line, a scalar as it is.
+pub(crate) fn pretty_value(v: &Value) -> String {
+    match v {
+        Value::Table(t) => tabulate_table(t, false, None, b','),
+        Value::Record(fields) => {
+            let inner: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("{} = {}", crate::value::quarb_key(k), v.to_quarb()))
+                .collect();
+            format!("%({})", inner.join(";\n  "))
+        }
+        Value::List(items) => {
+            let inner: Vec<String> = items.iter().map(Value::to_quarb).collect();
+            format!("@({})", inner.join(";\n  "))
+        }
+        other => other.display_form(),
+    }
+}
+
+/// What a table refuses with: the two readings it admits.
+fn table_refusal(t: &crate::Table, command: &str) -> String {
+    format!(
+        "{command}: {} is a table; '| @' reads its rows, '| %' its columns",
+        t.kind()
+    )
+}
+
+/// The table reading (`| #`): a table as itself; a list of records
+/// as a frame whose header is the names in order of first
+/// appearance, a record lacking one leaving a hole; a list of lists
+/// as an array (a short row padded with holes, a long one refused);
+/// a list of scalars as a one-column array (a sample); a record of
+/// lists as a frame by columns.
+pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Table(_) => Ok(v),
+        Value::Foreign(f) => f.rows().and_then(table_reading),
+        // A record of lists is the columns (the inverse of `| %`);
+        // any other record is one row.
+        Value::Record(fields) => {
+            if !fields.is_empty() && fields.iter().all(|(_, v)| matches!(v, Value::List(_))) {
+                let rows = rows_reading(Value::Record(fields))?;
+                return table_reading(rows);
+            }
+            table_reading(Value::list(vec![Value::Record(fields)]))
+        }
+        Value::List(items) => {
+            if items.is_empty() {
+                return Ok(Value::table(crate::Table {
+                    header: None,
+                    rows: Vec::new(),
+                }));
+            }
+            if items.iter().all(|v| matches!(v, Value::Record(_))) {
+                let mut header: Vec<String> = Vec::new();
+                for v in items.iter() {
+                    if let Value::Record(f) = v {
+                        for (k, _) in f {
+                            if !header.contains(k) {
+                                header.push(k.clone());
+                            }
+                        }
+                    }
+                }
+                let rows = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Record(f) => header
+                            .iter()
+                            .map(|k| {
+                                f.iter()
+                                    .find(|(n, _)| n == k)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect(),
+                        _ => unreachable!("records"),
+                    })
+                    .collect();
+                return Ok(Value::table(crate::Table {
+                    header: Some(header),
+                    rows,
+                }));
+            }
+            if items.iter().all(|v| matches!(v, Value::List(_))) {
+                let width = match &items[0] {
+                    Value::List(l) => l.len(),
+                    _ => unreachable!("lists"),
+                };
+                let mut rows = Vec::with_capacity(items.len());
+                for (i, v) in items.iter().enumerate() {
+                    let Value::List(l) = v else {
+                        unreachable!("lists")
+                    };
+                    if l.len() > width {
+                        return Err(format!(
+                            "row {} has {} values, the table {width} columns",
+                            i + 1,
+                            l.len()
+                        ));
+                    }
+                    let mut row = l.to_vec();
+                    row.resize(width, Value::Null);
+                    rows.push(row);
+                }
+                return Ok(Value::table(crate::Table { header: None, rows }));
+            }
+            if items
+                .iter()
+                .all(|v| !matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_)))
+            {
+                return Ok(Value::table(crate::Table {
+                    header: None,
+                    rows: items.iter().map(|v| vec![v.clone()]).collect(),
+                }));
+            }
+            Err("a table reads a list of records (a frame), a list of lists (an array) or a list of values (a sample); the rows here are of mixed kinds".into())
+        }
+        other => Err(format!(
+            "a table reads a list of records, a list of lists or a record of lists, not {}",
+            kind_of(&other)
+        )),
+    }
+}
+
+/// `header` and `dim` of a table: the list of names (null on the
+/// array face) and `@(rows; columns)`; a list of records answers as
+/// its table reading would.
+pub(crate) fn table_meta(v: Value, what: &str) -> Result<Value, String> {
+    let t = match table_reading(v)? {
+        Value::Table(t) => t,
+        other => return Err(format!("{} has no {what}", kind_of(&other))),
+    };
+    Ok(match what {
+        "header" => t.header_value(),
+        _ => t.shape(),
+    })
+}
+
+/// A 1-based position, negative from the end, resolved against a
+/// length; `None` out of range.
+fn position(n: i64, len: usize) -> Option<usize> {
+    let n = if n < 0 { len as i64 + 1 + n } else { n };
+    (n >= 1 && n as usize <= len).then_some(n as usize)
+}
+
+/// A range's ends resolved against a length into `from..to` (0-based,
+/// half-open), clamped; either end open.
+fn span(a: Option<i64>, b: Option<i64>, len: usize) -> (usize, usize) {
+    let l = len as i64;
+    let from = a.map_or(1, |x| if x < 0 { l + 1 + x } else { x }).clamp(1, l + 1) - 1;
+    let to = b.map_or(l, |x| if x < 0 { l + 1 + x } else { x }).clamp(0, l);
+    if from < to {
+        (from as usize, to as usize)
+    } else {
+        (0, 0)
+    }
+}
+
+/// The index of a value (spec: Indexing a Value): on a list the item
+/// or the sublist; on a table the row (as the table has it), the rows
+/// as a table, or with a second index the cell, a column slice (a
+/// list), a row slice (a record, keyed by the header or by position)
+/// or a sub-table; a column by position or by name. A record has no
+/// positional form, a string is not indexed.
+pub(crate) fn index_value(
+    v: Value,
+    rows: &IndexSpec,
+    cols: Option<&IndexSpec>,
+) -> Result<Value, String> {
+    match v {
+        Value::List(items) => {
+            if cols.is_some() {
+                return Err("a list has one dimension: '[i]' or '[a..b]', not '[i; j]'".into());
+            }
+            match rows {
+                IndexSpec::At(n) => Ok(position(*n, items.len())
+                    .map(|p| items[p - 1].clone())
+                    .unwrap_or(Value::Null)),
+                IndexSpec::Range(a, b) => {
+                    let (from, to) = span(*a, *b, items.len());
+                    Ok(Value::list(items[from..to].to_vec()))
+                }
+                IndexSpec::Name(n) => Err(format!(
+                    "a list is indexed by position, not by name ('{n}'); a record's field is ':{n}'"
+                )),
+            }
+        }
+        Value::Table(t) => {
+            let width = t.width();
+            let keys: Vec<String> = match &t.header {
+                Some(h) => h.clone(),
+                None => (1..=width).map(|j| j.to_string()).collect(),
+            };
+            let column = |spec: &IndexSpec| -> Result<(usize, usize), String> {
+                match spec {
+                    IndexSpec::At(j) => position(*j, width)
+                        .map(|p| (p - 1, p))
+                        .ok_or_else(|| format!("no column {j}: the table has {width}")),
+                    IndexSpec::Range(a, b) => Ok(span(*a, *b, width)),
+                    IndexSpec::Name(n) => match &t.header {
+                        Some(h) => h
+                            .iter()
+                            .position(|c| c == n)
+                            .map(|p| (p, p + 1))
+                            .ok_or_else(|| format!("no column '{n}' (the header: {})", h.join(", "))),
+                        None => Err(format!(
+                            "'{n}' names no column: the table has no header, its columns are positions"
+                        )),
+                    },
+                }
+            };
+            let (r0, r1) = match rows {
+                IndexSpec::At(n) => match position(*n, t.rows.len()) {
+                    Some(p) => (p - 1, p),
+                    None => return Ok(Value::Null),
+                },
+                IndexSpec::Range(a, b) => span(*a, *b, t.rows.len()),
+                IndexSpec::Name(n) => {
+                    return Err(format!("rows are indexed by position, not by name ('{n}')"));
+                }
+            };
+            let one_row = matches!(rows, IndexSpec::At(_));
+            let Some(cols) = cols else {
+                return Ok(if one_row {
+                    t.row(r0 + 1).unwrap_or(Value::Null)
+                } else {
+                    Value::table(crate::Table {
+                        header: t.header.clone(),
+                        rows: t.rows[r0..r1].to_vec(),
+                    })
+                });
+            };
+            let (c0, c1) = column(cols)?;
+            let one_col = !matches!(cols, IndexSpec::Range(..));
+            let cell = |i: usize, j: usize| t.rows[i].get(j).cloned().unwrap_or(Value::Null);
+            Ok(match (one_row, one_col) {
+                (true, true) => cell(r0, c0),
+                (false, true) => Value::list((r0..r1).map(|i| cell(i, c0)).collect()),
+                (true, false) => Value::Record(
+                    (c0..c1).map(|j| (keys[j].clone(), cell(r0, j))).collect(),
+                ),
+                (false, false) => Value::table(crate::Table {
+                    header: t.header.as_ref().map(|h| h[c0..c1].to_vec()),
+                    rows: (r0..r1).map(|i| (c0..c1).map(|j| cell(i, j)).collect()).collect(),
+                }),
+            })
+        }
+        // A row of a frame is a record: `t[2][1]` agrees with
+        // `t[2; 1]`, so a record indexed by position gives the value
+        // of its n-th field, by range the fields as a record.
+        Value::Record(fields) => {
+            if cols.is_some() {
+                return Err("a record has one dimension: '[i]', not '[i; j]'".into());
+            }
+            match rows {
+                IndexSpec::At(n) => Ok(position(*n, fields.len())
+                    .map(|p| fields[p - 1].1.clone())
+                    .unwrap_or(Value::Null)),
+                IndexSpec::Range(a, b) => {
+                    let (from, to) = span(*a, *b, fields.len());
+                    Ok(Value::Record(fields[from..to].to_vec()))
+                }
+                IndexSpec::Name(n) => Ok(fields
+                    .iter()
+                    .find(|(k, _)| k == n)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(Value::Null)),
+            }
+        }
+        Value::Str(_) => Err("a string is not indexed: 'substr' and 'cc' read its characters".into()),
+        other => Err(format!("{} has no index", kind_of(&other))),
+    }
+}
+
+/// `| [n]` / `| [a..b]` on a table or a list value: the row or the
+/// item, the rows or the sublist ([`index_value`]). On anything else,
+/// the whole-context refusal positional selection has always given on
+/// the plain pipe.
+pub(crate) fn table_rows_at(call: &FnCall, v: Value) -> Result<Value, String> {
+    if !matches!(v, Value::Table(_) | Value::List(_)) {
+        return Err(
+            "positional selection is whole-context; write '@| [n]' / '@| [a..b]' (a plain '| [cond]' filters per capsa; on a table or a list value, '| [n]' is the row or the item)".into(),
+        );
+    }
+    let spec = match call.args.first() {
+        Some(Arg::Lit(Value::Int(n))) => IndexSpec::At(*n),
+        Some(Arg::Range(a, b)) => IndexSpec::Range(*a, *b),
+        _ => return Err("'[n]' takes a position or a range".into()),
+    };
+    index_value(v, &spec, None)
+}
+
+/// `cell(i; j)` — one cell of a table by row position and column
+/// position or name: the pipeline spelling of `t[i; j]`.
+pub(crate) fn table_cell(call: &FnCall, v: Value) -> Result<Value, String> {
+    let spec = |a: Option<&Arg>| -> Result<IndexSpec, String> {
+        match a {
+            Some(Arg::Lit(Value::Int(n))) => Ok(IndexSpec::At(*n)),
+            Some(Arg::Range(a, b)) => Ok(IndexSpec::Range(*a, *b)),
+            Some(Arg::Lit(Value::Str(s))) => Ok(IndexSpec::Name(s.clone())),
+            _ => Err("cell(i; j) takes a row position and a column position or name".into()),
+        }
+    };
+    let i = spec(call.args.first())?;
+    let j = spec(call.args.get(1))?;
+    if !matches!(v, Value::Table(_)) {
+        return Err(format!("cell(i; j) reads a table, not {}", kind_of(&v)));
+    }
+    index_value(v, &i, Some(&j))
+}
+
+/// `row-to-header` — the first row up into the header (its values
+/// as the names); `header-to-row` — the header down into the rows
+/// (as text), the table then an array.
+pub(crate) fn header_shift(call: &FnCall, v: Value) -> Result<Value, String> {
+    let t = match table_reading(v)? {
+        Value::Table(t) => t,
+        other => return Err(format!("{} has no header to move", kind_of(&other))),
+    };
+    Ok(Value::table(match call.name.as_str() {
+        "row-to-header" => {
+            let Some(first) = t.rows.first() else {
+                return Err("row-to-header: the table has no row to lift".into());
+            };
+            crate::Table {
+                header: Some(first.iter().map(Value::to_string).collect()),
+                rows: t.rows[1..].to_vec(),
+            }
+        }
+        _ => {
+            let mut rows = Vec::with_capacity(t.rows.len() + 1);
+            if let Some(h) = &t.header {
+                rows.push(h.iter().cloned().map(Value::Str).collect());
+            }
+            rows.extend(t.rows.iter().cloned());
+            crate::Table { header: None, rows }
+        }
+    }))
+}
+
+/// The row reading (`| @`): a library value as its rows; a record
+/// whose fields are all lists as one record per position, the
+/// lists zipped; a list as itself.
+pub(crate) fn rows_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Foreign(f) => f.rows(),
+        Value::Table(t) => Ok(t.rows_value()),
+        Value::Record(fields)
+            if !fields.is_empty() && fields.iter().all(|(_, v)| matches!(v, Value::List(_))) =>
+        {
+            let len = |v: &Value| match v {
+                Value::List(l) => l.len(),
+                _ => 0,
+            };
+            let n = len(&fields[0].1);
+            if let Some((k, v)) = fields.iter().find(|(_, v)| len(v) != n) {
+                return Err(format!(
+                    "field '{}' holds {n} values, '{k}' holds {}; the columns must be of one length",
+                    fields[0].0,
+                    len(v)
+                ));
+            }
+            let rows = (0..n)
+                .map(|i| {
+                    Value::Record(
+                        fields
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    match v {
+                                        Value::List(l) => l[i].clone(),
+                                        _ => Value::Null,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+            Ok(Value::list(rows))
+        }
+        Value::Record(_) => Err(
+            "a record reads as rows when every field is a list (one column each); this one's are not"
+                .into(),
+        ),
+        other => Ok(other),
+    }
+}
+
+/// The column reading (`| %`): a library value as its columns; a
+/// list of records as one record of lists, a field per name in
+/// first appearance, null where a record lacks it; a record as
+/// itself.
+pub(crate) fn columns_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Foreign(f) => f.columns(),
+        Value::Table(t) => Ok(t.columns_value()),
+        Value::List(items) => {
+            if items.is_empty() {
+                return Ok(Value::Record(Vec::new()));
+            }
+            if let Some(odd) = items.iter().find(|v| !matches!(v, Value::Record(_))) {
+                return Err(format!(
+                    "the rows have no field names ({} among them); a list of records reads by column, transpose exchanges the rows and columns of a list of lists",
+                    kind_of(odd)
+                ));
+            }
+            let mut names: Vec<&String> = Vec::new();
+            for v in items.iter() {
+                if let Value::Record(f) = v {
+                    for (k, _) in f {
+                        if !names.contains(&k) {
+                            names.push(k);
+                        }
+                    }
+                }
+            }
+            Ok(Value::Record(
+                names
+                    .into_iter()
+                    .map(|k| {
+                        let column = items
+                            .iter()
+                            .map(|v| match v {
+                                Value::Record(f) => f
+                                    .iter()
+                                    .find(|(n, _)| n == k)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or(Value::Null),
+                                _ => Value::Null,
+                            })
+                            .collect();
+                        (k.clone(), Value::list(column))
+                    })
+                    .collect(),
+            ))
+        }
+        other => Ok(other),
+    }
+}
+
+/// `transpose` — a list of lists with its rows and columns
+/// exchanged; the rows must be of one length.
+pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Foreign(f) => Err(format!(
+            "{} is a library value; np:transpose exchanges its axes",
+            f.kind()
+        )),
+        // An array transposes to an array; a frame's columns are
+        // named, so its exchange is the column reading.
+        Value::Table(t) => match t.header {
+            None => Ok(Value::table(t.transposed())),
+            Some(_) => Err(format!(
+                "{} names its columns; '| %' reads them, transpose takes an array",
+                t.kind()
+            )),
+        },
+        Value::List(items) => {
+            if items.is_empty() {
+                return Ok(Value::list(Vec::new()));
+            }
+            let mut rows: Vec<&[Value]> = Vec::with_capacity(items.len());
+            for (i, v) in items.iter().enumerate() {
+                match v {
+                    Value::List(l) => rows.push(l.as_slice()),
+                    other => {
+                        return Err(format!(
+                            "row {} is {}, not a list; transpose takes a list of lists ('| %' reads records by column)",
+                            i + 1,
+                            kind_of(other)
+                        ));
+                    }
+                }
+            }
+            let n = rows[0].len();
+            if let Some(i) = rows.iter().position(|r| r.len() != n) {
+                return Err(format!(
+                    "row 1 holds {n} values, row {} holds {}; the rows must be of one length",
+                    i + 1,
+                    rows[i].len()
+                ));
+            }
+            Ok(Value::list(
+                (0..n)
+                    .map(|j| Value::list(rows.iter().map(|r| r[j].clone()).collect()))
+                    .collect(),
+            ))
+        }
+        other => Err(format!(
+            "transpose takes a list of lists, not {}",
+            kind_of(&other)
+        )),
+    }
+}
+
+/// The named fields of a call's bare-word operands.
+fn word_args(call: &FnCall) -> Vec<&str> {
+    let mut out = Vec::new();
+    for a in &call.args {
+        match a {
+            Arg::Lit(Value::Str(s)) => out.push(s.as_str()),
+            // A list constructor of names stands for the names
+            // (`melt(@(year; life))`).
+            Arg::Lit(Value::List(items)) => out.extend(items.iter().filter_map(|v| match v {
+                Value::Str(s) => Some(s.as_str()),
+                _ => None,
+            })),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A declared option's literal text, when written.
+fn opt_text(call: &FnCall, name: &str) -> Option<String> {
+    call.args.iter().find_map(|a| match a {
+        Arg::Opt { name: n, value } if n == name => Some(match value {
+            Some(crate::ast::Operand::Lit(l)) => l.to_string(),
+            Some(other) => crate::unparse::operand_text(other),
+            None => String::new(),
+        }),
+        _ => None,
+    })
+}
+
+fn field_of<'a>(fields: &'a [(String, Value)], name: &str) -> Option<&'a Value> {
+    fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+}
+
+/// `pivot(row; column; value)` — long to wide over records: one
+/// record per row key, in first appearance, carrying the row field
+/// and one field per column key, in first appearance; a cell no
+/// record fills is null. Without operands the first three fields
+/// serve by position (row, column, value), as `--pairs` reads a
+/// table of entries. Two records on one cell refuse: aggregating
+/// is the group's work before the pivot.
+fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
+    let names = word_args(call);
+    if !(names.is_empty() || names.len() == 3) {
+        return Err(
+            "pivot takes the row, column and value fields (pivot(row; column; value)), or no operand to read the first three fields by position"
+                .into(),
+        );
+    }
+    let mut row_name: Option<String> = None;
+    let mut row_keys: Vec<(String, Value)> = Vec::new();
+    let mut col_keys: Vec<String> = Vec::new();
+    let mut cells: std::collections::HashMap<(usize, usize), Value> =
+        std::collections::HashMap::new();
+    for (i, v) in input.iter().enumerate() {
+        let Value::Record(fields) = v else {
+            return Err(format!(
+                "pivot: value {} is {}, not a record",
+                i + 1,
+                kind_of(v)
+            ));
+        };
+        let (rn, row, col, val) = if names.is_empty() {
+            if fields.len() < 3 {
+                return Err(format!(
+                    "pivot: record {} has {} field(s); three are needed (row, column, value)",
+                    i + 1,
+                    fields.len()
+                ));
+            }
+            (
+                fields[0].0.as_str(),
+                &fields[0].1,
+                &fields[1].1,
+                &fields[2].1,
+            )
+        } else {
+            let get = |n: &str| {
+                field_of(fields, n).ok_or_else(|| {
+                    format!("pivot: record {} has no field '{n}'", i + 1)
+                })
+            };
+            (names[0], get(names[0])?, get(names[1])?, get(names[2])?)
+        };
+        row_name.get_or_insert_with(|| rn.to_string());
+        let rk = row.to_string();
+        let r = match row_keys.iter().position(|(k, _)| *k == rk) {
+            Some(r) => r,
+            None => {
+                row_keys.push((rk, row.clone()));
+                row_keys.len() - 1
+            }
+        };
+        let ck = col.to_string();
+        let c = match col_keys.iter().position(|k| *k == ck) {
+            Some(c) => c,
+            None => {
+                col_keys.push(ck);
+                col_keys.len() - 1
+            }
+        };
+        if let Some(prev) = cells.get(&(r, c)) {
+            return Err(format!(
+                "pivot: two values for row '{}', column '{}' ({} and {}); aggregate before the pivot",
+                row_keys[r].0, col_keys[c], prev, val
+            ));
+        }
+        cells.insert((r, c), val.clone());
+    }
+    let row_name = row_name.unwrap_or_else(|| "row".into());
+    Ok(row_keys
+        .iter()
+        .enumerate()
+        .map(|(r, (_, row))| {
+            let mut rec = vec![(row_name.clone(), row.clone())];
+            for (c, ck) in col_keys.iter().enumerate() {
+                rec.push((
+                    ck.clone(),
+                    cells.get(&(r, c)).cloned().unwrap_or(Value::Null),
+                ));
+            }
+            Value::Record(rec)
+        })
+        .collect())
+}
+
+/// `melt(id; …)` — wide to long over records: for every field of a
+/// record that is not an id, one record of the ids, the field's
+/// name and its value, under `name` and `value` (`--name=`,
+/// `--value=` rename them).
+fn melt(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
+    let ids = word_args(call);
+    let name_field = opt_text(call, "--name").unwrap_or_else(|| "name".into());
+    let value_field = opt_text(call, "--value").unwrap_or_else(|| "value".into());
+    let mut out = Vec::new();
+    for (i, v) in input.iter().enumerate() {
+        let Value::Record(fields) = v else {
+            return Err(format!(
+                "melt: value {} is {}, not a record",
+                i + 1,
+                kind_of(v)
+            ));
+        };
+        let head: Vec<(String, Value)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    id.to_string(),
+                    field_of(fields, id).cloned().unwrap_or(Value::Null),
+                )
+            })
+            .collect();
+        for (k, val) in fields {
+            if ids.contains(&k.as_str()) {
+                continue;
+            }
+            let mut rec = head.clone();
+            rec.push((name_field.clone(), Value::Str(k.clone())));
+            rec.push((value_field.clone(), val.clone()));
+            out.push(Value::Record(rec));
+        }
+    }
+    Ok(out)
 }
 
 fn arg_int(call: &FnCall, n: usize) -> Option<i64> {

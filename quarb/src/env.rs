@@ -133,7 +133,9 @@ impl Environment {
                         "environment '{}' has no command '{name}' (exec:{})",
                         self.alias, self.target
                     )))
-                } else if path.file_name().is_some_and(|f| f.to_string_lossy() == name)
+                } else if path
+                    .file_name()
+                    .is_some_and(|f| f.to_string_lossy() == name)
                     || path
                         .file_stem()
                         .is_some_and(|f| f.to_string_lossy() == name)
@@ -143,7 +145,9 @@ impl Environment {
                     Err(crate::QuarbError::unsupported(format!(
                         "environment '{}' has one command, '{}' (exec:{}), not '{name}'",
                         self.alias,
-                        path.file_stem().map(|f| f.to_string_lossy()).unwrap_or_default(),
+                        path.file_stem()
+                            .map(|f| f.to_string_lossy())
+                            .unwrap_or_default(),
                         self.target
                     )))
                 }
@@ -178,7 +182,9 @@ impl Environment {
     /// counts as one); a nonzero exit is a failed call. Standard
     /// error passes through.
     pub fn call(&self, name: &str, argv: &[String], stdin: &str) -> Result<String, CallFailure> {
-        let program = self.resolve(name).map_err(|e| CallFailure::Unknown(e.to_string()))?;
+        let program = self
+            .resolve(name)
+            .map_err(|e| CallFailure::Unknown(e.to_string()))?;
         let mut command = match &program {
             Program::Path(p) => {
                 let mut c = std::process::Command::new(p);
@@ -284,9 +290,7 @@ enum Program {
 /// An alias: a letter or `_`, then letters, digits, `_`, `-`.
 fn is_alias(s: &str) -> bool {
     let mut chars = s.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_')
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 

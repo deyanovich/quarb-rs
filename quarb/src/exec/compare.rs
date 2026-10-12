@@ -200,7 +200,24 @@ pub(super) fn glob_match(segs: &[PatSeg], text: &str) -> bool {
     }
 }
 
+/// A library value in a comparison (spec: Command Libraries, "A
+/// library value"): equal only to itself; against anything else it
+/// has no reading, and the comparison is refused by kind.
+fn foreign_in(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Foreign(x), Value::Foreign(y)) => Some(x == y),
+        (Value::Foreign(f), _) | (_, Value::Foreign(f)) => {
+            crate::exec::record_refusal(f.refusal("a comparison"));
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
+    if let Some(same) = foreign_in(a, b) {
+        return same;
+    }
     // A period beside anything: both through the calendar reading,
     // as intervals — nested periods are equal, so equality is
     // containment. This precedes the temporal rule where the other
@@ -255,6 +272,9 @@ pub(super) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
 }
 
 pub(super) fn value_cmp(a: &Value, b: &Value, scale: UnitScale) -> Option<Ordering> {
+    if let Some(same) = foreign_in(a, b) {
+        return same.then_some(Ordering::Equal);
+    }
     if matches!(a, Value::Period { .. }) || matches!(b, Value::Period { .. }) {
         return match (a.calendar_reading(), b.calendar_reading()) {
             (Some(x), Some(y)) => Some(x.interval_cmp(&y)),

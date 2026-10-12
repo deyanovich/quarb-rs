@@ -43,22 +43,38 @@ fn the_mount_grammar_names_the_kinds() {
     assert!(Environment::parse_mount("ga=events.json").is_none());
     assert!(Environment::parse_mount("t=text:book.txt").is_none());
     // An environment, malformed or not yet built.
-    let e = Environment::parse_mount("go=exec:/no/such/dir").unwrap().unwrap_err().to_string();
+    let e = Environment::parse_mount("go=exec:/no/such/dir")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("no such directory or program"), "{e}");
-    let e = Environment::parse_mount("sh=shell:bash").unwrap().unwrap_err().to_string();
+    let e = Environment::parse_mount("sh=shell:bash")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("takes no target"), "{e}");
-    let e = Environment::parse_mount("py=python:./helpers.py").unwrap().unwrap_err().to_string();
+    let e = Environment::parse_mount("py=python:./helpers.py")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("plugin round"), "{e}");
-    let e = Environment::parse_mount("9x=exec:/usr/bin").unwrap().unwrap_err().to_string();
+    let e = Environment::parse_mount("9x=exec:/usr/bin")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("alias is a word"), "{e}");
 }
 
 #[test]
 fn an_unmounted_alias_refuses_before_the_run() {
-    let e = run_with("/w/* | :: | sh:tr(a-z; A-Z)", vec![]).unwrap_err().to_string();
+    let e = run_with("/w/* | :: | sh:tr(a-z; A-Z)", vec![])
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("environment 'sh' is not mounted"), "{e}");
     // The prefix is required: a bare name never falls through.
-    let e = run_with("/w/* | :: | tr(a-z; A-Z)", vec![shell()]).unwrap_err().to_string();
+    let e = run_with("/w/* | :: | tr(a-z; A-Z)", vec![shell()])
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("pipeline command 'tr'"), "{e}");
 }
 
@@ -101,7 +117,11 @@ fn after_the_aggregation_pipe_once_over_the_context_as_lines() {
     );
     // The shared regulae ride every returned capsa.
     assert_eq!(
-        run_with("/w/* | :: @| .total(count) @| u:sort @| [1] | %(w = $_; total = $.total)", vec![bin()]).unwrap(),
+        run_with(
+            "/w/* | :: @| .total(count) @| u:sort @| [1] | %(w = $_; total = $.total)",
+            vec![bin()]
+        )
+        .unwrap(),
         vec!["%(w = \"apple\"; total = 3)"]
     );
 }
@@ -127,11 +147,20 @@ fn failures_are_null_per_capsa_and_a_refusal_over_the_context() {
         vec!["nil"]
     );
     // ... and refuses after `@|`.
-    let e = run_with("/w/* | :: @| u:false", vec![bin()]).unwrap_err().to_string();
+    let e = run_with("/w/* | :: @| u:false", vec![bin()])
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("'false' failed"), "{e}");
     // An unknown name refuses on either pipe, naming the alias.
-    let e = run_with("/w/* | :: | u:no_such_program_here", vec![bin()]).unwrap_err().to_string();
-    assert!(e.contains("environment 'u' has no command 'no_such_program_here'"), "{e}");
-    let e = run_with("/w/* | :: @| [1] | sh:no_such_program_here", vec![shell()]).unwrap_err().to_string();
+    let e = run_with("/w/* | :: | u:no_such_program_here", vec![bin()])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("environment 'u' has no command 'no_such_program_here'"),
+        "{e}"
+    );
+    let e = run_with("/w/* | :: @| [1] | sh:no_such_program_here", vec![shell()])
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("environment 'sh' has no command"), "{e}");
 }

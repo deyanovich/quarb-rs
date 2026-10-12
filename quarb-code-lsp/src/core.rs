@@ -156,7 +156,7 @@ impl Workspace {
     pub fn references(&self, uri: &str, word: &str) -> Vec<Location> {
         let re = regex_escape(word);
         self.forest_query(
-            &format!("//*<call>[::callee =~ /(^|[^A-Za-z0-9_$]){re}$/]"),
+            &format!("//*<call>[::callee == (/(^|[^A-Za-z0-9_$]){re}$/)]"),
             uri,
         )
     }

@@ -182,7 +182,7 @@ fn the_planner_names_its_rungs() {
         (
             "//page[//paragraph[:: *= \"x\"]] @| count",
             Rung::Prefilter,
-            "text-level",
+            "text-model",
         ),
         (
             "//page[::title *= \"x\"]::path",
@@ -202,7 +202,7 @@ fn the_planner_names_its_rungs() {
         (
             "/sites/example.org/pages/guides//page[//paragraph[:: *= \"jq\"]]::path",
             Rung::Prefilter,
-            "text-level",
+            "text-model",
         ),
         (
             "/sites/example.org/pages//page @| count",

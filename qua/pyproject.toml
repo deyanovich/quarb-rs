@@ -12,8 +12,19 @@ build-backend = "maturin"
 [project]
 name = "quarb-full"
 dynamic = ["version"]
-requires-python = ">=3.8"
-description = "The complete qua CLI, prebuilt — every Quarb adapter (databases, MongoDB, Neo4j, Kubernetes, GitHub, GitLab, mail, object stores, DuckDB, …) with no Rust toolchain and no compile"
+requires-python = ">=3.9"
+description = "The complete qua CLI, prebuilt — every Quarb adapter (databases, MongoDB, Neo4j, Kubernetes, GitHub, GitLab, mail, object stores, DuckDB, …) and the Python command libraries (numpy, pandas, scipy, scikit-learn, pymorphy3) with no Rust toolchain and no compile"
+# The Python command libraries ride in the wheel (the python-libs
+# feature below) and the packages they wrap come with it: one pip
+# install, then one qua call.
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "pymorphy3",
+    "pymorphy3-dicts-ru",
+]
 readme = "README-pypi.md"
 license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
@@ -37,3 +48,7 @@ Repository = "https://gitlab.com/quarb/engine"
 [tool.maturin]
 bindings = "bin"
 strip = true
+# The Python command libraries embed the interpreter (pyo3), so the
+# wheel is built per CPython version and tagged for it; maturin does
+# that for a bin crate depending on pyo3.
+features = ["python-libs"]

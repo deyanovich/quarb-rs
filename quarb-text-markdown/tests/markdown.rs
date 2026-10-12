@@ -117,9 +117,9 @@ fn verbatim() {
 /// Bob's empty cell is skipped.
 #[test]
 fn table_denormalizes() {
-    assert_eq!(nodes("//*<table>").len(), 1);
+    assert_eq!(nodes("//*<tabula>").len(), 1);
     assert_eq!(
-        values("//*<table>//unordered-item::"),
+        values("//*<tabula>//unordered-item::"),
         vec!["Name: Alice", "Role: captain", "Name: Bob"]
     );
 }

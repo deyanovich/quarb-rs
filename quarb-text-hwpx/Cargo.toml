@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.36.0" }
-quarb-text = { path = "../quarb-text", version = "0.36.0" }
+quarb = { path = "../quarb", version = "0.37.0" }
+quarb-text = { path = "../quarb-text", version = "0.37.0" }
 quick-xml.workspace = true
 zip.workspace = true
 thiserror.workspace = true
@@ -20,5 +20,5 @@ cfb = "0.7"
 flate2.workspace = true
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.36.0" }
+quarb = { path = "../quarb", version = "0.37.0" }
 zip.workspace = true

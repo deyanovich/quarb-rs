@@ -227,10 +227,10 @@ fn the_binary_container_reads_into_the_same_model() {
         ["First", "Second"]
     );
     assert_eq!(
-        values("//*<table>//*<cell> | ::lemma", &m),
+        values("//*<tabula>//*<cell> | ::lemma", &m),
         ["title", "price"]
     );
-    assert_eq!(values("//*<table>//*<cell> | ::body", &m), ["Emma", "25"]);
+    assert_eq!(values("//*<tabula>//*<cell> | ::body", &m), ["Emma", "25"]);
     assert_eq!(
         values("//ref | %(::target; t = ::)", &m),
         ["%(target = \"https://www.gutenberg.org/ebooks/158\"; t = \"Read it\")"]
