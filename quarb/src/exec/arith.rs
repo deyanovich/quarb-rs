@@ -318,6 +318,9 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
                     Value::Int(a.checked_rem(b).unwrap_or(0))
                 }
             }
+            // The matrix product is defined over a matrix and a
+            // vector (`broadcast`), never between scalars.
+            ArithOp::MatMul => Value::Null,
         };
     }
     let (Some(a), Some(b)) = (l.numeric(), r.numeric()) else {
@@ -332,6 +335,7 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
         ArithOp::Mul => Value::Float(a * b),
         ArithOp::IDiv | ArithOp::Mod if b == 0.0 => Value::Float(f64::NAN),
         ArithOp::Div => Value::Float(a / b),
+        ArithOp::MatMul => Value::Null,
         ArithOp::IDiv => {
             let t = (a / b).trunc();
             if t >= i64::MIN as f64 && t <= i64::MAX as f64 {
@@ -341,5 +345,353 @@ pub(super) fn arith(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) 
             }
         }
         ArithOp::Mod => Value::Float(a % b),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Broadcasting and the matrix product (spec: Arithmetic over
+// structures; The matrix).
+// ---------------------------------------------------------------------------
+
+/// Whether a value is one of the three structures an operator
+/// broadcasts over.
+fn is_structure(v: &Value) -> bool {
+    matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_))
+}
+
+/// Whether a cell's type admits an arithmetic operation under a
+/// scalar: a number, a duration (under `*` and `div` by a number,
+/// `+`/`-` with another span), an instant with a span, a quantity.
+/// Text, booleans, periods and null do not; such a cell stays as it
+/// is when a scalar broadcasts over its structure.
+fn admits(cell: &Value) -> bool {
+    matches!(
+        cell,
+        Value::Int(_) | Value::Float(_) | Value::Duration { .. } | Value::Instant { .. } | Value::Quantity { .. }
+    )
+}
+
+/// The kind words for the refusals.
+fn kind(v: &Value) -> String {
+    crate::stdlib::kind_of(v)
+}
+
+/// An arithmetic operator applied with broadcasting (spec:
+/// Arithmetic over structures): cell by cell where an operand is a
+/// list, a record or a table, the lower-dimensional operand
+/// stretched along the higher one's last axis, the result in the
+/// higher shape whichever side it stands on. A scalar applies to
+/// every cell whose type admits the operation and leaves the other
+/// cells as they are; two structures of one shape combine cell by
+/// cell; a list against a table goes coordinate by column, against
+/// a record coordinate by field; a mismatch is refused naming the
+/// dimensions. A table's columns re-type after. `x` is the matrix
+/// product.
+pub(super) fn broadcast(op: ArithOp, left: &Value, right: &Value, scale: UnitScale) -> Result<Value, String> {
+    if op == ArithOp::MatMul {
+        return matmul(left, right, scale);
+    }
+    let sym = op.symbol();
+    match (left, right) {
+        (l, r) if !is_structure(l) && !is_structure(r) => Ok(arith(op, l, r, scale)),
+        // Two tables: the same header and dimensions, cell by cell.
+        (Value::Table(t), Value::Table(u)) => {
+            if t.header != u.header || t.rows.len() != u.rows.len() || t.width() != u.width() {
+                return Err(format!(
+                    "{sym}: the tables differ in shape, {} and {}{}",
+                    t.kind().trim_start_matches("a frame ").trim_start_matches("an array "),
+                    u.kind().trim_start_matches("a frame ").trim_start_matches("an array "),
+                    if t.header != u.header { " (and in their headers)" } else { "" }
+                ));
+            }
+            let rows = t
+                .rows
+                .iter()
+                .zip(u.rows.iter())
+                .map(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| broadcast(op, x, y, scale)).collect::<Result<Vec<_>, _>>())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+        }
+        // A list against a table: coordinate by column.
+        (Value::Table(t), Value::List(v)) | (Value::List(v), Value::Table(t)) => {
+            let list_left = matches!(left, Value::List(_));
+            if v.len() != t.width() {
+                return Err(format!(
+                    "{sym}: a list of {} against a table of {} columns: a list goes coordinate by column",
+                    v.len(),
+                    t.width()
+                ));
+            }
+            let types = t.types();
+            let names: Vec<String> = match &t.header {
+                Some(h) => h.clone(),
+                None => (1..=t.width()).map(|j| j.to_string()).collect(),
+            };
+            for (j, coord) in v.iter().enumerate() {
+                let admitted = matches!(
+                    types[j],
+                    crate::ColumnType::Integer | crate::ColumnType::Float | crate::ColumnType::Duration | crate::ColumnType::Instant | crate::ColumnType::Quantity
+                );
+                if !matches!(coord, Value::Null) && !admitted {
+                    return Err(format!(
+                        "{sym}: column '{}' is {} and takes no {sym}; a null coordinate leaves it as it is",
+                        names[j],
+                        types[j].word()
+                    ));
+                }
+            }
+            let rows = t
+                .rows
+                .iter()
+                .map(|r| {
+                    r.iter()
+                        .zip(v.iter())
+                        .map(|(cell, coord)| {
+                            if matches!(coord, Value::Null) || matches!(cell, Value::Null) {
+                                Ok(cell.clone())
+                            } else if list_left {
+                                broadcast(op, coord, cell, scale)
+                            } else {
+                                broadcast(op, cell, coord, scale)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+        }
+        (Value::Table(_), Value::Record(_)) | (Value::Record(_), Value::Table(_)) => Err(format!(
+            "{sym}: a record against a table has no rule; a list goes coordinate by column, a record of one shape against a record"
+        )),
+        // A scalar over a table: every admitting cell, the others as
+        // they are.
+        (Value::Table(t), s) | (s, Value::Table(t)) => {
+            let scalar_left = !matches!(left, Value::Table(_));
+            let rows = t
+                .rows
+                .iter()
+                .map(|r| {
+                    r.iter()
+                        .map(|cell| {
+                            if !admits(cell) {
+                                cell.clone()
+                            } else if scalar_left {
+                                arith(op, s, cell, scale)
+                            } else {
+                                arith(op, cell, s, scale)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+        }
+        // Two lists: of one length, item by item; a list of lists
+        // against the shorter list along the last axis.
+        (Value::List(a), Value::List(b)) => {
+            // The lower-dimensional list stretches along the last
+            // axis of the higher: a list of lists against a flat
+            // list takes it row by row.
+            let flat = |l: &[Value]| l.iter().all(|x| !matches!(x, Value::List(_)));
+            let nested = |l: &[Value]| !l.is_empty() && l.iter().all(|x| matches!(x, Value::List(_)));
+            if nested(a) && flat(b) {
+                return Ok(Value::list(a.iter().map(|x| broadcast(op, x, right, scale)).collect::<Result<Vec<_>, _>>()?));
+            }
+            if flat(a) && nested(b) {
+                return Ok(Value::list(b.iter().map(|y| broadcast(op, left, y, scale)).collect::<Result<Vec<_>, _>>()?));
+            }
+            if a.len() == b.len() {
+                return Ok(Value::list(
+                    a.iter().zip(b.iter()).map(|(x, y)| broadcast(op, x, y, scale)).collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
+            Err(format!("{sym}: lists of {} and {} elements differ in shape", a.len(), b.len()))
+        }
+        // A list against a record: coordinate by field in order.
+        (Value::Record(f), Value::List(v)) | (Value::List(v), Value::Record(f)) => {
+            let list_left = matches!(left, Value::List(_));
+            if v.len() != f.len() {
+                return Err(format!(
+                    "{sym}: a list of {} against a record of {} fields: a list goes coordinate by field",
+                    v.len(),
+                    f.len()
+                ));
+            }
+            let fields = f
+                .iter()
+                .zip(v.iter())
+                .map(|((k, cell), coord)| {
+                    if matches!(coord, Value::Null) || matches!(cell, Value::Null) {
+                        return Ok((k.clone(), cell.clone()));
+                    }
+                    if !is_structure(cell) && !admits(cell) {
+                        return Err(format!("{sym}: field '{k}' is {} and takes no {sym}", kind(cell)));
+                    }
+                    let v = if list_left { broadcast(op, coord, cell, scale)? } else { broadcast(op, cell, coord, scale)? };
+                    Ok((k.clone(), v))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Record(fields))
+        }
+        // Two records: the same field names, field by field.
+        (Value::Record(a), Value::Record(b)) => {
+            let same = a.len() == b.len() && a.iter().all(|(k, _)| b.iter().any(|(n, _)| n == k));
+            if !same {
+                let names = |r: &Vec<(String, Value)>| r.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+                return Err(format!(
+                    "{sym}: the records differ in shape, fields {} and {}",
+                    names(a),
+                    names(b)
+                ));
+            }
+            let fields = a
+                .iter()
+                .map(|(k, x)| {
+                    let y = &b.iter().find(|(n, _)| n == k).expect("same names").1;
+                    Ok::<_, String>((k.clone(), broadcast(op, x, y, scale)?))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Record(fields))
+        }
+        // A scalar over a list or a record: every admitting cell,
+        // a nested structure recursively, the others as they are.
+        (Value::List(a), s) | (s, Value::List(a)) => {
+            let scalar_left = !matches!(left, Value::List(_));
+            Ok(Value::list(
+                a.iter()
+                    .map(|cell| {
+                        if is_structure(cell) {
+                            if scalar_left { broadcast(op, s, cell, scale) } else { broadcast(op, cell, s, scale) }
+                        } else if !admits(cell) {
+                            Ok(cell.clone())
+                        } else if scalar_left {
+                            Ok(arith(op, s, cell, scale))
+                        } else {
+                            Ok(arith(op, cell, s, scale))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Record(f), s) | (s, Value::Record(f)) => {
+            let scalar_left = !matches!(left, Value::Record(_));
+            Ok(Value::Record(
+                f.iter()
+                    .map(|(k, cell)| {
+                        let v = if is_structure(cell) {
+                            if scalar_left { broadcast(op, s, cell, scale)? } else { broadcast(op, cell, s, scale)? }
+                        } else if !admits(cell) {
+                            cell.clone()
+                        } else if scalar_left {
+                            arith(op, s, cell, scale)
+                        } else {
+                            arith(op, cell, s, scale)
+                        };
+                        Ok::<_, String>((k.clone(), v))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (l, r) => Ok(arith(op, l, r, scale)),
+    }
+}
+
+/// A vector: a list of numbers, non-empty.
+fn vector(v: &Value) -> Option<&[Value]> {
+    match v {
+        Value::List(l) if !l.is_empty() && l.iter().all(|x| matches!(x, Value::Int(_) | Value::Float(_))) => Some(l),
+        _ => None,
+    }
+}
+
+/// A matrix: an array (a table without a header) whose columns are
+/// all numeric, non-empty.
+fn matrix(v: &Value) -> Option<&crate::Table> {
+    match v {
+        Value::Table(t)
+            if t.header.is_none()
+                && !t.rows.is_empty()
+                && t.width() > 0
+                && t.types().iter().all(|c| matches!(c, crate::ColumnType::Integer | crate::ColumnType::Float))
+                && t.rows.iter().flatten().all(|c| !matches!(c, Value::Null)) =>
+        {
+            Some(t)
+        }
+        _ => None,
+    }
+}
+
+/// The dot product of two equal-length numeric rows.
+fn dot(a: impl Iterator<Item = Value>, b: impl Iterator<Item = Value>, scale: UnitScale) -> Value {
+    a.zip(b).fold(Value::Int(0), |acc, (x, y)| {
+        arith(ArithOp::Add, &acc, &arith(ArithOp::Mul, &x, &y, scale), scale)
+    })
+}
+
+/// `x` — the matrix product (spec: The matrix): a matrix times a
+/// vector is the vector of the row sums, a vector times a matrix
+/// the vector of the column sums (the vector read as a row), a
+/// matrix times a matrix a matrix, a vector times a vector of one
+/// length their dot product; the inner dimensions must agree, and
+/// anything else is refused by kind.
+fn matmul(left: &Value, right: &Value, scale: UnitScale) -> Result<Value, String> {
+    let column = |t: &crate::Table, j: usize| -> Vec<Value> { t.rows.iter().map(|r| r[j].clone()).collect() };
+    match (matrix(left), vector(left), matrix(right), vector(right)) {
+        (Some(m), _, _, Some(v)) => {
+            if m.width() != v.len() {
+                return Err(format!(
+                    "x: a matrix of {}×{} against a vector of {}: the inner dimensions differ ({} and {})",
+                    m.rows.len(),
+                    m.width(),
+                    v.len(),
+                    m.width(),
+                    v.len()
+                ));
+            }
+            Ok(Value::list(m.rows.iter().map(|r| dot(r.iter().cloned(), v.iter().cloned(), scale)).collect()))
+        }
+        (_, Some(v), Some(m), _) => {
+            if v.len() != m.rows.len() {
+                return Err(format!(
+                    "x: a vector of {} against a matrix of {}×{}: the inner dimensions differ ({} and {})",
+                    v.len(),
+                    m.rows.len(),
+                    m.width(),
+                    v.len(),
+                    m.rows.len()
+                ));
+            }
+            Ok(Value::list((0..m.width()).map(|j| dot(v.iter().cloned(), column(m, j).into_iter(), scale)).collect()))
+        }
+        (Some(m), _, Some(n), _) => {
+            if m.width() != n.rows.len() {
+                return Err(format!(
+                    "x: matrices of {}×{} and {}×{}: the inner dimensions differ ({} and {})",
+                    m.rows.len(),
+                    m.width(),
+                    n.rows.len(),
+                    n.width(),
+                    m.width(),
+                    n.rows.len()
+                ));
+            }
+            let rows = m
+                .rows
+                .iter()
+                .map(|r| (0..n.width()).map(|j| dot(r.iter().cloned(), column(n, j).into_iter(), scale)).collect())
+                .collect();
+            Ok(Value::table(crate::Table::new(None, rows)))
+        }
+        (_, Some(v), _, Some(w)) => {
+            if v.len() != w.len() {
+                return Err(format!("x: vectors of {} and {}: the lengths differ", v.len(), w.len()));
+            }
+            Ok(dot(v.iter().cloned(), w.iter().cloned(), scale))
+        }
+        _ => Err(format!(
+            "x is the matrix product: it takes a matrix (an array of one numeric type) or a vector (a list of numbers) on each side, not {} and {}",
+            kind(left),
+            kind(right)
+        )),
     }
 }

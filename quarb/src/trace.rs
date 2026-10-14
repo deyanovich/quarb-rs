@@ -181,8 +181,13 @@ fn step_record(i: usize, p: &PStep, staged: bool) -> qt::Step {
         PKind::Hop(s) => {
             r.kind = "hop".into();
             r.axis = Some(axis_text(&s.axis).into());
-            r.matcher = Some(unparse::matcher(&s.matcher));
-            r.matcherkind = Some(matcher_kind(&s.matcher).into());
+            if s.labels.is_empty() {
+                r.matcher = Some(unparse::matcher(&s.matcher));
+                r.matcherkind = Some(matcher_kind(&s.matcher).into());
+            } else {
+                r.matcher = Some(unparse::labels(&s.labels));
+                r.matcherkind = Some("labels".into());
+            }
             r.predicate = predicates_text(&s.predicates);
         }
         PKind::Group(g) => {

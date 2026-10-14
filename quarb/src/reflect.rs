@@ -219,10 +219,21 @@ impl QueryArbor {
     fn walk_step(&mut self, s: &Step, parent: usize) {
         let mut props = vec![
             ("axis".to_string(), Value::Str(axis_spelling(&s.axis))),
-            ("matcher".to_string(), Value::Str(matcher_text(&s.matcher))),
+            (
+                "matcher".to_string(),
+                Value::Str(if s.labels.is_empty() {
+                    matcher_text(&s.matcher)
+                } else {
+                    crate::unparse::labels(&s.labels)
+                }),
+            ),
             (
                 "matcher-kind".to_string(),
-                Value::Str(matcher_kind(&s.matcher).to_string()),
+                Value::Str(if s.labels.is_empty() {
+                    matcher_kind(&s.matcher).to_string()
+                } else {
+                    "labels".to_string()
+                }),
             ),
             ("leaf".to_string(), Value::Bool(s.leaf)),
         ];
@@ -434,6 +445,7 @@ impl QueryArbor {
                     crate::ast::ArithOp::Div => "div",
                     crate::ast::ArithOp::IDiv => "idiv",
                     crate::ast::ArithOp::Mod => "mod",
+                    crate::ast::ArithOp::MatMul => "x",
                 };
                 let id = self.intern(
                     Some("arith"),
@@ -505,6 +517,23 @@ impl QueryArbor {
                 let id = self.intern(Some("coalesce"), Vec::new(), Some(parent));
                 self.walk_operand(left, id);
                 self.walk_operand(right, id);
+            }
+            Operand::Range { from, to, step } => {
+                let id = self.intern(Some("range"), Vec::new(), Some(parent));
+                self.walk_operand(from, id);
+                self.walk_operand(to, id);
+                if let Some(s) = step {
+                    self.walk_operand(s, id);
+                }
+            }
+            // Sugar over a list: it reflects as the list it is.
+            Operand::RecordArray { rows, .. } => {
+                let id = self.intern(Some("list"), Vec::new(), Some(parent));
+                for row in rows {
+                    for (_, item) in row {
+                        self.walk_operand(item, id);
+                    }
+                }
             }
             Operand::Table { rows, .. } => {
                 let id = self.intern(Some("table"), Vec::new(), Some(parent));
@@ -783,6 +812,26 @@ impl QueryArbor {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
                 self.walk_command(inner, id);
             }
+            Command::Append { body, overwrite } => {
+                let props = if *overwrite {
+                    vec![("overwrite".to_string(), Value::Bool(true))]
+                } else {
+                    Vec::new()
+                };
+                let id = self.intern(Some("append"), props, Some(parent));
+                self.walk_command(body, id);
+            }
+            Command::AppendRow { items, overwrite } => {
+                let props = if *overwrite {
+                    vec![("overwrite".to_string(), Value::Bool(true))]
+                } else {
+                    Vec::new()
+                };
+                let id = self.intern(Some("append"), props, Some(parent));
+                for (_, item) in items {
+                    self.walk_operand(item, id);
+                }
+            }
             Command::Repeat { command, min, max } => {
                 let mut props = vec![("min".to_string(), Value::Int(*min as i64))];
                 if let Some(n) = max {
@@ -817,6 +866,11 @@ impl QueryArbor {
                         props.push(("to".to_string(), Value::Int(*t)));
                     }
                     self.intern(Some("span"), props, Some(parent));
+                }
+                Arg::Pairs { keys, values } => {
+                    let id = self.intern(Some("pairs"), Vec::new(), Some(parent));
+                    self.walk_operand(keys, id);
+                    self.walk_operand(values, id);
                 }
                 Arg::Named { name, value } => {
                     self.intern(

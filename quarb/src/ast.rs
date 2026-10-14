@@ -211,6 +211,23 @@ pub enum Command {
     /// mode exactly like a branch projection. Refused under `@|`
     /// and `$|`: hops are per-thread.
     Nav(Branch),
+    /// `+| body` — the append pipe (spec: The Append Pipe): the body
+    /// is evaluated per capsa with the topic, as the segment after
+    /// `|` is, and every value it yields is appended to the topic —
+    /// a value of the topic's own shape merged (a list
+    /// concatenated, a table's rows added, a record's fields added),
+    /// anything else as one element. `overwrite` is `+|!`, which
+    /// lets a record's field be replaced; `+|` never overwrites.
+    Append { body: Box<Command>, overwrite: bool },
+    /// `+| %(…)` — the append pipe with a row on its right, under
+    /// the table literal's rules: an item positional by the topic's
+    /// header or named, resolved at run time; on a record or a list
+    /// a named row is the record it spells, a positional one is
+    /// refused by kind.
+    AppendRow {
+        items: Vec<(Option<String>, Operand)>,
+        overwrite: bool,
+    },
     /// `$| command` — the iteration pipe, the scope-dual of `@|`: where
     /// `@|` hands its command ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per
@@ -292,6 +309,14 @@ pub enum Arg {
     Opt {
         name: String,
         value: Option<Operand>,
+    },
+    /// `%(@(a; b) = @(1; 2))`, `%($.k = $.v)` — the pairwise fields
+    /// (spec: the record constructor): a list of names on the left
+    /// of `=` takes a list of values pairwise, in order, among the
+    /// ordinary fields in the order written.
+    Pairs {
+        keys: Operand,
+        values: Operand,
     },
 }
 
@@ -434,6 +459,9 @@ pub struct Quant {
 pub struct Step {
     pub axis: Axis,
     pub matcher: Matcher,
+    /// The label selection of a crosslink hop, `->(a && !b)`;
+    /// empty when the matcher alone names the label.
+    pub labels: Vec<LabelClause>,
     /// `<...>` trait filters. Multiple clauses are ANDed together.
     pub traits: Vec<TraitClause>,
     /// `[...]` predicates. All must pass.
@@ -579,6 +607,28 @@ pub enum Operand {
     Table {
         header: Option<Vec<String>>,
         rows: Vec<TableRow>,
+    },
+    /// `@%(...)` — the record array (spec: List Construction):
+    /// sugar over a list of records in the table literal's shape, a
+    /// header list then one `%(...)` row per record, positional by
+    /// the header or named; a name the header lacks extends it, null
+    /// in every other row. A cell holds any value: no width is
+    /// promised, the value is a plain list.
+    RecordArray {
+        header: Vec<String>,
+        rows: Vec<Vec<(Option<String>, Operand)>>,
+    },
+    /// `a..b`, `a..b..step` — the range (spec: the calculator's
+    /// range): every integer from `a` to `b`, one value at a time,
+    /// as a path yields its matches; `5..1` counts down; a step
+    /// strides, the values always running from the first bound
+    /// toward the second, the step's sign saying where the stride
+    /// is anchored (`a..b..-n` strides from `b`). Bounds are integer
+    /// literals or parenthesized expressions.
+    Range {
+        from: Box<Operand>,
+        to: Box<Operand>,
+        step: Option<Box<Operand>>,
     },
     /// `value[i]`, `value[a..b]`, `table[i; j]` — brackets glued to a
     /// value expression index the value (spec: Indexing a Value): on
@@ -734,6 +784,26 @@ pub enum ArithOp {
     IDiv,
     /// `mod` — remainder; the sign follows the dividend.
     Mod,
+    /// `x` — the matrix product (spec: The matrix): between a matrix
+    /// (an array of one numeric type) and a vector (a list of
+    /// numbers), and nowhere else; a reserved word of the value
+    /// grammar.
+    MatMul,
+}
+
+impl ArithOp {
+    /// The operator as written.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "div",
+            ArithOp::IDiv => "idiv",
+            ArithOp::Mod => "mod",
+            ArithOp::MatMul => "x",
+        }
+    }
 }
 
 /// A comparison operator.
@@ -772,6 +842,34 @@ impl TraitClause {
             Some(name) => !has(name),
             None if alt == "*" => any,
             None => has(alt),
+        })
+    }
+}
+
+/// One conjunct of a crosslink label selection — `->(a && !b)`,
+/// spec: Label Selections — its alternatives OR'd, each a label
+/// pattern, negated or not. A step's clauses are ANDed, as a
+/// trait's are. The selection reads the labels a crosslink carries
+/// together: `(a && b)` is one crosslink labeled both ways. `*` is
+/// any label; every crosslink carries one, so `!*` selects nothing.
+#[derive(Debug, Clone)]
+pub struct LabelClause {
+    pub alts: Vec<LabelAlt>,
+}
+
+/// One alternative of a [`LabelClause`].
+#[derive(Debug, Clone)]
+pub struct LabelAlt {
+    pub neg: bool,
+    pub matcher: Matcher,
+}
+
+impl LabelClause {
+    /// Whether a crosslink carrying `labels` satisfies the clause.
+    pub fn matches(&self, labels: &[String]) -> bool {
+        self.alts.iter().any(|a| {
+            let hit = labels.iter().any(|l| a.matcher.matches(l));
+            hit != a.neg
         })
     }
 }

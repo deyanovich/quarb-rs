@@ -286,7 +286,9 @@ pub(crate) fn step(s: &Step) -> String {
     }
     // The parent and the ancestors take no name: the wildcard is
     // implied, and the bare axis is the canonical spelling.
-    let m = if matches!(s.axis, Axis::Parent | Axis::Ancestor(_))
+    let m = if !s.labels.is_empty() {
+        labels(&s.labels)
+    } else if matches!(s.axis, Axis::Parent | Axis::Ancestor(_))
         && matches!(s.matcher, Matcher::Any)
     {
         String::new()
@@ -396,6 +398,35 @@ impl OrPat for Option<(String, String)> {
     fn unwrap_or_default_with(self, pat: &str) -> (String, String) {
         self.unwrap_or_else(|| (String::new(), pat.to_string()))
     }
+}
+
+/// A crosslink label selection in its parentheses: the conjuncts
+/// joined by `&&`, a conjunct of several alternatives by `||` in
+/// its own parentheses, a negated alternative led by `!`.
+pub(crate) fn labels(clauses: &[crate::ast::LabelClause]) -> String {
+    let clause = |c: &crate::ast::LabelClause| -> String {
+        c.alts
+            .iter()
+            .map(|a| format!("{}{}", if a.neg { "!" } else { "" }, matcher(&a.matcher)))
+            .collect::<Vec<_>>()
+            .join(" || ")
+    };
+    let body = if clauses.len() == 1 {
+        clause(&clauses[0])
+    } else {
+        clauses
+            .iter()
+            .map(|c| {
+                if c.alts.len() > 1 {
+                    format!("({})", clause(c))
+                } else {
+                    clause(c)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" && ")
+    };
+    format!("({body})")
 }
 
 pub(crate) fn matcher(m: &Matcher) -> String {
@@ -586,7 +617,7 @@ pub(crate) fn operand_text(o: &Operand) -> String {
     operand(o)
 }
 
-fn operand(o: &Operand) -> String {
+pub(crate) fn operand(o: &Operand) -> String {
     match o {
         Operand::Match {
             scrutinee,
@@ -687,6 +718,30 @@ fn operand(o: &Operand) -> String {
                 Some(c) => format!("{}[{}; {}]", body_text(base), spec(rows), spec(c)),
                 None => format!("{}[{}]", body_text(base), spec(rows)),
             }
+        }
+        Operand::Range { from, to, step } => {
+            let bound = |e: &Operand| match e {
+                Operand::Lit(Value::Int(n)) => n.to_string(),
+                other => format!("({})", body_text(other)),
+            };
+            match step {
+                Some(s) => format!("{}..{}..{}", bound(from), bound(to), bound(s)),
+                None => format!("{}..{}", bound(from), bound(to)),
+            }
+        }
+        Operand::RecordArray { header, rows } => {
+            let mut parts: Vec<String> = vec![format!("@({})", header.join("; "))];
+            for row in rows {
+                let inner: Vec<String> = row
+                    .iter()
+                    .map(|(n, e)| match n {
+                        Some(n) => format!("{n} = {}", body_text(e)),
+                        None => body_text(e),
+                    })
+                    .collect();
+                parts.push(format!("%({})", inner.join("; ")));
+            }
+            format!("@%({})", parts.join("; "))
         }
         Operand::Table { header, rows } => {
             let mut parts: Vec<String> = Vec::new();
@@ -860,6 +915,7 @@ fn arith(op: ArithOp) -> &'static str {
         ArithOp::Div => "div",
         ArithOp::IDiv => "idiv",
         ArithOp::Mod => "mod",
+        ArithOp::MatMul => "x",
     }
 }
 
@@ -957,6 +1013,15 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Func(call) if is_record_call(&call.name) => {
             format!("| %{}", record_args(call, "; "))
         }
+        // `| #(3)` / `| #(@(a; b; c))` — the reshape, its header bare.
+        Command::Func(call) if call.name == "#" && !call.args.is_empty() => match &call.args[0] {
+            Arg::Lit(Value::List(names)) => format!(
+                "| #(@({}))",
+                names.iter().map(|n| name_text(&n.to_string())).collect::<Vec<_>>().join("; ")
+            ),
+            Arg::Lit(v) => format!("| #({})", v.to_quarb()),
+            _ => format!("| {}", fn_call(call)),
+        },
         Command::Func(call) => format!("| {}", fn_call(call)),
         // `%%(...)`: the record sigil's enriched register view.
         Command::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
@@ -992,6 +1057,43 @@ pub(crate) fn command(st: &Command) -> String {
                 None => format!("{{{min};}}"),
             };
             format!("{}{quant}", command(inner))
+        }
+        Command::Append { body, overwrite } => {
+            // A value body prints as the value (`+| 3`); any other
+            // command as it prints after `|`.
+            let body = match &**body {
+                Command::Expr(e) => {
+                    let text = operand(e);
+                    let bare = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
+                        || text.starts_with("@-")
+                        || text.starts_with("@(")
+                        || text.starts_with("@%(")
+                        || text.starts_with("#(")
+                        || matches!(text.as_str(), "null" | "true" | "false")
+                        || text.starts_with(|c: char| c.is_ascii_digit())
+                        || (text.starts_with('-')
+                            && text[1..].starts_with(|c: char| c.is_ascii_digit()));
+                    if bare { text } else { format!("({text})") }
+                }
+                other => {
+                    let text = command(other);
+                    text.strip_prefix("@| ")
+                        .or_else(|| text.strip_prefix("| "))
+                        .unwrap_or(&text)
+                        .to_string()
+                }
+            };
+            format!("+|{} {body}", if *overwrite { "!" } else { "" })
+        }
+        Command::AppendRow { items, overwrite } => {
+            let inner: Vec<String> = items
+                .iter()
+                .map(|(n, e)| match n {
+                    Some(n) => format!("{n} = {}", body_text(e)),
+                    None => body_text(e),
+                })
+                .collect();
+            format!("+|{} %({})", if *overwrite { "!" } else { "" }, inner.join("; "))
         }
         Command::Map(inner) => {
             let body = command(inner);
@@ -1138,6 +1240,7 @@ fn arg_text(a: &Arg) -> String {
             b.map(|n| n.to_string()).unwrap_or_default()
         ),
         Arg::Named { name, value } => format!("{name} = {}", literal(value)),
+        Arg::Pairs { keys, values } => format!("{} = {}", body_text(keys), body_text(values)),
         // An option's string value prints bare when the shell
         // spelling admits it (`--locale=ru`), quoted otherwise.
         Arg::Opt { name, value } => match value {
@@ -1252,6 +1355,82 @@ mod tests {
             "/a | %(fi = 1) | [:pp && ( :fi || :ss)]"
         );
         assert_fixpoint("/a | %(fi = 1) | [!( :fi || :ss)]");
+    }
+
+    #[test]
+    fn calculator_round_trips() {
+        for q in [
+            "= @(1..5)",
+            "= 0..8..2",
+            "= @(1..(2 + 1))",
+            "= @((1 + 1)..4..(1 + 0))",
+            "= @(1..12) | #(3)",
+            "= @(1..6) | #(@(a; b; c)) | :b",
+            "= @(1; @(2)) | flatten(1)",
+            "= %(@(a; b) = @(1; 2))",
+            "= %(id = 7; $.k = $.v) | keys",
+            "/a | %($.k = $_) | values",
+            "= 1..6 @| #(2) | dim",
+        ] {
+            assert_fixpoint(q);
+        }
+    }
+
+    #[test]
+    fn structure_arithmetic_round_trips() {
+        for q in [
+            "= @(1; 2) * 2 | $_ * 3",
+            "= #(%(1; 2)) x @(1; 1)",
+            "/a | @(::x) | $_ + 1 * 2 | count",
+            "= 5 | $_ mod 3",
+        ] {
+            assert_fixpoint(q);
+        }
+        // the operator in command position is the topic's expression
+        assert_eq!(rt("= 1 | * 2"), "= 1 | $_ * 2");
+        assert_eq!(rt("= 1 | + 2 * 3"), "= 1 | $_ + 2 * 3");
+    }
+
+    #[test]
+    fn append_pipe_round_trips() {
+        for q in [
+            "= @(1; 2) +| 3",
+            "/a | %(a = ::x) +|! %(a = 2)",
+            "= #(@(a; b); %(1; 2)) +| %(3; b = 4)",
+            "/a | @(::x) +| ::y | count",
+            "= @(0) +| (/rows/*::x)",
+        ] {
+            assert_fixpoint(q);
+        }
+        assert_eq!(rt("= @(1) +__ 2"), "= @(1) +| 2");
+    }
+
+    #[test]
+    fn record_array_round_trips() {
+        for q in [
+            "= @%(@(a; b); %(1; 2); %(b = 3))",
+            "/x | @%(@(name); %(::name))",
+        ] {
+            assert_fixpoint(q);
+        }
+    }
+
+    #[test]
+    fn label_selections_round_trip() {
+        for q in [
+            "/a->(ref && !doc)",
+            "/a<-((ref || doc) && !x*)",
+            "/a--(!(ref || doc))",
+            "/a->(!*)",
+            "(/a->(ref && doc)){2}",
+            "/a->(ref|doc)",
+        ] {
+            assert_fixpoint(q);
+        }
+        // CNF puts the conjunction outermost; the disjunction of
+        // two conjunctions distributes.
+        assert_eq!(rt("/a->(!(ref || doc))"), "/a->(!ref && !doc)");
+        assert_eq!(rt("/a->(ref .and. .not. doc)"), "/a->(ref && !doc)");
     }
 
     #[test]

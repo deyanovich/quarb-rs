@@ -48,7 +48,7 @@ fn the_column_reading_of_records_and_the_row_reading_back() {
     // after `|` one list value, after `@|` the stream of them.
     assert_eq!(
         run(r#"/rows/* | %(::book; ::x; ::y) @| % | @"#).unwrap(),
-        vec![r#"@(%(book = "a"; x = 1; y = 2); %(book = "b"; x = 3; y = 4); %(book = "c"; x = 5; y = 6))"#]
+        vec![r#"@%(@(book; x; y); %("a"; 1; 2); %("b"; 3; 4); %("c"; 5; 6))"#]
     );
     assert_eq!(
         run(r#"/rows/* | %(::book; ::x; ::y) @| % @| @"#).unwrap(),
@@ -70,16 +70,15 @@ fn the_column_reading_of_records_and_the_row_reading_back() {
 
 #[test]
 fn transpose_exchanges_rows_and_columns() {
-    // After `@|`, the stream of lists is the matrix; the result
-    // splits into one capsa per row, and a second transpose
-    // restores the rows.
+    // After `@|`, the stream of lists is the matrix: the result is
+    // an array of one type, and a second transpose restores it.
     assert_eq!(
         run(r#"/rows/* | @(::x; ::y) @| transpose"#).unwrap(),
-        vec!["@(1; 3; 5)", "@(2; 4; 6)"]
+        vec!["#(%(1; 3; 5);\n  %(2; 4; 6))"]
     );
     assert_eq!(
         run(r#"/rows/* | @(::x; ::y) @| transpose @| transpose"#).unwrap(),
-        vec!["@(1; 2)", "@(3; 4)", "@(5; 6)"]
+        vec!["#(%(1; 2);\n  %(3; 4);\n  %(5; 6))"]
     );
     let e = run(r#"/rows/* | (::book = "a" ? @(::x) : @(::x; ::y)) @| transpose"#)
         .unwrap_err()
@@ -264,10 +263,11 @@ fn the_table_literal_its_laws_and_its_readings() {
     assert!(refuse(r#"= "abc"[1]"#).contains("a string is not indexed"));
     assert!(refuse("= @(1; 2)[::x = 1]").contains("a condition on a value is not read"));
     assert!(refuse(&format!("= {t3}[2; \"nope\"]")).contains("no column 'nope'"));
-    // the header lifted and lowered
+    // the header lifted and lowered; the lowered names make their
+    // columns text, so the ages take their text form
     assert_eq!(
         one(&format!("= {t3}[..2] | header-to-row")),
-        "#(%(\"name\"; \"age\");\n  %(\"Braund\"; 22);\n  %(\"Allen\"; 35))"
+        "#(%(\"name\"; \"age\");\n  %(\"Braund\"; \"22\");\n  %(\"Allen\"; \"35\"))"
     );
     assert_eq!(
         one(&format!("= {t3} | header-to-row | row-to-header | header")),
@@ -302,5 +302,92 @@ fn the_table_literal_its_laws_and_its_readings() {
     assert_eq!(
         one(t),
         "#(@(name; age);\n  %(\"Braund\"; 22);\n  %(\"Allen\"; 35))"
+    );
+}
+
+/// The table is flat: a cell holds a scalar or null, never a
+/// structure. The literal, the table reading of records and of
+/// lists refuse, naming the cell; the records keep their shape.
+#[test]
+fn a_table_is_flat() {
+    let e = run(r#"= #(@(a; b); %(1; @(2; 3)))"#).unwrap_err().to_string();
+    assert!(
+        e.contains("row 1, column 2") && e.contains("a table is flat") && e.contains("list"),
+        "{e}"
+    );
+    let e = run(r#"= @(%(a = 1; b = @(2; 3))) | #"#).unwrap_err().to_string();
+    assert!(
+        e.contains("a table is flat") && e.contains("'b' holds a list in row 1") && e.contains("keep their shape"),
+        "{e}"
+    );
+    let e = run(r#"= @(@(1; %(k = 2))) | #"#).unwrap_err().to_string();
+    assert!(e.contains("row 1, column 2 holds a record"), "{e}");
+}
+
+/// The record array `@%(...)` (spec: List Construction): sugar over
+/// a list of records in the table literal's shape, and the form two
+/// or more records of one shape print in.
+#[test]
+fn the_record_array_is_a_list_of_records() {
+    // the constructor: header, then rows positional or named
+    assert_eq!(one(r#"= @%(@(a; b); %(1; 2); %(b = 4; a = 3))"#), r#"@%(@(a; b); %(1; 2); %(3; 4))"#);
+    // a name the header lacks extends it, null in every other row
+    assert_eq!(one(r#"= @%(@(a); %(1); %(2; c = 3))"#), r#"@%(@(a; c); %(1; null); %(2; 3))"#);
+    // a plain list of records of one shape prints in the form; one
+    // record, or records of differing shapes, print record by record
+    assert_eq!(one(r#"= @(%(a = 1); %(a = 2))"#), r#"@%(@(a); %(1); %(2))"#);
+    assert_eq!(one(r#"= @(%(a = 1))"#), r#"@(%(a = 1))"#);
+    assert_eq!(one(r#"= @(%(a = 1); %(b = 2))"#), r#"@(%(a = 1); %(b = 2))"#);
+    assert_eq!(one(r#"= @(%(a = 1; b = 2); %(b = 3; a = 4))"#), r#"@(%(a = 1; b = 2); %(b = 3; a = 4))"#);
+    // a cell holds any value: no width is promised
+    assert_eq!(one(r#"= @%(@(a); %(@(1; 2)); %(3))"#), r#"@%(@(a); %(@(1; 2)); %(3))"#);
+    // it is a list: json, the row command, the table reading
+    assert_eq!(one(r#"= @%(@(a; b); %(1; 2); %(3; 4)) | json"#), r#"[{"a": 1, "b": 2}, {"a": 3, "b": 4}]"#);
+    assert_eq!(one(r#"= @%(@(a; b); %(1; 2); %(3; 4)) | [2]"#), r#"%(a = 3; b = 4)"#);
+    assert_eq!(one(r#"= @%(@(a; b); %(1; 2); %(3; 4)) | # | dim"#), "@(2; 2)");
+    assert_eq!(one(r#"= 0 | @%(@(a); %(1); %(2)) | [1]"#), r#"%(a = 1)"#);
+    // the header is required; more positional values than names refuse
+    let e = run(r#"= @%(%(1; 2))"#).unwrap_err().to_string();
+    assert!(e.contains("header"), "{e}");
+    let e = run(r#"= @%(@(a); %(1; 2))"#).unwrap_err().to_string();
+    assert!(e.contains("row 1") && e.contains("positional"), "{e}");
+}
+
+/// Table columns are typed (spec: The Table): one scalar type per
+/// column, the least every non-null cell coerces to, the cells
+/// stored coerced; `| types` names them. The record array stays
+/// untyped.
+#[test]
+fn table_columns_are_typed() {
+    // digit strings make an integer column; the cells print bare
+    assert_eq!(one(r#"= #(@(year; name); %("1999"; "a"); %(2001; "b"))"#), "#(@(year; name);\n  %(1999; \"a\");\n  %(2001; \"b\"))");
+    assert_eq!(one(r#"= #(@(year; name); %("1999"; "a"); %(2001; "b")) | types"#), r#"@("integer"; "text")"#);
+    assert_eq!(one(r#"= #(@(year; name); %("1999"; "a"); %(2001; "b")) | :year"#), "@(1999; 2001)");
+    // the lattice: boolean < integer < float
+    assert_eq!(one(r#"= #(@(b); %("true"); %(false)) | types"#), "boolean");
+    assert_eq!(one(r#"= #(@(n); %(true); %(2))"#), "#(@(n);\n  %(1);\n  %(2))");
+    assert_eq!(one(r#"= #(@(x); %(1); %("2.5")) | types"#), "float");
+    assert_eq!(one(r#"= #(@(x); %(1); %("2.5")) | :x"#), "@(1; 2.5)");
+    // the types of their own
+    assert_eq!(one(r#"= #(@(d); %("2020-01-02"); %("2020-01-03T10:00:00Z")) | types"#), "instant");
+    assert_eq!(one(r#"= #(@(d); %("PT1H"); %("5d")) | types"#), "duration");
+    assert_eq!(one(r#"= #(@(p); %("1812"); %("2025-10")) | types"#), "period");
+    assert_eq!(one(r#"= #(@(q); %("5km"); %("3 m")) | types"#), "quantity");
+    // text is the top: a quantity column of two dimensions, a mixed column
+    assert_eq!(one(r#"= #(@(q); %("5km"); %("3kg")) | types"#), "text");
+    assert_eq!(one(r#"= #(@(c); %(1); %("a")) | :c"#), r#"@("1"; "a")"#);
+    assert_eq!(one(r#"= #(@(c); %(null); %(null)) | types"#), "text");
+    // null is missing in any column
+    assert_eq!(one(r#"= #(@(n); %("7"); %(null)) | types"#), "integer");
+    // the table reading of records types the same way
+    assert_eq!(one(r#"= @(%(y = "1999"); %(y = "2001")) | # | :y"#), "@(1999; 2001)");
+    assert_eq!(one(r#"/rows/* | %(::book; ::x) @| # | types"#), r#"@("text"; "integer")"#);
+    // the record array stays untyped: values as written
+    assert_eq!(one(r#"= @%(@(a); %("1"); %(2))"#), r#"@%(@(a); %("1"); %(2))"#);
+    // the header lowered into the rows makes its column text: the
+    // numbers below it take their text form
+    assert_eq!(
+        one(r#"= #(@(name; age); %("Braund"; 22)) | header-to-row | :2"#),
+        r#"@("age"; "22")"#
     );
 }

@@ -300,6 +300,22 @@ pub const SPECS: &[FnSpec] = &[
         "a table's shape, @(rows; columns)",
     ),
     both(
+        "keys",
+        "a record's field names as a list, in order; a table's header",
+    ),
+    both(
+        "values",
+        "a record's values as a list, in order; a table's rows as an array, columns and types kept",
+    ),
+    both(
+        "flatten",
+        "every nested list opened to any depth (flatten(n): n levels), scalars and nulls in order; a table's cells row by row",
+    ),
+    both(
+        "types",
+        "a table's column types, one word per column: boolean, integer, float, instant, duration, period, quantity, text",
+    ),
+    both(
         "[]",
         "a row of a table by position, or a slice of its rows (written '| [n]', '| [a..b]')",
     ),

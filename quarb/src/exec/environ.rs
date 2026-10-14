@@ -27,7 +27,7 @@ fn words(
                 a.map(|n| n.to_string()).unwrap_or_default(),
                 b.map(|n| n.to_string()).unwrap_or_default()
             )),
-            Arg::Named { .. } | Arg::Opt { .. } => None,
+            Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => None,
         }
     };
     let operands: Vec<String> = call.args.iter().filter_map(text).collect();
@@ -94,7 +94,7 @@ fn lib_values(
                 a.map(Value::Int).unwrap_or(Value::Null),
                 b.map(Value::Int).unwrap_or(Value::Null),
             ])),
-            Arg::Named { .. } | Arg::Opt { .. } => None,
+            Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => None,
         })
         .collect();
     let options = call

@@ -320,11 +320,17 @@ pub(crate) fn apply_command(
             .enumerate()
             .map(|(i, mut c)| {
                 let scope = c.scope(Some(i + 1), peers, outer);
-                let (fields, prov) = split_fields(record_fields_prov(
-                    &call.args, adapter, c.node, trace, scope,
-                ));
-                c.topic = Some(Value::Record(fields));
-                c.prov = prov;
+                match record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                    Ok(f) => {
+                        let (fields, prov) = split_fields(f);
+                        c.topic = Some(Value::Record(fields));
+                        c.prov = prov;
+                    }
+                    Err(why) => {
+                        crate::exec::record_refusal(why);
+                        c.topic = Some(Value::Null);
+                    }
+                }
                 c
             })
             .collect(),
@@ -444,6 +450,12 @@ pub(crate) fn apply_command(
             max,
         } => repeat_command(inner, min, max, caps, adapter, trace, outer),
         Command::Map(inner) => map_command(inner, caps, adapter, trace, outer),
+        Command::Append { body, overwrite } => {
+            append_command(body, *overwrite, caps, adapter, trace, outer)
+        }
+        Command::AppendRow { items, overwrite } => {
+            append_row_command(items, *overwrite, caps, adapter, trace, outer, peers)
+        }
         // The spread: fork a list topic into one thread per
         // element; null forks to nothing, a non-list scalar passes
         // through, a record passes whole. The outer form `...?`
@@ -609,12 +621,19 @@ pub(crate) fn apply_command(
         Command::AggRecord { call, enriched } => {
             let seed = seed_capsa(&caps, adapter);
             let scope = seed.scope(None, peers, outer);
+            let built = match record_fields_prov(&call.args, adapter, seed.node, trace, scope) {
+                Ok(f) => f,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    let mut out = seed;
+                    out.topic = Some(Value::Null);
+                    return vec![out];
+                }
+            };
             let (fields, prov) = if *enriched {
                 let mut fields = named_register_fields(&seed.register);
                 let mut parts = named_register_parts(&seed.register);
-                for (name, value, p) in
-                    record_fields_prov(&call.args, adapter, seed.node, trace, scope)
-                {
+                for (name, value, p) in built {
                     match fields.iter_mut().find(|(n, _)| n == &name) {
                         Some((_, v)) => *v = value,
                         None => fields.push((name.clone(), value)),
@@ -626,9 +645,7 @@ pub(crate) fn apply_command(
                 }
                 (fields, Prov::record(parts))
             } else {
-                split_fields(record_fields_prov(
-                    &call.args, adapter, seed.node, trace, scope,
-                ))
+                split_fields(built)
             };
             let mut out = seed;
             out.topic = Some(Value::Record(fields));
@@ -854,9 +871,17 @@ pub(super) fn record_with_command(
         .enumerate()
         .map(|(i, mut c)| {
             let scope = c.scope(Some(i + 1), peers, outer);
+            let built = match record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                Ok(f) => f,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    c.topic = Some(Value::Null);
+                    return c;
+                }
+            };
             let mut fields = named_register_fields(&c.register);
             let mut parts = named_register_parts(&c.register);
-            for (name, value, p) in record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+            for (name, value, p) in built {
                 match fields.iter_mut().find(|(n, _)| n == &name) {
                     Some((_, v)) => *v = value,
                     None => fields.push((name.clone(), value)),
@@ -1100,12 +1125,18 @@ pub(super) fn record_push_command(
         .enumerate()
         .map(|(i, mut c)| {
             let scope = c.scope(Some(i + 1), peers, outer);
+            let built = match record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                Ok(f) => f,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    c.topic = Some(Value::Null);
+                    return c;
+                }
+            };
             let (fields, prov) = if *enriched {
                 let mut fields = named_register_fields(&c.register);
                 let mut parts = named_register_parts(&c.register);
-                for (name, value, p) in
-                    record_fields_prov(&call.args, adapter, c.node, trace, scope)
-                {
+                for (name, value, p) in built {
                     match fields.iter_mut().find(|(n, _)| n == &name) {
                         Some((_, v)) => *v = value,
                         None => fields.push((name.clone(), value)),
@@ -1117,9 +1148,7 @@ pub(super) fn record_push_command(
                 }
                 (fields, Prov::record(parts))
             } else {
-                split_fields(record_fields_prov(
-                    &call.args, adapter, c.node, trace, scope,
-                ))
+                split_fields(built)
             };
             let value = Value::Record(fields);
             c.register.push(Reg {
@@ -1251,7 +1280,7 @@ pub(super) fn shell_command(
                 call.args.first().map(|a| match a {
                     Arg::Lit(v) => v.to_string(),
                     Arg::Expr(e) => operand_scalar(adapter, c.node, e, trace, scope).to_string(),
-                    Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } => String::new(),
+                    Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => String::new(),
                 })
             });
             c.topic = Some(match cmd {
@@ -1381,6 +1410,84 @@ pub(super) fn map_command(
                 c.prov = provs.pop().unwrap_or_default();
                 c.topic = Some(out.pop().expect("len checked"));
             }
+            c
+        })
+        .collect()
+}
+
+/// `+| body` — the append pipe (spec: The Append Pipe): per capsa,
+/// the body runs over the topic as the segment after `|` would, and
+/// every value it yields is appended to the topic by the shape
+/// rule; the capsa goes on with the new topic. A refusal nulls it.
+pub(super) fn append_command(
+    body: &Command,
+    overwrite: bool,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+) -> Vec<Capsa> {
+    caps.into_iter()
+        .map(|mut c| {
+            let topic = c.topic.clone().unwrap_or(Value::Null);
+            let pseudo = vec![Capsa {
+                prov: c.prov.clone(),
+                node: c.node,
+                register: c.register.clone(),
+                topic: Some(topic.clone()),
+                members: Vec::new(),
+                captures: c.captures.clone(),
+                named: c.named.clone(),
+                marks: c.marks.clone(),
+                bindings: c.bindings.clone(),
+                arrived: c.arrived.clone(),
+            }];
+            let items: Vec<Value> = apply_command(body, pseudo, adapter, trace, outer)
+                .into_iter()
+                .map(|p| p.topic.unwrap_or(Value::Null))
+                .collect();
+            c.topic = Some(match crate::stdlib::append_values(topic, items, overwrite) {
+                Ok(v) => v,
+                Err(why) => {
+                    crate::exec::record_refusal(format!("+|: {why}"));
+                    Value::Null
+                }
+            });
+            c
+        })
+        .collect()
+}
+
+/// `+| %(…)` — the append pipe with a row: the items evaluated per
+/// capsa, the row placed under the table literal's rules against the
+/// topic's header; a named row is a record on a record or a list.
+pub(super) fn append_row_command(
+    items: &[(Option<String>, Operand)],
+    overwrite: bool,
+    caps: Vec<Capsa>,
+    adapter: &impl AstAdapter,
+    trace: &Trace,
+    outer: Option<&Scope<'_>>,
+    peers: Option<&Peers>,
+) -> Vec<Capsa> {
+    caps.into_iter()
+        .enumerate()
+        .map(|(i, mut c)| {
+            let scope = c.scope(Some(i + 1), peers, outer);
+            let row: Vec<(Option<String>, Value)> = items
+                .iter()
+                .map(|(name, e)| {
+                    (name.clone(), operand_value(adapter, c.node, e, trace, &[], scope))
+                })
+                .collect();
+            let topic = c.topic.take().unwrap_or(Value::Null);
+            c.topic = Some(match crate::stdlib::append_row(topic, row, overwrite) {
+                Ok(v) => v,
+                Err(why) => {
+                    crate::exec::record_refusal(format!("+|: {why}"));
+                    Value::Null
+                }
+            });
             c
         })
         .collect()
@@ -1726,7 +1833,7 @@ pub(super) fn keyed_agg(
                     trace,
                     c.scope(Some(i + 1), peers, outer),
                 )),
-                Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => None,
+                Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => None,
             })
             .collect()
     };
@@ -1765,7 +1872,13 @@ pub(super) fn keyed_agg(
         let mut index: HashMap<Vec<SortKey>, usize> = HashMap::new();
         for (i, c) in caps.into_iter().enumerate() {
             let scope = c.scope(Some(i + 1), peers, outer);
-            let fields = record_fields_prov(&call.args, adapter, c.node, trace, scope);
+            let fields = match record_fields_prov(&call.args, adapter, c.node, trace, scope) {
+                Ok(f) => f,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    continue;
+                }
+            };
             let key: Vec<Value> = fields.iter().map(|(_, v, _)| v.clone()).collect();
             if key.iter().any(|v| matches!(v, Value::Null)) {
                 continue;

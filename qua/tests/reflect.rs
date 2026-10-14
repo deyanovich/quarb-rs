@@ -185,7 +185,7 @@ fn pandas_frames_chain_and_export() {
     assert_eq!(run(r#"/rows/* | %(::book; ::x; ::y) @| pd:x.sum"#).unwrap(), vec!["15"]);
     // An intermediate object takes its method on the path.
     let out = run(r#"/kv/* | %(::k; ::v) @| pd:groupby.sum(k) | @"#).unwrap();
-    assert_eq!(out, vec![r#"@(%(k = "p"; v = 5); %(k = "q"; v = 2))"#]);
+    assert_eq!(out, vec![r#"@%(@(k; v); %("p"; 5); %("q"; 2))"#]);
     // The frame serializes by its rows.
     let out = run(r#"/rows/*[::book = "a"] | %(::book; ::x) @| pd:round(0) | json"#).unwrap();
     assert_eq!(out, vec![r#"[{"book": "a", "x": 1}]"#]);
@@ -290,6 +290,21 @@ fn operands_keep_their_kind_and_the_input_fills_the_data_slot() {
     assert!(e.contains("row q: field 'w'") && e.contains("hole"), "{e}");
 }
 
+/// The table is flat: a frame whose cells hold lists (an object
+/// column) comes back across the boundary as a list of records, its
+/// shape kept, never as a table.
+#[test]
+fn a_frame_with_list_cells_comes_back_as_records() {
+    if !installed() {
+        return;
+    }
+    let r = run("= @(%(a = 1; b = @(2; 3)); %(a = 2; b = @(4))) @| pd:DataFrame").unwrap();
+    assert_eq!(r, vec!["%(a = 1; b = @(2; 3))", "%(a = 2; b = @(4))"]);
+    // the scalar frame beside it is still a table
+    let r = run("= @(%(a = 1; b = 2); %(a = 2; b = 4)) @| pd:DataFrame | dim").unwrap();
+    assert_eq!(r, vec!["@(2; 2)"]);
+}
+
 /// A table at the boundary: as the input or an operand of a reflected
 /// command it crosses as its rows, so a frame becomes the DataFrame
 /// or the matrix the construction makes, an array the matrix.
@@ -315,5 +330,5 @@ fn a_table_crosses_the_boundary_as_its_rows() {
     assert_eq!(r, vec!["1", "2", "3"]);
     // a Series on a named index comes back as a two-column frame
     let r = run("/rows/* | %(::book; ::x; ::y) @| # @| pd:DataFrame.mean(--numeric-only=true) | @").unwrap();
-    assert_eq!(r, vec![r#"@(%(index = "x"; value = 3.75); %(index = "y"; value = 0.875))"#]);
+    assert_eq!(r, vec![r#"@%(@(index; value); %("x"; 3.75); %("y"; 0.875))"#]);
 }

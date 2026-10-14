@@ -13,26 +13,45 @@
 use anyhow::Context;
 use clap::Parser;
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
+#[cfg(feature = "adapters")]
 use quarb_athena::AthenaAdapter;
+#[cfg(feature = "adapters")]
 use quarb_atrep::AtrepAdapter;
+#[cfg(feature = "adapters")]
 use quarb_bigquery::BigqueryAdapter;
+#[cfg(feature = "adapters")]
 use quarb_compose::ComposeAdapter;
+#[cfg(feature = "adapters")]
 use quarb_csv::CsvAdapter;
+#[cfg(feature = "adapters")]
 use quarb_duckdb::DuckdbAdapter;
+#[cfg(feature = "adapters")]
 use quarb_html::HtmlAdapter;
+#[cfg(feature = "adapters")]
 use quarb_json::JsonAdapter;
 #[cfg(feature = "kuzu")]
+#[cfg(feature = "adapters")]
 use quarb_kuzu::KuzuAdapter;
+#[cfg(feature = "adapters")]
 use quarb_mount::{Latent, Mount, MountAdapter};
+#[cfg(feature = "adapters")]
 use quarb_mysql::MysqlAdapter;
+#[cfg(feature = "adapters")]
 use quarb_open::*;
+#[cfg(feature = "adapters")]
 pub use quarb_open::{Mounted, OpenOpts, SourceCtx, open_target};
+#[cfg(feature = "adapters")]
 use quarb_oracle::OracleAdapter;
+#[cfg(feature = "adapters")]
 use quarb_postgres::PostgresAdapter;
+#[cfg(feature = "adapters")]
 use quarb_sqlite::SqliteAdapter;
+#[cfg(feature = "adapters")]
 use quarb_xml::XmlAdapter;
+#[cfg(feature = "adapters")]
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "adapters")]
 use std::rc::Rc;
 
 /// Query a filesystem tree, a JSON, XML, HTML, or CSV document.
@@ -356,11 +375,13 @@ struct OutputCtx {
     /// --budget, parsed.
     budget: Option<quarb::plan::Budget>,
     /// The --model file, parsed.
+    #[cfg(feature = "adapters")]
     model: Option<quarb_model::Model>,
     /// The output locale in force, with the layer that set it.
     locale: Option<(quarb::locale::OutputLocale, &'static str)>,
     /// Resident-serve mode: the socket, the idle TTL, and whether
     /// --now pinned the instant.
+    #[cfg(feature = "adapters")]
     resident: Option<(PathBuf, u64, bool)>,
     /// `@| encoding(LABEL)` taken off the end of the query.
     encoding: Option<(String, quarb::source::Escape)>,
@@ -371,6 +392,7 @@ struct OutputCtx {
 /// whose bare form is a complete target qualify — schemes that
 /// carry a payload (`git:PATH`, `mongodb://HOST/DB`) keep the
 /// two-argument form, where the split would be ambiguous.
+#[cfg(feature = "adapters")]
 fn split_scheme_query(q: &str) -> Option<(&'static str, &str)> {
     for scheme in ["github:", "gitlab:", "k8s:", "kubernetes:"] {
         if let Some(rest) = q.strip_prefix(scheme)
@@ -382,6 +404,7 @@ fn split_scheme_query(q: &str) -> Option<(&'static str, &str)> {
     None
 }
 
+#[cfg(feature = "adapters")]
 impl From<&Cli> for OpenOpts {
     fn from(cli: &Cli) -> Self {
         OpenOpts {
@@ -398,6 +421,7 @@ impl From<&Cli> for OpenOpts {
 /// Whether a target is written with a reader prefix or an adapter
 /// scheme (`text:…`, `imap://…`, `neo4j://…`) rather than as a
 /// path; a one-letter prefix is a Windows drive, a path.
+#[cfg(feature = "adapters")]
 fn is_prefixed_target(s: &str) -> bool {
     s.split_once(':').is_some_and(|(pre, _)| {
         pre.len() > 1
@@ -408,6 +432,7 @@ fn is_prefixed_target(s: &str) -> bool {
 }
 
 /// The relational targets the single flow keeps typed, for pushdown.
+#[cfg(feature = "adapters")]
 fn is_relational_target(s: &str) -> bool {
     s.starts_with("mssql://")
         || s.starts_with("oracle://")
@@ -420,7 +445,29 @@ fn is_relational_target(s: &str) -> bool {
 /// The complete CLI entry point (the `qua` binary is a thin
 /// shim over this; the `quarb-full` wheel ships it as
 /// `qua-full`).
+/// Which command runs: `qua`, with every source it can open, or
+/// `qc`, the calculator — the same code, the adapters compiled out
+/// and a query that would need one refused by name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Qua,
+    Calc,
+}
+
+/// `qua`'s entry point.
 pub fn cli_main() -> anyhow::Result<()> {
+    cli_main_with(Profile::Qua)
+}
+
+/// `qc`'s entry point: the calculator. The query runs as `qua` runs
+/// it after the expression head `=`; the `=` is accepted and not
+/// required, and anything that needs an input, a mount or a path
+/// from a node is refused, pointing at `qua`.
+pub fn calc_main() -> anyhow::Result<()> {
+    cli_main_with(Profile::Calc)
+}
+
+fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     // Restore the default SIGPIPE disposition. Rust ignores
     // SIGPIPE at startup, which turns a closed downstream pipe
     // (`qua ... | head`) into a panic on the next write; a Unix
@@ -441,13 +488,27 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
     }
 
-    let mut cli = Cli::parse();
+    let mut cli = match profile {
+        Profile::Qua => Cli::parse(),
+        // The calculator's help names it, and says what it is.
+        Profile::Calc => {
+            use clap::{CommandFactory, FromArgMatches};
+            let cmd = Cli::command()
+                .name("qc")
+                .about("The Quarb calculator: qua after the expression head, with every adapter off")
+                .override_usage("qc [OPTIONS] <QUERY>");
+            Cli::from_arg_matches(&cmd.get_matches())?
+        }
+    };
     // Environment mounts (`ALIAS=SCHEME:TARGET` with an environment
     // scheme) are taken off the inputs here, from the command line
     // only: mounting one is the opt-in that lets `ALIAS:name(…)`
     // run code outside the query.
     let environments = take_environments(&mut cli)?;
     let locale = set_output_locale(&cli)?;
+    if profile == Profile::Calc {
+        calc_check_options(&mut cli)?;
+    }
     let output = if cli.json {
         Output::Json
     } else if cli.jsonl {
@@ -476,6 +537,7 @@ pub fn cli_main() -> anyhow::Result<()> {
     // targets whose bare scheme is a complete target; the first
     // `/` begins the root-anchored query. The two-argument form
     // stays supported.
+    #[cfg(feature = "adapters")]
     if cli.paths.is_empty()
         && let Some((scheme, query)) = split_scheme_query(&cli.query)
     {
@@ -483,6 +545,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         cli.query = query.to_string();
     }
 
+    #[cfg(feature = "adapters")]
     if cli.xpath {
         let translation = quarb_xpath::translate(&cli.query).context("translating XPath")?;
         for note in &translation.notes {
@@ -490,6 +553,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
         cli.query = translation.query;
     }
+    #[cfg(feature = "adapters")]
     if cli.jq {
         let translation = quarb_jq::translate(&cli.query).context("translating jq")?;
         for note in &translation.notes {
@@ -497,6 +561,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         }
         cli.query = translation.query;
     }
+    #[cfg(feature = "adapters")]
     if cli.sql {
         let translation = quarb_sql::translate(&cli.query).context("translating SQL")?;
         for note in &translation.notes {
@@ -528,6 +593,11 @@ pub fn cli_main() -> anyhow::Result<()> {
         quarb::parse_defs(&text)
             .with_context(|| format!("parsing definitions in {}", defs_path.display()))?;
         cli.query = format!("{}\n{}", quarb::strip_defs_comments(&text), cli.query);
+    }
+    // The calculator reads its query once the definitions are in
+    // front of it, so a fragment a --defs file supplies is known.
+    if profile == Profile::Calc {
+        calc_check_query(&cli)?;
     }
 
     // --expand: print the fragment-expanded canonical query and
@@ -581,6 +651,7 @@ pub fn cli_main() -> anyhow::Result<()> {
     quarb::set_invocation_instant(now.0, now.1);
 
     // The session's sentence bonds, from every --desm file.
+    #[cfg(feature = "adapters")]
     if !cli.desm.is_empty() {
         let mut bonds = syndesmos::Syndesmos::empty();
         for f in &cli.desm {
@@ -594,7 +665,9 @@ pub fn cli_main() -> anyhow::Result<()> {
 
     // A --model file declares derived arbor structure; parse it once
     // and `run` wraps every mounted source in the enrichment layer.
+    #[cfg(feature = "adapters")]
     let mut parsed_model: Option<quarb_model::Model> = None;
+    #[cfg(feature = "adapters")]
     if let Some(model_path) = &cli.model {
         let model = quarb_model::parse_model_file(model_path)
             .map_err(|e| anyhow::anyhow!("parsing model {}: {e}", model_path.display()))?;
@@ -642,6 +715,7 @@ pub fn cli_main() -> anyhow::Result<()> {
 
     // Enable the AST cache before dispatch, so both a normal run and
     // a resident daemon's per-query parses consult it.
+    #[cfg(feature = "adapters")]
     if cli.cache || cli.cache_dir.is_some() {
         let dir = cli
             .cache_dir
@@ -662,6 +736,7 @@ pub fn cli_main() -> anyhow::Result<()> {
         #[cfg(not(unix))]
         anyhow::bail!("--resident needs Unix domain sockets (unavailable on this platform)");
     }
+    #[cfg_attr(not(feature = "adapters"), allow(unused_mut))]
     let mut oc = OutputCtx {
         output,
         expand: cli.expand,
@@ -677,12 +752,14 @@ pub fn cli_main() -> anyhow::Result<()> {
         explain: cli.explain,
         plan: cli.plan,
         budget: cli.budget.as_deref().map(parse_budget).transpose()?,
+        #[cfg(feature = "adapters")]
         model: parsed_model,
         locale,
+        #[cfg(feature = "adapters")]
         resident: None,
         encoding: None,
     };
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "adapters"))]
     {
         if cli.resident && !cli.resident_serve {
             return resident_client(&cli, &oc);
@@ -692,7 +769,71 @@ pub fn cli_main() -> anyhow::Result<()> {
             oc.resident = Some((sock, cli.resident_ttl, cli.now.is_some()));
         }
     }
-    execute(&cli, &cli.query, &oc)
+    if profile == Profile::Calc {
+        return calc_execute(&cli.query, cli.kaiv, &oc);
+    }
+    #[cfg(feature = "adapters")]
+    return execute(&cli, &cli.query, &oc);
+    #[cfg(not(feature = "adapters"))]
+    unreachable!("the adapters are compiled out: this build is the calculator")
+}
+
+/// The calculator's checks on the command line: no input, no mount,
+/// none of the options that open or translate one; the expression
+/// head supplied where the query lacks it.
+fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
+    if let Some(p) = cli.paths.first() {
+        anyhow::bail!(
+            "qc is the calculator and takes no input: '{}' names a source — run the query with qua",
+            p.display()
+        );
+    }
+    for (on, flag) in [
+        (cli.model.is_some(), "--model"),
+        (!cli.desm.is_empty(), "--desm"),
+        (cli.resident || cli.resident_serve, "--resident"),
+        (cli.cache || cli.cache_dir.is_some(), "--cache"),
+        (cli.xpath, "--xpath"),
+        (cli.jq, "--jq"),
+        (cli.sql, "--sql"),
+    ] {
+        if on {
+            anyhow::bail!("qc is the calculator: {flag} opens or translates a source — run it with qua");
+        }
+    }
+    let q = cli.query.trim_start();
+    if !q.starts_with('=') {
+        cli.query = format!("= {q}");
+    }
+    Ok(())
+}
+
+/// The calculator's check on the query, its definitions in front:
+/// one that navigates, or whose operand reads a document, is
+/// refused by name.
+fn calc_check_query(cli: &Cli) -> anyhow::Result<()> {
+    if !quarb::is_calculator(&cli.query) {
+        // A query that fails to parse says so; one that parses but
+        // navigates is refused by what it needs.
+        quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
+        anyhow::bail!(
+            "qc is the calculator: this query navigates (a path from a node, or a mount) — run it with qua"
+        );
+    }
+    if let Some(path) = quarb::calculator_reads(&cli.query) {
+        anyhow::bail!(
+            "qc is the calculator: '{path}' reads a document — run the query with qua over an input"
+        );
+    }
+    Ok(())
+}
+
+/// A calculator query, run against the bare root: what `qua` runs
+/// for an expression head without an input, and what `qc` runs for
+/// everything — one path, so the two print the same bytes.
+fn calc_execute(query: &str, kaiv: bool, oc: &OutputCtx) -> anyhow::Result<()> {
+    let adapter = quarb::adapter::Bare;
+    run_wrapped(query, &adapter, |_| String::new(), kaiv.then_some("stdin"), oc)
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +848,7 @@ pub fn cli_main() -> anyhow::Result<()> {
 /// flag that changes query semantics, so different views of the
 /// same tree get different sessions.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn resident_socket(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -759,6 +901,7 @@ fn resident_socket(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<PathBuf> {
 /// sockets, so an unverifiable dir is a hard error rather than a
 /// quiet risk.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn resident_dir() -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -784,6 +927,7 @@ fn resident_dir() -> anyhow::Result<PathBuf> {
 /// Client side: connect to the session (starting it if needed),
 /// send the query, stream the result.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn resident_client(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<()> {
     use std::io::Write as _;
     let sock = resident_socket(cli, oc)?;
@@ -829,6 +973,7 @@ fn resident_client(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<()> {
 /// its socket — the wait covers materialization, which for a large
 /// tree is exactly the cost the session exists to amortize.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn spawn_resident(sock: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixStream> {
     use std::os::unix::process::CommandExt as _;
     let log = sock.with_extension("log");
@@ -893,6 +1038,7 @@ fn spawn_resident(sock: &std::path::Path) -> anyhow::Result<std::os::unix::net::
 /// by a person; the cap only exists so a garbled length header
 /// cannot make the daemon allocate gigabytes.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 const RESIDENT_MAX_QUERY: usize = 1 << 20;
 
 /// Server side: bind the socket and answer queries against the
@@ -900,6 +1046,7 @@ const RESIDENT_MAX_QUERY: usize = 1 << 20;
 /// serially; each failure answers that client and the session
 /// lives on.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn resident_serve_loop<A: AstAdapter>(
     adapter: &A,
     render: impl Fn(NodeId) -> String,
@@ -1033,6 +1180,7 @@ fn resident_serve_loop<A: AstAdapter>(
 /// non-UTF-8 output survives verbatim). Queries in a session run
 /// serially, which keeps the fd dance safe.
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn with_stdout_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
     use std::io::{Read as _, Seek as _, Write as _};
     use std::os::fd::AsRawFd as _;
@@ -1060,6 +1208,7 @@ fn with_stdout_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
 
 /// An anonymous scratch file for the capture (unlinked at once).
 #[cfg(unix)]
+#[cfg(feature = "adapters")]
 fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
     let path = std::env::temp_dir().join(format!(
         "quarb-capture-{}-{:x}",
@@ -1086,6 +1235,7 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
 /// checks the budget again on the opened adapters' own estimates).
 /// `false` too when an input has no catalog — a database, a
 /// service — since its plan is the opened adapter's to price.
+#[cfg(feature = "adapters")]
 fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
     let cap = oc.budget.as_ref().map_or(quarb::Cap::NONE, |b| b.cap());
     let mut catalogs = Vec::new();
@@ -1208,6 +1358,7 @@ fn take_environments(cli: &mut Cli) -> anyhow::Result<Vec<quarb::Environment>> {
     Ok(environments)
 }
 
+#[cfg(feature = "adapters")]
 fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     // The source boundary of this invocation's one target.
     let ctx = &SourceCtx::default();
@@ -1839,7 +1990,8 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                      --model file opens its own sources with `mount NAME: target;`"
                 );
             }
-            "{}".to_owned()
+            // The calculator: the bare root, the path `qc` runs.
+            return calc_execute(query, cli.kaiv, oc);
         }
         None => read_prose(Path::new("-"), ctx)?,
     };
@@ -1952,6 +2104,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
 /// the unfiltered adapter: a first-query full pushdown would answer
 /// and exit before binding the socket, and a partial pushdown would
 /// bake its WHERE into the standing arbor every later query reuses.
+#[cfg(feature = "adapters")]
 fn pushdown_applies(cli: &Cli) -> bool {
     // A planned or budgeted run goes through the engine, whose run
     // prices the query against the store's estimator and prints or
@@ -1970,6 +2123,7 @@ fn pushdown_applies(cli: &Cli) -> bool {
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
 /// --explain commentary. Tried only after full pushdown refused.
+#[cfg(feature = "adapters")]
 fn partial_plan(
     cli: &Cli,
     query: &str,
@@ -1985,6 +2139,7 @@ fn partial_plan(
 /// and one that compares it with text only on a column that is
 /// not. A catalog that cannot be read answers no, and the query
 /// scans.
+#[cfg(feature = "adapters")]
 fn column_types_hold(
     cli: &Cli,
     what: &str,
@@ -2009,6 +2164,7 @@ fn column_types_hold(
 
 /// [`partial_plan`]; `keyed_hops` for an adapter that reads hops by
 /// key, where crosslinks and resolutions keep the prefilter.
+#[cfg(feature = "adapters")]
 fn partial_plan_with(
     cli: &Cli,
     query: &str,
@@ -2044,6 +2200,7 @@ fn partial_plan_with(
 
 /// The pushdown plan for a database input, with --explain
 /// commentary on stderr either way.
+#[cfg(feature = "adapters")]
 fn pushdown_plan(
     cli: &Cli,
     query: &str,
@@ -2079,6 +2236,7 @@ fn pushdown_plan(
 /// Print a pushed-down result the way the engine would: bare
 /// values for one column, records for several. Buffered: one
 /// flush at the end, not a syscall per line.
+#[cfg(feature = "adapters")]
 fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::Result<()> {
     // --explain: the statement the driver executed, verbatim,
     // ORDER BY and all. Recorded at execution because the key is
@@ -2160,6 +2318,7 @@ impl std::io::Write for OutSink {
 /// refused at the first such character.
 type OutputEncoding = Option<(String, quarb::source::Escape)>;
 
+#[cfg(feature = "adapters")]
 fn take_output_encoding(query: &str) -> anyhow::Result<(String, OutputEncoding)> {
     let trimmed = query.trim_end();
     let Some(head) = trimmed.strip_suffix(')') else {
@@ -2203,6 +2362,7 @@ fn take_output_encoding(query: &str) -> anyhow::Result<(String, OutputEncoding)>
 /// Run a query over an index-backed site store: the planner first
 /// — a count outright, a candidate set the engine re-verifies, or
 /// nothing (the scan) — with `--explain` commentary on stderr.
+#[cfg(feature = "adapters")]
 fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
     cli: &Cli,
     query: &str,
@@ -2278,6 +2438,7 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
     }
 }
 
+#[cfg(feature = "adapters")]
 fn web_rung_name(r: &quarb_web::plan::Rung) -> &'static str {
     match r {
         quarb_web::plan::Rung::Full => "full",
@@ -2293,6 +2454,7 @@ fn web_rung_name(r: &quarb_web::plan::Rung) -> &'static str {
 /// adapter's own locator, threaded through the bang-locator.
 /// Under --no-graft the wrap is skipped: a text column stays the
 /// server's own scalar.
+#[cfg(feature = "adapters")]
 fn run_relational<A: AstAdapter>(
     inner: A,
     no_graft: bool,
@@ -2327,6 +2489,7 @@ fn run_relational<A: AstAdapter>(
 
 /// Run `query` against `adapter`, printing node locations (via
 /// `render`) or projected values, one per line.
+#[cfg(feature = "adapters")]
 fn run<A: AstAdapter>(
     query: &str,
     adapter: &A,
@@ -2348,6 +2511,7 @@ fn run<A: AstAdapter>(
     run_modelled(query, adapter, render, kaiv_source, oc)
 }
 
+#[cfg(feature = "adapters")]
 fn run_modelled<A: AstAdapter>(
     query: &str,
     adapter: &A,
@@ -2371,6 +2535,7 @@ fn run_modelled<A: AstAdapter>(
 
 /// The resident check and wrap chain, shared by the plain and
 /// model-enriched paths.
+#[cfg(feature = "adapters")]
 fn run_dispatch<A: AstAdapter>(
     query: &str,
     adapter: &A,
@@ -2382,7 +2547,7 @@ fn run_dispatch<A: AstAdapter>(
     // the one place a resident session takes over: the adapter is
     // built and materialized, so instead of answering once and
     // exiting, serve queries against it until the TTL.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "adapters"))]
     if let Some((sock, ttl, pinned)) = oc.resident.clone() {
         return resident_serve_loop(adapter, render, &sock, ttl, pinned, oc);
     }
@@ -2412,7 +2577,10 @@ impl OutputCtx {
     /// --explain: the unresolved references a run left, and the
     /// folder leaves a reading refused (they answer null).
     fn explain_refs(&self, refs: &[String]) {
+        #[cfg(feature = "adapters")]
         let notes = quarb_open::take_notes();
+        #[cfg(not(feature = "adapters"))]
+        let notes: Vec<String> = Vec::new();
         if self.explain {
             for r in refs {
                 eprintln!(

@@ -75,6 +75,10 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
         match a {
             Arg::Expr(e) => v.operand(e),
             Arg::Opt { value: Some(e), .. } => v.operand(e),
+            Arg::Pairs { keys, values } => {
+                v.operand(keys);
+                v.operand(values);
+            }
             Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { value: None, .. } => {}
         }
     }
@@ -94,7 +98,14 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Select(p) => v.predicate(p),
         Command::Filter(e) => v.pred(e),
         Command::Nav(b) => v.branch(b),
-        Command::Map(inner) | Command::Repeat { command: inner, .. } => v.command(inner),
+        Command::Map(inner)
+        | Command::Append { body: inner, .. }
+        | Command::Repeat { command: inner, .. } => v.command(inner),
+        Command::AppendRow { items, .. } => {
+            for (_, i) in items {
+                v.operand(i);
+            }
+        }
         Command::Push(_)
         | Command::Recall(_)
         | Command::AggRecall(_)
@@ -196,6 +207,20 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                         }
                     }
                 }
+            }
+        }
+        Operand::RecordArray { rows, .. } => {
+            for row in rows {
+                for (_, i) in row {
+                    v.operand(i);
+                }
+            }
+        }
+        Operand::Range { from, to, step } => {
+            v.operand(from);
+            v.operand(to);
+            if let Some(s) = step {
+                v.operand(s);
             }
         }
         Operand::Piped { expr, commands } => {

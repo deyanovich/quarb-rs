@@ -1,0 +1,32 @@
+[package]
+name = "quarb-calc"
+description = "qc: the Quarb calculator — the engine's value grammar, value space and value commands as a command, with every adapter off"
+keywords = ["quarb", "calculator", "query", "cli", "tables"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "qc"
+path = "src/main.rs"
+
+[features]
+# The Python command libraries, by opt-in: the same features as
+# qua's, forwarded.
+morph = ["qua/morph"]
+scipy = ["qua/scipy"]
+sklearn = ["qua/sklearn"]
+numpy = ["qua/numpy"]
+pandas = ["qua/pandas"]
+python-libs = ["qua/python-libs"]
+
+[dependencies]
+# qua without its adapters: the calculator profile of the same
+# source.
+qua = { path = "../qua", version = "0.38.0", default-features = false }
+anyhow.workspace = true

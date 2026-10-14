@@ -170,7 +170,7 @@ pub use exec::{
 };
 pub use library::CommandLibrary;
 pub use parser::{Defs, parse_scope_path};
-pub use value::{Foreign, ForeignValue, Value, Table};
+pub use value::{Foreign, ForeignValue, Value, Table, ColumnType};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or
@@ -616,6 +616,31 @@ pub fn run_traced_prov_with_defs(
 /// no mounted target — the calculator invocation (spec: The
 /// Expression Head). Unparseable text answers `false`; the caller's
 /// normal run path owns the error message.
+/// The first operand of a calculator query that reads a document —
+/// a path from the root or a mark (`= (/rows/*::x)`), which a bare
+/// root answers with nothing — in its written form, or `None` when
+/// the query computes from its literals alone. The calculator
+/// command `qc` refuses such a query by name, pointing at `qua`.
+pub fn calculator_reads(query: &str) -> Option<String> {
+    let tokens = lexer::lex(query).ok()?;
+    let ast = parser::parse_with_defs(&tokens, Defs::default()).ok()?;
+    struct Reads(Option<String>);
+    impl ast::visit::Visitor for Reads {
+        fn operand(&mut self, o: &ast::Operand) {
+            if self.0.is_none()
+                && let ast::Operand::Rel { steps, .. } = o
+                && !steps.is_empty()
+            {
+                self.0 = Some(unparse::operand(o));
+            }
+            ast::visit::walk_operand(self, o);
+        }
+    }
+    let mut v = Reads(None);
+    ast::visit::walk_query(&mut v, &ast);
+    v.0
+}
+
 pub fn is_calculator(query: &str) -> bool {
     let Ok(tokens) = lexer::lex(query) else {
         return false;

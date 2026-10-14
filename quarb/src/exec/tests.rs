@@ -590,6 +590,42 @@ fn group_alternation() {
 }
 
 #[test]
+fn label_algebra() {
+    // x.rs --ref--> w.rs, --doc--> w.rs, --ref--> z.rs: the
+    // selection reads the labels a crosslink carries together.
+    let mut t = MockTree::sample();
+    t.links.insert(
+        2,
+        vec![
+            ("ref".to_string(), 7),
+            ("doc".to_string(), 7),
+            ("ref".to_string(), 5),
+        ],
+    );
+    assert_eq!(run("/a/x.rs->(ref && doc)", &t), vec![7]);
+    assert_eq!(run("/a/x.rs->(ref || doc)", &t), vec![7, 5]);
+    assert_eq!(run("/a/x.rs->(doc || ref)", &t), vec![7, 5]);
+    assert_eq!(run("/a/x.rs->(!doc)", &t), vec![5]);
+    assert_eq!(run("/a/x.rs->(!(ref || doc))", &t), Vec::<u64>::new());
+    assert_eq!(run("/a/x.rs->(ref && !doc)", &t), vec![5]);
+    assert_eq!(run("/a/x.rs->(r* && !d*)", &t), vec![5]);
+    // every crosslink carries a label: `!*` selects nothing
+    assert_eq!(run("/a/x.rs->(!*)", &t), Vec::<u64>::new());
+    // the incoming arrow mirrors it
+    assert_eq!(run("//w.rs<-(ref && doc)", &t), vec![2]);
+    assert_eq!(run("//z.rs<-(!doc)", &t), vec![2]);
+    assert_eq!(run("//z.rs<-(ref && doc)", &t), Vec::<u64>::new());
+    // a quantifier applies to the hop whatever it carries
+    let c = MockTree::cyclic();
+    assert_eq!(run("/a/x.rs->(mgr && !x){2}", &c), vec![7]);
+    assert_eq!(run("/a/x.rs(->(mgr || x)){2}", &c), vec![7]);
+    // the plain alternation is the union under its older spelling
+    assert_eq!(run("/a/x.rs->(ref|doc)", &t), run("/a/x.rs->(ref || doc)", &t));
+    // the words of the family spell the operators too
+    assert_eq!(run("/a/x.rs->(ref .and. .not. doc)", &t), vec![5]);
+}
+
+#[test]
 fn dot_wildcard_and_sugar() {
     let t = MockTree::sample();
     // `//` is expressible as a dot-wildcard pattern.
@@ -2840,3 +2876,4 @@ fn quantified_push_iterates() {
     assert!(parse(&lex("/a | upper{3}").unwrap()).is_err());
     assert!(parse(&lex("/a | .v(1){3;2}").unwrap()).is_err());
 }
+

@@ -468,13 +468,14 @@ impl AstAdapter for KuzuAdapter {
                 self.pks.get(&self.tables[*index]).cloned().map(Value::Str)
             }
             (Kind::Table { index }, "n-rows") => {
-                let stmt = format!("MATCH (m:{}) RETURN count(m)", bt(&self.tables[*index]));
+                let index = *index;
+                let stmt = format!("MATCH (m:{}) RETURN count(m)", bt(&self.tables[index]));
                 drop(nodes);
                 let conn = quarb::fetched_opt(kuzu::Connection::new(&self.db), || {
                     "kuzu: connecting".to_string()
                 })?;
                 let mut result = quarb::fetched_opt(conn.query(&stmt), || {
-                    format!("kuzu: counting table {}", self.tables[*index])
+                    format!("kuzu: counting table {}", self.tables[index])
                 })?;
                 result.next()?.first().map(cell_value)
             }

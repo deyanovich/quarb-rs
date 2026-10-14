@@ -388,7 +388,9 @@ def _numeric_columns(df):
         if str(col.dtype) == "boolean":
             df[c] = col.astype("Int64")
             continue
-        if col.dtype != object:
+        # pandas 3 infers its `str` dtype for text; it reads as
+        # object does.
+        if col.dtype != object and str(col.dtype) not in ("str", "string"):
             continue
         s = _series(col.tolist())
         df[c] = s if not isinstance(s, pd.Series) else s.values

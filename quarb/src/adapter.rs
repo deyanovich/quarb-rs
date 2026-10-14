@@ -536,6 +536,24 @@ impl Unopened {
     }
 }
 
+/// The bare root (spec: the expression head): the source a
+/// calculator query runs against — one node, no name, no children,
+/// no properties. `qua '= expr'` without an input and `qc` run on
+/// it, so the two agree by construction.
+pub struct Bare;
+
+impl AstAdapter for Bare {
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+    fn children(&self, _: NodeId) -> Vec<NodeId> {
+        Vec::new()
+    }
+    fn name(&self, _: NodeId) -> Option<String> {
+        None
+    }
+}
+
 impl AstAdapter for Unopened {
     fn root(&self) -> NodeId {
         NodeId(0)

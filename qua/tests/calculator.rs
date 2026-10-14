@@ -1,0 +1,169 @@
+//! The calculator's range, `flatten`, and the reshaping constructor
+//! (spec draft.150).
+
+use quarb::{QueryResult, Value};
+
+fn doc() -> quarb_json::JsonAdapter {
+    quarb_json::JsonAdapter::parse(
+        r#"{"rows":[
+            {"book":"a","x":1,"y":2},
+            {"book":"b","x":3,"y":4},
+            {"book":"c","x":5,"y":6}],
+          "long":[
+            {"book":"a","measure":"mean","v":1},
+            {"book":"a","measure":"semi","v":2},
+            {"book":"b","measure":"mean","v":3},
+            {"book":"b","measure":"semi","v":4}],
+          "m":[[1,2,3],[4,5,6]]}"#,
+    )
+    .unwrap()
+}
+
+fn run(q: &str) -> quarb::Result<Vec<String>> {
+    let run = quarb::Run::ambient();
+    let out = quarb::Query::parse(q, &doc())?.run(&doc(), &run)?;
+    Ok(match out.result {
+        QueryResult::Values(vs) => vs.iter().map(Value::display_form).collect(),
+        QueryResult::Nodes(ns) => ns.iter().map(|n| format!("{n:?}")).collect(),
+    })
+}
+
+fn one(q: &str) -> String {
+    let v = run(q).unwrap();
+    assert_eq!(v.len(), 1, "{q}: {v:?}");
+    v.into_iter().next().unwrap()
+}
+
+
+fn refuse(q: &str) -> String {
+    run(q).unwrap_err().to_string()
+}
+
+#[test]
+fn a_range_yields_its_integers_one_at_a_time() {
+    assert_eq!(run("= 1..5").unwrap(), vec!["1", "2", "3", "4", "5"]);
+    assert_eq!(one("= @(1..5)"), "@(1; 2; 3; 4; 5)");
+    assert_eq!(one("= @(0; 1..3; 9)"), "@(0; 1; 2; 3; 9)");
+    assert_eq!(one("= @(5..1)"), "@(5; 4; 3; 2; 1)");
+    assert_eq!(one("= @(0..8..2)"), "@(0; 2; 4; 6; 8)");
+    assert_eq!(one("= @(0..7..2)"), "@(0; 2; 4; 6)");
+    assert_eq!(one("= @(8..0..2)"), "@(8; 6; 4; 2; 0)");
+    // the values run from the first bound toward the second; the
+    // step's sign says where the stride is anchored
+    assert_eq!(one("= @(0..8..-2)"), "@(0; 2; 4; 6; 8)");
+    assert_eq!(one("= @(10..0..-5)"), "@(10; 5; 0)");
+    assert_eq!(one("= @(10..0..5)"), "@(10; 5; 0)");
+    assert_eq!(one("= @(0..7..-2)"), "@(1; 3; 5; 7)");
+    assert_eq!(one("= @(7..0..-2)"), "@(6; 4; 2; 0)");
+    assert_eq!(one("= @(3..3)"), "@(3)");
+    assert_eq!(one("= @(-2..2)"), "@(-2; -1; 0; 1; 2)");
+    // bounds as parenthesized expressions, no precedence of their own
+    assert_eq!(one("= @(1..(2 + 1))"), "@(1; 2; 3)");
+    assert_eq!(one("= @((1 + 1)..4)"), "@(2; 3; 4)");
+    // (a parenthesized integer alone is the rounded register `(N)`:
+    // a computed bound is an expression)
+    assert_eq!(one("= @((0 + 1)..(2 + 1)..(1 + 0))"), "@(1; 2; 3)");
+    assert_eq!(one("= @(1..(4 + 1)..2)"), "@(1; 3; 5)");
+    assert_eq!(one("= 1..5 @| sum"), "15");
+    // inside index brackets a range is still the slice
+    assert_eq!(one("= @(10; 20; 30; 40) | [2..3]"), "@(20; 30)");
+    // the refusals: a zero step, a bound that is no integer; the string is written quoted
+    assert!(refuse("= @(1..5..0)").contains("not zero"));
+    assert!(refuse(r#"= @(1..("a"))"#).contains("integer"));
+    assert_eq!(one(r#"= "1..5""#), "1..5");
+}
+
+#[test]
+fn keys_and_values_split_a_record_and_a_frame() {
+    assert_eq!(one("= %(a = 1; b = 2) | keys"), r#"@("a"; "b")"#);
+    assert_eq!(one("= %(a = 1; b = 2) | values"), "@(1; 2)");
+    assert_eq!(one("= #(@(a; b); %(1; 2)) | keys"), r#"@("a"; "b")"#);
+    assert_eq!(one("= #(@(a; b); %(1; 2)) | values"), "#(%(1; 2))");
+    assert_eq!(one(r#"= #(@(a; b); %("1"; "x")) | values | types"#), r#"@("integer"; "text")"#);
+    // on a list of records: the header is the collection's union,
+    // keys and values answer per record
+    let recs = "@(%(a = 1; b = 2); %(b = 3; a = 4; c = 5))";
+    assert_eq!(one(&format!("= {recs} | header")), r#"@("a"; "b"; "c")"#);
+    assert_eq!(one(&format!("= {recs} | keys")), r#"@(@("a"; "b"); @("b"; "a"; "c"))"#);
+    assert_eq!(one(&format!("= {recs} | values")), "@(@(1; 2); @(3; 4; 5))");
+    assert_eq!(one("= @(%(a = @(1; 2)); %(b = 3)) | header"), r#"@("a"; "b")"#);
+    assert!(refuse("= @(%(a = 1); 2) | keys").contains("not all records"));
+    assert!(refuse("= @(1; 2) | keys").contains("not all records"));
+    // (a stream of values crosses as the list it is)
+    assert!(refuse("= 7 | values").contains("not all records"));
+}
+
+#[test]
+fn the_pairwise_record_constructor() {
+    assert_eq!(one("= %(@(a; b) = @(1; 2))"), "%(a = 1; b = 2)");
+    assert_eq!(one(r#"= %(@("first name"; b) = @(1; 2)) | keys"#), r#"@("first name"; "b")"#);
+    assert_eq!(one("= %(id = 7; @(a; b) = @(1; 2); z = 9)"), "%(id = 7; a = 1; b = 2; z = 9)");
+    // two saved lists, and the topic under the keys
+    assert_eq!(one(r#"= 1 | .k(@("a"; "b")) | .v(@(1; 2)) | %($.k = $.v)"#), "%(a = 1; b = 2)");
+    // (the keys filed first: a push sets the topic to what it pushes)
+    assert_eq!(one(r#"= @("a"; "b") | .k | @(1; 2) | %($.k = $_)"#), "%(a = 1; b = 2)");
+    // the round trip: the record filed first, since a push sets the
+    // topic to what it pushes (`.k(keys)` would leave the keys)
+    assert_eq!(one("= %(a = 1; b = 2) | .r | keys | .k | $.r | values | %($.k = $_)"), "%(a = 1; b = 2)");
+    // the refusals: differing lengths, a repeated name, no list
+    assert!(refuse("= %(@(a; b) = @(1))").contains("differ in number, 2 and 1"));
+    // a repeated name: a literal list is refused at parse time, a
+    // computed one at run time
+    assert!(refuse("= %(a = 1; @(a) = @(2))").contains("'a' twice"));
+    assert!(refuse(r#"= @("a") | .k | %(a = 1; $.k = @(2))"#).contains("'a' is already a field"));
+    assert!(refuse("= %(@(a) = 2)").contains("list of values"));
+}
+
+#[test]
+fn transpose_yields_a_matrix_of_one_type() {
+    // every cell coerced together first, then the exchange
+    assert_eq!(one("= @(@(1; 2.5); @(3; 4)) | transpose"), "#(%(1; 3);\n  %(2.5; 4))");
+    assert_eq!(one("= @(@(1; 2.5); @(3; 4)) | transpose | types"), r#"@("float"; "float")"#);
+    assert_eq!(one(r#"= @(@(1; "a"); @(3; 4)) | transpose | types"#), r#"@("text"; "text")"#);
+    assert_eq!(one("= @(1..6) | #(3) | transpose"), "#(%(1; 4);\n  %(2; 5);\n  %(3; 6))");
+    assert_eq!(one("= @(1..6) | #(3) | transpose | transpose"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
+    // a frame is refused, pointing at values; a ragged grid by position; a list of records by kind
+    let e = refuse("= #(@(a; b); %(1; 2)) | transpose");
+    assert!(e.contains("'| values'"), "{e}");
+    assert_eq!(one("= #(@(a; b); %(1; 2)) | values | transpose"), "#(%(1);\n  %(2))");
+    assert!(refuse("= @(@(1); @(2; 3)) | transpose").contains("row 2 holds 2"));
+    assert!(refuse("= @(%(a = 1); %(a = 2)) | transpose").contains("list of records"));
+}
+
+#[test]
+fn flatten_opens_nested_lists_and_a_tables_cells() {
+    assert_eq!(one("= @(1; @(2; @(3))) | flatten"), "@(1; 2; 3)");
+    assert_eq!(one("= @(1; @(2; @(3))) | flatten(1)"), "@(1; 2; @(3))");
+    assert_eq!(one("= @(1; null; @(@()); 2) | flatten"), "@(1; null; 2)");
+    assert_eq!(one("= #(%(1; 2); %(3; 4)) | flatten"), "@(1; 2; 3; 4)");
+    assert_eq!(one(r#"= #(@(a; b); %("x"; 1)) | flatten"#), r#"@("x"; 1)"#);
+    assert_eq!(one("= 7 | flatten"), "7");
+    assert!(refuse("= %(a = 1) | flatten").contains("fields, not items"));
+    // over the stream: the topics' items, one row each
+    assert_eq!(run("= @(@(1; 2); @(3)) | ... @| flatten").unwrap(), vec!["1", "2", "3"]);
+}
+
+#[test]
+fn the_reshaping_constructor_lays_a_list_into_columns() {
+    assert_eq!(one("= @(1..12) | #(3) | dim"), "@(4; 3)");
+    assert_eq!(one("= @(1..6) | #(3)"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
+    assert_eq!(one("= @(1..6) | #(@(a; b; c)) | header"), r#"@("a"; "b"; "c")"#);
+    assert_eq!(one("= @(1..6) | #(@(a; b; c)) | :b"), "@(2; 5)");
+    // the columns type by the rule
+    assert_eq!(one(r#"= @("1"; "x"; "2"; "y") | #(2) | types"#), r#"@("integer"; "text")"#);
+    // round trips
+    assert_eq!(one("= #(%(1; 2); %(3; 4)) | flatten | #(2)"), "#(%(1; 2);\n  %(3; 4))");
+    assert_eq!(one("= @(1..12) | #(3) x @(1; 1; 1)"), "@(6; 15; 24; 33)");
+    // over the stream
+    assert_eq!(one("= 1..6 @| #(2) | dim"), "@(3; 2)");
+    // the refusals: a count that does not divide, no list topic, a nested item
+    assert!(refuse("= @(1..5) | #(3)").contains("5 items do not divide into rows of 3"));
+    // a stream of values is the list it lays out: one value, one item
+    assert!(refuse("= 7 | #(3)").contains("1 items do not divide into rows of 3"));
+    assert_eq!(one("= 7 | #(1) | dim"), "@(1; 1)");
+    assert!(refuse("= %(a = 1) | #(1)").contains("is not a list"));
+    assert!(refuse("= @(1; @(2)) | #(2)").contains("flat"));
+    // a literal with rows in command position is still the value
+    assert_eq!(one("= 1 | #(@(a); %(1)) | dim"), "@(1; 1)");
+    assert_eq!(one("= #(@(a; b)) | dim"), "@(0; 2)");
+}

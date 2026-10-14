@@ -19,7 +19,7 @@ use crate::ast::visit::{self, Visitor as _};
 use crate::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, FnCall, Group, InterpSeg, Matcher, Operand,
     PatSeg, PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RefProp,
-    RegRef, ScopePath, Step, TraitClause, TableRow, IndexSpec};
+    RegRef, ScopePath, Step, TraitClause, TableRow, IndexSpec, LabelAlt, LabelClause};
 use crate::error::{QuarbError, Result};
 use crate::lexer::{self, Token};
 use crate::value::Value;
@@ -390,7 +390,9 @@ fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::Recall(_)
         | Command::RecordWith(_)
         | Command::Spread { .. }
-        | Command::Map(_) => PipeMode::Scalar,
+        | Command::Map(_)
+        | Command::Append { .. }
+        | Command::AppendRow { .. } => PipeMode::Scalar,
         Command::Repeat { command, .. } => command_mode_out(command, cur),
     }
 }
@@ -819,6 +821,50 @@ impl Parser<'_> {
                     mode = command_mode_out(&command, mode);
                     pipeline.push(command);
                 }
+                // `+| body` — the append pipe: the body a scalar-mode
+                // command over the topic (a path parenthesized, as
+                // an expression).
+                Some(Token::AppendPipe { overwrite }) => {
+                    let overwrite = *overwrite;
+                    self.pos += 1;
+                    // `+| %(…)` — a row under the table literal's
+                    // rules, positional by the topic's header or
+                    // named, resolved at run time.
+                    if matches!(self.peek(), Some(Token::Percent))
+                        && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    {
+                        self.pos += 2;
+                        let items = self.record_row()?;
+                        let command = Command::AppendRow { items, overwrite };
+                        mode = command_mode_out(&command, mode);
+                        pipeline.push(command);
+                        continue;
+                    }
+                    // A bare literal is the value appended (`+| 3`,
+                    // `+| "x"`, `+| null`); anything else reads as
+                    // the segment after `|` would.
+                    let literal = match self.peek() {
+                        Some(Token::Name { quoted: true, .. }) => true,
+                        Some(Token::Name { text, quoted: false, .. }) => {
+                            matches!(text.as_str(), "null" | "true" | "false")
+                                || text.starts_with(|c: char| c.is_ascii_digit())
+                                || (text.starts_with('-')
+                                    && text[1..].starts_with(|c: char| c.is_ascii_digit()))
+                        }
+                        _ => false,
+                    };
+                    let body = if literal {
+                        Command::Expr(self.additive()?)
+                    } else {
+                        self.pipe_item(PipeMode::Scalar)?
+                    };
+                    let command = Command::Append {
+                        body: Box::new(body),
+                        overwrite,
+                    };
+                    mode = command_mode_out(&command, mode);
+                    pipeline.push(command);
+                }
                 // `$| command` — the map pipe.
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
@@ -901,6 +947,40 @@ impl Parser<'_> {
             self.pos = save;
             return Ok(Command::Expr(self.additive()?));
         }
+        // A binary arithmetic operator standing where a command
+        // stands takes the topic as its left operand: `| * 2` is
+        // `| ($_ * 2)`, and the rest of the expression follows at
+        // the operator's own level (`| * 2 + 1` is `$_ * 2 + 1`).
+        if let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+            && let Some(op) = arith_word(text)
+            && !matches!(
+                self.toks.get(self.pos + 1),
+                None | Some(Token::Pipe | Token::RParen | Token::AppendPipe { .. })
+            )
+            && !(matches!(self.toks.get(self.pos + 1), Some(Token::At | Token::Dollar))
+                && matches!(self.toks.get(self.pos + 2), Some(Token::Pipe)))
+        {
+            self.pos += 1;
+            let left = match op {
+                ArithOp::Add | ArithOp::Sub => {
+                    let right = self.multiplicative()?;
+                    Operand::Arith {
+                        op,
+                        left: Box::new(Operand::Topic),
+                        right: Box::new(right),
+                    }
+                }
+                _ => {
+                    let right = self.unary()?;
+                    self.multiplicative_from(Operand::Arith {
+                        op,
+                        left: Box::new(Operand::Topic),
+                        right: Box::new(right),
+                    })?
+                }
+            };
+            return Ok(Command::Expr(self.additive_from(left)?));
+        }
         // A command that starts like a path is a navigation command —
         // the pipeline spelling of a path continuation.
         if self.nav_command_ahead() {
@@ -959,8 +1039,13 @@ impl Parser<'_> {
             // `| :name` — the topic record's field; `| %+` — the
             // named-captures record.
             Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.additive()?)),
-            // `| @(a; b)` — a list literal as the command's expression.
-            Some(Token::At) if matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
+            // `| @(a; b)` — a list literal as the command's
+            // expression; `| @%(…)` the record array.
+            Some(Token::At)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    || (matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                        && matches!(self.toks.get(self.pos + 2), Some(Token::LParen))) =>
+            {
                 Ok(Command::Expr(self.additive()?))
             }
             Some(Token::At) => {
@@ -989,8 +1074,10 @@ impl Parser<'_> {
             // a list of records as a frame, a list of lists as an
             // array; `| #(…)` the literal as the value.
             Some(Token::Hash) => {
-                if matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) {
-                    return Ok(Command::Expr(self.additive()?));
+                if matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    || self.table_count_ahead()
+                {
+                    return self.table_command();
                 }
                 self.pos += 1;
                 Ok(Command::Func(FnCall {
@@ -2701,32 +2788,7 @@ impl Parser<'_> {
                 }
                 (Some(Token::Percent), Some(Token::LParen)) => {
                     self.pos += 2;
-                    let mut items: Vec<(Option<String>, Operand)> = Vec::new();
-                    loop {
-                        if matches!(self.peek(), Some(Token::RParen)) {
-                            self.pos += 1;
-                            break;
-                        }
-                        let name = match (self.peek(), self.toks.get(self.pos + 1)) {
-                            (Some(Token::Name { text, .. }), Some(Token::Eq)) => {
-                                let key = text.clone();
-                                self.pos += 2;
-                                Some(key)
-                            }
-                            _ => None,
-                        };
-                        items.push((name, self.additive()?));
-                        match self.peek() {
-                            Some(Token::Comma | Token::Semi) => self.pos += 1,
-                            Some(Token::RParen) => {}
-                            _ => {
-                                return Err(QuarbError::parse(
-                                    "a table row separates its items with ';': %(\"Braund\"; 22)",
-                                ));
-                            }
-                        }
-                    }
-                    rows.push(TableRow::Record(items));
+                    rows.push(TableRow::Record(self.record_row()?));
                 }
                 _ => {
                     return Err(QuarbError::parse(
@@ -2746,6 +2808,110 @@ impl Parser<'_> {
             }
         }
         Ok(Operand::Table { header, rows })
+    }
+
+    /// Whether `#` is followed by a parenthesized integer, which the
+    /// lexer hands over as the rounded register `(n)`: `$` and the
+    /// digits.
+    fn table_count_ahead(&self) -> bool {
+        matches!(self.toks.get(self.pos + 1), Some(Token::Dollar))
+            && matches!(self.toks.get(self.pos + 2), Some(Token::Name { text, quoted: false, .. }) if text.parse::<i64>().is_ok())
+    }
+
+    /// `| #(…)` in command position: `#(n)` lays the list topic into
+    /// rows of `n` columns, `#(@(a; b; c))` into the frame of those
+    /// columns (the header first, as in the literal, the rows coming
+    /// through the pipe); a literal with rows is the value it builds.
+    fn table_command(&mut self) -> Result<Command> {
+        // `#(3)`: the lexer reads a parenthesized integer as the
+        // rounded register `(3)`, so the count arrives as `$3`.
+        let call = if self.table_count_ahead()
+            && let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 2)
+            && let Ok(n) = text.parse::<i64>()
+        {
+            self.pos += 3;
+            FnCall {
+                name: "#".into(),
+                args: vec![Arg::Lit(Value::Int(n))],
+            }
+        } else {
+            let expr = self.additive()?;
+            match &expr {
+                Operand::Table {
+                    header: Some(h),
+                    rows,
+                } if rows.is_empty() => FnCall {
+                    name: "#".into(),
+                    args: vec![Arg::Lit(Value::list(h.iter().cloned().map(Value::Str).collect()))],
+                },
+                _ => return Ok(Command::Expr(expr)),
+            }
+        };
+        // `| #(3) x v` — the reshaped topic as the left operand of
+        // the expression that follows.
+        if let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+            && arith_word(text).is_some()
+        {
+            let left = Operand::Piped {
+                expr: Box::new(Operand::Topic),
+                commands: vec![Command::Func(call)],
+            };
+            let left = self.multiplicative_from(left)?;
+            return Ok(Command::Expr(self.additive_from(left)?));
+        }
+        Ok(Command::Func(call))
+    }
+
+    /// A table row's items after its `%(`, through the `)`: each
+    /// positional or `name = value`, `;` between them.
+    fn record_row(&mut self) -> Result<Vec<(Option<String>, Operand)>> {
+        let mut items: Vec<(Option<String>, Operand)> = Vec::new();
+        loop {
+            if matches!(self.peek(), Some(Token::RParen)) {
+                self.pos += 1;
+                break;
+            }
+            let name = match (self.peek(), self.toks.get(self.pos + 1)) {
+                (Some(Token::Name { text, .. }), Some(Token::Eq)) => {
+                    let key = text.clone();
+                    self.pos += 2;
+                    Some(key)
+                }
+                _ => None,
+            };
+            items.push((name, self.additive()?));
+            match self.peek() {
+                Some(Token::Comma | Token::Semi) => self.pos += 1,
+                Some(Token::RParen) => {}
+                _ => {
+                    return Err(QuarbError::parse(
+                        "a table row separates its items with ';': %(\"Braund\"; 22)",
+                    ));
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    /// `@%(…)` after its `@%`: the table literal's shape read as a
+    /// record array — the header required, every row a record.
+    fn record_array(&mut self) -> Result<Operand> {
+        let Operand::Table { header, rows } = self.table_literal()? else {
+            unreachable!("the table literal parses to a table operand")
+        };
+        let Some(header) = header else {
+            return Err(QuarbError::parse(
+                "the record array opens with its header list: @%(@(name; age); %(\"Austen\"; 41))",
+            ));
+        };
+        let rows = rows
+            .into_iter()
+            .map(|row| match row {
+                TableRow::Record(items) => items,
+                TableRow::List(items) => items.into_iter().map(|e| (None, e)).collect(),
+            })
+            .collect();
+        Ok(Operand::RecordArray { header, rows })
     }
 
     /// One index inside a value's brackets: a position, a range
@@ -2810,6 +2976,17 @@ impl Parser<'_> {
     fn func_call(&mut self) -> Result<FnCall> {
         // `@| @` and `@| %` bare — the row and column readings of
         // the stream (spec: Command Libraries, "A library value").
+        // `@| #(n)` / `@| #(@(a; b))` — the reshape of the stream.
+        if matches!(self.peek(), Some(Token::Hash))
+            && (matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) || self.table_count_ahead())
+        {
+            return match self.table_command()? {
+                Command::Func(call) => Ok(call),
+                _ => Err(QuarbError::parse(
+                    "after '@|' the table sigil takes a column count or a header list: '@| #(3)', '@| #(@(a; b))'; a table literal is a value, written after '|'",
+                )),
+            };
+        }
         if let Some(sigil @ (Token::At | Token::Percent | Token::Hash)) = self.peek()
             && !matches!(self.toks.get(self.pos + 1), Some(Token::LParen | Token::Percent))
             && !matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text == ".")
@@ -3115,6 +3292,65 @@ impl Parser<'_> {
             args.push(self.func_arg()?);
             return Ok(());
         }
+        // `@(a; b) = @(1; 2)` — a literal list of names on the left
+        // of `=` reads its names bare or quoted, as a header does.
+        if record
+            && matches!(self.peek(), Some(Token::At))
+            && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            && let Some(close) = self.matching_paren(self.pos + 1)
+            && matches!(self.toks.get(close + 1), Some(Token::Eq))
+        {
+            self.pos += 2;
+            let (items, _) = self.list_items(true)?;
+            self.pos += 1; // the `=`
+            let values = match self.func_arg()? {
+                Arg::Expr(e) => e,
+                Arg::Lit(Value::List(items)) => {
+                    Operand::List(items.iter().cloned().map(Operand::Lit).collect())
+                }
+                Arg::Lit(v) => Operand::Lit(v),
+                _ => {
+                    return Err(QuarbError::parse(
+                        "the pairwise field takes a list of values on the right of '=': %(@(a; b) = @(1; 2))",
+                    ));
+                }
+            };
+            args.push(Arg::Pairs {
+                keys: Operand::List(items),
+                values,
+            });
+            return Ok(());
+        }
+        // `$.k = $.v`, `$.k = $_` — any list expression on the left
+        // of `=` takes a list of values pairwise. The left side is
+        // read at the additive level, since a single `=` inside an
+        // expression would compare; an unnamed item that is no pair
+        // is read again the ordinary way.
+        if record {
+            let save = self.pos;
+            if let Ok(keys) = self.additive()
+                && matches!(self.peek(), Some(Token::Eq))
+            {
+                self.pos += 1;
+                let values = match self.func_arg()? {
+                    Arg::Expr(e) => e,
+                    // (a list of literals arrives folded; keep its
+                    // constructor so it prints back as one)
+                    Arg::Lit(Value::List(items)) => {
+                        Operand::List(items.iter().cloned().map(Operand::Lit).collect())
+                    }
+                    Arg::Lit(v) => Operand::Lit(v),
+                    _ => {
+                        return Err(QuarbError::parse(
+                            "the pairwise field takes a list of values on the right of '=': %(@(a; b) = @(1; 2))",
+                        ));
+                    }
+                };
+                args.push(Arg::Pairs { keys, values });
+                return Ok(());
+            }
+            self.pos = save;
+        }
         let arg = self.func_arg()?;
         if record && let Arg::Lit(Value::Str(name)) = &arg {
             return Err(QuarbError::parse(format!(
@@ -3125,6 +3361,25 @@ impl Parser<'_> {
         }
         args.push(arg);
         Ok(())
+    }
+
+    /// The index of the `)` closing the `(` at `open`, by token
+    /// nesting; `None` when none closes it.
+    fn matching_paren(&self, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, t) in self.toks.iter().enumerate().skip(open) {
+            match t {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn func_arg(&mut self) -> Result<Arg> {
@@ -3288,6 +3543,28 @@ impl Parser<'_> {
         }
         let axis = self.axis()?;
         if matches!(self.peek(), Some(Token::LParen)) {
+            // `->(a && !b)`: the label algebra, when the parentheses
+            // hold an operator of it; a plain alternation `->(a|b)`
+            // stays the path-pattern group it always was.
+            if matches!(axis, Axis::OutLink | Axis::InLink | Axis::BothLink)
+                && self.label_algebra_ahead()
+            {
+                let labels = self.label_selection()?;
+                let mut step = self.finish_step(axis, Matcher::Any)?;
+                step.labels = labels;
+                if matches!(self.peek(), Some(Token::Quant { .. })) {
+                    let quant = self.group_quant()?.expect("peeked a quantifier");
+                    let predicates = self.group_predicates()?;
+                    return Ok(PathElem::Group(Group {
+                        alts: vec![vec![PathElem::Step(step)]],
+                        quant,
+                        predicates,
+                        traits: Vec::new(),
+                        reach: self.reach(),
+                    }));
+                }
+                return Ok(PathElem::Step(step));
+            }
             return Ok(PathElem::Group(self.group(Some(axis))?));
         }
         if matches!(self.peek(), Some(Token::Quant { .. })) {
@@ -3311,6 +3588,7 @@ impl Parser<'_> {
             let hop = Step {
                 axis,
                 matcher: Matcher::Dot,
+                labels: Vec::new(),
                 traits: Vec::new(),
                 predicates: Vec::new(),
                 leaf: false,
@@ -3584,10 +3862,137 @@ impl Parser<'_> {
         Ok(Step {
             axis,
             matcher,
+            labels: Vec::new(),
             traits,
             predicates,
             leaf,
         })
+    }
+
+    /// Whether the `(` ahead opens a label algebra rather than a
+    /// path-pattern group: an `&&`, `||` or `!` (or their words)
+    /// somewhere before its closing `)`. A plain alternation has
+    /// none and stays a group.
+    fn label_algebra_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match t {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::AmpAmp | Token::PipePipe | Token::Bang => return true,
+                Token::Name { text, quoted: false, .. }
+                    if (AND_WORDS.contains(&text.as_str())
+                        || OR_WORDS.contains(&text.as_str())
+                        || NOT_WORDS.contains(&text.as_str()))
+                        && matches!(
+                            self.toks.get(i + 1),
+                            Some(Token::Name { .. } | Token::LParen | Token::Bang)
+                        ) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse `(expr)` after a crosslink arrow: the label algebra —
+    /// `||` or `|` (OR), `&&` (AND), tight `!` (NOT), parentheses,
+    /// wildcards in the labels — normalized to CNF like a trait
+    /// filter, one [`LabelClause`] per conjunct.
+    fn label_selection(&mut self) -> Result<Vec<LabelClause>> {
+        self.pos += 1; // consume '('
+        let Some(expr) = self.label_or() else {
+            return Err(QuarbError::parse(
+                "a label selection holds label names joined by '&&', '||' and '!': ->(a && !b)",
+            ));
+        };
+        if !matches!(self.peek(), Some(Token::RParen)) {
+            return Err(QuarbError::parse("expected ')' closing the label selection"));
+        }
+        self.pos += 1;
+        let clauses = trait_cnf(expr)?;
+        clauses
+            .into_iter()
+            .map(|c| {
+                let alts = c
+                    .alts
+                    .into_iter()
+                    .map(|alt| {
+                        let (neg, name) = match alt.strip_prefix('!') {
+                            Some(n) => (true, n),
+                            None => (false, alt.as_str()),
+                        };
+                        Ok(LabelAlt {
+                            neg,
+                            matcher: matcher_for(name, false)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(LabelClause { alts })
+            })
+            .collect()
+    }
+
+    fn label_or(&mut self) -> Option<TExpr> {
+        let mut left = self.label_and()?;
+        while matches!(self.peek(), Some(Token::PipePipe | Token::Pipe))
+            || self.eat_word_if_followed(OR_WORDS)
+        {
+            if matches!(self.peek(), Some(Token::PipePipe | Token::Pipe)) {
+                self.pos += 1;
+            }
+            let right = self.label_and()?;
+            left = TExpr::Or(Box::new(left), Box::new(right));
+        }
+        Some(left)
+    }
+
+    fn label_and(&mut self) -> Option<TExpr> {
+        let mut left = self.label_not()?;
+        while matches!(self.peek(), Some(Token::AmpAmp)) || self.eat_word_if_followed(AND_WORDS) {
+            if matches!(self.peek(), Some(Token::AmpAmp)) {
+                self.pos += 1;
+            }
+            let right = self.label_not()?;
+            left = TExpr::And(Box::new(left), Box::new(right));
+        }
+        Some(left)
+    }
+
+    fn label_not(&mut self) -> Option<TExpr> {
+        if matches!(self.peek(), Some(Token::Bang)) {
+            self.pos += 1;
+            return Some(TExpr::Not(Box::new(self.label_not()?)));
+        }
+        if self.eat_word_if_followed(NOT_WORDS) {
+            return Some(TExpr::Not(Box::new(self.label_not()?)));
+        }
+        match self.peek() {
+            Some(Token::Name { text, .. }) => {
+                let name = text.clone();
+                self.pos += 1;
+                Some(TExpr::Has(name))
+            }
+            Some(Token::LParen) => {
+                self.pos += 1;
+                let inner = self.label_or()?;
+                if !matches!(self.peek(), Some(Token::RParen)) {
+                    return None;
+                }
+                self.pos += 1;
+                Some(inner)
+            }
+            _ => None,
+        }
     }
 
     /// Whether the next tokens are `::name-->` (a resolution step),
@@ -4140,7 +4545,12 @@ impl Parser<'_> {
     /// The spaced `+` / `-` lex as lone name tokens (glued they are
     /// name characters), so the operator test is exact-text.
     fn additive(&mut self) -> Result<Operand> {
-        let mut left = self.multiplicative()?;
+        let left = self.multiplicative()?;
+        self.additive_from(left)
+    }
+
+    /// The additive loop from a left operand already read.
+    fn additive_from(&mut self, mut left: Operand) -> Result<Operand> {
         loop {
             let op = match self.peek() {
                 Some(Token::Name {
@@ -4202,7 +4612,12 @@ impl Parser<'_> {
     /// `unary ((*|div|idiv|mod) unary)*`. A bare `*` here follows a
     /// complete operand, so it is multiplication, not the wildcard.
     fn multiplicative(&mut self) -> Result<Operand> {
-        let mut left = self.unary()?;
+        let left = self.unary()?;
+        self.multiplicative_from(left)
+    }
+
+    /// The multiplicative loop from a left operand already read.
+    fn multiplicative_from(&mut self, mut left: Operand) -> Result<Operand> {
         loop {
             let op = match self.peek() {
                 Some(Token::Name {
@@ -4225,6 +4640,12 @@ impl Parser<'_> {
                     quoted: false,
                     ..
                 }) if text == "mod" => ArithOp::Mod,
+                // `x` — the matrix product, at the level of `*`.
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) if text == "x" => ArithOp::MatMul,
                 _ => break,
             };
             self.pos += 1;
@@ -4376,6 +4797,31 @@ impl Parser<'_> {
     }
 
     fn unary_primary(&mut self) -> Result<Operand> {
+        // `1..5`, `0..8..2`, `1..(n + 1)`: the range, glued around
+        // its dots; the first bound rides the token, the rest may
+        // be parenthesized expressions.
+        if let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+            && let Some((from, rest)) = range_head(text)
+        {
+            self.pos += 1;
+            return self.range_rest(Operand::Lit(Value::Int(from)), rest);
+        }
+        // `x` is the matrix product, a reserved word of the value
+        // grammar: it stands between two operands and nowhere else
+        // (the string is written quoted; names behind a sigil are
+        // untouched).
+        if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "x")
+            && self.toks.get(self.pos + 1).is_none_or(|t| {
+                !matches!(
+                    t,
+                    Token::RParen | Token::Semi | Token::Comma | Token::RBracket | Token::Pipe | Token::AppendPipe { .. }
+                )
+            })
+        {
+            return Err(QuarbError::parse(
+                "'x' is the matrix product and stands between two operands; the string is written quoted (\"x\")",
+            ));
+        }
         if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "-") {
             self.pos += 1;
             return Ok(Operand::Neg(Box::new(self.unary()?)));
@@ -4408,6 +4854,16 @@ impl Parser<'_> {
             // `(expr | f @| g)` — command semantics, mirrored.
             let commands = self.inline_pipe_tail()?;
             self.expect(Token::RParen, "')' to close a group")?;
+            // `(n)..5` — a parenthesized lower bound of a range.
+            if commands.is_empty()
+                && let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+                && let Some(rest) = text.strip_prefix("..")
+                && rest.split("..").all(|p| p.is_empty() || p.parse::<i64>().is_ok())
+            {
+                let rest: Vec<String> = rest.split("..").map(str::to_string).collect();
+                self.pos += 1;
+                return self.range_rest(inner, rest);
+            }
             return Ok(if commands.is_empty() {
                 inner
             } else {
@@ -4418,6 +4874,56 @@ impl Parser<'_> {
             });
         }
         self.operand()
+    }
+
+    /// The bounds of a range after its first: each an integer that
+    /// rode the token, or an empty part standing for a parenthesized
+    /// expression that follows; a step may ride the next token
+    /// (`1..(n)..2`). One bound is the end, two the end and the step.
+    fn range_rest(&mut self, from: Operand, mut parts: Vec<String>) -> Result<Operand> {
+        let mut bounds: Vec<Operand> = Vec::new();
+        let mut i = 0;
+        while i < parts.len() {
+            let p = parts[i].clone();
+            i += 1;
+            if p.is_empty() {
+                if !matches!(self.peek(), Some(Token::LParen)) {
+                    return Err(QuarbError::parse(
+                        "a range's bound is an integer or a parenthesized expression: 1..5, 1..(n + 1)",
+                    ));
+                }
+                self.pos += 1;
+                let e = self.additive()?;
+                self.expect(Token::RParen, "')' to close the range's bound")?;
+                bounds.push(e);
+                // the step may ride the next token: `..2`, `..(s)`
+                if i == parts.len()
+                    && bounds.len() == 1
+                    && let Some(Token::Name { text, quoted: false, .. }) = self.peek()
+                    && let Some(rest) = text.strip_prefix("..")
+                    && (rest.is_empty() || rest.parse::<i64>().is_ok())
+                {
+                    parts.push(rest.to_string());
+                    self.pos += 1;
+                }
+            } else {
+                let n: i64 = p.parse().map_err(|_| {
+                    QuarbError::parse(format!("a range's bound is an integer: '{p}' is not one"))
+                })?;
+                bounds.push(Operand::Lit(Value::Int(n)));
+            }
+        }
+        let mut bounds = bounds.into_iter();
+        let to = bounds.next().ok_or_else(|| QuarbError::parse("a range needs its end: 1..5"))?;
+        let step = bounds.next().map(Box::new);
+        if bounds.next().is_some() {
+            return Err(QuarbError::parse("a range has at most three parts: start..end..step"));
+        }
+        Ok(Operand::Range {
+            from: Box::new(from),
+            to: Box::new(to),
+            step,
+        })
     }
 
     /// A conditional-bearing expression: a predicate expression,
@@ -5226,7 +5732,7 @@ impl Parser<'_> {
                 let first = match args.next() {
                     Some(Arg::Lit(v)) => Operand::Lit(v),
                     Some(Arg::Expr(e)) => e,
-                    Some(Arg::Range(..)) | Some(Arg::Named { .. }) | Some(Arg::Opt { .. }) => {
+                    Some(Arg::Range(..)) | Some(Arg::Named { .. }) | Some(Arg::Opt { .. }) | Some(Arg::Pairs { .. }) => {
                         return Err(QuarbError::parse(format!(
                             "'{}(...)' as an operand cannot ride a range or an option as its topic",
                             call.name
@@ -5344,6 +5850,14 @@ impl Parser<'_> {
                     self.pos += 1;
                     let (items, _) = self.list_items(false)?;
                     return Ok(Operand::List(items));
+                }
+                // `@%(…)` — the record array, a list of records in
+                // the table literal's shape.
+                if matches!(self.peek(), Some(Token::Percent))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                {
+                    self.pos += 1;
+                    return self.record_array();
                 }
                 match self.peek() {
                     Some(Token::Name {
@@ -6094,6 +6608,34 @@ impl Parser<'_> {
     }
 }
 
+/// A token that opens a range (`1..5`, `1..`, `0..8..2`, `1..5..`):
+/// its first bound, and the parts after it (an empty part stands for
+/// a parenthesized expression that follows the token).
+fn range_head(text: &str) -> Option<(i64, Vec<String>)> {
+    let (first, rest) = text.split_once("..")?;
+    let from: i64 = first.parse().ok()?;
+    let parts: Vec<String> = rest.split("..").map(str::to_string).collect();
+    if parts.len() > 2 || parts.iter().any(|p| !p.is_empty() && p.parse::<i64>().is_err()) {
+        return None;
+    }
+    Some((from, parts))
+}
+
+/// The arithmetic operator a bare word spells, for the operator in
+/// command position.
+fn arith_word(text: &str) -> Option<ArithOp> {
+    Some(match text {
+        "+" => ArithOp::Add,
+        "-" => ArithOp::Sub,
+        "*" => ArithOp::Mul,
+        "div" => ArithOp::Div,
+        "idiv" => ArithOp::IDiv,
+        "mod" => ArithOp::Mod,
+        "x" => ArithOp::MatMul,
+        _ => return None,
+    })
+}
+
 /// A trait boolean expression, as parsed; normalized to CNF
 /// before it leaves the parser.
 enum TExpr {
@@ -6359,6 +6901,18 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
                 };
                 let name = name.to_string();
                 check(&name)?;
+                i += 1;
+            }
+            // The pairwise fields: a literal list of names is
+            // checked here; computed names at run time.
+            Arg::Pairs { keys, .. } => {
+                if let Operand::List(items) = keys {
+                    for item in items {
+                        if let Operand::Lit(v) = item {
+                            check(&v.to_string())?;
+                        }
+                    }
+                }
                 i += 1;
             }
             _ => {
@@ -6886,7 +7440,14 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         Command::Subcontext { body, .. } => subst_query(body, map),
         Command::Filter(e) => subst_pred_expr(e, map),
         Command::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
-        Command::Map(inner) | Command::Repeat { command: inner, .. } => subst_command(inner, map),
+        Command::Map(inner)
+        | Command::Append { body: inner, .. }
+        | Command::Repeat { command: inner, .. } => subst_command(inner, map),
+        Command::AppendRow { items, .. } => {
+            for (_, i) in items {
+                subst_operand(i, map);
+            }
+        }
         Command::Select(_)
         | Command::Push(_)
         | Command::FieldsPush
@@ -6961,6 +7522,20 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         Operand::List(items) => {
             for item in items {
                 subst_operand(item, map);
+            }
+        }
+        Operand::RecordArray { rows, .. } => {
+            for row in rows {
+                for (_, i) in row {
+                    subst_operand(i, map);
+                }
+            }
+        }
+        Operand::Range { from, to, step } => {
+            subst_operand(from, map);
+            subst_operand(to, map);
+            if let Some(s) = step {
+                subst_operand(s, map);
             }
         }
         Operand::Table { rows, .. } => {

@@ -220,7 +220,7 @@ pub(super) fn timeline_command(
         .map(|(i, c)| {
             let read = |a: &Arg| match a {
                 Arg::Lit(v) => v.clone(),
-                Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } => Value::Null,
+                Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => Value::Null,
                 Arg::Expr(e) => operand_scalar(
                     adapter,
                     c.node,

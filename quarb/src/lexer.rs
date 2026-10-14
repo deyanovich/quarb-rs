@@ -65,6 +65,10 @@ pub enum Token {
     /// (spec: The Conditional, "The null default"); spaced on both
     /// sides like every binary operator.
     Coalesce,
+    /// `+|` — the append pipe (spec: The Append Pipe): the body's
+    /// values appended to the topic; `+|!` the overwriting form,
+    /// for a record's fields. Rounded `+__` / `+__!`.
+    AppendPipe { overwrite: bool },
     /// `!` — distal suffix.
     Bang,
     /// `^` — root anchor; or its rounded spelling, the empty double
@@ -687,6 +691,21 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Pipe);
                 i += 3;
             }
+            // `+|` / `+|!` — the append pipe and its overwriting
+            // form; `+__` / `+__!` the rounded spellings.
+            '+' if at(i + 1) == Some('|') => {
+                let overwrite = at(i + 2) == Some('!');
+                tokens.push(Token::AppendPipe { overwrite });
+                i += if overwrite { 3 } else { 2 };
+            }
+            '+' if at(i + 1) == Some('_')
+                && at(i + 2) == Some('_')
+                && !at(i + 3).is_some_and(|c| is_name_char(c) && c != '!') =>
+            {
+                let overwrite = at(i + 3) == Some('!');
+                tokens.push(Token::AppendPipe { overwrite });
+                i += if overwrite { 4 } else { 3 };
+            }
             // `*(a; b)` — the rounded list literal (`*` stands in for
             // `@`, as in `*__` and `(*)`). A list literal follows
             // whitespace (rulings #52/#53), so after an axis the star
@@ -730,12 +749,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             {
                 // A row of a table literal, or an argument, glues to
                 // the opener or the separator before it, as a list
-                // literal does.
+                // literal does; the record array's `@%(` glues to
+                // its `@`.
                 if !after_whitespace(&chars, i)
                     && !after_push_dot(&chars, i)
                     && !matches!(
                         tokens.last(),
-                        Some(Token::LParen | Token::Semi | Token::Comma)
+                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At)
                     )
                 {
                     return Err(QuarbError::lex(

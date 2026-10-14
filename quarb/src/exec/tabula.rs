@@ -169,10 +169,7 @@ pub(super) fn node_table(adapter: &impl AstAdapter, node: NodeId) -> Result<Tabl
                 row
             })
             .collect();
-        return Ok(Table {
-            header: Some(header),
-            rows: body,
-        });
+        return Ok(Table::new(Some(header), body));
     }
     // A grid: spans repeated, the header where the format declares
     // one (a first row of head cells, or one under `thead`).
@@ -226,13 +223,7 @@ pub(super) fn node_table(adapter: &impl AstAdapter, node: NodeId) -> Result<Tabl
     }
     if header_rows > 0 {
         let header: Vec<String> = grid[header_rows - 1].iter().map(Value::to_string).collect();
-        return Ok(Table {
-            header: Some(header),
-            rows: grid.split_off(header_rows),
-        });
+        return Ok(Table::new(Some(header), grid.split_off(header_rows)));
     }
-    Ok(Table {
-        header: None,
-        rows: grid,
-    })
+    Ok(Table::new(None, grid))
 }

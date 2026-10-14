@@ -73,11 +73,12 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
     );
     assert_eq!(ok(&["//*<tabula> | # | cell(1; \"age\")", &text_md]), "41\n");
     // the DOM: a table element carries tabula; a first row of th is
-    // the header, a colspan repeats the cell, a number reads as one
+    // the header, a colspan repeats the cell, a column of numbers
+    // types as numbers (a mixed one stays text)
     assert_eq!(ok(&["//*<tabula> @| count", &html_s]), "2\n");
     assert_eq!(
         ok(&["//*<tabula>[1] | # | [2]", &html_s]),
-        "%(name = \"Bob\"; role = 29; age = 29)\n"
+        "%(name = \"Bob\"; role = \"29\"; age = 29)\n"
     );
     assert_eq!(ok(&["//*<tabula>[1] | # | dim", &html_s]), "@(2; 3)\n");
     // no header declared: the array face

@@ -94,7 +94,283 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
 }
 
+/// The keys a list of two or more records share in one order, when
+/// every item is such a record with at least one field: the header
+/// of the record array the list prints as.
+fn record_array_keys(items: &[Value]) -> Option<&[(String, Value)]> {
+    if items.len() < 2 {
+        return None;
+    }
+    let Value::Record(first) = &items[0] else {
+        return None;
+    };
+    if first.is_empty() {
+        return None;
+    }
+    let same = items.iter().all(|v| match v {
+        Value::Record(o) => o.len() == first.len() && o.iter().zip(first.iter()).all(|((a, _), (b, _))| a == b),
+        _ => false,
+    });
+    same.then_some(first.as_slice())
+}
+
+/// The type of a table column (spec: The Table): one scalar type
+/// per column, every non-null cell a value of it. Decided when the
+/// table is built, by [`Table::new`]: the least type every non-null
+/// cell coerces to, tried in this order — the lattice boolean <
+/// integer < float, then the types of their own, text the top, so
+/// no column fails to type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Boolean,
+    Integer,
+    Float,
+    Instant,
+    Duration,
+    Period,
+    Quantity,
+    Text,
+}
+
+impl ColumnType {
+    /// The type's word, as `| types` lists it.
+    pub fn word(self) -> &'static str {
+        match self {
+            ColumnType::Boolean => "boolean",
+            ColumnType::Integer => "integer",
+            ColumnType::Float => "float",
+            ColumnType::Instant => "instant",
+            ColumnType::Duration => "duration",
+            ColumnType::Period => "period",
+            ColumnType::Quantity => "quantity",
+            ColumnType::Text => "text",
+        }
+    }
+
+    const ORDER: [ColumnType; 8] = [
+        ColumnType::Boolean,
+        ColumnType::Integer,
+        ColumnType::Float,
+        ColumnType::Instant,
+        ColumnType::Duration,
+        ColumnType::Period,
+        ColumnType::Quantity,
+        ColumnType::Text,
+    ];
+
+    /// The type a stored cell is of (null is of every type).
+    fn of(v: &Value) -> Option<ColumnType> {
+        Some(match v {
+            Value::Null => return None,
+            Value::Bool(_) => ColumnType::Boolean,
+            Value::Int(_) => ColumnType::Integer,
+            Value::Float(_) => ColumnType::Float,
+            Value::Instant { .. } => ColumnType::Instant,
+            Value::Duration { .. } => ColumnType::Duration,
+            Value::Period { .. } => ColumnType::Period,
+            Value::Quantity { .. } => ColumnType::Quantity,
+            _ => ColumnType::Text,
+        })
+    }
+}
+
+/// `v` coerced to the column type `t`, `None` where it has no such
+/// reading. Text that reads as a type counts as that type; a
+/// boolean reads as 1 and 0 among integers, an integer as a float;
+/// every scalar has a text form.
+fn coerce_cell(v: &Value, t: ColumnType) -> Option<Value> {
+    use ColumnType as T;
+    if matches!(v, Value::Null) {
+        return Some(Value::Null);
+    }
+    match t {
+        T::Boolean => match v {
+            Value::Bool(_) => Some(v.clone()),
+            Value::Str(s) if s == "true" => Some(Value::Bool(true)),
+            Value::Str(s) if s == "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        T::Integer => match v {
+            Value::Bool(b) => Some(Value::Int(i64::from(*b))),
+            Value::Int(_) => Some(v.clone()),
+            Value::Str(_) => match v.numeric_reading() {
+                Some(n @ Value::Int(_)) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        },
+        T::Float => match v {
+            Value::Bool(b) => Some(Value::Float(if *b { 1.0 } else { 0.0 })),
+            Value::Int(n) => Some(Value::Float(*n as f64)),
+            Value::Float(_) => Some(v.clone()),
+            Value::Str(_) => match v.numeric_reading() {
+                Some(Value::Int(n)) => Some(Value::Float(n as f64)),
+                Some(f @ Value::Float(_)) => Some(f),
+                _ => None,
+            },
+            _ => None,
+        },
+        T::Instant => match v {
+            Value::Instant { .. } => Some(v.clone()),
+            Value::Str(s) => crate::temporal::parse_iso(s).map(|(secs, nanos, offset_min)| {
+                Value::Instant {
+                    secs,
+                    nanos,
+                    offset_min,
+                }
+            }),
+            _ => None,
+        },
+        T::Duration => match v {
+            Value::Duration { .. } => Some(v.clone()),
+            Value::Str(s) => {
+                crate::temporal::parse_span(s).map(|(secs, nanos)| Value::Duration { secs, nanos })
+            }
+            _ => None,
+        },
+        T::Period => match v {
+            Value::Period { .. } => Some(v.clone()),
+            Value::Str(s) => crate::period::Period::parse(s).map(Value::period),
+            _ => None,
+        },
+        T::Quantity => match v {
+            Value::Quantity { .. } => Some(v.clone()),
+            Value::Str(s) => {
+                crate::quantity::parse_unit_text(s).map(|(value, base, mag, unit)| Value::Quantity {
+                    value,
+                    base,
+                    written: Some((mag, unit)),
+                })
+            }
+            _ => None,
+        },
+        T::Text => Some(match v {
+            Value::Str(_) => v.clone(),
+            other => Value::Str(other.to_string()),
+        }),
+    }
+}
+
+/// One column typed: the first type of the order every non-null
+/// cell coerces to, and the cells coerced. A quantity column is of
+/// one dimension; cells of several fall through to text. An
+/// all-null column is text.
+fn type_column(cells: Vec<Value>) -> (ColumnType, Vec<Value>) {
+    for t in ColumnType::ORDER {
+        let coerced: Option<Vec<Value>> = cells.iter().map(|c| coerce_cell(c, t)).collect();
+        let Some(coerced) = coerced else { continue };
+        if t == ColumnType::Quantity {
+            let mut bases = coerced.iter().filter_map(|c| match c {
+                Value::Quantity { base, .. } => Some(base.as_str()),
+                _ => None,
+            });
+            if let Some(first) = bases.next()
+                && bases.any(|b| b != first)
+            {
+                continue;
+            }
+        }
+        return (t, coerced);
+    }
+    unreachable!("text is the top: every scalar has a text form")
+}
+
 impl Table {
+    /// A table built from its header and rows, the columns typed
+    /// (spec: The Table): each column takes the least type every
+    /// non-null cell coerces to, and its cells are stored coerced,
+    /// so a column of digit strings is an integer column that
+    /// prints its numbers bare. The rows are expected flat and of
+    /// one width; the one routine every builder of a table calls.
+    pub fn new(header: Option<Vec<String>>, rows: Vec<Vec<Value>>) -> Table {
+        let mut t = Table { header, rows };
+        let w = t.width();
+        if w == 0 || t.rows.is_empty() {
+            return t;
+        }
+        for j in 0..w {
+            let cells: Vec<Value> = t
+                .rows
+                .iter()
+                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                .collect();
+            let (_, coerced) = type_column(cells);
+            for (r, c) in t.rows.iter_mut().zip(coerced) {
+                if j < r.len() {
+                    r[j] = c;
+                } else {
+                    r.resize(j, Value::Null);
+                    r.push(c);
+                }
+            }
+        }
+        t
+    }
+
+    /// A matrix from rows of one width: every cell coerced TOGETHER
+    /// to the least type all of them admit, by the column lattice,
+    /// so the array is of one type (spec: Tables and Reshapes,
+    /// transpose). The rows are expected of one width.
+    pub fn matrix(rows: Vec<Vec<Value>>) -> Table {
+        let w = rows.first().map_or(0, Vec::len);
+        let cells: Vec<Value> = rows.into_iter().flatten().collect();
+        let (_, coerced) = type_column(cells);
+        let rows: Vec<Vec<Value>> = if w == 0 {
+            Vec::new()
+        } else {
+            coerced.chunks(w).map(|c| c.to_vec()).collect()
+        };
+        Table { header: None, rows }
+    }
+
+    /// The column types, one per column: the type of the cells as
+    /// stored (text for a column of nulls).
+    pub fn types(&self) -> Vec<ColumnType> {
+        (0..self.width())
+            .map(|j| {
+                self.rows
+                    .iter()
+                    .find_map(|r| r.get(j).and_then(ColumnType::of))
+                    .unwrap_or(ColumnType::Text)
+            })
+            .collect()
+    }
+
+    /// `| types`: the column types as a list of words.
+    pub fn types_value(&self) -> Value {
+        Value::list(
+            self.types()
+                .into_iter()
+                .map(|t| Value::Str(t.word().to_string()))
+                .collect(),
+        )
+    }
+
+    /// Whether every cell holds a scalar or null — what a table
+    /// promises (spec: The Table).
+    pub fn is_flat(&self) -> bool {
+        self.rows.iter().flatten().all(|c| {
+            !matches!(
+                c,
+                Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Foreign(_)
+            )
+        })
+    }
+
+    /// The rows as the list of records a frame stands for (positional
+    /// lists on the array face).
+    pub fn into_records(self) -> Value {
+        let Table { header, rows } = self;
+        Value::list(
+            rows.into_iter()
+                .map(|r| match &header {
+                    Some(h) => Value::Record(h.iter().cloned().zip(r).collect()),
+                    None => Value::list(r),
+                })
+                .collect(),
+        )
+    }
+
     /// The number of columns: the header's width, else the first
     /// row's (every row is padded or refused to that width).
     pub fn width(&self) -> usize {
@@ -226,9 +502,9 @@ impl Table {
     /// The rows and columns exchanged: an array's transpose.
     pub fn transposed(&self) -> Table {
         let w = self.width();
-        Table {
-            header: None,
-            rows: (0..w)
+        Table::new(
+            None,
+            (0..w)
                 .map(|j| {
                     self.rows
                         .iter()
@@ -236,7 +512,7 @@ impl Table {
                         .collect()
                 })
                 .collect(),
-        }
+        )
     }
 
     /// The literal that reads back: `#(@(name; age); %("Braund";
@@ -478,6 +754,22 @@ impl Value {
             Value::Null => "null".to_string(),
             Value::Str(s) => quarb_string(s),
             Value::List(l) => {
+                // Two or more records of one shape (the same keys in
+                // the same order) print as the record array, the
+                // header once; records that differ in shape print
+                // record by record, so no sparse grid is shown.
+                if let Some(keys) = record_array_keys(l) {
+                    let mut parts: Vec<String> = Vec::with_capacity(l.len() + 1);
+                    let names: Vec<String> = keys.iter().map(|(k, _)| quarb_key(k)).collect();
+                    parts.push(format!("@({})", names.join("; ")));
+                    for item in l.iter() {
+                        if let Value::Record(o) = item {
+                            let cells: Vec<String> = o.iter().map(|(_, v)| v.to_quarb()).collect();
+                            parts.push(format!("%({})", cells.join("; ")));
+                        }
+                    }
+                    return format!("@%({})", parts.join("; "));
+                }
                 let inner: Vec<String> = l.iter().map(Value::to_quarb).collect();
                 format!("@({})", inner.join("; "))
             }
@@ -497,6 +789,20 @@ impl Value {
 
     /// What a result line shows: a scalar bare (text unquoted), a
     /// record or list in its Quarb form.
+    /// A table a boundary would make implicitly — a library's frame
+    /// or two-dimensional array, an adapter's tabular source — as the
+    /// engine's value: the table when it is flat, else the list of
+    /// records that keeps its shape (spec: The Table). One rule for
+    /// every boundary; the explicit constructors (`#(…)`, `| #`)
+    /// refuse instead, since the query asked for a table.
+    pub fn table_or_records(t: Table) -> Value {
+        if t.is_flat() {
+            Value::table(Table::new(t.header, t.rows))
+        } else {
+            t.into_records()
+        }
+    }
+
     pub fn display_form(&self) -> String {
         match self {
             Value::List(_) | Value::Record(_) => self.to_quarb(),

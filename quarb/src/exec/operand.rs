@@ -10,6 +10,82 @@ use super::*;
 /// the list and an aggregate is not needed to keep it.
 /// Build the table a literal describes (spec: The Table Kind, the
 /// laws of the literal), `cell` evaluating one item.
+/// Whether a value may stand in a table's cell: a scalar or null,
+/// never a structure or an opaque value (spec: The Table).
+pub(crate) fn flat_cell(v: &Value) -> bool {
+    !matches!(
+        v,
+        Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Foreign(_)
+    )
+}
+
+/// The record array `@%(…)` as the list of records it stands for
+/// (spec: List Construction): positional items take the header's
+/// names in order, named items their own; a name the header lacks
+/// joins the names after it, and every record carries every name,
+/// null where its row said nothing.
+pub(super) fn record_array(
+    header: &[String],
+    rows: &[Vec<(Option<String>, Operand)>],
+    mut cell: impl FnMut(&Operand) -> Value,
+) -> Result<Value, String> {
+    let mut names: Vec<String> = header.to_vec();
+    let mut records: Vec<Vec<(String, Value)>> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let n = i + 1;
+        let mut fields: Vec<(String, Value)> = Vec::with_capacity(row.len());
+        let mut next = 0;
+        for (name, e) in row {
+            let v = cell(e);
+            let name = match name {
+                Some(name) => {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                    name.clone()
+                }
+                None => {
+                    if next >= header.len() {
+                        return Err(format!(
+                            "row {n} has more positional values than the header has names ({}); name the rest",
+                            header.len()
+                        ));
+                    }
+                    next += 1;
+                    header[next - 1].clone()
+                }
+            };
+            match fields.iter_mut().find(|(k, _)| *k == name) {
+                Some((_, slot)) => *slot = v,
+                None => fields.push((name, v)),
+            }
+        }
+        records.push(fields);
+    }
+    Ok(Value::list(
+        records
+            .into_iter()
+            .map(|fields| {
+                Value::Record(
+                    names
+                        .iter()
+                        .map(|k| {
+                            (
+                                k.clone(),
+                                fields
+                                    .iter()
+                                    .find(|(n, _)| n == k)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or(Value::Null),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    ))
+}
+
 pub(super) fn table_literal(
     mut header: Option<Vec<String>>,
     rows: &[crate::ast::TableRow],
@@ -94,9 +170,17 @@ pub(super) fn table_literal(
             ));
         }
         values.resize(w, Value::Null);
+        // The table is flat: a cell holds a scalar or null.
+        if let Some((j, v)) = values.iter().enumerate().find(|(_, v)| !flat_cell(v)) {
+            return Err(format!(
+                "row {n}, column {}: a table is flat, its cell a scalar or null, not {}",
+                j + 1,
+                crate::stdlib::kind_of(v)
+            ));
+        }
         out.push(values);
     }
-    Ok(crate::Table { header, rows: out })
+    Ok(crate::Table::new(header, out))
 }
 
 pub(super) fn record_fields_prov(
@@ -105,7 +189,7 @@ pub(super) fn record_fields_prov(
     node: NodeId,
     trace: &Trace,
     scope: Scope<'_>,
-) -> Vec<(String, Value, Prov)> {
+) -> Result<Vec<(String, Value, Prov)>, String> {
     let mut fields: Vec<(String, Value, Prov)> = Vec::new();
     let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
@@ -120,6 +204,7 @@ pub(super) fn record_fields_prov(
                     Some(Arg::Range(_, _))
                     | Some(Arg::Named { .. })
                     | Some(Arg::Opt { .. })
+                    | Some(Arg::Pairs { .. })
                     | None => (Value::Null, Prov::default()),
                 };
                 fields.push((name.clone(), value, prov));
@@ -132,10 +217,53 @@ pub(super) fn record_fields_prov(
                 fields.push((name, v, Prov::leaf(o)));
             }
             Arg::Lit(v) => fields.push((String::new(), v.clone(), Prov::default())),
+            // The pairwise fields: the names, then the values, in
+            // order; the counts must agree and no name may repeat.
+            Arg::Pairs { keys, values } => {
+                let k = operand_value(adapter, node, keys, trace, &[], scope);
+                let (v, o) = capture(|| operand_value(adapter, node, values, trace, &[], scope));
+                let names: Vec<String> = match &k {
+                    Value::List(l) => l
+                        .iter()
+                        .map(|n| match n {
+                            Value::Str(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    other => {
+                        return Err(format!(
+                            "the pairwise field takes a list of names on the left of '=', not {}",
+                            crate::stdlib::kind_of(other)
+                        ));
+                    }
+                };
+                let items: Vec<Value> = match &v {
+                    Value::List(l) => l.to_vec(),
+                    other => {
+                        return Err(format!(
+                            "the pairwise field takes a list of values on the right of '=', not {}",
+                            crate::stdlib::kind_of(other)
+                        ));
+                    }
+                };
+                if names.len() != items.len() {
+                    return Err(format!(
+                        "the pairwise field's names and values differ in number, {} and {}",
+                        names.len(),
+                        items.len()
+                    ));
+                }
+                for (name, value) in names.into_iter().zip(items) {
+                    if fields.iter().any(|(n, _, _)| *n == name) {
+                        return Err(format!("'{name}' is already a field of the record"));
+                    }
+                    fields.push((name, value, Prov::leaf(o.clone())));
+                }
+            }
             Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => {}
         }
     }
-    fields
+    Ok(fields)
 }
 
 /// Split provenance-bearing fields into the record's fields and
@@ -556,6 +684,83 @@ pub(super) fn eval_operand(
         // (a short row filled with holes, a long one refused), a
         // named item by its column, a header inferred from the first
         // full record where none is written.
+        // `a..b`, `a..b..step` — the range: every integer from a to
+        // b, one value at a time; a step strides, its sign flipping
+        // the written direction; a zero step is refused.
+        Operand::Range { from, to, step } => {
+            let int = |e: &Operand, what: &str| -> Result<i64, String> {
+                let v = operand_value(adapter, node, e, trace, bound, scope);
+                match v.numeric_reading() {
+                    Some(Value::Int(n)) => Ok(n),
+                    _ => Err(format!(
+                        "a range's {what} is an integer, not {}",
+                        crate::stdlib::kind_of(&v)
+                    )),
+                }
+            };
+            let bounds = (|| -> Result<Vec<Value>, String> {
+                let a = int(from, "start")?;
+                let b = int(to, "end")?;
+                let s = match step {
+                    Some(s) => int(s, "step")?,
+                    None => 1,
+                };
+                if s == 0 {
+                    return Err("a range's step is not zero".into());
+                }
+                // The values always run from the first bound toward
+                // the second; the step's sign says where the stride
+                // is anchored: `a..b..n` strides from a, `a..b..-n`
+                // from b (the content of `b..a..n`, listed from a).
+                let anchored_at_end = s < 0;
+                let s = s.abs();
+                let (from, to) = if anchored_at_end { (b, a) } else { (a, b) };
+                let mut out = Vec::new();
+                if from <= to {
+                    let mut i = from;
+                    while i <= to {
+                        out.push(Value::Int(i));
+                        i = match i.checked_add(s) {
+                            Some(n) => n,
+                            None => break,
+                        };
+                    }
+                } else {
+                    let mut i = from;
+                    while i >= to {
+                        out.push(Value::Int(i));
+                        i = match i.checked_sub(s) {
+                            Some(n) => n,
+                            None => break,
+                        };
+                    }
+                }
+                if anchored_at_end {
+                    out.reverse();
+                }
+                Ok(out)
+            })();
+            match bounds {
+                Ok(vs) => vs,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    vec![Value::Null]
+                }
+            }
+        }
+        // `@%(…)` — the record array: a list of records in the
+        // table literal's shape, the header extended by any name a
+        // row adds, null where a record lacks a name.
+        Operand::RecordArray { header, rows } => {
+            let cell = |e: &Operand| operand_value(adapter, node, e, trace, bound, scope);
+            match record_array(header, rows, cell) {
+                Ok(v) => vec![v],
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    vec![Value::Null]
+                }
+            }
+        }
         Operand::Table { header, rows } => {
             let cell = |e: &Operand| operand_value(adapter, node, e, trace, bound, scope);
             match table_literal(header.clone(), rows, cell) {
@@ -938,7 +1143,16 @@ pub(super) fn eval_operand(
             let r = operand_scalar_bound(adapter, node, right, trace, bound, scope);
             let l = retype_shaped_lit(left, l, &scale);
             let r = retype_shaped_lit(right, r, &scale);
-            vec![arith(*op, &l, &r, &scale)]
+            // Over a list, a record or a table the operator
+            // broadcasts (spec: Arithmetic over structures); a shape
+            // mismatch is a refusal, not a null.
+            vec![match super::arith::broadcast(*op, &l, &r, &scale) {
+                Ok(v) => v,
+                Err(why) => {
+                    crate::exec::record_refusal(why);
+                    Value::Null
+                }
+            }]
         }
         Operand::Neg(inner) => {
             let v = operand_scalar_bound(adapter, node, inner, trace, bound, scope);

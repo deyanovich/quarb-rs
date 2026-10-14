@@ -15,6 +15,95 @@ name = "qua"
 path = "src/main.rs"
 
 [features]
+# The adapters and the text model: every source qua can open. Off,
+# the build is the calculator profile — the value grammar, the
+# value space, the standard library's value commands, the pipes over
+# streams of values — which the `quarb-calc` crate ships as `qc`;
+# the same source, the same code paths, nothing reimplemented.
+default = ["adapters"]
+adapters = [
+    "dep:quarb-fs",
+    "dep:quarb-imap",
+    "dep:quarb-json",
+    "dep:quarb-yaml",
+    "dep:quarb-toml",
+    "dep:quarb-kaiv",
+    "dep:quarb-lines",
+    "dep:quarb-markdown",
+    "dep:quarb-gsheet",
+    "dep:quarb-html",
+    "dep:quarb-text",
+    "dep:quarb-text-html",
+    "dep:quarb-text-docx",
+    "dep:quarb-text-odt",
+    "dep:quarb-text-rtf",
+    "dep:quarb-text-doc",
+    "dep:quarb-text-epub",
+    "dep:quarb-text-latex",
+    "dep:quarb-pdf",
+    "dep:quarb-text-pdf",
+    "dep:quarb-text-djvu",
+    "dep:quarb-text-ofd",
+    "dep:quarb-text-hwpx",
+    "dep:quarb-text-uof",
+    "dep:quarb-text-markdown",
+    "dep:quarb-xml",
+    "dep:quarb-bigquery",
+    "dep:quarb-archive",
+    "dep:quarb-web",
+    "dep:quarb-tree-sitter",
+    "dep:quarb-code",
+    "dep:quarb-compose",
+    "dep:quarb-csv",
+    "dep:quarb-maildir",
+    "dep:quarb-metatheca",
+    "dep:quarb-atrep",
+    "dep:quarb-text-koine",
+    "dep:quarb-datastore",
+    "dep:quarb-duckdb",
+    "dep:quarb-firebase",
+    "dep:quarb-firestore",
+    "dep:quarb-git",
+    "dep:quarb-github",
+    "dep:quarb-gitlab",
+    "dep:quarb-xpath",
+    "dep:quarb-jq",
+    "dep:quarb-azlogs",
+    "dep:quarb-cflogs",
+    "dep:quarb-cwlogs",
+    "dep:quarb-ddlogs",
+    "dep:quarb-gcplogs",
+    "dep:quarb-kubernetes",
+    "dep:quarb-athena",
+    "dep:quarb-cosmos",
+    "dep:quarb-dynamodb",
+    "dep:quarb-kafka",
+    "dep:quarb-age",
+    "dep:quarb-arangodb",
+    "dep:quarb-falkordb",
+    "dep:quarb-memgraph",
+    "dep:quarb-neptune",
+    "dep:quarb-redis",
+    "dep:quarb-sparql",
+    "dep:quarb-mongodb",
+    "dep:quarb-mssql",
+    "dep:quarb-oracle",
+    "dep:quarb-ldap",
+    "dep:quarb-cbor",
+    "dep:quarb-mount",
+    "dep:quarb-open",
+    "dep:syndesmos",
+    "dep:quarb-model",
+    "dep:quarb-mysql",
+    "dep:quarb-objstore",
+    "dep:quarb-neo4j",
+    "dep:quarb-postgres",
+    "dep:quarb-serve",
+    "dep:quarb-xlsx",
+    "dep:quarb-sql",
+    "dep:quarb-sqlite",
+    "dep:quarb-relational",
+]
 # Kùzu bundles a large C++ build; the embedded-graph target is
 # opt-in, and the build currently needs two workarounds (both
 # upstream kuzu issues):
@@ -23,7 +112,7 @@ path = "src/main.rs"
 #     one binary needs RUSTFLAGS="-C link-arg=-Wl,-z,muldefs"
 #   RUSTFLAGS="-C link-arg=-Wl,-z,muldefs" \
 #     cargo install qua --features kuzu
-kuzu = ["dep:quarb-kuzu", "quarb-open/kuzu"]
+kuzu = ["adapters", "dep:quarb-kuzu", "quarb-open/kuzu"]
 # The pymorphy3 command library (`morph:`): embeds the local Python
 # through pyo3, so a default `qua` has no libpython dependency and
 # the feature links it in. Needs the pymorphy3 package and its
@@ -52,98 +141,98 @@ python-libs = ["morph", "scipy", "sklearn", "numpy", "pandas"]
 [dependencies]
 toml = "1.1.2"
 unicode-segmentation = "1"
-quarb = { path = "../quarb", version = "0.37.0", features = ["cjk"] }
-quarb-lib-morph = { path = "../quarb-lib-morph", version = "0.37.0", optional = true }
-quarb-lib-scipy = { path = "../quarb-lib-scipy", version = "0.37.0", optional = true }
-quarb-lib-sklearn = { path = "../quarb-lib-sklearn", version = "0.37.0", optional = true }
-quarb-lib-numpy = { path = "../quarb-lib-numpy", version = "0.37.0", optional = true }
-quarb-lib-pandas = { path = "../quarb-lib-pandas", version = "0.37.0", optional = true }
-quarb-fs = { path = "../quarb-fs", version = "0.37.0" }
-quarb-imap = { path = "../quarb-imap", version = "0.37.0" }
-quarb-json = { path = "../quarb-json", version = "0.37.0" }
-quarb-yaml = { path = "../quarb-yaml", version = "0.37.0" }
-quarb-toml = { path = "../quarb-toml", version = "0.37.0" }
-quarb-kaiv = { path = "../quarb-kaiv", version = "0.37.0" }
-quarb-lines = { path = "../quarb-lines", version = "0.37.0" }
-quarb-markdown = { path = "../quarb-markdown", version = "0.37.0" }
-quarb-gsheet = { path = "../quarb-gsheet", version = "0.37.0" }
-quarb-html = { path = "../quarb-html", version = "0.37.0" }
-quarb-text = { path = "../quarb-text", version = "0.37.0" }
-quarb-text-html = { path = "../quarb-text-html", version = "0.37.0" }
-quarb-text-docx = { path = "../quarb-text-docx", version = "0.37.0" }
-quarb-text-odt = { path = "../quarb-text-odt", version = "0.37.0" }
-quarb-text-rtf = { path = "../quarb-text-rtf", version = "0.37.0" }
-quarb-text-doc = { path = "../quarb-text-doc", version = "0.37.0" }
-quarb-text-epub = { path = "../quarb-text-epub", version = "0.37.0" }
-quarb-text-latex = { path = "../quarb-text-latex", version = "0.37.0" }
-quarb-pdf = { path = "../quarb-pdf", version = "0.37.0" }
-quarb-text-pdf = { path = "../quarb-text-pdf", version = "0.37.0" }
-quarb-text-djvu = { path = "../quarb-text-djvu", version = "0.37.0" }
-quarb-text-ofd = { path = "../quarb-text-ofd", version = "0.37.0" }
-quarb-text-hwpx = { path = "../quarb-text-hwpx", version = "0.37.0" }
-quarb-text-uof = { path = "../quarb-text-uof", version = "0.37.0" }
-quarb-text-markdown = { path = "../quarb-text-markdown", version = "0.37.0" }
-quarb-xml = { path = "../quarb-xml", version = "0.37.0" }
-quarb-bigquery = { path = "../quarb-bigquery", version = "0.37.0" }
-quarb-archive = { path = "../quarb-archive", version = "0.37.0", features = ["rar"] }
-quarb-web = { path = "../quarb-web", version = "0.37.0", features = ["sqlite", "postgres"] }
-quarb-tree-sitter = { path = "../quarb-tree-sitter", version = "0.37.0" }
-quarb-code = { path = "../quarb-code", version = "0.37.0" }
-quarb-compose = { path = "../quarb-compose", version = "0.37.0", features = ["koine"] }
-quarb-csv = { path = "../quarb-csv", version = "0.37.0" }
-quarb-maildir = { path = "../quarb-maildir", version = "0.37.0" }
-quarb-metatheca = { path = "../quarb-metatheca", version = "0.37.0" }
-quarb-atrep = { path = "../quarb-atrep", version = "0.37.0" }
-quarb-text-koine = { path = "../quarb-text-koine", version = "0.37.0" }
-quarb-datastore = { path = "../quarb-datastore", version = "0.37.0" }
-quarb-duckdb = { path = "../quarb-duckdb", version = "0.37.0" }
-quarb-firebase = { path = "../quarb-firebase", version = "0.37.0" }
-quarb-firestore = { path = "../quarb-firestore", version = "0.37.0" }
-quarb-git = { path = "../quarb-git", version = "0.37.0" }
-quarb-github = { path = "../quarb-github", version = "0.37.0" }
-quarb-gitlab = { path = "../quarb-gitlab", version = "0.37.0" }
-quarb-xpath = { path = "../quarb-xpath", version = "0.37.0" }
-quarb-jq = { path = "../quarb-jq", version = "0.37.0" }
-quarb-azlogs = { path = "../quarb-azlogs", version = "0.37.0" }
-quarb-cflogs = { path = "../quarb-cflogs", version = "0.37.0" }
-quarb-cwlogs = { path = "../quarb-cwlogs", version = "0.37.0" }
-quarb-ddlogs = { path = "../quarb-ddlogs", version = "0.37.0" }
-quarb-gcplogs = { path = "../quarb-gcplogs", version = "0.37.0" }
-quarb-kubernetes = { path = "../quarb-kubernetes", version = "0.37.0" }
-quarb-athena = { path = "../quarb-athena", version = "0.37.0" }
-quarb-cosmos = { path = "../quarb-cosmos", version = "0.37.0" }
-quarb-dynamodb = { path = "../quarb-dynamodb", version = "0.37.0" }
-quarb-kafka = { path = "../quarb-kafka", version = "0.37.0" }
-quarb-kuzu = { path = "../quarb-kuzu", version = "0.37.0", optional = true }
-quarb-age = { path = "../quarb-age", version = "0.37.0" }
-quarb-arangodb = { path = "../quarb-arangodb", version = "0.37.0" }
-quarb-falkordb = { path = "../quarb-falkordb", version = "0.37.0" }
-quarb-memgraph = { path = "../quarb-memgraph", version = "0.37.0" }
-quarb-neptune = { path = "../quarb-neptune", version = "0.37.0" }
-quarb-redis = { path = "../quarb-redis", version = "0.37.0" }
-quarb-sparql = { path = "../quarb-sparql", version = "0.37.0" }
-quarb-mongodb = { path = "../quarb-mongodb", version = "0.37.0" }
-quarb-mssql = { path = "../quarb-mssql", version = "0.37.0" }
-quarb-oracle = { path = "../quarb-oracle", version = "0.37.0" }
-quarb-ldap = { path = "../quarb-ldap", version = "0.37.0" }
-quarb-cbor = { path = "../quarb-cbor", version = "0.37.0" }
-quarb-mount = { path = "../quarb-mount", version = "0.37.0" }
-quarb-open = { path = "../quarb-open", version = "0.37.0" }
-syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
-quarb-model = { path = "../quarb-model", version = "0.37.0" }
+quarb = { path = "../quarb", version = "0.38.0", features = ["cjk"] }
+quarb-lib-morph = { path = "../quarb-lib-morph", version = "0.38.0", optional = true }
+quarb-lib-scipy = { path = "../quarb-lib-scipy", version = "0.38.0", optional = true }
+quarb-lib-sklearn = { path = "../quarb-lib-sklearn", version = "0.38.0", optional = true }
+quarb-lib-numpy = { path = "../quarb-lib-numpy", version = "0.38.0", optional = true }
+quarb-lib-pandas = { path = "../quarb-lib-pandas", version = "0.38.0", optional = true }
+quarb-fs = { path = "../quarb-fs", version = "0.38.0", optional = true }
+quarb-imap = { path = "../quarb-imap", version = "0.38.0", optional = true }
+quarb-json = { path = "../quarb-json", version = "0.38.0", optional = true }
+quarb-yaml = { path = "../quarb-yaml", version = "0.38.0", optional = true }
+quarb-toml = { path = "../quarb-toml", version = "0.38.0", optional = true }
+quarb-kaiv = { path = "../quarb-kaiv", version = "0.38.0", optional = true }
+quarb-lines = { path = "../quarb-lines", version = "0.38.0", optional = true }
+quarb-markdown = { path = "../quarb-markdown", version = "0.38.0", optional = true }
+quarb-gsheet = { path = "../quarb-gsheet", version = "0.38.0", optional = true }
+quarb-html = { path = "../quarb-html", version = "0.38.0", optional = true }
+quarb-text = { path = "../quarb-text", version = "0.38.0", optional = true }
+quarb-text-html = { path = "../quarb-text-html", version = "0.38.0", optional = true }
+quarb-text-docx = { path = "../quarb-text-docx", version = "0.38.0", optional = true }
+quarb-text-odt = { path = "../quarb-text-odt", version = "0.38.0", optional = true }
+quarb-text-rtf = { path = "../quarb-text-rtf", version = "0.38.0", optional = true }
+quarb-text-doc = { path = "../quarb-text-doc", version = "0.38.0", optional = true }
+quarb-text-epub = { path = "../quarb-text-epub", version = "0.38.0", optional = true }
+quarb-text-latex = { path = "../quarb-text-latex", version = "0.38.0", optional = true }
+quarb-pdf = { path = "../quarb-pdf", version = "0.38.0", optional = true }
+quarb-text-pdf = { path = "../quarb-text-pdf", version = "0.38.0", optional = true }
+quarb-text-djvu = { path = "../quarb-text-djvu", version = "0.38.0", optional = true }
+quarb-text-ofd = { path = "../quarb-text-ofd", version = "0.38.0", optional = true }
+quarb-text-hwpx = { path = "../quarb-text-hwpx", version = "0.38.0", optional = true }
+quarb-text-uof = { path = "../quarb-text-uof", version = "0.38.0", optional = true }
+quarb-text-markdown = { path = "../quarb-text-markdown", version = "0.38.0", optional = true }
+quarb-xml = { path = "../quarb-xml", version = "0.38.0", optional = true }
+quarb-bigquery = { path = "../quarb-bigquery", version = "0.38.0", optional = true }
+quarb-archive = { path = "../quarb-archive", version = "0.38.0", features = ["rar"], optional = true }
+quarb-web = { path = "../quarb-web", version = "0.38.0", features = ["sqlite", "postgres"], optional = true }
+quarb-tree-sitter = { path = "../quarb-tree-sitter", version = "0.38.0", optional = true }
+quarb-code = { path = "../quarb-code", version = "0.38.0", optional = true }
+quarb-compose = { path = "../quarb-compose", version = "0.38.0", features = ["koine"], optional = true }
+quarb-csv = { path = "../quarb-csv", version = "0.38.0", optional = true }
+quarb-maildir = { path = "../quarb-maildir", version = "0.38.0", optional = true }
+quarb-metatheca = { path = "../quarb-metatheca", version = "0.38.0", optional = true }
+quarb-atrep = { path = "../quarb-atrep", version = "0.38.0", optional = true }
+quarb-text-koine = { path = "../quarb-text-koine", version = "0.38.0", optional = true }
+quarb-datastore = { path = "../quarb-datastore", version = "0.38.0", optional = true }
+quarb-duckdb = { path = "../quarb-duckdb", version = "0.38.0", optional = true }
+quarb-firebase = { path = "../quarb-firebase", version = "0.38.0", optional = true }
+quarb-firestore = { path = "../quarb-firestore", version = "0.38.0", optional = true }
+quarb-git = { path = "../quarb-git", version = "0.38.0", optional = true }
+quarb-github = { path = "../quarb-github", version = "0.38.0", optional = true }
+quarb-gitlab = { path = "../quarb-gitlab", version = "0.38.0", optional = true }
+quarb-xpath = { path = "../quarb-xpath", version = "0.38.0", optional = true }
+quarb-jq = { path = "../quarb-jq", version = "0.38.0", optional = true }
+quarb-azlogs = { path = "../quarb-azlogs", version = "0.38.0", optional = true }
+quarb-cflogs = { path = "../quarb-cflogs", version = "0.38.0", optional = true }
+quarb-cwlogs = { path = "../quarb-cwlogs", version = "0.38.0", optional = true }
+quarb-ddlogs = { path = "../quarb-ddlogs", version = "0.38.0", optional = true }
+quarb-gcplogs = { path = "../quarb-gcplogs", version = "0.38.0", optional = true }
+quarb-kubernetes = { path = "../quarb-kubernetes", version = "0.38.0", optional = true }
+quarb-athena = { path = "../quarb-athena", version = "0.38.0", optional = true }
+quarb-cosmos = { path = "../quarb-cosmos", version = "0.38.0", optional = true }
+quarb-dynamodb = { path = "../quarb-dynamodb", version = "0.38.0", optional = true }
+quarb-kafka = { path = "../quarb-kafka", version = "0.38.0", optional = true }
+quarb-kuzu = { path = "../quarb-kuzu", version = "0.38.0", optional = true }
+quarb-age = { path = "../quarb-age", version = "0.38.0", optional = true }
+quarb-arangodb = { path = "../quarb-arangodb", version = "0.38.0", optional = true }
+quarb-falkordb = { path = "../quarb-falkordb", version = "0.38.0", optional = true }
+quarb-memgraph = { path = "../quarb-memgraph", version = "0.38.0", optional = true }
+quarb-neptune = { path = "../quarb-neptune", version = "0.38.0", optional = true }
+quarb-redis = { path = "../quarb-redis", version = "0.38.0", optional = true }
+quarb-sparql = { path = "../quarb-sparql", version = "0.38.0", optional = true }
+quarb-mongodb = { path = "../quarb-mongodb", version = "0.38.0", optional = true }
+quarb-mssql = { path = "../quarb-mssql", version = "0.38.0", optional = true }
+quarb-oracle = { path = "../quarb-oracle", version = "0.38.0", optional = true }
+quarb-ldap = { path = "../quarb-ldap", version = "0.38.0", optional = true }
+quarb-cbor = { path = "../quarb-cbor", version = "0.38.0", optional = true }
+quarb-mount = { path = "../quarb-mount", version = "0.38.0", optional = true }
+quarb-open = { path = "../quarb-open", version = "0.38.0", optional = true }
+syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"], optional = true }
+quarb-model = { path = "../quarb-model", version = "0.38.0", optional = true }
 clap.workspace = true
 anyhow.workspace = true
 kaiv = { version = "0.15.0", default-features = false }
-quarb-mysql = { path = "../quarb-mysql", version = "0.37.0" }
-quarb-objstore = { path = "../quarb-objstore", version = "0.37.0" }
-quarb-neo4j = { path = "../quarb-neo4j", version = "0.37.0" }
-quarb-postgres = { path = "../quarb-postgres", version = "0.37.0" }
-quarb-serve = { path = "../quarb-serve", version = "0.37.0" }
-quarb-xlsx = { path = "../quarb-xlsx", version = "0.37.0" }
-quarb-sql = { path = "../quarb-sql", version = "0.37.0" }
+quarb-mysql = { path = "../quarb-mysql", version = "0.38.0", optional = true }
+quarb-objstore = { path = "../quarb-objstore", version = "0.38.0", optional = true }
+quarb-neo4j = { path = "../quarb-neo4j", version = "0.38.0", optional = true }
+quarb-postgres = { path = "../quarb-postgres", version = "0.38.0", optional = true }
+quarb-serve = { path = "../quarb-serve", version = "0.38.0", optional = true }
+quarb-xlsx = { path = "../quarb-xlsx", version = "0.38.0", optional = true }
+quarb-sql = { path = "../quarb-sql", version = "0.38.0", optional = true }
 rusqlite.workspace = true
-quarb-sqlite = { path = "../quarb-sqlite", version = "0.37.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.37.0" }
+quarb-sqlite = { path = "../quarb-sqlite", version = "0.38.0", optional = true }
+quarb-relational = { path = "../quarb-relational", version = "0.38.0", optional = true }
 
 # The SIGPIPE disposition and the resident-session machinery are
 # Unix-only (gated with cfg(unix) in lib.rs).

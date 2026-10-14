@@ -332,10 +332,9 @@ pub(super) fn arrived_edge(
             target: succ,
         },
         Axis::OutLink => {
-            let label = links_of(adapter, from)
-                .iter()
-                .cloned()
-                .find(|(l, t)| *t == succ && matches_label(&step.matcher, l))
+            let label = select_links(step, &links_of(adapter, from))
+                .into_iter()
+                .find(|(_, t)| *t == succ)
                 .map(|(l, _)| l)?;
             EdgeCtx {
                 source: from,
@@ -344,10 +343,9 @@ pub(super) fn arrived_edge(
             }
         }
         Axis::InLink => {
-            let label = backlinks_of(adapter, from)
-                .iter()
-                .cloned()
-                .find(|(l, s)| *s == succ && matches_label(&step.matcher, l))
+            let label = select_links(step, &backlinks_of(adapter, from))
+                .into_iter()
+                .find(|(_, s)| *s == succ)
                 .map(|(l, _)| l)?;
             EdgeCtx {
                 source: succ,
@@ -359,10 +357,9 @@ pub(super) fn arrived_edge(
         // edge's true direction — the walk just declined to assert
         // it. Outgoing is tried first.
         Axis::BothLink => {
-            if let Some(label) = links_of(adapter, from)
-                .iter()
-                .cloned()
-                .find(|(l, t)| *t == succ && matches_label(&step.matcher, l))
+            if let Some(label) = select_links(step, &links_of(adapter, from))
+                .into_iter()
+                .find(|(_, t)| *t == succ)
                 .map(|(l, _)| l)
             {
                 EdgeCtx {
@@ -371,10 +368,9 @@ pub(super) fn arrived_edge(
                     target: succ,
                 }
             } else {
-                let label = backlinks_of(adapter, from)
-                    .iter()
-                    .cloned()
-                    .find(|(l, s)| *s == succ && matches_label(&step.matcher, l))
+                let label = select_links(step, &backlinks_of(adapter, from))
+                    .into_iter()
+                    .find(|(_, s)| *s == succ)
                     .map(|(l, _)| l)?;
                 EdgeCtx {
                     source: succ,
@@ -1035,12 +1031,9 @@ pub(super) fn apply_step(
             out.extend(by_reach(found, *reach));
         }
         Axis::OutLink => {
-            let matched: Vec<(String, NodeId)> = links_of(adapter, node)
-                .iter()
-                .cloned()
-                .filter(|(label, target)| {
-                    matches_label(&step.matcher, label) && tests_ok(adapter, *target, step)
-                })
+            let matched: Vec<(String, NodeId)> = select_links(step, &links_of(adapter, node))
+                .into_iter()
+                .filter(|(_, target)| tests_ok(adapter, *target, step))
                 .collect();
             let kept = apply_predicates(
                 adapter,
@@ -1063,12 +1056,9 @@ pub(super) fn apply_step(
             out.extend(kept.into_iter().map(|(_, target)| target));
         }
         Axis::InLink => {
-            let matched: Vec<(String, NodeId)> = backlinks_of(adapter, node)
-                .iter()
-                .cloned()
-                .filter(|(label, source)| {
-                    matches_label(&step.matcher, label) && tests_ok(adapter, *source, step)
-                })
+            let matched: Vec<(String, NodeId)> = select_links(step, &backlinks_of(adapter, node))
+                .into_iter()
+                .filter(|(_, source)| tests_ok(adapter, *source, step))
                 .collect();
             let kept = apply_predicates(
                 adapter,
@@ -1219,19 +1209,15 @@ pub(super) fn both_link_step(
     register: &[Reg],
     out: &mut Vec<NodeId>,
 ) {
-    let matched: Vec<(String, NodeId, bool)> = links_of(adapter, node)
-        .iter()
-        .cloned()
+    let matched: Vec<(String, NodeId, bool)> = select_links(step, &links_of(adapter, node))
+        .into_iter()
         .map(|(label, target)| (label, target, true))
         .chain(
-            backlinks_of(adapter, node)
-                .iter()
-                .cloned()
+            select_links(step, &backlinks_of(adapter, node))
+                .into_iter()
                 .map(|(label, source)| (label, source, false)),
         )
-        .filter(|(label, other, _)| {
-            matches_label(&step.matcher, label) && tests_ok(adapter, *other, step)
-        })
+        .filter(|(_, other, _)| tests_ok(adapter, *other, step))
         .collect();
     let kept = apply_predicates(
         adapter,
@@ -2014,6 +2000,7 @@ pub fn node_matches_elem(adapter: &impl AstAdapter, node: NodeId, elem: &PathEle
             let own = Step {
                 axis: Axis::Universal,
                 matcher: Matcher::Any,
+                labels: Vec::new(),
                 traits: g.traits.clone(),
                 predicates: g.predicates.clone(),
                 leaf: false,
@@ -2275,6 +2262,33 @@ pub(super) fn mentions_null_ctx(e: &PredExpr, bound: &[Option<NodeId>]) -> bool 
 
 pub(super) fn matches_label(matcher: &Matcher, label: &str) -> bool {
     matches!(matcher, Matcher::Any) || matcher.matches(label)
+}
+
+/// The crosslinks among `pairs` (label, other node) a step keeps.
+/// By its matcher, one per edge; by its label selection
+/// (`->(a && !b)`), one per other node, the selection reading the
+/// labels the crosslinks to that node carry together (spec: Label
+/// Selections) — the edge kept carries the first of them.
+pub(super) fn select_links(step: &Step, pairs: &[(String, NodeId)]) -> Vec<(String, NodeId)> {
+    if step.labels.is_empty() {
+        return pairs
+            .iter()
+            .filter(|(l, _)| matches_label(&step.matcher, l))
+            .cloned()
+            .collect();
+    }
+    let mut grouped: Vec<(NodeId, Vec<String>)> = Vec::new();
+    for (l, n) in pairs {
+        match grouped.iter_mut().find(|(m, _)| m == n) {
+            Some((_, ls)) => ls.push(l.clone()),
+            None => grouped.push((*n, vec![l.clone()])),
+        }
+    }
+    grouped
+        .into_iter()
+        .filter(|(_, ls)| step.labels.iter().all(|c| c.matches(ls)))
+        .map(|(n, mut ls)| (ls.swap_remove(0), n))
+        .collect()
 }
 
 /// Whether `node` satisfies all of `step`'s `<...>` trait clauses.

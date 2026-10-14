@@ -452,14 +452,18 @@ pub fn apply_scalar(
     // refused by kind anywhere else (spec: Command Libraries, "A
     // library value").
     match call.name.as_str() {
-        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
-        | "row-to-header" | "header-to-row" => {
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "types" | "[]"
+        | "cell" | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" => {
             return vec![refusing(call, match call.name.as_str() {
+                "keys" => keys_reading(topic),
+                "values" => values_reading(topic),
                 "@" | "rows" => rows_reading(topic),
                 "%" | "columns" => columns_reading(topic),
-                "#" => table_reading(topic),
+                "#" => table_command(call, topic),
+                "flatten" => flatten_value(call, topic),
                 "header" => table_meta(topic, "header"),
                 "dim" => table_meta(topic, "dim"),
+                "types" => table_meta(topic, "types"),
                 "[]" => table_rows_at(call, topic),
                 "cell" => table_cell(call, topic),
                 "row-to-header" | "header-to-row" => header_shift(call, topic),
@@ -1383,7 +1387,7 @@ pub fn apply_scalar(
                 .first()
                 .and_then(|a| match a {
                     Arg::Lit(v) => Some(v.clone()),
-                    Arg::Expr(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } => None,
+                    Arg::Expr(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => None,
                 })
                 .unwrap_or(Value::Null),
             other => other,
@@ -1811,7 +1815,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         _ => None,
     }) && !matches!(
         call.name.as_str(),
-        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell" | "row-to-header" | "header-to-row" | "json" | "jsonl" | "kaiv" | "csv" | "table" | "pretty" | "count" | "first" | "last" | "reverse"
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "types" | "[]" | "cell" | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "json" | "jsonl" | "kaiv" | "csv" | "table" | "pretty" | "count" | "first" | "last" | "reverse"
     ) {
         crate::exec::record_refusal(refusal);
         return vec![Value::Null];
@@ -1829,8 +1833,8 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // reshaped (spec: Command Libraries, "A library value";
         // the reshapes): one library value reads as itself, a
         // stream of records as the list of them.
-        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
-        | "row-to-header" | "header-to-row" => {
+        "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "types" | "[]" | "cell"
+        | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" => {
             // One library value, or one record (a record of lists
             // after `|`, whose items the executor hands here), is
             // the whole; anything else is the stream as a list.
@@ -1846,9 +1850,13 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             let out = refusing(call, match call.name.as_str() {
                 "@" | "rows" => rows_reading(whole),
                 "%" | "columns" => columns_reading(whole),
-                "#" => table_reading(whole),
+                "#" => table_command(call, whole),
+                "flatten" => flatten_value(call, whole),
+                "keys" => keys_reading(whole),
+                "values" => values_reading(whole),
                 "header" => table_meta(whole, "header"),
                 "dim" => table_meta(whole, "dim"),
+                "types" => table_meta(whole, "types"),
                 "[]" => table_rows_at(call, whole),
                 "cell" => table_cell(call, whole),
                 "row-to-header" | "header-to-row" => header_shift(call, whole),
@@ -3302,7 +3310,7 @@ fn exported(input: Vec<Value>) -> Vec<Value> {
 }
 
 /// A value's kind, for a reshape's refusal.
-fn kind_of(v: &Value) -> String {
+pub(crate) fn kind_of(v: &Value) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(_) => "a boolean".into(),
@@ -3408,18 +3416,25 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
         }
         Value::List(items) => {
             if items.is_empty() {
-                return Ok(Value::table(crate::Table {
-                    header: None,
-                    rows: Vec::new(),
-                }));
+                return Ok(Value::table(crate::Table::new(None, Vec::new())));
             }
             if items.iter().all(|v| matches!(v, Value::Record(_))) {
                 let mut header: Vec<String> = Vec::new();
-                for v in items.iter() {
+                for (i, v) in items.iter().enumerate() {
                     if let Value::Record(f) = v {
-                        for (k, _) in f {
+                        for (k, v) in f {
                             if !header.contains(k) {
                                 header.push(k.clone());
+                            }
+                            // The table is flat: a record whose
+                            // field holds a structure keeps its
+                            // shape as a record.
+                            if !crate::exec::flat_cell(v) {
+                                return Err(format!(
+                                    "a table is flat, its cell a scalar or null: '{k}' holds {} in row {}; the records keep their shape",
+                                    kind_of(v),
+                                    i + 1
+                                ));
                             }
                         }
                     }
@@ -3439,10 +3454,7 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
                         _ => unreachable!("records"),
                     })
                     .collect();
-                return Ok(Value::table(crate::Table {
-                    header: Some(header),
-                    rows,
-                }));
+                return Ok(Value::table(crate::Table::new(Some(header), rows)));
             }
             if items.iter().all(|v| matches!(v, Value::List(_))) {
                 let width = match &items[0] {
@@ -3461,20 +3473,25 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
                             l.len()
                         ));
                     }
+                    if let Some((j, v)) = l.iter().enumerate().find(|(_, v)| !crate::exec::flat_cell(v)) {
+                        return Err(format!(
+                            "a table is flat, its cell a scalar or null: row {}, column {} holds {}; the lists keep their shape",
+                            i + 1,
+                            j + 1,
+                            kind_of(v)
+                        ));
+                    }
                     let mut row = l.to_vec();
                     row.resize(width, Value::Null);
                     rows.push(row);
                 }
-                return Ok(Value::table(crate::Table { header: None, rows }));
+                return Ok(Value::table(crate::Table::new(None, rows)));
             }
-            if items
-                .iter()
-                .all(|v| !matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_)))
-            {
-                return Ok(Value::table(crate::Table {
-                    header: None,
-                    rows: items.iter().map(|v| vec![v.clone()]).collect(),
-                }));
+            if items.iter().all(crate::exec::flat_cell) {
+                return Ok(Value::table(crate::Table::new(
+                    None,
+                    items.iter().map(|v| vec![v.clone()]).collect(),
+                )));
             }
             Err("a table reads a list of records (a frame), a list of lists (an array) or a list of values (a sample); the rows here are of mixed kinds".into())
         }
@@ -3488,13 +3505,389 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
 /// `header` and `dim` of a table: the list of names (null on the
 /// array face) and `@(rows; columns)`; a list of records answers as
 /// its table reading would.
+/// The append pipe's shape rule (spec: The Append Pipe): `items`
+/// appended to `topic` — a list concatenates a list and takes any
+/// other value as one element; a table takes a record as one more
+/// row under the literal's rules and a table row by row (columns by
+/// name on a frame, by position on an array), its columns re-typed;
+/// a record takes a record's fields in order, a duplicate name
+/// refused unless `overwrite` (`+|!`, records only). Any other topic
+/// is refused by kind.
+pub(crate) fn append_values(topic: Value, items: Vec<Value>, overwrite: bool) -> Result<Value, String> {
+    match topic {
+        Value::List(l) => {
+            if overwrite {
+                return Err("'+|!' overwrites a record's fields; a list takes '+|'".into());
+            }
+            let mut out = l.to_vec();
+            for item in items {
+                match item {
+                    Value::List(more) => out.extend(more.iter().cloned()),
+                    other => out.push(other),
+                }
+            }
+            Ok(Value::list(out))
+        }
+        Value::Table(t) => {
+            if overwrite {
+                return Err("'+|!' overwrites a record's fields; a table takes '+|'".into());
+            }
+            let mut header = t.header.clone();
+            let mut rows = t.rows.clone();
+            for item in items {
+                let n = rows.len() + 1;
+                match item {
+                    Value::Record(fields) => {
+                        let row = place_named(&mut header, &mut rows, &fields, n)?;
+                        rows.push(row);
+                    }
+                    Value::Table(more) => match (&header, &more.header) {
+                        (Some(_), Some(h2)) => {
+                            for r in &more.rows {
+                                let fields: Vec<(String, Value)> =
+                                    h2.iter().cloned().zip(r.iter().cloned()).collect();
+                                let n = rows.len() + 1;
+                                let row = place_named(&mut header, &mut rows, &fields, n)?;
+                                rows.push(row);
+                            }
+                        }
+                        (None, None) => {
+                            let w = t.width();
+                            for r in &more.rows {
+                                let n = rows.len() + 1;
+                                if r.len() > w {
+                                    return Err(format!("row {n} has {} values, the table {w} columns", r.len()));
+                                }
+                                let mut row = r.clone();
+                                row.resize(w, Value::Null);
+                                rows.push(row);
+                            }
+                        }
+                        (Some(_), None) => {
+                            return Err("a frame takes rows by column name; the array appended has none (give it a header)".into());
+                        }
+                        (None, Some(_)) => {
+                            return Err("an array takes rows by position; the frame appended names its columns (take its rows with '| @' first)".into());
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "a table appends a record as a row, or a table row by row, not {}",
+                            kind_of(&other)
+                        ));
+                    }
+                }
+            }
+            Ok(Value::table(crate::Table::new(header, rows)))
+        }
+        Value::Record(mut fields) => {
+            for item in items {
+                match item {
+                    Value::Record(more) => {
+                        for (k, v) in more {
+                            match fields.iter_mut().find(|(n, _)| *n == k) {
+                                Some((_, slot)) if overwrite => *slot = v,
+                                Some(_) => {
+                                    return Err(format!(
+                                        "'{k}' is already a field of the record; '+|' never overwrites ('+|!' does)"
+                                    ));
+                                }
+                                None => fields.push((k, v)),
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "a record appends fields; {} has no name to be one",
+                            kind_of(&other)
+                        ));
+                    }
+                }
+            }
+            Ok(Value::Record(fields))
+        }
+        other => Err(format!(
+            "{} takes no append: the left side of '+|' is a list, a record or a table, which gives the shape",
+            kind_of(&other)
+        )),
+    }
+}
+
+/// One row of named fields laid under a table's header by name, a
+/// name the header lacks extending it (null in the rows before);
+/// on the array face a name names a position (`1`, `2`, …).
+fn place_named(
+    header: &mut Option<Vec<String>>,
+    rows: &mut [Vec<Value>],
+    fields: &[(String, Value)],
+    n: usize,
+) -> Result<Vec<Value>, String> {
+    let w = header.as_ref().map_or_else(|| rows.first().map_or(0, Vec::len), Vec::len);
+    let mut row = vec![Value::Null; w];
+    for (k, v) in fields {
+        if !crate::exec::flat_cell(v) {
+            return Err(format!(
+                "row {n}: '{k}' holds {}; a table is flat, its cell a scalar or null",
+                kind_of(v)
+            ));
+        }
+        let j = match header {
+            Some(h) => match h.iter().position(|c| c == k) {
+                Some(j) => j,
+                None => {
+                    h.push(k.clone());
+                    for r in rows.iter_mut() {
+                        r.push(Value::Null);
+                    }
+                    row.push(Value::Null);
+                    h.len() - 1
+                }
+            },
+            None => k
+                .parse::<usize>()
+                .ok()
+                .filter(|j| *j >= 1 && *j <= w)
+                .map(|j| j - 1)
+                .ok_or_else(|| {
+                    format!("row {n}: '{k}' names no column of an array of {w} (its columns are positions)")
+                })?,
+        };
+        row[j] = v.clone();
+    }
+    Ok(row)
+}
+
+/// `+| %(…)`: a row appended under the table literal's rules — on a
+/// table, positional items by the header's order (or by position on
+/// the array face) and named ones by name, a short row null-padded,
+/// a long row or an unknown name refused; on a record or a list, a
+/// named row is the record it spells, a positional one has no
+/// field to be.
+pub(crate) fn append_row(
+    topic: Value,
+    row: Vec<(Option<String>, Value)>,
+    overwrite: bool,
+) -> Result<Value, String> {
+    match topic {
+        Value::Table(t) => {
+            if overwrite {
+                return Err("'+|!' overwrites a record's fields; a table takes '+|'".into());
+            }
+            let w = t.width();
+            let n = t.rows.len() + 1;
+            let mut header = t.header.clone();
+            let mut rows = t.rows.clone();
+            let mut cells = vec![Value::Null; w];
+            let mut next = 0;
+            for (name, v) in row {
+                if !crate::exec::flat_cell(&v) {
+                    return Err(format!(
+                        "row {n}: a cell holds {}; a table is flat, its cell a scalar or null",
+                        kind_of(&v)
+                    ));
+                }
+                let j = match (&name, &mut header) {
+                    // A name the header lacks extends it: null in
+                    // the rows before.
+                    (Some(k), Some(h)) => match h.iter().position(|c| c == k) {
+                        Some(j) => j,
+                        None => {
+                            h.push(k.clone());
+                            for r in rows.iter_mut() {
+                                r.push(Value::Null);
+                            }
+                            cells.push(Value::Null);
+                            h.len() - 1
+                        }
+                    },
+                    (Some(k), None) => {
+                        return Err(format!(
+                            "row {n}: '{k}' names no column of an array (its columns are positions)"
+                        ));
+                    }
+                    (None, _) => {
+                        if next >= w {
+                            return Err(format!("row {n} has more values than the table has columns ({w})"));
+                        }
+                        next += 1;
+                        next - 1
+                    }
+                };
+                cells[j] = v;
+            }
+            rows.push(cells);
+            Ok(Value::table(crate::Table::new(header, rows)))
+        }
+        other => {
+            let mut fields: Vec<(String, Value)> = Vec::with_capacity(row.len());
+            for (name, v) in row {
+                match name {
+                    Some(k) => fields.push((k, v)),
+                    None => {
+                        return Err(format!(
+                            "a positional row appends to a table; {} takes named fields (%(name = value))",
+                            kind_of(&other)
+                        ));
+                    }
+                }
+            }
+            append_values(other, vec![Value::Record(fields)], overwrite)
+        }
+    }
+}
+
+/// `| #` and `| #(…)`: bare, the table reading; with a column count
+/// or a header list, the reshape (spec: the calculator's reshaping
+/// constructor): the list topic laid into rows of that many columns
+/// in reading order, an array of them or the frame of the named
+/// columns, a count that does not divide the length refused naming
+/// both numbers.
+pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
+    let Some(arg) = call.args.first() else {
+        return Ok(table_reading(v)?);
+    };
+    let (width, header): (usize, Option<Vec<String>>) = match arg {
+        Arg::Lit(Value::Int(n)) if *n >= 1 => (*n as usize, None),
+        Arg::Lit(Value::Int(n)) => return Err(format!("#({n}): a table has at least one column")),
+        Arg::Lit(Value::List(names)) => (
+            names.len(),
+            Some(names.iter().map(|n| n.to_string()).collect()),
+        ),
+        _ => return Err("#(…) in command position takes a column count or a header list: #(3), #(@(a; b; c))".into()),
+    };
+    let items = match v {
+        Value::List(l) => l,
+        other => {
+            return Err(format!(
+                "#({}) lays out a list into rows; {} is not a list",
+                match &header {
+                    Some(h) => format!("@({})", h.join("; ")),
+                    None => width.to_string(),
+                },
+                kind_of(&other)
+            ));
+        }
+    };
+    if width == 0 {
+        return Err("#(@()): a header names at least one column".into());
+    }
+    if items.len() % width != 0 {
+        return Err(format!(
+            "#({width}): {} items do not divide into rows of {width}",
+            items.len()
+        ));
+    }
+    if let Some((i, v)) = items.iter().enumerate().find(|(_, v)| !crate::exec::flat_cell(v)) {
+        return Err(format!(
+            "#({width}): item {} holds {}; a table is flat, its cell a scalar or null",
+            i + 1,
+            kind_of(v)
+        ));
+    }
+    let rows: Vec<Vec<Value>> = items.chunks(width).map(|c| c.to_vec()).collect();
+    Ok(Value::table(crate::Table::new(header, rows)))
+}
+
+/// `| flatten` / `| flatten(n)`: every nested list opened to any
+/// depth (or `n` levels), scalars and nulls kept in order; a table
+/// yields its cells row by row as one flat list; a record is
+/// refused by kind; any other value passes through.
+pub(crate) fn flatten_value(call: &FnCall, v: Value) -> Result<Value, String> {
+    let depth: Option<usize> = match call.args.first() {
+        None => None,
+        Some(Arg::Lit(Value::Int(n))) | Some(Arg::Expr(crate::ast::Operand::Lit(Value::Int(n)))) if *n >= 0 => {
+            Some(*n as usize)
+        }
+        Some(_) => return Err("flatten takes the number of levels to open, flatten(1), or none for every level".into()),
+    };
+    fn open(v: &Value, depth: Option<usize>, out: &mut Vec<Value>) {
+        match v {
+            Value::List(l) if depth != Some(0) => {
+                for item in l.iter() {
+                    open(item, depth.map(|d| d - 1), out);
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    match v {
+        Value::List(l) => {
+            let mut out = Vec::new();
+            for item in l.iter() {
+                open(item, depth, &mut out);
+            }
+            Ok(Value::list(out))
+        }
+        Value::Table(t) => Ok(Value::list(t.rows.iter().flatten().cloned().collect())),
+        Value::Record(_) => Err("flatten opens lists; a record has fields, not items (its values: '| %' reads a table's columns, a record's are its fields)".into()),
+        other => Ok(other),
+    }
+}
+
+/// `| keys`: a record's field names as a list, in order; a table's
+/// header under another name.
+pub(crate) fn keys_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Record(f) => Ok(Value::list(f.into_iter().map(|(k, _)| Value::Str(k)).collect())),
+        Value::Table(t) => Ok(t.header_value()),
+        // A list of records answers per record: one list of names
+        // each, in that record's own order (`| header` is the
+        // collection's union).
+        Value::List(l) if !l.is_empty() && l.iter().all(|v| matches!(v, Value::Record(_))) => {
+            Ok(Value::list(l.iter().map(|r| keys_reading(r.clone()).unwrap_or(Value::Null)).collect()))
+        }
+        Value::List(_) => Err("keys reads a list of records, one list of names per record; this list is not all records".into()),
+        other => Err(format!("keys reads a record's field names or a table's header, not {}", kind_of(&other))),
+    }
+}
+
+/// `| values`: a record's values as a list, in order; a table's rows
+/// as an array, the headerless table with its columns and their
+/// types kept, so `keys` and `values` split a frame as they split a
+/// record.
+pub(crate) fn values_reading(v: Value) -> Result<Value, String> {
+    match v {
+        Value::Record(f) => Ok(Value::list(f.into_iter().map(|(_, v)| v).collect())),
+        Value::List(l) if !l.is_empty() && l.iter().all(|v| matches!(v, Value::Record(_))) => {
+            Ok(Value::list(l.iter().map(|r| values_reading(r.clone()).unwrap_or(Value::Null)).collect()))
+        }
+        Value::List(_) => Err("values reads a list of records, one list of values per record; this list is not all records".into()),
+        Value::Table(t) => Ok(Value::table(crate::Table {
+            header: None,
+            rows: t.rows.clone(),
+        })),
+        other => Err(format!("values reads a record's values or a table's rows, not {}", kind_of(&other))),
+    }
+}
+
 pub(crate) fn table_meta(v: Value, what: &str) -> Result<Value, String> {
+    // A list of records has the collection's header — the union of
+    // the names in order of first appearance, what the record array
+    // prints — whether or not it reads as a table.
+    if what == "header"
+        && let Value::List(l) = &v
+        && !l.is_empty()
+        && l.iter().all(|v| matches!(v, Value::Record(_)))
+    {
+        let mut names: Vec<Value> = Vec::new();
+        for r in l.iter() {
+            if let Value::Record(f) = r {
+                for (k, _) in f {
+                    if !names.iter().any(|n| matches!(n, Value::Str(s) if s == k)) {
+                        names.push(Value::Str(k.clone()));
+                    }
+                }
+            }
+        }
+        return Ok(Value::list(names));
+    }
     let t = match table_reading(v)? {
         Value::Table(t) => t,
         other => return Err(format!("{} has no {what}", kind_of(&other))),
     };
     Ok(match what {
         "header" => t.header_value(),
+        "types" => t.types_value(),
         _ => t.shape(),
     })
 }
@@ -3685,10 +4078,10 @@ pub(crate) fn header_shift(call: &FnCall, v: Value) -> Result<Value, String> {
             let Some(first) = t.rows.first() else {
                 return Err("row-to-header: the table has no row to lift".into());
             };
-            crate::Table {
-                header: Some(first.iter().map(Value::to_string).collect()),
-                rows: t.rows[1..].to_vec(),
-            }
+            crate::Table::new(
+                Some(first.iter().map(Value::to_string).collect()),
+                t.rows[1..].to_vec(),
+            )
         }
         _ => {
             let mut rows = Vec::with_capacity(t.rows.len() + 1);
@@ -3696,7 +4089,7 @@ pub(crate) fn header_shift(call: &FnCall, v: Value) -> Result<Value, String> {
                 rows.push(h.iter().cloned().map(Value::Str).collect());
             }
             rows.extend(t.rows.iter().cloned());
-            crate::Table { header: None, rows }
+            crate::Table::new(None, rows)
         }
     }))
 }
@@ -3806,31 +4199,40 @@ pub(crate) fn columns_reading(v: Value) -> Result<Value, String> {
 /// `transpose` — a list of lists with its rows and columns
 /// exchanged; the rows must be of one length.
 pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
-    match v {
-        Value::Foreign(f) => Err(format!(
-            "{} is a library value; np:transpose exchanges its axes",
-            f.kind()
-        )),
-        // An array transposes to an array; a frame's columns are
-        // named, so its exchange is the column reading.
-        Value::Table(t) => match t.header {
-            None => Ok(Value::table(t.transposed())),
-            Some(_) => Err(format!(
-                "{} names its columns; '| %' reads them, transpose takes an array",
-                t.kind()
-            )),
+    // The rows of one width, from an array or a list of lists.
+    let rows: Vec<Vec<Value>> = match v {
+        Value::Foreign(f) => {
+            return Err(format!(
+                "{} is a library value; np:transpose exchanges its axes",
+                f.kind()
+            ));
+        }
+        Value::Table(t) => match &t.header {
+            None => t.rows.clone(),
+            // A frame's header is no row: shed it first.
+            Some(_) => {
+                return Err(format!(
+                    "{} names its columns, and the header is no row; '| values' sheds it (t | values | transpose)",
+                    t.kind()
+                ));
+            }
         },
         Value::List(items) => {
             if items.is_empty() {
-                return Ok(Value::list(Vec::new()));
+                return Ok(Value::table(crate::Table::new(None, Vec::new())));
             }
-            let mut rows: Vec<&[Value]> = Vec::with_capacity(items.len());
+            if items.iter().all(|v| matches!(v, Value::Record(_))) {
+                return Err(
+                    "transpose takes an array or a list of lists; a list of records reads as a table first ('| #'), and its values as the array ('| values')".into(),
+                );
+            }
+            let mut rows: Vec<Vec<Value>> = Vec::with_capacity(items.len());
             for (i, v) in items.iter().enumerate() {
                 match v {
-                    Value::List(l) => rows.push(l.as_slice()),
+                    Value::List(l) => rows.push(l.to_vec()),
                     other => {
                         return Err(format!(
-                            "row {} is {}, not a list; transpose takes a list of lists ('| %' reads records by column)",
+                            "row {} is {}, not a list; transpose takes an array or a list of lists",
                             i + 1,
                             kind_of(other)
                         ));
@@ -3845,17 +4247,33 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
                     rows[i].len()
                 ));
             }
-            Ok(Value::list(
-                (0..n)
-                    .map(|j| Value::list(rows.iter().map(|r| r[j].clone()).collect()))
-                    .collect(),
-            ))
+            if let Some((i, j, c)) = rows.iter().enumerate().find_map(|(i, r)| {
+                r.iter().enumerate().find(|(_, c)| !crate::exec::flat_cell(c)).map(|(j, c)| (i, j, c))
+            }) {
+                return Err(format!(
+                    "row {}, column {} holds {}; a matrix is flat, its cell a scalar or null",
+                    i + 1,
+                    j + 1,
+                    kind_of(c)
+                ));
+            }
+            rows
         }
-        other => Err(format!(
-            "transpose takes a list of lists, not {}",
-            kind_of(&other)
-        )),
-    }
+        other => {
+            return Err(format!(
+                "transpose takes an array or a list of lists, not {}",
+                kind_of(&other)
+            ));
+        }
+    };
+    // Every cell coerced together to one type, then the exchange:
+    // the matrix is an array of one type.
+    let m = crate::Table::matrix(rows);
+    let w = m.width();
+    let exchanged: Vec<Vec<Value>> = (0..w)
+        .map(|j| m.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)).collect())
+        .collect();
+    Ok(Value::table(crate::Table { header: None, rows: exchanged }))
 }
 
 /// The named fields of a call's bare-word operands.
@@ -4069,6 +4487,7 @@ fn arg_kind(a: &Arg) -> &'static str {
         Arg::Expr(_) => "an expression",
         Arg::Range(..) => "a range",
         Arg::Named { .. } | Arg::Opt { .. } => "an option",
+        Arg::Pairs { .. } => "a pairwise field",
     }
 }
 
