@@ -28,6 +28,12 @@ name: "Publish quarb-calc to PyPI (dist: quarb-calc)"
 #
 # 2. The GitHub `pypi` environment already exists (created for the
 #    quarb-py workflow); this reuses it.
+#
+# Windows: qua links SQLite for its saved results, and the runner has
+# no sqlite3.lib, so vcpkg builds a static one that libsqlite3-sys
+# finds through VCPKG_ROOT. The Windows job may fail without holding
+# the release back (the other wheels and the sdist publish; a rerun
+# adds the Windows wheel, since existing files are skipped).
 
 on:
   push:
@@ -41,6 +47,7 @@ jobs:
   build-wheels:
     name: Build wheel (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
     strategy:
       fail-fast: false
       matrix:
@@ -68,8 +75,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: SQLite for the link (Windows, vcpkg)
+        if: runner.os == 'Windows'
+        run: vcpkg install sqlite3:x64-windows-static-md
+
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
         with:
           target: ${{ matrix.target }}
           args: >-
@@ -132,3 +145,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
