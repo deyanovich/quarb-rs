@@ -6839,6 +6839,8 @@ dependencies = [
 [[package]]
 name = "syndesmos"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "511025660ca4143a85a27cc7d52c18340af42b0a070fed2f7af46a01805fe3a6"
 dependencies = [
  "regex",
  "unicode-segmentation",

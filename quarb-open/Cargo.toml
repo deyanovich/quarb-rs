@@ -95,7 +95,7 @@ quarb-serve = { path = "../quarb-serve", version = "0.38.1" }
 quarb-xlsx = { path = "../quarb-xlsx", version = "0.38.1" }
 quarb-sqlite = { path = "../quarb-sqlite", version = "0.38.1" }
 quarb-relational = { path = "../quarb-relational", version = "0.38.1" }
-syndesmos = { path = "../../../lit/syndesmos", version = "0.3.1", default-features = false, features = ["uax29"] }
+syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
 
 # metatheca's storage layer (apotheca) is unix-only file locking,
 # so the mt: door ships on unix and compiles out on Windows — the
