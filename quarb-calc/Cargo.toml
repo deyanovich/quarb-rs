@@ -28,5 +28,5 @@ python-libs = ["qua/python-libs"]
 [dependencies]
 # qua without its adapters: the calculator profile of the same
 # source.
-qua = { path = "../qua", version = "0.38.0", default-features = false }
+qua = { path = "../qua", version = "0.38.1", default-features = false }
 anyhow.workspace = true

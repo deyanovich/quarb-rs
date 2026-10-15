@@ -496,7 +496,21 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
             let cmd = Cli::command()
                 .name("qc")
                 .about("The Quarb calculator: qua after the expression head, with every adapter off")
-                .override_usage("qc [OPTIONS] <QUERY>");
+                .override_usage("qc [OPTIONS] <EXPRESSION>...")
+                // The calculator takes no input, so every positional
+                // argument is expression text: the words are joined
+                // with spaces, and `qc 3 + 5` needs no quotes. A
+                // leading negative number is a value, not an option.
+                .mut_arg("query", |a| {
+                    a.value_name("EXPRESSION")
+                        .allow_negative_numbers(true)
+                        .help("The expression, e.g. '2 + 3 * 4' or '@(1; 2) +| 3'; the head `=` is accepted and not required")
+                })
+                .mut_arg("paths", |a| {
+                    a.value_name("WORD")
+                        .allow_negative_numbers(true)
+                        .help("The rest of the expression: the arguments are joined with spaces, so quotes are needed only around what the shell would take (| * ; ( ) $ \")")
+                });
             Cli::from_arg_matches(&cmd.get_matches())?
         }
     };
@@ -782,11 +796,14 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
 /// none of the options that open or translate one; the expression
 /// head supplied where the query lacks it.
 fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
-    if let Some(p) = cli.paths.first() {
-        anyhow::bail!(
-            "qc is the calculator and takes no input: '{}' names a source — run the query with qua",
-            p.display()
-        );
+    // Every positional argument is expression text: `qc 3 + 5` is
+    // the expression `3 + 5`. The arguments stay in `paths` so that
+    // a query which fails to parse can name an existing file among
+    // them as the likely cause.
+    if !cli.paths.is_empty() {
+        let mut words = vec![cli.query.clone()];
+        words.extend(cli.paths.iter().map(|p| p.to_string_lossy().into_owned()));
+        cli.query = words.join(" ");
     }
     for (on, flag) in [
         (cli.model.is_some(), "--model"),
@@ -813,9 +830,19 @@ fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
 /// refused by name.
 fn calc_check_query(cli: &Cli) -> anyhow::Result<()> {
     if !quarb::is_calculator(&cli.query) {
-        // A query that fails to parse says so; one that parses but
-        // navigates is refused by what it needs.
-        quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
+        // A query that fails to parse says so, and when one of the
+        // arguments joined into it is a file on disk, the likely
+        // cause is an input the calculator does not take; one that
+        // parses but navigates is refused by what it needs.
+        if let Err(e) = quarb::expand(&cli.query, &quarb::Defs::default()) {
+            if let Some(p) = cli.paths.iter().find(|p| p.exists()) {
+                anyhow::bail!(
+                    "qc is the calculator and takes no input: '{}' names a file (an unquoted * or ? expands to the files of the directory: quote the expression) — a query over files runs with qua",
+                    p.display()
+                );
+            }
+            return Err(e).context("parsing the query");
+        }
         anyhow::bail!(
             "qc is the calculator: this query navigates (a path from a node, or a mount) — run it with qua"
         );

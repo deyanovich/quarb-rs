@@ -11,9 +11,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb-text = { path = "../quarb-text", version = "0.38.0" }
+quarb-text = { path = "../quarb-text", version = "0.38.1" }
 encoding_rs = "0.8"
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.38.0" }
+quarb = { path = "../quarb", version = "0.38.1" }

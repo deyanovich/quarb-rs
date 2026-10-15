@@ -37,6 +37,8 @@ mod steps;
 mod tests;
 mod text;
 
+// The arith helpers are reached by path outside the tests.
+#[cfg(test)]
 use arith::*;
 pub(crate) use commands::*;
 use compare::*;

@@ -11,13 +11,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.38.0" }
-quarb-text = { path = "../quarb-text", version = "0.38.0" }
-quarb-text-html = { path = "../quarb-text-html", version = "0.38.0" }
+quarb = { path = "../quarb", version = "0.38.1" }
+quarb-text = { path = "../quarb-text", version = "0.38.1" }
+quarb-text-html = { path = "../quarb-text-html", version = "0.38.1" }
 quick-xml.workspace = true
 zip.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.38.0" }
+quarb = { path = "../quarb", version = "0.38.1" }
 zip.workspace = true

@@ -20,6 +20,12 @@ fn the_head_is_accepted_and_not_required() {
     assert_eq!(qc(&["= @(1; 2) +| 3"]), (true, "@(1; 2; 3)\n".to_string()));
     assert_eq!(qc(&["@(1; 2) +| 3"]), (true, "@(1; 2; 3)\n".to_string()));
     assert_eq!(qc(&["2 + 3 * 4"]), (true, "14\n".to_string()));
+    // Unquoted: the arguments are joined with spaces, and a leading
+    // negative number is a value, not an option.
+    assert_eq!(qc(&["3", "+", "5"]), (true, "8\n".to_string()));
+    assert_eq!(qc(&["-3", "+", "5"]), (true, "2\n".to_string()));
+    assert_eq!(qc(&["=", "2", "*", "-4"]), (true, "-8\n".to_string()));
+    assert_eq!(qc(&["@(1; 2)", "+|", "3"]), (true, "@(1; 2; 3)\n".to_string()));
     assert_eq!(
         qc(&["#(@(title; year); %(\"Hamlet\"; 1603); %(\"Emma\"; \"1815\")) | types"]),
         (true, "@(\"text\"; \"integer\")\n".to_string())
@@ -36,8 +42,13 @@ fn the_output_forms_are_quas() {
 
 #[test]
 fn a_source_is_refused_by_name() {
+    // A file on disk among the arguments of a query that does not
+    // parse is named as the source the calculator does not take; a
+    // word that is no file is just part of the expression.
+    let (ok, text) = qc(&["= 1", "Cargo.toml"]);
+    assert!(!ok && text.contains("takes no input") && text.contains("'Cargo.toml'"), "{text}");
     let (ok, text) = qc(&["= 1", "data.json"]);
-    assert!(!ok && text.contains("takes no input") && text.contains("qua"), "{text}");
+    assert!(!ok && text.contains("parsing the query"), "{text}");
     let (ok, text) = qc(&["/rows/*::x"]);
     assert!(!ok && text.contains("reads a document") && text.contains("'/rows/*::x'"), "{text}");
     let (ok, text) = qc(&["= (/rows/*::x) | count"]);

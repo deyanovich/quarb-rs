@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+# The PyPI face of the quarb-calc crate: `pip install quarb-calc`
+# ships the `qc` binary prebuilt, under the crate's name. No
+# Python is embedded (the Python command libraries stay a cargo
+# feature), so one wheel serves every Python 3 on its platform.
+[project]
+name = "quarb-calc"
+dynamic = ["version"]
+requires-python = ">=3.8"
+description = "qc, the Quarb calculator, prebuilt: the value grammar, the value space (scalars, lists, records, typed tables) and the value commands as one command, with every adapter off"
+readme = "README-pypi.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+authors = [
+    { name = "Bojan Đuričković" }
+]
+keywords = ["quarb", "calculator", "query", "cli", "tables"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Environment :: Console",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://quarb.org/"
+Repository = "https://gitlab.com/quarb/engine"
+
+[tool.maturin]
+bindings = "bin"
+strip = true
