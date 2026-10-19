@@ -10,9 +10,9 @@
 //! `//function_item[::name = "main"]` reads as it should.
 //!
 //! Only *named* nodes appear (punctuation and keywords are
-//! syntax, not structure). Metadata: `;;;kind`, `;;;field` (this
-//! node's field name in its parent), `;;;start-line` /
-//! `;;;end-line` (1-based), `;;;n-children`. Rust, Python,
+//! syntax, not structure). Metadata: `:::kind`, `:::field` (this
+//! node's field name in its parent), `:::start-line` /
+//! `:::end-line` (1-based), `:::n-children`. Rust, Python,
 //! JavaScript, and C, by extension (`rs`, `py`, `js`, `c`); the
 //! grammar set is compile-time and easily grown.
 //!
@@ -318,7 +318,6 @@ impl AstAdapter for TreeSitterAdapter {
             "field" => n.field.map(|f| Value::Str(f.to_string())),
             "start-line" => Some(Value::Int(n.start_line as i64)),
             "end-line" => Some(Value::Int(n.end_line as i64)),
-            "n-children" => Some(Value::Int(n.children.len() as i64)),
             _ => None,
         }
     }

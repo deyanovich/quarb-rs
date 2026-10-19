@@ -21,9 +21,9 @@
 //!   page shows at exactly the same declared baseline (the
 //!   object's boundary `y` plus the code's `Y`, no tolerance), in
 //!   `x` order; a gap between two codes' declared extents reads as
-//!   a space. `::::page` and the line's bounding box `::::x`,
-//!   `::::y`, `::::width`, `::::height` in the page's units
-//!   (millimetres, top-left origin), and `::::baseline`. A
+//!   a space. `:::page` and the line's bounding box `:::x`,
+//!   `:::y`, `:::width`, `:::height` in the page's units
+//!   (millimetres, top-left origin), and `:::baseline`. A
 //!   `paragraph` is never minted — the format declares none.
 //! - A page's template pages (`Template`, drawn beneath it) are
 //!   part of what the page shows: their text joins the page's
@@ -831,17 +831,28 @@ impl AstAdapter for OfdText {
         }
     }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        /// A length in millimetres as the quantity, written in mm.
+        fn mm(v: f64) -> Value {
+            Value::Quantity {
+                value: v / 1000.0,
+                base: "m".to_string(),
+                written: Some((v, "mm".to_string())),
+            }
+        }
         match (&self.nodes[node.0 as usize], key) {
             (Node::Line { line, .. }, "page") => Some(Value::Int(line.page as i64)),
-            (Node::Line { line, .. }, "x") => Some(Value::Float(line.x)),
-            (Node::Line { line, .. }, "y") => Some(Value::Float(line.y)),
-            (Node::Line { line, .. }, "width") => Some(Value::Float(line.width)),
-            (Node::Line { line, .. }, "height") => Some(Value::Float(line.height)),
-            (Node::Line { line, .. }, "baseline") => Some(Value::Float(line.baseline)),
+            // Lengths in the page's millimetres, minted as such (spec:
+            // adapters mint a measure as a quantity in the source's
+            // unit): the extents and the coordinates alike.
+            (Node::Line { line, .. }, "x") => Some(mm(line.x)),
+            (Node::Line { line, .. }, "y") => Some(mm(line.y)),
+            (Node::Line { line, .. }, "width") => Some(mm(line.width)),
+            (Node::Line { line, .. }, "height") => Some(mm(line.height)),
+            (Node::Line { line, .. }, "baseline") => Some(mm(line.baseline)),
             (Node::Section { level, .. }, "level") => Some(Value::Int(*level as i64)),
             (Node::Page { index, .. }, "page" | "number") => Some(Value::Int(*index as i64)),
-            (Node::Page { width, .. }, "width") => Some(Value::Float(*width)),
-            (Node::Page { height, .. }, "height") => Some(Value::Float(*height)),
+            (Node::Page { width, .. }, "width") => Some(mm(*width)),
+            (Node::Page { height, .. }, "height") => Some(mm(*height)),
             (Node::Root { .. }, "n-pages") => Some(Value::Int(self.n_pages as i64)),
             _ => None,
         }

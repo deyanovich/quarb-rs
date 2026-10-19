@@ -1,6 +1,6 @@
 [package]
 name = "quarb-logs"
-version = "0.38.1"
+version = "0.39.0"
 edition = "2024"
 description = "What the Quarb log adapters share: the decoded field tree, JSON and timestamp decoding, percent-decoding, duration spellings"
 license = "MIT OR Apache-2.0"
@@ -8,5 +8,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.38.1" }
+quarb = { path = "../quarb", version = "0.39.0" }
 serde_json.workspace = true

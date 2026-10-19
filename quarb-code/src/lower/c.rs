@@ -40,7 +40,7 @@ fn chained_name(ts: &TreeSitterAdapter, i: usize) -> Option<String> {
 }
 
 /// The parameter list behind the declarator chain, for
-/// `::::n-params`.
+/// `:::n-params`.
 fn chained_params(ts: &TreeSitterAdapter, i: usize) -> Option<i64> {
     let mut d = field_child(ts, i, "declarator")?;
     loop {

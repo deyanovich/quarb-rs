@@ -30,7 +30,7 @@ fn the_fixture_reads_as_its_markdown_source_does() {
         ["Chapter I", "The old lady"]
     );
     assert_eq!(
-        values(&m, "//section[::lemma = \"The old lady\"]:::depth"),
+        values(&m, "//section[::lemma = \"The old lady\"]:depth"),
         ["2"]
     );
     assert_eq!(
@@ -60,7 +60,7 @@ fn the_fixture_reads_as_its_markdown_source_does() {
         values(&m, "//footnote<deixis>[1]->footnote::"),
         ["The first call."]
     );
-    assert_eq!(values(&m, "//footnote<deixis>[1]::::at"), ["10"]);
+    assert_eq!(values(&m, "//footnote<deixis>[1]:::at"), ["10"]);
     assert_eq!(
         values(&m, "//ref::target"),
         ["https://www.gutenberg.org/ebooks/74"]
@@ -122,7 +122,7 @@ fn header_rows_deletions_marks_bookmarks_and_an_endnote() {
     assert_eq!(values(&m, "//ref::target"), ["later"]);
     assert_eq!(values(&m, "//ref::"), ["back up"]);
     // An internal ref resolves to its bearer in-document.
-    assert_eq!(values(&m, "//ref::::resolved"), ["true"]);
+    assert_eq!(values(&m, "//ref:::resolved"), ["true"]);
     assert_eq!(
         values(&m, "//ref-->::"),
         ["A later paragraph kept with an index mark."]
@@ -141,7 +141,7 @@ fn the_code_page_decodes_the_bytes_and_is_reported() {
     assert_eq!(values(&m, "//paragraph::"), ["Поэма — том первый."]);
     assert_eq!(values(&m, "^::title"), ["Мёртвые души"]);
     assert_eq!(values(&m, "^::author"), ["Гоголь"]);
-    assert_eq!(values(&m, "^::::created"), ["1842-05-21T00:00:00"]);
+    assert_eq!(values(&m, "^:::created"), ["1842-05-21T00:00:00"]);
 }
 
 #[test]

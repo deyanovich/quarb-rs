@@ -51,7 +51,7 @@ fn the_index_answers_what_the_walk_finds() {
         ["1"]
     );
     assert_eq!(
-        values(&m, r#"//token[::lower = "one"][::::n > 1] @| count"#),
+        values(&m, r#"//token[::lower = "one"][:::n > 1] @| count"#),
         ["2"]
     );
     assert_eq!(
@@ -64,15 +64,15 @@ fn the_index_answers_what_the_walk_finds() {
     );
     // The same answers as the unindexed spelling.
     assert_eq!(
-        values(&m, r#"//token[::lower = "one"] | ::::n"#),
-        values(&m, r#"//token | [::lower = "one"] | ::::n"#)
+        values(&m, r#"//token[::lower = "one"] | :::n"#),
+        values(&m, r#"//token | [::lower = "one"] | :::n"#)
     );
 }
 
 #[test]
 fn a_trait_filters_a_quantified_group() {
     let m = corpus();
-    let from_one = |q: &str| values(&m, &format!(r#"//token[::::n = 1] | {q}"#));
+    let from_one = |q: &str| values(&m, &format!(r#"//token[:::n = 1] | {q}"#));
     // The second next token of "One" is the period: no word there.
     assert_eq!(from_one("(>token){2}<word>::"), Vec::<String>::new());
     // The hop stops at the sentence: "Three" opens

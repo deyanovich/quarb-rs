@@ -43,7 +43,7 @@ fn a_folder_of_documents_reads_at_the_text_level() {
 
     // the files and the subfolder, by name
     assert_eq!(
-        qua(&["/* | :::name", &text]),
+        qua(&["/* | :name", &text]),
         "01-one.md\n02-two.md\npart2\n"
     );
     // sections across the whole folder, the subfolder included
@@ -54,7 +54,7 @@ fn a_folder_of_documents_reads_at_the_text_level() {
     // words per chapter file: the prose, without the markup
     assert_eq!(
         qua(&[
-            r#"//*[:::name == *".md"] | "${:::name} ${(//paragraph | :: | wc @| sum)}""#,
+            r#"//*[:name == *".md"] | "${:name} ${(//paragraph | :: | wc @| sum)}""#,
             &text
         ]),
         "01-one.md 6\n02-two.md 8\n03-three.md 3\n"
@@ -75,7 +75,7 @@ fn a_folder_of_documents_reads_at_the_text_level() {
     assert_eq!(qua(&["//sentence @| count", &corpus]), "9\n");
     assert_eq!(
         qua(&[
-            r#"//*[:::name == *".md"] | "${:::name} ${(//token<word> @| count)}""#,
+            r#"//*[:name == *".md"] | "${:name} ${(//token<word> @| count)}""#,
             &corpus
         ]),
         // the headings' words counted too: headings are sentences
@@ -100,7 +100,7 @@ fn a_folder_of_editions_reads_at_the_literary_level() {
     let lit = format!("lit:{}", dir.display());
     // the edition is read with its speeches; the table stays a leaf
     assert_eq!(qua(&["//dialogue @| count", &lit]), "2\n");
-    assert_eq!(qua(&["/* | :::name", &lit]), "notes.csv\nplay.atd\n");
+    assert_eq!(qua(&["/* | :name", &lit]), "notes.csv\nplay.atd\n");
     // the text level reads the same edition's blocks without tokens
     let text = format!("text:{}", dir.display());
     assert_eq!(qua(&["//token @| count", &text]), "0\n");
@@ -164,18 +164,18 @@ fn an_unreadable_leaf_answers_null_with_the_reason_in_explain() {
         assert_eq!(qua(&["//paragraph @| count", &mount]), "2\n", "{level}");
         // the refused leaf is a document with nothing under it
         assert_eq!(
-            qua(&[r#"//*[:::name = "bad.xml"]//* @| count"#, &mount]),
+            qua(&[r#"//*[:name = "bad.xml"]//* @| count"#, &mount]),
             "0\n",
             "{level}"
         );
         assert_eq!(
-            qua(&[r#"//*[:::name = "bad.xml"] | %(::lemma)"#, &mount]),
+            qua(&[r#"//*[:name = "bad.xml"] | %(::lemma)"#, &mount]),
             "%(lemma = null)\n",
             "{level}"
         );
         // the shelf still lists it
         assert_eq!(
-            qua(&["/* | :::name", &mount]),
+            qua(&["/* | :name", &mount]),
             "bad.xml\ngood.xml\nplain.xml\n",
             "{level}"
         );

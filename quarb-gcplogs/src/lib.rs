@@ -27,9 +27,9 @@
 //!   messages.
 //! - **Traits**: every entry carries `entry` and its lowercased
 //!   severity, so `/entry<error>` selects a level structurally.
-//! - **Metadata**: `;;;severity` (the numeric rank, ordered —
-//!   `[;;;severity >= 400]` is WARNING and up), `;;;received`,
-//!   `;;;log` (the full logName), `;;;project`.
+//! - **Metadata**: `:::severity` (the numeric rank, ordered —
+//!   `[:::severity >= 400]` is WARNING and up), `:::received`,
+//!   `:::log` (the full logName), `:::project`.
 //!
 //! **Transport and auth**: the adapter shells out to
 //! `gcloud logging read --format=json` (kubectl-adapter posture:
@@ -577,6 +577,7 @@ impl AstAdapter for GclAdapter {
                     secs: e.secs,
                     nanos: e.nanos,
                     offset_min: e.offset_min,
+                    calendar: Default::default(),
                 }),
                 "logName" => Some(Value::Str(e.log.clone())),
                 "trace" => e.trace.clone().map(Value::Str),
@@ -678,6 +679,7 @@ impl AstAdapter for GclAdapter {
                 secs,
                 nanos,
                 offset_min,
+                calendar: Default::default(),
             }),
             "log" => Some(Value::Str(e.log_full.clone())),
             "project" => Some(Value::Str(self.project.clone())),
@@ -766,7 +768,7 @@ mod tests {
         // Severity as text, trait, and ordered metadata rank.
         assert_eq!(run("/entry[::severity = \"ERROR\"]::insertId"), vec!["e2"]);
         assert_eq!(run("/entry<error>::insertId"), vec!["e2"]);
-        assert_eq!(run("/entry[::::severity >= 400] @| count"), vec!["2"]);
+        assert_eq!(run("/entry[:::severity >= 400] @| count"), vec!["2"]);
         // The instant is typed: calendar comparison works.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
         // Short log ids, URL-decoded.
@@ -821,7 +823,7 @@ mod tests {
     fn trace_join_reconstructs_a_request() {
         let a = GclAdapter::from_json("demo", &fixture(), true);
         let got = match quarb::run(
-            "/entry<error> <=> /entry<info>[::trace = _::trace] \
+            "/entry<error> <=> /entry<info>[::trace = $$0::trace] \
              | %(failed = ::; upstream = $$1::)",
             &a,
         )

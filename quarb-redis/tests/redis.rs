@@ -32,7 +32,7 @@ fn live_redis() {
 
     // The colon convention is the tree.
     assert_eq!(
-        values(&a, "/*:::name"),
+        values(&a, "/*:name"),
         [
             "config",
             "events",
@@ -43,31 +43,31 @@ fn live_redis() {
             "user"
         ]
     );
-    assert_eq!(values(&a, "/user/*:::name"), ["1", "2"]);
+    assert_eq!(values(&a, "/user/*:name"), ["1", "2"]);
 
     // Hash fields are properties AND children; a key that is
     // also a prefix carries both facets.
     assert_eq!(values(&a, "/user/1::name"), ["Ada"]);
     assert_eq!(values(&a, "/user/*[::plan = \"pro\"]::city"), ["Oslo"]);
     assert_eq!(values(&a, "/user/1/visits/* @| count"), ["3"]);
-    assert_eq!(values(&a, "/user/1::::type"), ["hash"]);
+    assert_eq!(values(&a, "/user/1:::type"), ["hash"]);
 
     // JSON strings graft; plain strings stay leaves.
     assert_eq!(values(&a, "/session/abc::ip"), ["10.0.0.7"]);
     assert_eq!(values(&a, "/config/site::"), ["flags=beta"]);
 
     // zset members ride in score order, the score as metadata.
-    assert_eq!(values(&a, "/leaderboard/*:::name"), ["Bo", "Ada"]);
-    assert_eq!(values(&a, "/leaderboard/Ada::::score"), ["120"]);
+    assert_eq!(values(&a, "/leaderboard/*:name"), ["Bo", "Ada"]);
+    assert_eq!(values(&a, "/leaderboard/Ada:::score"), ["120"]);
 
     // Streams are bounded snapshots: id-named entries, typed
-    // ;;;ts instants, fields as properties.
+    // :::ts instants, fields as properties.
     assert_eq!(values(&a, "/events/* @| count"), ["2"]);
     assert_eq!(values(&a, "/events/*[::kind = \"buy\"]::amount"), ["45"]);
-    assert_eq!(values(&a, "/events/*[::::ts > 2020-01-01] @| count"), ["2"]);
+    assert_eq!(values(&a, "/events/*[:::ts > 2020-01-01] @| count"), ["2"]);
 
     // TTL is a typed duration.
-    assert_eq!(values(&a, "/ttl/token[::::ttl > 1h] @| count"), ["1"]);
+    assert_eq!(values(&a, "/ttl/token[:::ttl > 1h] @| count"), ["1"]);
 
     // Key-convention references resolve: the stream's user field
     // holds a full key.

@@ -43,14 +43,31 @@ fn both(hashed: &str, looped: &str) -> Vec<String> {
     a
 }
 
+/// A core-property predicate on an inner step of the joined
+/// expression stays on its step: the leading colon reads the
+/// candidate, never the outer context (draft 157).
+#[test]
+fn an_inner_steps_core_predicate_is_not_a_join_condition() {
+    let doc = r#"{"books":[{"title":"Iliad","author_id":1}],"authors":[{"id":1,"name":"Homer"}]}"#;
+    let a = JsonAdapter::parse(doc).unwrap();
+    let vals = |q: &str| match quarb::run(q, &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(
+        vals("/books/* <=> /*[:name != \"books\"]/*[::id = $$0::author_id] | $$1::name"),
+        vec!["Homer"]
+    );
+}
+
 #[test]
 fn the_inner_join_keeps_the_first_witness_in_document_order() {
     // Two authors carry id 2: the first in document order is the
     // witness. 3 and "3", 4.0 and "4" are equal, as `=` has them.
     assert_eq!(
         both(
-            "/books/* <=> /authors/*[::id = _::author_id] | %(::title; a = $$1::name)",
-            "/books/* <=> /authors/*[::id + 0 = _::author_id + 0] | %(::title; a = $$1::name)",
+            "/books/* <=> /authors/*[::id = $$0::author_id] | %(::title; a = $$1::name)",
+            "/books/* <=> /authors/*[::id + 0 = $$0::author_id + 0] | %(::title; a = $$1::name)",
         ),
         [
             r#"%(title = "Emma"; a = "Austen")"#,
@@ -65,9 +82,9 @@ fn the_inner_join_keeps_the_first_witness_in_document_order() {
 fn the_equality_may_stand_either_way_round_and_beside_other_conditions() {
     assert_eq!(
         both(
-            "/books/* <=> /authors/*[_::author_id = ::id && ::name != \"Twain\"] \
+            "/books/* <=> /authors/*[$$0::author_id = ::id && ::name != \"Twain\"] \
              | %(::title; a = $$1::name)",
-            "/books/* <=> /authors/*[(_::author_id = ::id || 1 = 2) && ::name != \"Twain\"] \
+            "/books/* <=> /authors/*[($$0::author_id = ::id || 1 = 2) && ::name != \"Twain\"] \
              | %(::title; a = $$1::name)",
         ),
         [
@@ -83,8 +100,8 @@ fn the_equality_may_stand_either_way_round_and_beside_other_conditions() {
 fn the_outer_join_keeps_the_unmatched_with_a_null_witness() {
     assert_eq!(
         both(
-            "/books/* <=>? /authors/*[::id = _::author_id] | %(::title; a = $$1::name)",
-            "/books/* <=>? /authors/*[::id + 0 = _::author_id + 0] | %(::title; a = $$1::name)",
+            "/books/* <=>? /authors/*[::id = $$0::author_id] | %(::title; a = $$1::name)",
+            "/books/* <=>? /authors/*[::id + 0 = $$0::author_id + 0] | %(::title; a = $$1::name)",
         ),
         [
             r#"%(title = "Emma"; a = "Austen")"#,
@@ -102,8 +119,8 @@ fn a_list_valued_property_joins_by_membership() {
     // `::tags` is a list: a value with no key, tested every time.
     assert_eq!(
         both(
-            "/books/* <=> /authors/*[::tags = _::tag] | %(::title; a = $$1::name)",
-            "/books/* <=> /authors/*[(::tags = _::tag || 1 = 2)] | %(::title; a = $$1::name)",
+            "/books/* <=> /authors/*[$$0::tag <<= ::tags] | %(::title; a = $$1::name)",
+            "/books/* <=> /authors/*[($$0::tag <<= ::tags || 1 = 2)] | %(::title; a = $$1::name)",
         ),
         [
             r#"%(title = "Emma"; a = "Austen")"#,

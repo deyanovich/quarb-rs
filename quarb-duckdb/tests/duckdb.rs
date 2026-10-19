@@ -99,13 +99,13 @@ fn hops_read_by_key() {
     };
     assert_eq!(
         v(
-            "/tracks/3::artist_id--> | %(::name; t = (^/tracks::::loaded); \
-           a = (^/artists::::loaded); n = (^/artists::::\"n-loaded\"))"
+            "/tracks/3::artist_id--> | %(::name; t = (^/tracks:::loaded); \
+           a = (^/artists:::loaded); n = (^/artists:::\"n-loaded\"))"
         ),
         [r#"%(name = "Bartok"; t = false; a = false; n = 1)"#]
     );
     assert_eq!(
-        v("/artists/1<-artist_id | %(::title; t = (^/tracks::::loaded))"),
+        v("/artists/1<-artist_id | %(::title; t = (^/tracks:::loaded))"),
         [
             r#"%(title = "Mars"; t = false)"#,
             r#"%(title = "Venus"; t = false)"#
@@ -115,10 +115,10 @@ fn hops_read_by_key() {
     assert_eq!(v("/tracks/99::title"), Vec::<String>::new());
     // a row read by key knows its place once asked (the table is
     // then read to find it)
-    assert_eq!(v("/tracks/3::::rowid"), ["3"]);
+    assert_eq!(v("/tracks/3:::rowid"), ["3"]);
     // a listing still reads the table whole
     assert_eq!(
-        v("/tracks/* @| count | %(n = $_; t = (^/tracks::::loaded))"),
+        v("/tracks/* @| count | %(n = $_; t = (^/tracks:::loaded))"),
         [r#"%(n = 3; t = true)"#]
     );
 }

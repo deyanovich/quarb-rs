@@ -70,10 +70,10 @@ pub fn base_href(document: &Html) -> Option<String> {
 ///
 /// - every `<meta name=… content=…>` / `<meta property=… content=…>`
 ///   verbatim, plus `title`, the root's `lang`, and the canonical
-///   link (the lossless layer, `::::name`);
+///   link (the lossless layer, `:::name`);
 /// - a schema.org JSON-LD block's top-level scalars and one level
-///   of nesting, as `schema:<key>` (`::::schema:@type`,
-///   `::::schema:author.name`);
+///   of nesting, as `schema:<key>` (`:::schema:@type`,
+///   `:::schema:author.name`);
 /// - the curated core: tags from `keywords` (comma-split),
 ///   `article:tag`, `rel="tag"` links, and JSON-LD `keywords`;
 ///   the category from `article:section` else JSON-LD
@@ -233,6 +233,7 @@ pub fn instant(s: &str) -> Option<quarb::Value> {
         secs,
         nanos,
         offset_min,
+        calendar: Default::default(),
     })
 }
 

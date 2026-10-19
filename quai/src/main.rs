@@ -295,7 +295,10 @@ fn main() -> Result<()> {
             None => kept.push(p),
             Some(Ok(e)) => {
                 if environments.iter().any(|x| x.alias == e.alias) {
-                    anyhow::bail!("two environments mounted as '{}'; give each its own alias", e.alias);
+                    anyhow::bail!(
+                        "two environments mounted as '{}'; give each its own alias",
+                        e.alias
+                    );
                 }
                 environments.push(e);
             }

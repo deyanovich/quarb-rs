@@ -73,7 +73,7 @@ fn refs_commits_and_time_travel() {
         values(&a, "/tags/start/src/lib.rs::"),
         ["pub fn one() {}\n"]
     );
-    assert_eq!(values(&a, "/branches/master/src/lib.rs::::size"), ["32 B"]);
+    assert_eq!(values(&a, "/branches/master/src/lib.rs:::size"), ["32_B"]);
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn dag_navigation() {
     // Bare ~> walks first parents; the merge has two via ->.
     assert_eq!(values(&a, "/HEAD::parent-->::subject"), ["second: grow"]);
     assert_eq!(values(&a, "/HEAD->parent @| count"), ["2"]);
-    assert_eq!(values(&a, "/HEAD::::n-parents"), ["2"]);
+    assert_eq!(values(&a, "/HEAD:::n-parents"), ["2"]);
     // Backlinks: the tag commit fathered two branches of history.
     assert_eq!(values(&a, "/tags/start<-parent @| count"), ["2"]);
     // Rev-syntax aliasing through children_named, no enumeration.
@@ -119,7 +119,7 @@ fn diff_surface() {
     assert_eq!(values(&a, "/commits/*[/src<changed>] @| count"), ["2"]);
     // The changed list and its count (a clean merge changes
     // nothing, matching git's own diff of a merge).
-    assert_eq!(values(&a, "/HEAD::::n-changed"), ["0"]);
+    assert_eq!(values(&a, "/HEAD:::n-changed"), ["0"]);
     assert_eq!(values(&a, "/commits/'HEAD~1'::changed"), ["src/lib.rs"]);
 }
 
@@ -129,16 +129,16 @@ fn tag_metadata() {
     let a = GitAdapter::open(&dir).unwrap();
     // The `start` tag sits on the first commit; nothing else is
     // tagged.
-    assert_eq!(values(&a, "/tags/start::::tags"), ["start"]);
-    assert_eq!(values(&a, "/HEAD::::n-tags"), ["0"]);
+    assert_eq!(values(&a, "/tags/start:::tags"), ["start"]);
+    assert_eq!(values(&a, "/HEAD:::n-tags"), ["0"]);
     assert_eq!(
-        values(&a, "/commits/*[::::n-tags > 0] | ::subject"),
+        values(&a, "/commits/*[:::n-tags > 0] | ::subject"),
         ["first: skeleton"]
     );
     // `git describe`: the nearest tagged ancestor, as a targeted
     // proximal walk.
     assert_eq!(
-        values(&a, "/HEAD(->parent)+[::::n-tags > 0]? | ::::tags"),
+        values(&a, "/HEAD(->parent)+[:::n-tags > 0]? | :::tags"),
         ["start"]
     );
 }
@@ -147,23 +147,23 @@ fn tag_metadata() {
 fn provenance_repo_and_commit_instant() {
     let dir = fixture("prov");
     let a = GitAdapter::open(&dir).unwrap();
-    // A commit's :::instant is its author date — the same instant
+    // A commit's :instant is its author date — the same instant
     // ::date mints; ref aliases answer for their commit.
-    assert_eq!(values(&a, "/HEAD:::instant"), values(&a, "/HEAD::date"));
+    assert_eq!(values(&a, "/HEAD:instant"), values(&a, "/HEAD::date"));
     // A tree entry answers "this repo, as of that commit".
     assert_eq!(
-        values(&a, "/tags/start/src/lib.rs:::instant"),
+        values(&a, "/tags/start/src/lib.rs:instant"),
         ["2020-01-01T00:00:00Z"]
     );
     // The source is the repository path, on every node; structural
     // dirs have no commit ancestor, so no instant (null displays
     // empty), and git assigns no dpid.
-    assert_eq!(values(&a, "/commits:::source"), [dir.display().to_string()]);
-    assert_eq!(values(&a, "/commits:::instant"), [""]);
-    assert_eq!(values(&a, "/HEAD:::dpid"), [""]);
+    assert_eq!(values(&a, "/commits:source"), [dir.display().to_string()]);
+    assert_eq!(values(&a, "/commits:instant"), [""]);
+    assert_eq!(values(&a, "/HEAD:dpid"), [""]);
     // The composite: repo, plus the commit instant where one exists.
     assert_eq!(
-        values(&a, "/tags/start:::provenance"),
+        values(&a, "/tags/start:provenance"),
         [format!("?{}@2020-01-01T00:00:00Z", dir.display())]
     );
 }

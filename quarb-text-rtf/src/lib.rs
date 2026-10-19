@@ -38,7 +38,7 @@
 //!   (`\ansicpgN`, the `\mac` / `\pc` / `\pca` charsets), `\uN`
 //!   a Unicode scalar whose substitute (`\ucN` of them) is
 //!   skipped. [`declared_encoding`] reports the code page as the
-//!   source's declaration, so `::::encoding` answers it.
+//!   source's declaration, so `:::encoding` answers it.
 //! - `{\info …}` declares the identity: `\title`, `\author`,
 //!   `\subject`, `\keywords`, `\doccomm`, `\creatim`, `\revtim`.
 //! - Not carried: headers and footers, pictures and objects,

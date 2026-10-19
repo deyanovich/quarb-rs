@@ -237,11 +237,17 @@ fn a_narrower_path_lowers_the_estimate() {
 #[test]
 fn a_listing_prices_a_size_filter_and_statistics_price_a_key() {
     let dir = scratch();
+    // A size is a quantity, so the filter says its unit (spec:
+    // Relations: a bare number never compares with a dimensioned
+    // value, and `::size > 40` prices to no node at all).
     let (out, err, ok) = qua(&dir, &["--plan", "//*<file>[::size > 40]", "corpus:shelf"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("nodes-max=0\n"), "{out}");
+    let (out, err, ok) = qua(&dir, &["--plan", "//*<file>[::size > 40_B]", "corpus:shelf"]);
     assert!(ok, "{err}");
     assert!(out.contains("trait=file"), "{out}");
     // Priced by the listing, still the engine's to run.
-    assert!(out.contains("conjunct=::size > 40 (unknown)\n"), "{out}");
+    assert!(out.contains("conjunct=::size > 40_B (unknown)\n"), "{out}");
     assert!(
         out.contains("nodes-min=0\n!int\nnodes-max=1\n!int\nbytes-min=42\n!int\nbytes-max=42"),
         "{out}"

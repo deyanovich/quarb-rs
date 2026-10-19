@@ -1,6 +1,6 @@
 //! The `.sentences` file (lang design/sentences-file.md): a given
 //! segmentation mounted with `?sentences=`, headings as sentences
-//! everywhere, `::::at` / `::::end` as the coordinates that survive
+//! everywhere, `:::at` / `:::end` as the coordinates that survive
 //! a resegmentation.
 
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ fn headings_are_sentences_in_the_computed_tier() {
         out,
         "The Play\nA word here.\nAnother one!\nAct Two\nLast words."
     );
-    let (out, _, _) = qua(&dir, &["//sentence[3]::::at", "corpus:play.md"]);
+    let (out, _, _) = qua(&dir, &["//sentence[3]:::at", "corpus:play.md"]);
     assert_eq!(out, "13");
     // A heading is one sentence whatever its punctuation, as on the
     // stored tiers.
@@ -87,11 +87,11 @@ fn a_sentences_file_is_the_given_tier() {
         out,
         "The Play\nA word here. Another one!\nAct Two\nLast words."
     );
-    // Line k is the sentence with ::::n = k.
+    // Line k is the sentence with :::n = k.
     let (out, _, _) = qua(
         &dir,
         &[
-            "//sentence[::::n = 2]::",
+            "//sentence[:::n = 2]::",
             "corpus:play.md?sentences=play.sentences",
         ],
     );

@@ -104,14 +104,14 @@ fn declarations_and_the_option_decide() {
         text(&dir, &["//песнь | ::", "iliada.xml"]),
         "Гнев, богиня, воспой\nСон"
     );
-    assert_eq!(text(&dir, &["^::::encoding", "iliada.xml"]), "windows-1251");
-    assert_eq!(text(&dir, &["^::::replaced", "iliada.xml"]), "0");
+    assert_eq!(text(&dir, &["^:::encoding", "iliada.xml"]), "windows-1251");
+    assert_eq!(text(&dir, &["^:::replaced", "iliada.xml"]), "0");
     // the HTML meta charset
     assert_eq!(text(&dir, &["//title | ::", "page.html"]), "Илиада");
-    assert_eq!(text(&dir, &["^::::encoding", "page.html"]), "KOI8-R");
+    assert_eq!(text(&dir, &["^:::encoding", "page.html"]), "KOI8-R");
     // the byte-order mark
     assert_eq!(text(&dir, &["/title::", "bom.json"]), "Илиада");
-    assert_eq!(text(&dir, &["^::::encoding", "bom.json"]), "UTF-8");
+    assert_eq!(text(&dir, &["^:::encoding", "bom.json"]), "UTF-8");
     // the option, on a plain file and on a reader prefix
     assert_eq!(
         text(
@@ -121,12 +121,12 @@ fn declarations_and_the_option_decide() {
         "2"
     );
     assert_eq!(
-        text(&dir, &["^::::encoding", "koi.txt?encoding=KOI8-R"]),
+        text(&dir, &["^:::encoding", "koi.txt?encoding=KOI8-R"]),
         "KOI8-R"
     );
     // the option outranks the declaration
     assert_eq!(
-        text(&dir, &["^::::encoding", "iliada.xml?encoding=koi8-r"]),
+        text(&dir, &["^:::encoding", "iliada.xml?encoding=koi8-r"]),
         "KOI8-R"
     );
 }
@@ -147,7 +147,7 @@ fn nothing_said_means_strict_utf8() {
         "Ил\u{FFFD}а"
     );
     assert_eq!(
-        text(&dir, &["^::::replaced", "bad.json?encoding=utf-8"]),
+        text(&dir, &["^:::replaced", "bad.json?encoding=utf-8"]),
         "1"
     );
     // an unknown label is refused at open
@@ -161,16 +161,16 @@ fn mounts_folders_and_archives_carry_the_rule() {
     let dir = fixture("layers");
     // each mount its own record
     assert_eq!(
-        text(&dir, &["/a::::encoding", "a=iliada.xml", "b=page.html"]),
+        text(&dir, &["/a:::encoding", "a=iliada.xml", "b=page.html"]),
         "windows-1251"
     );
     assert_eq!(
-        text(&dir, &["/b::::encoding", "a=iliada.xml", "b=page.html"]),
+        text(&dir, &["/b:::encoding", "a=iliada.xml", "b=page.html"]),
         "KOI8-R"
     );
     // a grafted folder: the leaf answers for the document it grafted
     assert_eq!(
-        text(&dir, &["/iliada.xml::::encoding", "--graft", "folder"]),
+        text(&dir, &["/iliada.xml:::encoding", "--graft", "folder"]),
         "windows-1251"
     );
     assert_eq!(
@@ -184,7 +184,7 @@ fn mounts_folders_and_archives_carry_the_rule() {
     );
     // archive members decode under the archive's rule
     assert_eq!(
-        text(&dir, &["//iliada.xml::::encoding", "ar.tar.gz"]),
+        text(&dir, &["//iliada.xml:::encoding", "ar.tar.gz"]),
         "windows-1251"
     );
     assert_eq!(
@@ -196,7 +196,7 @@ fn mounts_folders_and_archives_carry_the_rule() {
         "Ахилл"
     );
     assert_eq!(
-        text(&dir, &["//k.txt::::encoding", "ar.tar.gz?encoding=koi8-r"]),
+        text(&dir, &["//k.txt:::encoding", "ar.tar.gz?encoding=koi8-r"]),
         "KOI8-R"
     );
 }

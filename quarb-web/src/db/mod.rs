@@ -277,6 +277,7 @@ pub fn instant(secs: Option<i64>, off: Option<i64>) -> Option<Value> {
         secs: s,
         nanos: 0,
         offset_min: off.map(|o| o as i16),
+        calendar: Default::default(),
     })
 }
 

@@ -81,7 +81,7 @@ fn patterns_stay_canonical() {
 
 #[test]
 fn core_name_stays_canonical() {
-    assert_eq!(values("/@alice:::name"), vec!["alice"]);
+    assert_eq!(values("/@alice:name"), vec!["alice"]);
 }
 
 /// A two-level feed: accounts under the root, posts under each
@@ -168,5 +168,5 @@ fn parent_encoding_alias_is_not_a_root_child() {
 fn compound_alias_composes_with_navigation() {
     // Alias lands on the node; ordinary navigation continues —
     // ascend to the account and read its canonical name.
-    assert_eq!(tvalues("//@alice.pinned\\*:::name"), vec!["alice"]);
+    assert_eq!(tvalues("//@alice.pinned\\*:name"), vec!["alice"]);
 }

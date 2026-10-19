@@ -87,22 +87,25 @@ fn an_edge_over_a_list_field_connects_the_product() {
 /// complement — so a join condition against a list-valued field
 /// finds the partners the list names.
 #[test]
-fn equality_against_a_list_is_membership() {
+fn containment_against_a_list_is_membership() {
     let a = marks();
-    assert_eq!(values(&a, "/rows/*[::marks = '②']::w"), vec!["дом", "стол"]);
-    assert_eq!(values(&a, "/rows/*[::marks != '②']::w"), vec!["еда"]);
-    assert_eq!(values(&a, "/rows/*['①' = ::marks]::w"), vec!["дом"]);
+    assert_eq!(
+        values(&a, "/rows/*['②' <<= ::marks]::w"),
+        vec!["дом", "стол"]
+    );
+    assert_eq!(values(&a, "/rows/*[!('②' <<= ::marks)]::w"), vec!["еда"]);
+    assert_eq!(values(&a, "/rows/*['①' <<= ::marks]::w"), vec!["дом"]);
     // a join keyed on a list-valued field: a row meets every mark
     // node its list names, and the outer join's misses are the rows
     // whose list names none
     assert_eq!(
-        values(&a, "/rows/* <=> /marks/mark[:: = _::marks] | ::w"),
+        values(&a, "/rows/* <=> /marks/mark[:: <<= $$0::marks] | ::w"),
         vec!["дом", "стол"]
     );
     assert_eq!(
         values(
             &a,
-            "/rows/* <=>? /marks/mark[:: = _::marks] | [!$$1::] | ::w"
+            "/rows/* <=>? /marks/mark[:: <<= $$0::marks] | [!$$1::] | ::w"
         ),
         vec!["еда"]
     );

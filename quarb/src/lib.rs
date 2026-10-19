@@ -8,8 +8,8 @@
 //! It currently implements tree navigation in full (child, descendant,
 //! parent, ancestor, and sibling hops; proximal/distal reach; root and
 //! leaf anchors; literal, glob, and `~(...)` regex name matching;
-//! `<trait>` filters), scalar projection (`::` properties, `:::` core
-//! metadata, `;;;` adapter metadata), `[...]` predicates (comparisons,
+//! `<trait>` filters), scalar projection (`::` properties, `:` core
+//! metadata, `:::` adapter metadata), `[...]` predicates (comparisons,
 //! `and`/`or`/`not`/`!`, structural conditions, index selection),
 //! `||` union, `->` / `<-` crosslink navigation, path patterns
 //! (`(...)` groups with subpath alternation and `+`/`*`/`{m,n}`
@@ -37,54 +37,45 @@
 //! assert!(matches!(hits, QueryResult::Nodes(ns) if ns.is_empty()));
 //! ```
 
-pub mod adapter;
-mod ast;
-pub mod bibref;
-pub mod encoding;
-pub mod env;
 pub mod error;
-mod exec;
-#[cfg(feature = "kaiv")]
-pub mod kaiv_out;
-mod lexer;
-pub mod library;
-pub mod locale;
-pub mod number;
-mod parser;
-pub mod reflect;
-pub mod source;
-pub mod trace;
-pub use encoding::{base64, base64_decode, sha256, sha256_hex};
-pub mod complete;
-pub mod highlight;
-pub mod quantity;
+mod graph;
+mod pipeline;
 mod stdlib;
-pub use stdlib::{tabulate, tabulate_in, tabulate_with};
-pub mod table;
-pub use table::{
-    TABLE_CSS, table_cells, table_columns, table_html, table_html_plain, table_node_records,
-    table_rows_of,
-};
-pub mod names;
-pub mod plan;
-pub mod registry;
-pub use quarb_time::datenames;
+mod syntax;
+mod thread;
+mod value;
+// The public module paths, as they were before the layering.
+pub use graph::complete;
+pub use graph::host::{QueryResult, Traced, resolved_provenance};
+pub use graph::identity::{canonical_identity, canonical_identity_at_open, is_url, name_path};
+pub use graph::run::{Run, inherited};
+pub use graph::tabula::{table_node_records, table_rows_of};
+pub use graph::{adapter, conformance, koine, names, plan, reflect, source, target, trace};
+#[cfg(feature = "kaiv")]
+pub use pipeline::kaiv_out;
+pub use pipeline::{env, library};
+pub use quarb_time::{calendar, calnames, datenames, durnames, regional};
 /// The temporal fragment (the `quarb-time` crate, at its old paths).
 pub use quarb_time::{period, temporal, timex};
-pub mod target;
-pub mod translit;
-mod unparse;
-mod value;
+pub use stdlib::{tabulate, tabulate_in, tabulate_with};
+use syntax::{ast, lexer, parser, unparse};
+pub use syntax::{highlight, registry};
+pub use thread::prov::{ORIGIN_CAP, Origin, Origins, Prov};
+pub use value::encoding::{base64, base64_decode, sha256, sha256_hex};
+pub use value::split_seconds_pub;
+pub use value::table::{TABLE_CSS, table_cells, table_columns, table_html, table_html_plain};
+pub use value::{bibref, encoding, locale, number, quantity, table, translit};
 
-pub use adapter::{
+pub use error::{Kind as ErrorKind, QuarbError, Result};
+pub use graph::adapter::{
     Ask, AstAdapter, Cap, Catalog, CatalogLookup, Cmp, Confidence, Conjunct, Estimate, ExternalRef,
     InstantFrom, Latency, LinkDir, NodeId, PlanAxis, Provenance, ProvenanceList, Selection,
     StepPlan, Unopened,
 };
-pub mod conformance;
-pub use error::{Kind as ErrorKind, QuarbError, Result};
-pub mod koine;
 
+pub use pipeline::env::{EnvKind, Environment};
+pub use pipeline::library::CommandLibrary;
+pub use syntax::parser::{Defs, parse_scope_path};
 /// The invocation instant, pinned once by the tool layer (`qua
 /// --now`, or the clock read once at startup) and read by
 /// adapters that would otherwise consult the wall clock when
@@ -92,85 +83,11 @@ pub mod koine;
 /// replays: evaluation never reads a clock, and neither does a
 /// mount. `None` before the tool sets it — a library embedder
 /// that never pins gets the old wall-clock behavior.
-mod pinned {
-    use std::cell::Cell;
-    thread_local! {
-        pub(super) static NOW: Cell<Option<(i64, u32)>> = const { Cell::new(None) };
-    }
-}
-
-/// Pin the invocation instant for this thread (seconds and nanos
-/// since the epoch). Called once, by the tool, before mounting.
-pub fn set_invocation_instant(secs: i64, nanos: u32) {
-    pinned::NOW.with(|c| c.set(Some((secs, nanos))));
-}
-
-/// How a text is cut into sentences: the session's sentence bonds
-/// (a `.desm` set — "Dr." binds to what follows), behind which the
-/// engine does not care what segments. `sentences`, `sc` and the
-/// corpus reading segment with it, so a pipeline and a `corpus:`
-/// mount agree on "Dr. Smith". Without one, UAX #29 alone.
-pub trait SentenceBonds {
-    /// The sentences of `text`, in order, as slices of it.
-    fn unicode_sentences<'a>(&self, text: &'a str) -> Vec<&'a str>;
-    /// The concrete set, for a tool that extends it (`?desm=` on a
-    /// mount adds to the session's).
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-#[cfg(feature = "desm")]
-impl SentenceBonds for syndesmos::Syndesmos {
-    fn unicode_sentences<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        syndesmos::Syndesmos::unicode_sentences(self, text)
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-thread_local! {
-    /// The session's sentence bonds, set by the tool at open time.
-    static SENTENCE_BONDS: std::cell::RefCell<Option<std::rc::Rc<dyn SentenceBonds>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Set the session's sentence bonds (`qua --desm`, quai's).
-pub fn set_sentence_bonds(bonds: Option<std::rc::Rc<dyn SentenceBonds>>) {
-    SENTENCE_BONDS.with(|b| *b.borrow_mut() = bonds);
-}
-
-/// The session's sentence bonds, if any were loaded.
-pub fn sentence_bonds() -> Option<std::rc::Rc<dyn SentenceBonds>> {
-    SENTENCE_BONDS.with(|b| b.borrow().clone())
-}
-
-/// The pinned invocation instant, if the tool layer set one.
-pub fn invocation_instant() -> Option<(i64, u32)> {
-    pinned::NOW.with(|c| c.get())
-}
-
-/// The pinned instant in whole seconds, falling back to the wall
-/// clock — the one call an adapter needs when resolving a
-/// relative window. Reading it in `open` (never during
-/// evaluation) keeps a mount as reproducible as a query.
-pub fn now_secs() -> i64 {
-    match invocation_instant() {
-        Some((secs, _)) => secs,
-        None => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    }
-}
-pub use env::{EnvKind, Environment};
-pub use exec::{
-    ORIGIN_CAP, Origin, Origins, Prov, QueryResult, RunOptions as Run, Traced, canonical_identity,
-    canonical_identity_at_open, fetched, fetched_opt, is_url, name_path, record_refusal,
-    resolved_provenance,
+pub use value::ambient::{
+    SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
+    sentence_bonds, set_invocation_instant, set_sentence_bonds,
 };
-pub use library::CommandLibrary;
-pub use parser::{Defs, parse_scope_path};
-pub use value::{Foreign, ForeignValue, Value, Table, ColumnType};
+pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, Value};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or
@@ -244,7 +161,7 @@ pub fn validate_step_body(body: &str) -> Result<()> {
 /// Whether `node` would match the step body as a step of a path:
 /// decided at the node, the predicates evaluated there, no hop.
 pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &StepBody) -> bool {
-    exec::node_matches_elem(adapter, node, &body.0)
+    graph::steps::node_matches_elem(adapter, node, &body.0)
 }
 
 /// Convert a refusal recorded during evaluation into an error. The
@@ -253,23 +170,9 @@ pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &St
 /// quantifier cut off at the bound) records a refusal instead, and
 /// the entry points surface it here.
 fn checked<T>(result: T) -> Result<T> {
-    match exec::take_refusal() {
+    match value::ambient::take_refusal() {
         Some(msg) => Err(QuarbError::refused(msg)),
         None => Ok(result),
-    }
-}
-
-impl Run {
-    /// The options an embedder gets without choosing any: `now()`
-    /// from the instant the tool pinned ([`set_invocation_instant`],
-    /// if it did), the sentence bonds it set ([`set_sentence_bonds`]),
-    /// the shell gate closed, every other default.
-    pub fn ambient() -> Run {
-        Run {
-            now: invocation_instant(),
-            bonds: sentence_bonds(),
-            ..Run::default()
-        }
     }
 }
 
@@ -277,13 +180,6 @@ impl Run {
 /// run's when one is in progress (an adapter answering through the
 /// engine mid-evaluation keeps its caller's instant, bound, gate
 /// and targets), the ambient ones at the top.
-fn inherited() -> Run {
-    if exec::in_run() {
-        exec::run_option(|o| o.clone())
-    } else {
-        Run::ambient()
-    }
-}
 
 /// A query's closing serialization for people — `@| csv` or
 /// `@| table` as the last command — taken off for the tool to render.
@@ -354,10 +250,14 @@ impl Query {
         adapter: &impl AstAdapter,
         run: &Run,
     ) -> Result<Query> {
-        let _scope = exec::begin_run(Some(run.clone()));
+        let _scope = graph::run::enter(Some(run.clone()));
         let (tokens, spans) = lexer::lex_spanned(text)?;
-        let ast =
-            parser::parse_with_data_spanned(&tokens, Some(&spans), defs.clone(), Some(adapter))?;
+        let ast = parser::parse_with_data_spanned(
+            &tokens,
+            Some(&spans),
+            defs.clone(),
+            &graph::reflect::Reflector::new(Some(adapter)),
+        )?;
         Ok(Query { ast, closing: None })
     }
 
@@ -432,13 +332,17 @@ impl Query {
     /// shell command with the gate closed, an argument of the wrong
     /// kind); a malformed query is refused at [`Query::parse`].
     pub fn run(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Outcome> {
-        exec::gate(&self.ast, run)?;
+        pipeline::gate(&self.ast, &run.options())?;
         let plan = self.planned(adapter, run)?;
-        let result = checked(exec::eval_with(&self.ast, adapter, Some(run.clone())))?;
+        let result = checked(graph::host::eval_with(
+            &self.ast,
+            adapter,
+            Some(run.clone()),
+        ))?;
         Ok(Outcome {
             result,
             closing: self.closing.clone(),
-            refs: exec::take_refs(),
+            refs: pipeline::take_refs(),
             plan,
         })
     }
@@ -446,6 +350,25 @@ impl Query {
     /// The static plan when the run asks for it, held to the run's
     /// budget: a query the estimate puts beyond the budget is
     /// refused here, before anything runs.
+    /// Run at the calculator: no arbor, the run's topic on the head,
+    /// every thread standing nowhere. The result is always values.
+    pub fn run_calc(&self, run: &Run) -> Result<Outcome> {
+        pipeline::gate(&self.ast, &run.options())?;
+        let values = checked(graph::host::eval_calc(&self.ast, Some(run.clone())))?;
+        Ok(Outcome {
+            result: QueryResult::Values(values),
+            closing: self.closing.clone(),
+            refs: pipeline::take_refs(),
+            plan: None,
+        })
+    }
+
+    /// The calculator's traced run: every value with its provenance.
+    pub fn run_traced_prov_calc(&self, run: &Run) -> Result<Vec<Traced>> {
+        pipeline::gate(&self.ast, &run.options())?;
+        checked(graph::host::eval_calc_traced(&self.ast, Some(run.clone())))
+    }
+
     fn planned(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Option<plan::Plan>> {
         if !run.plan && run.budget.is_none() {
             return Ok(None);
@@ -480,10 +403,10 @@ impl Query {
 
     /// Like [`Query::run_traced`], with each value's provenance: the
     /// origins of its topic, per field for a record
-    /// ([`exec::Traced`]).
+    /// ([`graph::host::Traced`]).
     pub fn run_traced_prov(&self, adapter: &impl AstAdapter, run: &Run) -> Result<Vec<Traced>> {
-        exec::gate(&self.ast, run)?;
-        checked(exec::eval_traced_prov_with(
+        pipeline::gate(&self.ast, &run.options())?;
+        checked(graph::host::eval_traced_prov_with(
             &self.ast,
             adapter,
             Some(run.clone()),
@@ -548,7 +471,7 @@ pub fn run_traced(query: &str, adapter: &impl AstAdapter) -> Result<Vec<(NodeId,
 
 /// Like [`run_traced`], with each value's provenance
 /// ([`Query::run_traced_prov`]).
-pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<exec::Traced>> {
+pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<graph::host::Traced>> {
     run_traced_prov_with_defs(query, &Defs::default(), adapter)
 }
 
@@ -604,7 +527,7 @@ pub fn run_traced_prov_with_defs(
     query: &str,
     defs: &Defs,
     adapter: &impl AstAdapter,
-) -> Result<Vec<exec::Traced>> {
+) -> Result<Vec<graph::host::Traced>> {
     let r = inherited();
     Query::parse_with(query, defs, adapter, &r)?.run_traced_prov(adapter, &r)
 }
@@ -671,7 +594,7 @@ pub fn expand(query: &str, defs: &Defs) -> Result<String> {
 /// [`expand`] is the fixed point.
 pub fn expand_first(query: &str, defs: &Defs) -> Result<Vec<String>> {
     let tokens = lexer::lex(query)?;
-    parser::parse_first_steps(&tokens, defs.clone(), None)
+    parser::parse_first_steps(&tokens, defs.clone(), &graph::reflect::Reflector::new(None))
 }
 
 /// Like [`expand_first`], with the dataset at hand, so data-aware
@@ -683,9 +606,13 @@ pub fn expand_first_with(
     adapter: &impl AstAdapter,
     run: &Run,
 ) -> Result<Vec<String>> {
-    let _scope = exec::begin_run(Some(run.clone()));
+    let _scope = graph::run::enter(Some(run.clone()));
     let tokens = lexer::lex(query)?;
-    parser::parse_first_steps(&tokens, defs.clone(), Some(adapter))
+    parser::parse_first_steps(
+        &tokens,
+        defs.clone(),
+        &graph::reflect::Reflector::new(Some(adapter)),
+    )
 }
 
 /// Like [`expand`], with the dataset at hand, so data-aware macros

@@ -32,9 +32,9 @@ fn live_memgraph() {
     let Some(target) = gate() else { return };
     let a = MemgraphAdapter::connect(&target).unwrap();
 
-    assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
-    assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
+    assert_eq!(values(&a, "/*:name"), ["City", "Person"]);
+    assert_eq!(values(&a, "/Person:::n-rows"), ["2"]);
+    assert_eq!(values(&a, "/Person/*:name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
     assert_eq!(
         values(&a, "/City/*[::country = \"RS\"]::name"),

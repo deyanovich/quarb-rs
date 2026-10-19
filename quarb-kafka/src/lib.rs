@@ -28,9 +28,9 @@
 //! current row. Hint-less resolution tries the property name
 //! minus a trailing `_id`, pluralized bare.
 //!
-//! **Metadata**: `;;;key`, `;;;partition`, `;;;offset`, `;;;ts`
-//! (a typed instant — `[;;;ts > 2026-07-01]` works), `;;;topic`,
-//! and any record header by its own name; `;;;partitions` on a
+//! **Metadata**: `:::key`, `:::partition`, `:::offset`, `:::ts`
+//! (a typed instant — `[:::ts > 2026-07-01]` works), `:::topic`,
+//! and any record header by its own name; `:::partitions` on a
 //! topic. Internal topics (`__consumer_offsets` &c.) stay hidden
 //! unless `?internal=1`.
 //!
@@ -555,6 +555,7 @@ impl AstAdapter for KafkaAdapter {
                     secs: msg.secs,
                     nanos: msg.nanos,
                     offset_min: None,
+                    calendar: Default::default(),
                 }),
                 other => msg
                     .headers

@@ -33,7 +33,7 @@ fn plain_tar(dir: &PathBuf) -> Vec<u8> {
 
 fn check(a: &ArchiveAdapter) {
     assert_eq!(values(a, "//note.txt::"), ["Гнев, богиня, воспой\n"]);
-    assert_eq!(values(a, "//books.json::::size"), ["61 B"]);
+    assert_eq!(values(a, "//books.json:::size"), ["61_B"]);
     assert_eq!(values(a, "/shelf/* @| count"), ["2"]);
 }
 
@@ -88,7 +88,7 @@ fn seven_zip() {
     // 7z stores the directory's content at the top: no `shelf/`
     assert_eq!(values(&a, "/note.txt::"), ["Гнев, богиня, воспой\n"]);
     assert_eq!(values(&a, "/* @| count"), ["2"]);
-    assert_eq!(values(&a, "/books.json::::size"), ["61 B"]);
+    assert_eq!(values(&a, "/books.json:::size"), ["61_B"]);
 }
 
 #[test]

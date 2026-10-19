@@ -25,7 +25,7 @@ fn a_name_alias_is_a_way_in() {
     assert_eq!(values(&a, "//para::"), vec!["one", "two"]);
     // Canonical spellings keep working; reflection stays canonical.
     assert_eq!(values(&a, "//paragraph::"), vec!["one", "two"]);
-    assert_eq!(values(&a, "//para:::name"), vec!["paragraph", "paragraph"]);
+    assert_eq!(values(&a, "//para:name"), vec!["paragraph", "paragraph"]);
 }
 
 #[test]

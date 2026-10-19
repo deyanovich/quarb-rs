@@ -31,12 +31,12 @@ fn live_arangodb() {
 
     // Document collections at the root; edge collections are
     // link fabric, not tables.
-    assert_eq!(values(&a, "/*:::name"), ["cities", "people"]);
-    assert_eq!(values(&a, "/people::::n-rows"), ["2"]);
+    assert_eq!(values(&a, "/*:name"), ["cities", "people"]);
+    assert_eq!(values(&a, "/people:::n-rows"), ["2"]);
 
     // _key names documents; bodies are JSON subtrees with dual
     // exposure.
-    assert_eq!(values(&a, "/people/*:::name"), ["ada", "bo"]);
+    assert_eq!(values(&a, "/people/*:name"), ["ada", "bo"]);
     assert_eq!(values(&a, "/people/ada::role"), ["engineer"]);
     assert_eq!(values(&a, "/people/ada/langs/* @| count"), ["2"]);
     assert_eq!(values(&a, "/cities/*[::pop > 500000]::name"), ["Oslo"]);

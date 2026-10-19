@@ -132,10 +132,30 @@ fn the_shell_kind_reaches_the_users_shell() {
         run_with("/w/* | :: @| [1] | sh:echo(hi; there)", vec![shell()]).unwrap(),
         vec!["hi there"]
     );
-    // A `shell:` mount opens the shell gate: `sh(...)` runs.
+    // A `shell:` mount opens the shell gate: `sh(...)` runs, its
+    // command read raw to the balancing paren; shell quotes shield
+    // a paren and the backtick spelling is the same lexeme.
     assert_eq!(
-        run_with("/w/* | :: @| [1] | sh('tr a-z A-Z')", vec![shell()]).unwrap(),
+        run_with("/w/* | :: @| [1] | sh(tr a-z A-Z)", vec![shell()]).unwrap(),
         vec!["PEAR"]
+    );
+    assert_eq!(
+        run_with(
+            "/w/* | :: @| [1] | sh(tr 'a-z' \"A-Z\" | sed 's/^/(/; s/$/)/')",
+            vec![shell()]
+        )
+        .unwrap(),
+        vec!["(PEAR)"]
+    );
+    assert_eq!(
+        run_with("/w/* | :: @| [1] | `tr a-z A-Z`", vec![shell()]).unwrap(),
+        vec!["PEAR"]
+    );
+    // The quoted form is retired: its quotes would reach the shell.
+    let e = run_with("/w/* | :: @| [1] | sh('tr a-z A-Z')", vec![shell()]).unwrap_err();
+    assert!(
+        e.to_string().contains("sh reads its command raw: sh(cmd)"),
+        "{e}"
     );
 }
 

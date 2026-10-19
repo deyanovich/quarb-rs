@@ -14,10 +14,10 @@
 //!   properties of the key node;
 //! - *list* — ordered unnamed children;
 //! - *set* — members, sorted (deterministic listings);
-//! - *zset* — members in score order, the score at `;;;score`;
+//! - *zset* — members in score order, the score at `:::score`;
 //! - *stream* — a **bounded snapshot** (the Kafka ruling): the
 //!   entries present at first touch, named by entry id, their
-//!   id's clock minted as a typed `;;;ts` instant, fields as
+//!   id's clock minted as a typed `:::ts` instant, fields as
 //!   children and properties.
 //!
 //! **References.** Values that hold key names are Redis's foreign
@@ -26,8 +26,8 @@
 //! `-->user` when the value is the tail (`42` under the `user:`
 //! prefix).
 //!
-//! `;;;type` names a key's Redis type, `;;;ttl` is a typed
-//! duration (`[;;;ttl < 1h]` finds what expires soon), `;;;key`
+//! `:::type` names a key's Redis type, `:::ttl` is a typed
+//! duration (`[:::ttl < 1h]` finds what expires soon), `:::key`
 //! is the full key. The keyspace is scanned once at connect and
 //! sorted; values load lazily per key. Read-only, as always.
 //!
@@ -664,16 +664,14 @@ impl AstAdapter for RedisAdapter {
                     redis::cmd("TTL").arg(&k).query(&mut self.conn.borrow_mut()),
                     || format!("redis: TTL {k}"),
                 )?;
-                (ttl >= 0).then_some(Value::Duration {
-                    secs: ttl,
-                    nanos: 0,
-                })
+                (ttl >= 0).then_some(Value::seconds(ttl, 0))
             }
             (Kind::Scored { score, .. }, "score") => Some(Value::Float(*score)),
             (Kind::Entry { ms, .. }, "ts") => Some(Value::Instant {
                 secs: ms.div_euclid(1000),
                 nanos: (ms.rem_euclid(1000) as u32) * 1_000_000,
                 offset_min: None,
+                calendar: Default::default(),
             }),
             _ => None,
         }

@@ -1,6 +1,6 @@
 [package]
 name = "quarb-cypher"
-version = "0.38.1"
+version = "0.39.0"
 edition = "2024"
 description = "What the Cypher-speaking Quarb adapters share: literal and identifier spellings, the common statements, a relationship cache"
 license = "MIT OR Apache-2.0"
@@ -8,4 +8,4 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.38.1" }
+quarb = { path = "../quarb", version = "0.39.0" }

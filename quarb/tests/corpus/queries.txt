@@ -1,39 +1,39 @@
-//sentence[::::n = 68] | %(text = ::; chapter = \\?section::lemma)
-//sentence[::::n = 68]/token | %(form = ::; ::lemma; ::upos; ::deprel; head = (->head::); chain = ::::entity)
+//sentence[:::n = 68] | %(text = ::; chapter = \\?section::lemma)
+//sentence[:::n = 68]/token | %(form = ::; ::lemma; ::upos; ::deprel; head = (->head::); chain = :::entity)
 //token @| count
-//token[::::entity] @| unique_by($_; ::::mention) @| count
-//token[::::entity] | ::::entity @| unique @| count
-//token[::::entity][::upos = "PROPN"] @| unique_by($_; ::::mention) | %(e = ::::entity; m = ::mention) @| group(e = :e; m = :m) | count | %($.e; $.m; n = $_) @| top(14; :n)
-//token[::::entity = "e44"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
-//token[::::entity = "e44"][::deprel = "dobj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
-//token[::::entity = "e44"][::deprel = "dobj"]->head<-head[::deprel = "nsubj"][::::entity] | ::::entity @| group(e = $_) | count | %($.e; n = $_) @| top(6; :n)
-/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][::::entity] | ::::entity @| first)) | [$.e] | %(::name; ::gender; ::age; agent = (^/book//token[::::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[::::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) | %(:name; :gender; :age; :agent; :patient; total = :agent + :patient) | %(:name; :gender; :age; :agent; :patient; share = round(100 * :patient div :total)) @| top(16; :agent)
-/book//token[::::entity = "e44"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
-/book//token[::::entity = "e43"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
-/book//token[::::entity = "e46"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
-//token[::::entity = "e43"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
-//token[::::entity = "e101"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
-/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][::::entity] | ::::entity @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[::::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[::::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::gender) | %($.gender; agent = sum(:agent); patient = sum(:patient)) | %(:gender; :agent; :patient; total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
-/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][::::entity] | ::::entity @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[::::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[::::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::age) | %($.age; agent = sum(:agent); patient = sum(:patient)) | %(:age; :agent; :patient; total = :agent + :patient) | %(:age; :agent; :patient; share = round(100 * :patient div :total; 1))
-/cast/*[::name != "Mary"][::name != "Tom Sawyer"] | .m(::mention) | .e((^/book//token[::mention = $.m][::::entity] | ::::entity @| first)) | [$.e] | %(::gender; agent = (^/book//token[::::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[::::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::gender) | %($.gender; agent = sum(:agent); patient = sum(:patient)) | %(:gender; :agent; :patient; total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
-//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; tom = (//token[::::entity = "e44"][::deprel = "nsubj"] @| count); huck = (//token[::::entity = "e43"][::deprel = "nsubj"] @| count); joe = (//token[::::entity = "e101"][::deprel = "nsubj"] @| count); becky = (//token[::::entity = "e90"][::deprel = "nsubj"] @| count)) @| top(5; :huck)
-//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; tom = (//token[::::entity = "e44"][::deprel = "nsubj"] @| count); huck = (//token[::::entity = "e43"][::deprel = "nsubj"] @| count); joe = (//token[::::entity = "e101"][::deprel = "nsubj"] @| count); becky = (//token[::::entity = "e90"][::deprel = "nsubj"] @| count)) @| top(5; :becky)
-//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; agent = (//token[::::entity = "e101"][::deprel = "nsubj"] @| count); patient = (//token[::::entity = "e101"][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| top(4; :patient)
-/lit//token[::::entity = "e5152"] @| unique_by($_; ::::mention) | ::mention @| group(m = $_) | count | %(m = $.m; lit = $_; book = (^/book//token[::::n <= 2033][::::entity = "e44"] @| unique_by($_; ::::mention) | [::mention = $.m] @| count)) @| top(10; :lit)
-//token[::::entity = "e5152"] @| unique_by($_; ::::mention) @| count
-//token[::::n <= 2033][::::entity = "e44"] @| unique_by($_; ::::mention) @| count
-/lit//token[::::entity = "e5153"] @| unique_by($_; ::::mention) | ::mention @| group(m = $_) | count | %(m = $.m; lit = $_; book = (^/book//token[::::n <= 2033][::::entity = "e46"] @| unique_by($_; ::::mention) | [::mention = $.m] @| count)) @| top(8; :lit)
-//token[::::entity = "e5153"] @| unique_by($_; ::::mention) @| count
-//token[::::n <= 2033][::::entity = "e46"] @| unique_by($_; ::::mention) @| count
+//token[:::entity] @| unique_by($_; :::mention) @| count
+//token[:::entity] | :::entity @| unique @| count
+//token[:::entity][::upos = "PROPN"] @| unique_by($_; :::mention) | %(e = :::entity; m = ::mention) @| group(e = :e; m = :m) | count | %($.e; $.m; n = $_) @| top(14; :n)
+//token[:::entity = "e44"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
+//token[:::entity = "e44"][::deprel = "dobj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
+//token[:::entity = "e44"][::deprel = "dobj"]->head<-head[::deprel = "nsubj"][:::entity] | :::entity @| group(e = $_) | count | %($.e; n = $_) @| top(6; :n)
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][:::entity] | :::entity @| first)) | [$.e] | %(::name; ::gender; ::age; agent = (^/book//token[:::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[:::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) | %(:name; :gender; :age; :agent; :patient; total = :agent + :patient) | %(:name; :gender; :age; :agent; :patient; share = round(100 * :patient div :total)) @| top(16; :agent)
+/book//token[:::entity = "e44"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
+/book//token[:::entity = "e43"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
+/book//token[:::entity = "e46"][::deprel = "nsubj"]->head | .v(::lemma) | %(c = (^/classes/*[::lemma = $.v]::class @| first)) | [:c] @| group(c = :c) | count | %($.c; n = $_) @| top(6; :n)
+//token[:::entity = "e43"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
+//token[:::entity = "e101"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(8; :n)
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][:::entity] | :::entity @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[:::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[:::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::gender) | %($.gender; agent = sum(:agent); patient = sum(:patient)) | %(:gender; :agent; :patient; total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[::mention = $.m][:::entity] | :::entity @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[:::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[:::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::age) | %($.age; agent = sum(:agent); patient = sum(:patient)) | %(:age; :agent; :patient; total = :agent + :patient) | %(:age; :agent; :patient; share = round(100 * :patient div :total; 1))
+/cast/*[::name != "Mary"][::name != "Tom Sawyer"] | .m(::mention) | .e((^/book//token[::mention = $.m][:::entity] | :::entity @| first)) | [$.e] | %(::gender; agent = (^/book//token[:::entity = $.e][::deprel = "nsubj"] @| count); patient = (^/book//token[:::entity = $.e][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| group(::gender) | %($.gender; agent = sum(:agent); patient = sum(:patient)) | %(:gender; :agent; :patient; total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
+//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; tom = (//token[:::entity = "e44"][::deprel = "nsubj"] @| count); huck = (//token[:::entity = "e43"][::deprel = "nsubj"] @| count); joe = (//token[:::entity = "e101"][::deprel = "nsubj"] @| count); becky = (//token[:::entity = "e90"][::deprel = "nsubj"] @| count)) @| top(5; :huck)
+//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; tom = (//token[:::entity = "e44"][::deprel = "nsubj"] @| count); huck = (//token[:::entity = "e43"][::deprel = "nsubj"] @| count); joe = (//token[:::entity = "e101"][::deprel = "nsubj"] @| count); becky = (//token[:::entity = "e90"][::deprel = "nsubj"] @| count)) @| top(5; :becky)
+//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; agent = (//token[:::entity = "e101"][::deprel = "nsubj"] @| count); patient = (//token[:::entity = "e101"][::deprel = "dobj" || ::deprel = "nsubjpass"] @| count)) @| top(4; :patient)
+/lit//token[:::entity = "e5152"] @| unique_by($_; :::mention) | ::mention @| group(m = $_) | count | %(m = $.m; lit = $_; book = (^/book//token[:::n <= 2033][:::entity = "e44"] @| unique_by($_; :::mention) | [::mention = $.m] @| count)) @| top(10; :lit)
+//token[:::entity = "e5152"] @| unique_by($_; :::mention) @| count
+//token[:::n <= 2033][:::entity = "e44"] @| unique_by($_; :::mention) @| count
+/lit//token[:::entity = "e5153"] @| unique_by($_; :::mention) | ::mention @| group(m = $_) | count | %(m = $.m; lit = $_; book = (^/book//token[:::n <= 2033][:::entity = "e46"] @| unique_by($_; :::mention) | [::mention = $.m] @| count)) @| top(8; :lit)
+//token[:::entity = "e5153"] @| unique_by($_; :::mention) @| count
+//token[:::n <= 2033][:::entity = "e46"] @| unique_by($_; :::mention) @| count
 /book | %(chapters = (//section[::lemma == (/^CHAPTER/)] @| count); words = (//token<word> @| count); places = (//place @| count); mentions = (//token[::chora] @| count))
 //place | %(::onym; ::lemma; ::country; ::lat; ::lon) @| [..3]
 //place | %(::lemma; ::country; mentions = (<-place @| count); chapters = (<-place | %(c = ::cite) | :c @| unique @| count)) @| top(8; :mentions)
 //token[::chora] | %(c = ->place::country) @| group(c = $_:c) | count | %(country = $.c; mentions = $_) @| top(6; :mentions)
 //section[::lemma = "CHAPTER I"] | %(places = (//token[::chora]->place::lemma @| unique @| count); first = (//token[::chora]->place::lemma @| unique @| [..6] @| join(", ")))
 //place | [(<-place | [::cite = "The Innocents Abroad / CHAPTER I"] @| count) = 0] | %(::lemma; mentions = (<-place @| count)) @| top(5; :mentions)
-//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(place = ::lemma; chapter = ($.v | substr(23..)); at = (<-place | [::cite = $.v] | ::::n @| min)) @| sort_by(:at) | %(place = :place; chapter = :chapter)
-//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(p = ::lemma; lat = ::lat; lon = ::lon; at = (<-place | [::cite = $.v] | ::::n @| min)) @| sort_by(:at) @| window(2) | %(from = ($_ | :p @| first); to = ($_ | :p @| last); km = (haversine(($_ | :lat @| first); ($_ | :lon @| first); ($_ | :lat @| last); ($_ | :lon @| last)) | round)) | [:km > 0] @| top(5; :km)
-//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(p = ::lemma; lat = ::lat; lon = ::lon; at = (<-place | [::cite = $.v] | ::::n @| min)) @| sort_by(:at) @| window(2) | %(km = (haversine(($_ | :lat @| first); ($_ | :lon @| first); ($_ | :lat @| last); ($_ | :lon @| last)))) | :km @| sum | round
+//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(place = ::lemma; chapter = ($.v | substr(23..)); at = (<-place | [::cite = $.v] | :::n @| min)) @| sort_by(:at) | %(place = :place; chapter = :chapter)
+//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(p = ::lemma; lat = ::lat; lon = ::lon; at = (<-place | [::cite = $.v] | :::n @| min)) @| sort_by(:at) @| window(2) | %(from = ($_ | :p @| first); to = ($_ | :p @| last); km = (haversine(($_ | :lat @| first); ($_ | :lon @| first); ($_ | :lat @| last); ($_ | :lon @| last)) | round)) | [:km > 0] @| top(5; :km)
+//place[::onym != "new-york"] | .v((<-place | [::cite != "The Innocents Abroad / CHAPTER I"] | %(c = ::cite) @| group(c = $_:c) | %(c = $.c; n = ($_ @| count)) | [:n >= 3] @| top(1; :n) | :c @| first)) | [$.v] | %(p = ::lemma; lat = ::lat; lon = ::lon; at = (<-place | [::cite = $.v] | :::n @| min)) @| sort_by(:at) @| window(2) | %(km = (haversine(($_ | :lat @| first); ($_ | :lon @| first); ($_ | :lat @| last); ($_ | :lon @| last)))) | :km @| sum | round
 //section[::lemma == (/^CHAPTER (X|XX|XXX|XL|L|LX)$/)] | %(ch = ::lemma; km = (//token[::chora] | %(d = (haversine(40.71; -74.01; ->place::lat; ->place::lon))) | :d @| median | round))
 //place | %(::lemma; km = (haversine(40.71; -74.01; ::lat; ::lon) | round)) @| top(3; :km)
 //section[::lemma == (/^CHAPTER/)] | %(ch = ::lemma; per10k = ((((//token[::chora] @| count) * 10000) div (//token<word> @| count)) | round)) @| top(4; :per10k)
@@ -41,7 +41,7 @@
 //place | %(::lemma; ::lat; ::lon; mentions = (<-place @| count)) @| top(3; :mentions)
 /play | %(acts = (//section[::lemma == (/^ACT/)] @| count); scenes = (//section[::lemma == (/^SCENE/)] @| count); speeches = (//dialogue @| count); words = (//token<word> @| count); directions = (//paragraph<stage-direction> @| count); inline = (//stage-direction @| count))
 //character | %(::onym; ::lemma; ::role) @| [..4]
-//character | %(::lemma; speeches = (<-character[:::name = "dialogue"] @| count); words = (<-character[:::name = "dialogue"]//token<word> @| count)) @| top(8; :words)
+//character | %(::lemma; speeches = (<-character[:name = "dialogue"] @| count); words = (<-character[:name = "dialogue"]//token<word> @| count)) @| top(8; :words)
 //dialogue | %(a = ->character::onym; b = (>dialogue->character::onym)) | [:b] @| group(a = $_:a; b = $_:b) | count | %(a = $.a; b = $.b; n = $_) @| top(8; :n)
 //dialogue | %(a = ->character::onym; b = (>dialogue->character::onym)) | [:b] | %(x = ((:a < :b) ? :a : :b); y = ((:a < :b) ? :b : :a)) @| group(x = $_:x; y = $_:y) | count | %(a = $.x; b = $.y; n = $_) @| top(8; :n)
 //dialogue | %(a = ->character::onym; b = (>dialogue->character::onym)) | [:b] @| group(a = $_:a; b = $_:b) | count | %(a = $.a; b = $.b; n = $_; back = (^//dialogue | [->character::onym = $.b] | [>dialogue->character::onym = $.a] @| count)) | [:n > 15] | %(:a; :b; :n; :back; d = (:n - :back)) @| top(5; :d)
@@ -57,19 +57,19 @@
 //dialogue | %(a = ->character::onym; b = (>dialogue->character::onym)) | [:b] @| group(a = $_:a; b = $_:b) | count | %(a = $.a; b = $.b; n = $_) @| top(3; :n)
 //dialogue | %(a = ->character::onym; b = (>dialogue->character::onym)) | [:b] @| group(a = $_:a; b = $_:b) | count | %(a = $.a; b = $.b; n = $_) @| top(2; :n)
 /letters/* @| count
-/letters/* | %(::x-letter; ::to; d = (::::date | isodate); ::subject) @| [..3]
+/letters/* | %(::x-letter; ::to; d = (:::date | isodate); ::subject) @| [..3]
 /letters/* | %(t = ::to) @| group(t = $_:t) | count | %(to = $.t; letters = $_) @| top(4; :letters)
-/letters/* | %(y = (::::date | year)) @| group(y = $_:y) | count | %(year = $.y; letters = $_) @| sort_by(:year)
+/letters/* | %(y = (:::date | year)) @| group(y = $_:y) | count | %(year = $.y; letters = $_) @| sort_by(:year)
 /letters/* | %(p = ::x-place) @| group(p = $_:p) | count | %(place = $.p; letters = $_) @| top(6; :letters)
-/letters/* | %(l = ::x-letter; d = ::::date) @| sort_by(:d) @| window(2) | %(from = ($_ | :l @| first); to = ($_ | :l @| last); days = ((($_ | :d @| last) - ($_ | :d @| first)) | days)) @| top(3; :days)
-/letters/* | %(y = (::::date | year); w = (:: | wc)) @| group(y = $_:y) | [($_ @| count) >= 4] | %(year = $.y; letters = ($_ @| count); words = ($_ | :w @| median | round)) @| sort_by(:year)
-/letters/* | %(y = (::::date | year); n = (:: | lower | s/[^\p{L}]/ /g | words | [$_ = "ball" || $_ = "balls" || $_ = "dance" || $_ = "danced" || $_ = "dancing"] @| count)) @| group(y = $_:y) | %(year = $.y; dancing = ($_ | :n @| sum)) @| sort_by(:year)
-/letters/* | %(l = ::x-letter; d = (::::date | isodate); fi = (:: *= "First Impressions"); ss = (:: *= "Sense and Sensibility"); pp = (:: *= "Pride and Prejudice"); mp = (:: *= "Mansfield Park")) | [:fi || :ss || :pp || :mp] @| [..5]
-/letters/* | %(::x-letter; said = ::x-weekday; calendar = (::::date | strftime("%A"))) @| [..2]
-/letters/*[::x-weekday != ""][::x-year-printed = "yes"][::x-day-printed = "yes"] | [(::::date | strftime("%A")) = ::x-weekday] @| count
-/letters/*[::x-weekday != ""][::x-year-printed = "yes"][::x-day-printed = "yes"] | [(::::date | strftime("%A")) != ::x-weekday] | %(::x-letter; ::x-dateline; calendar = (::::date | strftime("%A")))
-/letters/*[::x-year-printed = "no"][::x-day-printed = "yes"][::x-weekday != ""] | %(agree = ((::::date | strftime("%A")) = ::x-weekday)) @| group(agree = $_:agree) | count | %(agree = $.agree; letters = $_)
-/letters/*[::x-year-printed = "no"][::x-day-printed = "yes"][::x-weekday != ""] | .md((::::date | strftime("-%m-%d"))) | .wd(::x-weekday) | .y0((::::date | year)) | [(::::date | strftime("%A")) != $.wd] | %(::x-letter; ::x-dateline; taken = $.y0; calendar = ("1796 1797 1798 1799 1800 1801 1802 1803 1804 1805 1806 1807 1808 1809 1810 1811 1812 1813 1814 1815 1816 1817" | words | [$_ >= $.y0] | [(datetime("${$_}${$.md}T12:00:00Z") | strftime("%A")) = $.wd] @| first))
+/letters/* | %(l = ::x-letter; d = :::date) @| sort_by(:d) @| window(2) | %(from = ($_ | :l @| first); to = ($_ | :l @| last); days = ((($_ | :d @| last) - ($_ | :d @| first)) | days)) @| top(3; :days)
+/letters/* | %(y = (:::date | year); w = (:: | wc)) @| group(y = $_:y) | [($_ @| count) >= 4] | %(year = $.y; letters = ($_ @| count); words = ($_ | :w @| median | round)) @| sort_by(:year)
+/letters/* | %(y = (:::date | year); n = (:: | lower | s/[^\p{L}]/ /g | words | [$_ = "ball" || $_ = "balls" || $_ = "dance" || $_ = "danced" || $_ = "dancing"] @| count)) @| group(y = $_:y) | %(year = $.y; dancing = ($_ | :n @| sum)) @| sort_by(:year)
+/letters/* | %(l = ::x-letter; d = (:::date | isodate); fi = (:: *= "First Impressions"); ss = (:: *= "Sense and Sensibility"); pp = (:: *= "Pride and Prejudice"); mp = (:: *= "Mansfield Park")) | [:fi || :ss || :pp || :mp] @| [..5]
+/letters/* | %(::x-letter; said = ::x-weekday; calendar = (:::date | strftime("%A"))) @| [..2]
+/letters/*[::x-weekday != ""][::x-year-printed = "yes"][::x-day-printed = "yes"] | [(:::date | strftime("%A")) = ::x-weekday] @| count
+/letters/*[::x-weekday != ""][::x-year-printed = "yes"][::x-day-printed = "yes"] | [(:::date | strftime("%A")) != ::x-weekday] | %(::x-letter; ::x-dateline; calendar = (:::date | strftime("%A")))
+/letters/*[::x-year-printed = "no"][::x-day-printed = "yes"][::x-weekday != ""] | %(agree = ((:::date | strftime("%A")) = ::x-weekday)) @| group(agree = $_:agree) | count | %(agree = $.agree; letters = $_)
+/letters/*[::x-year-printed = "no"][::x-day-printed = "yes"][::x-weekday != ""] | .md((:::date | strftime("-%m-%d"))) | .wd(::x-weekday) | .y0((:::date | year)) | [(:::date | strftime("%A")) != $.wd] | %(::x-letter; ::x-dateline; taken = $.y0; calendar = ("1796 1797 1798 1799 1800 1801 1802 1803 1804 1805 1806 1807 1808 1809 1810 1811 1812 1813 1814 1815 1816 1817" | words | [$_ >= $.y0] | [(datetime("${$_}${$.md}T12:00:00Z") | strftime("%A")) = $.wd] @| first))
 /letters/* | %(p = ::x-place) @| group(p = $_:p) | count | %(place = $.p; letters = $_) @| top(3; :letters)
 //section::lemma
 //section[::lemma = "References"]//ordered-item @| count
@@ -77,13 +77,13 @@
 //section[::lemma = "References"]//ordered-item | :: | bibref(cmos) | %(:author; :title; :year)
 //section[::lemma = "References"]//ordered-item[1] | :: | bibref(cmos)
 = "This closing line is prose, not a reference." | bibref(cmos) | %(ссылка = ($_ != null))
-//bib | %(номер = ::onym; автор = ::author; год = ::year; род = ::::genus)
-//cit | %(цель = ::target; место = ::locator; найдена = ::::resolved)
+//bib | %(номер = ::onym; автор = ::author; год = ::year; род = :::genus)
+//cit | %(цель = ::target; место = ::locator; найдена = :::resolved)
 //cit[::locator]-->::title
 //bib[!<-cit]::onym
-//cit[!::::resolved] @| count
+//cit[!:::resolved] @| count
 //paragraph @| count
-//bib | %(номер = ::onym; автор = ::author; заглавие = ::title; год = ::year; род = ::::genus)
+//bib | %(номер = ::onym; автор = ::author; заглавие = ::title; год = ::year; род = :::genus)
 //bib<article> | %(номер = ::onym; журнал = ::journal; том = ::volume; страницы = ::pages)
 //cit | %(цель = ::target; место = ::locator)
 //bib<article> | %(номер = ::onym; журнал = ::journal; выпуск = ::number; страницы = ::pages)
@@ -94,9 +94,9 @@
 //section[::lemma = "References"]//ordered-item | %(текст = (:: | substr(..32)); cmos = (:: | bibref(cmos) | :genus); ams = (:: | bibref(ams) | :genus))
 = "Ibid." | bibref(apa)
 = "This closing line is prose, not a reference." | bibref(cmos) | %(reference = ($_ != null))
-//bib | %(n = ::onym; author = ::author; year = ::year; genus = ::::genus)
-//cit | %(t = ::target; loc = ::locator; ok = ::::resolved)
-//bib | %(n = ::onym; author = ::author; title = ::title; year = ::year; genus = ::::genus)
+//bib | %(n = ::onym; author = ::author; year = ::year; genus = :::genus)
+//cit | %(t = ::target; loc = ::locator; ok = :::resolved)
+//bib | %(n = ::onym; author = ::author; title = ::title; year = ::year; genus = :::genus)
 //bib<article> | %(n = ::onym; journal = ::journal; volume = ::volume; pages = ::pages)
 //cit | %(t = ::target; loc = ::locator)
 //bib<article> | %(n = ::onym; journal = ::journal; number = ::number; pages = ::pages)
@@ -104,72 +104,72 @@
 //bib[3] | %(journal = ::journal; volume = ::volume; number = ::number; pages = ::pages)
 //bib[5] | %(medium = ::medium; seen = ::urldate; url = ::url)
 //section[::lemma = "References"]//ordered-item | %(text = (:: | substr(..32)); cmos = (:: | bibref(cmos) | :genus); ams = (:: | bibref(ams) | :genus))
-/*<type>:::name
+/*<type>:name
 //field::signature
 //asdict::doc
 //_process_class<-definition
 //*<call>[::callee = "JSONDecoder"]
 //*<function> @| count
-//*<function>[::::n-params > 9] | %(:::name; ::::n-params)
-//*<function> @| top(3; ::::end-line - ::::start-line)
+//*<function>[:::n-params > 9] | %(:name; :::n-params)
+//*<function> @| top(3; :::end-line - :::start-line)
 //*<function>[!::doc] @| count
 //loads//*<call>::callee @| unique @| sort
-//*[::doc == (/[Dd]eprecated/)] | %(:::name; ::start-line)
+//*[::doc == (/[Dd]eprecated/)] | %(:name; ::start-line)
 //tok_get::signature
 //verify_identifier::doc
 //tok_get<-definition
 //PyLong_FromLong
 //ERROR @| count
-//assignment[::left = "scanstring"] | %(::left; ::::start-line)
-//*<type> @| top(5; ::::n-children) | %(:::name; ::::n-children)
+//assignment[::left = "scanstring"] | %(::left; :::start-line)
+//*<type> @| top(5; :::n-children) | %(:name; :::n-children)
 //Searcher/search_path::signature
 //*<call>[::callee == (/(unwrap|expect)$/)] @| count
-/*:::name
+/*:name
 //section[::lemma = "Ben Rogers"]/paragraph::
 //*<cell>[::lemma = "Price"]::
 //*<deixis>->footnote::
 //*<note><-footnote\::
 //*<deixis>->endnote::
 //*<note> @| count
-//*<note>[::::form = "margin"]::
+//*<note>[:::form = "margin"]::
 //*<deixis>->aside::
 /aside[::onym = "1"]<-aside\::
 //index-mark::term
 //index-mark @| group("term"; ::term) | count | .marks | %.
-//section[::lemma = "Ben Rogers"]/line | %(text = ::; page = ::::page)
+//section[::lemma = "Ben Rogers"]/line | %(text = ::; page = :::page)
 /objects/catalog->Pages->Kids @| count
 //section[::lemma = "Index"]/line::
 //section[::lemma = "Index"]/line | [:: == (/^(.+), ([0-9]+)$/)] | %(term = $1; page = $2)
 //section[::lemma == *"Pattern"*]::lemma
 //*<note>[1]::
 def &gregorian: | tp("%Y-%m-%d") | ($_ + 12d); //*[::passenger_id] | .born(( ::year_rumi ? ::year_rumi + 584 : ::quarter ? (::quarter | s/ Q.*$//) * 1 : ::date ? (::date | s/^.*\s//) * 1 : ::född ? (::född | s/-.*$//) * 1 : ::né_le ? (::né_le | s/-.*$//) * 1 : ::date_of_birth ? (::date_of_birth | s/-.*$//) * 1 : ::natus ? (::natus | s/-.*$//) * 1 : ::nata ? (::nata | s/-.*$//) * 1 : ((::data_rozhdeniya | &gregorian) | s/-.*$//) * 1 )) | %(::passenger_id; born = $.born)
-/titanic-birth-records//födda/* <=> /titanic/row[::PassengerId = _::passenger_id] <=> /titanic-birth-records//födda/*[::fader = _::fader && ::moder = _::moder && ::passenger_id > _::passenger_id] | [$$1::Name *= "Mrs."] | %(aboard_as = $$1::Name; sibling = $$2::namn)
+/titanic-birth-records//födda/* <=> /titanic/row[::PassengerId = $$0::passenger_id] <=> /titanic-birth-records//födda/*[::fader = $$0::fader && ::moder = $$0::moder && ::passenger_id > $$0::passenger_id] | [$$1::Name *= "Mrs."] | %(aboard_as = $$1::Name; sibling = $$2::namn)
 def &gregorian: | tp("%Y-%m-%d") | ($_ + 12d); /archives/metricheskie_knigi/*[::familiya = "Abelzon"] | %(::familiya; julian = ::data_rozhdeniya; gregorian = (::data_rozhdeniya | &gregorian))
 /result/* @| group(::age_source) | count | .n | %.
 /entry[::service_name = "checkout"][::latency_ms]::latency_ms @| group("m"; (::timestamp | strftime("%H:%M"))) | mean | %($.m; mean_ms = ($_ | round))
 /entry[::service_name = "checkout"][::latency_ms]::latency_ms @| group("m"; (::timestamp | strftime("%H:%M"))) | mean | .now($_) @| shift(1) | %($.m; delta = (($.now - $_) | round))
-/entry<error>[::service_name = "checkout"] <=> /entry[::service_name = "gateway"][::trace = _::trace] <=>? /entry[::service_name = "payments-worker"][::trace = _::trace] | %(::order; edge_ms = ($$1::latency | s/s$//); retry = $$2::attempt) @| [..4]
+/entry<error>[::service_name = "checkout"] <=> /entry[::service_name = "gateway"][::trace = $$0::trace] <=>? /entry[::service_name = "payments-worker"][::trace = $$0::trace] | %(::order; edge_ms = ($$1::latency | s/s$//); retry = $$2::attempt) @| [..4]
 /entry<critical> | %(at = (::timestamp | strftime("%H:%M:%S")); ::service_name; what = ::)
-/entry[::service_name = "gateway"][::status >= 500] <=>? /entry[::service_name = "checkout"][::trace = _::trace] | [!$$1::trace] | %(at = (::timestamp | strftime("%H:%M:%S")); req = ::; ms = (::latency | s/s$//) * 1000)
+/entry[::service_name = "gateway"][::status >= 500] <=>? /entry[::service_name = "checkout"][::trace = $$0::trace] | [!$$1::trace] | %(at = (::timestamp | strftime("%H:%M:%S")); req = ::; ms = (::latency | s/s$//) * 1000)
 /entry<error>[::timestamp > 2026-07-25T14:16:10Z] @| count
 /entry[::service_name = "checkout"][::latency_ms] [::timestamp >= 2026-07-25T14:17:00Z]::latency_ms @| mean | round
 /orders/17/payload/customer/geo/city::
 /orders/17/payload::total
-/orders/*/payload/*:::name @| unique
+/orders/*/payload/*:name @| unique
 /orders/* | (/payload/total::) @| group("city"; (/payload/customer/geo/city::)) | sum | round(2) | .revenue | %.
 /orders/* | (/payload/total::) @| group("city"; ((/payload/customer/geo/city::) | default((/payload/city::)))) | sum | round(2) | .revenue | %.
-//div[::::classes *= "card"] | %(title = /h3::; price = /span[::::classes *= "price"]::; isbn = ::data-isbn) @| [..2]
-//div[::::classes *= "card"] @| count
+//div[:::classes *= "card"] | %(title = /h3::; price = /span[:::classes *= "price"]::; isbn = ::data-isbn) @| [..2]
+//div[:::classes *= "card"] @| count
 //*[:: == (/^\d+\.\d\d$/)]:: @| mean
 //*[:: == (/^\d+\.\d\d$/)]\\?[:: == (/Binding: /)] | [!(::style == (/none/))] | //*[:: == (/^\d+\.\d\d$/)]:: @| mean
 //*[:: == (/Wandering Almanac/)]\\?[::data-isbn]::data-isbn
 //*[:: == (/Wandering Almanac/)]\\?[::data-isbn]::data-isbn @| count
-//*[::::classes *= "za0d8e"]\\?[:: == (/Binding: /)] | [!(::style == (/none/))] | %(title = //*<link>::; price = //*[::::classes *= "za0d8e"]::) @| [..2]
-//*[:: == (/^\d+\.\d\d$/)]::::classes @| unique
-macro &tok!($shape): /data//*[:: == $shape]::::classes @| unique | "\"${$_}\""; //*[::::classes *= &tok!((/^\d+\.\d\d$/))]::
-def &vis: [!(::style == (/none/))]; macro &tok!($shape): /data//*[:: == $shape]::::classes @| unique | "\"${$_}\""; //*[::::classes *= &tok!((/^\d+\.\d\d$/))]\\?[:: == (/Binding: /)] | &vis @| count
-macro &ids!: /data//*::::attrs | ... | [$_ == (/^data-/)] @| unique | "//*[::${$_}][!(::style == (/none/))]::${$_}"; &ids!() @| count
-macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @| unique) | "/${$.g}//*[::::classes *= \"${$.t}\"]\\\\?*[:: == (/Binding: /)]" @| join(" || "); &all!() | [!(::style == (/none/))] @| count
+//*[:::classes *= "za0d8e"]\\?[:: == (/Binding: /)] | [!(::style == (/none/))] | %(title = //*<link>::; price = //*[:::classes *= "za0d8e"]::) @| [..2]
+//*[:: == (/^\d+\.\d\d$/)]:::classes @| unique
+macro &tok!($shape): /data//*[:: == $shape]:::classes @| unique | "\"${$_}\""; //*[:::classes *= &tok!((/^\d+\.\d\d$/))]::
+def &vis: [!(::style == (/none/))]; macro &tok!($shape): /data//*[:: == $shape]:::classes @| unique | "\"${$_}\""; //*[:::classes *= &tok!((/^\d+\.\d\d$/))]\\?[:: == (/Binding: /)] | &vis @| count
+macro &ids!: /data//*:::attrs | ... | [$_ == (/^data-/)] @| unique | "//*[::${$_}][!(::style == (/none/))]::${$_}"; &ids!() @| count
+macro &all!: /data/* | .g(:name) | .t(//*[:: == (/^\d+\.\d\d$/)]:::classes @| unique) | "/${$.g}//*[:::classes *= \"${$.t}\"]\\\\?*[:: == (/Binding: /)]" @| join(" || "); &all!() | [!(::style == (/none/))] @| count
 ): continue cmd = [lines[0][2:]] i = 1 # A command continues until the line carrying the store argument. while
 //page @| count
 /tags/tag[:: = "kaiv"]<-page::title
@@ -181,9 +181,9 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /sites/quarb.org/pages/index.html//paragraph//ref-->::title
 //page::pagerank @| sum | round(6)
 //h2::
-//div[::::classes *= "mw-heading2"]
+//div[:::classes *= "mw-heading2"]
 //section[:: == (/injun joe/i)]
-//section | %(::lemma; ::::level)
+//section | %(::lemma; :::level)
 //section[::lemma = "See also"]::
 //section[:: == (/fence/i)]::lemma
 //section[:: *= "Injun Joe"]::lemma
@@ -213,11 +213,11 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /cookies/cookie[:: = "c7a02"](--ip[(--cookie @| count) < 5]--cookie)+::
 //*<cell>[::lemma = "Цена"]::
 //section[::lemma = "Собакевич"]/paragraph::
-//section[::lemma = "Собакевич"]/line | %(text = ::; ::::page)
+//section[::lemma = "Собакевич"]/line | %(text = ::; :::page)
 //section[::lemma = "Указатель"]/line::
 //section[::lemma = "Указатель"]/line | [:: == (/^(.+), ([0-9]+)$/)] | %(term = $1; page = $2)
 //section[::lemma == (/шаблон/i)]::lemma
-//div[::::classes *= "mw-heading2"] @| [..3]
+//div[:::classes *= "mw-heading2"] @| [..3]
 //section[:: == (/ноздр/i)]
 //section[::lemma = "См. также"]::
 //section[:: == (/тройк/i)]::lemma
@@ -239,7 +239,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 &books | %(::mount; ::author; ::title; ::year) @| [..4]
 &books @| count
 &texts | (//token<word> @| count) @| sum
-&texts | .b(:::name) | .n(//token<word> @| count) | .t(//token @| count) | %(book = $.b; year = ((^/catalogue/*[::mount = $.b]::year @| first) + 0); words = $.n; mean = ((//sentence | (/token<word> @| count) @| mean) | round(1)); median = (//sentence | (/token<word> @| count) @| median); semi = ((//token[:: = ";"] @| count) * 1000 div $.t | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.t | round(1)); which = ((//token[::lower = "which"] @| count) * 1000 div $.n | round(2)); upon = ((//token[::lower = "upon"] @| count) * 1000 div $.n | round(2)); thou = ((//token[::lower = "thou"] @| count) * 1000 div $.n | round(2)))
+&texts | .b(:name) | .n(//token<word> @| count) | .t(//token @| count) | %(book = $.b; year = ((^/catalogue/*[::mount = $.b]::year @| first) + 0); words = $.n; mean = ((//sentence | (/token<word> @| count) @| mean) | round(1)); median = (//sentence | (/token<word> @| count) @| median); semi = ((//token[:: = ";"] @| count) * 1000 div $.t | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.t | round(1)); which = ((//token[::lower = "which"] @| count) * 1000 div $.n | round(2)); upon = ((//token[::lower = "upon"] @| count) * 1000 div $.n | round(2)); thou = ((//token[::lower = "thou"] @| count) * 1000 div $.n | round(2)))
 /measures/* | %(::year; ::book; ::words; ::mean; ::median; ::semi; ::quotes; ::which) @| sort_by(:year)
 /measures/* @| group(all = 1) | %(mean = (($_ @| spearman(::year; ::mean)) | round(2)); median = (($_ @| spearman(::year; ::median)) | round(2)); semi = (($_ @| spearman(::year; ::semi)) | round(2)); quotes = (($_ @| spearman(::year; ::quotes)) | round(2)); which = (($_ @| spearman(::year; ::which)) | round(2)); upon = (($_ @| spearman(::year; ::upon)) | round(2)))
 /measures/* @| group(from = (::year div 50 | floor) * 50) | %(from = $.from; books = ($_ @| count); mean = (($_ | ::mean @| mean) | round(1)); quotes = (($_ | ::quotes @| mean) | round(1)); which = (($_ | ::which @| mean) | round(1))) @| sort_by(:from)
@@ -247,7 +247,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /measures/* @| bottom(4; ::mean) | %(::year; ::book; ::mean)
 /measures/* @| top(4; ::mean) | %(::year; ::book; ::mean)
 /measures/* | [::thou > 1] | %(::year; ::book; ::thou)
-&texts | .b(:::name) | .year((^/catalogue/*[::mount = $.b]::year @| first) + 0) | .tot(//token<word> @| count) | //token<word>::lower @| group(b = $.b; year = $.year; tot = $.tot; w = $_) | count | %(book = $.b; year = $.year; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 17] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(book = $.r:book; year = $.r:year; w = $.r:w; z = ($_ | round(3)))
+&texts | .b(:name) | .year((^/catalogue/*[::mount = $.b]::year @| first) + 0) | .tot(//token<word> @| count) | //token<word>::lower @| group(b = $.b; year = $.year; tot = $.tot; w = $_) | count | %(book = $.b; year = $.year; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 17] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(book = $.r:book; year = $.r:year; w = $.r:w; z = ($_ | round(3)))
 /scores/* @| group(w = ::w) | %(w = $.w; rho = (($_ @| spearman(::year; ::z)) | round(2))) @| top(6; :rho)
 /scores/* @| group(w = ::w) | %(w = $.w; rho = (($_ @| spearman(::year; ::z)) | round(2))) @| bottom(6; :rho)
 /scores/* | .a(::book) | .ya(::year) | .w(::w) | .za(::z) | ^/scores/* | [::w = $.w] | [::book > $.a] | %(a = $.a; b = ::book; gap = abs(::year - $.ya); d = abs(::z - $.za)) @| group(a = $_:a; b = $_:b; gap = $_:gap) | %(a = $.a; b = $.b; gap = $.gap; delta = (($_ | :d @| mean) | round(3)))
@@ -256,15 +256,15 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /pairs/* @| group(band = (::gap div 50 | floor) * 50) | %(gap = $.band; pairs = ($_ @| count); delta = (($_ | ::delta @| mean) | round(2))) @| sort_by(:gap)
 /c/* | .m(::mount) | .y(::year) | (^/s/pairs/* | [::a = $.m || ::b = $.m] @| bottom(1; ::delta) | %(nearest = (::a = $.m ? ::b : ::a); years = ::gap)) | %(book = $.m; year = $.y; nearest = :nearest; years = :years)
 /measures/* | %(::year; ::book; ::mean; ::which) @| sort_by(:year) @| [..4]
-/* | %(book = :::name; verses = (//milestone[::value == (/\d+\.\d+$/)] @| count); words = (//token<word> @| count); notes = (//footnote<deixis> @| count))
+/* | %(book = :name; verses = (//milestone[::value == (/\d+\.\d+$/)] @| count); words = (//token<word> @| count); notes = (//footnote<deixis> @| count))
 /* | //token<word> | ::lower @| group(v = ::cite) | %(verse = $.v; text = ($_ @| join(" "))) @| [..2]
-/* | .b(:::name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | %(books = ($_ | :b @| unique @| sort @| join("+")); g = $.g) | [:books *= "+"] @| group(books = $_:books) | %(books = $.books; phrases = ($_ @| count)) @| sort_by(:books)
-/* | .b(:::name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 3] | %(phrase = $.g; at = ($_ | :c @| join(" "))) @| [..4]
-/* | .b(:::name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| ungroup | [:b = "mark"] | :c @| unique @| count
-/* | .b(:::name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| ungroup | [:b = "matthew"] | :c @| unique @| count
+/* | .b(:name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | %(books = ($_ | :b @| unique @| sort @| join("+")); g = $.g) | [:books *= "+"] @| group(books = $_:books) | %(books = $.books; phrases = ($_ @| count)) @| sort_by(:books)
+/* | .b(:name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 3] | %(phrase = $.g; at = ($_ | :c @| join(" "))) @| [..4]
+/* | .b(:name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| ungroup | [:b = "mark"] | :c @| unique @| count
+/* | .b(:name) | //token<word> | ::lower @| group(v = ::cite; b = $.b) | %(b = $.b; c = $.v; t = ($_ @| join(" "))) | .r | :t | ngrams(8) | %(g = $_; b = $.r:b; c = $.r:c) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| ungroup | [:b = "matthew"] | :c @| unique @| count
 /mark | .s(//token<word>[::cite = "mrk.1.4"] | ::lower @| join(" ") | ngrams(3)) | ^/matthew//token<word> | ::lower @| group(v = ::cite; s = $.s) | %(cite = $.v; t = ($_ @| join(" ")); s = $.s) | .r | :t | ngrams(3) | [$_ = $.r:s] @| group(c = $.r:cite; t = $.r:t) | count | %($.c; shared = $_; text = $.t) @| top(2; :shared)
 /mark | .s(//token<word>[::cite = "mrk.2.17"] | ::lower @| join(" ") | ngrams(3)) | ^/luke//token<word> | ::lower @| group(v = ::cite; s = $.s) | %(cite = $.v; t = ($_ @| join(" ")); s = $.s) | .r | :t | ngrams(3) | [$_ = $.r:s] @| group(c = $.r:cite; t = $.r:t) | count | %($.c; shared = $_; text = $.t) @| top(2; :shared)
-/* | %(издание = :::name; главы = (/section @| count); абзацы = (//paragraph @| count))
+/* | %(издание = :name; главы = (/section @| count); абзацы = (//paragraph @| count))
 /section[7]/paragraph[:: *= "Лондона, въ среду"] | :: | modernize("ru-1918") | timex(ru)
 /section[7]/paragraph[:: *= "Quitté Londres"] | :: | timex(fr)
 //paragraph | :: | modernize("ru-1918") | timex(ru) | :kind @| group("вид"; $_) | count | .n | %.
@@ -272,53 +272,53 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /section[3]/paragraph[:: *= "De Londres à Suez"] | :: | timex(fr) | :value @| join(" ")
 /section[3]/paragraph[:: *= "De Londres à Suez"] | :: | timex(fr) | :value | duration @| [..8] @| sum
 /section[3]/paragraph[:: *= "Отъ " && :: *= "дней"] | %(строка = (:: | substr(1..60)); значение = (:: | modernize("ru-1918") | timex(ru) | :value))
-/section | .c(:::index) | /paragraph | :: | modernize("ru-1918") | timex(ru) | [:kind = "date" && :text == (/^(в |во )?(понедельник|вторник|сред|серед|четверг|пятниц|суббот|воскресень)/)] | %(глава = $.c; :text; календарь = ($_ | time_anchor(1872) | datetime | strftime("%A"; "ru")))
-/section | .c(:::index) | /paragraph | :: | timex(fr) | [:kind = "date" && :text == (/di /)] | %(глава = $.c; :text; календарь = ($_ | time_anchor(1872) | datetime | strftime("%A"; "fr")))
-/section | .c(:::index) | /paragraph | :: | modernize("ru-1918") | timex(ru) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
-/section | .c(:::index) | /paragraph | :: | timex(fr) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
-/ru/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(французский = ((^/fr/row[::chapter = _::chapter && ::when = _::when] @| count) > 0)) @| group(k = $_:французский) | count | %(французский = $.k; дат = $_)
-/ru/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/fr/row[::chapter = _::chapter && ::when = _::when] @| count) = 0] | %(глава = ::chapter; ::text; ::when; французский = (^/fr/row[::chapter = _::chapter && ::when == (/^1872-\d\d-\d\d$/)]::when @| unique @| join(" ")))
-/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(русский = ((^/ru/row[::chapter = _::chapter && ::when = _::when] @| count) > 0)) @| group(k = $_:русский) | count | %(русский = $.k; дат = $_)
-/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/ru/row[::chapter = _::chapter && ::when = _::when] @| count) = 0] | %(глава = ::chapter; ::text; ::when)
+/section | .c(:index) | /paragraph | :: | modernize("ru-1918") | timex(ru) | [:kind = "date" && :text == (/^(в |во )?(понедельник|вторник|сред|серед|четверг|пятниц|суббот|воскресень)/)] | %(глава = $.c; :text; календарь = ($_ | time_anchor(1872) | datetime | strftime("%A"; "ru")))
+/section | .c(:index) | /paragraph | :: | timex(fr) | [:kind = "date" && :text == (/di /)] | %(глава = $.c; :text; календарь = ($_ | time_anchor(1872) | datetime | strftime("%A"; "fr")))
+/section | .c(:index) | /paragraph | :: | modernize("ru-1918") | timex(ru) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
+/section | .c(:index) | /paragraph | :: | timex(fr) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
+/ru/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(французский = ((^/fr/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) > 0)) @| group(k = $_:французский) | count | %(французский = $.k; дат = $_)
+/ru/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/fr/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) = 0] | %(глава = ::chapter; ::text; ::when; французский = (^/fr/row[::chapter = $$__::chapter && ::when == (/^1872-\d\d-\d\d$/)]::when @| unique @| join(" ")))
+/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(русский = ((^/ru/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) > 0)) @| group(k = $_:русский) | count | %(русский = $.k; дат = $_)
+/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/ru/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) = 0] | %(глава = ::chapter; ::text; ::when)
 /row[::kind = "date" && ::value == (/^XXXX-XX/)] @| count
-/ru/row[::kind = "time"] | %(французский = ((^/fr/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) > 0)) @| group(k = $_:французский) | count | %(французский = $.k; времён = $_)
-/fr/row[::kind = "time"] | %(русский = ((^/ru/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) > 0)) @| group(k = $_:русский) | count | %(русский = $.k; времён = $_)
+/ru/row[::kind = "time"] | %(французский = ((^/fr/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) > 0)) @| group(k = $_:французский) | count | %(французский = $.k; времён = $_)
+/fr/row[::kind = "time"] | %(русский = ((^/ru/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) > 0)) @| group(k = $_:русский) | count | %(русский = $.k; времён = $_)
 /row[::kind = "time" && ::text == (/35 минут/)] | %(глава = ::chapter; ::text; ::value)
 /row[::value = "T20:45"] | %(глава = ::chapter; ::text)
 /row[::value = "P8D" || ::value = "P7D" || ::value = "+P1W" || ::value = "P1W"] | %(k = ::kind; v = ::value) @| group(k = $_:k; v = $_:v) | count | %(вид = $.k; значение = $.v; n = $_)
-/ru/row[::kind = "relative" && ::text == (/^[Чч]ерез /)] | %(dans = (^/fr/row[::chapter = _::chapter && ::kind = "relative" && ::value = _::value] @| count); en = (^/fr/row[::chapter = _::chapter && ::kind = "duration" && (_::value | substr(2..)) = ::value] @| count)) | %(французский = (:dans > 0) ? "dans" : ((:en > 0) ? "en" : "ни то ни другое")) @| group(k = $_:французский) | count | %(французский = $.k; оборотов = $_)
+/ru/row[::kind = "relative" && ::text == (/^[Чч]ерез /)] | %(dans = (^/fr/row[::chapter = $$__::chapter && ::kind = "relative" && ::value = $$__::value] @| count); en = (^/fr/row[::chapter = $$__::chapter && ::kind = "duration" && (_::value | substr(2..)) = ::value] @| count)) | %(французский = (:dans > 0) ? "dans" : ((:en > 0) ? "en" : "ни то ни другое")) @| group(k = $_:французский) | count | %(французский = $.k; оборотов = $_)
 = "+P80D" | time_anchor(1872-10-02T20:45) | %(день = $_; неделя = ($_ | datetime | strftime("%A"; "ru")))
 = "+P79D" | time_anchor(1872-10-02T20:45) | %(день = $_; неделя = ($_ | datetime | strftime("%A"; "ru")))
 /section[37]/paragraph[:: *= "erreur de jour"] | :: | timex(fr) | %(:text; :kind; :value)
 /section[37]/paragraph[:: *= "ошибиться"] | :: | modernize("ru-1918") | timex(ru) | %(:text; :kind; :value)
-/* | %(edition = :::name; chapters = (/section @| count); paragraphs = (//paragraph @| count))
+/* | %(edition = :name; chapters = (/section @| count); paragraphs = (//paragraph @| count))
 /section[7]/paragraph[:: *= "Left London"] | :: | timex(en)
 //paragraph | :: | timex(en) | :kind @| group("kind"; $_) | count | .n | %.
 //paragraph | :: | timex(fr) | :kind @| group("kind"; $_) | count | .n | %.
 /section[3]/paragraph[:: *= "From London to Suez"] | :: | timex(en) | %(:text; :value)
-/section | .c(:::index) | /paragraph | :: | timex(en) | [:kind = "date" && :text == (/day,? /)] | %(ch = $.c; :text; calendar = ($_ | time_anchor(1872) | datetime | strftime("%A")))
-/section | .c(:::index) | /paragraph | :: | timex(fr) | [:kind = "date" && :text == (/di /)] | %(ch = $.c; :text; calendar = ($_ | time_anchor(1872) | datetime | strftime("%A"; "fr")))
-/section | .c(:::index) | /paragraph | :: | timex(en) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
-/en/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(french = ((^/fr/row[::chapter = _::chapter && ::when = _::when] @| count) > 0)) @| group(k = $_:french) | count | %(french = $.k; dates = $_)
-/en/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/fr/row[::chapter = _::chapter && ::when = _::when] @| count) = 0] | %(ch = ::chapter; ::text; ::when; french = (^/fr/row[::chapter = _::chapter && ::when == (/^1872-\d\d-\d\d$/)]::when @| unique @| join(" ")))
-/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(english = ((^/en/row[::chapter = _::chapter && ::when = _::when] @| count) > 0)) @| group(k = $_:english) | count | %(english = $.k; dates = $_)
-/section | .c(:::index) | /paragraph | :: | timex(en) | [:kind = "date"] @| timeline($_; 1872) | [:value == (/^XXXX-XX/)] | %(ch = $.c; :text; :when)
-/section | .c(:::index) | .a(/paragraph | :: | timex(en) | [:kind = "date" && :grain = "day" && !(:value == (/XX-\d\d$/)) && :value != "XXXX-12-21"] @| first | time_anchor(1872)) | /paragraph | :: | timex(en) | [:kind = "date"] @| timeline($_; $.a) | [:value == (/^XXXX-XX/)] | %(chapter = $.c; anchor = $.a; :text; :when)
-/placed/row | %(ch = ::chapter; ::anchor; ::text; ::when; french = (^/fr/row[::chapter = _::chapter && ::kind = "date" && ::when = _::when]::text @| unique @| join(", ")))
-/en/row[::kind = "time"] | %(french = ((^/fr/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) > 0)) @| group(k = $_:french) | count | %(french = $.k; times = $_)
-/fr/row[::kind = "time"] | %(english = ((^/en/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) > 0)) @| group(k = $_:english) | count | %(english = $.k; times = $_)
-/en/row[::kind = "time" && (::chapter = 33 || ::chapter = 34)] | [(^/fr/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) = 0] | %(ch = ::chapter; ::text; ::value)
-/fr/row[::kind = "time" && (::chapter = 33 || ::chapter = 34)] | [(^/en/row[::chapter = _::chapter && ::kind = "time" && ::value = _::value] @| count) = 0] | %(ch = ::chapter; ::text; ::value)
+/section | .c(:index) | /paragraph | :: | timex(en) | [:kind = "date" && :text == (/day,? /)] | %(ch = $.c; :text; calendar = ($_ | time_anchor(1872) | datetime | strftime("%A")))
+/section | .c(:index) | /paragraph | :: | timex(fr) | [:kind = "date" && :text == (/di /)] | %(ch = $.c; :text; calendar = ($_ | time_anchor(1872) | datetime | strftime("%A"; "fr")))
+/section | .c(:index) | /paragraph | :: | timex(en) | %(chapter = $.c; :text; :kind; :value; when = ($_ | time_anchor(1872)))
+/en/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(french = ((^/fr/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) > 0)) @| group(k = $_:french) | count | %(french = $.k; dates = $_)
+/en/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | [(^/fr/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) = 0] | %(ch = ::chapter; ::text; ::when; french = (^/fr/row[::chapter = $$__::chapter && ::when == (/^1872-\d\d-\d\d$/)]::when @| unique @| join(" ")))
+/fr/row[::kind = "date" && ::when == (/^1872-\d\d-\d\d$/)] | %(english = ((^/en/row[::chapter = $$__::chapter && ::when = $$__::when] @| count) > 0)) @| group(k = $_:english) | count | %(english = $.k; dates = $_)
+/section | .c(:index) | /paragraph | :: | timex(en) | [:kind = "date"] @| timeline($_; 1872) | [:value == (/^XXXX-XX/)] | %(ch = $.c; :text; :when)
+/section | .c(:index) | .a(/paragraph | :: | timex(en) | [:kind = "date" && :grain = "day" && !(:value == (/XX-\d\d$/)) && :value != "XXXX-12-21"] @| first | time_anchor(1872)) | /paragraph | :: | timex(en) | [:kind = "date"] @| timeline($_; $.a) | [:value == (/^XXXX-XX/)] | %(chapter = $.c; anchor = $.a; :text; :when)
+/placed/row | %(ch = ::chapter; ::anchor; ::text; ::when; french = (^/fr/row[::chapter = $$__::chapter && ::kind = "date" && ::when = $$__::when]::text @| unique @| join(", ")))
+/en/row[::kind = "time"] | %(french = ((^/fr/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) > 0)) @| group(k = $_:french) | count | %(french = $.k; times = $_)
+/fr/row[::kind = "time"] | %(english = ((^/en/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) > 0)) @| group(k = $_:english) | count | %(english = $.k; times = $_)
+/en/row[::kind = "time" && (::chapter = 33 || ::chapter = 34)] | [(^/fr/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) = 0] | %(ch = ::chapter; ::text; ::value)
+/fr/row[::kind = "time" && (::chapter = 33 || ::chapter = 34)] | [(^/en/row[::chapter = $$__::chapter && ::kind = "time" && ::value = $$__::value] @| count) = 0] | %(ch = ::chapter; ::text; ::value)
 /row[::value = "P8D" || ::value = "P1W" || ::value = "P15D" || ::value = "P2W"] | ::value @| group("value"; $_) | count | .n | %.
-/en/row[::kind = "duration" && ::text == (/^[Ii]n /)] | %(en = (^/fr/row[::chapter = _::chapter && ::kind = "duration" && ::value = _::value] @| count); dans = (^/fr/row[::chapter = _::chapter && ::kind = "relative" && (::value | substr(2..)) = _::value] @| count)) | %(french = (:dans > 0) ? "dans" : ((:en > 0) ? "en" : "neither")) @| group(k = $_:french) | count | %(french = $.k; phrases = $_)
+/en/row[::kind = "duration" && ::text == (/^[Ii]n /)] | %(en = (^/fr/row[::chapter = $$__::chapter && ::kind = "duration" && ::value = $$__::value] @| count); dans = (^/fr/row[::chapter = $$__::chapter && ::kind = "relative" && (::value | substr(2..)) = $$__::value] @| count)) | %(french = (:dans > 0) ? "dans" : ((:en > 0) ? "en" : "neither")) @| group(k = $_:french) | count | %(french = $.k; phrases = $_)
 = "+P80D" | time_anchor(1872-10-02T20:45) | %(day = $_; weekday = ($_ | datetime | strftime("%A")))
 = "+P79D" | time_anchor(1872-10-02T20:45) | %(day = $_; weekday = ($_ | datetime | strftime("%A")))
 /section[37]/paragraph[:: *= "error of a day"] | :: | timex(en) | %(:text; :kind; :value)
 /section[37]/paragraph[:: *= "error of a day"] | ::
-/sites/*/pages/wiki/*<dir> | %(work = :::name; pages = (//page @| count))
+/sites/*/pages/wiki/*<dir> | %(work = :name; pages = (//page @| count))
 /sites/*/pages/wiki/*<page>::title
-/sites/*/pages/wiki/"Мёртвые_души_(Гоголь)"/*<dir> | %(tom = :::name; chapters = (//page @| count))
-//page @| group(depth = :::depth) | count | %($.depth; pages = $_)
+/sites/*/pages/wiki/"Мёртвые_души_(Гоголь)"/*<dir> | %(tom = :name; chapters = (//page @| count))
+//page @| group(depth = :depth) | count | %($.depth; pages = $_)
 //page[::title = "Мёртвые души (Гоголь)/Том I/Глава I"]->link::title
 //page[::title = "Мёртвые души (Гоголь)/Том I/Глава II"]<-link::title
 //page @| top(4; ::in_degree) | %(::title; ::in_degree; ::out_degree)
@@ -329,14 +329,14 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //page[::title = "Мёртвые души (Гоголь)/Том I/Глава I"](->link[::title == *"/Глава"*])+ @| count
 //page[::title = "Мёртвые души (Гоголь)/Том I/Глава I"](->link[::title == *"/Глава"*])+!::title
 //page[::title = "Мёртвые души (Гоголь)/Том I/Глава XI"]->link::title
-//page[::title = "Мёртвые души (Гоголь)/Том I/Глава I"]/*[..4] | %(k = :::name; t = substr(::; 1..44))
-/sites/*/pages/wiki/*<dir> | %(work = :::name; whole = (//page<целый>//paragraph:: | words | ... @| count); parts = (//page<!целый && !редакция-1835>[::title == *"/Глава"* || ::title == *"/Действие"*]//paragraph:: | words | ... @| count))
+//page[::title = "Мёртвые души (Гоголь)/Том I/Глава I"]/*[..4] | %(k = :name; t = substr(::; 1..44))
+/sites/*/pages/wiki/*<dir> | %(work = :name; whole = (//page<целый>//paragraph:: | words | ... @| count); parts = (//page<!целый && !редакция-1835>[::title == *"/Глава"* || ::title == *"/Действие"*]//paragraph:: | words | ... @| count))
 //page[::title == *"/Глава I"][::title == *"Бульба"*] | %(::title; words = (//paragraph:: | words | ... @| count); opening = (//paragraph[(:: | words | ... @| count) > 8][1]:: | substr(1..44)))
-/sites/*/pages/wiki/*<dir> | %(work = :::name; words = (//page<!целый>//paragraph:: | words | ... @| count))
+/sites/*/pages/wiki/*<dir> | %(work = :name; words = (//page<!целый>//paragraph:: | words | ... @| count))
 //page[::title == *"/Глава I" || ::title == *"/Действие I"] | %(::title; opening = (//paragraph[(:: | words | ... @| count) > 12][1]:: | substr(1..50)))
-/sites/*/pages/wiki/*<dir> | %(work = :::name; w = (//page<!целый>//paragraph:: | words | ... @| count); d = (//page<!целый>//paragraph:: | words | ... | [$_ == (/^душ[аиуеоы]/i)] @| count)) | %(:work; per_10k = round(10000 * :d div :w; 1))
-/sites/*/pages/wiki/*<dir> | %(novel = :::name; chapters = (//page @| count))
-/sites/*/pages/wiki/"Emma_(Austen)"/*<dir> | %(volume = :::name; chapters = (//page @| count))
+/sites/*/pages/wiki/*<dir> | %(work = :name; w = (//page<!целый>//paragraph:: | words | ... @| count); d = (//page<!целый>//paragraph:: | words | ... | [$_ == (/^душ[аиуеоы]/i)] @| count)) | %(:work; per_10k = round(10000 * :d div :w; 1))
+/sites/*/pages/wiki/*<dir> | %(novel = :name; chapters = (//page @| count))
+/sites/*/pages/wiki/"Emma_(Austen)"/*<dir> | %(volume = :name; chapters = (//page @| count))
 //page[::title = "Pride and Prejudice (1817)/Chapter 1"]->link::title
 //page[::title = "Pride and Prejudice (1817)/Chapter 2"]<-link::title
 //page[::title = "Author:Jane Austen"]->link::title
@@ -347,10 +347,10 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //page[::title = "Pride and Prejudice (1817)/Chapter 1"]//paragraph[..8] | %(c = (:: | cc); t = substr(::; 1..48))
 //paragraph<furniture> @| count
 //paragraph<!furniture> @| count
-/sites/*/pages/wiki/*<dir> | %(novel = :::name; chapters = (//page @| count); words = (//paragraph<!furniture>:: | words | ... @| count))
-//page[:::depth >= 6] | %(::title; words = (//paragraph<!furniture>:: | words | ... @| count)) @| top(3; :words)
-//page[:::depth >= 6][::title == *"/Chapter 1" || ::title == *"/Chapter I"] | %(::title; opening = (//paragraph<!furniture>[(:: | words | ... @| count) > 12][1]:: | substr(1..60)))
-/sites/*/pages/wiki/*<dir> | %(novel = :::name; w = (//paragraph<!furniture>:: | words | ... @| count); m = (//paragraph<!furniture>:: | words | ... | [$_ == (/^marriage/i)] @| count)) | %(:novel; per_10k = round(10000 * :m div :w; 1))
+/sites/*/pages/wiki/*<dir> | %(novel = :name; chapters = (//page @| count); words = (//paragraph<!furniture>:: | words | ... @| count))
+//page[:depth >= 6] | %(::title; words = (//paragraph<!furniture>:: | words | ... @| count)) @| top(3; :words)
+//page[:depth >= 6][::title == *"/Chapter 1" || ::title == *"/Chapter I"] | %(::title; opening = (//paragraph<!furniture>[(:: | words | ... @| count) > 12][1]:: | substr(1..60)))
+/sites/*/pages/wiki/*<dir> | %(novel = :name; w = (//paragraph<!furniture>:: | words | ... @| count); m = (//paragraph<!furniture>:: | words | ... | [$_ == (/^marriage/i)] @| count)) | %(:novel; per_10k = round(10000 * :m div :w; 1))
 /repo | %(commits = (/commits/* @| count); pages = (/HEAD/pages/* @| count); authors = (/commits/* | ::author @| unique @| count); first = (/commits/* | ::date @| min | isodate); last = (/commits/* | ::date @| max | isodate))
 /repo/commits/* | %(::short; ::author; d = (::date | isodate); ::subject) @| [..3]
 /repo/commits/* | %(a = ::author) @| group(a = $_:a) | count | %(who = $.a; commits = $_) @| top(5; :commits)
@@ -365,43 +365,43 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /repo/commits/*[/pages/27.txt<changed>] | %(::short; ::author; d = (::date | isodate); ::subject)
 /log/*[::page = 27] | %(::revid; ::commit; ::user; ::level; ::size)
 /repo/HEAD/pages/27.txt:: | lines | [$_ != ""] | .p($_) | %(l = substr($.p; 1..32); since = (^/repo/commits/*[/pages/27.txt<changed>] | [/pages/27.txt:: *= $.p] @| last | ::short)) @| [..5]
-/log/*[::level > 0][::level < 3] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .c(($_ | ::commit @| first)) | .set(^/repo/HEAD/pages/*[:::name = $.f]:: | lower | s/[^\p{L}\p{N}’']/ /g | words) | ^/repo/commits/*[::short = $.c]/pages/*[:::name = $.f]:: | lower | s/[^\p{L}\p{N}’']/ /g | words | [$_ != $.set] @| group(w = $_) | count | %(word = $.w; pages = $_) @| top(8; :pages)
-/log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .b((^/log/*[::page = $.p][::level = 3] | ::commit @| last)) | [$.b] | %(page = $.p; changed = levenshtein((^/repo/commits/*[::short = $.b]/pages/*[:::name = $.f]::); (^/repo/HEAD/pages/*[:::name = $.f]::))) @| top(5; :changed)
-/log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .b((^/log/*[::page = $.p][::level = 3] | ::commit @| last)) | [$.b] | %(page = $.p; changed = levenshtein((^/repo/commits/*[::short = $.b]/pages/*[:::name = $.f]::); (^/repo/HEAD/pages/*[:::name = $.f]::))) | [:changed = 0] @| count
+/log/*[::level > 0][::level < 3] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .c(($_ | ::commit @| first)) | .set(^/repo/HEAD/pages/*[:name = $.f]:: | lower | s/[^\p{L}\p{N}’']/ /g | words) | ^/repo/commits/*[::short = $.c]/pages/*[:name = $.f]:: | lower | s/[^\p{L}\p{N}’']/ /g | words | [$_ != $.set] @| group(w = $_) | count | %(word = $.w; pages = $_) @| top(8; :pages)
+/log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .b((^/log/*[::page = $.p][::level = 3] | ::commit @| last)) | [$.b] | %(page = $.p; changed = levenshtein((^/repo/commits/*[::short = $.b]/pages/*[:name = $.f]::); (^/repo/HEAD/pages/*[:name = $.f]::))) @| top(5; :changed)
+/log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | .f(("${$.p}.txt")) | .b((^/log/*[::page = $.p][::level = 3] | ::commit @| last)) | [$.b] | %(page = $.p; changed = levenshtein((^/repo/commits/*[::short = $.b]/pages/*[:name = $.f]::); (^/repo/HEAD/pages/*[:name = $.f]::))) | [:changed = 0] @| count
 /log/*[::page = 290][::level = 3] @| last | .b(::commit) | .set(^/repo/HEAD/pages/290.txt:: | lower | s/[^\p{L}\p{N}’']/ /g | words) | .set2(^/repo/commits/*[::short = $.b]/pages/290.txt:: | lower | s/[^\p{L}\p{N}’']/ /g | words) | %(before = (^/repo/commits/*[::short = $.b]/pages/290.txt:: | lower | s/[^\p{L}\p{N}’']/ /g | words | [$_ != $.set] @| unique @| join(" ")); after = (^/repo/HEAD/pages/290.txt:: | lower | s/[^\p{L}\p{N}’']/ /g | words | [$_ != $.set2] @| unique @| join(" ")))
 /log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | %(days = (((($_ | ::timestamp @| min | datetime)) - (^/log/*[::page = $.p][::level > 0] | ::timestamp @| min | datetime)) | days)) @| group(k = "all") | %(pages = ($_ @| count); min = ($_ | :days @| min | round); median = ($_ | :days @| median | round); max = ($_ | :days @| max | round))
 /log/*[::level = 4] | %(p = ::page) @| group(p = $_:p) | %(page = $.p; days = (((($_ | ::timestamp @| min | datetime)) - (^/log/*[::page = $.p][::level > 0] | ::timestamp @| min | datetime)) | days | round)) @| sort_by(:days) @| [..3]
 /log/*[::level > 0] | %(p = ::page) @| group(p = $_:p) | %(y = ($_ | ::timestamp @| min | substr(..4))) @| group(y = $_:y) | count | %(year = $.y; pages = $_) @| sort_by(:year)
 /log/*[::level = 4] | %(u = ::user) @| group(u = $_:u) | count | %(who = $.u; validated = $_) @| top(3; :validated)
-//section[:::depth = 2] | ::lemma | timex(ru) @| timeline($_) | %(:text; :when; :from)
-//section[:::depth = 2] | ::lemma | timex(ru) @| timeline($_; 1833-01-01) | %(:text; :when; :from)
-//section[:::depth = 2] | :: | timex(ru) | [:kind = "date" || :kind = "relative"] @| timeline($_; 1833-01-01) | %(:text; :kind; :when; :from)
+//section[:depth = 2] | ::lemma | timex(ru) @| timeline($_) | %(:text; :when; :from)
+//section[:depth = 2] | ::lemma | timex(ru) @| timeline($_; 1833-01-01) | %(:text; :when; :from)
+//section[:depth = 2] | :: | timex(ru) | [:kind = "date" || :kind = "relative"] @| timeline($_; 1833-01-01) | %(:text; :kind; :when; :from)
 = "30 декабря 1833 года. 2 января." | timex(ru) @| timeline($_) | %(:text; :when)
 = "30 декабря 1833 года. 2 января." | timex(ru) @| timeline($_; forward) | %(:text; :when)
-//section[:::depth = 2] | ::lemma | timex(ru) @| timeline($_; 1833-01-01) | (:when | period(month)) @| group(month = $_) | count | %($.month; entries = $_)
-//section[:::depth = 2] | ::lemma | timex(en) @| timeline($_) | %(:text; :when; :from) @| [..5]
-//section[:::depth = 2] | ::lemma | timex(en) @| timeline($_) | %(:text; :when) @| [9..12]
-//section[:::depth = 2] | ::lemma | timex(en) @| timeline($_; forward) | %(:text; :when) @| [9..12]
-//section[:::depth = 2] | :: | timex(en) | [:kind != "vague"] @| timeline($_; forward) | %(:text; :kind; :when; :from) @| [8..12]
+//section[:depth = 2] | ::lemma | timex(ru) @| timeline($_; 1833-01-01) | (:when | period(month)) @| group(month = $_) | count | %($.month; entries = $_)
+//section[:depth = 2] | ::lemma | timex(en) @| timeline($_) | %(:text; :when; :from) @| [..5]
+//section[:depth = 2] | ::lemma | timex(en) @| timeline($_) | %(:text; :when) @| [9..12]
+//section[:depth = 2] | ::lemma | timex(en) @| timeline($_; forward) | %(:text; :when) @| [9..12]
+//section[:depth = 2] | :: | timex(en) | [:kind != "vague"] @| timeline($_; forward) | %(:text; :kind; :when; :from) @| [8..12]
 = "Two days later he sailed. The next day it rained." | timex(en) @| timeline($_; 1659-10-01) | %(:text; :when; :from)
-//section[:::depth = 2] | ::lemma | timex(en) @| timeline($_; forward) | (:when | period(month)) @| group(month = $_) | count | %($.month; entries = $_)
+//section[:depth = 2] | ::lemma | timex(en) @| timeline($_; forward) | (:when | period(month)) @| group(month = $_) | count | %($.month; entries = $_)
 //section | .s(::lemma) | /paragraph | %(sec = $.s; n = (:: | words @| count))
 //section | .s(::lemma) | /paragraph | [$.s = "Побег"] | :: | substr(1..40)
 //section | .s(::lemma) | /paragraph | :: | words @| group(s = $.s) | count | %($.s; n = $_)
 //section | %(::lemma; n = (/paragraph | :: | words @| count))
 //section | .s(::lemma) | /paragraph | [$.s = "The law"] | :: | substr(1..40)
-/f/hosts/* <=>? /m/*[::host = _::name] | %(::name; $$1::cpu)
-/f/hosts/* <=>? /m/*[::host = _::name] | [!$$1] | %(::name; ::tier)
-//*<function>[!<-definition]:::name
-/* | %(draft = :::name; words = (:: | wc); paragraphs = (//paragraph @| count))
-/old//paragraph <=> /new//paragraph[:: = _::] @| count
-/old//paragraph <=>? /new//paragraph[:: = _::] | [!$$1] | :: | substr(1..50)
-/new//paragraph <=>? /old//paragraph[:: = _::] | [!$$1] | :: | substr(1..50)
-/old//paragraph <=> /new//paragraph[:: != _:: && substr(::; 1..30) = substr(_::; 1..30)] | %(before = (:: | wc); after = ($$1:: | wc); opens = substr(::; 1..30))
-/old//section <=>? /new//section[::lemma = _::lemma] | %(section = ::lemma; before = (:: | wc); after = ($$1:: | wc))
-/new//section <=>? /old//section[::lemma = _::lemma] | [!$$1] | ::lemma
-/old//unordered-item <=>? /new//unordered-item[:: = _::] | [!$$1] | ::
-/new//unordered-item <=>? /old//unordered-item[:: = _::] | [!$$1] | ::
+/f/hosts/* <=>? /m/*[::host = $$0::name] | %(::name; $$1::cpu)
+/f/hosts/* <=>? /m/*[::host = $$0::name] | [!$$1] | %(::name; ::tier)
+//*<function>[!<-definition]:name
+/* | %(draft = :name; words = (:: | wc); paragraphs = (//paragraph @| count))
+/old//paragraph <=> /new//paragraph[:: = $$0::] @| count
+/old//paragraph <=>? /new//paragraph[:: = $$0::] | [!$$1] | :: | substr(1..50)
+/new//paragraph <=>? /old//paragraph[:: = $$0::] | [!$$1] | :: | substr(1..50)
+/old//paragraph <=> /new//paragraph[:: != $$0:: && substr(::; 1..30) = substr(_::; 1..30)] | %(before = (:: | wc); after = ($$1:: | wc); opens = substr(::; 1..30))
+/old//section <=>? /new//section[::lemma = $$0::lemma] | %(section = ::lemma; before = (:: | wc); after = ($$1:: | wc))
+/new//section <=>? /old//section[::lemma = $$0::lemma] | [!$$1] | ::lemma
+/old//unordered-item <=>? /new//unordered-item[:: = $$0::] | [!$$1] | ::
+/new//unordered-item <=>? /old//unordered-item[:: = $$0::] | [!$$1] | ::
 /idx/* | .f(::find) | %(entry = ::entry; tales = (^/book//section[!/section] | [:: *= $.f] | ::lemma @| join(", "))) | [:tales != ""] @| sort_by(lower(:entry))
 /idx/* | .f(::find) | %(entry = ::entry; n = (^/book//section[!/section] | [:: *= $.f] @| count)) | [:n = 0]
 /idx/* | .f(::find) | %(entry = ::entry; principal = (^/book//section[!/section] | [(//paragraph | [:: *= $.f] @| count) >= 5] | ::lemma @| join(", "))) | [:principal != ""] @| sort_by(lower(:entry))
@@ -484,7 +484,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /* | .n(//token<word> @| count) | .fx(//token[::lower = "said"] @| count) | //token[::lower = "said"]>token<word>::lower @| group(y = $_; n = $.n; fx = $.fx) | count | [$_ >= 5] | .fxy | .fy(^//token[::lower = $.y] @| count) | %(y = $.y; fxy = $.fxy; fy = $.fy; mi = (mi($.fxy; $.fx; $.fy; $.n) | round(2)); t = (t_score($.fxy; $.fx; $.fy; $.n) | round(2)); dice = (log_dice($.fxy; $.fx; $.fy) | round(2))) @| top(5; :dice)
 /* | .n(//token<word> @| count) | .fx(//token[::lower = "tom"] @| count) | //token[::lower = "tom"]>token<word>::lower @| group(y = $_; n = $.n; fx = $.fx) | count | [$_ >= 5] | .fxy | .fy(^//token[::lower = $.y] @| count) | %(y = $.y; fxy = $.fxy; fy = $.fy; mi = (mi($.fxy; $.fx; $.fy; $.n) | round(2)); t = (t_score($.fxy; $.fx; $.fy; $.n) | round(2)); dice = (log_dice($.fxy; $.fx; $.fy) | round(2))) @| top(5; :t)
 = log_dice(25; 689; 32) | round(2)
-//section[::lemma = "ВЫСТРЕЛ"]/paragraph[1]/sentence[1]/token | %(form = ::; ::class; n = ::::n) @| [..6]
+//section[::lemma = "ВЫСТРЕЛ"]/paragraph[1]/sentence[1]/token | %(form = ::; ::class; n = :::n) @| [..6]
 //section[::lemma = "ВЫСТРЕЛ"]/paragraph[3]/sentence[1]/token<word>[1] | %(word = ::; next = >token::; after = (>token){2}::)
 //section[!/section]//token<word>[>token<word>] | "${::lower} ${>token::lower}" @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(5; :n)
 //section[::lemma = "СТАНЦИОННЫЙ СМОТРИТЕЛЬ"]//token<word>[>token<word>] | "${::lower} ${>token::lower}" @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(3; :n)
@@ -493,7 +493,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //section[!/section]//token<word>[>token<word>][(>token){2}[::class = "word"]] | "${::lower} ${>token::lower} ${(>token){2}::lower}" @| group(trigram = $_) | count | %($.trigram; n = $_) @| top(5; :n)
 //section[!/section]//token[::lower = "сильвио"] | \\?sentence/token<word> | ::lower | [cc($_) > 3] | [$_ != "сильвио"] @| group(w = $_) | count | %($.w; n = $_) @| top(6; :n)
 //section[!/section] | :: | lower | s/[^\p{L}-]/ /g | ngrams(2) @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(5; :n)
-//section[::lemma = "CHAPTER I"]/paragraph[9]/sentence[1]/token | %(form = ::; ::class; n = ::::n) @| [..6]
+//section[::lemma = "CHAPTER I"]/paragraph[9]/sentence[1]/token | %(form = ::; ::class; n = :::n) @| [..6]
 //section[::lemma = "CHAPTER I"]/paragraph[9]/sentence[1]/token<word>[1] | %(word = ::; next = >token::; after = (>token){2}::)
 //section[::lemma *= "CHAPTER"]//token<word>[>token<word>] | "${::lower} ${>token::lower}" @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(5; :n)
 //section[::lemma = "CHAPTER I"]//token<word>[>token<word>] | "${::lower} ${>token::lower}" @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(3; :n)
@@ -502,64 +502,64 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //section[::lemma *= "CHAPTER"]//token<word>[>token<word>][(>token){2}[::class = "word"]] | "${::lower} ${>token::lower} ${(>token){2}::lower}" @| group(trigram = $_) | count | %($.trigram; n = $_) @| top(5; :n)
 //section[::lemma *= "CHAPTER"]//token[::lower = "huck"] | \\?sentence/token<word> | ::lower | [!($_ = "the" || $_ = "and" || $_ = "a" || $_ = "to" || $_ = "of" || $_ = "he" || $_ = "was" || $_ = "it" || $_ = "in" || $_ = "that" || $_ = "his" || $_ = "i" || $_ = "you" || $_ = "had" || $_ = "with" || $_ = "huck" || $_ = "huckleberry" || $_ = "huck’s")] @| group(w = $_) | count | %($.w; n = $_) @| top(6; :n)
 //section[::lemma *= "CHAPTER"] | :: | lower | s/[^\p{L}’]/ /g | ngrams(2) @| group(bigram = $_) | count | %($.bigram; n = $_) @| top(5; :n)
-/crew/0 | %(prop = ::name; core = :::name)
+/crew/0 | %(prop = ::name; core = :name)
 //article::id
-//p[1] | %(text = ::; classes = ::::classes)
-//merge | %(:::name; construct = ::::construct; kind = ::::kind; line = ::::start-line)
-//merge[::construct = "function"]:::name
-//*<heading>:::name
+//p[1] | %(text = ::; classes = :::classes)
+//merge | %(:name; construct = :::construct; kind = :::kind; line = :::start-line)
+//merge[::construct = "function"]:name
+//*<heading>:name
 /crew/0 | json
-/* | %(folder = :::name; files = (//*<file> @| count); size = (//*<file> | ::size @| sum))
-/new//*<file> <=>? /old//*<file>[:::name = _:::name] | [!$$1] | :::name
-/new//*<file> | .d(\:::name) | . <=>? /old//*<file>[:::name = _:::name][\:::name = $.d] | [!$$1] | %(in = $.d; :::name)
-/old//*<file> | .d(\:::name) | . <=>? /new//*<file>[:::name = _:::name][\:::name = $.d] | [!$$1] | %(in = $.d; :::name)
-/new//*<file> | .d(\:::name) | . <=> /old//*<file>[:::name = _:::name][\:::name = $.d][::size != _::size] | %(in = $.d; :::name; new = ::size; old = $$1::size)
-/new//*<file> | .d(\:::name) | . <=> /old//*<file>[:::name = _:::name][\:::name = $.d][::modified < _::modified] | %(:::name; new = ::modified; old = $$1::modified)
-/new//*<file> | .d(\:::name) | . <=> /old//*<file>[:::name = _:::name][\:::name = $.d][::size = _::size][::modified = _::modified][(:: | sha256) != (_:: | sha256)] | %(in = $.d; :::name; ::size)
-/new//*<file> | .d(\:::name) | . <=> /old//*<file>[:::name = _:::name][\:::name = $.d][(:: | sha256) = (_:: | sha256)] @| count
-/* | %(who = :::name; chapters = (//section[!/section] @| count); paras = (//paragraph @| count); sents = (//sentence @| count); words = (//token<word> @| count))
-/* | %(who = :::name; mean = ((//sentence | (/token<word> @| count) @| mean) | round(1)); median = (//sentence | (/token<word> @| count) @| median); sd = ((//sentence | (/token<word> @| count) @| std) | round(1)); p90 = (//sentence | (/token<word> @| count) @| percentile(90) | round(1)); max = (//sentence | (/token<word> @| count) @| max))
-/* | %(who = :::name; longest = (//sentence | %(n = (/token<word> @| count); text = substr(::; 1..60)) @| top(1; :n)))
-/* | .types(//token<word>::lower @| unique @| count) | %(who = :::name; wlen = ((//token<word>:: | cc @| mean) | round(2)); types = $.types; ttr = ($.types div (//token<word> @| count) | round(3)); hapax = ((//token<word>::lower @| group(w = $_) | count | [$_ = 1] @| count) div $.types | round(2)))
-/* | .who(:::name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) @| top(6; :n)
-/* | .who(:::name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "толстой"] @| top(5; :n)
-/* | .n(//token<word> @| count) | %(who = :::name; i = ((//token[::lower = "и"] @| count) * 1000 div $.n | round(1)); v = ((//token[::lower = "в"] @| count) * 1000 div $.n | round(1)); ne = ((//token[::lower = "не"] @| count) * 1000 div $.n | round(1)); ya = ((//token[::lower = "я"] @| count) * 1000 div $.n | round(1)); on = ((//token[::lower = "он"] @| count) * 1000 div $.n | round(1)); ona = ((//token[::lower = "она"] @| count) * 1000 div $.n | round(1)); ochen = ((//token[::lower = "очень"] @| count) * 1000 div $.n | round(1)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(who = $.r:who; w = $.r:w; z = ($_ | round(2))) @| [..8]
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; d = ($.r:who = "пушкин" ? $_ : null); t = ($.r:who = "толстой" ? $_ : null); l = ($.r:who = "лермонтов" ? $_ : null); u = ($.r:who = "гончаров" ? $_ : null)) @| group(w = $_:w) | %(dt = abs(($_ | :d @| max) - ($_ | :t @| max)); dl = abs(($_ | :d @| max) - ($_ | :l @| max)); du = abs(($_ | :d @| max) - ($_ | :u @| max)); tl = abs(($_ | :t @| max) - ($_ | :l @| max)); tu = abs(($_ | :t @| max) - ($_ | :u @| max)); lu = abs(($_ | :l @| max) - ($_ | :u @| max))) @| group(all = 1) | %(пушкин_толстой = (($_ | :dt @| mean) | round(2)); пушкин_лермонтов = (($_ | :dl @| mean) | round(2)); пушкин_гончаров = (($_ | :du @| mean) | round(2)); толстой_лермонтов = (($_ | :tl @| mean) | round(2)); толстой_гончаров = (($_ | :tu @| mean) | round(2)); лермонтов_гончаров = (($_ | :lu @| mean) | round(2)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; d = ($.r:who = "пушкин" ? $_ : null); t = ($.r:who = "толстой" ? $_ : null); l = ($.r:who = "лермонтов" ? $_ : null); u = ($.r:who = "гончаров" ? $_ : null)) @| group(w = $_:w) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| delta(:d; :t)) | round(2)); пушкин_лермонтов = (($_ @| delta(:d; :l)) | round(2)); пушкин_гончаров = (($_ @| delta(:d; :u)) | round(2)); толстой_лермонтов = (($_ @| delta(:t; :l)) | round(2)); толстой_гончаров = (($_ @| delta(:t; :u)) | round(2)); лермонтов_гончаров = (($_ @| delta(:l; :u)) | round(2)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | %(w = $_:w; d = ($_:who = "пушкин" ? $_:f : null); t = ($_:who = "толстой" ? $_:f : null); l = ($_:who = "лермонтов" ? $_:f : null); u = ($_:who = "гончаров" ? $_:f : null)) @| group(w = $_:w) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| cosine(:d; :t)) | round(4)); пушкин_лермонтов = (($_ @| cosine(:d; :l)) | round(4)); пушкин_гончаров = (($_ @| cosine(:d; :u)) | round(4)); толстой_лермонтов = (($_ @| cosine(:t; :l)) | round(4)); толстой_гончаров = (($_ @| cosine(:t; :u)) | round(4)); лермонтов_гончаров = (($_ @| cosine(:l; :u)) | round(4)))
-/* | .who(:::name) | .all(^//token<word> @| count) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "пушкин" ? $_ : 0); na = ($.who = "пушкин" ? $.tot : 0); b = ($.who != "пушкин" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "пушкин" ? $_ : 0); na = ($.who = "пушкин" ? $.tot : 0); b = ($.who != "пушкин" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "толстой" ? $_ : 0); na = ($.who = "толстой" ? $.tot : 0); b = ($.who != "толстой" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "лермонтов" ? $_ : 0); na = ($.who = "лермонтов" ? $.tot : 0); b = ($.who != "лермонтов" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "гончаров" ? $_ : 0); na = ($.who = "гончаров" ? $.tot : 0); b = ($.who != "гончаров" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .h(//token<word>::lower @| group(w = $_) | count @| entropy) | .k(//token<word>::lower @| group(w = $_) | count @| yule_k) | .m(//token<word>::lower @| mtld) | %(who = $.who; entropy = ($.h | round(2)); yule_k = ($.k | round(1)); mtld = ($.m | round(1)))
-/* | .n(//token @| count) | %(who = :::name; semi = ((//token[:: = ";"] @| count) * 1000 div $.n | round(1)); colon = ((//token[:: = ":"] @| count) * 1000 div $.n | round(1)); dash = ((//token[:: = "—"] @| count) * 1000 div $.n | round(1)); bang = ((//token[:: = "!"] @| count) * 1000 div $.n | round(1)); q = ((//token[:: = "?"] @| count) * 1000 div $.n | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.n | round(1)); dots = ((//token[:: = "…"] @| count) * 1000 div $.n | round(1)))
-/* | .n(//token<word> @| count) | %(who = :::name; hyphen = ((//token[:: = "-"] @| count) * 1000 div $.n | round(1)); slovoers = ((//token[:: = "с"][<token[:: = "-"]] @| count) * 1000 div $.n | round(2)); to = ((//token[:: = "то"][<token[:: = "-"]] @| count) * 1000 div $.n | round(1)))
-/* | .who(:::name) | //token<word>[<token[:: = "-"]] @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "пушкин"] @| top(5; :n)
+/* | %(folder = :name; files = (//*<file> @| count); size = (//*<file> | ::size @| sum))
+/new//*<file> <=>? /old//*<file>[:name = $$0:name] | [!$$1] | :name
+/new//*<file> | .d(\:name) | . <=>? /old//*<file>[:name = $$0:name][\:name = $.d] | [!$$1] | %(in = $.d; :name)
+/old//*<file> | .d(\:name) | . <=>? /new//*<file>[:name = $$0:name][\:name = $.d] | [!$$1] | %(in = $.d; :name)
+/new//*<file> | .d(\:name) | . <=> /old//*<file>[:name = $$0:name][\:name = $.d][::size != $$0::size] | %(in = $.d; :name; new = ::size; old = $$1::size)
+/new//*<file> | .d(\:name) | . <=> /old//*<file>[:name = $$0:name][\:name = $.d][::modified < $$0::modified] | %(:name; new = ::modified; old = $$1::modified)
+/new//*<file> | .d(\:name) | . <=> /old//*<file>[:name = $$0:name][\:name = $.d][::size = $$0::size][::modified = $$0::modified][(:: | sha256) != (_:: | sha256)] | %(in = $.d; :name; ::size)
+/new//*<file> | .d(\:name) | . <=> /old//*<file>[:name = $$0:name][\:name = $.d][(:: | sha256) = (_:: | sha256)] @| count
+/* | %(who = :name; chapters = (//section[!/section] @| count); paras = (//paragraph @| count); sents = (//sentence @| count); words = (//token<word> @| count))
+/* | %(who = :name; mean = ((//sentence | (/token<word> @| count) @| mean) | round(1)); median = (//sentence | (/token<word> @| count) @| median); sd = ((//sentence | (/token<word> @| count) @| std) | round(1)); p90 = (//sentence | (/token<word> @| count) @| percentile(90) | round(1)); max = (//sentence | (/token<word> @| count) @| max))
+/* | %(who = :name; longest = (//sentence | %(n = (/token<word> @| count); text = substr(::; 1..60)) @| top(1; :n)))
+/* | .types(//token<word>::lower @| unique @| count) | %(who = :name; wlen = ((//token<word>:: | cc @| mean) | round(2)); types = $.types; ttr = ($.types div (//token<word> @| count) | round(3)); hapax = ((//token<word>::lower @| group(w = $_) | count | [$_ = 1] @| count) div $.types | round(2)))
+/* | .who(:name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) @| top(6; :n)
+/* | .who(:name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "толстой"] @| top(5; :n)
+/* | .n(//token<word> @| count) | %(who = :name; i = ((//token[::lower = "и"] @| count) * 1000 div $.n | round(1)); v = ((//token[::lower = "в"] @| count) * 1000 div $.n | round(1)); ne = ((//token[::lower = "не"] @| count) * 1000 div $.n | round(1)); ya = ((//token[::lower = "я"] @| count) * 1000 div $.n | round(1)); on = ((//token[::lower = "он"] @| count) * 1000 div $.n | round(1)); ona = ((//token[::lower = "она"] @| count) * 1000 div $.n | round(1)); ochen = ((//token[::lower = "очень"] @| count) * 1000 div $.n | round(1)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(who = $.r:who; w = $.r:w; z = ($_ | round(2))) @| [..8]
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; d = ($.r:who = "пушкин" ? $_ : null); t = ($.r:who = "толстой" ? $_ : null); l = ($.r:who = "лермонтов" ? $_ : null); u = ($.r:who = "гончаров" ? $_ : null)) @| group(w = $_:w) | %(dt = abs(($_ | :d @| max) - ($_ | :t @| max)); dl = abs(($_ | :d @| max) - ($_ | :l @| max)); du = abs(($_ | :d @| max) - ($_ | :u @| max)); tl = abs(($_ | :t @| max) - ($_ | :l @| max)); tu = abs(($_ | :t @| max) - ($_ | :u @| max)); lu = abs(($_ | :l @| max) - ($_ | :u @| max))) @| group(all = 1) | %(пушкин_толстой = (($_ | :dt @| mean) | round(2)); пушкин_лермонтов = (($_ | :dl @| mean) | round(2)); пушкин_гончаров = (($_ | :du @| mean) | round(2)); толстой_лермонтов = (($_ | :tl @| mean) | round(2)); толстой_гончаров = (($_ | :tu @| mean) | round(2)); лермонтов_гончаров = (($_ | :lu @| mean) | round(2)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; d = ($.r:who = "пушкин" ? $_ : null); t = ($.r:who = "толстой" ? $_ : null); l = ($.r:who = "лермонтов" ? $_ : null); u = ($.r:who = "гончаров" ? $_ : null)) @| group(w = $_:w) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| delta(:d; :t)) | round(2)); пушкин_лермонтов = (($_ @| delta(:d; :l)) | round(2)); пушкин_гончаров = (($_ @| delta(:d; :u)) | round(2)); толстой_лермонтов = (($_ @| delta(:t; :l)) | round(2)); толстой_гончаров = (($_ @| delta(:t; :u)) | round(2)); лермонтов_гончаров = (($_ @| delta(:l; :u)) | round(2)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | %(w = $_:w; d = ($_:who = "пушкин" ? $_:f : null); t = ($_:who = "толстой" ? $_:f : null); l = ($_:who = "лермонтов" ? $_:f : null); u = ($_:who = "гончаров" ? $_:f : null)) @| group(w = $_:w) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| cosine(:d; :t)) | round(4)); пушкин_лермонтов = (($_ @| cosine(:d; :l)) | round(4)); пушкин_гончаров = (($_ @| cosine(:d; :u)) | round(4)); толстой_лермонтов = (($_ @| cosine(:t; :l)) | round(4)); толстой_гончаров = (($_ @| cosine(:t; :u)) | round(4)); лермонтов_гончаров = (($_ @| cosine(:l; :u)) | round(4)))
+/* | .who(:name) | .all(^//token<word> @| count) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "пушкин" ? $_ : 0); na = ($.who = "пушкин" ? $.tot : 0); b = ($.who != "пушкин" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "пушкин" ? $_ : 0); na = ($.who = "пушкин" ? $.tot : 0); b = ($.who != "пушкин" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "толстой" ? $_ : 0); na = ($.who = "толстой" ? $.tot : 0); b = ($.who != "толстой" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "лермонтов" ? $_ : 0); na = ($.who = "лермонтов" ? $.tot : 0); b = ($.who != "лермонтов" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "гончаров" ? $_ : 0); na = ($.who = "гончаров" ? $.tot : 0); b = ($.who != "гончаров" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .h(//token<word>::lower @| group(w = $_) | count @| entropy) | .k(//token<word>::lower @| group(w = $_) | count @| yule_k) | .m(//token<word>::lower @| mtld) | %(who = $.who; entropy = ($.h | round(2)); yule_k = ($.k | round(1)); mtld = ($.m | round(1)))
+/* | .n(//token @| count) | %(who = :name; semi = ((//token[:: = ";"] @| count) * 1000 div $.n | round(1)); colon = ((//token[:: = ":"] @| count) * 1000 div $.n | round(1)); dash = ((//token[:: = "—"] @| count) * 1000 div $.n | round(1)); bang = ((//token[:: = "!"] @| count) * 1000 div $.n | round(1)); q = ((//token[:: = "?"] @| count) * 1000 div $.n | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.n | round(1)); dots = ((//token[:: = "…"] @| count) * 1000 div $.n | round(1)))
+/* | .n(//token<word> @| count) | %(who = :name; hyphen = ((//token[:: = "-"] @| count) * 1000 div $.n | round(1)); slovoers = ((//token[:: = "с"][<token[:: = "-"]] @| count) * 1000 div $.n | round(2)); to = ((//token[:: = "то"][<token[:: = "-"]] @| count) * 1000 div $.n | round(1)))
+/* | .who(:name) | //token<word>[<token[:: = "-"]] @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "пушкин"] @| top(5; :n)
 //section[!/section] | %(chapter = ::lemma; words = (//token<word> @| count); mean = ((//sentence | (/token<word> @| count) @| mean) | round(1))) @| top(3; :mean)
-/* | %(who = :::name; speeches = (//dialogue-line @| count); spoken = ((//dialogue-line//token<word> @| count) div (//token<word> @| count) | round(2)); speech = ((//dialogue-line//sentence | (/token<word> @| count) @| mean) | round(1)); narration = ((//paragraph//sentence | (/token<word> @| count) @| mean) | round(1)))
-/* | %(who = :::name; unknown = ((//dialogue-line[::prosopon = "неизвестно"] @| count) div (//dialogue-line @| count) | round(2)))
+/* | %(who = :name; speeches = (//dialogue-line @| count); spoken = ((//dialogue-line//token<word> @| count) div (//token<word> @| count) | round(2)); speech = ((//dialogue-line//sentence | (/token<word> @| count) @| mean) | round(1)); narration = ((//paragraph//sentence | (/token<word> @| count) @| mean) | round(1)))
+/* | %(who = :name; unknown = ((//dialogue-line[::prosopon = "неизвестно"] @| count) div (//dialogue-line @| count) | round(2)))
 /лица/* | .id(::id) | %(::name; speeches = (^/книга//dialogue-line[::prosopon = $.id] @| count); words = (^/книга//dialogue-line[::prosopon = $.id]//token<word> @| count)) @| top(5; :words)
 /лица/* | .id(::id) | %(::name; speeches = (^/книга//dialogue-line[::prosopon = $.id] @| count); words = (^/книга//dialogue-line[::prosopon = $.id]//token<word> @| count)) @| top(3; :words)
 /лица/* | .id(::id) | %(::name; named = (^/книга//annotation<persname>[::prosopon = $.id] @| count); speeches = (^/книга//dialogue-line[::prosopon = $.id] @| count)) @| top(5; :named)
 /лица/* | .id(::id) | %(::name; words = (^/книга//dialogue-line[::prosopon = $.id]//token<word> @| count); sentence = ((^/книга//dialogue-line[::prosopon = $.id]//sentence | (/token<word> @| count) @| mean) | round(1))) @| top(3; :words)
-/* | %(who = :::name; chapters = (//section[::lemma == (/^chapter/i)] @| count); paras = (//paragraph @| count); sents = (//sentence @| count); words = (//token<word> @| count))
-/* | .who(:::name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "austen"] @| top(5; :n)
-/* | .n(//token<word> @| count) | %(who = :::name; the = ((//token[::lower = "the"] @| count) * 1000 div $.n | round(1)); and = ((//token[::lower = "and"] @| count) * 1000 div $.n | round(1)); of = ((//token[::lower = "of"] @| count) * 1000 div $.n | round(1)); i = ((//token[::lower = "i"] @| count) * 1000 div $.n | round(1)); he = ((//token[::lower = "he"] @| count) * 1000 div $.n | round(1)); she = ((//token[::lower = "she"] @| count) * 1000 div $.n | round(1)); very = ((//token[::lower = "very"] @| count) * 1000 div $.n | round(1)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; t = ($.r:who = "twain" ? $_ : null); c = ($.r:who = "conrad" ? $_ : null); l = ($.r:who = "london" ? $_ : null); a = ($.r:who = "austen" ? $_ : null)) @| group(w = $_:w) | %(tc = abs(($_ | :t @| max) - ($_ | :c @| max)); tl = abs(($_ | :t @| max) - ($_ | :l @| max)); ta = abs(($_ | :t @| max) - ($_ | :a @| max)); cl = abs(($_ | :c @| max) - ($_ | :l @| max)); ca = abs(($_ | :c @| max) - ($_ | :a @| max)); la = abs(($_ | :l @| max) - ($_ | :a @| max))) @| group(all = 1) | %(twain_conrad = (($_ | :tc @| mean) | round(2)); twain_london = (($_ | :tl @| mean) | round(2)); twain_austen = (($_ | :ta @| mean) | round(2)); conrad_london = (($_ | :cl @| mean) | round(2)); conrad_austen = (($_ | :ca @| mean) | round(2)); london_austen = (($_ | :la @| mean) | round(2)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; t = ($.r:who = "twain" ? $_ : null); c = ($.r:who = "conrad" ? $_ : null); l = ($.r:who = "london" ? $_ : null); a = ($.r:who = "austen" ? $_ : null)) @| group(w = $_:w) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| delta(:t; :c)) | round(2)); twain_london = (($_ @| delta(:t; :l)) | round(2)); twain_austen = (($_ @| delta(:t; :a)) | round(2)); conrad_london = (($_ @| delta(:c; :l)) | round(2)); conrad_austen = (($_ @| delta(:c; :a)) | round(2)); london_austen = (($_ @| delta(:l; :a)) | round(2)))
-/* | .who(:::name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | %(w = $_:w; t = ($_:who = "twain" ? $_:f : null); c = ($_:who = "conrad" ? $_:f : null); l = ($_:who = "london" ? $_:f : null); a = ($_:who = "austen" ? $_:f : null)) @| group(w = $_:w) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| cosine(:t; :c)) | round(4)); twain_london = (($_ @| cosine(:t; :l)) | round(4)); twain_austen = (($_ @| cosine(:t; :a)) | round(4)); conrad_london = (($_ @| cosine(:c; :l)) | round(4)); conrad_austen = (($_ @| cosine(:c; :a)) | round(4)); london_austen = (($_ @| cosine(:l; :a)) | round(4)))
-/* | .who(:::name) | .all(^//token<word> @| count) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "austen" ? $_ : 0); na = ($.who = "austen" ? $.tot : 0); b = ($.who != "austen" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "austen" ? $_ : 0); na = ($.who = "austen" ? $.tot : 0); b = ($.who != "austen" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "twain" ? $_ : 0); na = ($.who = "twain" ? $.tot : 0); b = ($.who != "twain" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "conrad" ? $_ : 0); na = ($.who = "conrad" ? $.tot : 0); b = ($.who != "conrad" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .who(:::name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "london" ? $_ : 0); na = ($.who = "london" ? $.tot : 0); b = ($.who != "london" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
-/* | .n(//token @| count) | %(who = :::name; semi = ((//token[:: = ";"] @| count) * 1000 div $.n | round(1)); colon = ((//token[:: = ":"] @| count) * 1000 div $.n | round(1)); dash = ((//token[:: = "—"] @| count) * 1000 div $.n | round(1)); bang = ((//token[:: = "!"] @| count) * 1000 div $.n | round(1)); q = ((//token[:: = "?"] @| count) * 1000 div $.n | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.n | round(1)))
-/* | .n(//token<word> @| count) | %(who = :::name; contractions = ((//token<word>[:: *= "’"][!(:: == *"’s")] @| count) * 1000 div $.n | round(1)))
-/* | .who(:::name) | //token<word>[:: *= "’"][!(:: == *"’s")] @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "austen"] @| top(4; :n)
+/* | %(who = :name; chapters = (//section[::lemma == (/^chapter/i)] @| count); paras = (//paragraph @| count); sents = (//sentence @| count); words = (//token<word> @| count))
+/* | .who(:name) | //token<word> @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "austen"] @| top(5; :n)
+/* | .n(//token<word> @| count) | %(who = :name; the = ((//token[::lower = "the"] @| count) * 1000 div $.n | round(1)); and = ((//token[::lower = "and"] @| count) * 1000 div $.n | round(1)); of = ((//token[::lower = "of"] @| count) * 1000 div $.n | round(1)); i = ((//token[::lower = "i"] @| count) * 1000 div $.n | round(1)); he = ((//token[::lower = "he"] @| count) * 1000 div $.n | round(1)); she = ((//token[::lower = "she"] @| count) * 1000 div $.n | round(1)); very = ((//token[::lower = "very"] @| count) * 1000 div $.n | round(1)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; t = ($.r:who = "twain" ? $_ : null); c = ($.r:who = "conrad" ? $_ : null); l = ($.r:who = "london" ? $_ : null); a = ($.r:who = "austen" ? $_ : null)) @| group(w = $_:w) | %(tc = abs(($_ | :t @| max) - ($_ | :c @| max)); tl = abs(($_ | :t @| max) - ($_ | :l @| max)); ta = abs(($_ | :t @| max) - ($_ | :a @| max)); cl = abs(($_ | :c @| max) - ($_ | :l @| max)); ca = abs(($_ | :c @| max) - ($_ | :a @| max)); la = abs(($_ | :l @| max) - ($_ | :a @| max))) @| group(all = 1) | %(twain_conrad = (($_ | :tc @| mean) | round(2)); twain_london = (($_ | :tl @| mean) | round(2)); twain_austen = (($_ | :ta @| mean) | round(2)); conrad_london = (($_ | :cl @| mean) | round(2)); conrad_austen = (($_ | :ca @| mean) | round(2)); london_austen = (($_ | :la @| mean) | round(2)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | .r | :f @| zscore($.r:w) | %(w = $.r:w; t = ($.r:who = "twain" ? $_ : null); c = ($.r:who = "conrad" ? $_ : null); l = ($.r:who = "london" ? $_ : null); a = ($.r:who = "austen" ? $_ : null)) @| group(w = $_:w) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| delta(:t; :c)) | round(2)); twain_london = (($_ @| delta(:t; :l)) | round(2)); twain_austen = (($_ @| delta(:t; :a)) | round(2)); conrad_london = (($_ @| delta(:c; :l)) | round(2)); conrad_austen = (($_ @| delta(:c; :a)) | round(2)); london_austen = (($_ @| delta(:l; :a)) | round(2)))
+/* | .who(:name) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; w = $_) | count | %(who = $.who; w = $.w; f = ($_ * 1000 div $.tot); n = $_) @| group(w = $_:w) | [($_ @| count) = 4] @| top(100; ($_ | :n @| sum)) @| ungroup | %(w = $_:w; t = ($_:who = "twain" ? $_:f : null); c = ($_:who = "conrad" ? $_:f : null); l = ($_:who = "london" ? $_:f : null); a = ($_:who = "austen" ? $_:f : null)) @| group(w = $_:w) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| cosine(:t; :c)) | round(4)); twain_london = (($_ @| cosine(:t; :l)) | round(4)); twain_austen = (($_ @| cosine(:t; :a)) | round(4)); conrad_london = (($_ @| cosine(:c; :l)) | round(4)); conrad_austen = (($_ @| cosine(:c; :a)) | round(4)); london_austen = (($_ @| cosine(:l; :a)) | round(4)))
+/* | .who(:name) | .all(^//token<word> @| count) | .tot(//token<word> @| count) | //token<word>::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "austen" ? $_ : 0); na = ($.who = "austen" ? $.tot : 0); b = ($.who != "austen" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "austen" ? $_ : 0); na = ($.who = "austen" ? $.tot : 0); b = ($.who != "austen" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "twain" ? $_ : 0); na = ($.who = "twain" ? $.tot : 0); b = ($.who != "twain" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "conrad" ? $_ : 0); na = ($.who = "conrad" ? $.tot : 0); b = ($.who != "conrad" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .who(:name) | .all(^//token<word>[:: = ::lower] @| count) | .tot(//token<word>[:: = ::lower] @| count) | //token<word>[:: = ::lower]::lower @| group(who = $.who; tot = $.tot; all = $.all; w = $_) | count | %(w = $.w; a = ($.who = "london" ? $_ : 0); na = ($.who = "london" ? $.tot : 0); b = ($.who != "london" ? $_ : 0); nb = $.all) @| group(w = $_:w) | %(w = $.w; a = ($_ | :a @| sum); na = ($_ | :na @| max); b = ($_ | :b @| sum); nb = (($_ | :nb @| max) - ($_ | :na @| max))) | %(w = :w; a = :a; b = :b; g = (loglik(:a; :na; :b; :nb) | round(1))) @| top(6; :g)
+/* | .n(//token @| count) | %(who = :name; semi = ((//token[:: = ";"] @| count) * 1000 div $.n | round(1)); colon = ((//token[:: = ":"] @| count) * 1000 div $.n | round(1)); dash = ((//token[:: = "—"] @| count) * 1000 div $.n | round(1)); bang = ((//token[:: = "!"] @| count) * 1000 div $.n | round(1)); q = ((//token[:: = "?"] @| count) * 1000 div $.n | round(1)); quotes = ((//token<quote> @| count) * 1000 div $.n | round(1)))
+/* | .n(//token<word> @| count) | %(who = :name; contractions = ((//token<word>[:: *= "’"][!(:: == *"’s")] @| count) * 1000 div $.n | round(1)))
+/* | .who(:name) | //token<word>[:: *= "’"][!(:: == *"’s")] @| group(who = $.who; w = ::lower) | count | %(who = $.who; w = $.w; n = $_) | [:who = "austen"] @| top(4; :n)
 //section[::lemma == (/^chapter/i)] | %(chapter = ::lemma; words = (//token<word> @| count); mean = ((//sentence | (/token<word> @| count) @| mean) | round(1))) @| top(3; :mean)
-/* | %(who = :::name; unknown = ((//dialogue-line[::prosopon = "unknown"] @| count) div (//dialogue-line @| count) | round(2)))
+/* | %(who = :name; unknown = ((//dialogue-line[::prosopon = "unknown"] @| count) div (//dialogue-line @| count) | round(2)))
 /cast/* | .id(::id) | %(::name; speeches = (^/book//dialogue-line[::prosopon = $.id] @| count); words = (^/book//dialogue-line[::prosopon = $.id]//token<word> @| count)) @| top(5; :words)
 /cast/* | .id(::id) | %(::name; speeches = (^/book//dialogue-line[::prosopon = $.id] @| count); words = (^/book//dialogue-line[::prosopon = $.id]//token<word> @| count)) @| top(3; :words)
 /cast/* | .id(::id) | %(::name; named = (^/book//annotation<persname>[::prosopon = $.id] @| count); speeches = (^/book//dialogue-line[::prosopon = $.id] @| count)) @| top(5; :named)
@@ -569,7 +569,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //книга | %(::название; выдач = (<--(::книга) @| count)) @| top(3; :выдач)
 //жанр | %(жанр = ::; выдач = (<-книга<--(::книга) @| count))
 //полка | %(полка = ::; книг = (<-книга @| count))
-/* | :::name
+/* | :name
 //reader | %(reader = ::; loans = (<--(::reader) @| count))
 //reader[:: = "Polly"]<--(::reader)::book-->::title
 //book | %(::title; loans = (<--(::book) @| count)) @| top(3; :loans)
@@ -581,18 +581,18 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //paragraph | :: | sentences | [$_ == (/(.{0,30})гусар(.{0,30})/)] | %(left = $1; right = $2) @| [..5]
 //paragraph | :: | sentences | [$_ == (/(гусар\w*)/)] | $1 @| group(f = $_) | %(f = $.f; n = ($_ @| count)) @| top(8; :n)
 //paragraph | :: | sentences | [$_ == (/\bгусар\b/)] @| count
-//paragraph[:: *= "гусар"] | %(at = :::index; text = substr(::; 1..50)) @| first
+//paragraph[:: *= "гусар"] | %(at = :index; text = substr(::; 1..50)) @| first
 //paragraph[:: == (/^[А-ЯЁ][А-ЯЁ -]+$/)] @| count
-//paragraph[:: *= "гусар"] | .i(:::index) | %(tale = (^//paragraph[:: == (/^[А-ЯЁ][А-ЯЁ -]+$/)] | [:::index < $.i] | :: @| last); text = substr(::; 1..50)) @| first
+//paragraph[:: *= "гусар"] | .i(:index) | %(tale = (^//paragraph[:: == (/^[А-ЯЁ][А-ЯЁ -]+$/)] | [:index < $.i] | :: @| last); text = substr(::; 1..50)) @| first
 //paragraph[:: *= "гусар"] | %(tale = \\?section::lemma; text = substr(::; 1..50)) @| first
 //section[:: *= "гусар"][!/section] | %(tale = ::lemma; n = (//paragraph[:: *= "гусар"] @| count)) @| top(3; :n)
 //section[::lemma = "СТАНЦИОННЫЙ СМОТРИТЕЛЬ"]//paragraph | :: | sentences | [$_ *= "гусар"] | substr(1..60) @| [..4]
 //paragraph[:: *= "whitewash"] @| count
 //paragraph | :: | sentences | [$_ *= "whitewash"] @| count
 //paragraph | :: | sentences | [$_ == (/(.{0,30})whitewash(.{0,30})/)] | %(left = $1; right = $2) @| [..5]
-//paragraph[:: *= "Injun Joe"] | %(at = :::index; text = substr(::; 1..50)) @| first
+//paragraph[:: *= "Injun Joe"] | %(at = :index; text = substr(::; 1..50)) @| first
 //paragraph[:: == (/^CHAPTER [IVXL]+$/)] @| count
-//paragraph[:: *= "Injun Joe"] | .i(:::index) | %(chapter = (^//paragraph[:: == (/^CHAPTER [IVXL]+$/)] | [:::index < $.i] | :: @| last); text = substr(::; 1..50)) | [:chapter] @| first
+//paragraph[:: *= "Injun Joe"] | .i(:index) | %(chapter = (^//paragraph[:: == (/^CHAPTER [IVXL]+$/)] | [:index < $.i] | :: @| last); text = substr(::; 1..50)) | [:chapter] @| first
 //paragraph[:: *= "Injun Joe"] | %(chapter = \\?section::lemma; text = substr(::; 1..50)) @| first
 //section[:: *= "Injun Joe"][!/section] | %(chapter = ::lemma; n = (//paragraph[:: *= "Injun Joe"] @| count)) @| top(3; :n)
 //section[::lemma = "CHAPTER IX"]//paragraph | :: | sentences | [$_ *= "Injun Joe"] | substr(1..60) @| [..3]
@@ -612,14 +612,14 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 :: | s/\s+//g | cc
 = 2000 - (:: | cc)
 . | %(words = (:: | wc); chars = (:: | cc); sentences = (//paragraph | :: | sc @| sum); paragraphs = (//paragraph @| count); sections = (//section @| count))
-//* @| group(:::name) | count | .n | %.
+//* @| group(:name) | count | .n | %.
 //section | %(title = ::lemma; words = (:: | wc); chars = (:: | cc))
 //section[!/section][(:: | cc) > 350] | ::lemma
 //paragraph | %(words = (:: | wc); opens = substr(::; 1..30))
 //paragraph | :: | wc @| mean
 //unordered-item | %(item = ::; chars = (:: | cc))
 //paragraph | :: | cc @| sum
-/* | %(file = :::name; words = (:: | wc); chars = (:: | cc))
+/* | %(file = :name; words = (:: | wc); chars = (:: | cc))
 //section[!/section][(:: | cc) > 400] | ::lemma
 /* | %(::книга; выдано = (::выдано | strptime("%d %B %Y г."; ru-RU)))
 /*[2] | ::выдано | strptime("%d %b %Y г."; ru-RU)
@@ -646,14 +646,14 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /*[2] | ::lent | strptime("%b %d, %Y"; en) | strftime("%A, %e %B %Y"; fr)
 /*[2] | ::lent | strptime("%b %d, %Y"; en) | strftime("%A, %e %B %Y"; de)
 /*[2] | ::lent | strptime("%b %d, %Y"; en) | strftime("%Y年%B%d日 %A"; zh)
-/knigi/* <=> /avtory/*[::id = _::автор] | %(::название; автор = $$1::имя) @| [..3]
+/knigi/* <=> /avtory/*[::id = $$0::автор] | %(::название; автор = $$1::имя) @| [..3]
 //книга | %(::название; автор = (->автор::имя)) @| [..4]
 //книга[->автор::id = "гоголь"]::название
 //автор[::id = "толстой"]<-книга::название
 //автор | %(::имя; книг = (<-книга @| count))
 //книга[!->автор] | %(::название; ::автор)
 //книга[::id = "ревизор"]::автор-->::имя
-/books/* <=> /authors/*[::id = _::author] | %(::title; author = $$1::name) @| [..3]
+/books/* <=> /authors/*[::id = $$0::author] | %(::title; author = $$1::name) @| [..3]
 //book | %(::title; author = (->author::name)) @| [..4]
 //book[->author::language = "Greek"]::title
 //author[::id = "twain"]<-book::title
@@ -667,7 +667,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //книга<!раннее><!без-даты> @| count
 //книга<раннее || без-даты> @| count
 //книга<ранние-стихи>::название
-//книга | %(::название; traits = (:::traits | join(" "))) @| [..4]
+//книга | %(::название; traits = (:traits | join(" "))) @| [..4]
 //автор[<-книга<раннее>]::имя
 //книга @| count
 //book<classic>::title
@@ -677,27 +677,27 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //book<!classic><!undated> @| count
 //book<classic || undated> @| count
 //book<stage-classic>::title
-//book | %(::title; traits = (:::traits | join(" "))) @| [..4]
+//book | %(::title; traits = (:traits | join(" "))) @| [..4]
 //author[<-book<classic>]::name
 //book @| count
 /* | ::цена @| sum
 /* @| count
 /* | ::цена
 /* | %(::название; ::цена)
-^::::delimiter
-^::::decimal
+^:::delimiter
+^:::decimal
 = "1 234,56" | number(ru-RU)
 = "1.234,56" | number(de-DE)
 = "1,234.56" | number(en-US)
 /* | %(::название; ::цена) @| csv(";"; название; цена)
-^::::encoding
+^:::encoding
 /*[::цена > 12,50]::название
 /* | ::price @| sum
 /* | ::price
 /* | %(::title; ::price)
 /* | %(::title; ::price) @| csv(";"; title; price)
-^::::title
-^::::languages
+^:::title
+^:::languages
 //entry::lemma
 //entry[::lemma = "ПЕ́РО"]/sense | %(::taxis; text = ::)
 //entry[::lemma = "КНИ́ГА"]/sense @| count
@@ -736,7 +736,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //genre[:: = "novel"]<-book->author::name @| unique
 //author[::id = "shakespeare"]<-book->genre::
 //genre[<-book->author::language = "Greek"]::
-//* | :::name @| unique
+//* | :name @| unique
 //section | %(::title; stanzas = (//strophe @| count); lines = (//stichos @| count))
 //blockquote | %(::hypograph)
 //strophe | %(first = (/stichos[1]::); lines = (/stichos @| count))
@@ -744,108 +744,108 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 //sentence @| count
 //title::
 //author::
-^ | %(::::title; ::::author)
+^ | %(:::title; :::author)
 //book-title::
 //stanza @| count
 /onegin.fb2//stichos @| count
-/* | %(:::name; title = (//title::); author = (//author::))
+/* | %(:name; title = (//title::); author = (//author::))
 /kapitanskaya-dochka.fb2//section::title
-/* | %(:::name; sections = (//section @| count); paragraphs = (//paragraph @| count); lines = (//stichos @| count))
-/* | %(:::name; sentences = (//sentence @| count); tokens = (//token @| count))
-/* | %(:::name; hits = (//sentence[:: == *"господин"*] @| count))
-/*[//sentence[:: == *"бричк"*]]:::name
-//section[::title == "Глава"*] | %(book = (\:::name); ::title)
+/* | %(:name; sections = (//section @| count); paragraphs = (//paragraph @| count); lines = (//stichos @| count))
+/* | %(:name; sentences = (//sentence @| count); tokens = (//token @| count))
+/* | %(:name; hits = (//sentence[:: == *"господин"*] @| count))
+/*[//sentence[:: == *"бричк"*]]:name
+//section[::title == "Глава"*] | %(book = (\:name); ::title)
 //sentence | :: | lower | s/[^\p{L}]/ /g | words @| group(w = $_) | count | %($.w; n = $_) @| top(8; :n)
-/zametki/*[::"$ref" == "http"* || ::"$ref" == "urn:"*] | %(key = :::name; ref = ::"$ref")
+/zametki/*[::"$ref" == "http"* || ::"$ref" == "urn:"*] | %(key = :name; ref = ::"$ref")
 /zametki/skhema-->
 /zametki/skhema-->::description
 /zametki/isbn-->
 /zametki/isbn-->::publisher
-/zametki/* | %(key = :::name; lands = (-->))
-/notes/*[::"$ref" == "http"* || ::"$ref" == "urn:"*] | %(key = :::name; ref = ::"$ref")
+/zametki/* | %(key = :name; lands = (-->))
+/notes/*[::"$ref" == "http"* || ::"$ref" == "urn:"*] | %(key = :name; ref = ::"$ref")
 /notes/schema-->
 /notes/schema-->::description
 /notes/isbn-->
 /notes/isbn-->::publisher
-/notes/* | %(key = :::name; lands = (-->))
+/notes/* | %(key = :name; lands = (-->))
 //стихотворение | %(::заглавие; text = ::)
 //title | ::
 /title::
 //paragraph | ::
-/* | %(::subject; ::::encoding)
+/* | %(::subject; :::encoding)
 /*[::subject = "Krepost"] | ::
 /*[::subject = "Тулуп"] | %(::from; ::subject)
 //section::title
 //paragraph[3] | :: | substr(1..60)
 //paragraph[2] | ::
-/*<file> | %(:::name; ::::encoding)
-/* | %(:::name; ::::encoding)
+/*<file> | %(:name; :::encoding)
+/* | %(:name; :::encoding)
 //песнь | ::
 /*[::subject = "The fence"] | ::
 /*[::subject = "Побелка"] | %(::from; ::subject)
 //*.md
 //глава-*
-/черновики/*.md | :::name
-//(/^письмо-.*\.txt$/) | :::name
-//*<dir> | :::name
+/черновики/*.md | :name
+//(/^письмо-.*\.txt$/) | :name
+//*<dir> | :name
 //*<file> @| count
 //*<file> @| group(ext = ::extension) | count | %($.ext; n = $_) @| sort_by(:ext)
 //* @| count
 //.cache/*
-//*<hidden> | :::name
+//*<hidden> | :name
 //*<!hidden> @| count
 //chapter-*
-/drafts/*.md | :::name
-//(/^to-.*\.txt$/) | :::name
-//сканы/* | %(:::name; ::size)
-//*<file>[::size > 200kB] | :::name
-//*<file>[::size > 1MB] | %(:::name; size = (::size | convert("MB")))
-//*<file>[::size < 100B] | %(:::name; ::size)
-//*<file> @| top(3; ::size) | %(:::name; size = (::size | convert("kB")))
+/drafts/*.md | :name
+//(/^to-.*\.txt$/) | :name
+//сканы/* | %(:name; ::size)
+//*<file>[::size > 200kB] | :name
+//*<file>[::size > 1MB] | %(:name; size = (::size | convert("MB")))
+//*<file>[::size < 100B] | %(:name; ::size)
+//*<file> @| top(3; ::size) | %(:name; size = (::size | convert("kB")))
 //*<file> | ::size @| sum | convert("MB")
-//*<dir> | %(dir = :::name; files = (//*<file> @| count); size = (//*<file> | ::size @| sum | convert("kB")))
+//*<dir> | %(dir = :name; files = (//*<file> @| count); size = (//*<file> | ::size @| sum | convert("kB")))
 //*<file> @| group(ext = ::extension) | %($.ext; files = ($_ @| count); size = ($_ | ::size @| sum)) @| top(3; :size)
-//*<file>[::size > 100kB][::modified < 2025-06-01] | %(:::name; ::size; ::modified)
-//scans/* | %(:::name; ::size)
-//черновики/* | %(:::name; ::modified)
-//*<file>[::modified > now() - 3d] | %(:::name; ::modified)
+//*<file>[::size > 100kB][::modified < 2025-06-01] | %(:name; ::size; ::modified)
+//scans/* | %(:name; ::size)
+//черновики/* | %(:name; ::modified)
+//*<file>[::modified > now() - 3d] | %(:name; ::modified)
 //*<file>[::modified > now() - 1w] @| count
-//*<file>[::modified < 2025-06-01] | %(:::name; ::modified)
-//*<file>[::modified >= 2026-03-01][::modified < 2026-04-01] | :::name
-//*<file> @| top(3; ::modified) | %(:::name; ::modified)
-//*<file> @| bottom(2; ::modified) | %(:::name; ::modified)
-//*<file> | %(:::name; age = (now() - ::modified)) @| top(3; :age)
-//*<file>[::modified > ^//глава-01.md::modified] | :::name
+//*<file>[::modified < 2025-06-01] | %(:name; ::modified)
+//*<file>[::modified >= 2026-03-01][::modified < 2026-04-01] | :name
+//*<file> @| top(3; ::modified) | %(:name; ::modified)
+//*<file> @| bottom(2; ::modified) | %(:name; ::modified)
+//*<file> | %(:name; age = (now() - ::modified)) @| top(3; :age)
+//*<file>[::modified > ^//глава-01.md::modified] | :name
 //*<file> @| group(month = (::modified | isomonth)) | count | %($.month; n = $_) @| sort_by(:month)
-//*<dir> | %(dir = :::name; latest = (/*<file> | ::modified @| max))
-//drafts/* | %(:::name; ::modified)
-//*<file>[::modified > ^//chapter-01.md::modified] | :::name
-//*[:::name == *".md"] | %(file = :::name; sentences = (//sentence @| count); words = (//token<word> @| count))
+//*<dir> | %(dir = :name; latest = (/*<file> | ::modified @| max))
+//drafts/* | %(:name; ::modified)
+//*<file>[::modified > ^//chapter-01.md::modified] | :name
+//*[:name == *".md"] | %(file = :name; sentences = (//sentence @| count); words = (//token<word> @| count))
 //token<word> | ::lower @| group(word = $_) | count | %($.word; n = $_) @| top(3; :n)
 //token<word> | ::lower @| unique @| count
-//*[:::name == *".md"] | %(file = :::name; сильвио = (//token[::lower = "сильвио"] @| count))
-//sentence[//token[::lower = "пистолета"]] | %(file = (\\*[:::name == *".md"] | :::name); sentence = substr(::; 1..50))
-//*[:::name == *".md"] | %(file = :::name; longest = (//sentence | (//token<word> @| count) @| max))
-//*[:::name == *".md"] | %(file = :::name; tom = (//token[::lower = "tom"] @| count))
-//sentence[//token[::lower = "whitewash"]] | %(file = (\\*[:::name == *".md"] | :::name); sentence = substr(::; 1..50))
-//* | :::name | indent(:::depth - 1)
-//*<dir> | %(dir = :::name; files = (/*<file> @| count); newest = (/*<file> @| top(1; ::modified) | :::name); size = (/*<file> | ::size @| sum))
-//*<dir>[!/*] | :::name
-//*<symlink> | %(:::name; lands = (->* | :::name))
-//*<symlink>[!->*] | :::name
+//*[:name == *".md"] | %(file = :name; сильвио = (//token[::lower = "сильвио"] @| count))
+//sentence[//token[::lower = "пистолета"]] | %(file = (\\*[:name == *".md"] | :name); sentence = substr(::; 1..50))
+//*[:name == *".md"] | %(file = :name; longest = (//sentence | (//token<word> @| count) @| max))
+//*[:name == *".md"] | %(file = :name; tom = (//token[::lower = "tom"] @| count))
+//sentence[//token[::lower = "whitewash"]] | %(file = (\\*[:name == *".md"] | :name); sentence = substr(::; 1..50))
+//* | :name | indent(:depth - 1)
+//*<dir> | %(dir = :name; files = (/*<file> @| count); newest = (/*<file> @| top(1; ::modified) | :name); size = (/*<file> | ::size @| sum))
+//*<dir>[!/*] | :name
+//*<symlink> | %(:name; lands = (->* | :name))
+//*<symlink>[!->*] | :name
 /текущая.md->*
-/текущая.md | %(:::name; words = (:: | wc))
-/черновики/глава-02.md | %(:::name; words = (:: | wc))
-/свежее->*/* | :::name
+/текущая.md | %(:name; words = (:: | wc))
+/черновики/глава-02.md | %(:name; words = (:: | wc))
+/свежее->*/* | :name
 /свежее/глава-01.md
 /свежее->*/глава-01.md
-//*<file> @| group(name = :::name) | count | [$_ > 1] | %($.name; n = $_)
-//*<file> @| group(size = ::size) | [($_ @| count) > 1] | %(size = $.size; files = ($_ | :::name @| join(", ")))
-//*<file> @| group(hash = (:: | sha256)) | [($_ @| count) > 1] | %(hash = ($.hash | substr(1..12)); files = ($_ | :::name @| join(", ")))
+//*<file> @| group(name = :name) | count | [$_ > 1] | %($.name; n = $_)
+//*<file> @| group(size = ::size) | [($_ @| count) > 1] | %(size = $.size; files = ($_ | :name @| join(", ")))
+//*<file> @| group(hash = (:: | sha256)) | [($_ @| count) > 1] | %(hash = ($.hash | substr(1..12)); files = ($_ | :name @| join(", ")))
 /current.md->*
-/current.md | %(:::name; words = (:: | wc))
-/drafts/chapter-02.md | %(:::name; words = (:: | wc))
-/latest->*/* | :::name
+/current.md | %(:name; words = (:: | wc))
+/drafts/chapter-02.md | %(:name; words = (:: | wc))
+/latest->*/* | :name
 /latest/chapter-01.md
 /latest->*/chapter-01.md
 /orders/1->customer_id
@@ -857,7 +857,7 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 /people/person[::name = "ada"]<--(::assignee)::title
 //helper<-definition
 //is_name_char<-definition | %(line = ::start-line)
-/*<symlink> | %(:::name;
+/*<symlink> | %(:name;
 //paragraph[1..2] | :: | words @| [..5]
 //paragraph[1..2] | :: | words @| count
 //paragraph[1..3] | %(n = (:: | words @| count); text = (:: | substr(1..30)))
@@ -874,12 +874,12 @@ macro &all!: /data/* | .g(:::name) | .t(//*[:: == (/^\d+\.\d\d$/)]::::classes @|
 def &above($col, $min): /rows/*[$col >= $min]; &above(::fare, 500)::name
 def &above($col, $min): [$col >= $min]; /rows/*&above(::fare, 500)::name
 def &above($col, $min): [$col >= $min]; /*&above(::fare, 500)::name
-def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::name
+def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):name
 /data/inventory.json/items/*[::qty < 5]::sku
 /data/inventory.json/items/*[::qty < 5]
 /data/inventory.json/items/*[::qty < 5] .i \\data/orders.csv/*[::sku = $$.i::sku]::order
 /events/*/payload/user[::mfa = false]/name::
-//*<function> | %(:::name; ::lang)
+//*<function> | %(:name; ::lang)
 //section @| count
 //paragraph @| cc
 //paragraph | cc @| sum
@@ -900,11 +900,11 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //equivalent[::lang = "en"] @| count
 //entry[//equivalent:: *= "house"] | %(::lemma; en = (//equivalent::))
 //a-->
-//a | %(text = ::; lands = (-->):::name)
+//a | %(text = ::; lands = (-->):name)
 //a | %(text = ::; page = (-->)//title::)
-//a[(-->):::name = "h2"] | %(text = ::; heading = (-->)::)
+//a[(-->):name = "h2"] | %(text = ::; heading = (-->)::)
 //a[!(-->)] | %(text = ::; href = ::href)
-//*.html | %(page = :::name; links = (//a @| count); dead = (//a[!(-->)] @| count))
+//*.html | %(page = :name; links = (//a @| count); dead = (//a[!(-->)] @| count))
 //paragraph | :: | sentences | wc @| median
 //paragraph | :: | wc @| median
 //paragraph | :: | sentences | [wc($_) > 40] @| count
@@ -922,33 +922,33 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //paragraph[(:: | sc) = 1][(:: | wc) > 60] | %(chapter = \\?section::lemma; words = (:: | wc); opens = substr(::; 1..40))
 //paragraph | :: | sentences | [wc($_) > 30] | %(words = wc($_); opens = substr($_; 1..40))
 //письмо-пете.txt::
-//*.txt[:: *= "мельниц"] | :::name
+//*.txt[:: *= "мельниц"] | :name
 //настройки.json/версия::
 //настройки.json/редактор/имя
-//настройки.json | %(folder = \:::name; версия = /версия::; редактор = /редактор/имя::)
+//настройки.json | %(folder = \:name; версия = /версия::; редактор = /редактор/имя::)
 //*.json[/редактор/шрифт:: = "mono"]
-//*.csv | %(file = :::name; rows = (/row @| count))
+//*.csv | %(file = :name; rows = (/row @| count))
 //книги.csv/row[::жанр = "поэма"]::название
-//paragraph[:: *= "мученик"] | %(file = (\\*[:::name == *".md"] | :::name); opens = substr(::; 1..30))
+//paragraph[:: *= "мученик"] | %(file = (\\*[:name == *".md"] | :name); opens = substr(::; 1..30))
 //to-becky.txt::
-//*.txt[:: *= "cave"] | :::name
+//*.txt[:: *= "cave"] | :name
 //settings.json/version::
 //settings.json/editor/name
-//settings.json | %(folder = \:::name; version = /version::; editor = /editor/name::)
+//settings.json | %(folder = \:name; version = /version::; editor = /editor/name::)
 //*.json[/editor/font:: = "mono"]
 //books.csv/row[::genre = "epic"]::title
-//paragraph[:: *= "whitewash"] | %(file = (\\*[:::name == *".md"] | :::name); opens = substr(::; 1..30))
-//*[:::name == *".md"] | %(file = :::name; words = (:: | wc); paragraphs = (//paragraph @| count))
-//*[:::name == *".md"] | :: | wc @| sum
-/*[:::name == *".md"] | %(file = :::name; words = (:: | wc)) | %(:file; :words; left = 500 - :words)
-//*[:::name == *".md"][!//paragraph] | :::name
-//paragraph[:: *= "пистолет"] | %(file = (\\*[:::name == *".md"] | :::name); opens = substr(::; 1..40))
+//paragraph[:: *= "whitewash"] | %(file = (\\*[:name == *".md"] | :name); opens = substr(::; 1..30))
+//*[:name == *".md"] | %(file = :name; words = (:: | wc); paragraphs = (//paragraph @| count))
+//*[:name == *".md"] | :: | wc @| sum
+/*[:name == *".md"] | %(file = :name; words = (:: | wc)) | %(:file; :words; left = 500 - :words)
+//*[:name == *".md"][!//paragraph] | :name
+//paragraph[:: *= "пистолет"] | %(file = (\\*[:name == *".md"] | :name); opens = substr(::; 1..40))
 /zametki//unordered-item::
-//paragraph[:: *= "whitewash"] | %(file = (\\*[:::name == *".md"] | :::name); opens = substr(::; 1..40))
+//paragraph[:: *= "whitewash"] | %(file = (\\*[:name == *".md"] | :name); opens = substr(::; 1..40))
 /notes//unordered-item::
-//a | %(text = ::; href = ::href; lands = (-->):::name)
-/docs//a | %(text = ::; lands = (-->):::name)
-/docs//*.html | %(page = :::name; dead = (//a[!(-->)]::href))
+//a | %(text = ::; href = ::href; lands = (-->):name)
+/docs//a | %(text = ::; lands = (-->):name)
+/docs//*.html | %(page = :name; dead = (//a[!(-->)]::href))
 /zametki/spravka-->//h1::
 /docs//a-->
 /notes/guide-->//h1::
@@ -963,14 +963,14 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 /crew/*[::shift != "day"]::name
 /crew/*::shift @| count
 /crew/*/shift @| count
-/* | %(:::name; title = (::title); author = (::author))
-/* | %(:::name; sections = (//section @| count); first = (/section[1]::lemma))
+/* | %(:name; title = (::title); author = (::author))
+/* | %(:name; sections = (//section @| count); first = (/section[1]::lemma))
 /*/section[::lemma = "Book the Second"]/section::lemma
-/* | %(:::name; notes = (//footnote<note> @| count); words = (//paragraph | :: | wc @| sum))
-/* | %(:::name; tokens = (//token<word> @| count))
-/* | .f(:::name) | //section[:: *= "pestilence"] | %(file = $.f; ::lemma)
+/* | %(:name; notes = (//footnote<note> @| count); words = (//paragraph | :: | wc @| sum))
+/* | %(:name; tokens = (//token<word> @| count))
+/* | .f(:name) | //section[:: *= "pestilence"] | %(file = $.f; ::lemma)
 //sentence[1] | %(id = ::id; text = ::)
-//token[::::sentence = 1] | %(form = ::; lemma = ::lemma; pos = ::upos; rel = ::deprel; head = (->head::))
+//token[:::sentence = 1] | %(form = ::; lemma = ::lemma; pos = ::upos; rel = ::deprel; head = (->head::))
 //token[::upos = "NOUN"]::Case @| group(c = $_) | count | %($.c; n = $_) @| top(5; :n)
 //token[::upos = "VERB"]::Mood @| group(m = $_) | count | %($.m; n = $_) @| top(4; :n)
 //token[::upos = "VERB"]::Voice @| group(t = $_) | count | %($.t; n = $_) @| top(3; :n)
@@ -985,14 +985,14 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //sentence[//token[::Mood = "Imp"]] @| count
 //sentence[//token[::Mood = "Imp"]]:: @| [..2]
 //автор[::id = "гоголь"]<-книга::название
-/vydachi/* <=> //книга[::id = _::книга] | %(::читатель; книга = $$1::название) @| [..3]
+/vydachi/* <=> //книга[::id = $$0::книга] | %(::читатель; книга = $$1::название) @| [..3]
 //author[::language = "Greek"]<-book::title
-/loans/* <=> //book[::id = _::book] | %(::reader; book = $$1::title) @| [..3]
+/loans/* <=> //book[::id = $$0::book] | %(::reader; book = $$1::title) @| [..3]
 /web-*::tier
-//*.rs//token:::name
+//*.rs//token:name
 *//* @| count
-//(/web-0[12]/):::name
-//*<javascript>//handler:::name
+//(/web-0[12]/):name
+//*<javascript>//handler:name
 //row @| count
 //автор::имя
 //роман::название
@@ -1008,11 +1008,11 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //section[//token[::lower *= "плюшкин"]] | ::lemma @| last
 //section[//token[::lower *= "плюшкин"]] @| count
 //section | (//token[::lower *= "ноздрев"] @| count) @| window(..0) | sum
-//token[::lower *= "ноздрев"]::::n @| window(2) | (($_ @| max) - ($_ @| min)) @| max
-//token[::lower *= "ноздрев"] | .n(::::n) | .гл(\\?section::lemma) | ::::n @| window(2) | %(разрыв = (($_ @| max) - ($_ @| min)); глава = $.гл; позиция = $.n) @| top(2; :разрыв)
-//token<word> | %(bin = ((::::n div 10000) | floor); ноздрев = (::lower *= "ноздрев" ? 1 : 0); чичиков = (::lower *= "чичиков" ? 1 : 0)) @| group(bin = $_:bin) | %(bin = $.bin; слов = ($_ @| count); ноздрев = ($_ | :ноздрев @| sum); чичиков = ($_ | :чичиков @| sum))
-//token<word> | %(bin = ((::::n div 10000) | floor); w = (::lower *= "ноздрев" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
-//token<word> | %(bin = ((::::n div 10000) | floor); w = (::lower *= "чичиков" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
+//token[::lower *= "ноздрев"]:::n @| window(2) | (($_ @| max) - ($_ @| min)) @| max
+//token[::lower *= "ноздрев"] | .n(:::n) | .гл(\\?section::lemma) | :::n @| window(2) | %(разрыв = (($_ @| max) - ($_ @| min)); глава = $.гл; позиция = $.n) @| top(2; :разрыв)
+//token<word> | %(bin = ((:::n div 10000) | floor); ноздрев = (::lower *= "ноздрев" ? 1 : 0); чичиков = (::lower *= "чичиков" ? 1 : 0)) @| group(bin = $_:bin) | %(bin = $.bin; слов = ($_ @| count); ноздрев = ($_ | :ноздрев @| sum); чичиков = ($_ | :чичиков @| sum))
+//token<word> | %(bin = ((:::n div 10000) | floor); w = (::lower *= "ноздрев" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
+//token<word> | %(bin = ((:::n div 10000) | floor); w = (::lower *= "чичиков" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
 //section[::lemma *= "CHAPTER"] | %(ch = ::lemma; words = (//token<word> @| count); sentence = ((//sentence | (/token<word> @| count) @| mean) | round(1)); dialogue = ((//dialogue-line//token<word> @| count) * 100 div (//token<word> @| count) | round(0))) @| [..6]
 //section[::lemma *= "CHAPTER"] | (//sentence | (/token<word> @| count) @| mean) @| window(3) | mean | round(1) @| [..6]
 //section[::lemma *= "CHAPTER"] | .ch(::lemma) | ((//dialogue-line//token<word> @| count) * 100 div (//token<word> @| count)) @| window(2) | %(ch = $.ch; from = ($_ @| first | round(0)); to = ($_ @| last | round(0)); change = ((($_ @| last) - ($_ @| first)) | round(0))) @| top(3; :change)
@@ -1021,12 +1021,12 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //section[::lemma *= "CHAPTER"][//token[::lower = "becky"]] | ::lemma @| last
 //section[::lemma *= "CHAPTER"][//token[::lower = "becky"]] @| count
 //section[::lemma *= "CHAPTER"] | (//token[::lower = "huck"] @| count) @| window(..0) | sum @| [..6]
-//token[::lower = "huck"]::::n @| window(2) | (($_ @| max) - ($_ @| min)) @| max
-//token[::lower = "huck"] | .n(::::n) | .ch(\\?section::lemma) | ::::n @| window(2) | %(gap = (($_ @| max) - ($_ @| min)); ch = $.ch; at = $.n) @| top(2; :gap)
-//token<word> | %(bin = ((::::n div 10000) | floor); huck = (::lower = "huck" ? 1 : 0); tom = (::lower = "tom" ? 1 : 0)) @| group(bin = $_:bin) | %(bin = $.bin; words = ($_ @| count); huck = ($_ | :huck @| sum); tom = ($_ | :tom @| sum))
-//token<word> | %(bin = ((::::n div 10000) | floor); w = (::lower = "huck" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
-//token<word> | %(bin = ((::::n div 10000) | floor); w = (::lower = "tom" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
-//section @| outline(:::depth; ::lemma)
+//token[::lower = "huck"]:::n @| window(2) | (($_ @| max) - ($_ @| min)) @| max
+//token[::lower = "huck"] | .n(:::n) | .ch(\\?section::lemma) | :::n @| window(2) | %(gap = (($_ @| max) - ($_ @| min)); ch = $.ch; at = $.n) @| top(2; :gap)
+//token<word> | %(bin = ((:::n div 10000) | floor); huck = (::lower = "huck" ? 1 : 0); tom = (::lower = "tom" ? 1 : 0)) @| group(bin = $_:bin) | %(bin = $.bin; words = ($_ @| count); huck = ($_ | :huck @| sum); tom = ($_ | :tom @| sum))
+//token<word> | %(bin = ((:::n div 10000) | floor); w = (::lower = "huck" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
+//token<word> | %(bin = ((:::n div 10000) | floor); w = (::lower = "tom" ? 1 : 0)) @| group(bin = $_:bin) | %(n = ($_ | :w @| sum); size = ($_ @| count)) @| dp(:n; :size) | round(2)
+//section @| outline(:depth; ::lemma)
 //footnote<note> @| count
 //*<note>[:: *= "imperfect tense"]<-footnote\::
 //section::onym
@@ -1040,7 +1040,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //token<word>[:: *= "ѳ"] | %(w = ::; ::modern) @| [..2]
 //token[::lower = "печорин"] | %(до = (<<token[..3]:: @| join(" ")); w = ::; после = (>>token[..3]:: @| join(" "))) @| [..3]
 //token<word>::lower @| group(w = $_) | count | %($.w; n = $_) @| top(5; :n)
-/* | .n(//token<word> @| count) | %(издание = :::name; n = $.n; я = ((//token[::lower = "я"] @| count) * 1000 div $.n | round(1)); не = ((//token[::lower = "не"] @| count) * 1000 div $.n | round(1)); был = ((//token[::lower = "был"] @| count) * 1000 div $.n | round(1)); ничего = ((//token[::lower = "ничего"] @| count) * 1000 div $.n | round(1)))
+/* | .n(//token<word> @| count) | %(издание = :name; n = $.n; я = ((//token[::lower = "я"] @| count) * 1000 div $.n | round(1)); не = ((//token[::lower = "не"] @| count) * 1000 div $.n | round(1)); был = ((//token[::lower = "был"] @| count) * 1000 div $.n | round(1)); ничего = ((//token[::lower = "ничего"] @| count) * 1000 div $.n | round(1)))
 = "Я ѣхалъ на перекладныхъ изъ Тифлиса." | modernize("дореформенная")
 = "объѣхалъ міръ" | modernize("ru-1918")
 = "ſo ſhall the firſt be laſt" | modernize("long-s")
@@ -1054,17 +1054,17 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //token<word>::lower | s/^v([^aeiouy])/u$1/ | [$_ = "unto"] @| count
 = "Heauen and Earth" | modernize("long-s")
 = "Повѣсти Бѣлкина" | modernize("ru-1918")
-//section @| outline(:::depth; ::lemma; "1.")
-//section[:::depth <= 2] @| outline(:::depth; ::lemma; "1.")
-//section[::lemma = "Метель"]//section @| outline(:::depth; ::lemma; "1.")
-//section | .t(::lemma) | .w(:: | wc) | :::depth @| number | %(no = $_; title = $.t; words = $.w)
+//section @| outline(:depth; ::lemma; "1.")
+//section[:depth <= 2] @| outline(:depth; ::lemma; "1.")
+//section[::lemma = "Метель"]//section @| outline(:depth; ::lemma; "1.")
+//section | .t(::lemma) | .w(:: | wc) | :depth @| number | %(no = $_; title = $.t; words = $.w)
 //section[!/paragraph][!/section] | ::lemma
-//section[::::level > :::depth] | %(heading = ::lemma; level = ::::level; depth = :::depth)
-//section @| outline(::::level; ::lemma; "1.")
-//section[!/section] @| outline(:::depth; ::lemma; "1.") @| [..4]
-//section | ::lemma | indent(:::depth - 1; "· ")
-//* | :::name | indent(:::depth - 1) @| [..7]
-//section[::lemma = "The graveyard"]//section @| outline(:::depth; ::lemma; "1.")
+//section[:::level > :depth] | %(heading = ::lemma; level = :::level; depth = :depth)
+//section @| outline(:::level; ::lemma; "1.")
+//section[!/section] @| outline(:depth; ::lemma; "1.") @| [..4]
+//section | ::lemma | indent(:depth - 1; "· ")
+//* | :name | indent(:depth - 1) @| [..7]
+//section[::lemma = "The graveyard"]//section @| outline(:depth; ::lemma; "1.")
 //ref | %(text = ::; target = ::target) @| [..5]
 . | %(links = (//ref @| count); web = (//ref[::target == "http"*] @| count); anchors = (//ref[::target == "#"*] @| count))
 //ref[::target == "http"*] | ::target | s/^https?:\/\/([^\/]+)\/.*$/$1/ @| group(site = $_) | count | %($.site; n = $_)
@@ -1074,7 +1074,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //ref[:: = "здесь" || :: = "тут" || :: == "http"*] | %(text = ::; target = ::target)
 //ref<dangling> | %(text = ::; target = ::target)
 //ref[::target == "#"*] | %(text = ::; lands = (->* | ::lemma))
-/doc//ref[!(::target == "http"*)][!(::target == "#"*)] <=>? /dir/*[:::name = _::target] | %(target = ::target; found = ($$1 ? "yes" : "no"))
+/doc//ref[!(::target == "http"*)][!(::target == "#"*)] <=>? /dir/*[:name = $$0::target] | %(target = ::target; found = ($$1 ? "yes" : "no"))
 //ref[::target = "https://www.gutenberg.org/ebooks/245"] | ::
 //ref[:: = "here" || :: = "this" || :: == "http"*] | %(text = ::; target = ::target)
 //row[::жанр = "поэма"] | ::название @| pairs
@@ -1106,22 +1106,22 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 /* | (::out | period(month)) @| group(month = $_) | count | %($.month; loans = $_)
 /* | (::out | period(year)) @| unique
 = "It was finished in March 1660." | timex(en) | %(:text; :value; :grain)
-/книга//token[::entity = "LOC"] @| unique_by($_; ::::mention) | ::lemma @| group(место = $_) | count | %($.место; n = $_) @| top(8; :n)
+/книга//token[::entity = "LOC"] @| unique_by($_; :::mention) | ::lemma @| group(место = $_) | count | %($.место; n = $_) @| top(8; :n)
 /места/* | %(::название; ::вид; ::широта; ::примечание) @| [..3]
-/книга//token[::entity = "LOC"] @| unique_by($_; ::::mention) | ::lemma @| group(лемма = $_) | count | .n | %(место = (^/места/*[::лемма = $.лемма]::название @| first); n = $.n; широта = (^/места/*[::лемма = $.лемма]::широта @| first); долгота = (^/места/*[::лемма = $.лемма]::долгота @| first)) | [:место] @| top(8; :n)
-/книга//token[::entity = "LOC"] @| unique_by($_; ::::mention) @| count
-/книга//token[::entity = "LOC"] @| unique_by($_; ::::mention) | ::lemma | [$_ = (^/места/*::лемма)] @| count
-/книга//section[::lemma *= "ГЛАВА"] | %(глава = ::lemma; места = (//token[::entity = "LOC"] @| unique_by($_; ::::mention) | ::lemma | [$_ = (^/места/*::лемма)] @| unique @| join(", "))) | [:места] @| [..6]
+/книга//token[::entity = "LOC"] @| unique_by($_; :::mention) | ::lemma @| group(лемма = $_) | count | .n | %(место = (^/места/*[::лемма = $.лемма]::название @| first); n = $.n; широта = (^/места/*[::лемма = $.лемма]::широта @| first); долгота = (^/места/*[::лемма = $.лемма]::долгота @| first)) | [:место] @| top(8; :n)
+/книга//token[::entity = "LOC"] @| unique_by($_; :::mention) @| count
+/книга//token[::entity = "LOC"] @| unique_by($_; :::mention) | ::lemma | [$_ = (^/места/*::лемма)] @| count
+/книга//section[::lemma *= "ГЛАВА"] | %(глава = ::lemma; места = (//token[::entity = "LOC"] @| unique_by($_; :::mention) | ::lemma | [$_ = (^/места/*::лемма)] @| unique @| join(", "))) | [:места] @| [..6]
 /книга//token[::entity = "LOC"][::lemma = "казань"] | \\?section::lemma @| unique
-/книга//token[::entity = "LOC"] @| unique_by($_; ::::mention) | ::lemma @| group(лемма = $_) | count | .n | %(место = (^/места/*[::лемма = $.лемма]::название @| first); n = $.n; широта = (^/места/*[::лемма = $.лемма]::широта @| first); долгота = (^/места/*[::лемма = $.лемма]::долгота @| first)) | [:широта] @| top(5; :n)
-/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) | ::mention @| group(place = $_) | count | %($.place; n = $_) @| top(6; :n)
+/книга//token[::entity = "LOC"] @| unique_by($_; :::mention) | ::lemma @| group(лемма = $_) | count | .n | %(место = (^/места/*[::лемма = $.лемма]::название @| first); n = $.n; широта = (^/места/*[::лемма = $.лемма]::широта @| first); долгота = (^/места/*[::лемма = $.лемма]::долгота @| first)) | [:широта] @| top(5; :n)
+/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) | ::mention @| group(place = $_) | count | %($.place; n = $_) @| top(6; :n)
 /places/* | %(::name; ::kind; ::lat; ::lon) @| [..3]
-/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) | ::mention @| group(place = $_) | count | .n | %(place = $.place; n = $.n; lat = (^/places/*[::name = $.place]::lat @| first); lon = (^/places/*[::name = $.place]::lon @| first)) | [:lat] @| top(8; :n)
-/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) @| count
-/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) | ::mention | [$_ = (^/places/*::name)] @| count
-/book//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; places = (//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) | ::mention | [$_ = (^/places/*::name)] @| unique @| join(", "))) | [:places] @| [..6]
+/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) | ::mention @| group(place = $_) | count | .n | %(place = $.place; n = $.n; lat = (^/places/*[::name = $.place]::lat @| first); lon = (^/places/*[::name = $.place]::lon @| first)) | [:lat] @| top(8; :n)
+/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) @| count
+/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) | ::mention | [$_ = (^/places/*::name)] @| count
+/book//section[::lemma *= "CHAPTER"] | %(ch = ::lemma; places = (//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) | ::mention | [$_ = (^/places/*::name)] @| unique @| join(", "))) | [:places] @| [..6]
 /book//token[::entity = "GPE" || ::entity = "LOC"][::mention = "Cardiff Hill"] | \\?section::lemma @| unique
-/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; ::::mention) | ::mention @| group(place = $_) | count | .n | %(place = $.place; n = $.n; lat = (^/places/*[::name = $.place]::lat @| first); lon = (^/places/*[::name = $.place]::lon @| first)) | [:lat] @| top(5; :n)
+/book//token[::entity = "GPE" || ::entity = "LOC"] @| unique_by($_; :::mention) | ::mention @| group(place = $_) | count | .n | %(place = $.place; n = $.n; lat = (^/places/*[::name = $.place]::lat @| first); lon = (^/places/*[::name = $.place]::lon @| first)) | [:lat] @| top(5; :n)
 //section | %(глава = ::lemma; предложений = (//sentence[::id] @| count); слов = (//token<word> @| count))
 //sentence[::id = "50665"]::
 //token[:: = "остави"][1] | %(::lemma; ::upos; ::feats; ::deprel; head = (->head::))
@@ -1182,7 +1182,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 /rows/*
 /rows/*::name
 /* | %(::name; ::fare)
-/*<function> | %(:::name; span = ::end-line - ::start-line)
+/*<function> | %(:name; span = ::end-line - ::start-line)
 /rows/* | %(::fare - 100)
 /* | @(::name; ::fare)
 /* | @(::name; ::fare) | join(": ")
@@ -1204,7 +1204,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 //row[::shelf = "A1"] | %(::title; ::genre) @| table @| count
 //paragraph[:: = >paragraph::]::
 //paragraph[:: = (>paragraph){2}::] | :: | substr(1..40)
-//paragraph[:: = (>paragraph){1;4}::] | %(text = substr(::; 1..40); at = :::index)
+//paragraph[:: = (>paragraph){1;4}::] | %(text = substr(::; 1..40); at = :index)
 //paragraph[substr(::; 1..13) = substr(>paragraph::; 1..13)] | :: | substr(1..40)
 //section[::lemma = "ВЫСТРЕЛ"]/paragraph[12] | :: | sentences
 //paragraph[(:: | sentences @| count) > (:: | sentences @| unique @| count)] | :: | substr(1..50)
@@ -1221,18 +1221,18 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 (/replies/*)+?::who
 (/replies/*)+!::who
 (/replies/* .(::who))+! | @. | join(" > ")
-//if(\)+[::construct = "function"]?:::name
+//if(\)+[::construct = "function"]?:name
 /rows/* | .who(::name) | .paid(::fare) | %.
 /rows/* | .(::fare) | .who(::name) | %%.
 /* | .who(::name) | .paid(::fare) | %.
 //sentence | ::
 /anchar.txt | ::
 //anchar.txt | ::
-//* | :::name
-/*/* | :::name
-//*[:::name == *".txt"] | %(:::name; ::::encoding)
+//* | :name
+/*/* | :name
+//*[:name == *".txt"] | %(:name; :::encoding)
 //пушкин.txt | ::
-^::::replaced
+^:::replaced
 /gnev.txt | ::
 //gnev.txt | ::
 //гнев.txt | ::
@@ -1288,28 +1288,28 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 /zametki/chtenie-->::title
 /zametki/avtor-->::
 /z/chtenie-->
-/zametki/* | %(key = :::name; title = (-->)::title)
-/zametki/*[(-->)]:::name
-/zametki/*[!(-->)] | %(key = :::name; ref = ::"$ref")
+/zametki/* | %(key = :name; title = (-->)::title)
+/zametki/*[(-->)]:name
+/zametki/*[!(-->)] | %(key = :name; ref = ::"$ref")
 /notes/reading-->
 /notes/reading-->::title
 /notes/author-->::
 /n/reading-->
-/notes/* | %(key = :::name; title = (-->)::title)
-/notes/*[(-->)]:::name
-/notes/*[!(-->)] | %(key = :::name; ref = ::"$ref")
+/notes/* | %(key = :name; title = (-->)::title)
+/notes/*[(-->)]:name
+/notes/*[!(-->)] | %(key = :name; ref = ::"$ref")
 //cit | %(mark = ::; key = ::target)
 //cit | ::target @| unique
 //bib | %(key = ::onym; ::author; ::year)
-/paper//cit <=>? /refs//bib[::onym = _::target] | [!$$1] | ::target @| unique
-/refs//bib <=>? /paper//cit[::target = _::onym] | [!$$1] | %(key = ::onym; ::title)
-/paper//cit <=> /refs//bib[::onym = _::target] | %(key = ::target; author = $$1::author; year = $$1::year) @| [..3]
+/paper//cit <=>? /refs//bib[::onym = $$0::target] | [!$$1] | ::target @| unique
+/refs//bib <=>? /paper//cit[::target = $$0::onym] | [!$$1] | %(key = ::onym; ::title)
+/paper//cit <=> /refs//bib[::onym = $$0::target] | %(key = ::target; author = $$1::author; year = $$1::year) @| [..3]
 //cit @| group(key = ::target) | count | %($.key; n = $_) @| top(3; :n)
 //cit[::target = "karamzin1818"] | %(section = \\section::lemma; opens = (\paragraph | :: | substr(1..50)))
-/notes//cit <=>? /refs//bib[::onym = _::target] | [!$$1] | ::target @| unique
-/*[:::name != "refs"] | .d(:::name) | //cit | . <=>? ^/refs//bib[::onym = _::target] | [!$$1] | %(draft = $.d; key = ::target) @| unique
-/refs//bib <=>? /*[:::name != "refs"]//cit[::target = _::onym] | [!$$1] | ::onym
-//cit | %(key = ::target; resolved = ::::resolved)
+/notes//cit <=>? /refs//bib[::onym = $$0::target] | [!$$1] | ::target @| unique
+/*[:name != "refs"] | .d(:name) | //cit | . <=>? ^/refs//bib[::onym = $$0::target] | [!$$1] | %(draft = $.d; key = ::target) @| unique
+/refs//bib <=>? /*[:name != "refs"]//cit[::target = $$0::onym] | [!$$1] | ::onym
+//cit | %(key = ::target; resolved = :::resolved)
 //cit<dangling>::target
 //bib[!<-cit] | %(key = ::onym; ::title)
 //cit->* | %(::onym; ::author; ::year) @| [..3]
@@ -1325,26 +1325,26 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 /rows/* | .name(::name) | .c(::class) | .peers(\/*[::class = $.c] @| count) | %.
 /rows/* .me | .name(::name) | .same(\/*[::class = $$.me::class] @| count) | .peers($.same - 1) | %.
 //*<call> .c ->definition | %(
-//*<call> .c ->definition | %(:::name; distance = $$.c::start-line - ::start-line)
+//*<call> .c ->definition | %(:name; distance = $$.c::start-line - ::start-line)
 //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) @| group(phrase = $_) | count | %($.phrase; n = $_) @| top(6; :n)
 //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(5) @| group(phrase = $_) | count | [$_ > 1] | %($.phrase; n = $_)
 //section[!/section] | .ch(::lemma) | /paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) | %(g = $_; tale = $.ch) @| group(g = $_:g) | %(phrase = $.g; n = ($_ @| count); tales = ($_ | :tale @| unique @| count)) @| top(5; :tales)
 //section[!/section] | [(:: | lower) *= "стал ходить взад и вперед"] | ::lemma
-/* | .b(:::name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] | %(phrase = $.g; n = ($_ @| count)) @| top(6; :n)
-/* | .b(:::name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| count
+/* | .b(:name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] | %(phrase = $.g; n = ($_ @| count)) @| top(6; :n)
+/* | .b(:name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}-]/ /g | ngrams(4) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| count
 //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(5) @| group(phrase = $_) | count | %($.phrase; n = $_) @| top(6; :n)
 //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(8) @| group(phrase = $_) | count | [$_ > 1] | %($.phrase; n = $_)
 //section[!/section] | .ch(::lemma) | /paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(5) | %(g = $_; ch = $.ch) @| group(g = $_:g) | %(phrase = $.g; n = ($_ @| count); chapters = ($_ | :ch @| unique @| count)) @| top(5; :chapters)
 //section[!/section] | [(:: | lower) *= "the black avenger of the spanish main"] | ::lemma
-/* | .b(:::name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(6) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] | %(phrase = $.g; n = ($_ @| count)) @| top(6; :n)
-/* | .b(:::name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(6) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| count
+/* | .b(:name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(6) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] | %(phrase = $.g; n = ($_ @| count)) @| top(6; :n)
+/* | .b(:name) | //section[!/section]/paragraph | :: | lower | s/[^\p{L}’-]/ /g | ngrams(6) | %(g = $_; b = $.b) @| group(g = $_:g) | [($_ | :b @| unique @| count) = 2] @| count
 //article/p::
 //article/p[2]::
 //if
 /merge/for/if[2]::start-line
 /Lexer
 //helper
-//article/*[2]:::name
+//article/*[2]:name
 /Lexer | %(::construct; line = ::start-line)
 /Lexer[::construct = "impl"]/helper::start-line
 &на_руках | %(::читатель; книга = ::книга-->::название; ::выдана)
@@ -1358,13 +1358,13 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):::nam
 &by("Austen") | &card
 //book[::genre = "epic"] | &card
 /*
-^ | %(::::n-pages; ::::text-layer; ::title)
-//page | %(::::page; ::::width; ::::height; ::::dpi; ::::text-layer)
+^ | %(:::n-pages; :::text-layer; ::title)
+//page | %(:::page; :::width; :::height; :::dpi; :::text-layer)
 /page[1]//line | :: @| [..4]
-/page[2]//line | %(t = ::; ::::y; ::::x; ::::width) @| [5..8]
-/page[2]//column | %(::::y; ::::height; lines = (//line @| count))
+/page[2]//line | %(t = ::; :::y; :::x; :::width) @| [5..8]
+/page[2]//column | %(:::y; :::height; lines = (//line @| count))
 /scan/page[2]//line | .t(::) | . <=> /canon/*[levenshtein(::; $.t) < 6] | %(scan = $.t; canon = $$1::; d = levenshtein($.t; $$1::)) @| [3..8]
-/scan/page[2]//line | .t(::) | . <=>? /canon/*[levenshtein(::; $.t) < 6] | [!$$1] | %(scan = $.t; ::::y)
+/scan/page[2]//line | .t(::) | . <=>? /canon/*[levenshtein(::; $.t) < 6] | [!$$1] | %(scan = $.t; :::y)
 def &pricey: /rows/*[::fare > 300]; &pricey::name
 def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::matcher}"; &agg(/count)
 /orders/*[::total > 100]::total
@@ -1426,7 +1426,7 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 //paragraph | :: | sentences | [$_ == (/^And\b/)] @| count
 //section[!/section] | %(chapter = ::lemma; n = (//paragraph | :: | sentences | [$_ == (/^And\b/)] @| count)) @| top(3; :n)
 /commits/* | %(::short; ::author; date = (::date | isodate); ::subject)
-/tags/* | %(tag = :::name; at = ::short; ::subject)
+/tags/* | %(tag = :name; at = ::short; ::subject)
 /HEAD/vystrel.txt:: | lines | [$_ != ""] | substr(1..50) @| [..4]
 /commits/* | %(::short; paragraphs = (/vystrel.txt:: | lines | [$_ != ""] @| count) - 1)
 /commits/* | .v(::short) | /vystrel.txt:: | lines | [$_ != ""] | %(v = $.v; l = $_) @| group(l = $_:l) | [($_ @| count) < 4] | %(l = substr($.l; 1..40); in = ($_ | :v @| join(" ")))
@@ -1447,57 +1447,57 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 /tags/edition-1/chapter-1.txt:: | lines | [$_ == (/“/)] @| count
 /HEAD/chapter-1.txt:: | lines | [$_ == (/“/)] @| count
 //token[::entity]::entity @| group(t = $_) | count | %($.t; n = $_) @| top(5; :n)
-//token[::entity = "PER"] @| unique_by($_; ::::mention) | ::mention @| unique
-//token[::entity = "PER"] @| unique_by($_; ::::mention) | ::lemma @| group(l = $_) | count | %($.l; n = $_) @| top(6; :n)
-//token[::entity = "PER"] @| unique_by($_; ::::mention) | ::lemma @| group(l = $_) | count | %($.l; n = $_) @| top(8; :n)
+//token[::entity = "PER"] @| unique_by($_; :::mention) | ::mention @| unique
+//token[::entity = "PER"] @| unique_by($_; :::mention) | ::lemma @| group(l = $_) | count | %($.l; n = $_) @| top(6; :n)
+//token[::entity = "PER"] @| unique_by($_; :::mention) | ::lemma @| group(l = $_) | count | %($.l; n = $_) @| top(8; :n)
 //token[::lower == (/^чичиков/)][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
 //token[::lower == (/^ноздрев/)][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
 //sentence[//token[::lower == (/^чичиков/)]][//token[::lower == (/^ноздрев/)]] @| count
 //sentence[//token[::lower == (/^чичиков/)]] @| count
 //sentence[//token[::lower == (/^чичиков/)]][//token[::lower == (/^ноздрев/)]]:: @| first
-//token[::entity = "PERSON"] @| unique_by($_; ::::mention) | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(6; :n)
-//token[::entity = "PERSON"] @| unique_by($_; ::::mention) | ::mention @| unique
-//token[::::entity] @| unique_by($_; ::::mention) | ::::entity @| group(e = $_) | count | %($.e; n = $_) @| top(3; :n)
-//token[::::entity = "e5152"] @| unique_by($_; ::::mention) | [::upos != "PRON"] | ::mention @| unique
-//token[::::entity = "e5153"] @| unique_by($_; ::::mention) | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(5; :n)
+//token[::entity = "PERSON"] @| unique_by($_; :::mention) | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(6; :n)
+//token[::entity = "PERSON"] @| unique_by($_; :::mention) | ::mention @| unique
+//token[:::entity] @| unique_by($_; :::mention) | :::entity @| group(e = $_) | count | %($.e; n = $_) @| top(3; :n)
+//token[:::entity = "e5152"] @| unique_by($_; :::mention) | [::upos != "PRON"] | ::mention @| unique
+//token[:::entity = "e5153"] @| unique_by($_; :::mention) | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(5; :n)
 //character | %(::lemma; ::role; mentions = (<-character @| count))
 //token[::prosopon = "tom"]::lower @| group(w = $_) | count | %($.w; n = $_) @| top(5; :n)
 //token[::prosopon = "tom"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
-//token[::::entity = "e5152"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
-//token[::::entity = "e5153"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
-//sentence[//token[::::entity = "e5152"]][//token[::::entity = "e5153"]] @| count
-//token[::::entity = "e5152"][::::mention] | ::::sentence @| unique @| count
-//sentence[//token[::::entity = "e5152"]][//token[::::entity = "e5153"]]:: @| first
-/* | %(who = :::name; sents = (//sentence @| count); tokens = (//token @| count); words = (//token[::upos != "PUNCT"] @| count))
-/* | .who(:::name) | //token @| group(who = $.who; p = ::upos) | count | %(who = $.who; p = $.p; n = $_) @| top(6; :n)
-/* | .n(//token[::upos != "PUNCT"] @| count) | %(who = :::name; noun = ((//token[::upos = "NOUN"] @| count) * 1000 div $.n | round); verb = ((//token[::upos = "VERB"] @| count) * 1000 div $.n | round); adj = ((//token[::upos = "ADJ"] @| count) * 1000 div $.n | round); adv = ((//token[::upos = "ADV"] @| count) * 1000 div $.n | round); pron = ((//token[::upos = "PRON"] @| count) * 1000 div $.n | round); propn = ((//token[::upos = "PROPN"] @| count) * 1000 div $.n | round); vn = ((//token[::upos = "VERB"] @| count) div (//token[::upos = "NOUN"] @| count) | round(2)))
-/* | .v(//token[::upos = "VERB"] @| count) | .p(//token[::upos = "PRON"] @| count) | %(who = :::name; past = ((//token[::upos = "VERB"][::tense = "Past"] @| count) div $.v | round(2)); present = ((//token[::upos = "VERB"][::tense = "Pres"] @| count) div $.v | round(2)); perf = ((//token[::upos = "VERB"][::aspect = "Perf"] @| count) div $.v | round(2)); first = ((//token[::upos = "PRON"][::person = "First"] @| count) div $.p | round(2)); third = ((//token[::upos = "PRON"][::person = "Third"] @| count) div $.p | round(2)))
-/* | %(who = :::name; mean = ((//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| mean) | round(2)); p90 = (//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| percentile(90)); max = (//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| max))
+//token[:::entity = "e5152"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
+//token[:::entity = "e5153"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
+//sentence[//token[:::entity = "e5152"]][//token[:::entity = "e5153"]] @| count
+//token[:::entity = "e5152"][:::mention] | :::sentence @| unique @| count
+//sentence[//token[:::entity = "e5152"]][//token[:::entity = "e5153"]]:: @| first
+/* | %(who = :name; sents = (//sentence @| count); tokens = (//token @| count); words = (//token[::upos != "PUNCT"] @| count))
+/* | .who(:name) | //token @| group(who = $.who; p = ::upos) | count | %(who = $.who; p = $.p; n = $_) @| top(6; :n)
+/* | .n(//token[::upos != "PUNCT"] @| count) | %(who = :name; noun = ((//token[::upos = "NOUN"] @| count) * 1000 div $.n | round); verb = ((//token[::upos = "VERB"] @| count) * 1000 div $.n | round); adj = ((//token[::upos = "ADJ"] @| count) * 1000 div $.n | round); adv = ((//token[::upos = "ADV"] @| count) * 1000 div $.n | round); pron = ((//token[::upos = "PRON"] @| count) * 1000 div $.n | round); propn = ((//token[::upos = "PROPN"] @| count) * 1000 div $.n | round); vn = ((//token[::upos = "VERB"] @| count) div (//token[::upos = "NOUN"] @| count) | round(2)))
+/* | .v(//token[::upos = "VERB"] @| count) | .p(//token[::upos = "PRON"] @| count) | %(who = :name; past = ((//token[::upos = "VERB"][::tense = "Past"] @| count) div $.v | round(2)); present = ((//token[::upos = "VERB"][::tense = "Pres"] @| count) div $.v | round(2)); perf = ((//token[::upos = "VERB"][::aspect = "Perf"] @| count) div $.v | round(2)); first = ((//token[::upos = "PRON"][::person = "First"] @| count) div $.p | round(2)); third = ((//token[::upos = "PRON"][::person = "Third"] @| count) div $.p | round(2)))
+/* | %(who = :name; mean = ((//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| mean) | round(2)); p90 = (//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| percentile(90)); max = (//token[::deprel != "ROOT"][::upos != "PUNCT"] | (abs(::id - (->head::id))) @| max))
 //token[::deprel != "ROOT"][::upos != "PUNCT"] | %(word = ::; d = abs(::id - (->head::id)); text = substr(::sentence; 1..60)) @| top(2; :d)
-/* | %(who = :::name; height = ((//sentence | (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max) @| mean) | round(2)); max = (//sentence | (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max) @| max))
+/* | %(who = :name; height = ((//sentence | (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max) @| mean) | round(2)); max = (//sentence | (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max) @| max))
 //sentence | %(h = (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max); text = substr(::; 1..60)) @| top(2; :h)
-/* | .s(//sentence @| count) | %(who = :::name; clauses = ((//token[::deprel = "advcl" || ::deprel = "ccomp" || ::deprel = "acl:relcl" || ::deprel = "acl" || ::deprel = "xcomp"] @| count) div $.s | round(2)); relcl = ((//token[::deprel = "acl:relcl"] @| count) * 100 div $.s | round(1)); passive = ((//sentence[//token[::deprel = "nsubj:pass"]] @| count) * 100 div $.s | round(1)))
-/* | .who(:::name) | //token[::deprel != "punct"] @| group(who = $.who; r = ::deprel) | count | %(who = $.who; r = $.r; n = $_) | [:who = "толстой"] @| top(6; :n)
-/* | .who(:::name) | //token[::deprel = "ROOT"][::upos = "VERB"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "пушкин"] @| top(5; :n)
-/* | .who(:::name) | //token[::deprel = "ROOT"][::upos = "VERB"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "толстой"] @| top(5; :n)
-/* | .who(:::name) | //token[::deprel = "obj"]->head @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "гончаров"] @| top(5; :n)
-/* | .who(:::name) | .r(//sentence | %(n = (/token[::upos != "PUNCT"] @| count); h = (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max)) @| corr(:n; :h)) | .s(//sentence | %(n = (/token[::upos != "PUNCT"] @| count); h = (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max)) @| spearman(:n; :h)) | %(who = $.who; pearson = ($.r | round(3)); spearman = ($.s | round(3)))
-/* | .who(:::name) | .n(//token @| count) | //token @| group(who = $.who; n = $.n; p = ::upos) | count | %(p = $.p; d = ($.who = "пушкин" ? $_ div $.n : null); t = ($.who = "толстой" ? $_ div $.n : null); l = ($.who = "лермонтов" ? $_ div $.n : null); u = ($.who = "гончаров" ? $_ div $.n : null)) @| group(p = $_:p) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| cosine(:d; :t)) | round(4)); пушкин_лермонтов = (($_ @| cosine(:d; :l)) | round(4)); пушкин_гончаров = (($_ @| cosine(:d; :u)) | round(4)); толстой_лермонтов = (($_ @| cosine(:t; :l)) | round(4)); толстой_гончаров = (($_ @| cosine(:t; :u)) | round(4)); лермонтов_гончаров = (($_ @| cosine(:l; :u)) | round(4)))
-/* | .n(//token @| count) | %(who = :::name; persons = ((//token[::ner = "B-PER"] @| count) * 1000 div $.n | round(1)); places = ((//token[::ner = "B-LOC"] @| count) * 1000 div $.n | round(1)))
+/* | .s(//sentence @| count) | %(who = :name; clauses = ((//token[::deprel = "advcl" || ::deprel = "ccomp" || ::deprel = "acl:relcl" || ::deprel = "acl" || ::deprel = "xcomp"] @| count) div $.s | round(2)); relcl = ((//token[::deprel = "acl:relcl"] @| count) * 100 div $.s | round(1)); passive = ((//sentence[//token[::deprel = "nsubj:pass"]] @| count) * 100 div $.s | round(1)))
+/* | .who(:name) | //token[::deprel != "punct"] @| group(who = $.who; r = ::deprel) | count | %(who = $.who; r = $.r; n = $_) | [:who = "толстой"] @| top(6; :n)
+/* | .who(:name) | //token[::deprel = "ROOT"][::upos = "VERB"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "пушкин"] @| top(5; :n)
+/* | .who(:name) | //token[::deprel = "ROOT"][::upos = "VERB"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "толстой"] @| top(5; :n)
+/* | .who(:name) | //token[::deprel = "obj"]->head @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "гончаров"] @| top(5; :n)
+/* | .who(:name) | .r(//sentence | %(n = (/token[::upos != "PUNCT"] @| count); h = (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max)) @| corr(:n; :h)) | .s(//sentence | %(n = (/token[::upos != "PUNCT"] @| count); h = (/token[::upos != "PUNCT"] | ((->head)+ @| count) @| max)) @| spearman(:n; :h)) | %(who = $.who; pearson = ($.r | round(3)); spearman = ($.s | round(3)))
+/* | .who(:name) | .n(//token @| count) | //token @| group(who = $.who; n = $.n; p = ::upos) | count | %(p = $.p; d = ($.who = "пушкин" ? $_ div $.n : null); t = ($.who = "толстой" ? $_ div $.n : null); l = ($.who = "лермонтов" ? $_ div $.n : null); u = ($.who = "гончаров" ? $_ div $.n : null)) @| group(p = $_:p) | %(d = ($_ | :d @| max); t = ($_ | :t @| max); l = ($_ | :l @| max); u = ($_ | :u @| max)) @| group(all = 1) | %(пушкин_толстой = (($_ @| cosine(:d; :t)) | round(4)); пушкин_лермонтов = (($_ @| cosine(:d; :l)) | round(4)); пушкин_гончаров = (($_ @| cosine(:d; :u)) | round(4)); толстой_лермонтов = (($_ @| cosine(:t; :l)) | round(4)); толстой_гончаров = (($_ @| cosine(:t; :u)) | round(4)); лермонтов_гончаров = (($_ @| cosine(:l; :u)) | round(4)))
+/* | .n(//token @| count) | %(who = :name; persons = ((//token[::ner = "B-PER"] @| count) * 1000 div $.n | round(1)); places = ((//token[::ner = "B-LOC"] @| count) * 1000 div $.n | round(1)))
 //token[::ner = "B-PER"] | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(5; :n)
-/* | .v(//token[::upos = "VERB"] @| count) | .p(//token[::upos = "PRON"] @| count) | %(who = :::name; past = ((//token[::upos = "VERB"][::tense = "Past"] @| count) div $.v | round(2)); present = ((//token[::upos = "VERB"][::tense = "Pres"] @| count) div $.v | round(2)); first = ((//token[::upos = "PRON"][::person = "1"] @| count) div $.p | round(2)); third = ((//token[::upos = "PRON"][::person = "3"] @| count) div $.p | round(2)))
-/* | .s(//sentence @| count) | %(who = :::name; clauses = ((//token[::deprel = "advcl" || ::deprel = "ccomp" || ::deprel = "relcl" || ::deprel = "acl" || ::deprel = "xcomp"] @| count) div $.s | round(2)); relcl = ((//token[::deprel = "relcl"] @| count) * 100 div $.s | round(1)); passive = ((//sentence[//token[::deprel = "nsubjpass"]] @| count) * 100 div $.s | round(1)))
-/* | .who(:::name) | //token[::deprel != "punct"] @| group(who = $.who; r = ::deprel) | count | %(who = $.who; r = $.r; n = $_) | [:who = "conrad"] @| top(6; :n)
-/* | .who(:::name) | //token[::deprel = "ROOT"][::upos = "VERB"][::lemma != "’"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "austen"] @| top(5; :n)
-/* | .who(:::name) | //token[::deprel = "ROOT"][::upos = "VERB"][::lemma != "’"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "twain"] @| top(5; :n)
-/* | .who(:::name) | //token[::deprel = "dobj"]->head @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "conrad"] @| top(5; :n)
-/* | .who(:::name) | .n(//token @| count) | //token @| group(who = $.who; n = $.n; p = ::upos) | count | %(p = $.p; t = ($.who = "twain" ? $_ div $.n : null); c = ($.who = "conrad" ? $_ div $.n : null); l = ($.who = "london" ? $_ div $.n : null); a = ($.who = "austen" ? $_ div $.n : null)) @| group(p = $_:p) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| cosine(:t; :c)) | round(4)); twain_london = (($_ @| cosine(:t; :l)) | round(4)); twain_austen = (($_ @| cosine(:t; :a)) | round(4)); conrad_london = (($_ @| cosine(:c; :l)) | round(4)); conrad_austen = (($_ @| cosine(:c; :a)) | round(4)); london_austen = (($_ @| cosine(:l; :a)) | round(4)))
-/* | .n(//token @| count) | %(who = :::name; persons = ((//token[::ner = "B-PERSON"] @| count) * 1000 div $.n | round(1)); places = ((//token[::ner = "B-GPE" || ::ner = "B-LOC"] @| count) * 1000 div $.n | round(1)))
+/* | .v(//token[::upos = "VERB"] @| count) | .p(//token[::upos = "PRON"] @| count) | %(who = :name; past = ((//token[::upos = "VERB"][::tense = "Past"] @| count) div $.v | round(2)); present = ((//token[::upos = "VERB"][::tense = "Pres"] @| count) div $.v | round(2)); first = ((//token[::upos = "PRON"][::person = "1"] @| count) div $.p | round(2)); third = ((//token[::upos = "PRON"][::person = "3"] @| count) div $.p | round(2)))
+/* | .s(//sentence @| count) | %(who = :name; clauses = ((//token[::deprel = "advcl" || ::deprel = "ccomp" || ::deprel = "relcl" || ::deprel = "acl" || ::deprel = "xcomp"] @| count) div $.s | round(2)); relcl = ((//token[::deprel = "relcl"] @| count) * 100 div $.s | round(1)); passive = ((//sentence[//token[::deprel = "nsubjpass"]] @| count) * 100 div $.s | round(1)))
+/* | .who(:name) | //token[::deprel != "punct"] @| group(who = $.who; r = ::deprel) | count | %(who = $.who; r = $.r; n = $_) | [:who = "conrad"] @| top(6; :n)
+/* | .who(:name) | //token[::deprel = "ROOT"][::upos = "VERB"][::lemma != "’"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "austen"] @| top(5; :n)
+/* | .who(:name) | //token[::deprel = "ROOT"][::upos = "VERB"][::lemma != "’"] @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "twain"] @| top(5; :n)
+/* | .who(:name) | //token[::deprel = "dobj"]->head @| group(who = $.who; v = ::lemma) | count | %(who = $.who; v = $.v; n = $_) | [:who = "conrad"] @| top(5; :n)
+/* | .who(:name) | .n(//token @| count) | //token @| group(who = $.who; n = $.n; p = ::upos) | count | %(p = $.p; t = ($.who = "twain" ? $_ div $.n : null); c = ($.who = "conrad" ? $_ div $.n : null); l = ($.who = "london" ? $_ div $.n : null); a = ($.who = "austen" ? $_ div $.n : null)) @| group(p = $_:p) | %(t = ($_ | :t @| max); c = ($_ | :c @| max); l = ($_ | :l @| max); a = ($_ | :a @| max)) @| group(all = 1) | %(twain_conrad = (($_ @| cosine(:t; :c)) | round(4)); twain_london = (($_ @| cosine(:t; :l)) | round(4)); twain_austen = (($_ @| cosine(:t; :a)) | round(4)); conrad_london = (($_ @| cosine(:c; :l)) | round(4)); conrad_austen = (($_ @| cosine(:c; :a)) | round(4)); london_austen = (($_ @| cosine(:l; :a)) | round(4)))
+/* | .n(//token @| count) | %(who = :name; persons = ((//token[::ner = "B-PERSON"] @| count) * 1000 div $.n | round(1)); places = ((//token[::ner = "B-GPE" || ::ner = "B-LOC"] @| count) * 1000 div $.n | round(1)))
 //token[::ner = "B-PERSON"] | ::mention @| group(m = $_) | count | %($.m; n = $_) @| top(5; :n)
-/f/hosts/* <=> /m/*[::host = _::name] | %(::name; cpu = $$1::cpu)
-/f/hosts/* <=>? /m/*[::host = _::name] | %(::name; cpu = $$1::cpu)
-/f/hosts/* <=> /m/*[::host = _::name] <=> /s/*[:::name = _::name] | %(::name; cpu = $$1::cpu; tier = $$2::tier)
-/f/hosts/* | .t(::tier) <=> /m/*[::host = _::name && $.t = "prod"] | %(::name; cpu = $$1::cpu)
+/f/hosts/* <=> /m/*[::host = $$0::name] | %(::name; cpu = $$1::cpu)
+/f/hosts/* <=>? /m/*[::host = $$0::name] | %(::name; cpu = $$1::cpu)
+/f/hosts/* <=> /m/*[::host = $$0::name] <=> /s/*[:name = $$0::name] | %(::name; cpu = $$1::cpu; tier = $$2::tier)
+/f/hosts/* | .t(::tier) <=> /m/*[::host = $$0::name && $.t = "prod"] | %(::name; cpu = $$1::cpu)
 /f/hosts/* .h <=> /m/*[::host = $$.h::name] | %(::name; cpu = $$1::cpu)
 /f/hosts/* :=: /m/*(?::host = ((0))::name) __ %(::name; cpu = ((1))::cpu)
 /replies/* .top //replies/* | %(who = ::who; under = $$.top::who)
@@ -1506,14 +1506,14 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 /replies/* .top //replies/* __ %(who = ::who; under = ((top))::who; first = ((.1))::who)
 /replies/* .top //replies/* __ %(under = ((top))::who; first = ((.1))::who; last = ((.))::who)
 /play | %(acts = (//section[::lemma == (/^Действие/)] @| count); scenes = (//section[::lemma == (/^Явление/)] @| count); speeches = (//dialogue @| count); words = (//token<word> @| count); directions = (//paragraph<stage-direction> @| count))
-//character | %(::lemma; speeches = (<-character[:::name = "dialogue"] @| count); words = (<-character[:::name = "dialogue"]//token<word> @| count)) @| top(6; :words)
-//character[::onym = "хлестаков"] | <-character[:::name = "dialogue"] | %(act = (\\section[::lemma == (/^Действие/)] | ::lemma); words = (//token<word> @| count)) @| group(act = $_:act) | %($.act; speeches = ($_ @| count); words = ($_ | :words @| sum))
+//character | %(::lemma; speeches = (<-character[:name = "dialogue"] @| count); words = (<-character[:name = "dialogue"]//token<word> @| count)) @| top(6; :words)
+//character[::onym = "хлестаков"] | <-character[:name = "dialogue"] | %(act = (\\section[::lemma == (/^Действие/)] | ::lemma); words = (//token<word> @| count)) @| group(act = $_:act) | %($.act; speeches = ($_ @| count); words = ($_ | :words @| sum))
 //dialogue | %(who = ->character::lemma; words = (//token<word> @| count); opens = substr(::; 1..40)) @| top(4; :words)
 //dialogue[->character::onym = "хлестаков"] | %(cue = (<dialogue | :: | substr(-30..)); line = substr(::; 1..40)) @| [..5]
 //paragraph<stage-direction>[:: *= "Хлестаков"] | %(act = (\\section[::lemma == (/^Действие/)] | ::lemma); direction = ::) @| [..6]
 //section[::lemma == (/^Явление/)] | %(act = (\\section[::lemma == (/^Действие/)] | ::lemma); scene = substr(::lemma; 1..30); speakers = (//dialogue->character::onym @| unique @| count); speeches = (//dialogue @| count)) @| top(4; :speakers)
 /play | %(acts = (//section[::lemma == (/^ACT/)] @| count); scenes = (//section[::lemma == (/^SCENE/)] @| count); speeches = (//dialogue @| count); words = (//token<word> @| count); directions = (//paragraph<stage-direction> @| count))
-//character[::onym = "ophelia"] | <-character[:::name = "dialogue"] | %(act = (\\section[::lemma == (/^ACT/)] | ::lemma); words = (//token<word> @| count)) @| group(act = $_:act) | %($.act; speeches = ($_ @| count); words = ($_ | :words @| sum))
+//character[::onym = "ophelia"] | <-character[:name = "dialogue"] | %(act = (\\section[::lemma == (/^ACT/)] | ::lemma); words = (//token<word> @| count)) @| group(act = $_:act) | %($.act; speeches = ($_ @| count); words = ($_ | :words @| sum))
 //dialogue[->character::onym = "ophelia"] | %(cue = (<dialogue | :: | substr(-30..)); line = substr(::; 1..40)) @| [..5]
 //paragraph<stage-direction>[:: *= "Ophelia"] | %(act = (\\section[::lemma == (/^ACT/)] | ::lemma); direction = ::)
 //section[::lemma == (/^SCENE/)] | %(act = (\\section[::lemma == (/^ACT/)] | ::lemma); scene = substr(::lemma; 1..30); speakers = (//dialogue->character::onym @| unique @| count); speeches = (//dialogue @| count)) @| top(4; :speakers)
@@ -1527,17 +1527,17 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 &profile | .r | %(who = $.r:who; year = (^/catalogue/* | [::mount = $.r:who] | ::year @| first); mean = $.r:mean) @| sort_by(:year)
 &rate("the")
 = "6 октября 1899 года он уехал, а через два дня вернулся." | timex(ru)
-//section[:::depth = 2] | ::lemma | timex(ru) | %(:text; :value)
-//section[:::depth = 2]/paragraph | :: | timex(ru) | %(:text; :kind; :value)
-//section[:::depth = 2] | %(::lemma; n = (/paragraph | :: | timex(ru) @| count))
-//section[:::depth = 2] | .h(::lemma) | /paragraph | :: | timex(ru) | [:kind = "relative" || :kind = "duration"] | %(entry = $.h; :text; :kind; :value)
+//section[:depth = 2] | ::lemma | timex(ru) | %(:text; :value)
+//section[:depth = 2]/paragraph | :: | timex(ru) | %(:text; :kind; :value)
+//section[:depth = 2] | %(::lemma; n = (/paragraph | :: | timex(ru) @| count))
+//section[:depth = 2] | .h(::lemma) | /paragraph | :: | timex(ru) | [:kind = "relative" || :kind = "duration"] | %(entry = $.h; :text; :kind; :value)
 = "вчера" | timex(ru) | time_anchor(1833-05-11)
 = "через два дня" | timex(ru) | time_anchor(1833-05-11)
 = "He left on 6 October 1899 and came back the next day." | timex(en)
-//section[:::depth = 2] | ::lemma | timex(en) | %(:text; :value) @| [..4]
-//section[:::depth = 2]/paragraph | :: | timex(en) | %(:text; :kind; :value)
-//section[:::depth = 2] | %(::lemma; n = (/paragraph | :: | timex(en) @| count)) @| [..4]
-//section[:::depth = 2] | .h(::lemma) | /paragraph | :: | timex(en) | [:kind != "vague"] | %(entry = $.h; :text; :kind; :value)
+//section[:depth = 2] | ::lemma | timex(en) | %(:text; :value) @| [..4]
+//section[:depth = 2]/paragraph | :: | timex(en) | %(:text; :kind; :value)
+//section[:depth = 2] | %(::lemma; n = (/paragraph | :: | timex(en) @| count)) @| [..4]
+//section[:depth = 2] | .h(::lemma) | /paragraph | :: | timex(en) | [:kind != "vague"] | %(entry = $.h; :text; :kind; :value)
 = "the next day" | timex(en) | time_anchor(1659-11-18)
 = "two months later" | timex(en) | time_anchor(1659-09-30)
 = "the following Monday" | timex(en) | time_anchor(1659-09-30)
@@ -1549,14 +1549,14 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 /row[(::stamp | strptime("%d/%b/%Y:%H:%M:%S")) > now() - 3d]::path
 /rows/* @| top(2; ::fare) | %(::name; ::fare)
 /rows/* | %(::name; ::fare) @| top(2; .fare)
-//*<function> @| top(2; ::end-line - ::start-line) | %(:::name)
+//*<function> @| top(2; ::end-line - ::start-line) | %(:name)
 /* @| top(2; ::fare) | %(::name; ::fare)
 //название
-//* @| group(kind = (:::traits | join(" "))) | count | %($.kind; n = $_)
-//*<number> | %(key = :::name; value = ::)
+//* @| group(kind = (:traits | join(" "))) | count | %($.kind; n = $_)
+//*<number> | %(key = :name; value = ::)
 //*[:: = 1869]
 //название[:: = "Ревизор"] | \::автор
-/хранитель | %(::имя; ::с; leaf = :::is-leaf)
+/хранитель | %(::имя; ::с; leaf = :is-leaf)
 //книги/* | %(::название; ::год)
 //*[::год = 1869]
 //книги/*[1] | ::метки
@@ -1565,13 +1565,13 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 //title
 //*[:: = 1815]
 //title[:: = "Emma"] | \::author
-/keeper | %(::name; ::since; leaf = :::is-leaf)
+/keeper | %(::name; ::since; leaf = :is-leaf)
 //books/* | %(::title; ::year)
 //*[::year = 1815]
 //books/*[1] | ::tags
-/polyglot/* | %(:::name; size = ::::size)
-/polyglot/*[::::size > 0.4kB]:::name
-/polyglot/shapes.rs | %(:::name; size = (::::size | convert(kB)))
+/polyglot/* | %(:name; size = :::size)
+/polyglot/*[:::size > 0.4kB]:name
+/polyglot/shapes.rs | %(:name; size = (:::size | convert(kB)))
 /@racks/*[::cooling < ::draw]::name
 /@racks/* | %(::name; ::cooling; watts = ((::cooling | convert(W)) | round))
 /@racks/*[::ups > 10kW*h]::name
@@ -1594,7 +1594,7 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 /cart/loads/*[(::weight | quantity) > "2 cwt"]::what
 /cart/loads/*[(::haul | quantity) < "1 mi"]::what
 /cart/loads/0 | %(::weight; bushels = (::weight | convert(bushel)))
-//token[::::sentence = 7] | %(form = ::; pos = ::upos; rel = ::deprel; head = (->head::))
+//token[:::sentence = 7] | %(form = ::; pos = ::upos; rel = ::deprel; head = (->head::))
 //token<word>[::upos = "VERB"]::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
 //token[::lemma = "говорить"]<-head[::deprel = "nsubj"]::lower @| group(s = $_) | count | %($.s; n = $_) @| top(3; :n)
 //token[::lemma = "господин"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
@@ -1607,7 +1607,7 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 //token[::tense = "Pres"][::upos = "VERB"] @| count
 //token[::Aspect = "Perf"][::upos = "VERB"] @| count
 //token[::Aspect = "Imp"][::upos = "VERB"] @| count
-//token[::::sentence = 2] | %(form = ::; pos = ::upos; rel = ::deprel; head = (->head::))
+//token[:::sentence = 2] | %(form = ::; pos = ::upos; rel = ::deprel; head = (->head::))
 //token[::lemma = "say"]<-head[::deprel = "nsubj"]::lower @| group(s = $_) | count | %($.s; n = $_) @| top(3; :n)
 //token[::lower = "tom"][::deprel = "nsubj"]->head::lemma @| group(v = $_) | count | %($.v; n = $_) @| top(3; :n)
 //token[::lower = "tom"][::deprel = "dobj"] | %(verb = (->head::lemma); ::sentence)

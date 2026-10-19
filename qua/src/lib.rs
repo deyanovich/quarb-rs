@@ -71,6 +71,12 @@ struct Cli {
     /// from stdin.
     paths: Vec<PathBuf>,
 
+    /// The calculator's: one thread per line of the input, the line
+    /// as its topic (`seq 5 | qc -l '$_ * 2'`); sugar for
+    /// `$_ | lines |` at the head.
+    #[arg(short = 'l', long = "lines", hide = true)]
+    lines: bool,
+
     /// Include hidden entries (filesystem only).
     #[arg(long)]
     hidden: bool,
@@ -99,6 +105,29 @@ struct Cli {
     /// document and each value's origin node.
     #[arg(long)]
     kaiv: bool,
+
+    /// The notation of the document on standard input, which is
+    /// read as JSON by default and never sniffed: one of json jsonl
+    /// yaml toml xml html markdown text csv tsv fb2 conllu kaiv quarb,
+    /// an atrep extension (atd atk usfm), or a source grammar's name
+    /// (rust, python, …). The flags --yaml --toml --xml --html
+    /// --markdown --text --fb2 name the common ones directly.
+    #[arg(long = "format", value_name = "NOTATION")]
+    stdin_format: Option<String>,
+    #[arg(long = "yaml", conflicts_with = "stdin_format")]
+    in_yaml: bool,
+    #[arg(long = "toml", conflicts_with = "stdin_format")]
+    in_toml: bool,
+    #[arg(long = "xml", conflicts_with = "stdin_format")]
+    in_xml: bool,
+    #[arg(long = "html", conflicts_with = "stdin_format")]
+    in_html: bool,
+    #[arg(long = "markdown", conflicts_with = "stdin_format")]
+    in_markdown: bool,
+    #[arg(long = "text", conflicts_with = "stdin_format")]
+    in_text: bool,
+    #[arg(long = "fb2", conflicts_with = "stdin_format")]
+    in_fb2: bool,
 
     /// With --kaiv: how many origins a value's provenance lists by
     /// name before the rest collapse into the elision marker
@@ -372,6 +401,12 @@ struct OutputCtx {
     explain: bool,
     /// --plan: print the static plan and stop.
     plan: bool,
+    /// The calculator's input: its pipe, read as one text, the topic
+    /// the expression head's thread opens with (`None` at a terminal).
+    /// The calculator profile: the run goes through the engine's
+    /// calculator entry, no arbor.
+    calc: bool,
+    topic: Option<Value>,
     /// --budget, parsed.
     budget: Option<quarb::plan::Budget>,
     /// The --model file, parsed.
@@ -456,7 +491,10 @@ enum Profile {
 
 /// `qua`'s entry point.
 pub fn cli_main() -> anyhow::Result<()> {
-    cli_main_with(Profile::Qua)
+    let r = cli_main_with(Profile::Qua);
+    #[cfg(feature = "alloc-stats")]
+    alloc_stats::report();
+    r
 }
 
 /// `qc`'s entry point: the calculator. The query runs as `qua` runs
@@ -464,7 +502,69 @@ pub fn cli_main() -> anyhow::Result<()> {
 /// required, and anything that needs an input, a mount or a path
 /// from a node is refused, pointing at `qua`.
 pub fn calc_main() -> anyhow::Result<()> {
-    cli_main_with(Profile::Calc)
+    let r = cli_main_with(Profile::Calc);
+    #[cfg(feature = "alloc-stats")]
+    alloc_stats::report();
+    r
+}
+
+/// The benchmark harness's allocation counter (feature
+/// `alloc-stats`, never on in a shipped binary): a global allocator
+/// that counts every allocation and reallocation, the bytes they
+/// requested, and the peak heap in use, and reports the three on
+/// stderr at exit. Relaxed atomics: the counts are totals, not an
+/// ordering, and a thread's increments need no synchronization
+/// with another's.
+#[cfg(feature = "alloc-stats")]
+mod alloc_stats {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+    static LIVE: AtomicU64 = AtomicU64::new(0);
+    static PEAK: AtomicU64 = AtomicU64::new(0);
+
+    struct Counting;
+
+    fn note(size: usize) {
+        COUNT.fetch_add(1, Relaxed);
+        BYTES.fetch_add(size as u64, Relaxed);
+        let live = LIVE.fetch_add(size as u64, Relaxed) + size as u64;
+        PEAK.fetch_max(live, Relaxed);
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            note(l.size());
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            note(l.size());
+            unsafe { System.alloc_zeroed(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            LIVE.fetch_sub(l.size() as u64, Relaxed);
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+            LIVE.fetch_sub(l.size() as u64, Relaxed);
+            note(new_size);
+            unsafe { System.realloc(p, l, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    pub fn report() {
+        eprintln!(
+            "alloc-stats: allocations {} bytes {} peak-heap {}",
+            COUNT.load(Relaxed),
+            BYTES.load(Relaxed),
+            PEAK.load(Relaxed)
+        );
+    }
 }
 
 fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
@@ -510,7 +610,8 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
                     a.value_name("WORD")
                         .allow_negative_numbers(true)
                         .help("The rest of the expression: the arguments are joined with spaces, so quotes are needed only around what the shell would take (| * ; ( ) $ \")")
-                });
+                })
+                .mut_arg("lines", |a| a.hide(false));
             Cli::from_arg_matches(&cmd.get_matches())?
         }
     };
@@ -765,6 +866,8 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         now,
         explain: cli.explain,
         plan: cli.plan,
+        calc: profile == Profile::Calc,
+        topic: None,
         budget: cli.budget.as_deref().map(parse_budget).transpose()?,
         #[cfg(feature = "adapters")]
         model: parsed_model,
@@ -773,6 +876,20 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         resident: None,
         encoding: None,
     };
+    // The calculator's input: a pipe is read whole, as one text, the
+    // topic the expression head's thread opens with; nothing is
+    // parsed (a document on a pipe is qua's). At a terminal the
+    // topic stays null.
+    if profile == Profile::Calc {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text)
+                .context("reading standard input")?;
+            oc.topic = Some(Value::Str(text));
+        }
+    } else if cli.lines {
+        anyhow::bail!("--lines is the calculator's: pipe the text to qc");
+    }
     #[cfg(all(unix, feature = "adapters"))]
     {
         if cli.resident && !cli.resident_serve {
@@ -815,13 +932,28 @@ fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
         (cli.sql, "--sql"),
     ] {
         if on {
-            anyhow::bail!("qc is the calculator: {flag} opens or translates a source — run it with qua");
+            anyhow::bail!(
+                "qc is the calculator: {flag} opens or translates a source — run it with qua"
+            );
         }
     }
     let q = cli.query.trim_start();
-    if !q.starts_with('=') {
-        cli.query = format!("= {q}");
-    }
+    let body = q.strip_prefix('=').unwrap_or(q).trim_start();
+    // `-l`: one thread per line of the input — the head's text topic
+    // split by `lines`, the query running over the lines as after
+    // an iteration pipe. A body that opens with a pipe joins as it
+    // stands; any other body is a command of its own.
+    // A body that opens with a pipe stands for `$_ | …`: the topic
+    // (the input) is what it pipes from.
+    let opens_with_pipe = ["|", "@|", "+|", "__", "@__", "+__"]
+        .iter()
+        .any(|p| body.starts_with(p));
+    cli.query = match (cli.lines, opens_with_pipe) {
+        (true, true) => format!("= $_ | lines {body}"),
+        (true, false) => format!("= $_ | lines | {body}"),
+        (false, true) => format!("= $_ {body}"),
+        (false, false) => format!("= {body}"),
+    };
     Ok(())
 }
 
@@ -860,7 +992,13 @@ fn calc_check_query(cli: &Cli) -> anyhow::Result<()> {
 /// everything — one path, so the two print the same bytes.
 fn calc_execute(query: &str, kaiv: bool, oc: &OutputCtx) -> anyhow::Result<()> {
     let adapter = quarb::adapter::Bare;
-    run_wrapped(query, &adapter, |_| String::new(), kaiv.then_some("stdin"), oc)
+    run_wrapped(
+        query,
+        &adapter,
+        |_| String::new(),
+        kaiv.then_some("stdin"),
+        oc,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2022,106 +2160,158 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         }
         None => read_prose(Path::new("-"), ctx)?,
     };
-    let path: Option<&Path> = None;
     // Strip a leading UTF-8 BOM (RFC 8259 permits ignoring it): it
-    // otherwise breaks JSON parsing and defeats the XML/HTML sniffers,
-    // since U+FEFF is not whitespace so `trim_start` leaves it in place.
+    // otherwise breaks JSON parsing, since U+FEFF is not whitespace
+    // so `trim_start` leaves it in place.
     let text = match text.strip_prefix('\u{feff}') {
         Some(rest) => rest.to_owned(),
         None => text,
     };
-
-    let source = path.map_or_else(|| "stdin".to_string(), |p| p.display().to_string());
-    let kaiv = cli.kaiv.then_some(source.as_str());
-
-    // A .quarb file holds a Quarb query: reflect it as an arbor and
-    // query the query (extension-only, like CSV).
-    if is_quarb(path) {
-        let adapter = quarb::reflect::QueryArbor::parse(&text).context("parsing Quarb query")?;
-        return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+    let kaiv = cli.kaiv.then_some("stdin");
+    // An empty pipe is no input: an expression head runs as the
+    // calculator against the bare root, anything that navigates is
+    // refused as with no input at all.
+    if text.trim().is_empty() {
+        if quarb::is_calculator(&cli.query) {
+            return calc_execute(query, cli.kaiv, oc);
+        }
+        quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
+        anyhow::bail!(
+            "no input: standard input is empty — give a directory, a file, or pipe a document; \
+             an expression head '= expr' runs without one"
+        );
     }
-    // CSV/TSV are extension-only (tabular text is not sniffable).
-    if let Some(delim) = csv_delimiter(path) {
-        let adapter = CsvAdapter::parse_declared(&text, delim, ctx.csv()).context("parsing CSV")?;
-        return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
-    }
-    // YAML/TOML are extension-only (both share the JSON model).
-    if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
-        let ext = ext.to_ascii_lowercase();
-        let ext = ext.as_str();
-        if matches!(ext, "yaml" | "yml") {
-            let adapter = quarb_yaml::parse(&text).context("parsing YAML")?;
-            return run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc);
+    // Standard input is read as JSON by default and never sniffed
+    // (spec: Grafting; the qua chapter): a notation flag names
+    // anything else.
+    let notation = stdin_notation(cli)?;
+    stdin_dispatch(&notation, &text, query, kaiv, ctx, oc)
+}
+
+/// The notation the flags name for standard input: `--format NAME`
+/// or one of the direct flags, JSON without any; two at once are
+/// refused.
+fn stdin_notation(cli: &Cli) -> anyhow::Result<String> {
+    let direct: Vec<&str> = [
+        (cli.in_yaml, "yaml"),
+        (cli.in_toml, "toml"),
+        (cli.in_xml, "xml"),
+        (cli.in_html, "html"),
+        (cli.in_markdown, "markdown"),
+        (cli.in_text, "text"),
+        (cli.in_fb2, "fb2"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, n)| n)
+    .collect();
+    anyhow::ensure!(
+        direct.len() <= 1,
+        "standard input has one notation: --{} and --{} name two",
+        direct[0],
+        direct[1]
+    );
+    Ok(match (&cli.stdin_format, direct.first()) {
+        // the extension synonyms read as their notation (the
+        // calculator profile has no compose crate to ask)
+        (Some(f), _) => match f.trim().to_ascii_lowercase().as_str() {
+            "yml" => "yaml".to_string(),
+            "md" => "markdown".to_string(),
+            "ndjson" => "jsonl".to_string(),
+            "txt" | "plain" => "text".to_string(),
+            "htm" => "html".to_string(),
+            other => other.to_string(),
+        },
+        (None, Some(n)) => n.to_string(),
+        (None, None) => "json".to_string(),
+    })
+}
+
+/// Run `query` over standard input read as `notation`.
+#[cfg(feature = "adapters")]
+fn stdin_dispatch(
+    notation: &str,
+    text: &str,
+    query: &str,
+    kaiv: Option<&str>,
+    ctx: &SourceCtx,
+    oc: &OutputCtx,
+) -> anyhow::Result<()> {
+    match notation {
+        "json" => {
+            let adapter = JsonAdapter::parse(text).with_context(|| {
+                "parsing standard input as JSON (its default notation; --format NAME or \
+                 --yaml, --xml, --html, --text … name another)"
+            })?;
+            run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc)
         }
-        if ext == "toml" {
-            let adapter = quarb_toml::parse(&text).context("parsing TOML")?;
-            return run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc);
+        "jsonl" => {
+            let adapter = JsonAdapter::parse_lines(text).context("parsing JSON Lines")?;
+            run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc)
         }
-        if matches!(ext, "md" | "markdown") {
-            let adapter = quarb_markdown::parse(&text);
-            return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+        "yaml" => {
+            let adapter = quarb_yaml::parse(text).context("parsing YAML")?;
+            run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc)
         }
-        // Plain text mounts at the text level: blank-line-separated
-        // paragraphs (`text:` forces the same reading for html/md).
-        if ext == "txt" {
-            let adapter = quarb_text::TextModel::parse_plain(&text);
-            return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+        "toml" => {
+            let adapter = quarb_toml::parse(text).context("parsing TOML")?;
+            run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc)
         }
-        // A treebank reads as a document; `corpus:`
-        // adds its tokens.
-        if matches!(ext, "conllu" | "conllup") {
-            let adapter = quarb_text::TextModel::parse_conllu_text(&text)
+        "xml" => {
+            let adapter = XmlAdapter::parse(text).context("parsing XML")?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "html" => {
+            let adapter = HtmlAdapter::parse(text);
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "markdown" => {
+            let adapter = quarb_markdown::parse(text);
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "text" => {
+            let adapter = quarb_text::TextModel::parse_plain(text);
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "csv" | "tsv" => {
+            let delim = if notation == "csv" { b',' } else { b'\t' };
+            let adapter =
+                CsvAdapter::parse_declared(text, delim, ctx.csv()).context("parsing CSV")?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "fb2" => {
+            let adapter = quarb_text_koine::parse_xml_as(text, "fb2")
+                .map_err(|e| anyhow::anyhow!("reading FictionBook: {e}"))?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        "conllu" | "conllup" => {
+            let adapter = quarb_text::TextModel::parse_conllu_text(text)
                 .map_err(|e| anyhow::anyhow!("reading CoNLL-U: {e}"))?;
-            return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
         }
-        if matches!(ext, "jsonl" | "ndjson") {
-            let adapter = JsonAdapter::parse_lines(&text).context("parsing JSONL")?;
-            return run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc);
+        "quarb" => {
+            let adapter = quarb::reflect::QueryArbor::parse(text).context("parsing Quarb query")?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
         }
-        // kaiv documents — the typed arbor whose namepaths ARE
-        // quarb paths, so --kaiv output re-mounts (graft and join
-        // over typed results). Extension picks the pipeline command:
-        // .kaiv is canonical, .daiv compiles first, .raiv
-        // denormalizes its $field references.
-        if matches!(ext, "daiv" | "kaiv" | "raiv") {
-            let dir = path.and_then(|p| p.parent());
-            let adapter = parse_kaiv_ext(ext, &text, dir)?;
-            return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+        "kaiv" | "daiv" | "raiv" => {
+            let adapter = parse_kaiv_ext(notation, text, None)?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
         }
-        // atrep documents mount through the dialektos they
-        // declare (.atd deltos, .atk kanon); the file's directory
-        // anchors dialektos resolution, std definitions embedded.
-        if matches!(ext, "atd" | "atk" | "usfm" | "sfm") {
-            let dir = path.and_then(|p| p.parent()).unwrap_or(Path::new("."));
-            let adapter = AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
-            return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
+        "atd" | "atk" | "usfm" | "sfm" | "atrep" => {
+            let adapter =
+                AtrepAdapter::parse_str(text, Path::new(".")).context("parsing atrep document")?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
         }
-    }
-    if is_atrep(&text) {
-        let dir = path
-            .and_then(|p| p.parent())
-            .unwrap_or_else(|| Path::new("."));
-        let adapter = AtrepAdapter::parse_str(&text, dir).context("parsing atrep document")?;
-        return run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc);
-    }
-    if is_xml(path, &text) {
-        let adapter = XmlAdapter::parse(&text).context("parsing XML")?;
-        run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
-    } else if is_html(path, &text) {
-        let adapter = HtmlAdapter::parse(&text);
-        run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
-    } else {
-        // A whole-document parse first; a stream of per-line values
-        // (JSONL — qua's own output shape) second, so results pipe
-        // back in. The original error wins if neither reading fits.
-        let adapter = match JsonAdapter::parse(&text) {
-            Ok(a) => a,
-            Err(e) => match JsonAdapter::parse_lines(&text) {
-                Ok(a) => a,
-                Err(_) => return Err(e).context("parsing JSON"),
-            },
-        };
-        run(query, &adapter, |n| adapter.pointer(n), kaiv, ctx, oc)
+        ext if quarb_tree_sitter::supported(ext) => {
+            let adapter = quarb_tree_sitter::TreeSitterAdapter::parse(text, ext)
+                .map_err(|e| anyhow::anyhow!("parsing {ext} source: {e}"))?;
+            run(query, &adapter, |n| adapter.locator(n), kaiv, ctx, oc)
+        }
+        other => anyhow::bail!(
+            "--format {other}: no such notation; standard input reads as one of {}, conllu, \
+             kaiv, quarb, an atrep extension (atd atk usfm) or a source grammar's name",
+            quarb_compose::NOTATIONS.join(", ")
+        ),
     }
 }
 
@@ -2171,14 +2361,20 @@ fn column_types_hold(
     cli: &Cli,
     what: &str,
     types: &quarb_sql::ColumnTypes,
-    catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool)>>,
+    catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
 ) -> bool {
     if types.is_empty() {
         return true;
     }
     let unmet = match catalog() {
         Ok(c) => types.unmet(&c),
-        Err(_) => types.numeric.iter().chain(&types.text).cloned().collect(),
+        Err(_) => types
+            .numeric
+            .iter()
+            .chain(&types.text)
+            .chain(&types.json)
+            .cloned()
+            .collect(),
     };
     if !unmet.is_empty() && cli.explain {
         eprintln!(
@@ -2526,7 +2722,7 @@ fn run<A: AstAdapter>(
     oc: &OutputCtx,
 ) -> anyhow::Result<()> {
     // The source boundary's record (the single-input flow read one
-    // source) answers `::::encoding` / `::::replaced` on the root.
+    // source) answers `:::encoding` / `:::replaced` on the root.
     if let Some((encoding, replaced)) = ctx.take_record() {
         let sourced = quarb::source::Sourced {
             inner: quarb_model::Borrowed(adapter),
@@ -2549,11 +2745,50 @@ fn run_modelled<A: AstAdapter>(
     // A --model file enriches every source with derived structure,
     // and its derived nodes render through the composed locator.
     if let Some(model) = oc.model.clone() {
+        let documents = model.nodes.iter().any(|n| n.trait_name == "document");
         let enriched = quarb_model::ModelAdapter::new(quarb_model::Borrowed(adapter), model);
         enriched
             .check()
             .map_err(|e| anyhow::anyhow!("reading the model: {e}"))?;
         let base_render = &render;
+        if documents {
+            // a node constructor whose role wears the trait
+            // `document` declares a corpus (spec: The Corpus
+            // Reading): each member's text is read as prose, its
+            // other keys declared, and the member serves the corpus
+            // commands like a mounted document
+            let reader: quarb_compose::DocumentNodes<
+                quarb_model::ModelAdapter<quarb_model::Borrowed<'_>>,
+            > = std::rc::Rc::new(|m, n| {
+                let (text, declared) = m.document_member(n)?;
+                let path = m.locator(n, |_| String::new());
+                let doc = quarb_open::document_of(&text, &path, &declared);
+                let ctx = SourceCtx::default();
+                Some(
+                    quarb_open::finish_corpus(
+                        doc,
+                        None,
+                        None,
+                        None,
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        "corpus",
+                        &ctx,
+                    )
+                    .unwrap_or_else(|_| quarb_open::document_of(&text, &path, &declared)),
+                )
+            });
+            let composed = ComposeAdapter::new(enriched)
+                .with_document_graft(quarb_compose::DocumentGraft::Text)
+                .with_document_nodes(reader);
+            let model_render =
+                |n: NodeId| composed.locator(n, |o| composed.outer().locator(o, base_render));
+            return run_dispatch(query, &composed, model_render, kaiv_source, oc);
+        }
         let model_render = |n: NodeId| enriched.locator(n, base_render);
         return run_dispatch(query, &enriched, model_render, kaiv_source, oc);
     }
@@ -2597,6 +2832,7 @@ impl OutputCtx {
             collation: self.locale.map(|(l, _)| l.tag.to_string()),
             budget: self.budget.clone(),
             plan: self.plan,
+            topic: self.topic.clone(),
             ..quarb::Run::ambient()
         }
     }
@@ -2659,8 +2895,19 @@ fn run_wrapped<A: AstAdapter>(
         print!("{}", parsed.plan(adapter).to_kaiv(query));
         return Ok(());
     }
+    let run_query = |q: &quarb::Query| -> anyhow::Result<quarb::Outcome> {
+        Ok(if oc.calc {
+            q.run_calc(&run)?
+        } else {
+            q.run(adapter, &run)?
+        })
+    };
     if let Some(source) = kaiv_source {
-        let rows = parsed.run_traced_prov(adapter, &run)?;
+        let rows = if oc.calc {
+            parsed.run_traced_prov_calc(&run)?
+        } else {
+            parsed.run_traced_prov(adapter, &run)?
+        };
         print!(
             "{}",
             emit_kaiv(
@@ -2675,7 +2922,7 @@ fn run_wrapped<A: AstAdapter>(
     }
     let save = oc.save.clone();
     if let Some((path, table)) = save {
-        let out = parsed.run(adapter, &run)?;
+        let out = run_query(&parsed)?;
         oc.explain_refs(&out.refs);
         let values = match out.result {
             QueryResult::Values(vs) => vs,
@@ -2692,8 +2939,8 @@ fn run_wrapped<A: AstAdapter>(
     // Under an output locale a closing `@| csv` / `@| table` is the
     // tool's to render: the rows come back as they stand before it.
     let outcome = match oc.locale.map(|(l, _)| l) {
-        Some(_) if mode == Output::Quarb => parsed.for_rendering().run(adapter, &run)?,
-        _ => parsed.run(adapter, &run)?,
+        Some(_) if mode == Output::Quarb => run_query(&parsed.for_rendering())?,
+        _ => run_query(&parsed)?,
     };
     let quarb::Outcome {
         result,
@@ -3059,7 +3306,7 @@ fn emit_kaiv(
     // Every node a leaf may be attributed to, in first-appearance
     // order: the row's own, then its value's origins, tree-walked.
     fn origin_nodes(p: &Prov, out: &mut Vec<NodeId>) {
-        out.extend(p.origins.nodes());
+        out.extend(p.origins.positions().map(quarb::NodeId::from));
         for (_, q) in p.parts.iter() {
             origin_nodes(q, out);
         }
@@ -3131,7 +3378,7 @@ fn emit_kaiv(
             let ns: Vec<NodeId> = if o.is_empty() {
                 vec![row.node]
             } else {
-                o.nodes().collect()
+                o.positions().map(quarb::NodeId::from).collect()
             };
             for n in ns {
                 let list = prov_of(n);
@@ -3400,7 +3647,7 @@ mod tests {
             let mut o = Origins::default();
             for &n in ns {
                 o.insert(Origin {
-                    node: NodeId(n),
+                    position: (NodeId(n)).into(),
                     command: 1,
                 });
             }
@@ -3450,14 +3697,14 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(
-            prov("/@results/0/n:::provenance"),
+            prov("/@results/0/n:provenance"),
             [
                 "?https://s.example.com/1@2026-07-17T12:00:00Z#row-1;https://s.example.com/2@2026-07-18T12:00:00Z#row-2"
             ]
         );
-        assert_eq!(prov("/@results/0/n:::instant"), ["2026-07-18T12:00:00Z"]);
-        assert_eq!(prov("/@results/0/n:::@provenance | count"), ["2"]);
-        assert_eq!(prov("/@results/0/v:::elided"), ["0"]);
+        assert_eq!(prov("/@results/0/n:instant"), ["2026-07-18T12:00:00Z"]);
+        assert_eq!(prov("/@results/0/n:@provenance | count"), ["2"]);
+        assert_eq!(prov("/@results/0/v:elided"), ["0"]);
 
         // The bound: a value read from twelve nodes names `cap` of
         // them and counts the rest; the engine's own bound adds to
@@ -3465,7 +3712,7 @@ mod tests {
         let mut o = Origins::default();
         for n in 1..=12 {
             o.insert(Origin {
-                node: NodeId(n),
+                position: (NodeId(n)).into(),
                 command: 1,
             });
         }
@@ -3480,9 +3727,9 @@ mod tests {
         assert_eq!(line.matches("#row-").count(), 3, "{line}");
         assert!(line.ends_with(";+9"), "{line}");
         let back = quarb_kaiv::KaivAdapter::parse_kaiv(&out).unwrap();
-        assert_eq!(prov_back(&back, "/@results/0/value:::elided"), ["9"]);
+        assert_eq!(prov_back(&back, "/@results/0/value:elided"), ["9"]);
         assert_eq!(
-            prov_back(&back, "/@results/0/value:::@provenance | count"),
+            prov_back(&back, "/@results/0/value:@provenance | count"),
             ["3"]
         );
 

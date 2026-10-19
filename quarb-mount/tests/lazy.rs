@@ -65,7 +65,7 @@ fn an_unanchored_search_opens_every_mount() {
     assert_eq!((na.get(), nb.get()), (1, 1));
     let (m, na, nb) = table();
     assert_eq!(
-        values("/*:::name", &m),
+        values("/*:name", &m),
         [Value::Str("a".into()), Value::Str("b".into())]
     );
     assert_eq!((na.get(), nb.get()), (1, 1));
@@ -117,7 +117,7 @@ fn a_reference_lands_on_a_latent_mount_through_its_identity() {
         .unwrap();
     m.declare_identity(idx, "https://docs.test/guide.html".into());
     assert_eq!(
-        values("/site//a-->:::name", &m),
+        values("/site//a-->:name", &m),
         [Value::Str("page".into())]
     );
     assert_eq!(opened.get(), 1);

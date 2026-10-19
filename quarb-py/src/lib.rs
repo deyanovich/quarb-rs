@@ -28,9 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use quarb_pyvalue::{Quantity, value_to_py};
 use quarb::AstAdapter;
 use quarb::{NodeId, QueryResult, Value};
+use quarb_pyvalue::{Quantity, value_to_py};
 
 /// The invocation instant for `now()`, as (seconds, subsecond
 /// nanoseconds) since the Unix epoch.

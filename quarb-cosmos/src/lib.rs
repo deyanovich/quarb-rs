@@ -4,8 +4,8 @@
 //! Cosmos documents are plain JSON, so the arbor mapping is the
 //! JSON adapter's, with the document's `id` as its name. System
 //! fields (`_rid`, `_etag`, `_ts`, …) stay out of the tree and
-//! surface as adapter metadata instead: `;;;ts` (the epoch
-//! last-modified), `;;;rid`, `;;;etag`.
+//! surface as adapter metadata instead: `:::ts` (the epoch
+//! last-modified), `:::rid`, `:::etag`.
 //!
 //! **References.** Cosmos declares no typed pointers, so `->`
 //! enumerates nothing; resolve with a hint naming the target

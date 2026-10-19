@@ -687,6 +687,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "calendrical_calculations"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5abbd6eeda6885048d357edc66748eea6e0268e3dd11f326fff5bd248d779c26"
+dependencies = [
+ "core_maths",
+ "displaydoc",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1037,6 +1047,15 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -2429,6 +2448,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_calendar"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58655df2f728e46e4eee80bddebefacf52ec3e77cdb925014b47c5a5905eb55c"
+dependencies = [
+ "calendrical_calculations",
+ "displaydoc",
+ "icu_calendar_data",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_provider",
+ "ixdtf",
+ "tinystr",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_calendar_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc00caaa3fb3201ff7a18aa458e8c3ab042b9da154cfdf948bdde3936c31c36e"
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,16 +2486,37 @@ dependencies = [
 
 [[package]]
 name = "icu_locale_core"
-version = "2.2.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29"
+checksum = "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb"
 dependencies = [
  "displaydoc",
  "litemap",
+ "serde",
  "tinystr",
  "writeable",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_locale_fallback"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "251af8e57c9400e3eb58242fe5b8b1152b2a64fdf4cf632f923c38ccee6f2fa9"
+dependencies = [
+ "icu_locale_core",
+ "icu_locale_fallback_data",
+ "icu_provider",
+ "potential_utf",
+ "tinystr",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_locale_fallback_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "decf2a22ec8fa68f1a0c1129a3f8583f8f8bc24e8b9ccbe98ead99f62a4dc3a8"
 
 [[package]]
 name = "icu_normalizer"
@@ -2497,12 +2560,14 @@ checksum = "8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14"
 
 [[package]]
 name = "icu_provider"
-version = "2.2.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421"
+checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
+ "serde",
+ "stable_deref_trait",
  "writeable",
  "yoke",
  "zerofrom",
@@ -2630,6 +2695,12 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "ixdtf"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d3667095d64c3ecffc96463a21157b04bf3e252f6e8d5750b20c02e33c194e3"
 
 [[package]]
 name = "jiff"
@@ -3895,6 +3966,8 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
+ "serde_core",
+ "writeable",
  "zerovec",
 ]
 
@@ -4052,7 +4125,7 @@ dependencies = [
 
 [[package]]
 name = "qm"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4062,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "qua"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4166,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "quai"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4182,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "quai-wasm"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -4196,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "quarb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "colligo",
  "encoding_rs",
@@ -4214,6 +4287,7 @@ dependencies = [
  "syndesmos",
  "thiserror 2.0.21",
  "toml",
+ "transliteratio",
  "unicode-normalization",
  "unicode-segmentation",
  "url",
@@ -4221,7 +4295,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-age"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-cypher",
@@ -4233,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-arangodb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4244,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-archive"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "bzip2",
  "flate2",
@@ -4263,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-athena"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -4276,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-atrep"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "atrep",
  "quarb",
@@ -4286,14 +4360,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-aws"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-azlogs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4305,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-bigquery"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4318,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-calc"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "qua",
@@ -4326,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cbor"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "ciborium",
  "quarb",
@@ -4337,7 +4411,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cflogs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4349,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-tree-sitter",
@@ -4358,7 +4432,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-code-lsp"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4374,7 +4448,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-compose"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "flate2",
  "quarb",
@@ -4399,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cosmos"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4410,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-csv"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "csv",
  "quarb",
@@ -4419,7 +4493,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-cwlogs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -4432,14 +4506,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-cypher"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-datastore"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4450,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-ddlogs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4462,7 +4536,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-duckdb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "duckdb",
  "quarb",
@@ -4473,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-dynamodb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -4485,7 +4559,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-falkordb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-cypher",
@@ -4495,7 +4569,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firebase"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4506,7 +4580,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-firestore"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4517,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-fs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "ignore",
  "quarb",
@@ -4526,7 +4600,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gcplogs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-logs",
@@ -4536,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-git"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.21",
@@ -4544,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-github"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4554,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gitlab"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4564,7 +4638,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-gsheet"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -4576,7 +4650,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-html"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "html5ever",
  "quarb",
@@ -4585,14 +4659,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-http"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "ureq",
 ]
 
 [[package]]
 name = "quarb-imap"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-maildir",
@@ -4601,7 +4675,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-jq"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-json",
@@ -4610,7 +4684,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-json"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde",
@@ -4619,7 +4693,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kafka"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "rskafka",
@@ -4632,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kaiv"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "kaiv 0.15.0",
  "quarb",
@@ -4640,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kubernetes"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4650,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-kuzu"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "cxx-build",
  "kuzu",
@@ -4663,7 +4737,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-ldap"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "ldap3",
  "quarb",
@@ -4672,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lib-morph"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4681,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lib-numpy"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4690,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lib-pandas"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4699,7 +4773,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lib-scipy"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4708,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lib-sklearn"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -4717,14 +4791,14 @@ dependencies = [
 
 [[package]]
 name = "quarb-lines"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
 ]
 
 [[package]]
 name = "quarb-logs"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -4732,7 +4806,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-lsp"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "kaivrpc",
@@ -4743,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-maildir"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "thiserror 2.0.21",
@@ -4751,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-markdown"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pulldown-cmark",
  "quarb-html",
@@ -4759,7 +4833,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-memgraph"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "neo4rs",
  "quarb",
@@ -4771,7 +4845,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-metatheca"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "metatheca",
  "quarb",
@@ -4782,9 +4856,8 @@ dependencies = [
 
 [[package]]
 name = "quarb-model"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
- "kaiv 0.15.0",
  "quarb",
  "quarb-json",
  "quarb-sqlite",
@@ -4797,7 +4870,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mongodb"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "mongodb",
  "quarb",
@@ -4806,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mount"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-csv",
@@ -4816,7 +4889,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mssql"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4828,7 +4901,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-mysql"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4839,7 +4912,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-neo4j"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-cypher",
@@ -4851,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-neptune"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -4864,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-objstore"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-aws",
@@ -4877,7 +4950,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-open"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -4964,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-oracle"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "oracle",
  "quarb",
@@ -4974,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-pdf"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "lopdf",
  "quarb",
@@ -4983,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-postgres"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -4994,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-py"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -5020,7 +5093,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-pyvalue"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pyo3",
  "quarb",
@@ -5028,7 +5101,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-redis"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "redis",
@@ -5038,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-relational"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "serde_json",
@@ -5046,7 +5119,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-serve"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "kaiv 0.15.0",
  "quarb",
@@ -5057,7 +5130,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-session"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "quarb",
@@ -5090,7 +5163,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sparql"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-http",
@@ -5101,7 +5174,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sql"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-sqlite",
@@ -5111,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-sqlite"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-relational",
@@ -5123,7 +5196,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "csv",
  "percent-encoding",
@@ -5136,7 +5209,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-djvu"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "djvu-rs",
  "quarb",
@@ -5145,7 +5218,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-doc"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "cfb",
  "encoding_rs",
@@ -5156,7 +5229,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-docx"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5167,7 +5240,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-epub"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5179,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-html"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "ego-tree",
  "quarb",
@@ -5191,7 +5264,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-hwpx"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "cfb",
  "flate2",
@@ -5204,7 +5277,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-koine"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "atrep",
  "flate2",
@@ -5218,7 +5291,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-latex"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5226,7 +5299,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-markdown"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "pulldown-cmark",
  "quarb",
@@ -5235,7 +5308,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-odt"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5246,7 +5319,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-ofd"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -5256,7 +5329,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-pdf"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "lopdf",
  "quarb",
@@ -5265,7 +5338,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-rtf"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "encoding_rs",
  "quarb",
@@ -5275,7 +5348,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-text-uof"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-text",
@@ -5286,14 +5359,15 @@ dependencies = [
 
 [[package]]
 name = "quarb-time"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
+ "icu_calendar",
  "regex",
 ]
 
 [[package]]
 name = "quarb-toml"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -5302,11 +5376,11 @@ dependencies = [
 
 [[package]]
 name = "quarb-trace"
-version = "0.38.1"
+version = "0.39.0"
 
 [[package]]
 name = "quarb-tree-sitter"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "tempfile",
@@ -5320,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-wasm"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "getrandom 0.3.4",
  "quarb",
@@ -5342,7 +5416,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-web"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5368,7 +5442,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xlsx"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "calamine",
  "quarb",
@@ -5379,7 +5453,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xml"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quick-xml 0.39.4",
@@ -5388,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-xpath"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb",
  "quarb-xml",
@@ -5397,7 +5471,7 @@ dependencies = [
 
 [[package]]
 name = "quarb-yaml"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "quarb-json",
  "serde_json",
@@ -7078,11 +7152,12 @@ dependencies = [
 
 [[package]]
 name = "tinystr"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
+checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
 dependencies = [
  "displaydoc",
+ "serde_core",
  "zerovec",
 ]
 
@@ -7327,6 +7402,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "transliteratio"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3ad4dc21457af645fc966fab7cc05a2b4c9ec49f722eae7e1b688a4499b3812"
+dependencies = [
+ "unicode-normalization",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -8008,9 +8093,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "writeable"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wyz"
@@ -8149,21 +8234,23 @@ dependencies = [
 
 [[package]]
 name = "zerotrie"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf"
+checksum = "4ea269c3bd32f0a32c321907a2ae912ba6f4649bb0fc764a15627e99a7095a3f"
 dependencies = [
  "displaydoc",
  "yoke",
  "zerofrom",
+ "zerovec",
 ]
 
 [[package]]
 name = "zerovec"
-version = "0.11.6"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
+checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
 dependencies = [
+ "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",
@@ -8171,13 +8258,13 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.3"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
+checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.0",
 ]
 
 [[package]]

@@ -419,7 +419,7 @@ fn citation_fields_and_the_sources_part() {
         ["Strahan & Cadell"]
     );
     assert_eq!(
-        values(&m, "//bib::::genus"),
+        values(&m, "//bib:::genus"),
         ["liber", "liber", "commentarius"]
     );
     assert_eq!(values(&m, "//bib[::onym = \"Hom\"]::ephemeris"), ["Epics"]);
@@ -460,7 +460,7 @@ fn core_properties_declare_the_identity() {
     assert_eq!(values(&m, "^::author"), ["Jane Austen"]);
     assert_eq!(values(&m, "^::description"), ["A novel."]);
     assert_eq!(values(&m, "^::tags"), ["regency, manners"]);
-    assert_eq!(values(&m, "^::::created"), ["1813-01-28T00:00:00Z"]);
+    assert_eq!(values(&m, "^:::created"), ["1813-01-28T00:00:00Z"]);
 }
 
 #[test]

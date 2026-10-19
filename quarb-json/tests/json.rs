@@ -54,7 +54,7 @@ fn value_expressions() {
     assert_eq!(vals("/items/1 | /price:: idiv /qty::"), vec!["5"]);
     // a computed column, aggregated
     assert_eq!(
-        vals("/items/* | .total(/price:: * /qty::) @| sum"),
+        vals("/items/* | .total(/price:: * /qty::) | $.total @| sum"),
         vec!["32"]
     );
 }
@@ -169,10 +169,10 @@ fn resolve_json_ref() {
 
 #[test]
 fn metadata_and_aggregation() {
-    assert_eq!(values("/users::::length"), vec!["2"]);
-    assert_eq!(values("/users/0/name::::type"), vec!["string"]);
+    assert_eq!(values("/users:::length"), vec!["2"]);
+    assert_eq!(values("/users/0/name:::type"), vec!["string"]);
     // total age across users
-    assert_eq!(values("/users/*/age::::type"), vec!["number", "number"]);
+    assert_eq!(values("/users/*/age:::type"), vec!["number", "number"]);
     assert_eq!(values("/users/*/age:: @| sum"), vec!["47"]);
 }
 
@@ -199,11 +199,11 @@ fn correlated_join_navigates_from_context() {
         quarb::QueryResult::Nodes(_) => panic!("expected values"),
     };
     let join = "/orders/* <=> /users/*\
-        [/id:: = _/uid:: && _/amount:: > /limit::] | /amount::";
+        [/id:: = $$0/uid:: && $$0/amount:: > /limit::] | /amount::";
     assert_eq!(vals(join), vec!["200"]);
     // stacked brackets share the binding, so identical result
     let stacked = "/orders/* <=> /users/*\
-        [/id:: = _/uid::][_/amount:: > /limit::] | /amount::";
+        [/id:: = $$0/uid::][$$0/amount:: > /limit::] | /amount::";
     assert_eq!(vals(stacked), vec!["200"]);
 }
 
@@ -231,7 +231,7 @@ fn join_projection() {
                   "orders": [{"uid": 1, "amt": 30}, {"uid": 2, "amt": 45}, {"uid": 1, "amt": 99}]}"#;
     let adapter = JsonAdapter::parse(doc).unwrap();
     let got = match quarb::run(
-        "/orders/* <=> /users/*[/id:: = _/uid::] | %(who = $$1/name::; amt = /amt::)",
+        "/orders/* <=> /users/*[/id:: = $$0/uid::] | %(who = $$1/name::; amt = /amt::)",
         &adapter,
     )
     .unwrap()
@@ -328,7 +328,7 @@ fn property_reading() {
     assert_eq!(run("/mixed::"), ["1, s"]);
     assert_eq!(run("/mixed/*::x"), ["2"]);
     // Length counts fields and children alike; the ref still resolves.
-    assert_eq!(run("/server::::length"), ["4"]);
+    assert_eq!(run("/server:::length"), ["4"]);
     assert_eq!(run(r##"/ref::"$ref"-->::name"##), ["Emma"]);
     // Roots that are values.
     let l = JsonAdapter::parse_as("[1, 2, 3]", Reading::Property).unwrap();

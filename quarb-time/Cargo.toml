@@ -10,5 +10,13 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = ["calendars"]
+# The non-Gregorian calendars (Julian, Hebrew, Hijri, Persian, Coptic,
+# Ethiopian, Buddhist, Indian, ROC, Japanese, Chinese, Korean) through
+# ICU4X; off, only the Gregorian reading converts.
+calendars = ["dep:icu_calendar"]
+
 [dependencies]
 regex = "1"
+icu_calendar = { version = "2.3", optional = true }

@@ -147,7 +147,11 @@ fn record_sigil_refusals() {
     assert!(e.to_string().contains("twice"), "{e}");
     // a leading string no longer names the field after it: the key
     // is written, as for a computed value
-    for q in [r#"/items/* | %("Braund"; 22)"#, r#"/items/* | %("seen"; $_)"#, r#"/items/* | %%("n", "won")"#] {
+    for q in [
+        r#"/items/* | %("Braund"; 22)"#,
+        r#"/items/* | %("seen"; $_)"#,
+        r#"/items/* | %%("n", "won")"#,
+    ] {
         let e = quarb::run(q, &doc()).unwrap_err().to_string();
         assert!(
             e.contains("needs a name") && e.contains("retired") && e.contains("age = 22"),

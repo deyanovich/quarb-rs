@@ -168,7 +168,11 @@ pub(crate) fn extend_sys_path(py: Python<'_>) -> PyResult<()> {
     DONE.set(()).ok();
     let exe_prefix = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().and_then(|b| b.parent()).map(|p| p.display().to_string()))
+        .and_then(|p| {
+            p.parent()
+                .and_then(|b| b.parent())
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_default();
     let code = c"
 import os, site, sys
@@ -231,7 +235,15 @@ pub(crate) fn is_plain(obj: &Bound<'_, PyAny>) -> bool {
         .unwrap_or_default();
     matches!(
         module.split('.').next().unwrap_or(""),
-        "builtins" | "collections" | "itertools" | "datetime" | "decimal" | "fractions" | "uuid" | "pathlib" | "quarb"
+        "builtins"
+            | "collections"
+            | "itertools"
+            | "datetime"
+            | "decimal"
+            | "fractions"
+            | "uuid"
+            | "pathlib"
+            | "quarb"
     )
 }
 
@@ -245,7 +257,11 @@ impl PyForeign {
         PyForeign { obj }
     }
 
-    fn glue<T>(&self, name: &str, f: impl Fn(Bound<'_, PyAny>) -> PyResult<T>) -> Result<T, String> {
+    fn glue<T>(
+        &self,
+        name: &str,
+        f: impl Fn(Bound<'_, PyAny>) -> PyResult<T>,
+    ) -> Result<T, String> {
         Python::attach(|py| {
             let m = module(py).map_err(|e| e.to_string())?;
             let out = m

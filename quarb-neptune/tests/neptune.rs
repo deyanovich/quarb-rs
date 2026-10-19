@@ -201,11 +201,11 @@ fn bottled_neptune() {
     .unwrap();
 
     // Catalog via the summary API.
-    assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
+    assert_eq!(values(&a, "/*:name"), ["City", "Person"]);
+    assert_eq!(values(&a, "/Person:::n-rows"), ["2"]);
 
     // ?key= names nodes; properties project.
-    assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
+    assert_eq!(values(&a, "/Person/*:name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
 
     // Relationships as typed crosslinks, both directions, with

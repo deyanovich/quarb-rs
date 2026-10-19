@@ -12,17 +12,17 @@
 //!   namespace prefix (`dc:title`). Prefixes are not resolved to
 //!   URIs. Since `:` is not a bare-name character in Quarb, a
 //!   prefixed name is navigated with a quoted segment
-//!   (`//'dc:title'`); `;;;local-name` and `;;;ns-prefix` metadata
-//!   allow prefix-agnostic filtering (`//*[;;;local-name =
+//!   (`//'dc:title'`); `:::local-name` and `:::ns-prefix` metadata
+//!   allow prefix-agnostic filtering (`//*[:::local-name =
 //!   "title"]`). The document root is unnamed; the document
 //!   element is its single child.
 //! - Nodes have no traits: XML has no universal structural
 //!   vocabulary, and leaf/container distinctions are already
-//!   available as core metadata (`:::is-leaf`, `:::n-children`).
+//!   available as core metadata (`:is-leaf`, `:n-children`).
 //! - Attributes are properties: `::pages`, `::href`. The default
 //!   projection (`::`) and `::text` are the element's text
-//!   content; `;;;tag`, `;;;id`, `;;;local-name`, `;;;ns-prefix`,
-//!   `;;;n-attrs`, and any `;;;attr` expose metadata.
+//!   content; `:::tag`, `:::id`, `:::local-name`, `:::ns-prefix`,
+//!   `:::n-attrs`, and any `:::attr` expose metadata.
 //! - An attribute holding an ID reference resolves: `::ref-->`
 //!   follows a bare IDREF value (`book="b1"`) or a fragment
 //!   (`href="#b1"`) to the element with that `id` or `xml:id`.
@@ -356,7 +356,7 @@ impl AstAdapter for XmlAdapter {
         Some(Value::Str(self.nodes[node.0 as usize].text.clone()))
     }
 
-    /// `;;;tag`, `;;;local-name`, `;;;ns-prefix`, and `;;;n-attrs`
+    /// `:::tag`, `:::local-name`, `:::ns-prefix`, and `:::n-attrs`
     /// — facts about the element, never its data: attributes are
     /// properties (`::pages`), text is the bare projection.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

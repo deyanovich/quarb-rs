@@ -119,13 +119,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \toprule
 \textbf{Crate} & \textbf{Responsibility} \\
 \midrule
-\texttt{quarb} & The core engine: \texttt{lexer}, \texttt{parser},
-  \texttt{ast}, \texttt{exec}, and the \texttt{adapter} module
-  defining \texttt{AstAdapter}. No I/O. \\
+\texttt{quarb} & The core engine, in layers (Section~\ref{sec:layers}):
+  \texttt{value}, \texttt{syntax}, \texttt{stdlib},
+  \texttt{pipeline}, \texttt{graph} (the \texttt{adapter}
+  module defining \texttt{AstAdapter} is its). No I/O. \\
 \texttt{quarb-fs} & The filesystem adapter. Depends on \texttt{quarb}. \\
 \texttt{quarb-imap} & Remote IMAP mailboxes, queried in place:
   the maildir mapping over the wire (folders, messages by UID,
-  headers as properties, \texttt{::::epoch}), transported by
+  headers as properties, \texttt{:::epoch}), transported by
   \texttt{curl} over subprocess (it speaks IMAP natively) — zero
   new dependencies. Lazy per message: one LIST, one UID SEARCH
   per folder, two fetches per touched message. The thread fabric
@@ -163,7 +164,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   Sections with explicit title (\texttt{::lemma}) + body are
   derived from the flat heading stream by the outline rule;
   paragraphs, blockquotes (attribution as \texttt{::hypograph}),
-  lists, and verbatim blocks (\texttt{::::lang}) complete the
+  lists, and verbatim blocks (\texttt{:::lang}) complete the
   vocabulary; tables denormalize into nested lists carrying the
   \texttt{<table>} trait. Bare \texttt{::} is the flattened prose
   of the subtree. The apparatus is first class (litogramma's
@@ -174,7 +175,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   and \texttt{<dangling>} traits; the \texttt{aside} family
   (anchored margin content) rides the same machinery without
   \texttt{<note>}, and margin-spelled footnotes carry
-  \texttt{::::form}; \texttt{index-mark} nodes expose
+  \texttt{:::form}; \texttt{index-mark} nodes expose
   declared index marks (\texttt{::term}) invisible to the prose. Plain text (\texttt{.txt}, blank-line
   paragraphs) mounts here by default; \texttt{text:} forces the
   reading for html/md. Depends on \texttt{quarb}. \\
@@ -243,7 +244,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   soup dropped (nav, chrome, scripts, forms, media), the head
   read for the page's declared identity (\texttt{title},
   \texttt{lang}, canonical, every \texttt{meta}, \texttt{rel=tag}
-  links, a JSON-LD block — verbatim as \texttt{::::} metadata on
+  links, a JSON-LD block — verbatim as \texttt{:::} metadata on
   the document, and curated into tags-as-traits, \texttt{::category},
   \texttt{::description}, \texttt{::author}, \texttt{::published};
   every node answers \texttt{::href} / \texttt{::anchor} /
@@ -274,7 +275,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   sense number), the inline apparatus to spans named by their
   sims with \texttt{::kind} / \texttt{::lang} from the genos,
   an \texttt{inflection} to a \texttt{<hidden>} node outside
-  the prose, the languages line to \texttt{::::languages}, and
+  the prose, the languages line to \texttt{:::languages}, and
   the definition list typed \texttt{.abbreviations} (or, left
   untyped, the one before the first entry) to the abbreviations
   list (\texttt{::kind}) the labels resolve against
@@ -305,7 +306,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   sectioning commands, footnotes (the at-callout convention
   normalized to document-end bodies), the endnotes package on
   its own counter, Tufte sidenotes into the footnote family
-  (\texttt{::::form}), \texttt{\textbackslash marginpar} /
+  (\texttt{:::form}), \texttt{\textbackslash marginpar} /
   \texttt{\textbackslash marginnote} as asides,
   \texttt{\textbackslash index} marks,
   quote/quotation, itemize/enumerate, verbatim; prose by drop
@@ -320,7 +321,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   from the two declared rungs: the \texttt{/Outlines} tree
   (titles as \texttt{::lemma}, destinations bounding each
   section's extent) and exact-baseline line geometry
-  (bit-for-bit equal \texttt{y}, \texttt{::::page}/\texttt{::::y}
+  (bit-for-bit equal \texttt{y}, \texttt{:::page}/\texttt{:::y}
   metadata; ToUnicode CMaps decoded, one stated kern constant for
   word gaps). No \texttt{paragraph} is ever minted. Depends on
   \texttt{quarb-text}, \texttt{quarb-pdf}, and \texttt{lopdf}. \\
@@ -331,8 +332,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   one); a page's zones are its tree as the text layer names them
   (\texttt{column}, \texttt{region}, \texttt{paragraph},
   \texttt{line}; words a line's text; declared paragraphs kept,
-  none minted); \texttt{::::page}/\texttt{x}/\texttt{y}/
-  \texttt{width}/\texttt{height} on every zone; \texttt{::::text-layer}
+  none minted); \texttt{:::page}/\texttt{x}/\texttt{y}/
+  \texttt{width}/\texttt{height} on every zone; \texttt{:::text-layer}
   on page and document; the \texttt{ANT} metadata as the document
   node's properties. Bundled, single-page and indirect documents;
   the text layer only (no OCR). The plain mount of a \texttt{.djvu}
@@ -347,9 +348,9 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{page/*} without one); a \texttt{line} is the text codes
   a page shows at one declared baseline in \texttt{x} order (a gap
   between two codes' extents a space; no \texttt{paragraph}
-  minted); \texttt{::::page}, the bounding box
-  \texttt{::::x}/\texttt{y}/\texttt{width}/\texttt{height} in
-  the page's millimetres, \texttt{::::baseline}; a page's template
+  minted); \texttt{:::page}, the bounding box
+  \texttt{:::x}/\texttt{y}/\texttt{width}/\texttt{height} in
+  the page's millimetres, \texttt{:::baseline}; a page's template
   pages join its lines; \texttt{DocInfo} (title, author, subject,
   abstract, keywords, dates, creator, custom data) as the document
   node's properties. Attachments and signatures read under the
@@ -400,14 +401,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   table-naming reference label for undeclared references (required
   where a column declares no key). Loading is catalog-
   eager, rows-lazy, hops by key: a table is read whole only when a
-  query lists it (\texttt{/t/*}, \texttt{::::n-rows}); a hop reads
+  query lists it (\texttt{/t/*}, \texttt{:::n-rows}); a hop reads
   the rows it lands on through the driver's keyed source
   (\texttt{WHERE key IN (\dots)}, one statement per frontier; such
   a row carries no row id until the table is read, never a
   sentinel value a real row could bear), rows
   keep their identity when the table is later read whole, and
-  untouched tables are never read (\texttt{::::loaded},
-  \texttt{::::n-loaded} report the state). Engine
+  untouched tables are never read (\texttt{:::loaded},
+  \texttt{:::n-loaded} report the state). Engine
   adapters are thin catalog drivers over it. Depends on
   \texttt{quarb}. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
@@ -466,14 +467,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{ldap[s]://[USER:PASS@]HOST[:PORT]/BASE\_DN}. \\
 \texttt{quarb-cbor} & The CBOR (RFC~8949) adapter, the JSON
   mapping extended: non-text map keys name nodes by canonical
-  rendering, byte strings are hex scalars (\texttt{::::length}
+  rendering, byte strings are hex scalars (\texttt{:::length}
   is the raw byte count), the standard time tags (0, 1) decode
   to instants, other tags are transparent with the number at
-  \texttt{::::tag}. Traits carry the CBOR type. Binary, by the
+  \texttt{:::tag}. Traits carry the CBOR type. Binary, by the
   \texttt{.cbor} extension. Depends on \texttt{ciborium}. \\
 \texttt{quarb-csv} & The CSV/TSV adapter (one \texttt{row} node per
   record, columns as properties, empty cells as missing values that
-  numeric aggregates skip; \texttt{::::columns} / \texttt{::::n-rows}
+  numeric aggregates skip; \texttt{:::columns} / \texttt{:::n-rows}
   metadata). Depends on \texttt{quarb} and \texttt{csv}. \\
 \texttt{quarb-xpath} & The XPath~1.0 bridge, both directions:
   \texttt{translate} imports an XPath expression to Quarb, and
@@ -541,8 +542,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   tree — the syntax level (né \texttt{quarb-code}): node kinds
   as edge names (\texttt{//function\_item}), tree-sitter
   \emph{fields} as properties (\texttt{::name} on a function is
-  its name), source text as the value, \texttt{::::start-line} /
-  \texttt{::::kind} / \texttt{::::field} metadata; named nodes
+  its name), source text as the value, \texttt{:::start-line} /
+  \texttt{:::kind} / \texttt{:::field} metadata; named nodes
   only. Rust / Python / JavaScript / C by extension,
   compile-time grammar set. Grafts under composition —
   \texttt{--graft} queries every function in a directory tree
@@ -555,7 +556,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   else dissolves (children hoist). Curated traits
   (\texttt{<function>}, \texttt{<type>}, \texttt{<loop>});
   \texttt{::signature} / \texttt{::doc} / \texttt{::callee};
-  raw backend kind only at \texttt{::::kind} (aliased, closed
+  raw backend kind only at \texttt{:::kind} (aliased, closed
   surface); \texttt{->definition} file-local crosslinks, one
   declaration list per identifier: a qualified callee
   (\texttt{Type::new}, \texttt{obj.helper}) prefers the
@@ -578,8 +579,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   (\texttt{store.json!/books/1}). \texttt{qua}: default for
   archives, \texttt{--graft} for directories. \\
 \texttt{quarb-archive} & Zip, tar and 7z archives as directory trees
-  (entries as nodes, content as value, \texttt{::::size} /
-  \texttt{::::compressed}), every format through a pure-Rust
+  (entries as nodes, content as value, \texttt{:::size} /
+  \texttt{:::compressed}), every format through a pure-Rust
   library so the wasm build reads them too: zip members deflate,
   deflate64, bzip2 (\texttt{bzip2} with \texttt{libbz2-rs-sys}),
   lzma (\texttt{lzma-rs}); tar plain and under gzip
@@ -653,7 +654,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   kaiv document (quarbopsis: \texttt{quao trace}). \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
   and mbox mailboxes: headers as properties (lowercased), the
-  body as the value, \texttt{::::epoch} parsing the Date header
+  body as the value, \texttt{:::epoch} parsing the Date header
   for range predicates. The thread graph is reference fabric:
   \texttt{::in-reply-to\textasciitilde>} walks to the parent
   message, \texttt{<-in-reply-to} finds the replies, via a
@@ -714,7 +715,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   children (the \texttt{/row} convention); severity as text
   property, lowercased trait
   (\texttt{/entry<error>}), and ordered numeric rank
-  (\texttt{::::severity}, GCP's enum values); timestamps as
+  (\texttt{:::severity}, GCP's enum values); timestamps as
   typed instants; \texttt{::trace} the bare trace id — the
   \texttt{<=>} join key across services. Unknown property
   names fall through payload top level → labels → resource
@@ -736,8 +737,8 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   names it), JSON messages decoded with property fallthrough
   (\texttt{::level}, \texttt{::requestId} — the cross-group
   join key), \texttt{filter=} as a server-side CloudWatch
-  filter pattern, \texttt{::::group}/\texttt{::::stream}/
-  \texttt{::::received}/\texttt{::::id} metadata.
+  filter pattern, \texttt{:::group}/\texttt{:::stream}/
+  \texttt{:::received}/\texttt{:::id} metadata.
   \texttt{endpoint=} overrides the URL (LocalStack; the
   bottled \texttt{cwlogs-server.py} fixture). Read-only.
   Target: \texttt{cwl:[GROUP]?since=1h\&filter=…\&limit=N}
@@ -762,7 +763,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{GET zones/\{zone\}/logs/received} NDJSON, one flat
   record per request, fields as properties under their own
   names plus minted \texttt{::ray} and \texttt{::timestamp};
-  the default value is the request line; \texttt{::::cache} the
+  the default value is the request line; \texttt{:::cache} the
   cache status. \texttt{since=} is mandatory (Logpull demands a
   range; \texttt{until} clamps a minute behind now). The Ray ID
   is what the origin sees as \texttt{cf-ray}, so mounting the
@@ -778,7 +779,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   bounded snapshots (\texttt{since=}/\texttt{limit=} mandatory),
   \texttt{query=} as Datadog's own search syntax run
   server-side. Severity is Datadog's \texttt{::status} plus the
-  family trait and ordered \texttt{::::severity} rank;
+  family trait and ordered \texttt{:::severity} rank;
   \texttt{::trace} is minted from \texttt{dd.trace\_id}; tags
   split into fallthrough properties (\texttt{env:prod} answers
   \texttt{::env}); custom attributes navigate as children. Auth
@@ -802,7 +803,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   (\texttt{\$-::contributions}). Counts and scalars are
   properties (\texttt{::stars}, timestamps as instants); flags,
   issue labels, and repo topics are traits (\texttt{<fork>},
-  \texttt{<bug>}, \texttt{<cli>}); an organization answers the
+  \texttt{<label:bug>}, \texttt{<topic:cli>}); an organization answers the
   \texttt{<org>} shorthand and the forge-neutral
   \texttt{<group>} alias. Direct addressing skips
   enumeration (\texttt{/rust-lang/rust/issues/12345}, closed
@@ -849,7 +850,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{git log -- path} is
   \texttt{/commits/*[/path<changed>]}; commits answer
   \texttt{::changed} (the touched paths, deletions included)
-  and \texttt{::::n-changed}. Plumbing over subprocess —
+  and \texttt{:::n-changed}. Plumbing over subprocess —
   no libgit2, zero new dependencies. Target: \texttt{git:PATH}.
   Read-only. \\
 \texttt{quarb-atrep} & The atrep semantic-document adapter —
@@ -942,6 +943,119 @@ the surface without changing it\,---\,the filesystem, a JSON tree,
 an HTML DOM, and an XML document are genuinely the same arbor to
 the engine.
 
+\section{The Layers of the Engine Crate}\label{sec:layers}
+
+The \texttt{quarb} crate is one crate in layers, each a directory
+under \texttt{quarb/src/}, each allowed to reference only the layers
+below it:
+
+\begin{xltabular}{\textwidth}{l X}
+\toprule
+\textbf{Layer} & \textbf{Holds} \\
+\midrule
+\texttt{value} & The value space: null, bool, int, float, text,
+  list, record, table, foreign; numbers, quantities, locales,
+  transliteration, encodings. What an AST literal holds. No node. \\
+\texttt{syntax} & The language as text and tree: lexer, parser,
+  AST, unparser, highlighter, completion, the function registry.
+  One grammar for the calculator and the graph language. \\
+\texttt{stdlib} & The functions over values, reached by name from
+  a call, with the arithmetic and comparisons the operators run. \\
+\texttt{thread} & The forking machine: a list of threads and three
+  moves (fork, terminate, the whole-list map); every layer above
+  hangs its own per-thread state on the thread, copied on a fork
+  and never shared afterwards. \\
+\texttt{pipeline} & Commands, control operators, bodies,
+  environments, the registry and memo of a run, provenance. \\
+\texttt{graph} & Arbors, anchors, steps, correlation, adapters,
+  identity, tabula reading, reflection, the trace. Everything
+  that knows a node. \\
+\bottomrule
+\end{xltabular}
+
+\texttt{lib.rs} is the facade above all of them: the public paths
+(\texttt{quarb::adapter}, \texttt{quarb::Value}, \texttt{quarb::run},
+\ldots) are re-exports and did not move. The dependency direction is
+checked, not assumed: \texttt{scripts/layers.py} resolves every
+\texttt{crate::} path in a layer's files to its layer and fails on a
+reference upward that \texttt{scripts/layers-debt.txt} does not
+record. The record is the debt still being paid and is meant to
+burn down to nothing; a change that adds an upward reference fails
+the check, and one that removes some must update the record in the
+same commit. Six references remain: the parser's default reflector
+(a test convenience), the library's two kaiv arms, and the graph
+tests' reach into the facade.
+
+\paragraph{The thread and its attachment.} The thread
+(\texttt{thread/mod.rs}) is generic over what the layer above hangs
+on it: \texttt{Thread<X>} carries a register, a topic with its
+provenance, the members of a group, the captures of the last match,
+and one \texttt{ext: X}. The \texttt{Attachment} trait names what a
+scope may see of the attachment beside the attachment itself: a
+\texttt{View} (the graph's: whether the thread stands on a node), a
+\texttt{Crossing} (the edge a hop is crossing, for \texttt{\$-}), a
+\texttt{Witness} (what a correlation search tries in place of the
+thread's own bindings), and a \texttt{Key} (what a context is indexed
+by). The calculator's attachment is the unit type, so a calculator
+thread is the register and the topic and nothing else. The graph's
+is \texttt{GraphExt} (\texttt{graph/navigate.rs}): the node, the
+correlation bindings and the arrived edges, and the capsa of the
+spec is \texttt{Thread<GraphExt>}. The walk's frontier carries one
+attachment per path, so a predicate pass borrows it and clones
+nothing. A \texttt{Position} is a number the thread and the pipeline
+carry and compare; only the graph reads it as a node.
+
+The register is the whole memory (spec: The Capsa): one sequence of
+regulae, a regula any value, node references included. A mark
+\texttt{.name} files a reference to the position
+(\texttt{Value::Node}, minted by \texttt{graph::navigate::node\_ref}
+with the node's coordinate and its locator), so there is no mark
+store beside the register and one name pool over both kinds. The
+reads split by side: \texttt{\$.} \texttt{@.} \texttt{\%.}
+\texttt{\%..} see the regulae that are not references, \texttt{\$\$.}
+\texttt{@@.} \texttt{\%\%.} \texttt{\%\%..} the references, positions
+counting on each side; a name reads whatever was filed under it last
+(\texttt{pipeline/register.rs}). The dedup key of a walk is the node
+and the merged sequence, so the interleaving of values and
+references is part of a thread's state. The cursor is the scope's
+business, not the thread's: \texttt{\$\$\_} (\texttt{Operand::Position})
+reads the node the scope stands on, \texttt{\$\$\_\_}
+(\texttt{Operand::Invoking}) the scope's \texttt{outer}, set when a
+query body opens, and \texttt{\$\$0} (\texttt{Operand::Driver}) the
+scope's \texttt{driver}, set by the join condition alone and refused
+by the parser anywhere else. Bare, each is a reference; a reference
+read as a value prints and exports as its locator, equals a
+reference to the same node, and resolves to it under \texttt{-->}.
+
+\paragraph{The host.} The pipeline evaluates commands and operands
+against a \texttt{Host} (\texttt{pipeline/mod.rs}), the trait that
+holds every question the pipeline cannot answer from a value alone:
+the root attachment, a property of a node, the provenance at a
+position, a node's scalar, its rendering as JSON, XML or a table,
+the navigation of a step, the edges of a node. Every adapter is a
+host (\texttt{graph/host.rs} implements the trait for any
+\texttt{AstAdapter}), and so is the calculator's \texttt{Calc},
+whose attachment is the unit and whose node questions are refused by
+name. The generic operand evaluator (\texttt{pipeline/operand.rs})
+runs on any host; the graph keeps the node-reading half
+(\texttt{graph/operand.rs}) and wraps the generic one with a witness
+slot for correlation. The registry tags every command with the
+layer its answer comes from (\texttt{Layer::Value} or
+\texttt{Layer::Node}); the calculator's entry refuses a pipeline
+that names a node command before it runs, as it refuses a head that
+is not bare.
+
+\paragraph{The parser's reflector.} The parser expands macros
+through an \texttt{Expander} (\texttt{syntax/expand.rs}), a trait
+with the usage questions a macro body needs answered; the graph's
+\texttt{Reflector} implements it over an optional adapter, so the
+syntax layer never names the evaluator. The ambient state a run
+needs below the pipeline (the collation, the sentence bonds, the
+refusal channel the library reports into) lives in
+\texttt{value/ambient.rs} as a stack entered per run; the run
+options the graph adds (the plan, the budget, the reference targets)
+stay in \texttt{graph/run.rs}.
+
 \section{The Execution Ladder}\label{sec:ladder}
 
 Database adapters evaluate on a three-rung ladder; every rung is
@@ -984,7 +1098,7 @@ hold this), so the rungs trade only latency and transfer:
     leading run only (a positional predicate before an expression
     one sees unfiltered rows), a single \texttt{/table/*} branch
     with no correlations, the table reached exactly once, no
-    crosslink/resolution axes, no \texttt{:::}/\texttt{::::}
+    crosslink/resolution axes, no \texttt{:}/\texttt{:::}
     metadata (each would observe the filtering). Since the
     JSON-column round (2026-07-31), refused predicates in the
     leading run degrade to \emph{superset prefilters} instead
@@ -1044,9 +1158,9 @@ root-anchored sequence of hops, each an axis followed by a name:
   & \live wildcard, glob, and regex name matching \\
 \texttt{<code>}, \texttt{<a|b>}, \texttt{<a><b>}
   & \live trait filters (alternation, conjunction) \\
-\texttt{::}, \texttt{:::key}, \texttt{::::key}
+\texttt{::}, \texttt{:key}, \texttt{:::key}
   & \live property, core-metadata, and adapter-metadata projection \\
-\texttt{[::::size > 1K]}, \texttt{[/child]}, \texttt{[n]},
+\texttt{[:::size > 1K]}, \texttt{[/child]}, \texttt{[n]},
 \texttt{[-1]}, \texttt{[2..5]}
   & \live predicates: comparisons (\texttt{=} \texttt{!=} \texttt{<}
     \texttt{<=} \texttt{>} \texttt{>=}), substring \texttt{*=}, regex
@@ -1092,7 +1206,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     reflection: \texttt{.quarb} files open as the query's own arbor
     (\texttt{quarb::reflect}; vocabulary locked v1, enforced by the
     conformance corpus in \texttt{tests/vocabulary.rs}, version on
-    the root as \texttt{::::vocabulary}) \\
+    the root as \texttt{:::vocabulary}) \\
 \texttt{def \&f(\$x): ...;}, \texttt{\&f(::age)},
 \texttt{--defs}, \texttt{--expand}
   & \live fragments: parse-time expansion with call-by-name
@@ -1211,7 +1325,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     elsewhere; \texttt{transpose}, \texttt{pivot}, \texttt{melt} are
     the stdlib's reshapes \\
 \texttt{= \#(@(name; age); \%("Braund"; 22))}, \texttt{\#(\%(1; 2); \%(3; 4))}, \texttt{@| \#},
-\texttt{| :age}, \texttt{\$\_:::shape},
+\texttt{| :age}, \texttt{\$\_:shape},
 \texttt{fit((\textasciicircum{}/* | ::label))}
   & \live the table kind and the operand rule: \texttt{Value::Table}
     (\texttt{quarb::Table}: an optional header and rows of one width,
@@ -1295,11 +1409,13 @@ root-anchored sequence of hops, each an axis followed by a name:
     consult the whole table (share-of-total columns) \\
 \texttt{.c(\^{}/row[::k = \$\$.k] @| count)},
 \texttt{| \%(\$\$1/name::; /amt::)}
-  & \live correlated subqueries: \texttt{\$\$} steps a capsa-scope
-    operand out to the invoking capsa (\texttt{\$\$.name},
-    \texttt{\$\$\_}, \texttt{\$\$ord}; the node form
-    \texttt{\$\$::prop} / \texttt{\$\$/child::x} re-anchors on the
-    invoking capsa's node; stacking \texttt{\$\$\$} steps further)
+  & \live correlated subqueries: the capsa is shared, so
+    \texttt{\$.name}, \texttt{\$\_} and \texttt{\$ord} read the same
+    register inside a body; \texttt{\$\$\_\_} is the invoking
+    position (\texttt{\$\$\_\_::prop}, \texttt{\$\$\_\_/child::x}),
+    one query body out and no further, \texttt{\$\$\_} the position
+    and \texttt{\$\$0} the driver of a join condition (2026-10-18;
+    \texttt{\_} retired)
     — wide crosstabs, groupwise transforms; and the correlation
     keeps its \emph{witness}, so \texttt{\$*k} in pipeline commands
     projects the joined side into output (\texttt{SELECT a.x, b.y});
@@ -1330,20 +1446,23 @@ root-anchored sequence of hops, each an axis followed by a name:
     and the whole-arbor walk runs only where the adapter opts in
     (\texttt{walks\_for\_references}), else the query is refused;
     \texttt{::a=>(/scope/*::b)} is the value match \\
-\texttt{\$.r:::provenance}, \texttt{:::\%provenance},
-\texttt{:::@origin}, \texttt{--reproducible}
+\texttt{\$.r:%provenance:text}, \texttt{:\%provenance},
+\texttt{:@origin}, \texttt{--reproducible}
   & \live value provenance (2026-09-06/07): every value carries
     its \emph{origins} (node, command; \texttt{Origins} bounded at
     eight, the rest counted) and the provenance entries of the
     nodes it was read from, kept in lockstep with record fields and
-    list items (\texttt{Prov} in \texttt{exec.rs}, thread-local
-    read frames). The value-side \texttt{:::} rung
-    (\texttt{Operand::ValueMeta}) answers \texttt{provenance}
-    (kaiv text), the shaped keys \texttt{\%provenance} /
-    \texttt{@provenance} (record / list: source, path, instant,
-    instant-from, dpid), \texttt{origin} / \texttt{\%origin} /
-    \texttt{@origin} (node ids with the command), \texttt{path},
-    \texttt{elided}. \texttt{resolved\_provenance} fills the
+    list items (\texttt{Prov} in \texttt{pipeline/prov.rs}, thread-local
+    read frames). A value's provenance reads through the shape
+    sigils only (draft 157, \texttt{Operand::ValueMeta}):
+    \texttt{:\%provenance} the record (source, path, instant,
+    instant-from, dpid, elided, text — the text being the kaiv
+    canonical list), \texttt{:@provenance} one record per entry,
+    \texttt{:\%origin} / \texttt{:@origin} the node ids with the
+    command; the bare keys (\texttt{value:::source}) refuse with a
+    pointer to \texttt{:\%provenance:source}, and on a node the same
+    keys are the core rung (\texttt{/x:source},
+    \texttt{/x:\%provenance}). \texttt{resolved\_provenance} fills the
     name-path within the source and completes the instant ladder
     node $\to$ source (mount target mtime) $\to$ access
     (invocation instant); \texttt{--reproducible} holds the two
@@ -1359,7 +1478,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     outside a pipeline context. What lets one push read its
     neighbours: \texttt{<-link:\%.} inside an expression body is
     the peer's whole register \\
-\texttt{((!7))}, \texttt{((!\$.v:::origin))}
+\texttt{((!7))}, \texttt{((!\$.v:%origin:id))}
   & \live the node-id anchor (2026-09-07): \texttt{Anchor::Id} takes
     an expression; a number, a \texttt{\%origin} record (by
     \texttt{id}), a list forks. \texttt{AstAdapter::has\_node}
@@ -1383,18 +1502,33 @@ root-anchored sequence of hops, each an axis followed by a name:
 \medskip
 
 The pipeline runs on \emph{capsae}\,---\,the register system's unit,
-a node paired with a register (its breadcrumbs) and a current topic.
-A per-capsa \texttt{|} transforms each topic; \texttt{@|} reduces the
-whole context; \texttt{| .name} pushes the topic onto the register and
-\texttt{| \$.name} recalls it; a subcontext \texttt{| .(expr)}
+a node paired with a register (its breadcrumbs, node references
+among them) and a current topic. A per-capsa \texttt{|} transforms
+each topic; \texttt{@|} reduces the whole context; \texttt{| .name}
+pushes the topic onto the register (a reference to the position
+where there is no topic) and \texttt{| \$.name} recalls it; a
+subcontext \texttt{| .(expr)}
 evaluates \texttt{expr} from each node, reduces it to a scalar, and
 pushes it\,---\,grouped aggregation without leaving the query. A
+push of any spelling appends to the capsa and leaves the cursor as
+it is (spec draft 154): the topic before \texttt{| .n(expr)} is the
+topic after it, the value waits in the register for
+\texttt{\$.n}, and a query ending in a push yields its topics as
+they stood (\texttt{pipeline\_projected} treats no push as
+value-typing). The context family reads the command's input
+snapshot (spec draft 157): \texttt{@\_} the peers' topics,
+\texttt{@@\_} their positions (\texttt{Host::positions}; a glued
+projection maps over them), \texttt{\#*} and \texttt{\#\#*} the
+context as a table of the value or the node regulae
+(\texttt{pipeline::operand::matrix}, one row per thread, the columns
+as \texttt{\%..} names them, typed by the table rule); the old
+\texttt{@*} refuses with the pointer. A
 push quantified \texttt{\{N\}} repeats over the whole context, each
 round seeing the last (the iteration loop); \texttt{X:.r} reads the
 register of whichever capsa stands at the node \texttt{X} reaches,
 from the same snapshot; and every value remembers where it was
-read, so \texttt{:::} on a value answers its provenance the way
-\texttt{:::} on a node does.
+read, so \texttt{:} on a value answers its provenance the way
+\texttt{:} on a node does.
 
 \medskip
 
@@ -1412,10 +1546,33 @@ non-hierarchical crosslinks. The engine drives all navigation through
 the \texttt{AstAdapter} trait, so this trait \emph{is} the contract
 between the language and the world.
 
+One clause of that contract concerns the values an adapter mints
+(spec: adapter responsibilities, draft 155): a property that
+\emph{measures} something is a quantity in the source's own unit\,---\,a
+size through \texttt{Value::bytes}, a span of time through
+\texttt{Value::seconds}, a length as a \texttt{Value::Quantity} written
+in millimetres or kibibytes as the source keeps it\,---\,and a count
+stays a number. A bare number never compares with a quantity (a
+threshold names its unit, \texttt{[::size > 40\_B]}), so a measure
+minted bare would be unreachable from a criterion.
+
+A second clause concerns traits (spec: adapter traits, draft 156). A
+relational cell carries its column's declared type, lowercased and
+stripped of parameters (\texttt{<varchar>}, \texttt{<integer>}), and
+beside it the derived kind \texttt{<number>}, \texttt{<string>} or
+\texttt{<boolean>}; the one implementation is
+\texttt{quarb\_relational::type\_traits} over the
+\texttt{TableSpec::column\_types} each driver fills from its catalog
+(PRAGMA \texttt{table\_info}, \texttt{information\_schema}, Oracle's
+\texttt{user\_tab\_columns}). A file carries its lowercased extension
+beside its class (\texttt{<json>}, \texttt{<tgz>}; \texttt{.tar.gz}
+carries \texttt{<gz>} and \texttt{<tar>}), so the leaf of the file
+system and the root of the grafted document say what they are alike.
+
 \section{The Live Trait}
 
 The methods the skeleton actually uses. Signatures are the real ones
-from \texttt{quarb/src/adapter.rs}:
+from \texttt{quarb/src/graph/adapter.rs}:
 
 \begin{lstlisting}[language=rust]
 /// An opaque handle to a node, minted and interpreted by the
@@ -1448,7 +1605,7 @@ pub trait AstAdapter {
     /// The default projection, bare `::` (filesystem: file content).
     fn default_value(&self, _node: NodeId) -> Option<Value> { None }
 
-    /// Adapter metadata `::::key` (filesystem: size, modified, …).
+    /// Adapter metadata `:::key` (filesystem: size, modified, …).
     fn metadata(&self, _node: NodeId, _key: &str) -> Option<Value> { None }
 
     /// Outgoing / incoming crosslinks as (label, node) pairs, for
@@ -1593,7 +1750,7 @@ pub trait AstAdapter {
 \noindent
 The navigation methods are required; the projection methods carry
 defaults, so an adapter implements only what its domain offers. Core
-metadata (\texttt{:::key}\,---\,index, depth, counts, \texttt{is-leaf},
+metadata (\texttt{:key}\,---\,index, depth, counts, \texttt{is-leaf},
 \dots) is computed by the engine from the navigation surface, so no
 adapter implements it.
 
@@ -1633,7 +1790,7 @@ Three observations that the filesystem work has already forced:
   no wrapper forwarded (\texttt{descendants\_where},
   \texttt{has\_node}, \texttt{provenance\_list}), and
   \texttt{ModelAdapter} dropping \texttt{link\_property} and
-  aliased metadata, so an edge property or \texttt{::::size}
+  aliased metadata, so an edge property or \texttt{:::size}
   answered nothing under \texttt{--model}; the macro round of
   2026-10-07 found the Python binding's \texttt{Dyn} forwarding
   29 methods of 45. A model's mount
@@ -1876,8 +2033,8 @@ nothing about encodings.
   decodes.
 \item \textbf{Layers that read bytes} take the rule and answer for
   what they decoded: \texttt{Sourced} (the wrapper \texttt{qua}
-  puts on a mount it read itself) answers \texttt{::::encoding} and
-  \texttt{::::replaced} on the root; \texttt{ComposeAdapter}
+  puts on a mount it read itself) answers \texttt{:::encoding} and
+  \texttt{:::replaced} on the root; \texttt{ComposeAdapter}
   (\texttt{with\_decoding}) reads a grafted leaf through its path
   and answers on that leaf; \texttt{ArchiveAdapter}
   (\texttt{open\_with\_decoding}) on each member it reads, tar
@@ -2147,7 +2304,7 @@ cargo run -p qua -- '/README.md'      # a single top-level file
 
 # query a document
 cargo run -p qua -- '/users/0/name::' data.json
-cargo run -p qua -- '//book[::pages > 200]::::id' catalog.xml
+cargo run -p qua -- '//book[::pages > 200]:::id' catalog.xml
 cargo run -p qua -- '//a::href' page.html
 \end{lstlisting}
 

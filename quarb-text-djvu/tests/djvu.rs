@@ -181,9 +181,9 @@ fn sections_pages_zones_and_geometry() {
         ["Глава первая", "Глава вторая"]
     );
     assert_eq!(values(&m, "/section/section::lemma"), ["Примечания"]);
-    assert_eq!(values(&m, "/section[1]/page::::page"), ["1"]);
-    assert_eq!(values(&m, "/section[2]/page::::page"), ["2"]);
-    assert_eq!(values(&m, "/section/section/page::::page"), ["3"]);
+    assert_eq!(values(&m, "/section[1]/page:::page"), ["1"]);
+    assert_eq!(values(&m, "/section[2]/page:::page"), ["2"]);
+    assert_eq!(values(&m, "/section/section/page:::page"), ["3"]);
     // zones as the layer names them; words are a line's text
     assert_eq!(values(&m, "//column @| count"), ["2"]);
     assert_eq!(values(&m, "//paragraph @| count"), ["4"]);
@@ -201,19 +201,19 @@ fn sections_pages_zones_and_geometry() {
     assert_eq!(
         values(
             &m,
-            "//line[2] | %(::::page; ::::x; ::::y; ::::width; ::::height)"
+            "//line[2] | %(:::page; :::x; :::y; :::width; :::height)"
         ),
         ["%(page = 1; x = 100; y = 180; width = 500; height = 30)"]
     );
-    assert_eq!(values(&m, "//paragraph[2]::::height"), ["80"]);
+    assert_eq!(values(&m, "//paragraph[2]:::height"), ["80"]);
     // a page without a text layer has no zones and still mounts
     assert_eq!(values(&m, "//page @| count"), ["3"]);
     assert_eq!(values(&m, "//page[3]/* @| count"), ["0"]);
-    assert_eq!(values(&m, "//page[3]::::text-layer"), ["false"]);
-    assert_eq!(values(&m, "^::::text-layer"), ["true"]);
-    assert_eq!(values(&m, "^::::n-pages"), ["3"]);
+    assert_eq!(values(&m, "//page[3]:::text-layer"), ["false"]);
+    assert_eq!(values(&m, "^:::text-layer"), ["true"]);
+    assert_eq!(values(&m, "^:::n-pages"), ["3"]);
     assert_eq!(
-        values(&m, "//page[1] | %(::::width; ::::height; ::::dpi)"),
+        values(&m, "//page[1] | %(:::width; :::height; :::dpi)"),
         ["%(width = 800; height = 1200; dpi = 300)"]
     );
     // the declared identity
@@ -227,8 +227,8 @@ fn sections_pages_zones_and_geometry() {
 fn without_an_outline_the_tree_is_pages() {
     let bytes = page(&[&[&["Одна", "строка"]]]);
     let m = quarb_text_djvu::parse(&bytes).unwrap();
-    assert_eq!(values(&m, "/* | :::name"), ["page"]);
+    assert_eq!(values(&m, "/* | :name"), ["page"]);
     assert_eq!(values(&m, "/page/column/paragraph/line::"), ["Одна строка"]);
-    assert_eq!(values(&m, "^::::text-layer"), ["true"]);
+    assert_eq!(values(&m, "^:::text-layer"), ["true"]);
     assert!(quarb_text_djvu::parse(b"not a djvu").is_err());
 }

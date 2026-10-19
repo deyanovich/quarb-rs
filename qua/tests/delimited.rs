@@ -94,19 +94,19 @@ fn one_list_three_ways_one_total() {
     // Excel's `sep=;` line decides the delimiter and is not a row
     assert_eq!(ok(&dir, &[sum, "prices-excel.csv"]), "1256.75");
     assert_eq!(ok(&dir, &["/* @| count", "prices-excel.csv"]), "3");
-    assert_eq!(ok(&dir, &["^::::delimiter", "prices-excel.csv"]), ";");
+    assert_eq!(ok(&dir, &["^:::delimiter", "prices-excel.csv"]), ";");
     // what was decided, on the root
     assert_eq!(
         ok(
             &dir,
             &[
-                "^::::decimal",
+                "^:::decimal",
                 "prices-semicolon.csv?delimiter=;&decimal=comma"
             ]
         ),
         "comma"
     );
-    assert_eq!(ok(&dir, &["^::::decimal", "prices.csv"]), "point");
+    assert_eq!(ok(&dir, &["^:::decimal", "prices.csv"]), "point");
 }
 
 #[test]

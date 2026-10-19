@@ -88,7 +88,7 @@ fn predicates_reflect() {
 
 #[test]
 fn source_metadata_and_introspection_aggregates() {
-    assert_eq!(values("^::::source"), vec![Value::Str(QUERY.to_string())]);
+    assert_eq!(values("^:::query"), vec![Value::Str(QUERY.to_string())]);
     // "how many commands does this query run?"
     assert_eq!(values("/query/pipeline/* @| count"), vec![Value::Int(5)]);
     // "does it use any descendant hops?" — no
@@ -143,9 +143,9 @@ fn recall_resolution_is_scope_aware() {
     // the join's first entry (/b/*), not the body's own branches:
     // the context ref resolves to the /b/* branch (one deduped
     // node — before the fix the inner one resolved to /c/*).
-    let src = r#"/a/* <=> /b/*[::x = _::x] | .s(/c/*[::y = $$1::y] @| count) | $.s"#;
+    let src = r#"/a/* <=> /b/*[::x = $$0::x] | .s(/c/*[::y = $$1::y] @| count) | $.s"#;
     assert_eq!(
-        vals(src, "//context::index-->/step[1]::matcher"),
+        vals(src, "//context[::index = 1]::index-->/step[1]::matcher"),
         vec![Value::Str("b".to_string())]
     );
 }

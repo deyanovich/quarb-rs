@@ -72,17 +72,28 @@ fn specs(conn: &Connection, refs: &[(String, String)]) -> Result<Vec<TableSpec>,
         // Columns and the primary key (a single-column pk names the
         // rows; a composite or absent pk falls back to rowid).
         let mut columns = Vec::new();
+        let mut json_columns = Vec::new();
         let mut pk_cols: Vec<(i64, usize)> = Vec::new();
+        let mut column_types: Vec<String> = Vec::new();
         {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(&name)))?;
             let mut rows = stmt.query([])?;
             while let Some(r) = rows.next()? {
                 let col: String = r.get(1)?;
+                let declared: String = r.get(2)?;
                 let pk: i64 = r.get(5)?;
                 if pk > 0 {
                     pk_cols.push((pk, columns.len()));
                 }
+                // a column declared JSON or JSONB declares its
+                // cells' notation (spec: Grafting)
+                if declared.trim().eq_ignore_ascii_case("json")
+                    || declared.trim().eq_ignore_ascii_case("jsonb")
+                {
+                    json_columns.push(columns.len());
+                }
                 columns.push(col);
+                column_types.push(declared);
             }
         }
         pk_cols.sort();
@@ -134,6 +145,8 @@ fn specs(conn: &Connection, refs: &[(String, String)]) -> Result<Vec<TableSpec>,
             columns,
             pk,
             fks,
+            json_columns,
+            column_types,
         });
     }
     Ok(out)
@@ -549,7 +562,7 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
 pub fn column_catalog(
     path: &std::path::Path,
     tables: &[&str],
-) -> Result<Vec<(String, bool)>, SqliteError> {
+) -> Result<Vec<(String, bool, bool)>, SqliteError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut catalog = Vec::new();
     for table in tables {
@@ -557,7 +570,11 @@ pub fn column_catalog(
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         for row in rows {
             let (name, declared) = row?;
-            catalog.push((name, numeric_affinity(&declared)));
+            // numeric affinity, and whether the column is declared
+            // json (the graft's declaration, kept by SQLite as the
+            // type name)
+            let json = matches!(declared.trim().to_ascii_lowercase().as_str(), "json" | "jsonb");
+            catalog.push((name, numeric_affinity(&declared), json));
         }
     }
     Ok(catalog)

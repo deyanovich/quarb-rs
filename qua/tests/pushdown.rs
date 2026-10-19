@@ -88,3 +88,48 @@ fn a_comparison_the_types_would_change_scans() {
     assert_eq!(out, "0");
     assert!(err.contains("pushdown: not used"), "{err}");
 }
+
+/// A JSON path under a column pushes down only as the scan grafts:
+/// a TEXT column holding JSON text is a leaf on both roads (no
+/// rows), a column declared JSON grafts on both, and `<json>` on
+/// the hop declares the graft on both whatever the column's type.
+#[test]
+fn a_json_path_pushes_only_as_declared() {
+    let dir = fixture("json-declared");
+    let db = rusqlite::Connection::open(dir.join("lib.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE jrows (id INTEGER PRIMARY KEY, j TEXT);
+         INSERT INTO jrows VALUES
+           (1, '{\"tag\":\"gold\"}'), (2, '{\"tag\":\"lead\"}'), (3, '{\"tag\":\"gold\"}');
+         CREATE TABLE t (id INTEGER PRIMARY KEY, doc JSON);
+         INSERT INTO t VALUES (1, '{\"tag\":\"gold\"}'), (2, '{\"tag\":\"lead\"}');",
+    )
+    .unwrap();
+    let scan = |q: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(["--no-pushdown", q, "lib.db"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    // TEXT, undeclared: the leaf is a leaf on both roads.
+    let q = "/jrows/*[/j/tag:: = \"gold\"]::id";
+    let (out, err) = qua(&dir, q);
+    assert_eq!(out, "");
+    assert_eq!(scan(q), "");
+    assert!(!err.contains("json_extract") || err.contains("scann"), "{err}");
+    // Declared JSON: both roads graft and agree.
+    let q = "/t/*[/doc/tag:: = \"gold\"]::id";
+    let (out, err) = qua(&dir, q);
+    assert_eq!(out, "1");
+    assert_eq!(scan(q), "1");
+    assert!(err.contains("json_extract"), "{err}");
+    // `<json>` on the hop declares the graft on both roads.
+    let q = "/jrows/*[/j<json>/tag:: = \"gold\"]::id";
+    let (out, _) = qua(&dir, q);
+    assert_eq!(out, "1\n3");
+    assert_eq!(scan(q), "1\n3");
+}

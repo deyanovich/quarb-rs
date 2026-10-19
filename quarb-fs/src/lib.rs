@@ -12,7 +12,7 @@
 //! rules is a planned optimization.
 //!
 //! Projections and traits are live: the default projection (`::`) is
-//! a file's text content; `;;;key` exposes metadata (`size`,
+//! a file's text content; `:::key` exposes metadata (`size`,
 //! `modified`, `extension`, `is-dir`, `is-file`, and on Unix `mode`
 //! and `permissions`); and `<trait>` filters on a structural class
 //! (`dir`, `file`, `symlink`) or a file class by extension (`code`,
@@ -158,7 +158,8 @@ fn file_class(ext: &str) -> Option<&'static str> {
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "tiff" | "ico" => "image",
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "audio",
         "mp4" | "mkv" | "webm" | "mov" | "avi" => "video",
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => "archive",
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "tgz" | "tbz2" | "txz"
+        | "tzst" => "archive",
         "json" | "yaml" | "yml" | "toml" | "xml" | "csv" | "ini" => "data",
         _ => return None,
     };
@@ -166,7 +167,7 @@ fn file_class(ext: &str) -> Option<&'static str> {
 }
 
 /// The language trait for source files the code level lowers —
-/// named exactly as the code level's `::::lang` answers, so
+/// named exactly as the code level's `:::lang` answers, so
 /// `//*<javascript>` covers the whole extension family where
 /// `*.js` names one spelling. Grows with the grammar set.
 fn source_language(ext: &str) -> Option<&'static str> {
@@ -246,11 +247,17 @@ impl AstAdapter for FsAdapter {
 
     /// Traits of a filesystem node: a structural trait (`dir`,
     /// `file`, or `symlink`), for files a class derived from the
-    /// extension (`code`, `text`, `image`, …), and `hidden` for an
-    /// entry whose name starts with a dot.
+    /// extension (`code`, `text`, `image`, …) with the language for
+    /// source the code level lowers, the extension itself lowercased
+    /// (`json`, `csv`, `tgz`; a `.tar.gz` carries `gz` and `tar`) so
+    /// the file says what it is as the leaf of the file system and
+    /// as the root of a grafted document alike (spec: adapter
+    /// traits), and `hidden` for an entry whose name starts with a
+    /// dot.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let path = &self.paths[node.0 as usize];
         let mut out = Vec::new();
+        let mut is_file = false;
         if let Ok(md) = std::fs::symlink_metadata(path) {
             let ft = md.file_type();
             if ft.is_symlink() {
@@ -259,6 +266,7 @@ impl AstAdapter for FsAdapter {
                 out.push("dir".into());
             } else if ft.is_file() {
                 out.push("file".into());
+                is_file = true;
             }
         }
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -268,6 +276,20 @@ impl AstAdapter for FsAdapter {
             }
             if let Some(lang) = source_language(&ext) {
                 out.push(lang.into());
+            }
+            if is_file {
+                out.push(ext.clone());
+                // The compound archive suffix: `.tar.gz`, `.tar.xz`
+                // and kin carry the inner `tar` too.
+                let inner = path
+                    .file_stem()
+                    .map(std::path::Path::new)
+                    .and_then(|s| s.extension())
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase);
+                if inner.as_deref() == Some("tar") && ext != "tar" {
+                    out.push("tar".into());
+                }
             }
         }
         // A dot-name is hidden, as `ls` has it. The mount root is
@@ -294,7 +316,7 @@ impl AstAdapter for FsAdapter {
         }
     }
 
-    /// Filesystem metadata (`;;;key`): `size`, `modified`,
+    /// Filesystem metadata (`:::key`): `size`, `modified`,
     /// `extension`, `is-dir`, `is-file`, and (on Unix) `mode` and
     /// `permissions`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
@@ -312,6 +334,7 @@ impl AstAdapter for FsAdapter {
                     secs: d.as_secs() as i64,
                     nanos: d.subsec_nanos(),
                     offset_min: None,
+                    calendar: Default::default(),
                 }),
             "extension" => path
                 .extension()
@@ -335,13 +358,13 @@ impl AstAdapter for FsAdapter {
 
     /// Data provenance: the entry's canonical absolute path as the
     /// source, its mtime as the instant (the same derivation as
-    /// `::::modified`, so the two always agree). No dpid — the
+    /// `:::modified`, so the two always agree). No dpid — the
     /// filesystem assigns none.
     /// Ruling #29: a file cannot grow properties — the surface is
     /// closed — so the filesystem annotations answer at `::` too:
-    /// `::size`, `::modified`, `::extension` read as `::::size`,
-    /// `::::modified`, `::::extension` (and `::::is-dir`,
-    /// `::::is-file`, `::::mode`, `::::permissions`). Data would win
+    /// `::size`, `::modified`, `::extension` read as `:::size`,
+    /// `:::modified`, `:::extension` (and `:::is-dir`,
+    /// `:::is-file`, `:::mode`, `:::permissions`). Data would win
     /// if a file had such a property; none does.
     fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
         &[

@@ -62,7 +62,7 @@ fn sections_derive() {
     assert_eq!(values("/paragraph::"), vec!["Preamble."]);
     assert_eq!(values("/section::lemma"), vec!["Guide"]);
     assert_eq!(values("/section/section::lemma"), vec!["Usage"]);
-    assert_eq!(values("/section/section::::level"), vec!["2"]);
+    assert_eq!(values("/section/section:::level"), vec!["2"]);
     // Everything after the h2 belongs to Usage — including the
     // trailing paragraph.
     assert!(
@@ -109,7 +109,7 @@ fn lists() {
 /// as authored.
 #[test]
 fn verbatim() {
-    assert_eq!(values("//verbatim::::lang"), vec!["rust"]);
+    assert_eq!(values("//verbatim:::lang"), vec!["rust"]);
     assert_eq!(values("//verbatim::"), vec!["fn main() {}"]);
 }
 

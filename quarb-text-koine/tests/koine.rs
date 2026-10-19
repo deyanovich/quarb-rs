@@ -60,7 +60,7 @@ fn enclosing_headings_rebuild_their_nesting() {
         ["The war", "First attempt", "Second attempt"]
     );
     assert_eq!(values(&m, "/section/section::lemma"), ["First attempt"]);
-    assert_eq!(values(&m, "/section[1]/section::::level"), ["2"]);
+    assert_eq!(values(&m, "/section[1]/section:::level"), ["2"]);
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn a_dialektos_definition_refuses() {
 
 /// Markdown through atrep's endomorphosis: at-markdown's flat
 /// heading endos carry their level in the name, flat item runs
-/// wrap into lists, fence info strings become ::::lang.
+/// wrap into lists, fence info strings become :::lang.
 #[test]
 fn markdown_imports_through_at_markdown() {
     let m = quarb_text_koine::parse_markdown(
@@ -119,7 +119,7 @@ fn markdown_imports_through_at_markdown() {
     assert_eq!(values(&m, "//section::lemma"), ["The war", "First attempt"]);
     assert_eq!(values(&m, "/section/section::lemma"), ["First attempt"]);
     assert_eq!(values(&m, "//unordered-item::"), ["alpha", "beta"]);
-    assert_eq!(values(&m, "//verbatim::::lang"), ["rust"]);
+    assert_eq!(values(&m, "//verbatim:::lang"), ["rust"]);
     assert_eq!(values(&m, "//verbatim::"), ["fn main() {}"]);
 }
 
@@ -282,9 +282,9 @@ fn fictionbook_imports_by_namespace() {
     assert_eq!(values(&l, "//title::"), ["Евгений Онегин"]);
     assert_eq!(values(&l, "//author::"), ["Александр Пушкин"]);
     // and declares them on the document node, as html's head does
-    assert_eq!(values(&m, "^::::title"), ["Евгений Онегин"]);
-    assert_eq!(values(&m, "^::::author"), ["Александр Пушкин"]);
-    assert_eq!(values(&l, "^::::title"), ["Евгений Онегин"]);
+    assert_eq!(values(&m, "^:::title"), ["Евгений Онегин"]);
+    assert_eq!(values(&m, "^:::author"), ["Александр Пушкин"]);
+    assert_eq!(values(&l, "^:::title"), ["Евгений Онегин"]);
 }
 
 /// A TEI speech on the text level: a `<sp><speaker>` block keeps
@@ -461,7 +461,7 @@ fn lit_keeps_the_inline_simmeres() {
     assert_eq!(values(&m, "//annotation<placename>::chora"), ["garden"]);
     assert_eq!(values(&m, "//annotation<date>::chronos"), ["1876-06-01"]);
     // Foreign is emphasis with the language after the genos.
-    assert_eq!(values(&m, "//emphasis<foreign>::::lang"), ["la"]);
+    assert_eq!(values(&m, "//emphasis<foreign>:::lang"), ["la"]);
     assert_eq!(values(&m, "//emphasis::"), ["Sic transit", "glory"]);
     // No key leaks into the prose.
     assert_eq!(values(&m, r#"//paragraph[:: *= "polly"] @| count"#), ["0"]);
@@ -550,7 +550,7 @@ fn bibtex_mounts_as_bib_entries() {
     );
     assert_eq!(values(&m, "//bib<liber>::onym"), ["knuth84"]);
     assert_eq!(values(&m, "//bib[::ephemeris]::onym"), ["lamport94"]);
-    assert_eq!(values(&m, "//bib::::genus"), ["liber", "commentarius"]);
+    assert_eq!(values(&m, "//bib:::genus"), ["liber", "commentarius"]);
     // The plain form: the full data, values in source order.
     assert_eq!(
         values(&m, r#"//bib[::onym = "knuth84"]::"#),
@@ -587,7 +587,7 @@ fn endo_links_become_refs() {
     )
     .unwrap();
     assert_eq!(
-        values(&m, "//ref | %(t = ::target; i = ::::resolved)"),
+        values(&m, "//ref | %(t = ::target; i = :::resolved)"),
         [
             "%(t = \"https://quarb.org/spec\"; i = null)",
             "%(t = \"#usage\"; i = false)"
@@ -673,7 +673,7 @@ Polly sighed. Polly's cat slept.</p>
     assert_eq!(
         values(
             &m,
-            r#"//character[::onym = "polly"]<-character[:::name = "token"] @| count"#
+            r#"//character[::onym = "polly"]<-character[:name = "token"] @| count"#
         ),
         ["2"]
     );
@@ -901,7 +901,7 @@ fn inline_notes_are_footnotes_not_prose() {
     assert_eq!(values(&m, r#"//token[:: = "phrase"] @| count"#), ["1"]);
     assert_eq!(values(&m, r#"//token[:: = "phrase"]::cite"#), ["jhn.3.16"]);
     let n = |w: &str| {
-        values(&m, &format!(r#"//token[:: = "{w}"]::::n"#))[0]
+        values(&m, &format!(r#"//token[:: = "{w}"]:::n"#))[0]
             .parse::<u32>()
             .unwrap()
     };
@@ -1074,8 +1074,8 @@ Rome fell slowly @@.@>[(gibbon1776)ch. 15.@@ and Persia was vast \
 
 /// Headings are sentences everywhere (the ruling of 2026-10-09):
 /// the title and every heading get one derived sentence under
-/// their node, before the content, counted in sequence; `::::at`
-/// and `::::end` are character coordinates in the block's text.
+/// their node, before the content, counted in sequence; `:::at`
+/// and `:::end` are character coordinates in the block's text.
 #[test]
 fn headings_are_sentences_and_coordinates_survive_resegmentation() {
     let md = "# The Play\n\nA word here. Another one!\n\n## Act Two\n\nLast words.\n";
@@ -1091,14 +1091,14 @@ fn headings_are_sentences_and_coordinates_survive_resegmentation() {
             "Last words."
         ]
     );
-    assert_eq!(values(&m, "//sentence::::n"), ["1", "2", "3", "4", "5"]);
+    assert_eq!(values(&m, "//sentence:::n"), ["1", "2", "3", "4", "5"]);
     assert_eq!(values(&m, "//section[1]/sentence[1]::"), ["The Play"]);
-    assert_eq!(values(&m, "//sentence[3]::::at"), ["13"]);
-    assert_eq!(values(&m, "//sentence[3]::::end"), ["25"]);
+    assert_eq!(values(&m, "//sentence[3]:::at"), ["13"]);
+    assert_eq!(values(&m, "//sentence[3]:::end"), ["25"]);
     // Trimmed at both ends: end - at is the character count.
-    assert_eq!(values(&m, "//sentence[2]::::end"), ["12"]);
-    assert_eq!(values(&m, "//sentence[3]/token[2]::::at"), ["21"]);
-    assert_eq!(values(&m, "//sentence[3]/token[2]::::end"), ["24"]);
+    assert_eq!(values(&m, "//sentence[2]:::end"), ["12"]);
+    assert_eq!(values(&m, "//sentence[3]/token[2]:::at"), ["21"]);
+    assert_eq!(values(&m, "//sentence[3]/token[2]:::end"), ["24"]);
     assert_eq!(values(&m, "//token @| count"), ["14"]);
 }
 

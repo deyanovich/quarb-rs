@@ -309,7 +309,7 @@ fn numbers_and_dates_keep_their_order_and_their_forms() {
     // what a locale renders, the same locale's reader reads back
     assert_eq!(
         ok(&dir, &[], &["--locale", "de-CH", "--grouping", "= 1234.5"]),
-        "1\u{2019}234.5"
+        "1'234.5"
     );
     assert_eq!(
         ok(&dir, &[], &["= \"1\u{2019}234.5\" | number(de-CH)"]),

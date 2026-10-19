@@ -44,22 +44,22 @@ fn embedded_kuzu() {
     let a = KuzuAdapter::open(&format!("kuzu:{}", path.display())).unwrap();
 
     // Catalog: node tables at the root; rows named by primary key.
-    assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person::::primary-key"), ["name"]);
-    assert_eq!(values(&a, "/Person::::n-rows"), ["3"]);
-    assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo", "Cy"]);
+    assert_eq!(values(&a, "/*:name"), ["City", "Person"]);
+    assert_eq!(values(&a, "/Person:::primary-key"), ["name"]);
+    assert_eq!(values(&a, "/Person:::n-rows"), ["3"]);
+    assert_eq!(values(&a, "/Person/*:name"), ["Ada", "Bo", "Cy"]);
 
     // Typed properties; DATE mints an instant.
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
     assert_eq!(values(&a, "/City/*[::pop > 500000]::name"), ["Oslo"]);
     assert_eq!(
-        values(&a, "/Person/*[::hired > 2020-01-01]:::name"),
+        values(&a, "/Person/*[::hired > 2020-01-01]:name"),
         ["Bo", "Cy"]
     );
 
     // Rel tables are typed crosslinks, both directions.
     assert_eq!(values(&a, "/Person/Ada->LIVES_IN::name"), ["Oslo"]);
-    assert_eq!(values(&a, "/City/Oslo<-LIVES_IN:::name"), ["Ada", "Cy"]);
+    assert_eq!(values(&a, "/City/Oslo<-LIVES_IN:name"), ["Ada", "Cy"]);
     assert_eq!(values(&a, "/Person/Bo<-MENTORS::name"), ["Ada"]);
 
     // Edge properties answer the $- accessor.

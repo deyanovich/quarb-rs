@@ -44,7 +44,7 @@ fn refusals() {
     let err = |q: &str| export(q).unwrap_err().to_string();
     assert!(err("//book/title::").contains("'//' axis"));
     assert!(err("/books/*<block>/title::").contains("trait"));
-    assert!(err("/a <=> /b[::x = _::x]").contains("correlation"));
+    assert!(err("/a <=> /b[::x = $$0::x]").contains("correlation"));
     assert!(err("/books/* | .t(/title::) | $.t").contains("command"));
     assert!(err("/books/*.rs/x::").contains("glob"));
 }

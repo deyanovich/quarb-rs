@@ -221,7 +221,7 @@ fn bottled_athena_catalog() {
     ))
     .unwrap();
     // catalog
-    assert_eq!(values(&a, "/*:::name"), ["artists", "tracks"]);
+    assert_eq!(values(&a, "/*:name"), ["artists", "tracks"]);
     // rows named by the ?key= nomination; typed cells
     assert_eq!(values(&a, "/artists/Holst::country"), ["England"]);
     // pagination: both tracks pages arrive

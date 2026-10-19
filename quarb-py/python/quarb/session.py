@@ -274,7 +274,7 @@ class Session:
             parent = base.rstrip("/") + rel
         parent = parent.rstrip("/")
         # `parent` is now a path like "/users/*" or "" (root).
-        query = f"{parent}/*:::name" if parent else "/*:::name"
+        query = f"{parent}/*:name" if parent else "/*:name"
         try:
             names = [str(n) for n in doc.values(query)]
         except Exception:

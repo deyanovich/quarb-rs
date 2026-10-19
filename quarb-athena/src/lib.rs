@@ -439,6 +439,8 @@ fn introspect(client: &Client) -> Result<Vec<TableSpec>, AthenaError> {
             columns,
             pk,
             fks: Vec::new(),
+            json_columns: Vec::new(),
+            column_types: Vec::new(),
         });
     }
     Ok(out)

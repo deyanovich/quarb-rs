@@ -17,7 +17,7 @@
 //! one, or a synthesized request line (`Name` + `ResultCode`,
 //! the AppRequests shape).
 //!
-//! - **Metadata**: `;;;table`, `;;;workspace`, `;;;type` (the
+//! - **Metadata**: `:::table`, `:::workspace`, `:::type` (the
 //!   row's `Type` column when present).
 //! - **The join**: Azure threads `OperationId` through
 //!   application tables — the family's correlation key on this
@@ -572,6 +572,7 @@ impl AstAdapter for AzlAdapter {
                     secs: row.secs,
                     nanos: row.nanos,
                     offset_min: None,
+                    calendar: Default::default(),
                 });
             }
             if let Some(v) = row
@@ -722,6 +723,6 @@ mod tests {
         // TimeGenerated is a typed instant behind ::timestamp.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
         // Metadata names the table.
-        assert_eq!(run("/entry[1]::::table"), vec!["AppRequests"]);
+        assert_eq!(run("/entry[1]:::table"), vec!["AppRequests"]);
     }
 }

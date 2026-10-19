@@ -27,7 +27,7 @@ fn nested_path_predicate_reads_the_register() {
     assert_eq!(in_predicate[3], "%(v = 4; n = 3)");
     // `_` one scope out is the capsa's node.
     assert_eq!(
-        values("/b/* | %(n = (^/a/*[:: < _::x] @| count))"),
+        values("/b/* | %(n = (^/a/*[:: < $$__::x] @| count))"),
         ["%(n = 1)", "%(n = 2)"]
     );
     // A body subcontext forks as before.

@@ -155,9 +155,98 @@ fn archive_name(name: &str) -> bool {
     quarb_archive::archive_extension(name.rsplit('.').next().unwrap_or(""))
 }
 
-/// Parse `content` by `name`'s extension, else by sniffing.
-fn parse_inner(
-    name: &str,
+/// The notations a leaf can be declared to carry (spec: Grafting):
+/// the one vocabulary `?format=NOTATION` on a mount and `<NOTATION>`
+/// on a hop share, the Text Readings' names of the formats. Source
+/// languages come besides, by their grammar names.
+pub const NOTATIONS: &[&str] = &[
+    "json", "jsonl", "yaml", "toml", "xml", "html", "markdown", "text", "csv", "tsv", "fb2",
+];
+
+/// The canonical notation a name declares by its extension (`.json`,
+/// `.yml`, `.htm`, `.ndjson`), a source language by its grammar's
+/// extension; None for no extension or one no reader takes.
+pub fn notation_of_name(name: &str) -> Option<String> {
+    let (_, ext) = name.rsplit_once('.')?;
+    let ext = ext.to_ascii_lowercase();
+    let n = match ext.as_str() {
+        "json" => "json",
+        "jsonl" | "ndjson" => "jsonl",
+        "xml" | "svg" | "xhtml" => "xml",
+        "fb2" => "fb2",
+        "html" | "htm" => "html",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "md" | "markdown" => "markdown",
+        "txt" => "text",
+        "csv" => "csv",
+        "tsv" => "tsv",
+        _ => {
+            #[cfg(feature = "source")]
+            if quarb_tree_sitter::supported(&ext) {
+                return Some(ext);
+            }
+            return None;
+        }
+    };
+    Some(n.to_string())
+}
+
+/// Whether a word names a notation (`?format=`, `<NOTATION>`).
+pub fn is_notation(name: &str) -> bool {
+    let n = canonical_notation(name);
+    if NOTATIONS.contains(&n.as_str()) {
+        return true;
+    }
+    #[cfg(feature = "source")]
+    if quarb_tree_sitter::supported(&n) {
+        return true;
+    }
+    false
+}
+
+/// A notation's canonical spelling: the extension synonyms read as
+/// their notation (`yml` yaml, `md` markdown, `ndjson` jsonl, `txt`
+/// text).
+pub fn canonical_notation(name: &str) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    match n.as_str() {
+        "yml" => "yaml".into(),
+        "md" => "markdown".into(),
+        "ndjson" => "jsonl".into(),
+        "txt" | "plain" => "text".into(),
+        "htm" => "html".into(),
+        _ => n,
+    }
+}
+
+/// The notation a text declares about itself in its first bytes
+/// (the Text Readings' declared identity): an XML declaration or a
+/// DOCTYPE. Nothing else counts; a brace or a bracket is a guess,
+/// not a declaration.
+pub fn self_declared(content: &str) -> Option<&'static str> {
+    let t = content.trim_start_matches('\u{feff}').trim_start();
+    if t.starts_with("<?xml") {
+        return Some("xml");
+    }
+    if t.len() >= 9 && t[..9].eq_ignore_ascii_case("<!doctype") {
+        let rest = t[9..].trim_start();
+        return Some(
+            if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("html") {
+                "html"
+            } else {
+                "xml"
+            },
+        );
+    }
+    None
+}
+
+/// Parse `content` as `notation` (canonical): the reader that
+/// notation names, at the mount's graft levels. None when the text
+/// does not parse as it, or no reader here takes the notation.
+fn parse_as(
+    notation: &str,
     content: &str,
     graft: SourceGraft,
     doc: DocumentGraft,
@@ -165,19 +254,19 @@ fn parse_inner(
 ) -> Option<Inner> {
     #[cfg(not(feature = "source"))]
     let _ = graft;
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let ext = canonical_notation(notation);
     match ext.as_str() {
         "json" => {
             return quarb_json::JsonAdapter::parse(content)
                 .ok()
                 .map(Inner::Json);
         }
-        "jsonl" | "ndjson" => {
+        "jsonl" => {
             return quarb_json::JsonAdapter::parse_lines(content)
                 .ok()
                 .map(Inner::Json);
         }
-        "xml" | "svg" | "xhtml" => {
+        "xml" => {
             // A FictionBook declared by its namespace grafts at the
             // text level through the koine route when the level
             // asks for it; the DOM otherwise, like any XML.
@@ -199,15 +288,15 @@ fn parse_inner(
             }
             return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
         }
-        "html" | "htm" => {
+        "html" => {
             return Some(match doc {
                 DocumentGraft::Dom => Inner::Html(quarb_html::HtmlAdapter::parse(content)),
                 DocumentGraft::Text => Inner::Text(quarb_text_html::parse(content)),
             });
         }
-        "yaml" | "yml" => return quarb_yaml::parse(content).ok().map(Inner::Json),
+        "yaml" => return quarb_yaml::parse(content).ok().map(Inner::Json),
         "toml" => return quarb_toml::parse(content).ok().map(Inner::Json),
-        "md" | "markdown" => {
+        "markdown" => {
             return Some(match doc {
                 DocumentGraft::Dom => Inner::Html(quarb_markdown::parse(content)),
                 DocumentGraft::Text => Inner::Text(quarb_text_markdown::parse(content)),
@@ -215,7 +304,7 @@ fn parse_inner(
         }
         // Plain text grafts at the text level (blank-line
         // paragraphs); html/md keep their DOM-level graft.
-        "txt" => return Some(Inner::Text(quarb_text::TextModel::parse_plain(content))),
+        "text" => return Some(Inner::Text(quarb_text::TextModel::parse_plain(content))),
         "csv" => {
             return quarb_csv::CsvAdapter::parse_declared(content, b',', csv)
                 .ok()
@@ -239,61 +328,15 @@ fn parse_inner(
         }
         _ => {}
     }
-    // Content sniff for extensionless names.
-    let t = content.trim_start();
-    if t.starts_with('{') || t.starts_with('[') {
-        return quarb_json::JsonAdapter::parse(content)
-            .ok()
-            .map(Inner::Json);
-    }
-    if t.starts_with("<?xml") {
-        return quarb_xml::XmlAdapter::parse(content).ok().map(Inner::Xml);
-    }
     None
-}
-
-/// Whether `parse_inner` could take a leaf of this name: one of the
-/// extensions it reads, a source extension with a grammar, or no
-/// extension at all (then the content decides). The list mirrors
-/// the arms of `parse_inner`.
-fn grafts_by_name(name: &str) -> bool {
-    let Some((_, ext)) = name.rsplit_once('.') else {
-        return true;
-    };
-    let ext = ext.to_ascii_lowercase();
-    if matches!(
-        ext.as_str(),
-        "json"
-            | "jsonl"
-            | "ndjson"
-            | "xml"
-            | "svg"
-            | "xhtml"
-            | "fb2"
-            | "html"
-            | "htm"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "md"
-            | "markdown"
-            | "txt"
-            | "csv"
-            | "tsv"
-    ) {
-        return true;
-    }
-    #[cfg(feature = "source")]
-    if quarb_tree_sitter::supported(&ext) {
-        return true;
-    }
-    false
 }
 
 /// One graft: an inner arbor mounted at an outer leaf.
 struct Graft {
     outer: NodeId,
     inner: Inner,
+    /// The notation the leaf was read as.
+    notation: String,
 }
 
 /// Grafted node ids carry this tag bit; the rest indexes the intern
@@ -310,6 +353,12 @@ const GRAFT_BIT: u64 = 1 << 55;
 /// A host's reader for a document leaf: the path in, its text-level
 /// model out, or `None` to leave the leaf to the default grafting.
 pub type DocumentReader = std::rc::Rc<dyn Fn(&std::path::Path) -> Option<quarb_text::TextModel>>;
+
+/// A host's reader for a document leaf that has no path: the outer
+/// adapter and the leaf in, its text-level model out (a row's body
+/// under `?doc=`, a model file's `document` member), or `None` to
+/// leave the leaf to the default grafting (spec: The Corpus Reading).
+pub type DocumentNodes<A> = std::rc::Rc<dyn Fn(&A, NodeId) -> Option<quarb_text::TextModel>>;
 
 pub struct ComposeAdapter<A: AstAdapter> {
     outer: A,
@@ -341,8 +390,8 @@ pub struct ComposeAdapter<A: AstAdapter> {
     document_reader: Option<DocumentReader>,
     /// The mount's rule at the source boundary (`?encoding=` and
     /// the declaration reporter): every leaf this layer reads by
-    /// path decodes under it, and the layer answers `::::encoding`
-    /// / `::::replaced` on the leaf it grafted. A leaf with no path
+    /// path decodes under it, and the layer answers `:::encoding`
+    /// / `:::replaced` on the leaf it grafted. A leaf with no path
     /// grafts from the outer adapter's text as before.
     decoding: SourceDecoding,
     /// Per graft: the record of its decoding, when this layer did
@@ -351,6 +400,11 @@ pub struct ComposeAdapter<A: AstAdapter> {
     /// The mount's `?delimiter=` / `?decimal=`, for the delimited
     /// leaves it grafts.
     csv: quarb_csv::CsvOptions,
+    /// The mount's `?format=NOTATION`: every leaf beneath reads as
+    /// it (spec: Grafting).
+    default_notation: Option<String>,
+    /// The host's reading of document leaves that have no path.
+    document_nodes: Option<DocumentNodes<A>>,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -370,10 +424,28 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             decoding: SourceDecoding::default(),
             decoded: RefCell::new(HashMap::new()),
             csv: quarb_csv::CsvOptions::default(),
+            default_notation: None,
+            document_nodes: None,
         }
     }
 
     /// The delimited-text options for this mount (builder-style).
+    /// The host's reading of document leaves by node: a leaf the
+    /// reader answers grafts as that text-level model (the leaves
+    /// `?doc=` names, a model file's `document` members).
+    pub fn with_document_nodes(mut self, reader: DocumentNodes<A>) -> Self {
+        self.document_nodes = Some(reader);
+        self
+    }
+
+    /// Every leaf beneath the mount reads as `notation`, the mount's
+    /// `?format=NOTATION` (spec: Grafting); a leaf whose text does not
+    /// parse as it stays a leaf.
+    pub fn with_default_notation(mut self, notation: Option<String>) -> Self {
+        self.default_notation = notation.map(|n| canonical_notation(&n));
+        self
+    }
+
     pub fn with_csv_options(mut self, csv: quarb_csv::CsvOptions) -> Self {
         self.csv = csv;
         self
@@ -512,12 +584,45 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     /// touch. Only childless outer nodes with text content are
     /// candidates.
     fn graft_at(&self, node: NodeId) -> Option<usize> {
+        self.graft_probe(node, None)
+    }
+
+    /// Read an outer leaf as `notation`, the query's `<NOTATION>` at
+    /// a hop (spec: Grafting): true when the leaf is grafted as that
+    /// notation afterwards, whether by this call or before it.
+    pub fn graft_as(&self, node: NodeId, notation: &str) -> bool {
+        let want = canonical_notation(notation);
+        if let Some(Some(g)) = self.probed.borrow().get(&node).copied() {
+            return self.grafts.borrow()[g].notation == want;
+        }
+        // a leaf probed as nothing may still read under a request
+        self.probed.borrow_mut().remove(&node);
+        match self.graft_probe(node, Some(&want)) {
+            Some(g) => self.grafts.borrow()[g].notation == want,
+            None => false,
+        }
+    }
+
+    fn graft_probe(&self, node: NodeId, requested: Option<&str>) -> Option<usize> {
         if let Some(&g) = self.probed.borrow().get(&node) {
             return g;
         }
         let g = (|| {
             if !self.outer.children(node).is_empty() {
                 return None;
+            }
+            // a document leaf the host reads by node (spec: The
+            // Corpus Reading): its model is the graft
+            if let Some(read) = &self.document_nodes
+                && let Some(model) = read(&self.outer, node)
+            {
+                let mut grafts = self.grafts.borrow_mut();
+                grafts.push(Graft {
+                    outer: node,
+                    inner: Inner::Text(model),
+                    notation: "document".into(),
+                });
+                return Some(grafts.len() - 1);
             }
             let name = self.outer.name(node)?;
             if archive_name(&name)
@@ -531,10 +636,15 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                         .with_source_graft(self.source_graft)
                         .with_document_graft(self.document_graft)
                         .with_decoding(self.decoding.clone())
-                        .with_csv_options(self.csv),
+                        .with_csv_options(self.csv)
+                        .with_default_notation(self.default_notation.clone()),
                 ));
                 let mut grafts = self.grafts.borrow_mut();
-                grafts.push(Graft { outer: node, inner });
+                grafts.push(Graft {
+                    outer: node,
+                    inner,
+                    notation: "archive".into(),
+                });
                 return Some(grafts.len() - 1);
             }
             if let Some(read) = &self.document_reader
@@ -546,14 +656,28 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 grafts.push(Graft {
                     outer: node,
                     inner: Inner::Text(model),
+                    notation: "document".into(),
                 });
                 return Some(grafts.len() - 1);
             }
-            // The name decides first: a leaf whose extension no
-            // reader here takes (an image, a binary, an unknown
-            // suffix) stays a leaf unread — only a known extension,
-            // or none (the content sniff), is worth the bytes.
-            if !grafts_by_name(&name) {
+            // A leaf grafts only as declared (spec: Grafting): by
+            // the substrate (a json column), by the mount's
+            // `?format=`, by its name's extension, or by what the
+            // bytes say of themselves (an XML declaration, a
+            // DOCTYPE). A leaf nothing declares is a leaf, unread;
+            // a named leaf whose extension no reader takes (an
+            // image, a binary) likewise. Only a nameless leaf is
+            // worth reading for its own declaration.
+            let declared = requested
+                .map(|r| canonical_notation(r))
+                .or_else(|| {
+                    self.outer
+                        .declared_notation(node)
+                        .map(|n| canonical_notation(&n))
+                })
+                .or_else(|| self.default_notation.clone())
+                .or_else(|| notation_of_name(&name));
+            if declared.is_none() && name.contains('.') {
                 return None;
             }
             // Through the path when there is one: the bytes meet
@@ -576,8 +700,9 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                     _ => return None,
                 },
             };
-            let mut inner = parse_inner(
-                &name,
+            let notation = declared.or_else(|| self_declared(&content).map(str::to_string))?;
+            let mut inner = parse_as(
+                &notation,
                 &content,
                 self.source_graft,
                 self.document_graft,
@@ -589,7 +714,11 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 model.set_document_url(&u);
             }
             let mut grafts = self.grafts.borrow_mut();
-            grafts.push(Graft { outer: node, inner });
+            grafts.push(Graft {
+                outer: node,
+                inner,
+                notation,
+            });
             if let Some(r) = record {
                 self.decoded.borrow_mut().insert(grafts.len() - 1, r);
             }
@@ -892,7 +1021,7 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().metadata(inner, key),
             // Like properties: what the outer cannot answer, the
-            // grafted document's root may (`::::"og:type"` on the
+            // grafted document's root may (`:::"og:type"` on the
             // file that holds the page).
             None => self.outer.metadata(node, key).or_else(|| {
                 let g = self.graft_at(node)?;
@@ -1006,6 +1135,11 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 .adapter()
                 .has_trait(inner, name),
             None => {
+                // `<json>` on a hop reads the leaf as JSON (spec:
+                // Grafting): the trait holds when it grafts as such
+                if is_notation(name) && self.outer.children(node).is_empty() {
+                    return self.graft_as(node, name) || self.outer.has_trait(node, name);
+                }
                 self.outer.has_trait(node, name)
                     || self.graft_at(node).is_some_and(|g| {
                         let grafts = self.grafts.borrow();

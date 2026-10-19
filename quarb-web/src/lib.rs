@@ -415,6 +415,7 @@ impl<S: WebStore> WebAdapter<S> {
                 secs,
                 nanos,
                 offset_min,
+                ..
             }) => Some((*secs, *nanos, *offset_min)),
             _ => None,
         }

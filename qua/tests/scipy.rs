@@ -83,8 +83,10 @@ fn omit_drops_the_holes_pairwise() {
     if !installed() {
         return;
     }
-    let with = run(r#"/holes/* | %(::hp; ::mpg) @| sp:pearsonr(--nan-policy=omit --digits=3)"#).unwrap();
-    let filtered = run(r#"/holes/*[::hp != null] | %(::hp; ::mpg) @| sp:pearsonr(--digits=3)"#).unwrap();
+    let with =
+        run(r#"/holes/* | %(::hp; ::mpg) @| sp:pearsonr(--nan-policy=omit --digits=3)"#).unwrap();
+    let filtered =
+        run(r#"/holes/*[::hp != null] | %(::hp; ::mpg) @| sp:pearsonr(--digits=3)"#).unwrap();
     assert_eq!(with, filtered);
     assert!(with[0].starts_with("%(statistic = -0.9"), "{with:?}");
     let e = refuse(r#"/holes/* | %(::hp; ::mpg) @| sp:pearsonr"#);
@@ -150,10 +152,9 @@ fn rows_cluster_and_pairs_read_by_position() {
     }
     let r = run("/rows/* | %(::book; ::mean; ::semi) @| sp:fcluster(-t=2 --method=ward) | :cluster @| join(\"\")").unwrap();
     assert_eq!(r, vec!["111222"]);
-    let r = run(
-        "/rows/* | %(::book; ::mean; ::semi) @| sp:linkage(--method=single --digits=3) @| [1]",
-    )
-    .unwrap();
+    let r =
+        run("/rows/* | %(::book; ::mean; ::semi) @| sp:linkage(--method=single --digits=3) @| [1]")
+            .unwrap();
     assert_eq!(
         r,
         vec!["%(a = @(\"d\"); b = @(\"e\"); distance = 2.15; size = 2)"]

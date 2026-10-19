@@ -58,16 +58,25 @@ const TREEBANK: &str = "# sent_id = 1
 
 #[test]
 fn corpus_dash_reads_conllu() {
-    assert_eq!(qua("//token @| count", "corpus:-", TREEBANK), "6\n");
-    assert_eq!(
-        qua("//token[::::n = 1]::lemma", "corpus:-", TREEBANK),
-        "one\n"
-    );
+    // nothing is sniffed (spec: Grafting): the treebank on the pipe
+    // is named by ?format=conllu, and unnamed it is prose
     assert_eq!(
         qua("//token @| count", "corpus:-?format=conllu", TREEBANK),
         "6\n"
     );
-    assert_eq!(qua("//sentence @| count", "text:-", TREEBANK), "2\n");
+    assert_eq!(
+        qua(
+            "//token[:::n = 1]::lemma",
+            "corpus:-?format=conllu",
+            TREEBANK
+        ),
+        "one\n"
+    );
+    assert_ne!(qua("//token @| count", "corpus:-", TREEBANK), "6\n");
+    assert_eq!(
+        qua("//sentence @| count", "text:-?format=conllu", TREEBANK),
+        "2\n"
+    );
     // Prose on the pipe keeps the prose reading.
     assert_eq!(qua("//sentence @| count", "text:-", PROSE), "0\n");
 }

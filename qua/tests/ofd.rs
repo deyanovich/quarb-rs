@@ -76,9 +76,9 @@ fn the_text_level_reads_lines_under_the_outline() {
     assert_eq!(
         ok(
             &dir,
-            &["//line[2] | %(::::page; ::::x; ::::y)", "text:emma.ofd"]
+            &["//line[2] | %(:::page; :::x; :::y)", "text:emma.ofd"]
         ),
-        "%(page = 1; x = 30; y = 20)"
+        "%(page = 1; x = 30_mm; y = 20_mm)"
     );
     assert_eq!(
         ok(&dir, &["^ | %(::title; ::author)", "text:emma.ofd"]),
@@ -105,7 +105,7 @@ fn the_plain_mount_is_the_package() {
     let dir = fixture("mount");
     // The zip's members, the XML grafted: the attachment reads as
     // XML under the document, the signatures would too.
-    assert_eq!(ok(&dir, &["/* | :::name", "emma.ofd"]), "OFD.xml\nDoc_0");
+    assert_eq!(ok(&dir, &["/* | :name", "emma.ofd"]), "OFD.xml\nDoc_0");
     assert_eq!(
         ok(&dir, &["/Doc_0/Attachs/notes.xml//note::", "emma.ofd"]),
         "Highbury"
@@ -113,7 +113,7 @@ fn the_plain_mount_is_the_package() {
     assert_eq!(
         ok(
             &dir,
-            &["/OFD.xml//*[:::name = \"ofd:DocRoot\"]::", "emma.ofd"]
+            &["/OFD.xml//*[:name = \"ofd:DocRoot\"]::", "emma.ofd"]
         ),
         "Doc_0/Document.xml"
     );

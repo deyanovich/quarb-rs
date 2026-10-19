@@ -16,6 +16,8 @@ fn spec(name: &str, columns: &[&str], pk: Option<usize>, fks: &[(usize, &str)]) 
             .iter()
             .map(|(c, t)| (*c, t.to_string(), String::new()))
             .collect(),
+        json_columns: Vec::new(),
+        column_types: Vec::new(),
     }
 }
 
@@ -67,13 +69,13 @@ fn values(model: &RelationalModel, query: &str) -> Vec<String> {
 fn only_touched_tables_load() {
     let (model, fetched) = counting_model();
     // listing tables touches nothing
-    assert_eq!(values(&model, "/*::::loaded"), vec!["false", "false"]);
+    assert_eq!(values(&model, "/*:::loaded"), vec!["false", "false"]);
     assert!(fetched.borrow().is_empty());
     // querying users loads users only
     assert_eq!(values(&model, "/users/1::name"), vec!["Ada"]);
     assert_eq!(*fetched.borrow(), vec!["users"]);
-    assert_eq!(values(&model, "/users::::loaded"), vec!["true"]);
-    assert_eq!(values(&model, "/orders::::loaded"), vec!["false"]);
+    assert_eq!(values(&model, "/users:::loaded"), vec!["true"]);
+    assert_eq!(values(&model, "/orders:::loaded"), vec!["false"]);
     // ... and only once, however often it is read
     let _ = values(&model, "/users/*::name @| count");
     assert_eq!(*fetched.borrow(), vec!["users"]);
@@ -96,6 +98,6 @@ fn eager_build_never_fetches() {
             values: vec![Value::Int(7)],
         }],
     )]);
-    assert_eq!(values(&model, "/t::::loaded"), vec!["true"]);
+    assert_eq!(values(&model, "/t:::loaded"), vec!["true"]);
     assert_eq!(values(&model, "/t/7::id"), vec!["7"]);
 }

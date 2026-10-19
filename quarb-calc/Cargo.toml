@@ -24,9 +24,11 @@ sklearn = ["qua/sklearn"]
 numpy = ["qua/numpy"]
 pandas = ["qua/pandas"]
 python-libs = ["qua/python-libs"]
+# The benchmark harness's allocation counter (see scripts/bench).
+alloc-stats = ["qua/alloc-stats"]
 
 [dependencies]
 # qua without its adapters: the calculator profile of the same
 # source.
-qua = { path = "../qua", version = "0.38.1", default-features = false }
+qua = { path = "../qua", version = "0.39.0", default-features = false }
 anyhow.workspace = true

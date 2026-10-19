@@ -4,7 +4,12 @@
 //! and read by `| @` and `| %`; the gate on a reflected synopsis.
 //! Built only with the python features; runs where the packages
 //! import (PYTHONPATH may point at them).
-#![cfg(all(feature = "numpy", feature = "pandas", feature = "scipy", feature = "sklearn"))]
+#![cfg(all(
+    feature = "numpy",
+    feature = "pandas",
+    feature = "scipy",
+    feature = "sklearn"
+))]
 
 use quarb::library::CommandLibrary;
 use quarb::{QueryResult, Value};
@@ -64,10 +69,16 @@ fn the_gate_reads_the_signature() {
     }
     // An unknown name: the package's nearest names.
     let e = refuse("/v/* | :: @| np:meen");
-    assert!(e.contains("have no 'meen'") && e.contains("nearest: mean"), "{e}");
+    assert!(
+        e.contains("have no 'meen'") && e.contains("nearest: mean"),
+        "{e}"
+    );
     // An option the function does not take, refused with its synopsis.
     let e = refuse("/v/* | :: @| np:mean(--foo=1)");
-    assert!(e.contains("has no option '--foo'") && e.contains("--axis="), "{e}");
+    assert!(
+        e.contains("has no option '--foo'") && e.contains("--axis="),
+        "{e}"
+    );
     // A method chain's unknown tail opens the gate: Python judges.
     let e = refuse(r#"/rows/* | %(::book; ::x) @| pd:groupby.nothing(book)"#);
     assert!(e.contains("nothing"), "{e}");
@@ -82,7 +93,10 @@ fn the_gate_reads_the_signature() {
         r#"/rows/* | %(::book; ::x) @| pd:to_pickle("x.pkl")"#,
     ] {
         let e = refuse(q);
-        assert!(e.contains("is withheld") && e.contains("outside the query"), "{q}: {e}");
+        assert!(
+            e.contains("is withheld") && e.contains("outside the query"),
+            "{q}: {e}"
+        );
     }
     // The pure converters stay.
     assert!(run(r#"/rows/* | %(::book; ::x) @| pd:to_dict"#).is_ok());
@@ -91,8 +105,13 @@ fn the_gate_reads_the_signature() {
     let model = r#"/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book))"#;
     let e = refuse(&format!("{model} | [$_] | count"));
     assert!(e.contains("library value"), "{e}");
-    let e = refuse(r#"/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book)) | [$_ > 1] | count"#);
-    assert!(e.contains("a comparison") && e.contains("library value"), "{e}");
+    let e = refuse(
+        r#"/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book)) | [$_ > 1] | count"#,
+    );
+    assert!(
+        e.contains("a comparison") && e.contains("library value"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -121,7 +140,10 @@ fn numpy_functions_over_the_stream() {
         run("/v/* | :: @| np:cumsum").unwrap(),
         vec!["#(%(1);\n  %(3);\n  %(6);\n  %(10);\n  %(20))"]
     );
-    assert_eq!(run("/v/* | :: @| np:cumsum @| @").unwrap(), vec!["1", "3", "6", "10", "20"]);
+    assert_eq!(
+        run("/v/* | :: @| np:cumsum @| @").unwrap(),
+        vec!["1", "3", "6", "10", "20"]
+    );
     assert_eq!(run("/v/* | :: @| np:cumsum | [2]").unwrap(), vec!["3"]);
     // a list literal on the pipe is the sample itself
     assert_eq!(run("= @(-1; 1) @| np:log @| @").unwrap(), vec!["nan", "0"]);
@@ -134,8 +156,13 @@ fn numpy_functions_over_the_stream() {
     assert_eq!(run("/v/* | :: @| np:cumsum @| np:max").unwrap(), vec!["20"]);
     assert_eq!(run("/v/* | :: @| np:cumsum | np:max").unwrap(), vec!["20"]);
     // A library value in a stdlib command is refused by kind.
-    let e = refuse(r#"/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book)) | upper"#);
-    assert!(e.contains("is a library value") && e.contains("'| @'"), "{e}");
+    let e = refuse(
+        r#"/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book)) | upper"#,
+    );
+    assert!(
+        e.contains("is a library value") && e.contains("'| @'"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -147,10 +174,19 @@ fn numeric_text_enters_arrays_and_frames_as_numbers() {
     // it reads as (CSV fields arrive as text), so arrays compute and
     // a frame's column is numeric when every value reads as one.
     assert_eq!(run("/csv/* | ::tip @| np:mean").unwrap(), vec!["2.5"]);
-    assert_eq!(run("/csv/* | ::tip @| np:percentile(50)").unwrap(), vec!["2.5"]);
+    assert_eq!(
+        run("/csv/* | ::tip @| np:percentile(50)").unwrap(),
+        vec!["2.5"]
+    );
     let out = run(r#"/csv/* | %(::sex; ::tip) @| pd:groupby.mean(sex) @| @"#).unwrap();
-    assert_eq!(out, vec![r#"%(sex = "F"; tip = 2.5)"#, r#"%(sex = "M"; tip = 2.5)"#]);
-    assert_eq!(run(r#"/csv/* | %(::sex; ::tip) @| pd:tip.dtype"#).unwrap(), vec!["float64"]);
+    assert_eq!(
+        out,
+        vec![r#"%(sex = "F"; tip = 2.5)"#, r#"%(sex = "M"; tip = 2.5)"#]
+    );
+    assert_eq!(
+        run(r#"/csv/* | %(::sex; ::tip) @| pd:tip.dtype"#).unwrap(),
+        vec!["float64"]
+    );
     // A class first on the path is constructed from the input when
     // its first parameter is its data; the operands go on.
     let a = run("/series/* | :: @| pd:Series.rolling.mean(3) @| @ @| [3]").unwrap();
@@ -168,21 +204,26 @@ fn pandas_frames_chain_and_export() {
     // by the statistic.
     // (describe's index is the statistic: the first column of the
     // table coming back, so the column reading keys rows by it)
-    let out = run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | [2] | :x"#)
-        .unwrap();
+    let out =
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | [2] | :x"#).unwrap();
     assert_eq!(out, vec!["3.75"]);
-    let out = run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | header"#).unwrap();
+    let out =
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | header"#).unwrap();
     assert_eq!(out, vec![r#"@("index"; "x"; "y")"#]);
     // The row reading carries the index back as the first field.
-    let out = run(r#"/rows/* | %(::book; ::x; ::y) @| pd:corr(--method=spearman) @| @ @| [1]"#)
-        .unwrap();
+    let out =
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:corr(--method=spearman) @| @ @| [1]"#).unwrap();
     assert_eq!(out, vec![r#"%(index = "x"; x = 1; y = -0.8)"#]);
     // The label is the index; the frame's text columns stay.
-    let out = run(r#"/rows/* | %(::book; ::x; ::y) @| pd:sort_values(x; --ascending=false) @| @ @| [1]"#)
-        .unwrap();
+    let out =
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:sort_values(x; --ascending=false) @| @ @| [1]"#)
+            .unwrap();
     assert_eq!(out, vec![r#"%(book = "d"; x = 6; y = 0.5)"#]);
     // A scalar back from a method is a number.
-    assert_eq!(run(r#"/rows/* | %(::book; ::x; ::y) @| pd:x.sum"#).unwrap(), vec!["15"]);
+    assert_eq!(
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:x.sum"#).unwrap(),
+        vec!["15"]
+    );
     // An intermediate object takes its method on the path.
     let out = run(r#"/kv/* | %(::k; ::v) @| pd:groupby.sum(k) | @"#).unwrap();
     assert_eq!(out, vec![r#"@%(@(k; v); %("p"; 5); %("q"; 2))"#]);
@@ -204,7 +245,10 @@ fn scipy_and_sklearn_by_reflection_beside_the_declared_commands() {
     let out = run(r#"= @(1; 2; 3; 4) | sp:stats.describe | :mean"#).unwrap();
     assert_eq!(out, vec!["2.5"]);
     // A module instance's method with its options.
-    assert_eq!(run("= 0 | sp:stats.norm.cdf(--loc=0 --scale=1)").unwrap(), vec!["0.5"]);
+    assert_eq!(
+        run("= 0 | sp:stats.norm.cdf(--loc=0 --scale=1)").unwrap(),
+        vec!["0.5"]
+    );
     // An estimator: constructed with its options, the method over the
     // matrix; the labels come back by position through `| @`.
     let out = run(r#"/rows/* | %(::book; ::x; ::y) @| sklearn:cluster.KMeans.fit_predict(2; --random-state=0 --n-init=1) @| @ @| count"#)
@@ -216,7 +260,10 @@ fn scipy_and_sklearn_by_reflection_beside_the_declared_commands() {
     // A callable instance on the path is walked into, or called
     // when given arguments: the frozen distribution.
     assert_eq!(run("= 0 | sp:stats.norm(0; 1).cdf").is_err(), true);
-    assert_eq!(run("= 1.96 | sp:stats.norm.cdf | round(3)").unwrap(), vec!["0.975"]);
+    assert_eq!(
+        run("= 1.96 | sp:stats.norm.cdf | round(3)").unwrap(),
+        vec!["0.975"]
+    );
     assert_eq!(out, vec!["2"]);
 }
 
@@ -261,7 +308,9 @@ fn operands_keep_their_kind_and_the_input_fills_the_data_slot() {
     ))
     .unwrap();
     assert_eq!(r, vec!["2"]);
-    let e = refuse(&format!("{x} @| sklearn:model_selection.cross_val_score(--cv=2)"));
+    let e = refuse(&format!(
+        "{x} @| sklearn:model_selection.cross_val_score(--cv=2)"
+    ));
     assert!(
         e.contains("needs 1 operand") && e.contains("cross_val_score(estimator; [X = $_]"),
         "{e}"
@@ -324,11 +373,18 @@ fn a_table_crosses_the_boundary_as_its_rows() {
     assert_eq!(r, vec!["a"]);
     let r = run("/rows/* | %(::book; ::x; ::y) @| sklearn:naive_bayes.GaussianNB.fit((^/rows/* | ::book)) @| sklearn:naive_bayes.GaussianNB.predict(%(x = 6; y = 0.5)) @| @").unwrap();
     assert_eq!(r, vec!["d"]);
-    let r = run("/rows/* | %(::book; ::x; ::y) @| sp:spatial.distance.cdist(#(@(x; y); %(1; 2))) | dim").unwrap();
+    let r = run(
+        "/rows/* | %(::book; ::x; ::y) @| sp:spatial.distance.cdist(#(@(x; y); %(1; 2))) | dim",
+    )
+    .unwrap();
     assert_eq!(r, vec!["@(4; 1)"]);
     let r = run("= 1 @| np:append(@(2; 3)) @| @").unwrap();
     assert_eq!(r, vec!["1", "2", "3"]);
     // a Series on a named index comes back as a two-column frame
-    let r = run("/rows/* | %(::book; ::x; ::y) @| # @| pd:DataFrame.mean(--numeric-only=true) | @").unwrap();
-    assert_eq!(r, vec![r#"@%(@(index; value); %("x"; 3.75); %("y"; 0.875))"#]);
+    let r = run("/rows/* | %(::book; ::x; ::y) @| # @| pd:DataFrame.mean(--numeric-only=true) | @")
+        .unwrap();
+    assert_eq!(
+        r,
+        vec![r#"@%(@(index; value); %("x"; 3.75); %("y"; 0.875))"#]
+    );
 }

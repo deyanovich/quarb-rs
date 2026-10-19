@@ -25,7 +25,7 @@
 //!   reference inside a direct array edges from the array's
 //!   owner under the array's key, so `/objects/pages->Kids`
 //!   fans out to the pages exactly as the PDF means it.
-//! - A stream object carries `::::stream-length` (the raw length)
+//! - A stream object carries `:::stream-length` (the raw length)
 //!   and its dictionary like any other.
 //!
 //! The audience is inspection and forensics: `//font`,
@@ -97,7 +97,7 @@ impl PdfAdapter {
                     }
                     a.nodes[n]
                         .meta
-                        .push(("stream-length".into(), Value::Int(s.content.len() as i64)));
+                        .push(("stream-length".into(), Value::bytes(s.content.len() as i64)));
                     let dict = s.dict.clone();
                     a.fill_dict(n, &dict, &by_id);
                 }

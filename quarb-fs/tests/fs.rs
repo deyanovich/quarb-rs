@@ -146,6 +146,35 @@ fn symlink_crosslinks() {
     assert_eq!(names("//*[->*]", &dir), vec!["link.txt"]);
 }
 
+/// A file carries its extension as a trait beside its class,
+/// lowercased; a compound archive suffix carries the inner `tar`
+/// too; a directory carries none (spec: adapter traits).
+#[test]
+fn a_file_carries_its_extension_as_a_trait() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    fs::create_dir(p.join("data.d")).unwrap();
+    fs::write(p.join("data.d/rows.CSV"), "a,b").unwrap();
+    fs::write(p.join("data.d/cfg.json"), "{}").unwrap();
+    fs::write(p.join("site.tar.gz"), "").unwrap();
+    fs::write(p.join("site.tgz"), "").unwrap();
+    fs::write(p.join("README"), "hello").unwrap();
+    assert_eq!(names("//*<csv>", &dir), vec!["data.d/rows.CSV"]);
+    assert_eq!(names("//*<json><data>", &dir), vec!["data.d/cfg.json"]);
+    assert_eq!(
+        values("/data.d/rows.CSV:traits", &dir),
+        vec!["file, data, csv"]
+    );
+    assert_eq!(
+        values("/site.tar.gz:traits", &dir),
+        vec!["file, archive, gz, tar"]
+    );
+    assert_eq!(values("/site.tgz:traits", &dir), vec!["file, archive, tgz"]);
+    assert_eq!(names("//*<tar>", &dir), vec!["site.tar.gz"]);
+    assert_eq!(values("/README:traits", &dir), vec!["file"]);
+    assert_eq!(values("/data.d:traits", &dir), vec!["dir"]);
+}
+
 #[test]
 fn pipelines_and_union() {
     let dir = TempDir::new().unwrap();
@@ -158,10 +187,10 @@ fn pipelines_and_union() {
     // count of code files (aggregation via @|)
     assert_eq!(values("//*<code> @| count", &dir), vec!["2"]);
     // total size of code files
-    assert_eq!(values("//*<code>::::size @| sum", &dir), vec!["6 B"]);
+    assert_eq!(values("//*<code>:::size @| sum", &dir), vec!["6_B"]);
     // sorted joined names
     assert_eq!(
-        values("//*<code>:::name @| sort @| join(\", \")", &dir),
+        values("//*<code>:name @| sort @| join(\", \")", &dir),
         vec!["a.rs, b.rs"]
     );
     // union of code and text files, counted
@@ -178,22 +207,22 @@ fn predicates() {
     fs::write(p.join("README.md"), "hello").unwrap();
 
     // size comparison
-    assert_eq!(names("//*[::::size > 1000]", &dir), vec!["src/big.rs"]);
+    assert_eq!(names("//*[:::size > 1000_B]", &dir), vec!["src/big.rs"]);
     // extension equality (bare-name literal)
     assert_eq!(
-        names("//*[::::extension = \"rs\"]", &dir),
+        names("//*[:::extension = \"rs\"]", &dir),
         vec!["src/big.rs", "src/small.rs"]
     );
     // regex match on the name
     assert_eq!(
-        names("//*[:::name == (/^small/)]", &dir),
+        names("//*[:name == (/^small/)]", &dir),
         vec!["src/small.rs"]
     );
     // structural condition: dirs that contain a big.rs
     assert_eq!(names("/*[/big.rs]", &dir), vec!["src"]);
     // boolean combination
     assert_eq!(
-        names("//*[::::is-file && ::::size < 10]", &dir),
+        names("//*[:::is-file && :::size < 10_B]", &dir),
         vec!["README.md", "src/small.rs"]
     );
 }
@@ -224,11 +253,11 @@ fn trait_filters() {
 fn projections_return_scalars() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("hello.txt"), "hi there").unwrap();
-    assert_eq!(values("//hello.txt:::name", &dir), vec!["hello.txt"]);
-    assert_eq!(values("//hello.txt:::is-leaf", &dir), vec!["true"]);
-    assert_eq!(values("//hello.txt::::size", &dir), vec!["8 B"]);
-    assert_eq!(values("//hello.txt::::extension", &dir), vec!["txt"]);
-    assert_eq!(values("//hello.txt::::is-file", &dir), vec!["true"]);
+    assert_eq!(values("//hello.txt:name", &dir), vec!["hello.txt"]);
+    assert_eq!(values("//hello.txt:is-leaf", &dir), vec!["true"]);
+    assert_eq!(values("//hello.txt:::size", &dir), vec!["8_B"]);
+    assert_eq!(values("//hello.txt:::extension", &dir), vec!["txt"]);
+    assert_eq!(values("//hello.txt:::is-file", &dir), vec!["true"]);
     // bare :: is the default projection — file content
     assert_eq!(values("//hello.txt::", &dir), vec!["hi there"]);
 }
@@ -259,23 +288,23 @@ fn flags_can_include_ignored_and_hidden() {
 fn provenance_is_path_and_mtime() {
     let dir = sample_tree();
     let root = dir.path().canonicalize().unwrap();
-    // :::source is the entry's canonical absolute path.
+    // :source is the entry's canonical absolute path.
     assert_eq!(
-        values("//guide.txt:::source", &dir),
+        values("//guide.txt:source", &dir),
         vec![root.join("docs/guide.txt").display().to_string()]
     );
-    // :::instant is the mtime — always in agreement with the
+    // :instant is the mtime — always in agreement with the
     // adapter-metadata spelling.
     assert_eq!(
-        values("//guide.txt:::instant", &dir),
-        values("//guide.txt::::modified", &dir)
+        values("//guide.txt:instant", &dir),
+        values("//guide.txt:::modified", &dir)
     );
     // No dpid: the filesystem assigns none (null displays empty).
-    assert_eq!(values("//guide.txt:::dpid", &dir), vec![""]);
+    assert_eq!(values("//guide.txt:dpid", &dir), vec![""]);
     // The composite carries source and instant only; the kaiv
     // spelling prints the instant to the whole second.
-    let composite = values("//guide.txt:::provenance", &dir);
-    let instant = values("//guide.txt:::instant", &dir)[0].clone();
+    let composite = values("//guide.txt:provenance", &dir);
+    let instant = values("//guide.txt:instant", &dir)[0].clone();
     let expected = format!(
         "?{}@{}",
         root.join("docs/guide.txt").display(),

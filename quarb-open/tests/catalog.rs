@@ -142,7 +142,8 @@ fn a_listing_applies_size_and_kind_filters() {
     use quarb::{Ask, Cmp, Conjunct, Value};
     let dir = scratch();
     let shelf = dir.join("shelf");
-    let forty = Value::Int(40);
+    // A size is a quantity: the bound says its unit (spec: Relations).
+    let forty = Value::bytes(40);
     let ask = Ask {
         scope: &[],
         cap: Cap::NONE,

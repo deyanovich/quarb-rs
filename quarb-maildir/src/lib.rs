@@ -18,8 +18,8 @@
 //! `::message-id`, ...) with RFC 2047 left as-is (v1); the body
 //! is the node's value (`::`). For multipart messages the body is
 //! the raw MIME body — as stored, not pretty; a `text/plain` part
-//! extractor is a recorded refinement. `;;;n-messages` on the
-//! root; `<message>` trait; `;;;epoch` parses the `Date` header
+//! extractor is a recorded refinement. `:::n-messages` on the
+//! root; `<message>` trait; `:::epoch` parses the `Date` header
 //! to a unix timestamp for range predicates.
 //!
 //! Read-only, entirely: the adapter never touches flags, never
@@ -92,7 +92,7 @@ pub struct MaildirAdapter {
     /// Message-ID (angle brackets stripped) → message index.
     by_id: HashMap<String, usize>,
     /// Per message: the decoding record from the source boundary
-    /// (`::::encoding`, `::::replaced`).
+    /// (`:::encoding`, `:::replaced`).
     records: Vec<(String, usize)>,
 }
 
@@ -218,7 +218,7 @@ fn parse_date(s: &str) -> Option<i64> {
 }
 
 /// [`parse_date`] keeping the written UTC offset (minutes), for
-/// the minted `;;;date` instant.
+/// the minted `:::date` instant.
 fn parse_date_full(s: &str) -> Option<(i64, i16)> {
     // "Tue, 7 Jul 2026 12:00:00 +0200" — day-of-week optional.
     let s = s.split_once(',').map(|(_, r)| r).unwrap_or(s).trim();
@@ -443,9 +443,9 @@ impl AstAdapter for MaildirAdapter {
         Some(Value::Str(self.msg(node)?.body.clone()))
     }
 
-    /// `;;;epoch` (the Date header as a unix timestamp),
-    /// `;;;date` (the same, minted as an instant),
-    /// `;;;n-headers`; `;;;n-messages` on the root.
+    /// `:::epoch` (the Date header as a unix timestamp),
+    /// `:::date` (the same, minted as an instant),
+    /// `:::n-headers`; `:::n-messages` on the root.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             return match key {
@@ -464,7 +464,7 @@ impl AstAdapter for MaildirAdapter {
                 self.records.get((node.0 as usize).checked_sub(1)?)?.1 as i64,
             )),
             // Whether the message still sits in new/ (Maildir's
-            // "unseen" signal) — `/*[;;;new]` is the unread query.
+            // "unseen" signal) — `/*[:::new]` is the unread query.
             "new" => Some(Value::Bool(
                 self.msg(node)?
                     .path
@@ -481,6 +481,7 @@ impl AstAdapter for MaildirAdapter {
                     secs,
                     nanos: 0,
                     offset_min: Some(offset_min),
+                    calendar: Default::default(),
                 }
             }),
             "n-headers" => Some(Value::Int(self.msg(node)?.headers.len() as i64)),

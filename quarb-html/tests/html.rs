@@ -53,29 +53,29 @@ fn attributes_as_properties() {
     assert_eq!(values("//p::class"), vec!["intro"]);
     assert_eq!(values("//html::lang"), vec!["en"]);
     // via metadata too
-    assert_eq!(values("//p::::classes"), vec!["intro"]);
+    assert_eq!(values("//p:::classes"), vec!["intro"]);
     assert_eq!(values("//h1::id"), vec!["top"]);
-    assert_eq!(values("//h1::::tag"), vec!["h1"]);
-    // core-meta `:::traits` is the node's trait list
-    assert_eq!(values("//strong:::traits"), vec!["inline"]);
-    assert_eq!(values("//h1:::traits"), vec!["block, heading"]);
+    assert_eq!(values("//h1:::tag"), vec!["h1"]);
+    // core-meta `:traits` is the node's trait list
+    assert_eq!(values("//strong:traits"), vec!["inline"]);
+    assert_eq!(values("//h1:traits"), vec!["block, heading"]);
 }
 
-/// `::::attrs` enumerates attribute NAMES, in document order — the
+/// `:::attrs` enumerates attribute NAMES, in document order — the
 /// discovery half of the attribute story (`::name` reads a value,
-/// `::::attrs` says which names exist, so a renamed attribute stays
+/// `:::attrs` says which names exist, so a renamed attribute stays
 /// probeable by its value's shape).
 #[test]
 fn attribute_names_as_metadata() {
-    assert_eq!(values("//html::::attrs"), vec!["lang"]);
-    assert_eq!(values("//p::::attrs"), vec!["class"]);
-    // token test, like `::::classes`: which elements carry an href?
+    assert_eq!(values("//html:::attrs"), vec!["lang"]);
+    assert_eq!(values("//p:::attrs"), vec!["class"]);
+    // token test, like `:::classes`: which elements carry an href?
     assert_eq!(
-        nodes("//*[::::attrs *= 'href']"),
+        nodes("//*[:::attrs *= 'href']"),
         vec!["/html/body/main/a[1]", "/html/body/main/a[2]"]
     );
     // no attributes → an empty list, not a miss
-    assert_eq!(values("//ul::::attrs"), vec![""]);
+    assert_eq!(values("//ul:::attrs"), vec![""]);
 }
 
 #[test]
@@ -142,8 +142,8 @@ fn numeric_aggregation_over_string_attributes() {
     assert_eq!(vals("//s::rank @| avg"), vec!["3.2"]);
     assert_eq!(vals("//s::rank @| max"), vec!["5"]);
     // per-user average (subcontext), then the average of those
-    assert_eq!(vals("//user | .(/s::rank @| avg)"), vec!["2", "5"]);
-    assert_eq!(vals("//user | .(/s::rank @| avg) @| avg"), vec!["3.5"]);
+    assert_eq!(vals("//user | .(/s::rank @| avg) | $."), vec!["2", "5"]);
+    assert_eq!(vals("//user | .(/s::rank @| avg) | $. @| avg"), vec!["3.5"]);
     // max is a numeric reduction: names have no numeric reading, so
     // they are skipped and an all-non-numeric input reduces to null.
     // Text ordering is expressed with `sort | last`.
@@ -171,8 +171,8 @@ fn value_expressions_over_string_attributes() {
     // computed pipeline topic; the non-numeric row is null (empty)
     assert_eq!(vals("//item | ::price * ::qty"), vec!["12", "20", ""]);
     // a computed column, pushed then aggregated
-    assert_eq!(vals("//item | .total(::price * ::qty) @| sum"), vec!["32"]);
-    assert_eq!(vals("//item | .total(::price * ::qty) @| max"), vec!["20"]);
+    assert_eq!(vals("//item | .total(::price * ::qty) | $.total @| sum"), vec!["32"]);
+    assert_eq!(vals("//item | .total(::price * ::qty) | $.total @| max"), vec!["20"]);
 }
 
 /// A correlated join whose two conditions must bind to the *same*
@@ -203,16 +203,16 @@ fn correlated_join_shares_one_binding() {
     // conditions must hold under the same binding.
     let join = concat!(
         r#"//li[::class = "order"]:: <=> "#,
-        r#"//li[::class = "user"][::data-id = _::data-uid "#,
-        r#"&& ::data-limit < _::data-amount]"#,
+        r#"//li[::class = "user"][::data-id = $$0::data-uid "#,
+        r#"&& ::data-limit < $$0::data-amount]"#,
     );
     assert_eq!(run(join), vec!["order-A"]);
     // Stacked brackets are a conjunction, so they share the binding
     // and must give the identical result.
     let stacked = concat!(
         r#"//li[::class = "order"]:: <=> "#,
-        r#"//li[::class = "user"][::data-id = _::data-uid]"#,
-        r#"[::data-limit < _::data-amount]"#,
+        r#"//li[::class = "user"][::data-id = $$0::data-uid]"#,
+        r#"[::data-limit < $$0::data-amount]"#,
     );
     assert_eq!(run(stacked), vec!["order-A"]);
 }

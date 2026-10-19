@@ -120,7 +120,7 @@ One.\footnotemark[7] Two.
 fn dangling_mark_lints() {
     let m = parse(r#"\section{S} Text.\footnotemark[9]"#);
     assert_eq!(values(&m, "//*<dangling>::onym"), ["9"]);
-    assert_eq!(values(&m, "//*<dangling>::::resolved"), ["false"]);
+    assert_eq!(values(&m, "//*<dangling>:::resolved"), ["false"]);
     // the dangling callout projects its raw onym
     assert_eq!(values(&m, "//*<dangling>::"), ["9"]);
 }
@@ -237,7 +237,7 @@ After."#,
 fn sidenotes_are_footnotes_in_the_margin() {
     // Placement is presentation: \sidenote joins the footnote
     // family (shared counter and namespace); the declared
-    // spelling survives as ::::form = "margin" on both ends.
+    // spelling survives as :::form = "margin" on both ends.
     let m = parse(
         r#"\section{S}
 The war began.\footnote{In October.} It went
@@ -246,15 +246,15 @@ badly.\sidenote{By November it was over.}"#,
     assert_eq!(values(&m, "//footnote @| count"), ["4"]);
     assert_eq!(values(&m, "//*<note>::onym"), ["1", "2"]);
     assert_eq!(
-        values(&m, r#"//*<note>[::::form = "margin"]::"#),
+        values(&m, r#"//*<note>[:::form = "margin"]::"#),
         ["By November it was over."]
     );
     assert_eq!(
-        values(&m, r#"//*<deixis>[::::form = "margin"]->footnote::"#),
+        values(&m, r#"//*<deixis>[:::form = "margin"]->footnote::"#),
         ["By November it was over."]
     );
     // the plain footnote carries no form
-    assert_eq!(values(&m, "//*<note>[::::form] @| count"), ["1"]);
+    assert_eq!(values(&m, "//*<note>[:::form] @| count"), ["1"]);
 }
 
 #[test]
@@ -352,11 +352,11 @@ optionals \citet[see][p.~7]{lamport94}.
     );
     // The two linters: uncited entries, dangling citations.
     assert_eq!(values(&m, "//bib[!<-cit]::onym"), ["unused00"]);
-    assert_eq!(values(&m, "//cit[!::::resolved] @| count"), ["0"]);
+    assert_eq!(values(&m, "//cit[!:::resolved] @| count"), ["0"]);
     // Citation keys are their own namespace: a \ref to a bib key
     // does not resolve (LaTeX's \newlabel vs \bibcite).
     let m2 = quarb_text_latex::parse("\\section{A}\\label{knuth84}\nSee \\cite{knuth84}.\n");
-    assert_eq!(values(&m2, "//cit[!::::resolved] @| count"), ["1"]);
+    assert_eq!(values(&m2, "//cit[!:::resolved] @| count"), ["1"]);
 }
 
 /// Finding 22: the scanner walks bytes but never splits a

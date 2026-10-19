@@ -209,7 +209,7 @@ async fn introspect(
     let mut all_decodes = Vec::new();
     for name in names {
         let cols = sqlx::query(
-            "SELECT column_name, data_type FROM information_schema.columns \
+            "SELECT column_name, data_type, column_type FROM information_schema.columns \
              WHERE table_schema = DATABASE() AND table_name = ? \
              ORDER BY ordinal_position",
         )
@@ -217,6 +217,16 @@ async fn introspect(
         .fetch_all(&mut *conn)
         .await?;
         let columns: Vec<String> = cols.iter().map(|r| r.get(0)).collect();
+        // The full column type (`int(11) unsigned`, `tinyint(1)`),
+        // the cells' type trait; `tinyint(1)` is MySQL's boolean.
+        let column_types: Vec<String> = cols.iter().map(|r| r.get::<String, _>(2)).collect();
+        // a JSON column declares its cells' notation (spec: Grafting)
+        let json_columns: Vec<usize> = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.get::<String, _>(1).eq_ignore_ascii_case("json"))
+            .map(|(i, _)| i)
+            .collect();
         let decodes: Vec<Decode> = cols
             .iter()
             .map(|r| {
@@ -266,6 +276,8 @@ async fn introspect(
             columns,
             pk,
             fks,
+            json_columns,
+            column_types,
         });
         all_decodes.push(decodes);
     }
@@ -330,7 +342,7 @@ async fn fetch_rows(
 /// a mixed comparison by rules of its own (`n = 'abc'` is `n = 0`),
 /// so a plan is Quarb's scan only where a column compared with a
 /// number is numeric and one compared with text is not.
-pub fn column_catalog(config: &str, tables: &[&str]) -> Result<Vec<(String, bool)>, MysqlError> {
+pub fn column_catalog(config: &str, tables: &[&str]) -> Result<Vec<(String, bool, bool)>, MysqlError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -361,7 +373,8 @@ pub fn column_catalog(config: &str, tables: &[&str]) -> Result<Vec<(String, bool
                         | "double"
                         | "decimal"
                 );
-                catalog.push((name, numeric));
+                let json = data_type.eq_ignore_ascii_case("json");
+                catalog.push((name, numeric, json));
             }
         }
         Ok(catalog)

@@ -90,7 +90,7 @@ fn a_parenthesized_operand_opens_on_a_field() {
     // a predicate command inside the operand pipe, against a pushed set
     assert_eq!(
         values(
-            r#"/rows/* | .s(("the of" | ngrams(1))) | %(w = ::word) | %(hit = (:w | lower | [$_ = $.s] @| count))"#
+            r#"/rows/* | .s(("the of" | ngrams(1))) | %(w = ::word) | %(hit = (:w | lower | [$_ <<= $.s] @| count))"#
         ),
         ["%(hit = 1)", "%(hit = 0)", "%(hit = 0)", "%(hit = 1)"]
     );
@@ -102,7 +102,7 @@ fn membership_in_a_large_list_hashes() {
     // and "of" are in the set, the rest are not
     let set: Vec<String> = (0..70).map(|i| format!("w{i}")).collect();
     let q = format!(
-        r#"/rows/* | .set(("{} the of" | ngrams(1))) | %(w = ::word) | %(w = :w; hit = ((:w | lower) = $.set))"#,
+        r#"/rows/* | .set(("{} the of" | ngrams(1))) | %(w = ::word) | %(w = :w; hit = ((:w | lower) <<= $.set))"#,
         set.join(" ")
     );
     assert_eq!(

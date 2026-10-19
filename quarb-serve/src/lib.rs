@@ -102,11 +102,9 @@ fn value_to_json(v: &Value, typed: bool) -> Json {
             secs,
             nanos,
             offset_min,
+            ..
         } if typed => {
             json!({"t": "instant", "v": {"secs": secs, "nanos": nanos, "offset_min": offset_min}})
-        }
-        Value::Duration { secs, nanos } if typed => {
-            json!({"t": "duration", "v": {"secs": secs, "nanos": nanos}})
         }
         Value::Quantity {
             value,
@@ -159,11 +157,12 @@ fn value_from_json(j: &Json) -> Value {
                 .pointer("/offset_min")
                 .and_then(|x| x.as_i64())
                 .map(|m| m as i16),
+            calendar: Default::default(),
         },
-        ("duration", Some(v)) => Value::Duration {
-            secs: v.pointer("/secs").and_then(|x| x.as_i64()).unwrap_or(0),
-            nanos: v.pointer("/nanos").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        },
+        ("duration", Some(v)) => Value::seconds(
+            v.pointer("/secs").and_then(|x| x.as_i64()).unwrap_or(0),
+            v.pointer("/nanos").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        ),
         ("quantity", Some(v)) => Value::Quantity {
             value: v.pointer("/value").and_then(|x| x.as_f64()).unwrap_or(0.0),
             base: v
@@ -924,6 +923,7 @@ mod tests {
             secs: 1_700_000_000,
             nanos: 500,
             offset_min: Some(-120),
+            calendar: Default::default(),
         }
     }
 
@@ -931,10 +931,7 @@ mod tests {
     fn typed_values_roundtrip_json() {
         for v in [
             sample_instant(),
-            Value::Duration {
-                secs: 3600,
-                nanos: 0,
-            },
+            Value::seconds(3600, 0),
             Value::Quantity {
                 value: 14.0,
                 base: "B".into(),
@@ -958,7 +955,7 @@ mod tests {
         // on the far side, where value_from_json reads the tag.
         for v in [
             sample_instant(),
-            Value::Duration { secs: 5, nanos: 1 },
+            Value::seconds(5, 1),
             Value::Quantity {
                 value: 14.0,
                 base: "B".into(),

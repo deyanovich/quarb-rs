@@ -71,7 +71,10 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
         ok(&["//*<tabula> | # | [2]", &text_md]),
         "%(name = \"Bob\"; role = null; age = 29)\n"
     );
-    assert_eq!(ok(&["//*<tabula> | # | cell(1; \"age\")", &text_md]), "41\n");
+    assert_eq!(
+        ok(&["//*<tabula> | # | cell(1; \"age\")", &text_md]),
+        "41\n"
+    );
     // the DOM: a table element carries tabula; a first row of th is
     // the header, a colspan repeats the cell, a column of numbers
     // types as numbers (a mixed one stays text)
@@ -86,7 +89,10 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
         ok(&["//*<tabula>[2] | #", &html_s]),
         "#(%(1; 2);\n  %(3; 4))\n"
     );
-    assert_eq!(ok(&["//*<tabula>[2] | # | transpose | [1]", &html_s]), "@(1; 3)\n");
+    assert_eq!(
+        ok(&["//*<tabula>[2] | # | transpose | [1]", &html_s]),
+        "@(1; 3)\n"
+    );
     // XML: TEI's table, its label row the header, an empty cell null
     assert_eq!(
         ok(&["//*<tabula> | # | [2]", &xml_s]),
@@ -94,6 +100,9 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
     );
     // not a table: refused with the pointer
     let (ok_, _, err) = qua(&["/html/body | #", &html_s]);
-    assert!(!ok_ && err.contains("is not a table") && err.contains("//*<tabula>"), "{err}");
+    assert!(
+        !ok_ && err.contains("is not a table") && err.contains("//*<tabula>"),
+        "{err}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

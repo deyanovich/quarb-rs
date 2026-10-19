@@ -117,14 +117,14 @@ fn bottled_cosmos() {
         "cosmos://shop/shop?endpoint=http://127.0.0.1:{port}"
     ))
     .unwrap();
-    assert_eq!(values(&a, "/*:::name"), ["customers", "orders"]);
+    assert_eq!(values(&a, "/*:name"), ["customers", "orders"]);
     // both feed pages arrive; docs are id-named and id-sorted
-    assert_eq!(values(&a, "/orders/*:::name"), ["o-1", "o-2"]);
+    assert_eq!(values(&a, "/orders/*:name"), ["o-1", "o-2"]);
     // nested arrays descend; system fields stay out of the tree
     assert_eq!(values(&a, "/orders/o-1/lines/*::sku"), ["tea", "cup"]);
     assert_eq!(values(&a, "/customers/ada/* @| count"), ["3"]);
     // …but surface as metadata
-    assert_eq!(values(&a, "/customers/ada::::ts"), ["1753380000"]);
+    assert_eq!(values(&a, "/customers/ada:::ts"), ["1753380000"]);
     // hinted and hint-less resolution, via the id query
     assert_eq!(
         values(&a, "/orders/o-1::customer_id-->customers::tier"),

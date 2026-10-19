@@ -6,8 +6,12 @@
 //! ([`datenames`]). Dependency-free apart from `regex`; the engine
 //! (`quarb`) re-exports these modules at their old paths.
 
+pub mod calendar;
+pub mod calnames;
 pub mod datenames;
+pub mod durnames;
 pub mod period;
+pub mod regional;
 pub mod temporal;
 pub mod timex;
 mod timexdata;

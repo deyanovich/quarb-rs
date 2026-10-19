@@ -54,6 +54,7 @@ fn cell_value(d: &Data) -> Value {
                 secs: unix.floor() as i64,
                 nanos: ((unix - unix.floor()) * 1e9) as u32,
                 offset_min: None,
+                calendar: Default::default(),
             }
         }
         other => Value::Str(other.to_string()),
@@ -106,6 +107,8 @@ impl XlsxAdapter {
                     columns,
                     pk: None,
                     fks: Vec::new(),
+                    json_columns: Vec::new(),
+                    column_types: Vec::new(),
                 },
                 rows,
             ));
@@ -213,6 +216,7 @@ mod tests {
                 secs: 1_704_067_200,
                 nanos: 0,
                 offset_min: None,
+                calendar: Default::default(),
             }
         );
     }

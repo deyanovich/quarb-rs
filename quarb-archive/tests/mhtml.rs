@@ -59,11 +59,11 @@ fn parts_are_members_under_their_locations() {
     std::fs::write(&path, mhtml()).unwrap();
     let a = ArchiveAdapter::open(&path).unwrap();
     assert_eq!(
-        values(&a, "//*<file> | :::name"),
+        values(&a, "//*<file> | :name"),
         ["index.html", "style.css", "frame-1@mhtml.blink.png"]
     );
     assert_eq!(
-        values(&a, "/example.org/dead-souls/index.html::::encoding"),
+        values(&a, "/example.org/dead-souls/index.html:::encoding"),
         ["windows-1251"]
     );
     assert_eq!(

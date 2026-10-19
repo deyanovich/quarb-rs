@@ -27,6 +27,14 @@ for itself (`|`, `*`, `;`, parentheses, `$`, `"`). A query that
 navigates — a path from a node, a mount — is refused by name,
 pointing at `qua`.
 
+A pipe is the input: `qc` reads it whole, as one text, the topic
+of its single thread, and never parses it (`cat notes.md | qc '$_
+| wc'`; a document on a pipe is `qua`'s). `-l` makes one thread
+per line, the line as its topic (`seq 5 | qc -l '$_ * 2'`, `ls |
+qc -l '@| count'`): sugar for `$_ | lines |` at the head. A query
+that opens with a pipe pipes from the topic (`echo a b c | qc '|
+words @| count'`). At a terminal the topic is null.
+
 The output forms are `qua`'s: the Quarb form by default,
 `--json`, `--jsonl`, `--csv`, `--pretty`, `--save FILE` into
 SQLite, `--kaiv`.

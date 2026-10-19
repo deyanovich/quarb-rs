@@ -116,16 +116,16 @@ fn grafted_nodes_inherit_outer_leaf_provenance() {
     let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
     // Inside the graft and on the file: same source, same instant.
     assert_eq!(
-        values(&a, "/store.json/books/*[/t:: = 'Dune']:::source"),
-        values(&a, "/store.json:::source")
+        values(&a, "/store.json/books/*[/t:: = 'Dune']:source"),
+        values(&a, "/store.json:source")
     );
     assert_eq!(
-        values(&a, "/store.json/books/*[/t:: = 'Dune']:::instant"),
-        values(&a, "/store.json:::instant")
+        values(&a, "/store.json/books/*[/t:: = 'Dune']:instant"),
+        values(&a, "/store.json:instant")
     );
     // The source is the real file path, not the jar-style locator.
-    assert!(values(&a, "/store.json/books:::source")[0].ends_with("store.json"));
-    assert!(!values(&a, "/store.json/books:::source")[0].contains('!'));
+    assert!(values(&a, "/store.json/books:source")[0].ends_with("store.json"));
+    assert!(!values(&a, "/store.json/books:source")[0].contains('!'));
 }
 
 /// `::key` dual exposure answers *at* the graft root, not only one
@@ -187,8 +187,8 @@ fn source_graft_level_is_per_mount() {
     assert_eq!(values(&a, "/lexer.rs/lex/is_name_char @| count"), ["1"]);
     // lex, is_name_char, the filter closure (a lambda IS a
     // <function>), and the two helpers.
-    assert_eq!(values(&a, "//*<function>:::name @| count"), ["5"]);
-    assert_eq!(values(&a, "//helper:::name @| count"), ["2"]);
+    assert_eq!(values(&a, "//*<function>:name @| count"), ["5"]);
+    assert_eq!(values(&a, "//helper:name @| count"), ["2"]);
     assert_eq!(values(&a, "//function_item @| count"), ["0"]);
     // The locator shows the seam with the bang, the query never
     // sees it.
@@ -290,7 +290,7 @@ fn a_tarball_of_pages_at_the_text_level() {
         vec!["guide, jq", "guide, sql"]
     );
     // ...and every declaration, verbatim, under the name it was made with.
-    assert_eq!(values(&site, "/capsa.html::::\"og:type\""), vec!["article"]);
+    assert_eq!(values(&site, "/capsa.html:::\"og:type\""), vec!["article"]);
     // A hit links back to its page, narrowed to its section.
     assert_eq!(
         values(&site, "//paragraph[:: *= \"witness\"] | link | :href"),

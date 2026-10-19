@@ -22,8 +22,12 @@ use quarb::Value;
 use quarb::library::{CommandLibrary, LibCall, LibFailure, Synopsis};
 use quarb_pyvalue::Reflective;
 
-static REFLECT: Reflective =
-    Reflective::new("pandas", &["pandas.DataFrame", "pandas.Series"], "frame", true);
+static REFLECT: Reflective = Reflective::new(
+    "pandas",
+    &["pandas.DataFrame", "pandas.Series"],
+    "frame",
+    true,
+);
 
 /// The library.
 pub struct Pandas;
@@ -70,9 +74,21 @@ mod tests {
 
     fn rows() -> Value {
         Value::list(vec![
-            rec(&[("book", Value::Str("a".into())), ("x", Value::Int(1)), ("y", Value::Float(2.0))]),
-            rec(&[("book", Value::Str("b".into())), ("x", Value::Int(3)), ("y", Value::Float(1.0))]),
-            rec(&[("book", Value::Str("c".into())), ("x", Value::Int(5)), ("y", Value::Float(0.0))]),
+            rec(&[
+                ("book", Value::Str("a".into())),
+                ("x", Value::Int(1)),
+                ("y", Value::Float(2.0)),
+            ]),
+            rec(&[
+                ("book", Value::Str("b".into())),
+                ("x", Value::Int(3)),
+                ("y", Value::Float(1.0)),
+            ]),
+            rec(&[
+                ("book", Value::Str("c".into())),
+                ("x", Value::Int(5)),
+                ("y", Value::Float(0.0)),
+            ]),
         ])
     }
 
@@ -102,22 +118,42 @@ mod tests {
         // A frame comes back as a table: the index (the statistic)
         // its first column, the columns after it.
         let frame = call("describe", rows(), vec![], vec![]);
-        let Value::Table(f) = &frame else { panic!("{frame:?}") };
+        let Value::Table(f) = &frame else {
+            panic!("{frame:?}")
+        };
         assert_eq!(f.kind(), "a frame 8×3");
-        assert_eq!(f.header.as_deref(), Some(&["index".to_string(), "x".into(), "y".into()][..]));
+        assert_eq!(
+            f.header.as_deref(),
+            Some(&["index".to_string(), "x".into(), "y".into()][..])
+        );
         // The table is the input of the next method, crossing as its
         // rows, so the frame is made of it again with its index.
         let rounded = call("round", frame.clone(), vec![Value::Int(1)], vec![]);
-        let Value::Table(r) = &rounded else { panic!("{rounded:?}") };
-        let Value::Record(cols) = r.columns_value() else { panic!() };
+        let Value::Table(r) = &rounded else {
+            panic!("{rounded:?}")
+        };
+        let Value::Record(cols) = r.columns_value() else {
+            panic!()
+        };
         assert_eq!(cols[1].0, "x");
         let Value::List(x) = &cols[1].1 else { panic!() };
         assert_eq!(x[1], Value::Float(3.0));
         // Rows carry the index back as the first field, named.
-        let corr = call("corr", rows(), vec![], vec![("method", Value::Str("spearman".into()))]);
-        let Value::Table(c) = &corr else { panic!("{corr:?}") };
-        let Value::List(recs) = c.rows_value() else { panic!() };
-        let Value::Record(first) = &recs[0] else { panic!() };
+        let corr = call(
+            "corr",
+            rows(),
+            vec![],
+            vec![("method", Value::Str("spearman".into()))],
+        );
+        let Value::Table(c) = &corr else {
+            panic!("{corr:?}")
+        };
+        let Value::List(recs) = c.rows_value() else {
+            panic!()
+        };
+        let Value::Record(first) = &recs[0] else {
+            panic!()
+        };
         assert_eq!(first[0].0, "index");
         assert_eq!(first[0].1, Value::Str("x".into()));
         assert_eq!(first[2].1, Value::Float(-1.0));
@@ -125,17 +161,31 @@ mod tests {
         let idx = call("index.tolist", rows(), vec![], vec![]);
         assert_eq!(
             idx,
-            Value::list(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())])
+            Value::list(vec![
+                Value::Str("a".into()),
+                Value::Str("b".into()),
+                Value::Str("c".into())
+            ])
         );
         // An intermediate object takes its method on the path.
-        let g = call("groupby.sum", Value::list(vec![
-            rec(&[("k", Value::Str("p".into())), ("v", Value::Int(1))]),
-            rec(&[("k", Value::Str("q".into())), ("v", Value::Int(2))]),
-            rec(&[("k", Value::Str("p".into())), ("v", Value::Int(4))]),
-        ]), vec![Value::Str("k".into())], vec![]);
+        let g = call(
+            "groupby.sum",
+            Value::list(vec![
+                rec(&[("k", Value::Str("p".into())), ("v", Value::Int(1))]),
+                rec(&[("k", Value::Str("q".into())), ("v", Value::Int(2))]),
+                rec(&[("k", Value::Str("p".into())), ("v", Value::Int(4))]),
+            ]),
+            vec![Value::Str("k".into())],
+            vec![],
+        );
         let Value::Table(g) = &g else { panic!("{g:?}") };
-        let Value::List(sums) = g.rows_value() else { panic!() };
-        assert_eq!(sums[0], rec(&[("k", Value::Str("p".into())), ("v", Value::Int(5))]));
+        let Value::List(sums) = g.rows_value() else {
+            panic!()
+        };
+        assert_eq!(
+            sums[0],
+            rec(&[("k", Value::Str("p".into())), ("v", Value::Int(5))])
+        );
         // A scalar comes back as a number.
         assert_eq!(call("x.mean", rows(), vec![], vec![]), Value::Float(3.0));
     }

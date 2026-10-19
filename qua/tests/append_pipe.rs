@@ -34,7 +34,6 @@ fn one(q: &str) -> String {
     v.into_iter().next().unwrap()
 }
 
-
 fn refuse(q: &str) -> String {
     run(q).unwrap_err().to_string()
 }
@@ -61,7 +60,10 @@ fn a_list_appends_elements_and_concatenates_lists() {
 
 #[test]
 fn a_table_appends_rows_and_retypes() {
-    assert_eq!(one("= #(@(a; b); %(1; 2)) +| %(a = 3; b = 4) | dim"), "@(2; 2)");
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) +| %(a = 3; b = 4) | dim"),
+        "@(2; 2)"
+    );
     assert_eq!(one("= #(@(a; b); %(1; 2)) +| %(b = 5) | :a"), "@(1; null)");
     // a name the header lacks extends it, null in the rows before
     assert_eq!(
@@ -77,13 +79,16 @@ fn a_table_appends_rows_and_retypes() {
         "@%(@(a; b; c); %(1; 2; null); %(null; 3; 4))"
     );
     // a table row by row, columns by name on a frame
-    assert_eq!(one("= #(@(a; b); %(1; 2)) +| #(@(b; a); %(9; 8)) | :a"), "@(1; 8)");
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) +| #(@(b; a); %(9; 8)) | :a"),
+        "@(1; 8)"
+    );
     // by position on an array
     assert_eq!(one("= #(%(1; 2)) +| #(%(3; 4)) | dim"), "@(2; 2)");
     assert!(refuse("= #(%(1; 2)) +| #(%(3; 4; 5))").contains("3 values"));
     // the columns re-type after the append
-    assert_eq!(one("= #(@(a); %(1)) +| %(a = \"x\") | types"), "text");
-    assert_eq!(one("= #(@(a); %(\"1\")) +| %(a = 2) | types"), "integer");
+    assert_eq!(one("= #(@(a); %(1)) +| %(a = \"x\") | type"), "text");
+    assert_eq!(one("= #(@(a); %(\"1\")) +| %(a = 2) | type"), "int");
     // a cell holds a scalar or null
     assert!(refuse("= #(@(a); %(1)) +| %(a = @(1; 2))").contains("flat"));
     // not a list
@@ -103,7 +108,10 @@ fn a_row_on_the_right_follows_the_literal_rules() {
     );
     // a short row is null-padded, a long row refused
     assert_eq!(one(r#"= #(@(a; b); %(1; 2)) +| %(3) | :b"#), "@(2; null)");
-    assert_eq!(one(r#"= #(@(a; b); %(1; 2)) +| %(3; c = 9) | header"#), r#"@("a"; "b"; "c")"#);
+    assert_eq!(
+        one(r#"= #(@(a; b); %(1; 2)) +| %(3; c = 9) | header"#),
+        r#"@("a"; "b"; "c")"#
+    );
     assert!(refuse(r#"= #(@(a; b); %(1; 2)) +| %(3; 4; 5)"#).contains("more values"));
     // the array face takes positions, not names
     assert_eq!(one(r#"= #(%(1; 2)) +| %(3; 4) | dim"#), "@(2; 2)");

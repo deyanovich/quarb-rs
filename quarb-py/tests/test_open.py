@@ -35,7 +35,7 @@ def test_fs_and_code(tmp_path):
     (tmp_path / "a.py").write_text("def one():\n    return 1\n\ndef two():\n    return 2\n")
     (tmp_path / "note.txt").write_text("x" * 2048)
     d = quarb.open(str(tmp_path))
-    assert d.values("//note.txt[::::size > 1kB]:::name") == ["note.txt"]
+    assert d.values("//note.txt[:::size > 1kB]:name") == ["note.txt"]
     c = quarb.open(str(tmp_path / "a.py"))
     assert c.values("//function_definition @| count") == [2]
 
@@ -69,7 +69,7 @@ def test_mount_cross_source_join(tmp_path):
     d = quarb.mount([str(tmp_path / "fleet.yaml"), str(db)])
     assert d.values("/*") == ["/fleet", "/cmdb"]
     rows = d.records(
-        "/cmdb/hosts/* <=> /fleet/hosts/*[/name:: = _::name] "
+        "/cmdb/hosts/* <=> /fleet/hosts/*[/name:: = $$0::name] "
         "| %(host = $$1/name::; owner = ::owner)"
     )
     assert rows == [

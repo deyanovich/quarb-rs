@@ -15,8 +15,8 @@
 //! - **Lines with geometry**: the real objects. A `line` groups
 //!   the text runs a page shows at exactly the same declared
 //!   baseline (identical y after the declared matrix math — no
-//!   tolerance, no clustering), in x order. `::::page`, `::::x`,
-//!   `::::y` carry the coordinates. A `paragraph` is NEVER minted
+//!   tolerance, no clustering), in x order. `:::page`, `:::x`,
+//!   `:::y` carry the coordinates. A `paragraph` is NEVER minted
 //!   from a PDF — print formats declare none, and the vocabulary
 //!   says so.
 //! - Run text decodes through the font's `/ToUnicode` CMap when
@@ -836,10 +836,21 @@ impl AstAdapter for PdfText {
         }
     }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        /// A length in typographic points as the quantity, written in pt.
+        fn pt(v: f64) -> Value {
+            Value::Quantity {
+                value: v * 0.0254 / 72.0,
+                base: "m".to_string(),
+                written: Some((v, "pt".to_string())),
+            }
+        }
         match (&self.nodes[node.0 as usize], key) {
             (Node::Line { line, .. }, "page") => Some(Value::Int(line.page as i64)),
-            (Node::Line { line, .. }, "x") => Some(Value::Float(line.x)),
-            (Node::Line { line, .. }, "y") => Some(Value::Float(line.y)),
+            // Coordinates in the page's typographic points, minted
+            // as lengths (spec: adapters mint a measure as a
+            // quantity in the source's unit; `pt` = 1/72 in).
+            (Node::Line { line, .. }, "x") => Some(pt(line.x)),
+            (Node::Line { line, .. }, "y") => Some(pt(line.y)),
             (Node::Section { level, .. }, "level") => Some(Value::Int(*level as i64)),
             (Node::Page { index, .. }, "page") => Some(Value::Int(*index as i64)),
             _ => None,

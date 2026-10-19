@@ -34,7 +34,7 @@ fn values(a: &ModelAdapter<SqliteAdapter>, q: &str) -> Vec<String> {
 const MODEL: &str = r#"
     node /deploys/deploy: /deploys/*;
     node /errors/error:   /errors/*;
-    rel /errors/error -> /deploys/deploy [::at < _::at];
+    rel /errors/error -> /deploys/deploy [::at < $$0::at];
 "#;
 
 #[test]
@@ -100,8 +100,8 @@ fn a_second_relation_between_the_same_sets_mints_a_second_role() {
         node /deploys/deploy: /deploys/*;
         node /errors/error:   /errors/*;
         node /culprits/culprit: /deploys/*;
-        rel /errors/error -> /deploys/deploy   [::at < _::at];
-        rel /errors/error -> /culprits/culprit [::at < _::at && ::rev = 'b2'];
+        rel /errors/error -> /deploys/deploy   [::at < $$0::at];
+        rel /errors/error -> /culprits/culprit [::at < $$0::at && ::rev = 'b2'];
     "#);
     // both relations from the same error, each under its own label
     let mut got = values(&a, "/errors/error[::msg = 'timeout']->deploy::rev");
@@ -162,7 +162,7 @@ fn an_aliased_node_forwards_base_provenance() {
     // base's provenance (none here — sqlite records none), never a
     // model:/ derivation stamp.
     assert_eq!(
-        values(&a, "/deploys/deploy[::rev = 'b2']:::source"),
+        values(&a, "/deploys/deploy[::rev = 'b2']:source"),
         vec![""]
     );
 }

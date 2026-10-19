@@ -113,12 +113,14 @@ fn decode(v: &Bson) -> Field {
                 secs: ms.div_euclid(1000),
                 nanos: (ms.rem_euclid(1000) * 1_000_000) as u32,
                 offset_min: None,
+                calendar: Default::default(),
             })
         }
         Bson::Timestamp(t) => Field::Scalar(Value::Instant {
             secs: t.time as i64,
             nanos: 0,
             offset_min: None,
+            calendar: Default::default(),
         }),
         Bson::Decimal128(d) => Field::Scalar(Value::Str(d.to_string())),
         Bson::Symbol(s) => Field::Scalar(Value::Str(s.clone())),
@@ -465,8 +467,8 @@ impl AstAdapter for MongodbAdapter {
         }
     }
 
-    /// `;;;path`, `;;;n-fields` (a document's top-level field
-    /// count), and `;;;length` (element count for an array or
+    /// `:::path`, `:::n-fields` (a document's top-level field
+    /// count), and `:::length` (element count for an array or
     /// embedded document, character count for a string).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
@@ -577,6 +579,7 @@ mod tests {
                 secs,
                 nanos,
                 offset_min,
+                ..
             }) => {
                 assert_eq!(secs, 1_700_000_000);
                 assert_eq!(nanos, 250_000_000);

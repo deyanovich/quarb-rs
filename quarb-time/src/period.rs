@@ -54,6 +54,9 @@ impl Grain {
 pub struct Period {
     pub start: i64,
     pub grain: Grain,
+    /// The calendar whose month or year the period names (spec:
+    /// Calendars); the Gregorian for every period born of text.
+    pub calendar: crate::calendar::Calendar,
 }
 
 fn month_days(y: i64, m: u32) -> u32 {
@@ -101,6 +104,7 @@ impl Period {
         Some(Period {
             start: days_from_civil(y, mo, d) * 86400 + h as i64 * 3600 + mi as i64 * 60 + s as i64,
             grain,
+            calendar: Default::default(),
         })
     }
 
@@ -109,10 +113,25 @@ impl Period {
         components(self.start)
     }
 
+    /// The same period read in `calendar` (spec: Calendars): the
+    /// timeline unchanged, the month and year bounds the calendar's.
+    pub fn in_calendar(self, calendar: crate::calendar::Calendar) -> Period {
+        Period { calendar, ..self }
+    }
+
     /// The first second after the period.
     pub fn end(&self) -> i64 {
         let (y, mo, ..) = self.fields();
+        let days = self.start.div_euclid(86400);
         match self.grain {
+            Grain::Year if self.calendar != Default::default() => {
+                crate::calendar::next_year_start(self.calendar, days)
+                    .map_or(self.start, |d| d * 86400)
+            }
+            Grain::Month if self.calendar != Default::default() => {
+                crate::calendar::next_month_start(self.calendar, days)
+                    .map_or(self.start, |d| d * 86400)
+            }
             Grain::Year => days_from_civil(y + 1, 1, 1) * 86400,
             Grain::Month => {
                 let (y, mo) = if mo == 12 { (y + 1, 1) } else { (y, mo + 1) };
@@ -131,8 +150,21 @@ impl Period {
         if grain > self.grain {
             return None;
         }
+        // a calendar's month or year begins where the calendar says
+        if self.calendar != Default::default() && matches!(grain, Grain::Year | Grain::Month) {
+            let days = self.start.div_euclid(86400);
+            let start = match grain {
+                Grain::Year => crate::calendar::year_start(self.calendar, days)?,
+                _ => crate::calendar::month_start(self.calendar, days)?,
+            };
+            return Some(Period {
+                start: start * 86400,
+                grain,
+                calendar: self.calendar,
+            });
+        }
         let (y, mo, d, h, mi, s) = self.fields();
-        Period::of(y, mo, d, h, mi, s, grain)
+        Period::of(y, mo, d, h, mi, s, grain).map(|p| p.in_calendar(self.calendar))
     }
 
     /// An instant at the grain it prints at: the day for a midnight
@@ -142,6 +174,7 @@ impl Period {
         Period {
             start: secs,
             grain: if midnight { Grain::Day } else { Grain::Second },
+            calendar: Default::default(),
         }
     }
 
@@ -158,8 +191,18 @@ impl Period {
         }
     }
 
-    /// ISO-8601 at reduced precision, at the period's own grain.
+    /// ISO-8601 at reduced precision, at the period's own grain. A
+    /// month or a year of another calendar has no ISO form of its
+    /// own and prints as the day it begins on (spec: Calendars).
     pub fn format(&self) -> String {
+        if self.calendar != Default::default() && matches!(self.grain, Grain::Year | Grain::Month) {
+            return Period {
+                start: self.start,
+                grain: Grain::Day,
+                calendar: Default::default(),
+            }
+            .format();
+        }
         let (y, mo, d, h, mi, s) = self.fields();
         let year = if y < 0 {
             format!("-{:04}", -y)
@@ -442,7 +485,11 @@ impl Period {
                     .checked_add(minutes.checked_mul(60)?)?
                     .checked_add(seconds)?;
                 let start = base.start.checked_add(sign.checked_mul(delta)?)?;
-                let moved = Period { start, grain };
+                let moved = Period {
+                    start,
+                    grain,
+                    calendar: base.calendar,
+                };
                 YEARS.contains(&moved.fields().0).then_some(moved)
             }
         }

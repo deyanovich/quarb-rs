@@ -78,7 +78,7 @@ fn soup_is_dropped() {
 fn sections_nest_through_wrappers() {
     assert_eq!(values("/section::lemma"), vec!["Guide"]);
     assert_eq!(values("/section/section::lemma"), vec!["Usage"]);
-    assert_eq!(values("/section/section::::level"), vec!["2"]);
+    assert_eq!(values("/section/section:::level"), vec!["2"]);
 }
 
 /// Inline markup flattens into paragraph prose.
@@ -111,7 +111,7 @@ fn lists() {
 /// Fenced code becomes a verbatim block with its language.
 #[test]
 fn verbatim() {
-    assert_eq!(values("//verbatim::::lang"), vec!["rust"]);
+    assert_eq!(values("//verbatim:::lang"), vec!["rust"]);
     assert_eq!(values("//verbatim::"), vec!["fn main() {}"]);
 }
 
@@ -143,7 +143,7 @@ fn html_round_trips() {
         "//section::lemma",
         "//blockquote::hypograph",
         "//ordered-item::taxis",
-        "//verbatim::::lang",
+        "//verbatim:::lang",
         "::",
     ] {
         let a = quarb::run(q, &m).unwrap();
@@ -447,10 +447,10 @@ fn head_declarations_answer_queries() {
     };
     assert_eq!(vals("::category"), vec!["Data Model"]);
     // A declared name with a colon is quoted, like an XML
-    // namespaced attribute: `::::"og:type"`.
-    assert_eq!(vals("::::\"og:type\""), vec!["article"]);
-    assert_eq!(vals("(())::::\"article:section\""), vec!["Data Model"]);
-    assert_eq!(vals("::::\"schema:@type\""), vec!["TechArticle"]);
+    // namespaced attribute: `:::"og:type"`.
+    assert_eq!(vals(":::\"og:type\""), vec!["article"]);
+    assert_eq!(vals("(()):::\"article:section\""), vec!["Data Model"]);
+    assert_eq!(vals(":::\"schema:@type\""), vec!["TechArticle"]);
 }
 
 /// Links into a document: the canonical URL is the base, a

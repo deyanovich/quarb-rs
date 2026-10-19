@@ -122,7 +122,7 @@ fn an_unanchored_search_lands_anywhere() {
 
 #[test]
 fn correlations_are_planned_too() {
-    let p = plan("/u/* <=> /t/*[::id = _::id]");
+    let p = plan("/u/* <=> /t/*[::id = $$0::id]");
     assert_eq!(p.correlations.len(), 1);
     assert_eq!(
         p.correlations[0].branches[0].steps[0].name,

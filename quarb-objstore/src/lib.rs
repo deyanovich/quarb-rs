@@ -32,7 +32,7 @@
 //!   SharedKey signature. `endpoint=URL` points at Azurite or any
 //!   compatible endpoint (path-style, account in the path).
 //!
-//! Metadata: `;;;size`, `;;;updated` on objects; traits
+//! Metadata: `:::size`, `:::updated` on objects; traits
 //! `<object>` / `<prefix>`. Read-only, as always.
 
 use quarb::{AstAdapter, NodeId, Value};
@@ -581,7 +581,7 @@ impl AstAdapter for ObjstoreAdapter {
         self.content_of(node).map(Value::Str)
     }
 
-    /// `;;;size`, `;;;updated`, `;;;key`.
+    /// `:::size`, `:::updated`, `:::key`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         let n = &nodes[node.0 as usize];

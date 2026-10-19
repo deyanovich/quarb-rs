@@ -41,21 +41,39 @@ fn the_null_default_fills_a_null_and_nothing_else() {
     );
     // false, 0 and "" are values and stay
     assert_eq!(run("/letters/*[::id = \"c\"] | (::n ?? 9)").unwrap(), ["0"]);
-    assert_eq!(run("/letters/*[::id = \"c\"] | (::ok ?? true)").unwrap(), ["false"]);
-    assert_eq!(run("/letters/*[::id = \"c\"] | (::when ?? \"x\")").unwrap(), [""]);
+    assert_eq!(
+        run("/letters/*[::id = \"c\"] | (::ok ?? true)").unwrap(),
+        ["false"]
+    );
+    assert_eq!(
+        run("/letters/*[::id = \"c\"] | (::when ?? \"x\")").unwrap(),
+        [""]
+    );
     // the chain takes the first non-null, grouping to the right
     assert_eq!(
         run("/letters/*[::id = \"b\"] | (::when ?? ::nothing ?? ::notBefore)").unwrap(),
         ["1844-05-29"]
     );
     // below arithmetic, above the conditional
-    assert_eq!(run("/letters/*[::id = \"c\"] | (::n + 1 ?? 7)").unwrap(), ["1"]);
-    assert_eq!(run("/letters/*[::id = \"b\"] | (::missing + 1 ?? 7)").unwrap(), ["7"]);
     assert_eq!(
-        run("/letters/*[::id = \"b\"] | (::when ?? ::notBefore ? \"dated\" : \"undated\")").unwrap(),
+        run("/letters/*[::id = \"c\"] | (::n + 1 ?? 7)").unwrap(),
+        ["1"]
+    );
+    assert_eq!(
+        run("/letters/*[::id = \"b\"] | (::missing + 1 ?? 7)").unwrap(),
+        ["7"]
+    );
+    assert_eq!(
+        run("/letters/*[::id = \"b\"] | (::when ?? ::notBefore ? \"dated\" : \"undated\")")
+            .unwrap(),
         ["dated"]
     );
     // spaced on both sides
-    let e = run("/letters/* | (::when??::notBefore)").unwrap_err().to_string();
-    assert!(e.contains("'??' is an operator and takes a space on both sides"), "{e}");
+    let e = run("/letters/* | (::when??::notBefore)")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("'??' is an operator and takes a space on both sides"),
+        "{e}"
+    );
 }

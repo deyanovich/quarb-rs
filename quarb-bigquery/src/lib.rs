@@ -471,6 +471,8 @@ fn introspect(client: &Client, dataset: &str) -> Result<Vec<TableSpec>, Bigquery
             columns,
             pk,
             fks: table_fks,
+            json_columns: Vec::new(),
+            column_types: Vec::new(),
         });
     }
     Ok(out)
@@ -612,6 +614,8 @@ mod tests {
             columns: vec!["id".into(), "customer".into(), "total".into()],
             pk: Some(0),
             fks: vec![],
+            json_columns: Vec::new(),
+            column_types: Vec::new(),
         };
         assert_eq!(
             estimate_sql("shop", &spec, &[]),

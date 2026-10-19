@@ -56,10 +56,7 @@ impl LocalExecutor {
     /// The environments mounted for the session; a `shell:` one
     /// opens the shell gate as `--allow-shell` does.
     pub fn with_environments(mut self, environments: Vec<quarb::Environment>) -> Self {
-        if environments
-            .iter()
-            .any(|e| e.kind == quarb::EnvKind::Shell)
-        {
+        if environments.iter().any(|e| e.kind == quarb::EnvKind::Shell) {
             self.allow_shell = true;
         }
         self.environments = environments;

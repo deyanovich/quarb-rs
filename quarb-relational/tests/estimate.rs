@@ -14,6 +14,8 @@ fn specs() -> Vec<TableSpec> {
         columns: vec!["id".into(), "customer".into()],
         pk: Some(0),
         fks: vec![],
+        json_columns: Vec::new(),
+        column_types: Vec::new(),
     }]
 }
 

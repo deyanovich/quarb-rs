@@ -522,7 +522,7 @@ impl Parser {
                 self.pos += 1;
                 match state {
                     State::Nodes => {
-                        out.push_str("::::length");
+                        out.push_str(":::length");
                         Ok(State::Values)
                     }
                     // A slice's length is its element count.
@@ -549,7 +549,7 @@ impl Parser {
                 }
                 self.pos += 1;
                 // Child names, sorted — jq's keys sorts.
-                out.push_str("/*:::name @| sort");
+                out.push_str("/*:name @| sort");
                 self.notes
                     .push("keys: Quarb streams the names; jq boxes them into one array".into());
                 Ok(State::Values)
@@ -988,8 +988,8 @@ mod tests {
 
     #[test]
     fn functions() {
-        assert_eq!(t(".users | length"), "/users::::length");
-        assert_eq!(t(".users[0] | keys"), "/users/0/*:::name @| sort");
+        assert_eq!(t(".users | length"), "/users:::length");
+        assert_eq!(t(".users[0] | keys"), "/users/0/*:name @| sort");
         assert_eq!(t(".nums | add"), "/nums/*:: @| sum");
         assert_eq!(t(".nums | min"), "/nums/*:: @| min");
         assert_eq!(t(".nums | unique"), "/nums/*:: @| unique @| sort");

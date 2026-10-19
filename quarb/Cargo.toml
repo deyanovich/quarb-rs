@@ -45,8 +45,8 @@ cjk = []
 libc = "0.2"
 
 [dependencies]
-quarb-trace = { path = "../quarb-trace", version = "0.38.1" }
-quarb-time = { path = "../quarb-time", version = "0.38.1" }
+quarb-trace = { path = "../quarb-trace", version = "0.39.0" }
+quarb-time = { path = "../quarb-time", version = "0.39.0" }
 kaiv = { version = "0.15.0", default-features = false, optional = true }
 thiserror.workspace = true
 globset.workspace = true
@@ -56,6 +56,9 @@ unicode-segmentation = "1"
 strsim = "0.11"
 rust-stemmers = "1"
 unicode-normalization = "0.1"
+# Every transliteration, accent and spelling table; the engine takes
+# them all (the crate's default), the three script commands wrap it.
+transliteratio = "0.1.0"
 syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"], optional = true }
 colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }
 serde_json = { workspace = true, optional = true }

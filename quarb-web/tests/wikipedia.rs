@@ -399,7 +399,7 @@ fn the_category_tree() {
         ),
         ["%(in = 1; n = 1)"]
     );
-    assert_eq!(lines(&a, "/sites/*::::hierarchy"), ["categories"]);
+    assert_eq!(lines(&a, "/sites/*:::hierarchy"), ["categories"]);
     // The prefilter under a category prefix: candidates by column,
     // the walk narrowed to them and their ancestors.
     let p = quarb_web::plan::plan(

@@ -46,14 +46,19 @@ fn mock_github() {
     assert_eq!(v("/ada/boiler::stars"), ["42"]);
     assert_eq!(v("/ada/boiler::license"), ["MIT"]);
 
-    // Topics and flags are traits.
-    assert_eq!(v("/ada/*<cli>::name"), ["boiler"]);
+    // Topics and flags are traits; topics in their own namespace,
+    // swept by the segment wildcard.
+    assert_eq!(v("/ada/*<topic:cli>::name"), ["boiler"]);
+    assert_eq!(v("/ada/*<topic:*>::name"), ["boiler"]);
+    assert_eq!(v("/ada/*<topic:.>::name"), ["boiler"]);
+    assert_eq!(v("/ada/*<cli> @| count"), ["0"]);
     assert_eq!(v("/ada/*<fork>::name"), ["fork-of-kettle"]);
 
     // Sections: the issues listing keeps PRs out; labels are
     // traits; closed issues answer by direct address.
     assert_eq!(v("/ada/boiler/issues/* @| count"), ["1"]);
-    assert_eq!(v("/ada/boiler/issues/*<bug>::title"), ["Steam leak"]);
+    assert_eq!(v("/ada/boiler/issues/*<label:bug>::title"), ["Steam leak"]);
+    assert_eq!(v("/ada/boiler/issues/*<label:*>::title"), ["Steam leak"]);
     assert_eq!(v("/ada/boiler/issues/3::state"), ["closed"]);
     assert_eq!(v("/ada/boiler/pulls/2::head"), ["valve"]);
     assert_eq!(v("/ada/boiler/releases/*::tag"), ["v1.0"]);
@@ -61,7 +66,7 @@ fn mock_github() {
     // The file tree; content is the value.
     assert_eq!(v("/ada/boiler/files/*<dir>"), ["/ada/boiler/files/src"]);
     assert_eq!(v("/ada/boiler/files/README.md::"), ["boil the ocean\n"]);
-    assert_eq!(v("/ada/boiler/files/src/main.rs::size"), ["20"]);
+    assert_eq!(v("/ada/boiler/files/src/main.rs::size"), ["20_B"]);
 
     // The social fabric, both directions.
     assert_eq!(v("/ada->follows::login"), ["grace"]);

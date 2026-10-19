@@ -90,7 +90,7 @@ fn outline_sections_with_nesting_and_front_matter() {
         ["The war", "First attempt"]
     );
     // geometry rides as adapter metadata
-    assert_eq!(values(&m, "//line[::::y = 760]::::page"), ["1"]);
+    assert_eq!(values(&m, "//line[:::y = 760_pt]:::page"), ["1"]);
 }
 
 #[test]

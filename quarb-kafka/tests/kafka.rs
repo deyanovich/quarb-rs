@@ -34,12 +34,12 @@ fn live_kafka() {
     let a = KafkaAdapter::connect(&target).unwrap();
 
     // Topics list, internal ones hidden.
-    assert_eq!(values(&a, "/*:::name"), ["events", "logs", "users"]);
-    assert_eq!(values(&a, "/events::::partitions"), ["2"]);
+    assert_eq!(values(&a, "/*:name"), ["events", "logs", "users"]);
+    assert_eq!(values(&a, "/events:::partitions"), ["2"]);
 
     // The bounded window sees every message, across partitions.
     assert_eq!(values(&a, "/events/* @| count"), ["5"]);
-    let mut keys = values(&a, "/events/*::::key");
+    let mut keys = values(&a, "/events/*:::key");
     keys.sort();
     assert_eq!(keys, ["e1", "e2", "e3", "e4", "e5"]);
 
@@ -55,7 +55,7 @@ fn live_kafka() {
     );
 
     // Record timestamps are typed instants.
-    assert_eq!(values(&a, "/events/*[::::ts > 2020-01-01] @| count"), ["5"]);
+    assert_eq!(values(&a, "/events/*[:::ts > 2020-01-01] @| count"), ["5"]);
 
     // Key-named messages repeat: u1's history, in time order.
     assert_eq!(values(&a, "/users/'u1' @| count"), ["2"]);
@@ -83,5 +83,5 @@ fn live_kafka() {
 
     // Topic selection at the target.
     let only = KafkaAdapter::connect(&format!("{target}{sep}topics=logs")).unwrap();
-    assert_eq!(values(&only, "/*:::name"), ["logs"]);
+    assert_eq!(values(&only, "/*:name"), ["logs"]);
 }

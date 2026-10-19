@@ -52,7 +52,7 @@
 //!   — the reader sees a mark there (the LaTeX adapter's
 //!   convention).
 //! - **Verbatim** blocks keep their text as authored
-//!   (`::::lang` from the first genos); an `englossis` reads as
+//!   (`:::lang` from the first genos); an `englossis` reads as
 //!   verbatim in its embedded dialect's name; verse stichoi
 //!   lower as `verse`/`strophe`/`stichos`, the
 //!   stichos taxis the citation coordinate.
@@ -266,8 +266,8 @@ fn import_with(mut doc: atrep::Document, lit: bool) -> Result<TextModel, KoineEr
 /// The document's declared identity, as the html reading declares
 /// its head: the hoisted header an importer writes at the top
 /// (`=` title, `=:` author, `="` abstract — a FictionBook's
-/// description, a TEI title statement) becomes `::::title`,
-/// `::::author`, `::::description` on the document node. The
+/// description, a TEI title statement) becomes `:::title`,
+/// `:::author`, `:::description` on the document node. The
 /// paragraphs themselves stay in the text as they are.
 fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
     let mut head = quarb_text::HeadMeta::default();
@@ -328,7 +328,7 @@ fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
                 }
             }
             // The dictionary vocabulary: the languages line, the
-            // index language first — `::::languages`.
+            // index language first — `:::languages`.
             "languages" => {
                 for code in text.split(|c: char| c.is_whitespace() || c == ',') {
                     if !code.is_empty() {

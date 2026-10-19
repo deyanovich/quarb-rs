@@ -20,7 +20,7 @@ fn scan_filter_resolve() {
     let a = DynamodbAdapter::connect(&target).unwrap();
     // deterministic key-sorted listing, hash-named items repeating
     assert_eq!(
-        values(&a, "/tracks/*:::name"),
+        values(&a, "/tracks/*:name"),
         ["Bartok", "Bartok", "Holst"]
     );
     // the sort key stays a property to filter on

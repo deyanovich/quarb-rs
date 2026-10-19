@@ -501,6 +501,10 @@ impl TextModel {
             .iter()
             .filter_map(|&i| f(&self.mentions[i as usize - 1]))
             .collect();
+        // A scalar for one mention, a list for several: the
+        // containment comparison reads both shapes alike (a value
+        // that is no container contains itself), and a grouping key
+        // stays a scalar for the common token.
         match vs.len() {
             0 => None,
             1 => vs.into_iter().next(),

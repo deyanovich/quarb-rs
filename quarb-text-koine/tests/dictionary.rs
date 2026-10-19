@@ -162,10 +162,10 @@ fn the_abbreviations_list_resolves_the_labels() {
 fn the_dictionarys_identity_and_languages() {
     let m = parse_dsl_file(&fixture("webster.dsl")).unwrap();
     assert_eq!(
-        values(&m, "::::title"),
+        values(&m, ":::title"),
         ["Webster's Revised Unabridged Dictionary (1913)"]
     );
-    assert_eq!(values(&m, "::::languages"), ["en, en"]);
+    assert_eq!(values(&m, ":::languages"), ["en, en"]);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn a_russian_dictionary_keeps_its_stress_and_citations() {
         values(&m, "//entry[//citation:: = \"Записная книжка.\"]::lemma"),
         ["КНИ́ГА"]
     );
-    assert_eq!(values(&m, "::::languages"), ["ru, ru"]);
+    assert_eq!(values(&m, ":::languages"), ["ru, ru"]);
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn the_declared_encoding_is_the_bom_or_the_code_page_header() {
 }
 
 /// A dictionary written in lexigramma itself: the title line is its
-/// declared identity and the languages line `::::languages` on the
+/// declared identity and the languages line `:::languages` on the
 /// native route too, and the abbreviations list — undeclared, so
 /// the one standing before the first entry (the `abbreviations`
 /// sim, `@[[ … ]]@`, is the declared form from the atrep release
@@ -237,8 +237,8 @@ fn the_declared_encoding_is_the_bom_or_the_code_page_header() {
 fn a_native_lexigramma_dictionary_declares_itself() {
     let src = "@@@!lexigramma\n\n@= Pocket Latin =@\n\n@=/ la en /=@\n\n@::;\n@:: poet., poetic.\n@;\npoetic\n;@\n::@\n;::@\n\n@! penna\n@:(1)\nA feather @[ poet. ]@ or a pen.\n:@\n!@\n";
     let m = parse_str(src, Path::new(".")).unwrap();
-    assert_eq!(values(&m, "::::title"), ["Pocket Latin"]);
-    assert_eq!(values(&m, "::::languages"), ["la, en"]);
+    assert_eq!(values(&m, ":::title"), ["Pocket Latin"]);
+    assert_eq!(values(&m, ":::languages"), ["la, en"]);
     assert_eq!(values(&m, "//entry::lemma"), ["penna"]);
     assert_eq!(values(&m, "//unordered-list::kind"), ["abbreviations"]);
     assert_eq!(values(&m, "//label-->::"), ["poet., poetic.: poetic"]);

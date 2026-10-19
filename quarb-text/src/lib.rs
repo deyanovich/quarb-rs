@@ -27,8 +27,8 @@
 //! - `::lemma`, `::hypograph`, and `::taxis` are properties; bare
 //!   `::` (and `::text`) is the flattened prose of the subtree,
 //!   lemma first, hypograph last.
-//! - `::::level` on a section is the source heading level;
-//!   `::::lang` on a verbatim block is its declared language.
+//! - `:::level` on a section is the source heading level;
+//!   `:::lang` on a verbatim block is its declared language.
 //! - Sections are derived from the flat heading stream by the
 //!   outline rule: a heading closes every open section at its
 //!   level or deeper, then opens a section under the nearest
@@ -182,7 +182,7 @@ pub enum Block {
         onym: String,
         family: Option<NoteFamily>,
         /// The declared spelling placed this pair in the margin
-        /// (a Tufte-style sidenote): surfaced as `::::form =
+        /// (a Tufte-style sidenote): surfaced as `:::form =
         /// "margin"` on both ends — the family stays footnote,
         /// placement is presentation.
         margin: bool,
@@ -502,8 +502,8 @@ enum Kind {
     /// The corpus reading: one token of a prose
     /// block — a UAX #29 word segment — with `::` its form,
     /// `::lower` the case-folded form, `<word>` / `<number>` /
-    /// `<punct>` its class, `::::n` its position in the document
-    /// and `::::sentence` the UAX #29 sentence it falls in. The
+    /// `<punct>` its class, `:::n` its position in the document
+    /// and `:::sentence` the UAX #29 sentence it falls in. The
     /// tokens sit under the block's derived `sentence` nodes
     /// — the sentence tier — and a treebank's
     /// A treebank's sentence: in a standalone CoNLL-U
@@ -601,7 +601,7 @@ struct Node {
     /// A callout whose source declared no family: resolution may
     /// re-kind it from the body it reaches.
     family_open: bool,
-    /// The declared spelling was a margin form (`::::form`).
+    /// The declared spelling was a margin form (`:::form`).
     margin: bool,
     /// Callout -> body edge, once resolved.
     note_edge: Option<NodeId>,
@@ -1204,8 +1204,8 @@ pub fn normalize_ws(s: &str) -> String {
 /// name/property pairs, `title`, the `lang` attribute, the
 /// canonical link, `rel="tag"` links) and a schema.org JSON-LD
 /// block. Two layers: every declaration lands verbatim under
-/// `::::name` (`::::description`, `::::og:type`,
-/// `::::article:section`, `::::schema:@type`), so nothing a page
+/// `:::name` (`:::description`, `:::og:type`,
+/// `:::article:section`, `:::schema:@type`), so nothing a page
 /// says is lost; and the standard vocabularies feed a curated
 /// core — the tags (`keywords`, `article:tag`, `rel=tag`, JSON-LD
 /// `keywords`) become traits on the document and `::tags`, the
@@ -1910,7 +1910,7 @@ impl TextModel {
     /// (`?references=STANDARD`): every paragraph that reads as a
     /// reference under the standard becomes a `bib` node — its
     /// text the projection, the fields under the canonical campi,
-    /// the genus as trait and `::::genus`, `::onym` the list's
+    /// the genus as trait and `:::genus`, `::onym` the list's
     /// number or else the responsible party and year — and the
     /// citations in the remaining prose become `cit` nodes
     /// (bracketed numbers and ranges with their pinpoint, author-
@@ -2509,7 +2509,7 @@ impl TextModel {
 /// Ruling #35: wire each callout to its body by (family, onym) —
 /// first body wins on a duplicate — build the reverse index, and
 /// mark the dangling: a callout with no body keeps its node,
-/// carries `<dangling>` and `::::resolved = false`, and emits no
+/// carries `<dangling>` and `:::resolved = false`, and emits no
 /// edge.
 fn resolve_notes(nodes: &mut [Node]) {
     let mut bodies: std::collections::HashMap<(Kind, String), NodeId> = Default::default();
@@ -2894,7 +2894,7 @@ impl TextModel {
     /// an endnote's body, and a body no callout reaches, follow
     /// the flow, as at the end. The tree is untouched — bodies
     /// stay under their note node, reached by `->footnote` — only
-    /// `::::n` and the sentence tier follow the printed order, so
+    /// `:::n` and the sentence tier follow the printed order, so
     /// a window or a dispersion does not run out of the prose into
     /// a commentary. With `?notes=omit` the bodies are left
     /// untokenized.
@@ -4554,8 +4554,8 @@ impl AstAdapter for TextModel {
         &["level", "lang", "form", "n"]
     }
 
-    /// `::::level` on sections (the source heading level) and
-    /// `::::lang` on verbatim blocks (the declared language).
+    /// `:::level` on sections (the source heading level) and
+    /// `:::lang` on verbatim blocks (the declared language).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if let Some(v) = tier::virt(node) {
             return self.v_metadata(v, key);
@@ -4584,8 +4584,8 @@ impl AstAdapter for TextModel {
             "at" if n.at.is_some() => n.at.map(|(lo, _)| Value::Int(lo as i64)),
             // The corpus reading: a token's position and sentence.
             // A sentence node's document-wide ordinal, under both
-            // spellings, so `/paragraph[7]/sentence[3]::::n` and a
-            // token's `::::sentence` agree.
+            // spellings, so `/paragraph[7]/sentence[3]:::n` and a
+            // token's `:::sentence` agree.
             "n" | "sentence" if n.kind == Kind::Sentence => n.taxis.map(Value::Int),
             // A stored sentence's coordinates: its first row's
             // offset and its last row's end in the block's text (a
@@ -4608,7 +4608,7 @@ impl AstAdapter for TextModel {
                     self.chars_to(block, r.at) + self.ann_names.get(r.form).chars().count() as i64
                 }))
             }
-            // `::::resolved` on a callout: the broken-apparatus
+            // `:::resolved` on a callout: the broken-apparatus
             // linter's fact.
             "resolved" if n.deixis => Some(Value::Bool(!n.dangling)),
             // …and on an internal ref: the broken-cross-reference

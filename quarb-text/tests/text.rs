@@ -69,7 +69,7 @@ fn sections_derive_from_flat_headings() {
         vec!["/section[1]/section[1]", "/section[1]/section[2]"]
     );
     assert_eq!(values(&m, "/section/section::lemma"), vec!["Deep", "Mid"]);
-    assert_eq!(values(&m, "/section/section::::level"), vec!["3", "2"]);
+    assert_eq!(values(&m, "/section/section:::level"), vec!["3", "2"]);
     // Pre-heading content is root body, not a section's.
     assert_eq!(values(&m, "/paragraph::"), vec!["Preamble."]);
 }
@@ -529,7 +529,7 @@ fn closed_surface_adapters_alias_their_metadata() {
     ]);
     // The annotation answers at either depth.
     assert_eq!(values(&m, "//section::level"), vec!["3"]);
-    assert_eq!(values(&m, "//section::::level"), vec!["3"]);
+    assert_eq!(values(&m, "//section:::level"), vec!["3"]);
     assert_eq!(values(&m, "//verbatim::lang"), vec!["rust"]);
     // Predicates see the alias too.
     assert_eq!(
@@ -538,8 +538,8 @@ fn closed_surface_adapters_alias_their_metadata() {
     );
     // An undeclared metadata key stays four-colon only.
     assert_eq!(values(&m, "//section::nonesuch"), vec![""]);
-    // Core metadata is never aliased: `::name` is not `:::name`.
-    let names = values(&m, "//section | %(data = ::name; core = :::name)");
+    // Core metadata is never aliased: `::name` is not `:name`.
+    let names = values(&m, "//section | %(data = ::name; core = :name)");
     assert!(names[0].contains("data = null"), "{names:?}");
 }
 
@@ -667,7 +667,7 @@ fn verse_lines_carry_the_citation_coordinate() {
 
 /// The corpus reading (with its sentence tier): under every prose block its sentences, under each its
 /// tokens — UAX #29 word segments with their class as a trait,
-/// `::lower`, and document-wide `::::n` / `::::sentence`; the
+/// `::lower`, and document-wide `:::n` / `:::sentence`; the
 /// block's own prose and the renderers are unchanged, and a
 /// sibling hop stops at the sentence.
 #[test]
@@ -694,7 +694,7 @@ fn corpus_reading_tokenizes_prose_blocks() {
     // its document-wide ordinal, is derived, and is no block.
     assert_eq!(values(&m, "//paragraph[2]/sentence @| count"), ["3"]);
     assert_eq!(values(&m, "//paragraph[2]/sentence[3]::"), ["No answer."]);
-    assert_eq!(values(&m, "//paragraph[2]/sentence[3]::::n"), ["4"]);
+    assert_eq!(values(&m, "//paragraph[2]/sentence[3]:::n"), ["4"]);
     assert_eq!(
         values(&m, "//paragraph[2]/sentence[3]/token::"),
         ["No", "answer", "."]
@@ -712,19 +712,19 @@ fn corpus_reading_tokenizes_prose_blocks() {
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::lower"), ["tom’s"]);
     assert_eq!(values(&m, "//token[:: = \"Smith\"]::class"), ["word"]);
     // Positions count through the document; the heading's tokens come first.
-    assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::::n"), ["3"]);
+    assert_eq!(values(&m, "//token[:: = \"Tom’s\"]:::n"), ["3"]);
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::n"), ["3"]);
     // UAX #29 breaks after "Dr." — the sentence ordinal shows it,
     // and the sibling hop stops there: the sentence
     // is the token's parent.
-    assert_eq!(values(&m, "//token[:: = \"Dr\"]::::sentence"), ["2"]);
-    assert_eq!(values(&m, "//token[:: = \"Smith\"]::::sentence"), ["3"]);
+    assert_eq!(values(&m, "//token[:: = \"Dr\"]:::sentence"), ["2"]);
+    assert_eq!(values(&m, "//token[:: = \"Smith\"]:::sentence"), ["3"]);
     assert_eq!(
         values(&m, "//token[:: = \"Dr\"]>token>token @| count"),
         ["0"]
     );
     assert_eq!(values(&m, "//token[:: = \"Dr\"]>token::"), ["."]);
-    // `::sentence` is the sentence's text; `::::sentence` its ordinal.
+    // `::sentence` is the sentence's text; `:::sentence` its ordinal.
     assert_eq!(
         values(&m, "//token[:: = \"Smith\"]::sentence"),
         ["Smith owes 3,000 dollars.”"]
@@ -749,19 +749,19 @@ fn corpus_reading_tokenizes_prose_blocks() {
 
 /// Sentence bonds: a `.desm` abbreviation undoes a
 /// UAX #29 break; the tokens and their positions are untouched,
-/// only `::::sentence` and `::sentence` change.
+/// only `:::sentence` and `::sentence` change.
 #[test]
 fn sentence_tailoring_undoes_declared_breaks() {
     let text = "Tom met Dr. Smith. He owed 3,000 dollars. so he said. Then Mrs. Polly came.";
     let mut plain = TextModel::parse_plain(text);
     plain.tokenize();
-    assert_eq!(values(&plain, "//token[:: = \"Smith\"]::::sentence"), ["2"]);
+    assert_eq!(values(&plain, "//token[:: = \"Smith\"]:::sentence"), ["2"]);
     // UAX #29 itself keeps "dollars. so" together (no break before a
     // lowercase letter): five sentences before the tailoring.
     assert_eq!(
         values(
             &plain,
-            "//token @| group(s = ::::sentence) | count @| count"
+            "//token @| group(s = :::sentence) | count @| count"
         ),
         ["5"]
     );
@@ -769,7 +769,7 @@ fn sentence_tailoring_undoes_declared_breaks() {
     let mut tailored = TextModel::parse_plain(text);
     tailored.tokenize_with(Some(&tailoring));
     assert_eq!(
-        values(&tailored, "//token[:: = \"Smith\"]::::sentence"),
+        values(&tailored, "//token[:: = \"Smith\"]:::sentence"),
         ["1"]
     );
     assert_eq!(
@@ -782,13 +782,13 @@ fn sentence_tailoring_undoes_declared_breaks() {
         ["He owed 3,000 dollars. so he said."]
     );
     assert_eq!(
-        values(&tailored, "//token[:: = \"Polly\"]::::sentence"),
+        values(&tailored, "//token[:: = \"Polly\"]:::sentence"),
         ["3"]
     );
     assert_eq!(
         values(
             &tailored,
-            "//token @| group(s = ::::sentence) | count @| count"
+            "//token @| group(s = :::sentence) | count @| count"
         ),
         ["3"]
     );
@@ -798,13 +798,13 @@ fn sentence_tailoring_undoes_declared_breaks() {
         values(&plain, "//token @| count")
     );
     assert_eq!(
-        values(&tailored, "//token[:: = \"Polly\"]::::n"),
-        values(&plain, "//token[:: = \"Polly\"]::::n")
+        values(&tailored, "//token[:: = \"Polly\"]:::n"),
+        values(&plain, "//token[:: = \"Polly\"]:::n")
     );
     // An abbreviation is a whole word: "Undr." is not "Dr.".
     let mut edge = TextModel::parse_plain("He said Undr. Then left.");
     edge.tokenize_with(Some(&tailoring));
-    assert_eq!(values(&edge, "//token[:: = \"Then\"]::::sentence"), ["2"]);
+    assert_eq!(values(&edge, "//token[:: = \"Then\"]:::sentence"), ["2"]);
 }
 
 /// A CoNLL-U annotation replaces the built-in tokens and sentences
@@ -837,7 +837,7 @@ fn conllu_annotation_replaces_the_token_layer() {
 ";
     m.annotate_conllu(conllu).unwrap();
     // The tool's tokens: "Dr." is one, and the sentence is the tool's.
-    assert_eq!(values(&m, "//token[:: = \"Dr.\"]::::sentence"), ["1"]);
+    assert_eq!(values(&m, "//token[:: = \"Dr.\"]:::sentence"), ["1"]);
     assert_eq!(
         values(&m, "//token[:: = \"Smith\"]::sentence"),
         ["Tom said: “Dr. Smith owes it.”"]
@@ -866,7 +866,7 @@ fn conllu_annotation_replaces_the_token_layer() {
     );
     assert_eq!(values(&m, "//token[:: = \"n't\"]::lemma"), ["not"]);
     assert_eq!(values(&m, "//token[:: = \"do\"]::sentence"), ["He don't."]);
-    assert_eq!(values(&m, "//token[:: = \"n't\"]::::n"), ["13"]);
+    assert_eq!(values(&m, "//token[:: = \"n't\"]:::n"), ["13"]);
     // Positions run through the document; the block's prose is untouched.
     assert_eq!(
         values(&m, "//paragraph[1]::"),

@@ -52,14 +52,14 @@ fn a_numbered_list_lowers_to_bib_nodes_and_cits_resolve() {
         ["Gibbon, Edward", "Herodotus", "Austen, Jane"]
     );
     assert_eq!(values(&m, "//bib::year"), ["1776", "1920", "1816"]);
-    assert_eq!(values(&m, "//bib::::genus"), ["book", "book", "article"]);
+    assert_eq!(values(&m, "//bib:::genus"), ["book", "book", "article"]);
     assert_eq!(
         values(&m, "//bib<article>::journal"),
         ["The Quarterly Review"]
     );
     assert_eq!(values(&m, "//cit::target"), ["1", "2", "3", "1", "2"]);
     assert_eq!(values(&m, "//cit[1]::locator"), ["45"]);
-    assert_eq!(values(&m, "//cit[!::::resolved] @| count"), ["0"]);
+    assert_eq!(values(&m, "//cit[!:::resolved] @| count"), ["0"]);
     assert_eq!(values(&m, "//bib[!<-cit] @| count"), ["0"]);
     // The prose stays prose; the entries' text is their projection.
     assert_eq!(values(&m, "//paragraph @| count"), ["2"]);
@@ -87,12 +87,12 @@ fn numbered_in_the_text_and_a_gost_list() {
     let mut m = TextModel::build(blocks);
     assert_eq!(m.lower_references("gost").unwrap(), 2);
     assert_eq!(values(&m, "//bib::onym"), ["1", "2"]);
-    assert_eq!(values(&m, "//bib::::genus"), ["book", "article"]);
+    assert_eq!(values(&m, "//bib:::genus"), ["book", "article"]);
     assert_eq!(values(&m, "//bib[2]::journal"), ["Вестник древней истории"]);
     assert_eq!(values(&m, "//bib[2]::pages"), ["45–52"]);
     assert_eq!(
         values(&m, "//cit | %(t = ::target; l = ::locator)"),
         ["%(t = \"2\"; l = \"с. 45\")", "%(t = \"1\"; l = null)"]
     );
-    assert_eq!(values(&m, "//cit[!::::resolved] @| count"), ["0"]);
+    assert_eq!(values(&m, "//cit[!:::resolved] @| count"), ["0"]);
 }

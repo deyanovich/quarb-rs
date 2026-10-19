@@ -92,18 +92,20 @@ fn cell(row: &duckdb::Row<'_>, i: usize) -> Value {
                 secs,
                 nanos,
                 offset_min: None,
+                calendar: Default::default(),
             }
         }
         Ok(ValueRef::Date32(days)) => Value::Instant {
             secs: days as i64 * 86_400,
             nanos: 0,
             offset_min: None,
+            calendar: Default::default(),
         },
         // TIME reads as the span from midnight; INTERVAL by DuckDB's
         // month = 30d, day = 24h expansion.
         Ok(ValueRef::Time64(unit, v)) => {
             let (secs, nanos) = secs_nanos(unit, v);
-            Value::Duration { secs, nanos }
+            Value::seconds(secs, nanos)
         }
         Ok(ValueRef::Interval {
             months,
@@ -113,10 +115,10 @@ fn cell(row: &duckdb::Row<'_>, i: usize) -> Value {
             let total = (months as i128) * 30 * 86_400 * 1_000_000_000
                 + (days as i128) * 86_400 * 1_000_000_000
                 + nanos as i128;
-            Value::Duration {
-                secs: total.div_euclid(1_000_000_000) as i64,
-                nanos: total.rem_euclid(1_000_000_000) as u32,
-            }
+            Value::seconds(
+                total.div_euclid(1_000_000_000) as i64,
+                total.rem_euclid(1_000_000_000) as u32,
+            )
         }
         // BLOB (and UUID, handed over as its 16 bytes) as lowercase hex.
         Ok(ValueRef::Blob(b)) => Value::Str(b.iter().map(|byte| format!("{byte:02x}")).collect()),
@@ -194,15 +196,24 @@ fn introspect(conn: &Connection) -> Result<Vec<TableSpec>, DuckdbError> {
     let mut specs = Vec::new();
     for name in names {
         let mut columns = Vec::new();
+        let mut json_columns = Vec::new();
+        let mut column_types: Vec<String> = Vec::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT column_name FROM information_schema.columns \
+                "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = 'main' AND table_name = ? \
                  ORDER BY ordinal_position",
             )?;
             let mut rows = stmt.query([&name])?;
             while let Some(r) = rows.next()? {
+                // a JSON column declares its cells' notation (spec:
+                // Grafting)
+                let declared: String = r.get(1)?;
+                if declared.eq_ignore_ascii_case("json") {
+                    json_columns.push(columns.len());
+                }
                 columns.push(r.get::<_, String>(0)?);
+                column_types.push(declared);
             }
         }
         // Keys via DuckDB's native constraint catalog
@@ -251,6 +262,8 @@ fn introspect(conn: &Connection) -> Result<Vec<TableSpec>, DuckdbError> {
             columns,
             pk,
             fks,
+            json_columns,
+            column_types,
         });
     }
     Ok(specs)

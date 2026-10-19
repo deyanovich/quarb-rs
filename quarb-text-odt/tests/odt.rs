@@ -71,7 +71,7 @@ fn the_fixture_reads_as_its_markdown_source_does() {
             ["Chapter I", "The old lady"]
         );
         assert_eq!(
-            values(&m, "//section[::lemma = \"The old lady\"]:::depth"),
+            values(&m, "//section[::lemma = \"The old lady\"]:depth"),
             ["2"]
         );
         // The title and author paragraphs stand before the first
@@ -123,7 +123,7 @@ fn the_fixture_reads_as_its_markdown_source_does() {
             ["The first call."]
         );
         // A byte offset: the curly quotes are three bytes each.
-        assert_eq!(values(&m, "//footnote<deixis>[1]::::at"), ["10"]);
+        assert_eq!(values(&m, "//footnote<deixis>[1]:::at"), ["10"]);
         // The link and the heading's bookmark.
         assert_eq!(
             values(&m, "//ref::target"),

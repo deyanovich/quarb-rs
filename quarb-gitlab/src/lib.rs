@@ -23,9 +23,12 @@
 //! Metadata splits by register: comparable values are properties
 //! (`::stars`, `::open-issues`, timestamps as instants); unary
 //! facts are traits — visibility (`<private>`), `<archived>`,
-//! `<fork>`, project topics, issue/MR labels verbatim (scoped
-//! labels included), `<draft>`, `<confidential>`, and
-//! pipeline/job statuses (`<failed>`).
+//! `<fork>`, project topics in their namespace (`<topic:cli>`),
+//! issue/MR labels in theirs (`<label:bug>`; a scoped label's
+//! `::` is the segment colon, so `temp::high` is
+//! `<label:temp:high>` and `<label:temp:.>` sweeps the scope),
+//! `<draft>`, `<confidential>`, and pipeline/job statuses
+//! (`<failed>`).
 //!
 //! **Transport and auth**: the adapter shells out to `glab api`,
 //! so hosts (`GITLAB_HOST`), tokens, and self-managed instances
@@ -141,9 +144,32 @@ fn str_value(s: &str) -> Value {
             secs,
             nanos,
             offset_min,
+            calendar: Default::default(),
         };
     }
     Value::Str(s.to_string())
+}
+
+/// A byte count as the size quantity; anything but a whole number
+/// passes through.
+fn bytes(v: Value) -> Value {
+    match v {
+        Value::Int(n) => Value::bytes(n),
+        other => other,
+    }
+}
+
+/// A number of seconds (whole for a pipeline, fractional for a job)
+/// as the span of time.
+fn seconds(v: Value) -> Value {
+    match v {
+        Value::Int(n) => Value::seconds(n, 0),
+        Value::Float(f) if f.is_finite() => {
+            let whole = f.floor();
+            Value::seconds(whole as i64, ((f - whole) * 1e9).round() as u32)
+        }
+        other => other,
+    }
 }
 
 fn json_scalar(v: &Json) -> Option<Value> {
@@ -901,7 +927,11 @@ impl AstAdapter for GitlabAdapter {
                     ts.push("fork".to_string());
                 }
                 if let Some(topics) = d.and_then(|d| d.get("topics")).and_then(|v| v.as_array()) {
-                    ts.extend(topics.iter().filter_map(|t| t.as_str().map(str::to_string)));
+                    ts.extend(
+                        topics
+                            .iter()
+                            .filter_map(|t| t.as_str().map(|t| format!("topic:{t}"))),
+                    );
                 }
                 ts
             }
@@ -926,7 +956,12 @@ impl AstAdapter for GitlabAdapter {
                     ts.push("upcoming".to_string());
                 }
                 if let Some(labels) = d.and_then(|d| d.get("labels")).and_then(|v| v.as_array()) {
-                    ts.extend(labels.iter().filter_map(|l| l.as_str().map(str::to_string)));
+                    // a scoped label `scope::value` reads as the
+                    // segments `label:scope:value`
+                    ts.extend(labels.iter().filter_map(|l| {
+                        l.as_str()
+                            .map(|l| format!("label:{}", l.replace("::", ":")))
+                    }));
                 }
                 ts
             }
@@ -1052,9 +1087,13 @@ impl AstAdapter for GitlabAdapter {
                             "status" => "/status",
                             "ref" => "/ref",
                             "source" => "/source",
-                            "duration" => "/duration",
+                            // A pipeline's or job's duration, seconds
+                            // in the API, minted as the span; a file's
+                            // size in bytes (spec: adapters mint a
+                            // measure as a quantity).
+                            "duration" => return at(&d, "/duration").map(seconds),
                             "command" => "/command",
-                            "size" => "/size",
+                            "size" => return at(&d, "/size").map(bytes),
                             _ => return None,
                         };
                         at(&d, key)

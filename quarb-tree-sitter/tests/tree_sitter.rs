@@ -10,7 +10,7 @@ fn rust_functions_fields_and_lines() {
     };
     assert_eq!(v("//function_item::name"), ["main", "greet"]);
     assert_eq!(
-        v("//function_item[::name = \"greet\"]::::start-line"),
+        v("//function_item[::name = \"greet\"]:::start-line"),
         ["2"]
     );
     assert_eq!(v("//call_expression::function"), ["greet"]);

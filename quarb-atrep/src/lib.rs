@@ -31,7 +31,7 @@
 //!   embedded bibliogramma englossis when one is present;
 //!   otherwise its `::param` stays available for cross-mount
 //!   joins. A reference whose target is missing keeps its node,
-//!   carries `<dangling>` and `::::resolved = false`, and emits no
+//!   carries `<dangling>` and `:::resolved = false`, and emits no
 //!   edge — `//*<dangling>` is a broken-cross-reference linter.
 //! - The default projection of a resolved reference is its
 //!   rendered form — the target's lemma (falling back to the
@@ -1118,11 +1118,11 @@ impl AstAdapter for AtrepAdapter {
         Some(Value::Str(n.text.clone()))
     }
 
-    /// Root: `::::dialect`, `::::dialect-version`. Sim nodes:
-    /// `::::short-desc`, `::::long-desc`, `::::form`, `::::keyword`,
-    /// `::::bracket-matching`. References: `::::resolved`. Verbatim:
-    /// `::::lang`. Enmedia: `::::media`, `::::sha256`. Englossis:
-    /// `::::dialect`.
+    /// Root: `:::dialect`, `:::dialect-version`. Sim nodes:
+    /// `:::short-desc`, `:::long-desc`, `:::form`, `:::keyword`,
+    /// `:::bracket-matching`. References: `:::resolved`. Verbatim:
+    /// `:::lang`. Enmedia: `:::media`, `:::sha256`. Englossis:
+    /// `:::dialect`.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = self.node(node);
         match key {
@@ -1258,7 +1258,7 @@ The onym query language.
         assert_eq!(values(&a, "//emphasis::text"), ["OQL"]);
         assert_eq!(values(&a, "//strong::text"), ["text"]);
         // Root metadata carries the declaration.
-        assert_eq!(values(&a, "::::dialect"), ["koine"]);
+        assert_eq!(values(&a, ":::dialect"), ["koine"]);
     }
 
     #[test]
@@ -1319,8 +1319,8 @@ The onym query language.
         let a = mount();
         assert_eq!(values(&a, "//*<dangling>::target"), ["ghost"]);
         assert_eq!(values(&a, "//*<dangling>->* @| count"), ["0"]);
-        assert_eq!(values(&a, "//*<dangling>::::resolved"), ["false"]);
-        assert_eq!(values(&a, "//ref[1]::::resolved"), ["true"]);
+        assert_eq!(values(&a, "//*<dangling>:::resolved"), ["false"]);
+        assert_eq!(values(&a, "//ref[1]:::resolved"), ["true"]);
     }
 
     #[test]

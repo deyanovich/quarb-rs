@@ -53,7 +53,7 @@ fn the_doors() {
     assert_eq!(
         ok(
             &dir,
-            &["//*[:::name = \"字:文本串\"]:: @| first", "emma.uot"]
+            &["//*[:name = \"字:文本串\"]:: @| first", "emma.uot"]
         ),
         "Chapter I"
     );

@@ -17,7 +17,7 @@
 mod parse;
 
 pub use parse::{
-    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl, UnitsDecl,
+    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl, UnitDecl,
     parse_model, parse_model_file, resolve_mount_target,
 };
 
@@ -169,10 +169,11 @@ pub struct ModelAdapter<A: AstAdapter> {
     /// "a reference is declared on this node" means for a model.
     ref_scopes: OnceCell<Vec<std::collections::HashSet<NodeId>>>,
     referrers: RefCell<HashMap<(usize, Option<String>), HashMap<NodeId, Vec<usize>>>>,
-    /// The unit libraries' definitions (`units LIBRARY;`), loaded at
-    /// construction: name → definition, aliases included. An error
-    /// here is what `check` reports.
-    units: Result<BTreeMap<String, kaiv::faiv::UnitDef>, String>,
+    /// The declared units (`unit NAME = FACTOR EXPRESSION;`, and the
+    /// `units PATH;` files), resolved at construction: every spelling
+    /// → its factor to the base and its base expansion. An error here
+    /// is what `check` reports.
+    units: Result<BTreeMap<String, (f64, String)>, String>,
 }
 
 /// One `index SCOPE::prop;` declaration, materialized.
@@ -303,33 +304,71 @@ impl<A: AstAdapter> ModelAdapter<A> {
         }
     }
 
-    /// Read every `units LIBRARY;` into one table. Refused: a file
-    /// that cannot be read or parsed, and a name the table already
-    /// holds — built in, or from a library imported earlier.
-    fn load_units(decls: &[UnitsDecl]) -> Result<BTreeMap<String, kaiv::faiv::UnitDef>, String> {
-        let mut table: BTreeMap<String, kaiv::faiv::UnitDef> = BTreeMap::new();
+    /// Resolve every unit declaration into one table, in order:
+    /// each expression names built-in units, units declared earlier,
+    /// or opaque units. Refused: a name the table already holds
+    /// (built in, or declared earlier) and an expression that is
+    /// not unit text.
+    fn load_units(decls: &[UnitDecl]) -> Result<BTreeMap<String, (f64, String)>, String> {
+        let mut table: BTreeMap<String, (f64, String)> = BTreeMap::new();
         for decl in decls {
-            let bytes =
-                std::fs::read(&decl.path).map_err(|e| format!("units {}: {e}", decl.library))?;
-            let lib = kaiv::faiv::parse_faiv(&bytes)
-                .map_err(|e| format!("units {}: {e}", decl.library))?;
-            for (name, def) in lib.units {
-                if kaiv::unit::scale(&name).is_some() {
-                    return Err(format!(
-                        "units {}: '{name}' is a built-in unit already",
-                        decl.library
-                    ));
+            let custom = |name: &str| table.get(name).cloned();
+            let Some((f, base)) = quarb::quantity::scale_expr_with(&decl.expr, &custom) else {
+                return Err(format!(
+                    "unit {}: '{}' is not unit text",
+                    decl.names[0], decl.expr
+                ));
+            };
+            let def = (decl.factor * f, base);
+            for name in &decl.names {
+                if quarb::quantity::unit_scale(name).is_some() {
+                    return Err(format!("unit {name}: a built-in unit already"));
                 }
-                if table.contains_key(&name) {
-                    return Err(format!(
-                        "units {}: '{name}' is already defined by an earlier library",
-                        decl.library
-                    ));
+                if table.contains_key(name) {
+                    return Err(format!("unit {name}: declared already"));
                 }
-                table.insert(name, def);
+                table.insert(name.clone(), def.clone());
             }
         }
         Ok(table)
+    }
+
+    /// A member of a container whose role wears the trait `document`
+    /// (spec: The Corpus Reading): the record's `text` is the body,
+    /// every other key a declaration of the document under that
+    /// name. None for any other node.
+    pub fn document_member(&self, node: NodeId) -> Option<(String, Vec<(String, String)>)> {
+        if node.0 & MODEL_TAG == 0 {
+            return None;
+        }
+        let c = ((node.0 & !MODEL_TAG) >> CIDX_SHIFT) as usize;
+        let v = (node.0 & VAL_MASK) as usize;
+        let cont = self.containers().get(c)?;
+        if v == 0 || cont.trait_of(v) != "document" {
+            return None;
+        }
+        let Member::Value(Value::Record(fields)) = cont.member(v)? else {
+            return None;
+        };
+        let text = fields.iter().find_map(|(k, val)| match (k.as_str(), val) {
+            ("text", Value::Str(s)) => Some(s.clone()),
+            ("text", other) if !matches!(other, Value::Null) => Some(other.to_string()),
+            _ => None,
+        })?;
+        let declared = fields
+            .iter()
+            .filter(|(k, val)| k != "text" && !matches!(val, Value::Null))
+            .map(|(k, val)| {
+                (
+                    k.clone(),
+                    match val {
+                        Value::Str(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                )
+            })
+            .collect();
+        Some((text, declared))
     }
 
     /// Everything a model can get wrong that only the source can
@@ -895,9 +934,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
     }
 
     /// Substitute the driver operand in a relation's condition:
-    /// `_::field` becomes that property of the source node, bare
-    /// `$$_` its default projection (`$$` is the heritage spelling). Text inside string literals is
-    /// left alone.
+    /// `$$0::field` (rounded `((0))::field`) becomes that property of
+    /// the source node, bare `$$0` its default projection. Text
+    /// inside string literals is left alone; `_`, the retired
+    /// spelling, passes through to the lexer's refusal, and `$$_`
+    /// is the engine's position (the candidate), untouched.
     fn bind_driver(&self, cond: &str, source: NodeId) -> String {
         let view = PriorView {
             base: &self.base,
@@ -924,31 +965,20 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         i += 1;
                     }
                 }
-                // `_` — the served node (the relation's source); `$$_`
-                // and the bare `$$` are its heritage spellings.
-                c @ ('$' | '_')
-                    if (c == '$' && b.get(i + 1) == Some(&'$'))
-                        || (c == '_'
-                            && !(i > 0
-                                && (b[i - 1].is_alphanumeric()
-                                    || b[i - 1] == '_'
-                                    || b[i - 1] == '-'))
-                            && !b.get(i + 1).is_some_and(|c| {
-                                c.is_alphanumeric() || *c == '_' || *c == '-'
-                            })) =>
+                // `$$0` / `((0))` — the driver: the served node (the
+                // relation's source).
+                c @ ('$' | '(')
+                    if (c == '$'
+                        && b.get(i + 1) == Some(&'$')
+                        && b.get(i + 2) == Some(&'0')
+                        && !b.get(i + 3).is_some_and(|c| c.is_ascii_digit()))
+                        || (c == '('
+                            && b.get(i + 1) == Some(&'(')
+                            && b.get(i + 2) == Some(&'0')
+                            && b.get(i + 3) == Some(&')')
+                            && b.get(i + 4) == Some(&')')) =>
                 {
-                    if c == '$' {
-                        i += 2;
-                        if b.get(i) == Some(&'_')
-                            && !b
-                                .get(i + 1)
-                                .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                        {
-                            i += 1;
-                        }
-                    } else {
-                        i += 1;
-                    }
+                    i += if c == '$' { 3 } else { 5 };
                     let value = if b.get(i) == Some(&':') && b.get(i + 1) == Some(&':') {
                         i += 2;
                         let start = i;
@@ -1127,7 +1157,7 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
     }
     // Minimal on purpose: base nodes forward; prior-container nodes
     // answer default (constructor queries never project
-    // `:::provenance` mid-derivation).
+    // `:provenance` mid-derivation).
     fn document_by_ref(&self, id: &str) -> Option<NodeId> {
         self.base.document_by_ref(id)
     }
@@ -1823,9 +1853,8 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         if let Ok(customs) = &self.units
             && !customs.is_empty()
-            && let Some(hit) = kaiv::unit::scale_with(expr, customs)
         {
-            return Some(hit);
+            return quarb::quantity::scale_expr_with(expr, &|name| customs.get(name).cloned());
         }
         self.base.unit_scale(expr)
     }

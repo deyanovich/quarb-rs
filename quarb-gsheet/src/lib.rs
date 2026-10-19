@@ -173,6 +173,8 @@ impl GsheetAdapter {
                     columns,
                     pk: None,
                     fks: Vec::new(),
+                    json_columns: Vec::new(),
+                    column_types: Vec::new(),
                 },
                 rows,
             ));

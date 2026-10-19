@@ -179,7 +179,7 @@ fn pieces_paragraphs_and_a_footnote() {
         ]
     );
     assert_eq!(values(&m, "//footnote<deixis> @| count"), ["1"]);
-    assert_eq!(values(&m, "//footnote<deixis>::::at"), ["10"]);
+    assert_eq!(values(&m, "//footnote<deixis>:::at"), ["10"]);
     assert_eq!(
         values(&m, "//footnote<deixis>->footnote::"),
         ["Так назвал её автор."]

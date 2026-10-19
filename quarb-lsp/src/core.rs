@@ -151,10 +151,10 @@ mod tests {
 
     #[test]
     fn refusal_is_anchored() {
-        // The bare ::: needs a key; the diagnostic lands on it.
-        let d = diagnostics("/tags/* | %(:::)");
+        // The bare : needs a key; the diagnostic lands on it.
+        let d = diagnostics("/tags/* | %(:)");
         assert_eq!(d.len(), 1, "{d:?}");
-        assert!(d[0].message.contains(":::"), "{}", d[0].message);
+        assert!(d[0].message.contains(":"), "{}", d[0].message);
     }
 
     #[test]

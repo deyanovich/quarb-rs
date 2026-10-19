@@ -37,7 +37,7 @@ pub struct Mount {
     pub name: String,
     /// The target the mount was opened from (a path, a URL, a
     /// connection string), retained as the provenance layer's
-    /// `:::source` fill. `None` when the host constructed the
+    /// `:source` fill. `None` when the host constructed the
     /// adapter without one; the mount name then stands in.
     pub target: Option<String>,
     pub adapter: Box<dyn AstAdapter>,
@@ -806,7 +806,7 @@ impl AstAdapter for MountAdapter {
 
     /// The mount is a provenance layer: the inner adapter answers
     /// first with what its substrate records, and the mount fills a
-    /// missing `:::source` with its target (the real-world address;
+    /// missing `:source` with its target (the real-world address;
     /// the query-local mount name only as a fallback).
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         match self.decode(node) {
@@ -830,8 +830,8 @@ impl AstAdapter for MountAdapter {
 }
 
 impl MountAdapter {
-    /// The mount's fill: `:::source` its target (the real-world
-    /// address; the query-local name as a fallback), `:::path` the
+    /// The mount's fill: `:source` its target (the real-world
+    /// address; the query-local name as a fallback), `:path` the
     /// node's name-path inside the mounted adapter, and — for a
     /// target that is a local file — the file's modification time
     /// as the source rung of the instant ladder.

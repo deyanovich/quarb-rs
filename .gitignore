@@ -16,3 +16,6 @@ quarb-wasm/pkg/
 __pycache__/
 quarb-py/python/quarb/*.so
 quarb-wasm/npm/dist/
+
+# benchmark fixtures (scripts/bench/gen.py regenerates them)
+/scripts/bench/fixtures/

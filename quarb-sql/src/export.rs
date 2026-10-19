@@ -118,31 +118,44 @@ pub struct ColumnTypes {
     pub numeric: Vec<String>,
     /// Columns compared with a text literal.
     pub text: Vec<String>,
+    /// Columns the plan extracts a JSON path from on the strength
+    /// of the column's declaration alone (the hop carried no
+    /// `<json>`): the pushed `json_extract` is the scan's only where
+    /// the catalog declares the column json, since the scan grafts
+    /// a leaf only as declared (spec: Grafting).
+    pub json: Vec<String>,
 }
 
 impl ColumnTypes {
     pub fn is_empty(&self) -> bool {
-        self.numeric.is_empty() && self.text.is_empty()
+        self.numeric.is_empty() && self.text.is_empty() && self.json.is_empty()
     }
 
     /// The assumptions a catalog does not bear out: the columns
     /// compared with a number that are not numeric-typed, and those
     /// compared with text that are. `catalog` lists every column of
-    /// the tables read, with whether its type is numeric; names
-    /// meet without regard to case. A column the catalog does not
-    /// list is unknown, and counts as unmet.
-    pub fn unmet(&self, catalog: &[(String, bool)]) -> Vec<String> {
-        let met = |column: &str, want: bool| {
+    /// the tables read, with whether its type is numeric and
+    /// whether it is declared json; names meet without regard to
+    /// case. A column the catalog does not list is unknown, and
+    /// counts as unmet.
+    pub fn unmet(&self, catalog: &[(String, bool, bool)]) -> Vec<String> {
+        let met = |column: &str, pick: fn(&(String, bool, bool)) -> bool, want: bool| {
             let mut found = catalog
                 .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case(column))
+                .filter(|(name, ..)| name.eq_ignore_ascii_case(column))
                 .peekable();
-            found.peek().is_some() && found.all(|(_, numeric)| *numeric == want)
+            found.peek().is_some() && found.all(|entry| pick(entry) == want)
         };
+        let numeric = |e: &(String, bool, bool)| e.1;
+        let json = |e: &(String, bool, bool)| e.2;
         let mut out: Vec<String> = Vec::new();
-        for (columns, want) in [(&self.numeric, true), (&self.text, false)] {
+        for (columns, pick, want) in [
+            (&self.numeric, numeric as fn(&(String, bool, bool)) -> bool, true),
+            (&self.text, numeric, false),
+            (&self.json, json, true),
+        ] {
             for c in columns {
-                if !met(c, want) && !out.contains(c) {
+                if !met(c, pick, want) && !out.contains(c) {
                     out.push(c.clone());
                 }
             }
@@ -452,7 +465,7 @@ pub struct Partial {
 /// `^`-anchored subcontexts, self-references — would see the
 /// filtered subset); no crosslink or resolution axes anywhere
 /// (backlinks and reverse resolution into the table would too);
-/// and no `:::` / `;;;` metadata anywhere (a filtered `;;;n-rows`
+/// and no `:` / `:::` metadata anywhere (a filtered `:::n-rows`
 /// would lie).
 pub fn partial_pushdown(quarb: &str, dialect: Option<Dialect>) -> Option<Partial> {
     partial_pushdown_explained(quarb, dialect).ok()
@@ -650,7 +663,7 @@ impl Exporter {
                 "projection" if self.prop_s(*n, "kind") != "property" => {
                     return Err(SqlError::Unsupported(
                         "metadata would observe the filtering \
-                         (;;;n-rows, :::index)"
+                         (:::n-rows, :index)"
                             .into(),
                     ));
                 }
@@ -737,6 +750,7 @@ impl Exporter {
             // probe sees JSON null too, as the graft does.
             "path" => {
                 let (col, path) = self.json_path_loose(e)?;
+                self.note_json_column(e, &col);
                 let probe = json_type_probe(dialect, None, &col, &path)?;
                 Some(json_valid_guard(
                     dialect,
@@ -767,6 +781,7 @@ impl Exporter {
                         .map(|v| v.to_string())
                         .unwrap_or_default();
                     let op = if pi == 0 { op.clone() } else { flip_op(&op) };
+                    self.note_json_column(kids[pi], &col);
                     return self.json_prefilter(dialect, &col, &path, &op, &ty, &raw);
                 }
                 None
@@ -866,6 +881,24 @@ impl Exporter {
     /// [`json_path`], loosened for existence: the projection may
     /// be absent (a bare structural path) as well as the bare
     /// `::`.
+    /// Whether a JSON path under a column reads the column as JSON
+    /// on the strength of its declaration alone: the column hop
+    /// (the first step) carries no `<json>` trait. Such a column is
+    /// an assumption of the plan ([`ColumnTypes::json`]); with the
+    /// trait the graft is declared on the hop and holds on both
+    /// roads.
+    fn note_json_column(&mut self, o: NodeId, col: &str) {
+        let declared_on_hop = self.kids(o, "step").first().is_some_and(|s| {
+            self.kids(*s, "trait").iter().any(|t| {
+                matches!(self.prop(*t, "alts"), Some(Value::List(alts))
+                    if alts.iter().any(|a| matches!(a, Value::Str(x) if x == "json")))
+            })
+        });
+        if !declared_on_hop && !self.column_types.json.iter().any(|c| c == col) {
+            self.column_types.json.push(col.to_string());
+        }
+    }
+
     fn json_path_loose(&self, o: NodeId) -> Option<(String, Vec<String>)> {
         if self.json_path(o).is_some() {
             return self.json_path(o);
@@ -1165,6 +1198,7 @@ impl Exporter {
                         if self.is_text_literal(kids[li])
                             && let Some((col, path)) = self.json_path(kids[pi])
                         {
+                            self.note_json_column(kids[pi], &col);
                             // Quarb's value_eq compares numeric-looking
                             // strings numerically — '150' matches the
                             // JSON number 150, and the string "150.0".
@@ -1474,9 +1508,25 @@ impl Exporter {
                     .ok_or_else(|| SqlError::Unsupported("a bare '$*' reference".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
+                if matches!(self.prop(o, "index"), Some(Value::Int(0))) {
+                    // `$$0::col` — the driver, legal only inside the
+                    // joined expression's ON bracket (the parser
+                    // refuses it anywhere else).
+                    if !self.in_on {
+                        return Err(SqlError::Unsupported(
+                            "a '$$0' reference outside the join's ON".into(),
+                        ));
+                    }
+                    if self.kid(o, "step").is_some() {
+                        return Err(SqlError::Unsupported(
+                            "a '$$0' reference beyond a plain column ($$0::col)".into(),
+                        ));
+                    }
+                    return Ok(format!("{}.{col}", self.from_sql.clone()));
+                }
                 if self.in_on {
                     return Err(SqlError::Unsupported(
-                        "a '$*' reference inside the ON (the driver is '$$')".into(),
+                        "a '$*' reference inside the ON (the driver is '$$0')".into(),
                     ));
                 }
                 let Some(join) = self.join_sql.clone() else {
@@ -1492,30 +1542,14 @@ impl Exporter {
                     ))),
                 }
             }
-            "outer" => {
-                // `$$::col` — the driver, legal only inside the
-                // joined expression's ON bracket (elsewhere the
-                // engine reads an enclosing subcontext scope).
-                if !self.in_on {
-                    return Err(SqlError::Unsupported(
-                        "a '$$' reference outside the join's ON".into(),
-                    ));
-                }
-                let kids = self.arbor.children(o);
-                let inner = *kids
-                    .first()
-                    .ok_or_else(|| SqlError::Unsupported("an empty '$$' reference".into()))?;
-                if self.kind(inner) != "path" || self.kid(inner, "step").is_some() {
-                    return Err(SqlError::Unsupported(
-                        "a '$$' reference beyond a plain column ($$::col)".into(),
-                    ));
-                }
-                let p = self
-                    .kid(inner, "projection")
-                    .ok_or_else(|| SqlError::Unsupported("a bare '$$' reference".into()))?;
-                let col = self.projection_col(p)?;
-                let col = self.sql_ident(&col, "column name")?;
-                Ok(format!("{}.{col}", self.from_sql.clone()))
+            "invoking" => {
+                // `$$__::col` — the invoking position of an enclosing
+                // query body, never the driver (that is `$$0`, a
+                // context of index 0, since draft 153). SQL has no
+                // enclosing body to read.
+                Err(SqlError::Unsupported(
+                    "a '$$__' reference (the driver inside the ON is '$$0')".into(),
+                ))
             }
             "arith" => {
                 let op = self.prop_s(o, "op");
@@ -1585,7 +1619,7 @@ impl Exporter {
             return None;
         }
         // The projection must be the bare `::` (default value of
-        // the JSON leaf), not `::key` or a `;;;`/`:::` metadata form.
+        // the JSON leaf), not `::key` or a `:::`/`:` metadata form.
         let proj = self.kid(o, "projection")?;
         if self.prop_s(proj, "kind") != "property" || self.prop(proj, "key").is_some() {
             return None;
@@ -1685,7 +1719,7 @@ impl Exporter {
             conjuncts(self, c, &mut parts);
         }
         for e in parts {
-            let uses_driver = self.subtree_has(e, "outer");
+            let uses_driver = self.subtree_has_driver(e);
             self.in_on = true;
             let cond = self.pred_expr(e, Some(rtable));
             self.in_on = false;
@@ -1710,9 +1744,9 @@ impl Exporter {
     /// column operand (`::col`) in `e`'s subtree, appended to the
     /// join obligation with their raw (catalog) names.
     fn collect_join_cols(&mut self, e: NodeId) -> Result<(), SqlError> {
-        // The `$$…` side is the driver — not part of the joined
+        // The `$$0` side is the driver — not part of the joined
         // table's obligation.
-        if self.kind(e) == "outer" {
+        if self.is_driver(e) {
             return Ok(());
         }
         if self.kind(e) == "path"
@@ -1728,14 +1762,18 @@ impl Exporter {
         Ok(())
     }
 
-    fn subtree_has(&self, n: NodeId, kind: &str) -> bool {
-        if self.kind(n) == kind {
-            return true;
-        }
-        self.arbor
-            .children(n)
-            .into_iter()
-            .any(|c| self.subtree_has(c, kind))
+    /// `$$0`: a context operand of index 0 (the driver).
+    fn is_driver(&self, n: NodeId) -> bool {
+        self.kind(n) == "context" && matches!(self.prop(n, "index"), Some(Value::Int(0)))
+    }
+
+    fn subtree_has_driver(&self, n: NodeId) -> bool {
+        self.is_driver(n)
+            || self
+                .arbor
+                .children(n)
+                .into_iter()
+                .any(|c| self.subtree_has_driver(c))
     }
 
     /// Consume the pipeline into SELECT clauses.

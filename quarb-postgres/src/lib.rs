@@ -185,7 +185,7 @@ impl PostgresAdapter {
             // Columns, in ordinal order, with their catalog types.
             let cols = client
                 .query(
-                    "SELECT column_name, data_type \
+                    "SELECT column_name, data_type, udt_name \
                      FROM information_schema.columns \
                      WHERE table_schema = 'public' AND table_name = $1 \
                      ORDER BY ordinal_position",
@@ -194,6 +194,21 @@ impl PostgresAdapter {
                 .await?;
             let columns: Vec<String> = cols.iter().map(|r| r.get(0)).collect();
             let types: Vec<String> = cols.iter().map(|r| r.get(1)).collect();
+            // The type as PostgreSQL names it (`varchar`, `int4`,
+            // `timestamptz`; an array's element type behind its
+            // underscore), the cells' type trait.
+            let column_types: Vec<String> = cols
+                .iter()
+                .map(|r| r.get::<_, String>(2).trim_start_matches('_').to_string())
+                .collect();
+            // a json or jsonb column declares its cells' notation
+            // (spec: Grafting)
+            let json_columns: Vec<usize> = types
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.eq_ignore_ascii_case("json") || t.eq_ignore_ascii_case("jsonb"))
+                .map(|(i, _)| i)
+                .collect();
 
             // The primary key (single-column keys name the rows).
             let pk_rows = client
@@ -258,6 +273,8 @@ impl PostgresAdapter {
                 columns,
                 pk,
                 fks,
+                json_columns,
+                column_types,
             });
             all_types.push(types);
         }

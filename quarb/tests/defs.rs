@@ -280,7 +280,7 @@ fn path_splice_errors() {
     // a pipeline-carrying body cannot enter a walk
     assert!(err("def &s: /row | upper; /x&s").contains("carries a pipeline"));
     // ... nor a correlation
-    assert!(err("def &j: /a <=> /b[::x = _::x]; /x&j").contains("carries a correlation"));
+    assert!(err("def &j: /a <=> /b[::x = $$0::x]; /x&j").contains("carries a correlation"));
     // ... nor a re-anchoring body
     assert!(err("def &t: ^/a; /x&t").contains("re-anchors"));
     // a projected body cannot continue the walk
@@ -480,8 +480,8 @@ fn defs_file_comments() {
 fn unparse_fixpoint() {
     let queries = [
         "/row[::Age >= 18] @| count",
-        "//book[::pages > 200]::::id",
-        "//*<block>[:::index = 2][1..3]$",
+        "//book[::pages > 200]:::ident",
+        "//*<block>[:index = 2][1..3]$",
         "/items/*[/price:: * /qty:: > 15]/name::",
         "/a || /b::x | upper @| join(\", \")",
         "/row @| group(::Pclass) | top(2, ::Fare) @| ungroup | %($.Pclass; ::Name)",
@@ -489,12 +489,12 @@ fn unparse_fixpoint() {
         "/row | .a(::x) | %. @| [2..-1]",
         "/row | .(::x) | .b(::y) | %%.",
         "/users/* | .total(/orders/*/amt:: @| sum) | $.total",
-        "//user <=> //order[::uid = _::id && ::amt > _::limit]",
+        "//user <=> //order[::uid = $$0::id && ::amt > $$0::limit]",
         "//p[!(::a = 1 || ::b = 2)]",
         "/x | s/foo/bar/g | trim",
-        "/x | (:::index + 1) * 3",
-        "/x[- :::index = -2]",
-        "::::n-rows",
+        "/x | (:index + 1) * 3",
+        "/x[- :index = -2]",
+        ":::n-rows",
         "//(/^ch[0-9]+$/)/*.rs",
         "/row | [::name == (/^(\\w+), (\\w+)/)] | %(surname = $1; title = $2)",
         "/row | ::fare @| window(-2..0) | mean",
@@ -504,9 +504,9 @@ fn unparse_fixpoint() {
         "/row | \"${::name} (${::age})\" @| join(\", \")",
         "/row | ::fare | .f | \"fare \\$${$.f}, doubled ${$_ * 2}\"",
         "//h2>>p:: @| join(\" \")",
-        "//aside<<?*::::tag || //a[1]>>!p",
-        "/row | .d(::dept) | .m(^/row[::dept = $.d]::pay @| mean) | $.m - _",
-        "/users/* <=> /orders/*[/uid:: = _/id::] | %(::name; amt = $$1/amt::)",
+        "//aside<<?*:::tag || //a[1]>>!p",
+        "/row | .d(::dept) | .m(^/row[::dept = $.d]::pay @| mean) | $.m - $$__",
+        "/users/* <=> /orders/*[/uid:: = $$0/id::] | %(::name; amt = $$1/amt::)",
         "/tracks/* | %(::title; artist = ::album_id-->::artist_id-->::name)",
         "/invoices/* | ::qty * ::track_id-->::price @| group(::customer) | sum",
         // Round-trip regressions (2026-07-21 review): constant and
@@ -520,7 +520,7 @@ fn unparse_fixpoint() {
         "/a | (3)",
         "/a | (now())",
         "/a | (- 3)",
-        "/a | (@*)",
+        "/a | (@_)",
         "/files | \".gitignore\"",
         "//x<\"my trait\">",
         "//a <- 3",

@@ -43,7 +43,7 @@ fn the_tree_from_paths() {
         ["Quarb for jq users"]
     );
     assert_eq!(strs(&a, "/sites/*<site>::host"), ["example.org"]);
-    assert_eq!(strs(&a, "/sites/example.org::::n-pages"), ["5"]);
+    assert_eq!(strs(&a, "/sites/example.org:::n-pages"), ["5"]);
 }
 
 #[test]

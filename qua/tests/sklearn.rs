@@ -52,7 +52,10 @@ fn the_synopsis_is_checked_before_the_run() {
     );
     // A module of the package is no command: the gate says so.
     let e = refuse("/rows/* @| sklearn:svm");
-    assert!(e.contains("is a module of sklearn") && e.contains("svm.<name>"), "{e}");
+    assert!(
+        e.contains("is a module of sklearn") && e.contains("svm.<name>"),
+        "{e}"
+    );
 }
 
 #[test]

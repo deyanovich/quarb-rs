@@ -39,22 +39,22 @@ fn rust_naming_rule() {
     let m = model("rs");
     // Declared identifiers are edge names; pre-order.
     assert_eq!(
-        v(&m, "//*<function>:::name"),
+        v(&m, "//*<function>:name"),
         ["lex", "is_name_char", "helper", "f", "run"]
     );
     // A filepath into the program: module / function / nested fn.
     assert_eq!(v(&m, "/lexer/lex/is_name_char @| count"), ["1"]);
     // The impl is the type's namespace continued: two nodes named
     // Lexer (struct, impl), and /Lexer/helper addresses the method.
-    assert_eq!(v(&m, "//Lexer:::name @| count"), ["2"]);
-    assert_eq!(v(&m, "/Lexer/helper:::name"), ["helper"]);
+    assert_eq!(v(&m, "//Lexer:name @| count"), ["2"]);
+    assert_eq!(v(&m, "/Lexer/helper:name"), ["helper"]);
     assert_eq!(v(&m, "//helper"), ["/Lexer[2]/helper"]);
     // Named declarations across kinds.
-    assert_eq!(v(&m, "//lexer::::construct"), ["module"]);
-    assert_eq!(v(&m, "//Token::::construct"), ["type"]);
-    assert_eq!(v(&m, "//Token/*:::name"), ["Word", "Space"]);
-    assert_eq!(v(&m, "//pos::::construct"), ["field"]);
-    assert_eq!(v(&m, "//LIMIT::::construct"), ["constant"]);
+    assert_eq!(v(&m, "//lexer:::construct"), ["module"]);
+    assert_eq!(v(&m, "//Token:::construct"), ["type"]);
+    assert_eq!(v(&m, "//Token/*:name"), ["Word", "Space"]);
+    assert_eq!(v(&m, "//pos:::construct"), ["field"]);
+    assert_eq!(v(&m, "//LIMIT:::construct"), ["constant"]);
     assert_eq!(v(&m, "//import @| count"), ["1"]);
 }
 
@@ -68,25 +68,25 @@ fn rust_properties_and_metadata() {
         ["pub fn lex(input: &str) -> Vec<char>"]
     );
     // &mut self is a declared parameter, as written.
-    assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
+    assert_eq!(v(&m, "//helper:::n-params"), ["2"]);
     // The escape hatch, and its two-colon alias.
-    assert_eq!(v(&m, "//lex::::kind"), ["function_item"]);
+    assert_eq!(v(&m, "//lex:::kind"), ["function_item"]);
     assert_eq!(v(&m, "//lex::kind"), ["function_item"]);
-    assert_eq!(v(&m, "//lex::::lang"), ["rust"]);
+    assert_eq!(v(&m, "//lex:::lang"), ["rust"]);
     // The ruled name is switch; the backend spelling survives in kind.
-    assert_eq!(v(&m, "//switch::::kind"), ["match_expression"]);
+    assert_eq!(v(&m, "//switch:::kind"), ["match_expression"]);
 }
 
 #[test]
 fn rust_adoption_and_definitions() {
     let m = model("rs");
     // let f = |x| … adopts the binding's name; no lambda remains.
-    assert_eq!(v(&m, "//f::::construct"), ["function"]);
-    assert_eq!(v(&m, "//f::::kind"), ["closure_expression"]);
+    assert_eq!(v(&m, "//f:::construct"), ["function"]);
+    assert_eq!(v(&m, "//f:::kind"), ["closure_expression"]);
     assert_eq!(v(&m, "//lambda @| count"), ["0"]);
     // Calls resolve to same-file declarations by identifier.
     assert_eq!(
-        v(&m, "//*<call>->definition:::name"),
+        v(&m, "//*<call>->definition:name"),
         ["is_name_char", "f", "helper"]
     );
     assert_eq!(v(&m, "//f<-definition @| count"), ["1"]);
@@ -109,55 +109,55 @@ fn rust_dissolve() {
 fn python_table() {
     let m = model("py");
     assert_eq!(
-        v(&m, "//*<function>:::name"),
+        v(&m, "//*<function>:name"),
         ["__init__", "lex", "helper", "f", "run"]
     );
-    assert_eq!(v(&m, "/Lexer/lex:::name"), ["lex"]);
+    assert_eq!(v(&m, "/Lexer/lex:name"), ["lex"]);
     assert_eq!(v(&m, "//lex::doc"), ["Scan the input."]);
     assert_eq!(v(&m, "//Lexer::doc"), ["A lexer."]);
     assert_eq!(v(&m, "//lex::signature"), ["def lex(self)"]);
-    assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
+    assert_eq!(v(&m, "//helper:::n-params"), ["2"]);
     // elif is an if-arm with its own condition.
     assert_eq!(v(&m, "//if @| count"), ["2"]);
     assert_eq!(v(&m, "//else @| count"), ["1"]);
-    assert_eq!(v(&m, "//switch::::kind"), ["match_statement"]);
+    assert_eq!(v(&m, "//switch:::kind"), ["match_statement"]);
     // f = lambda x: … adopts; the call to it resolves.
-    assert_eq!(v(&m, "//f::::construct"), ["function"]);
+    assert_eq!(v(&m, "//f:::construct"), ["function"]);
     assert_eq!(v(&m, "//lambda @| count"), ["0"]);
     assert_eq!(v(&m, "//f<-definition @| count"), ["1"]);
     assert_eq!(v(&m, "//import @| count"), ["2"]);
-    assert_eq!(v(&m, "//lex::::lang"), ["python"]);
+    assert_eq!(v(&m, "//lex:::lang"), ["python"]);
 }
 
 #[test]
 fn javascript_table() {
     let m = model("js");
     assert_eq!(
-        v(&m, "//*<function>:::name"),
+        v(&m, "//*<function>:name"),
         ["constructor", "lex", "length", "helper", "main"]
     );
-    assert_eq!(v(&m, "/Lexer/lex:::name"), ["lex"]);
+    assert_eq!(v(&m, "/Lexer/lex:name"), ["lex"]);
     assert_eq!(v(&m, "//Lexer<type>::doc"), ["A lexer."]);
     assert_eq!(v(&m, "//lex::doc"), ["Scan the input."]);
     // A class field, named by its property.
-    assert_eq!(v(&m, "//size::::construct"), ["field"]);
+    assert_eq!(v(&m, "//size:::construct"), ["field"]);
     // const helper = (a, b) => {} adopts; no lambda remains.
-    assert_eq!(v(&m, "//helper::::construct"), ["function"]);
-    assert_eq!(v(&m, "//helper::::kind"), ["arrow_function"]);
-    assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
+    assert_eq!(v(&m, "//helper:::construct"), ["function"]);
+    assert_eq!(v(&m, "//helper:::kind"), ["arrow_function"]);
+    assert_eq!(v(&m, "//helper:::n-params"), ["2"]);
     assert_eq!(v(&m, "//lambda @| count"), ["0"]);
     // do-while is a while; the backend spelling survives in kind.
     assert_eq!(v(&m, "//while @| count"), ["2"]);
-    assert_eq!(v(&m, "//while[2]::::kind"), ["do_statement"]);
+    assert_eq!(v(&m, "//while[2]:::kind"), ["do_statement"]);
     assert_eq!(v(&m, "//switch @| count"), ["1"]);
     // new Lexer(…) is a call whose callee resolves to the type.
     assert_eq!(
-        v(&m, "//*<call>->definition:::name @| unique @| sort"),
+        v(&m, "//*<call>->definition:name @| unique @| sort"),
         ["Lexer", "helper"]
     );
     assert_eq!(v(&m, "//Lexer<-definition @| count"), ["2"]);
     assert_eq!(v(&m, "//import @| count"), ["1"]);
-    assert_eq!(v(&m, "//lex::::lang"), ["javascript"]);
+    assert_eq!(v(&m, "//lex:::lang"), ["javascript"]);
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn c_table() {
     let m = model("c");
     // The declarator chain: a pointer-returning function is named
     // by its leaf identifier, never the whole declarator.
-    assert_eq!(v(&m, "//*<function>:::name"), ["helper", "main"]);
+    assert_eq!(v(&m, "//*<function>:name"), ["helper", "main"]);
     assert_eq!(
         v(&m, "//helper::signature"),
         ["static int *helper(int a, int b)"]
@@ -173,24 +173,24 @@ fn c_table() {
     assert_eq!(v(&m, "//helper::doc"), ["Advance to the limit."]);
     // The prototype dissolves: one helper, not decl + def.
     assert_eq!(v(&m, "//helper<function> @| count"), ["1"]);
-    assert_eq!(v(&m, "//helper::::n-params"), ["2"]);
+    assert_eq!(v(&m, "//helper:::n-params"), ["2"]);
     // (void) declares no parameters.
-    assert_eq!(v(&m, "//main::::n-params"), ["0"]);
+    assert_eq!(v(&m, "//main:::n-params"), ["0"]);
     // Named specifiers with bodies declare types; enumerators are
     // fields; a function-pointer typedef resolves through the chain.
-    assert_eq!(v(&m, "//*<type>:::name"), ["lexer", "token", "step_fn"]);
-    assert_eq!(v(&m, "//token/*:::name"), ["WORD", "SPACE"]);
-    assert_eq!(v(&m, "//pos::::construct"), ["field"]);
+    assert_eq!(v(&m, "//*<type>:name"), ["lexer", "token", "step_fn"]);
+    assert_eq!(v(&m, "//token/*:name"), ["WORD", "SPACE"]);
+    assert_eq!(v(&m, "//pos:::construct"), ["field"]);
     // Both #define forms are constants.
-    assert_eq!(v(&m, "//LIMIT::::construct"), ["constant"]);
-    assert_eq!(v(&m, "//STEP::::construct"), ["constant"]);
+    assert_eq!(v(&m, "//LIMIT:::construct"), ["constant"]);
+    assert_eq!(v(&m, "//STEP:::construct"), ["constant"]);
     assert_eq!(v(&m, "//import @| count"), ["1"]);
     // The else-if ladder routes through else.
     assert_eq!(v(&m, "//if/else/if @| count"), ["1"]);
-    assert_eq!(v(&m, "//switch::::kind"), ["switch_statement"]);
+    assert_eq!(v(&m, "//switch:::kind"), ["switch_statement"]);
     assert_eq!(v(&m, "//helper<-definition @| count"), ["1"]);
     assert_eq!(v(&m, "//lex @| count"), ["0"]);
-    assert_eq!(v(&m, "//main::::lang"), ["c"]);
+    assert_eq!(v(&m, "//main:::lang"), ["c"]);
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn uniformity_across_languages() {
     for ext in ["rs", "py", "js", "c"] {
         let m = model(ext);
         // One query shape everywhere.
-        let functions = v(&m, "//*<function>:::name");
+        let functions = v(&m, "//*<function>:name");
         assert!(
             functions.iter().any(|n| n == "helper"),
             "{ext}: {functions:?}"
@@ -209,7 +209,7 @@ fn uniformity_across_languages() {
         assert_ne!(v(&m, "//*<call> @| count"), ["0"], "{ext}");
         assert_ne!(v(&m, "//*<import> @| count"), ["0"], "{ext}");
         // The dissolve proof: every minted construct is vocabulary.
-        for construct in v(&m, "//*::::construct @| unique") {
+        for construct in v(&m, "//*:::construct @| unique") {
             assert!(
                 VOCABULARY.contains(&construct.as_str()),
                 "{ext}: {construct}"
@@ -244,7 +244,7 @@ fn cache_reuse() {
     let a = CodeModel::parse(RS, "rs").unwrap();
     let b = CodeModel::parse(RS, "rs").unwrap();
     quarb_tree_sitter::set_cache(None);
-    assert_eq!(v(&a, "//*<function>:::name"), v(&b, "//*<function>:::name"));
+    assert_eq!(v(&a, "//*<function>:name"), v(&b, "//*<function>:name"));
     assert!(
         std::fs::read_dir(&dir)
             .map(|d| d.count() > 0)

@@ -39,20 +39,28 @@ pub struct Model {
     /// one by, and the path (a mount root or a node inside one) the
     /// tree stands at. An identity ending in a separator is a base.
     pub trees: Vec<TreeDecl>,
-    /// `units LIBRARY;` — a kaiv `.faiv` unit library imported into
-    /// the unit table the unital reading consults, for every source
-    /// the model mounts: every spelling it lists reads, output
-    /// prints the primary name. A relative path is joined to the
-    /// model file's directory.
-    pub units: Vec<UnitsDecl>,
+    /// `unit NAME[, ALIAS...] = FACTOR EXPRESSION;` — a unit added
+    /// to the unit table the quantity coercion consults, for every
+    /// source the model mounts (spec: Unit Libraries): one of the
+    /// unit is FACTOR of EXPRESSION, the expression naming built-in
+    /// units, units declared earlier, or opaque units. The first
+    /// name is the primary spelling, the rest aliases. Also what
+    /// `units PATH;` imports: a file of unit declarations only.
+    pub units: Vec<UnitDecl>,
+    /// The unit files imported (`units PATH;`), each once.
+    pub unit_files: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct UnitsDecl {
-    /// The library as written.
-    pub library: String,
-    /// The file, resolved.
-    pub path: std::path::PathBuf,
+pub struct UnitDecl {
+    /// The spellings, the first primary.
+    pub names: Vec<String>,
+    /// The factor, exact where a decimal would round (`1/40`).
+    pub factor: f64,
+    /// The unit expression the factor scales.
+    pub expr: String,
+    /// The declaration as written, for messages.
+    pub stmt: String,
 }
 
 /// A declared trait: `trait <heading>: (h1|h2|h3);`.
@@ -710,10 +718,12 @@ fn parse_model_in(
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
                 model.indexes.extend(sub.indexes);
-                for u in sub.units {
-                    if !model.units.iter().any(|x| x.path == u.path) {
-                        model.units.push(u);
+                model.units.extend(sub.units);
+                for f in sub.unit_files {
+                    if model.unit_files.contains(&f) {
+                        return Err(format!("use {file}: a unit file is imported twice"));
                     }
+                    model.unit_files.push(f);
                 }
                 for t in sub.trees {
                     if model.trees.iter().any(|x| x.identity == t.identity) {
@@ -816,25 +826,99 @@ fn parse_model_in(
                     path: path.to_string(),
                 });
             }
-            "units" => {
-                let library = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-                if library.is_empty() {
+            "unit" => {
+                // `unit NAME[, ALIAS...];` declares a base unit of its
+                // own dimension; an alias ending in `-` stands before
+                // the magnitude (`$12`).
+                let (names, right) = match rest.split_once('=') {
+                    Some((n, r)) => (n, Some(r)),
+                    None => (rest, None),
+                };
+                let names: Vec<String> = names.split(',').map(|n| n.trim().to_string()).collect();
+                let good = |n: &str| {
+                    let body = n.strip_suffix('-').unwrap_or(n);
+                    !body.is_empty() && body.chars().all(quarb::quantity::is_name_char)
+                };
+                if names.iter().any(|n| !good(n)) || names[0].ends_with('-') {
                     return Err(format!(
-                        "units needs a library: 'units starye-mery.faiv;' ('{stmt}')"
+                        "unit names are letters or currency symbols, separated by commas, a prefix alias ending in '-': '{stmt}'"
                     ));
                 }
-                let path = std::path::Path::new(library);
+                let Some(right) = right else {
+                    model.units.push(UnitDecl {
+                        expr: names[0].clone(),
+                        names,
+                        factor: 1.0,
+                        stmt: stmt.to_string(),
+                    });
+                    continue;
+                };
+                let right = right.trim();
+                let (factor, expr) = right.split_once(char::is_whitespace).ok_or_else(|| {
+                    format!("unit needs a factor and a unit expression after '=': '{stmt}'")
+                })?;
+                let factor = parse_factor(factor).ok_or_else(|| {
+                    format!("unit: '{factor}' is not a positive decimal or ratio: '{stmt}'")
+                })?;
+                let expr = expr.trim().to_string();
+                if quarb::quantity::scale_expr(&expr).is_none()
+                    && !expr.chars().all(|c| {
+                        quarb::quantity::is_name_char(c)
+                            || c.is_ascii_digit()
+                            || matches!(c, '*' | '/' | '^')
+                    })
+                {
+                    return Err(format!("unit: '{expr}' is not unit text: '{stmt}'"));
+                }
+                model.units.push(UnitDecl {
+                    names,
+                    factor,
+                    expr,
+                    stmt: stmt.to_string(),
+                });
+            }
+            "units" => {
+                let file = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                if file.is_empty() {
+                    return Err(format!("units needs a file of unit declarations: '{stmt}'"));
+                }
+                let path = std::path::Path::new(file);
                 let path = match (path.is_absolute(), base_dir) {
                     (false, Some(dir)) => dir.join(path),
                     _ => path.to_path_buf(),
                 };
-                if model.units.iter().any(|u| u.path == path) {
-                    return Err(format!("units '{library}' is imported twice: '{stmt}'"));
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                if model.unit_files.contains(&canon) {
+                    return Err(format!("units '{file}' is imported twice: '{stmt}'"));
                 }
-                model.units.push(UnitsDecl {
-                    library: library.to_string(),
-                    path,
-                });
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("units {file}: reading {}: {e}", path.display()))?;
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
+                let sub = parse_model_in(&text, path.parent(), visited, done)
+                    .map_err(|e| format!("units {file}: {e}"))?;
+                if !sub.mounts.is_empty()
+                    || !sub.nodes.is_empty()
+                    || !sub.refs.is_empty()
+                    || !sub.rels.is_empty()
+                    || !sub.edges.is_empty()
+                    || !sub.aliases.is_empty()
+                    || !sub.indexes.is_empty()
+                    || !sub.trees.is_empty()
+                    || !sub.traits.is_empty()
+                    || !sub.defs_text.trim().is_empty()
+                {
+                    return Err(format!(
+                        "units {file}: a units file holds unit declarations only"
+                    ));
+                }
+                model.unit_files.push(canon);
+                for f in sub.unit_files {
+                    if model.unit_files.contains(&f) {
+                        return Err(format!("units {file}: a unit file is imported twice"));
+                    }
+                    model.unit_files.push(f);
+                }
+                model.units.extend(sub.units);
             }
             "index" => {
                 let (scope, property) = split_field(rest)?;
@@ -945,9 +1029,9 @@ mod tests {
     #[test]
     fn a_semicolon_projection_is_not_a_terminator() {
         // legacy ;;; in a body survives the statement splitter
-        let m = parse_model("node /sizes/size: /files/*::::size;").unwrap();
+        let m = parse_model("node /sizes/size: /files/*:::size;").unwrap();
         assert_eq!(m.nodes.len(), 1);
-        assert_eq!(m.nodes[0].query, "/files/*::::size");
+        assert_eq!(m.nodes[0].query, "/files/*:::size");
     }
 
     #[test]
@@ -983,11 +1067,11 @@ mod tests {
 
     #[test]
     fn parses_a_relation() {
-        let m = parse_model("rel /errors/error -> /deploys/deploy [::at > _::at];").unwrap();
+        let m = parse_model("rel /errors/error -> /deploys/deploy [::at > $$0::at];").unwrap();
         assert_eq!(m.rels.len(), 1);
         assert_eq!(m.rels[0].source, "/errors/error");
         assert_eq!(m.rels[0].target, "/deploys/deploy");
-        assert_eq!(m.rels[0].cond, "[::at > _::at]");
+        assert_eq!(m.rels[0].cond, "[::at > $$0::at]");
     }
 
     #[test]
@@ -1087,4 +1171,14 @@ mod ref_condition_tests {
         let e = parse_model("ref /a/*::when --> /b/c[/d::when = $];").unwrap_err();
         assert!(e.contains("not a path"), "{e}");
     }
+}
+
+/// A unit declaration's factor: a positive decimal, or a ratio of
+/// two (`1/40`), exact where a decimal would round.
+fn parse_factor(text: &str) -> Option<f64> {
+    let f = match text.split_once('/') {
+        Some((a, b)) => a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok()?,
+        None => text.parse::<f64>().ok()?,
+    };
+    (f.is_finite() && f > 0.0).then_some(f)
 }

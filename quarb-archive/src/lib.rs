@@ -26,7 +26,7 @@
 //! An archive is a directory tree in a file: entries become
 //! nodes under their path (intermediate directories synthesized),
 //! a file entry's content is its value (`::`, text lossily
-//! decoded), and `;;;size` / `;;;compressed` (zip) report the
+//! decoded), and `:::size` / `:::compressed` (zip) report the
 //! obvious. Half the world's document formats are zip archives —
 //! `.jar`, `.docx`, `.xlsx`, `.odt`, `.epub` — and composed with
 //! [`quarb-compose`], their inner XML/JSON is directly queryable:
@@ -534,7 +534,7 @@ pub struct ArchiveAdapter {
     source: Source,
     /// The mount's rule at the source boundary; every member read
     /// as text decodes under it, and the member answers
-    /// `::::encoding` / `::::replaced`.
+    /// `:::encoding` / `:::replaced`.
     decoding: SourceDecoding,
     /// Per entry: the decoding record, once read.
     records: RefCell<Vec<Option<(String, usize)>>>,
@@ -1582,7 +1582,7 @@ impl AstAdapter for ArchiveAdapter {
         self.content(entry).map(Value::Str)
     }
 
-    /// `;;;size`, `;;;compressed` (zip), `;;;n-entries` (root).
+    /// `:::size`, `:::compressed` (zip), `:::n-entries` (root).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         if matches!(key, "encoding" | "replaced")
@@ -1602,7 +1602,7 @@ impl AstAdapter for ArchiveAdapter {
         }
         match key {
             "size" => n.size.map(Value::bytes),
-            "compressed" => n.compressed.map(Value::Int),
+            "compressed" => n.compressed.map(Value::bytes),
             "n-entries" if node.0 == 0 => Some(Value::Int(self.nodes.len() as i64 - 1)),
             _ => None,
         }

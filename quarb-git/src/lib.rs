@@ -20,7 +20,7 @@
 //! *children are its tree* — descend `/branches/master/src/lib.rs`
 //! and the blob's content is the node's value (`::`), giving
 //! time-travel file access at any commit. Tree entries carry
-//! `;;;type`, `;;;mode`, `;;;size`, and `;;;hash`.
+//! `:::type`, `:::mode`, `:::size`, and `:::hash`.
 //!
 //! References are inherent, no schema needed: `::parent-->`
 //! resolves to the first parent, `->parent` enumerates all
@@ -802,6 +802,7 @@ impl AstAdapter for GitAdapter {
                 secs: info.date,
                 nanos: 0,
                 offset_min: info.date_offset,
+                calendar: Default::default(),
             },
             "committer" => Value::Str(info.committer),
             "subject" => Value::Str(info.subject),
@@ -826,7 +827,7 @@ impl AstAdapter for GitAdapter {
     /// (a tree entry answers "this repo, as of that commit" — the
     /// same instant `::date` mints). The structural dirs and the
     /// root have no commit ancestor and answer source only. No
-    /// dpid — the commit hash stays on `::hash` / `::::short`.
+    /// dpid — the commit hash stays on `::hash` / `:::short`.
     fn provenance(&self, node: NodeId) -> quarb::Provenance {
         let instant = self
             .commit_ancestor(node)
@@ -860,9 +861,9 @@ impl AstAdapter for GitAdapter {
             .map(|d| Value::Str(d.text))
     }
 
-    /// Commits: `;;;short`, `;;;n-parents`, `;;;tags`,
-    /// `;;;n-tags`. Entries: `;;;type`, `;;;mode`, `;;;size`,
-    /// `;;;hash`.
+    /// Commits: `:::short`, `:::n-parents`, `:::tags`,
+    /// `:::n-tags`. Entries: `:::type`, `:::mode`, `:::size`,
+    /// `:::hash`.
     /// Ruling #29: this adapter's property surface is closed — a
     /// commit object cannot grow fields — so its annotations
     /// answer at `::` too. `hash` is in the list on purpose:

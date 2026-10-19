@@ -14,7 +14,7 @@ traits (`<function>`, `<type>`, `<loop>`, …) classify across
 languages, `::signature` / `::doc` / `::callee` are uniform
 properties, `->definition` crosslinks resolve calls to their
 same-file declarations, and the raw grammar kind survives only
-as `::::kind`. Built on the
+as `:::kind`. Built on the
 [`quarb-tree-sitter`](https://crates.io/crates/quarb-tree-sitter)
 parse (the syntax level, which remains the default reading of
 source files; the `code:` target prefix opts up). Grammars:

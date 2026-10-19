@@ -6,8 +6,10 @@
 use quarb::{QueryResult, Value};
 
 fn doc() -> quarb_json::JsonAdapter {
-    quarb_json::JsonAdapter::parse(r#"{"v":[{"x":"3"},{"x":"nan"},{"x":"1"},{"x":"inf"},{"x":"-inf"}]}"#)
-        .unwrap()
+    quarb_json::JsonAdapter::parse(
+        r#"{"v":[{"x":"3"},{"x":"nan"},{"x":"1"},{"x":"inf"},{"x":"-inf"}]}"#,
+    )
+    .unwrap()
 }
 
 fn run(q: &str) -> Vec<String> {

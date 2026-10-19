@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 const CORPUS: &[&str] = &[
     // descendant axis, traits, expr/index/range predicates, leaf
     // anchor, adapter-metadata projection
-    "//book<block || inline>[::pages > 200][2][1..3]$::::id",
+    "//book<block || inline>[::pages > 200][2][1..3]$:::ident",
     // the trait boolean algebra: &&, tight !, parens (CNF inside)
     "//sec<(a || b) && !deprecated>",
     // union branches, scalar + aggregate commands, literal args
@@ -33,26 +33,29 @@ const CORPUS: &[&str] = &[
     "/page<--cite(/a/*::id)",
     "/n::a=>(/s/*::b)",
     // core metadata, and/or/not, a bare truthy operand
-    "/x[:::index = 2 && !(::a = 1 || ::b)]",
+    "/x[:index = 2 && !(::a = 1 || ::b)]",
     // comparison zoo
     "/x[::a != 1][::b < 2][::c <= 3][::d >= 4][::e *= \"q\"][::f !== (/z/)]",
     // literal types
     "/x[::a = true][::b = null][::c = 1.5]",
     // arithmetic zoo, parenthesized value group, unary minus
-    "/x | ::a - ::b | ::c div ::d | ::e idiv ::f | (:::index + 1) * 3",
-    "/x[- :::index = -2]",
+    "/x | ::a - ::b | ::c div ::d | ::e idiv ::f | (:index + 1) * 3",
+    "/x[- :index = -2]",
     // pushes (named + bare), computed columns (named + bare),
     // register recalls, topic, ordinal filter, positional selection
     "/x | .n(::a * ::b) | $.n | .named | . | .(::a + 1) \
      | [$ord mod 2 = 1] @| [2..-1] @| [3]",
-    "/x | $_ | @. | %. | %%. | $. | $.2",
+    "/x | $_ | @. | %. | %.. | $. | $.2",
+    // the node side of the capsa: marks as references, the node
+    // views, the position as a value (`$$_`) and its tail
+    "/x/* | .M | @@. | %%. | %%.. | %(me = $$_; k = $$_::k; up = $$__::k)",
     "/row | [::n == (/(?<y>\\d+)/)] | %+ | .% | $.y",
     // subcontexts, named and bare
     "/users/* | .total(/orders/*/amt:: @| sum) | .(//y @| count)",
     // correlation (driver-first): the ON clause references the
     // driver as `_::…`, earlier entries as `$*k`, the candidate
     // itself as `$*`; a second entry exercises the indexed ref
-    "//user <=> //order[::uid = _::id && ::amt > $*::limit] <=> //note[::oid = $$1::id]",
+    "//user <=> //order[::uid = $$0::id && ::amt > $*::limit] <=> //note[::oid = $$1::id]",
     // match captures
     "/row | [::name == (/^(\\w+), (\\w+)/)] | %(k = $1; j = $2)",
     // window spans: closed, open-start, open-end; keyed; shift
@@ -72,7 +75,7 @@ const CORPUS: &[&str] = &[
     // a named option (the csv delimiter) reflects as an option node
     "/row | ::fare @| csv(\";\"; fare)",
     // outer-scope operands (correlated subqueries)
-    "/row | .d(::dept) | .m(^/row[::dept = $.d][:::index = $ord] | _::x | _/kid::y)",
+    "/row | .d(::dept) | .m(^/row[::dept = $.d][:index = $ord] | $$__::x | $$__/kid::y)",
     // path patterns: grouping, alternation, nesting, + quantifier
     "//div(/ul/li|/ol/li|/dl(/dt|/dd))+",
     // dot wildcard, {m,n}, proximal suffix; a group in a predicate
@@ -90,16 +93,19 @@ const CORPUS: &[&str] = &[
     // the arrived-edges plural: bare and projected
     "/a->e | %(@-; @-::qty)",
     // the context operand and an inline pipe tail
-    "/a | .p((::x div (@*::x @| sum) | round))",
+    "/a | .p((::x div (@@_::x @| sum) | round))",
+    // the context family: the topics, the positions, the tables
+    "/a/* | ::x | %(pct = $_ * 100 div sum(@_); who = @@_; n = (@_ @| count))",
+    "/a/* | .k(::x) | .v(::x * 2) | #*:k | ##* | (*_) | ((*_))::x",
     // the conditional, chained
     "/a | %(::n; bin = (::x < 2 ? \"lo\" : ::x < 9 ? \"mid\" : \"hi\"))",
     // the spread
     "/a->e | @-::roles | ... | ...",
     // the outer spread and the outer correlation (2026-07-11;
     // driver-first since 2026-07-25)
-    "//order::amt <=>? //user[::id = _::uid] | ...?",
+    "//order::amt <=>? //user[::id = $$0::uid] | ...?",
     // the anchored operand (2026-07-11)
-    "//commit[::::short = ^/tags/*::::short]",
+    "//commit[:::short = ^/tags/*:::short]",
     // marks and the (name) anchor (2026-07-11)
     "/movie .m <-ACTED_IN[::born > $$.m::released] | %(::name; $$.m::title)",
     // the branch-position mark anchor, inside a subcontext body
@@ -109,18 +115,18 @@ const CORPUS: &[&str] = &[
     // the shell command, backtick-sugared (2026-07-11; reflects as
     // an ordinary func named sh)
     "/files/* | `wc -l`",
-    // the value-side provenance projection (2026-09-06): `:::key`
+    // the value-side provenance projection (2026-09-06): `:key`
     // after a recall
-    "/x | .v(::a) | $.v:::provenance",
+    "/x | .v(::a) | $.v:%provenance:text",
     // the cross-capsa read (2026-09-07): a register accessor glued
     // to a node path reads the peer standing there
     "//x | .v(::a) | <-link:.v",
     // the quantified push (2026-09-07): the iteration loop
     "/a | .v(1) | .v($.v * 2){3} | .w($.v + 1){1;5}",
     // the node-id anchor and the shaped core keys (2026-09-07):
-    // `((!N))` stands on a coordinate, `:::%key` / `:::@key` read
+    // `((!N))` stands on a coordinate, `:%key` / `:@key` read
     // a key as a record / a list
-    "/a | ((!3))::name | . | ((!3))/*:::%provenance | . | $_:::@origin | .k(((!3)):::index + 1) | ((!$.k)):::name",
+    "/a | ((!3))::name | . | ((!3))/*:%provenance | . | $_:@origin | .k(((!3)):index + 1) | ((!$.k)):name",
     // the map pipe: transform, filter, slice within the topic
     "/a | @-::roles $| upper $| [$_ != \"x\"] $| [1..2]",
     // now() and call operands (2026-07-12, the duration-parsing
@@ -130,7 +136,7 @@ const CORPUS: &[&str] = &[
     // projected, root- and mark-anchored, quantified — a branch in
     // command position, wrapped in the nav kind
     "/teams/* | .team(::name) | /members/* | .who(::name) | %.",
-    "/a .m | /b | ^/c:::name | . | $$.m/d(->e)+::x",
+    "/a .m | /b | ^/c:name | . | $$.m/d(->e)+::x",
     // the mark array (2026-07-24, marks symmetry): anonymous
     // marks, positional/recency/plural anchors — in branch and
     // in operand position
@@ -171,9 +177,8 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             "node-id",
         ],
     ),
-    // v1 additive growth: capsae, piped (2026-07-11, @* + inline
+    // v1 additive growth: capsae, piped (2026-07-11, @_ + inline
     // pipes).
-    ("capsae", &[]),
     ("capture", &["group"]),
     // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
     ("captures", &[]),
@@ -195,6 +200,10 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("group", &["max", "min", "reach"]),
     // v1 additive growth: interp (2026-07-07, interpolation).
     ("interp", &[]),
+    // the invoking position `_` (2026-10-18; the node was spelled
+    // outer from 2026-07-07 to draft 151, the row renamed with the
+    // spec's term, the only non-additive change in the lock)
+    ("invoking", &[]),
     ("list", &[]),
     ("literal", &["type", "value"]),
     // v1 additive growth: map (2026-07-11, the $| pipe).
@@ -207,6 +216,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: nav (2026-07-23, pipeline navigation —
     // a branch in command position; its contents reflect with the
     // ordinary branch kinds).
+    // v2 additive growth: the context family (2026-10-19, draft
+    // 157): matrix (#* / ##*, ::side), positions (@@_), topics (@_)
+    ("matrix", &["side"]),
     ("nav", &[]),
     ("neg", &[]),
     ("not", &[]),
@@ -216,8 +228,6 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("option", &["name", "value"]),
     ("or", &[]),
     ("ordinal", &[]),
-    // v1 additive growth: outer (2026-07-07, correlated subqueries).
-    ("outer", &[]),
     ("parens", &[]),
     // v1 additive growth: anchored key (2026-07-11, ^-operands);
     // mark key same day (the (name) anchor); the mark-array
@@ -239,6 +249,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("peer-reg", &["ref"]),
     ("piped", &[]),
     ("pipeline", &[]),
+    // v2 additive growth: position (2026-10-18, the cursor `$$_`).
+    ("position", &[]),
+    ("positions", &[]),
     ("predicate", &["from", "kind", "to", "value"]),
     ("projection", &["key", "kind"]),
     ("push", &["name"]),
@@ -269,10 +282,11 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ),
     ("subcontext", &["name"]),
     ("topic", &[]),
+    ("topics", &[]),
     ("trait", &["alts"]),
-    // v1 additive growth: value-meta (2026-09-06, a value's `:::key`
+    // v1 additive growth: value-meta (2026-09-06, a value's `:key`
     // provenance projection).
-    ("value-meta", &["key"]),
+    ("value-meta", &["key", "shape"]),
     // v1 additive growth: when (2026-07-11, the value match's arm).
     ("when", &["regex"]),
 ];
@@ -383,7 +397,7 @@ fn root_carries_the_version() {
         Some(Value::Int(2))
     );
     assert_eq!(
-        arbor.metadata(arbor.root(), "source"),
+        arbor.metadata(arbor.root(), "query"),
         Some(Value::Str("/x".to_string()))
     );
 }

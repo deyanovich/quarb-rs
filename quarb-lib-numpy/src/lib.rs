@@ -77,14 +77,20 @@ mod tests {
             return;
         }
         // A function of the package: the stream its first parameter.
-        assert_eq!(agg("mean", nums(&[1, 2, 3, 6]), vec![]).unwrap(), Value::Float(3.0));
+        assert_eq!(
+            agg("mean", nums(&[1, 2, 3, 6]), vec![]).unwrap(),
+            Value::Float(3.0)
+        );
         // A surplus operand fills the next positional parameter.
         assert_eq!(
             agg("percentile", nums(&[1, 2, 3, 4]), vec![Value::Int(50)]).unwrap(),
             Value::Float(2.5)
         );
         // A dotted name walks a submodule.
-        assert_eq!(agg("linalg.norm", nums(&[3, 4]), vec![]).unwrap(), Value::Float(5.0));
+        assert_eq!(
+            agg("linalg.norm", nums(&[3, 4]), vec![]).unwrap(),
+            Value::Float(5.0)
+        );
         // A method of ndarray, the input its receiver; the
         // two-dimensional array it returns comes back as a table
         // (an array, no header), read by its rows.
@@ -95,7 +101,11 @@ mod tests {
         )
         .unwrap();
         let Value::Table(f) = &t else { panic!("{t:?}") };
-        assert!(f.header.is_none() && f.kind().starts_with("an array 3×2"), "{}", f.kind());
+        assert!(
+            f.header.is_none() && f.kind().starts_with("an array 3×2"),
+            "{}",
+            f.kind()
+        );
         assert_eq!(
             f.rows_value(),
             Value::list(vec![nums(&[1, 4]), nums(&[2, 5]), nums(&[3, 6])])
@@ -104,7 +114,11 @@ mod tests {
         let syn = Numpy.resolve("percentile").unwrap();
         assert_eq!(syn.operands[0].name, "a");
         assert_eq!(syn.operands[1].name, "q");
-        assert!(syn.options.iter().any(|o| o.long == "method"), "{:?}", syn.options);
+        assert!(
+            syn.options.iter().any(|o| o.long == "method"),
+            "{:?}",
+            syn.options
+        );
         let e = Numpy.resolve("meen").unwrap_err();
         assert!(e.contains("numpy") && e.contains("mean"), "{e}");
     }

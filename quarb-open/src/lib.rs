@@ -12,7 +12,7 @@
 //! target before it is opened, `?delimiter=` / `?decimal=` for
 //! delimited files, `?references=STANDARD` for a text reading,
 //! and the record of the decoding a read made goes on the
-//! mount's root as `::::encoding` / `::::replaced`.
+//! mount's root as `:::encoding` / `:::replaced`.
 
 use anyhow::Context;
 use quarb::{AstAdapter, NodeId};
@@ -84,12 +84,15 @@ use std::rc::Rc;
 /// — `?encoding=` (the explicit label), `?delimiter=` / `?decimal=`
 /// for a delimited file, `?references=STANDARD` for a text reading —
 /// and the record of the decoding a read made, which goes on the
-/// mount's root as `::::encoding` / `::::replaced`. One per target
+/// mount's root as `:::encoding` / `:::replaced`. One per target
 /// opened, passed to every door and reader; nothing about a source
 /// lives in a thread-local.
 #[derive(Clone, Default)]
 pub struct SourceCtx {
     encoding: std::cell::RefCell<Option<String>>,
+    /// The `?format=NOTATION` of a plain mount: every leaf beneath
+    /// reads as it (spec: Grafting).
+    format: std::cell::RefCell<Option<String>>,
     csv: std::cell::Cell<quarb_csv::CsvOptions>,
     references: std::cell::RefCell<Option<String>>,
     record: std::cell::RefCell<Option<(String, usize)>>,
@@ -99,6 +102,11 @@ impl SourceCtx {
     /// The `?encoding=` label in force, if one was given.
     pub fn encoding(&self) -> Option<String> {
         self.encoding.borrow().clone()
+    }
+
+    /// The `?format=NOTATION` in force for a plain mount, if given.
+    pub fn format(&self) -> Option<String> {
+        self.format.borrow().clone()
     }
 
     fn set_encoding(&self, label: &str) {
@@ -434,6 +442,7 @@ pub fn take_reader_encoding(rest: &str, ctx: &SourceCtx) -> anyhow::Result<Strin
     // Each mount states its own options: a `?references=` from an
     // earlier mount does not carry over.
     ctx.set_references(None);
+    *ctx.format.borrow_mut() = None;
     if Path::new(rest).exists() || !rest.contains('?') {
         return Ok(rest.to_string());
     }
@@ -442,8 +451,19 @@ pub fn take_reader_encoding(rest: &str, ctx: &SourceCtx) -> anyhow::Result<Strin
         match pair.split_once('=') {
             Some(("encoding", label)) => set_encoding_option(label, ctx)?,
             Some(("references", standard)) => set_references_option(standard, ctx)?,
+            // `?format=NOTATION` names what the bytes are when
+            // nothing else does (spec: Grafting): conllu for a
+            // treebank on a pipe, else one of the notations
+            Some(("format", notation)) => {
+                anyhow::ensure!(
+                    notation == "conllu" || quarb_compose::is_notation(notation),
+                    "format={notation} on {path} names no notation (conllu, or one of {})",
+                    quarb_compose::NOTATIONS.join(", ")
+                );
+                *ctx.format.borrow_mut() = Some(notation.to_string());
+            }
             _ => anyhow::bail!(
-                "unknown option {pair:?} on {path} — this reader takes encoding=, references="
+                "unknown option {pair:?} on {path} — this reader takes encoding=, references=, format="
             ),
         }
     }
@@ -833,9 +853,10 @@ pub fn corpus_level(
         let text = read_prose(target, ctx)?;
         if is_xml(Some(target), &text) {
             koine_level(rest, ctx)?
-        } else if ext.is_none() && quarb_text::looks_like_conllu(&text) {
-            // A pipe or an extensionless file carrying CoNLL-U:
-            // the treebank reading, as `?format=conllu` would say.
+        } else if ext.is_none() && format == Some("conllu") {
+            // A pipe or an extensionless file carrying CoNLL-U reads
+            // as the treebank when `?format=conllu` says so; nothing
+            // is sniffed (spec: Grafting).
             own_annotation()?;
             let mut m = quarb_text::TextModel::parse_conllu_corpus(&text)
                 .map_err(|e| anyhow::anyhow!("reading {rest} as CoNLL-U: {e}"))?;
@@ -1199,6 +1220,7 @@ pub fn read_prose(target: &Path, ctx: &SourceCtx) -> anyhow::Result<String> {
 /// the option among their own.
 pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf> {
     ctx.clear_encoding();
+    *ctx.format.borrow_mut() = None;
     ctx.set_csv(quarb_csv::CsvOptions::default());
     let Some(s) = p.to_str() else {
         return Ok(p.to_path_buf());
@@ -1222,6 +1244,18 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
                     anyhow::anyhow!("{}: unknown encoding label {label:?}", p.display())
                 })?;
                 ctx.set_encoding(label);
+            }
+            // `?format=NOTATION`: every leaf beneath the mount reads
+            // as the notation (spec: Grafting)
+            Some(("format", notation)) => {
+                if !quarb_compose::is_notation(notation) {
+                    anyhow::bail!(
+                        "{}: format={notation:?} names no notation (one of {})",
+                        p.display(),
+                        quarb_compose::NOTATIONS.join(", ")
+                    );
+                }
+                *ctx.format.borrow_mut() = Some(notation.to_string());
             }
             Some(("delimiter", label)) => set_csv_option(|c| c.with_delimiter_label(label), ctx)?,
             Some(("decimal", label)) => set_csv_option(|c| c.with_decimal_label(label), ctx)?,
@@ -1253,7 +1287,7 @@ pub fn csv_options(ctx: &SourceCtx) -> quarb_csv::CsvOptions {
 }
 
 /// Put the decoding record, if a read made one, on the adapter's
-/// root: `::::encoding` and `::::replaced` answer there.
+/// root: `:::encoding` and `:::replaced` answer there.
 pub fn take_source_record(ctx: &SourceCtx) -> Option<(String, usize)> {
     ctx.take_record()
 }
@@ -1527,12 +1561,8 @@ pub fn text_level_inner(text: &str, path: Option<&Path>) -> anyhow::Result<quarb
             quarb_text_koine::parse_xml_as(text, kind)
                 .map_err(|e| anyhow::anyhow!("reading {kind} through the koine route: {e}"))?
         }
-        _ if text.trim_start().starts_with('<') => quarb_text_html::parse(text),
-        // A pipe or an extensionless file carrying CoNLL-U.
-        None if quarb_text::looks_like_conllu(text) => {
-            quarb_text::TextModel::parse_conllu_text(text)
-                .map_err(|e| anyhow::anyhow!("reading CoNLL-U: {e}"))?
-        }
+        // a DOCTYPE declares markup; a bare `<` declares nothing
+        _ if quarb_compose::self_declared(text) == Some("html") => quarb_text_html::parse(text),
         _ => quarb_text::TextModel::parse_plain(text),
     })
 }
@@ -1874,6 +1904,174 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     })
 }
 
+/// A document's text-level model from a text and what the source
+/// says of it (spec: The Corpus Reading): the prose read as
+/// paragraphs, every (name, value) a declaration answering under
+/// `:::name`.
+pub fn document_of(text: &str, path: &str, declared: &[(String, String)]) -> quarb_text::TextModel {
+    let mut m = quarb_text::TextModel::parse_plain(text);
+    let mut head = m.head_meta().clone();
+    for (k, v) in declared {
+        head.declare(k, v);
+    }
+    m.set_head_meta(head);
+    m.set_document_path(path);
+    m
+}
+
+/// The `?doc=PATH` form of a reading prefix over a source that is no
+/// directory (spec: The Corpus Reading): `corpus:sqlite:blog.db?doc=
+/// posts/*/body` mounts the source, names the leaves the path
+/// reaches as documents, each read as prose with its siblings (the
+/// row's other columns) riding as its declarations, under the
+/// reading's remaining options. None when the target carries no
+/// `doc=`; for a directory the document leaf is the file and the
+/// option is implied.
+fn documents_at(
+    level: &'static str,
+    rest: &str,
+    cli: &OpenOpts,
+    ctx: &SourceCtx,
+) -> Option<anyhow::Result<Mounted>> {
+    let (target, query) = rest.rsplit_once('?')?;
+    let mut doc = None;
+    let mut others = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("doc", path)) => doc = Some(path.to_string()),
+            _ => others.push(pair.to_string()),
+        }
+    }
+    let doc = doc?;
+    Some((|| {
+        let inner = if others.is_empty() {
+            target.to_string()
+        } else {
+            format!("{target}?{}", others.join("&"))
+        };
+        let mounted = open_mount(Path::new(&inner), cli)
+            .with_context(|| format!("{level}: opening {inner} for ?doc={doc}"))?;
+        // the options the reading keeps (conllu=, annotate=, cast=, …)
+        let mut conllu = None;
+        let mut sentences = None;
+        let mut annotate = None;
+        let mut desm = Vec::new();
+        let mut cast = None;
+        let mut places = None;
+        let mut modernize = None;
+        let mut notes = None;
+        for pair in &others {
+            match pair.split_once('=') {
+                Some(("conllu", v)) => conllu = Some(v.to_string()),
+                Some(("sentences", v)) => sentences = Some(v.to_string()),
+                Some(("annotate", v)) => annotate = Some(v.to_string()),
+                Some(("desm", v)) => desm.push(v.to_string()),
+                Some(("cast", v)) => cast = Some(v.to_string()),
+                Some(("places", v)) => places = Some(v.to_string()),
+                Some(("modernize", v)) => modernize = Some(v.to_string()),
+                Some(("notes", v)) => notes = Some(v.to_string()),
+                // the source's own options rode to the mount
+                _ => {}
+            }
+        }
+        let path_query = if doc.starts_with('/') {
+            doc.clone()
+        } else {
+            format!("/{doc}")
+        };
+        let leaves: std::collections::HashSet<NodeId> = match quarb::run(
+            &path_query,
+            &mounted.adapter,
+        )
+        .map_err(|e| anyhow::anyhow!("{level}: ?doc={doc}: {e}"))?
+        {
+            quarb::QueryResult::Nodes(ns) => ns.into_iter().collect(),
+            quarb::QueryResult::Values(_) => anyhow::bail!(
+                "{level}: ?doc={doc} must name the leaves whose text is the document, not values"
+            ),
+        };
+        if leaves.is_empty() {
+            anyhow::bail!("{level}: ?doc={doc} names no leaf in {target}");
+        }
+        let allow_shell = cli.allow_shell;
+        let ctx_owned = ctx.clone();
+        let reader: quarb_compose::DocumentNodes<Box<dyn AstAdapter>> =
+            Rc::new(move |a: &Box<dyn AstAdapter>, n: NodeId| {
+                if !leaves.contains(&n) {
+                    return None;
+                }
+                let text = match a.default_value(n)? {
+                    quarb::Value::Str(s) => s,
+                    other => other.to_string(),
+                };
+                // the siblings of the leaf (the row's other columns)
+                // declare the document under their names
+                let mut declared = Vec::new();
+                let parent = a.parent(n);
+                if let Some(p) = parent {
+                    for sib in a.children(p) {
+                        if sib == n {
+                            continue;
+                        }
+                        if let (Some(name), Some(v)) = (a.name(sib), a.default_value(sib))
+                            && !matches!(v, quarb::Value::Null)
+                        {
+                            let v = match v {
+                                quarb::Value::Str(s) => s,
+                                other => other.to_string(),
+                            };
+                            declared.push((name, v));
+                        }
+                    }
+                }
+                let path = match (parent.and_then(|p| a.name(p)), a.name(n)) {
+                    (Some(p), Some(l)) => format!("{p}/{l}"),
+                    (_, Some(l)) => l,
+                    _ => String::new(),
+                };
+                let model = document_of(&text, &path, &declared);
+                if level == "text" {
+                    return Some(model);
+                }
+                match finish_corpus(
+                    model,
+                    conllu.clone(),
+                    sentences.clone(),
+                    annotate.clone(),
+                    &desm,
+                    cast.clone(),
+                    places.clone(),
+                    modernize.clone(),
+                    notes.clone(),
+                    allow_shell,
+                    level,
+                    &ctx_owned,
+                ) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        note(format!(
+                            "{level}: {path} not read, its fields answer null: {e}"
+                        ));
+                        Some(document_of(&text, &path, &declared))
+                    }
+                }
+            });
+        let render = mounted.render;
+        let a = Rc::new(
+            ComposeAdapter::new(mounted.adapter)
+                .with_document_graft(DocumentGraft::Text)
+                .with_document_nodes(reader)
+                .with_decoding(current_decoding(ctx)?)
+                .with_csv_options(ctx.csv()),
+        );
+        let r = a.clone();
+        Ok(Mounted::of(
+            a,
+            Box::new(move |n| r.locator(n, |o| render(o))),
+        ))
+    })())
+}
+
 pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Result<Mounted> {
     if p.is_dir() {
         let opts = FsOptions {
@@ -1886,7 +2084,8 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                     Some(fs.path(n))
                 })
                 .with_decoding(current_decoding(ctx)?)
-                .with_csv_options(ctx.csv()),
+                .with_csv_options(ctx.csv())
+                .with_default_notation(ctx.format()),
             );
             let r = a.clone();
             return Ok(Mounted::of(
@@ -1958,6 +2157,9 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         && let Some(rest) = s.strip_prefix("lit:")
         && !rest.is_empty()
     {
+        if let Some(m) = documents_at("lit", rest, cli, ctx) {
+            return m;
+        }
         if let Some((dir, opts)) = document_dir(rest) {
             let a = Rc::new(document_folder(
                 dir,
@@ -2000,6 +2202,9 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         && let Some(rest) = s.strip_prefix("corpus:")
         && !rest.is_empty()
     {
+        if let Some(m) = documents_at("corpus", rest, cli, ctx) {
+            return m;
+        }
         if let Some((dir, opts)) = document_dir(rest) {
             let a = Rc::new(document_folder(
                 dir,
@@ -2024,6 +2229,9 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         && let Some(rest) = s.strip_prefix("text:")
         && !rest.is_empty()
     {
+        if let Some(m) = documents_at("text", rest, cli, ctx) {
+            return m;
+        }
         let rest = &take_reader_encoding(rest, ctx)?;
         let target = Path::new(rest);
         // A directory of documents: the folder tree, each document
@@ -2143,6 +2351,16 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
             Some(rest) => rest.to_owned(),
             None => text,
         };
+        // a treebank on a pipe or an extensionless file, named by
+        // ?format=conllu: the document reading of its sentences
+        if ctx.format().as_deref() == Some("conllu") {
+            let a = Rc::new(
+                quarb_text::TextModel::parse_conllu_text(&text)
+                    .map_err(|e| anyhow::anyhow!("reading {rest} as CoNLL-U: {e}"))?,
+            );
+            let r = a.clone();
+            return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+        }
         let a = Rc::new(text_level(&text, Some(target), ctx)?);
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));

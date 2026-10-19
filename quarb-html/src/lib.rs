@@ -14,7 +14,7 @@
 //!   anchor with an `href`.
 //! - Attributes are properties: `::href`, `::class`, `::id`. The
 //!   default projection (`::`) is the element's text content;
-//!   `::::tag`, `::::classes`, `::::attrs`, and `::::n-attrs`
+//!   `:::tag`, `:::classes`, `:::attrs`, and `:::n-attrs`
 //!   expose adapter metadata.
 //! - An anchor's fragment `href` resolves: `::href-->` follows
 //!   `#section` to the element with `id="section"`.
@@ -521,9 +521,9 @@ impl AstAdapter for HtmlAdapter {
         Some(Value::Str(self.text_of(node).to_string()))
     }
 
-    /// `::::tag`, `::::classes` (the class attribute, split),
-    /// `::::attrs` (the attribute names, sorted — the parser does
-    /// not preserve source order), and `::::n-attrs` — facts about
+    /// `:::tag`, `:::classes` (the class attribute, split),
+    /// `:::attrs` (the attribute names, sorted — the parser does
+    /// not preserve source order), and `:::n-attrs` — facts about
     /// the element, never its data: attribute values are properties
     /// (`::href`), text is the bare projection. `attrs` is what
     /// makes a renamed attribute discoverable: enumerate the names,

@@ -13,9 +13,9 @@
 //!   null, which numeric aggregates skip and null propagation
 //!   respects — pandas' `NaN` behavior without a sentinel.
 //! - Rows are leaves; there are no traits and no crosslinks.
-//! - `::::columns` on the root lists the column names; `::::n-rows`
-//!   counts records; `::::n-fields` on a row counts its cells;
-//!   `::::delimiter` and `::::decimal` on the root say what was
+//! - `:::columns` on the root lists the column names; `:::n-rows`
+//!   counts records; `:::n-fields` on a row counts its cells;
+//!   `:::delimiter` and `:::decimal` on the root say what was
 //!   decided.
 //!
 //! The first record must be the header. Parsing is strict about
@@ -291,8 +291,8 @@ impl AstAdapter for CsvAdapter {
             .collect()
     }
 
-    /// `::::columns` (root), `::::n-rows` (root), `::::delimiter` and
-    /// `::::decimal` (root, as decided), `::::n-fields` (row), and any
+    /// `:::columns` (root), `:::n-rows` (root), `:::delimiter` and
+    /// `:::decimal` (root, as decided), `:::n-fields` (row), and any
     /// column by name.
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {

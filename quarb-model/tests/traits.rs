@@ -1,7 +1,7 @@
 //! Trait declarations: `trait <name>: STEP;` — a node carries the
 //! declared trait exactly when it would match STEP as a step of a
 //! path, decided at the node. A real trait: it takes part in the
-//! trait algebra and `:::traits` lists it; an earlier declaration is
+//! trait algebra and `:traits` lists it; an earlier declaration is
 //! visible to a later one, never the reverse; a built-in or a
 //! container's trait cannot be redefined; an undefined trait still
 //! matches nothing.
@@ -51,7 +51,7 @@ fn a_declared_trait_is_decided_at_the_node() {
     // The algebra, and the listing.
     assert_eq!(values(&a, "//*<titled && !long> @| count"), ["2"]);
     assert_eq!(
-        values(&a, "/items/0 | :::traits"),
+        values(&a, "/items/0 | :traits"),
         ["object, long, titled"].map(|s| s.to_string())
     );
     // Undefined stays silent.

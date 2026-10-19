@@ -173,10 +173,14 @@ fn the_point_is_carried_from_capsa_to_capsa() {
 fn a_period_compares_as_an_interval() {
     let dir = fixture("period");
     let ids = |pred: &str| ok(&dir, &[&format!("/rows/*[{pred}]::id"), "log.json"]);
-    // equality is containment: every instant and day of the month
-    assert_eq!(ids("(::at | period) = 2025-10"), "1\n2");
-    assert_eq!(ids("::at = ('2025-10' | period)"), "1\n2");
-    // disjoint periods are ordered by the timeline
+    // a period reads as its first instant: a month equals its first
+    // day and no other; containment is the containment comparison
+    assert_eq!(ids("(::at | period) = 2025-10-31"), "2");
+    assert_eq!(ids("(::at | period) = 2025-10"), "");
+    assert_eq!(ids("(::at | period) <<= 2025-10"), "1\n2");
+    assert_eq!(ids("::at <<= ('2025-10' | period)"), "1\n2");
+    assert_eq!(ids("2025-10 >>= ::at"), "1\n2");
+    // periods are ordered by their first instants
     assert_eq!(ids("(::at | period) < 2025-11"), "1\n2\n4");
     assert_eq!(ids("(::at | period) >= ('2025-10-31' | period)"), "2\n3");
     // constructing, coarsening, and the grain

@@ -10,8 +10,8 @@
 //! value. Tables with a sort (range) key may repeat a name —
 //! exactly as `/row` repeats in CSV — and the sort key stays a
 //! property to filter on:
-//! `/music/'Beatles'[::song = "Help!"]::year`. `;;;hash-key` /
-//! `;;;range-key` on a table name the schema; `:::index` is the
+//! `/music/'Beatles'[::song = "Help!"]::year`. `:::hash-key` /
+//! `:::range-key` on a table name the schema; `:index` is the
 //! stable position within the (key-sorted, deterministic) scan.
 //!
 //! **References.** DynamoDB declares no foreign keys, so `->`

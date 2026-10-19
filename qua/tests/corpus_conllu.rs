@@ -112,13 +112,13 @@ fn the_treebank_reads_as_a_corpus() {
     assert_eq!(values(&m, "//sentence[2]/token @| count"), ["10"]);
     // Positions count the text's tokens only; the empty node has
     // none.
-    assert_eq!(values(&m, "//token[::::n = 24]::"), ["."]);
-    assert_eq!(values(&m, "//token[::::n] @| count"), ["24"]);
-    assert_eq!(values(&m, "//token<empty>[::::n] @| count"), ["0"]);
+    assert_eq!(values(&m, "//token[:::n = 24]::"), ["."]);
+    assert_eq!(values(&m, "//token[:::n] @| count"), ["24"]);
+    assert_eq!(values(&m, "//token<empty>[:::n] @| count"), ["0"]);
     assert_eq!(values(&m, "//token<empty>::id"), ["6.1"]);
     // Sentence text and ordinal still answer on the token.
     assert_eq!(
-        values(&m, "//token[::id = \"2\"][::::sentence = 3]::sentence"),
+        values(&m, "//token[::id = \"2\"][:::sentence = 3]::sentence"),
         ["No answer."]
     );
     // Every column.
@@ -158,8 +158,8 @@ fn the_treebank_reads_as_a_corpus() {
         values(&m, "//sentence[1]/token[::id = \"9\"]::mwt"),
         ["couldn't"]
     );
-    assert_eq!(values(&m, "//token[::id = \"10\"]::::mwt"), ["9-10"]);
-    assert_eq!(values(&m, "//token[::::mwt] @| count"), ["2"]);
+    assert_eq!(values(&m, "//token[::id = \"10\"]:::mwt"), ["9-10"]);
+    assert_eq!(values(&m, "//token[:::mwt] @| count"), ["2"]);
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn the_sidecar_aligns_ranges_past_nine() {
     assert_eq!(values(&m, "//paragraph[2]/sentence[1]::"), ["No answer."]);
     assert_eq!(values(&m, "//paragraph[2]/sentence/token @| count"), ["3"]);
     assert_eq!(values(&m, "//token[::mwt]::"), ["could", "n't"]);
-    assert_eq!(values(&m, "//token[::id = \"10\"]::::mwt"), ["9-10"]);
+    assert_eq!(values(&m, "//token[::id = \"10\"]:::mwt"), ["9-10"]);
     assert_eq!(values(&m, "//token[::lower = \"old\"]->head::"), ["lady"]);
     assert_eq!(
         values(
@@ -288,7 +288,7 @@ fn the_sidecar_aligns_ranges_past_nine() {
     );
     assert_eq!(values(&m, "//token[::case = \"Nom\"]::"), ["she"]);
     assert_eq!(
-        values(&m, "//token[::::sentence = 2]::sentence"),
+        values(&m, "//token[:::sentence = 2]::sentence"),
         ["No answer.", "No answer.", "No answer."]
     );
     // A form that is not in the text names the offset.
@@ -378,15 +378,15 @@ fn mentions_from_ner_tags() {
     // the tag, no cluster from an NER-only source.
     assert_eq!(values(&m, "//token[::entity] @| count"), ["5"]);
     assert_eq!(
-        values(&m, "//token[::entity = \"PERSON\"]::mention"),
+        values(&m, "//token[\"PERSON\" <<= ::entity]::mention"),
         ["she", "Tom", "Huck"]
     );
     assert_eq!(
-        values(&m, "//token[::entity = \"WORK_OF_ART\"]::::mention"),
+        values(&m, "//token[\"WORK_OF_ART\" <<= ::entity]:::mention"),
         ["3", "5"]
     );
-    assert_eq!(values(&m, "//token[::::mention = 2]::"), ["Tom"]);
-    assert_eq!(values(&m, "//token[::::entity] @| count"), ["0"]);
+    assert_eq!(values(&m, "//token[2 <<= :::mention]::"), ["Tom"]);
+    assert_eq!(values(&m, "//token[:::entity] @| count"), ["0"]);
     // BIO continuation joins tokens within a sentence.
     let mut two = quarb_text::TextModel::parse_plain("Aunt Polly waited.\n");
     two.annotate_conllu(
@@ -394,7 +394,7 @@ fn mentions_from_ner_tags() {
     )
     .unwrap();
     assert_eq!(
-        values(&two, "//token[::::mention = 1]::"),
+        values(&two, "//token[1 <<= :::mention]::"),
         ["Aunt", "Polly"]
     );
     assert_eq!(
@@ -411,9 +411,12 @@ fn mentions_from_ner_tags() {
 fn mentions_from_corefud_brackets() {
     let m = quarb_text::TextModel::parse_conllu_corpus(COREF).unwrap();
     // A chain is the tokens sharing a cluster.
-    assert_eq!(values(&m, "//token[::::entity = \"e1\"]::"), ["Tom", "he"]);
     assert_eq!(
-        values(&m, "//token[::::entity = \"e1\"]::::mention"),
+        values(&m, "//token[\"e1\" <<= :::entity]::"),
+        ["Tom", "he"]
+    );
+    assert_eq!(
+        values(&m, "//token[\"e1\" <<= :::entity]:::mention"),
         ["1", "3"]
     );
     assert_eq!(
@@ -427,7 +430,7 @@ fn mentions_from_corefud_brackets() {
         ["The old lady's spectacles, The old lady"]
     );
     assert_eq!(
-        values(&m, "//token[::lower = \"lady\"]::::entity"),
+        values(&m, "//token[::lower = \"lady\"]:::entity"),
         ["e4, e3"]
     );
     assert_eq!(
@@ -479,18 +482,18 @@ fn the_set_reading() {
     // and the second's 3.
     assert_eq!(values(&m, "//token @| count"), vec!["28"]);
     assert_eq!(
-        values(&m, "//token[::lower = \"huck\"]::::n"),
+        values(&m, "//token[::lower = \"huck\"]:::n"),
         vec!["18", "25"]
     );
     assert_eq!(
-        values(&m, "//token[::lower = \"huck\"]::::sentence"),
+        values(&m, "//token[::lower = \"huck\"]:::sentence"),
         vec!["2", "4"]
     );
     // Mentions decode once over the set, under the header the
     // second file declares.
-    assert_eq!(values(&m, "//token[::::entity = \"e7\"]::"), vec!["Huck"]);
+    assert_eq!(values(&m, "//token[\"e7\" <<= :::entity]::"), vec!["Huck"]);
     assert_eq!(
-        values(&m, "//token[::entity = \"PERSON\"] @| count"),
+        values(&m, "//token[\"PERSON\" <<= ::entity] @| count"),
         vec!["3"]
     );
     // An error names the file.
@@ -572,7 +575,7 @@ fn a_directory_of_treebank_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A stored sentence answers `::::at` / `::::end` from its rows, a
+/// A stored sentence answers `:::at` / `:::end` from its rows, a
 /// treebank document's tokens along the sentence surface.
 #[test]
 fn stored_sentences_and_treebank_tokens_have_coordinates() {
@@ -602,9 +605,9 @@ fn stored_sentences_and_treebank_tokens_have_coordinates() {
     };
     // The sidecar: the sentences' coordinates in the paragraph.
     let sidecar = "corpus:t.txt?conllu=t.conllu";
-    assert_eq!(run("//sentence | ::::at", sidecar), "0\n9");
-    assert_eq!(run("//sentence | ::::end", sidecar), "8\n23");
-    assert_eq!(run("//sentence[::::at = 9]::", sidecar), "Huck sat down.");
+    assert_eq!(run("//sentence | :::at", sidecar), "0\n9");
+    assert_eq!(run("//sentence | :::end", sidecar), "8\n23");
+    assert_eq!(run("//sentence[:::at = 9]::", sidecar), "Huck sat down.");
     // Headings are sentences under the sidecar's tier too, counted
     // in sequence before the content.
     let headed = "corpus:h.md?conllu=t.conllu";
@@ -612,16 +615,16 @@ fn stored_sentences_and_treebank_tokens_have_coordinates() {
         run("//sentence | ::", headed),
         "Chapter One\nTom ran.\nHuck sat down."
     );
-    assert_eq!(run("//sentence | ::::n", headed), "1\n2\n3");
+    assert_eq!(run("//sentence | :::n", headed), "1\n2\n3");
     assert_eq!(
-        run("//section[1]/sentence[1]/token | ::::n", headed),
+        run("//section[1]/sentence[1]/token | :::n", headed),
         "1\n2"
     );
-    assert_eq!(run("//sentence[2]/token[1]::::n", headed), "3");
-    assert_eq!(run("//sentence[1]::::end", headed), "11");
+    assert_eq!(run("//sentence[2]/token[1]:::n", headed), "3");
+    assert_eq!(run("//sentence[1]:::end", headed), "11");
     // The treebank as a document: tokens along the surface, the
     // sentence its own block.
     let doc = "corpus:t.conllu";
-    assert_eq!(run("//sentence[1]/token | ::::at", doc), "0\n4\n7");
-    assert_eq!(run("//sentence[2] | ::::end", doc), "14");
+    assert_eq!(run("//sentence[1]/token | :::at", doc), "0\n4\n7");
+    assert_eq!(run("//sentence[2] | :::end", doc), "14");
 }

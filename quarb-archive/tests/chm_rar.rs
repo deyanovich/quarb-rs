@@ -36,11 +36,11 @@ fn a_chm_is_an_archive_of_pages() {
     let n: usize = values(&a, "//*<file> @| count")[0].parse().unwrap();
     assert!(n > 1000, "{n} members");
     // The system records are not members; the sitemap is.
-    assert_eq!(values(&a, "/*[:::name == (/^[#$]/)] @| count"), ["0"]);
-    assert_eq!(values(&a, "//*[:::name == (/\\.hhc$/)] @| count"), ["1"]);
+    assert_eq!(values(&a, "/*[:name == (/^[#$]/)] @| count"), ["0"]);
+    assert_eq!(values(&a, "//*[:name == (/\\.hhc$/)] @| count"), ["1"]);
     // An HTML page reads as HTML through the compose graft.
     let a = quarb_compose::ComposeAdapter::new(ArchiveAdapter::open(&path).unwrap());
-    let titles = values(&a, "//*[:::name == (/\\.html$/)][1]//title::");
+    let titles = values(&a, "//*[:name == (/\\.html$/)][1]//title::");
     assert_eq!(titles.len(), 1, "{titles:?}");
     assert!(!titles[0].is_empty());
 }
@@ -51,7 +51,7 @@ fn a_rar_is_read_only_with_the_feature() {
     let opened = ArchiveAdapter::open(&path);
     if cfg!(feature = "rar") {
         let a = opened.unwrap();
-        let names = values(&a, "//*<file> | :::name");
+        let names = values(&a, "//*<file> | :name");
         assert!(!names.is_empty(), "{names:?}");
     } else {
         let e = opened.err().map(|e| e.to_string()).unwrap_or_default();

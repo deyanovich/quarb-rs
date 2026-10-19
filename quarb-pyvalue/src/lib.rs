@@ -103,6 +103,7 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
             secs,
             nanos,
             offset_min,
+            ..
         } => {
             // datetime is microsecond-precision; nanos round down.
             // No source offset means the UTC timeline — the result
@@ -127,11 +128,14 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
                 )?
                 .unbind()
         }
-        Value::Duration { secs, nanos } => py
-            .import("datetime")?
-            .getattr("timedelta")?
-            .call1((0, *secs, nanos / 1000))?
-            .unbind(),
+        // a span of time, the quantity of dimension T, is a timedelta
+        Value::Quantity { base, value, .. } if base == "s" => {
+            let (secs, nanos) = quarb::split_seconds_pub(*value);
+            py.import("datetime")?
+                .getattr("timedelta")?
+                .call1((0, secs, nanos / 1000))?
+                .unbind()
+        }
         // Python has no value for a stretch of the calendar at a
         // grain: a period arrives as its ISO-8601 text at reduced
         // precision (`1899-10`, `1899-10-06T14:30`).
@@ -148,6 +152,9 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
         .into_pyobject(py)?
         .into_any()
         .unbind(),
+        // A node reference crosses as its locator text: no Python
+        // form keeps nodeness.
+        Value::Node(n) => n.locator.as_ref().into_py_any(py)?,
         // A library value of a Python library is its object, back as
         // it is; one of another library has no Python form.
         Value::Foreign(f) => match f.as_any().downcast_ref::<PyForeign>() {
@@ -187,7 +194,13 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             .ok()
             .and_then(|m| m.extract::<String>().ok())
             .unwrap_or_default();
-        if module == "numpy" && !obj.hasattr("shape").unwrap_or(false) || module == "numpy" && obj.getattr("shape").ok().is_some_and(|s| s.len().unwrap_or(1) == 0) {
+        if module == "numpy" && !obj.hasattr("shape").unwrap_or(false)
+            || module == "numpy"
+                && obj
+                    .getattr("shape")
+                    .ok()
+                    .is_some_and(|s| s.len().unwrap_or(1) == 0)
+        {
             if let Ok(item) = obj.call_method0("item") {
                 return py_to_value(&item);
             }
@@ -256,14 +269,15 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             secs,
             nanos,
             offset_min,
+            calendar: Default::default(),
         });
     }
     if obj.is_instance(&datetime.getattr("timedelta")?)? {
         let total: f64 = obj.call_method0("total_seconds")?.extract()?;
-        return Ok(Value::Duration {
-            secs: total.floor() as i64,
-            nanos: ((total - total.floor()) * 1e9).round() as u32,
-        });
+        return Ok(Value::seconds(
+            total.floor() as i64,
+            ((total - total.floor()) * 1e9).round() as u32,
+        ));
     }
     if foreign::is_plain(obj) {
         if obj.hasattr("__iter__")? && !obj.hasattr("read")? {

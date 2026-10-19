@@ -13,14 +13,14 @@
 //!
 //! - **Properties**: `::status` (native) with the lowercased
 //!   status as a trait (`/entry<error>`) and the numeric family
-//!   rank at `;;;severity`; `::timestamp` (a typed instant),
+//!   rank at `:::severity`; `::timestamp` (a typed instant),
 //!   `::service`, `::host`, `::trace` (minted from
 //!   `dd.trace_id` when present — the join key). Anything else
 //!   falls through to the event's custom attributes, then its
 //!   tags — a `env:prod` tag answers `::env`.
 //! - **The default value** (`::`) is the log message.
 //! - **Children**: the custom-attribute tree, and `tags`.
-//! - **Metadata**: `;;;severity`, `;;;id`, `;;;index`.
+//! - **Metadata**: `:::severity`, `:::id`, `:::index`.
 //!
 //! **Transport and auth**: `POST /api/v2/logs/events/search`
 //! with `DD-API-KEY` + `DD-APPLICATION-KEY` from `$DD_API_KEY` /
@@ -520,6 +520,7 @@ impl AstAdapter for DdlAdapter {
                     secs: e.secs,
                     nanos: e.nanos,
                     offset_min: e.offset_min,
+                    calendar: Default::default(),
                 }),
                 "service" => e.service.clone().map(Value::Str),
                 "host" => e.host.clone().map(Value::Str),
@@ -623,7 +624,7 @@ mod tests {
         // and an ordered rank.
         assert_eq!(run("/entry::"), vec!["POST /pay 500", "processor timeout"]);
         assert_eq!(run("/entry<error>::service"), vec!["checkout"]);
-        assert_eq!(run("/entry[::::severity >= 400] @| count"), vec!["1"]);
+        assert_eq!(run("/entry[:::severity >= 400] @| count"), vec!["1"]);
         // Fallthrough: custom attributes, then tags.
         assert_eq!(run("/entry[::order]::order"), vec!["o-1402"]);
         assert_eq!(run("/entry[::team]::team"), vec!["payments"]);
@@ -634,7 +635,7 @@ mod tests {
         );
         // The minted trace joins the two services.
         let joined = run(
-            "/entry<error> <=> /entry[::service = 'gateway'][::trace = _::trace] \
+            "/entry<error> <=> /entry[::service = 'gateway'][::trace = $$0::trace] \
              | %(::order; edge = $$1::)",
         );
         assert_eq!(

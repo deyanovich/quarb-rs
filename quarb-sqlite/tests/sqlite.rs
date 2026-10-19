@@ -48,6 +48,21 @@ fn adapter() -> SqliteAdapter {
     SqliteAdapter::load(&conn).unwrap()
 }
 
+/// A cell carries its column's declared type as a trait, lowercased
+/// and stripped of parameters, and the derived kind beside it (spec:
+/// adapter traits); tables and rows carry none.
+#[test]
+fn cells_carry_their_columns_type_traits() {
+    assert_eq!(values("/tracks/1/price:traits"), ["real, number"]);
+    assert_eq!(values("/tracks/1/title:traits"), ["text, string"]);
+    assert_eq!(values("/tracks/1/secs:traits"), ["integer, number"]);
+    assert_eq!(values("/tracks/1/*<number> @| count"), ["4"]);
+    assert_eq!(values("/tracks/1/*<integer>:name @| join(\", \")"), ["id, album_id, secs"]);
+    assert_eq!(values("/tracks/*/*<string> @| count"), values("/tracks/* @| count"));
+    assert_eq!(values("/tracks:traits"), [""]);
+    assert_eq!(values("/tracks/1:traits"), [""]);
+}
+
 fn values(query: &str) -> Vec<String> {
     let a = adapter();
     match quarb::run(query, &a).unwrap() {
@@ -68,13 +83,13 @@ fn nodes(query: &str) -> Vec<String> {
 fn tables_and_rows() {
     // tables are the root's children; rows are named by primary key
     assert_eq!(nodes("/*"), vec!["/albums", "/artists", "/tracks"]);
-    assert_eq!(values("/tracks::::n-rows"), vec!["8"]);
+    assert_eq!(values("/tracks:::n-rows"), vec!["8"]);
     assert_eq!(nodes("/tracks/7"), vec!["/tracks/7"]);
     assert_eq!(values("/artists/2::name"), vec!["Bartok"]);
     // columns are properties; SQL NULL is null (dropna filters)
     assert_eq!(values("/tracks/*[::price > 1]::title @| count"), vec!["4"]);
     assert_eq!(values("/tracks/*[::album_id] @| count"), vec!["7"]);
-    assert_eq!(values("/tracks/8::::table"), vec!["tracks"]);
+    assert_eq!(values("/tracks/8:::table"), vec!["tracks"]);
 }
 
 #[test]
@@ -160,7 +175,7 @@ fn sql_shapes() {
     // JOIN with projection of both sides (the witness)
     assert_eq!(
         values(
-            "/tracks/*[::secs > 400] <=> /albums/*[::id = _::album_id] \
+            "/tracks/*[::secs > 400] <=> /albums/*[::id = $$0::album_id] \
              | %(album = $$1::title; ::title)"
         ),
         vec![

@@ -23,6 +23,10 @@ pub struct Names {
     pub days: [&'static [&'static str]; 7],
     /// `%a`.
     pub days_abbr: [&'static [&'static str]; 7],
+    /// `%p`: the day periods, CLDR's abbreviated format forms (AM
+    /// and PM where the language keeps them), the Latin AM/PM read
+    /// everywhere besides.
+    pub periods: [&'static [&'static str]; 2],
 }
 
 macro_rules! names {
@@ -76,6 +80,7 @@ pub static EN: Names = Names {
         ["Sat"],
         ["Sun"]
     ],
+    periods: names![["AM"], ["PM"]],
 };
 
 pub static RU: Names = Names {
@@ -117,6 +122,7 @@ pub static RU: Names = Names {
         ["воскресенье"],
     ],
     days_abbr: names![["пн"], ["вт"], ["ср"], ["чт"], ["пт"], ["сб"], ["вс"]],
+    periods: names![["AM"], ["PM"]],
 };
 
 pub static DE: Names = Names {
@@ -137,13 +143,13 @@ pub static DE: Names = Names {
     months_abbr: names![
         ["Jan.", "Jan.", "Jan"],
         ["Feb.", "Feb.", "Feb"],
-        ["März", "März", "Mär."],
+        ["März", "März", "Mär.", "Mär"],
         ["Apr.", "Apr.", "Apr"],
         ["Mai"],
-        ["Juni", "Juni", "Jun."],
-        ["Juli", "Juli", "Jul."],
+        ["Juni", "Juni", "Jun.", "Jun"],
+        ["Juli", "Juli", "Jul.", "Jul"],
         ["Aug.", "Aug.", "Aug"],
-        ["Sept.", "Sept.", "Sep."],
+        ["Sept.", "Sept.", "Sep.", "Sep"],
         ["Okt.", "Okt.", "Okt"],
         ["Nov.", "Nov.", "Nov"],
         ["Dez.", "Dez.", "Dez"],
@@ -166,6 +172,7 @@ pub static DE: Names = Names {
         ["Sa.", "Sa"],
         ["So.", "So"]
     ],
+    periods: names![["AM"], ["PM"]],
 };
 
 pub static FR: Names = Names {
@@ -215,6 +222,7 @@ pub static FR: Names = Names {
         ["sam.", "sam"],
         ["dim.", "dim"]
     ],
+    periods: names![["AM"], ["PM"]],
 };
 
 pub static ES: Names = Names {
@@ -264,6 +272,7 @@ pub static ES: Names = Names {
         ["sáb"],
         ["dom"]
     ],
+    periods: names![["a. m.", "a.m."], ["p. m.", "p.m."]],
 };
 
 pub static IT: Names = Names {
@@ -313,6 +322,7 @@ pub static IT: Names = Names {
         ["sab"],
         ["dom"]
     ],
+    periods: names![["AM"], ["PM"]],
 };
 
 pub static PT: Names = Names {
@@ -362,6 +372,7 @@ pub static PT: Names = Names {
         ["sáb.", "sáb.", "sáb"],
         ["dom.", "dom.", "dom"]
     ],
+    periods: names![["AM"], ["PM"]],
 };
 
 /// Chinese: a month is its number and 月 (the numeral form wide,
@@ -413,6 +424,7 @@ pub static ZH: Names = Names {
         ["周六"],
         ["周日"]
     ],
+    periods: names![["上午"], ["下午"]],
 };
 
 /// Japanese: a month is its number and 月, one form; weekdays
@@ -456,6 +468,7 @@ pub static JA: Names = Names {
         ["日曜日"],
     ],
     days_abbr: names![["月"], ["火"], ["水"], ["木"], ["金"], ["土"], ["日"]],
+    periods: names![["午前"], ["午後"]],
 };
 
 /// Arabic: CLDR's `ar` month names (the set the Gulf and Egypt
@@ -508,24 +521,28 @@ pub static AR: Names = Names {
         ["السبت"],
         ["الأحد"]
     ],
+    periods: names![["ص"], ["م"]],
 };
 
 /// Turkish: months one form, lowercase as CLDR has them; the
 /// abbreviations capitalized as CLDR has those.
+// CLDR's format forms are capitalized (Ocak, Salı): Turkish
+// capitalizes month and weekday names inside a date, which is the
+// only place strftime writes them. Reading is case-folded.
 pub static TR: Names = Names {
     months: names![
-        ["ocak"],
-        ["şubat"],
-        ["mart"],
-        ["nisan"],
-        ["mayıs"],
-        ["haziran"],
-        ["temmuz"],
-        ["ağustos"],
-        ["eylül"],
-        ["ekim"],
-        ["kasım"],
-        ["aralık"],
+        ["Ocak"],
+        ["Şubat"],
+        ["Mart"],
+        ["Nisan"],
+        ["Mayıs"],
+        ["Haziran"],
+        ["Temmuz"],
+        ["Ağustos"],
+        ["Eylül"],
+        ["Ekim"],
+        ["Kasım"],
+        ["Aralık"],
     ],
     months_abbr: names![
         ["Oca"],
@@ -542,13 +559,13 @@ pub static TR: Names = Names {
         ["Ara"],
     ],
     days: names![
-        ["pazartesi"],
-        ["salı"],
-        ["çarşamba"],
-        ["perşembe"],
-        ["cuma"],
-        ["cumartesi"],
-        ["pazar"],
+        ["Pazartesi"],
+        ["Salı"],
+        ["Çarşamba"],
+        ["Perşembe"],
+        ["Cuma"],
+        ["Cumartesi"],
+        ["Pazar"],
     ],
     days_abbr: names![
         ["Pzt"],
@@ -559,12 +576,17 @@ pub static TR: Names = Names {
         ["Cmt"],
         ["Paz"]
     ],
+    periods: names![["ÖÖ"], ["ÖS"]],
 };
 
 /// The table for a BCP 47 locale: the language decides (`ru-RU`,
 /// `ru`, `ru_RU` alike). The locales shipped, by size of language:
 /// en, zh, es, ar, pt, ru, ja, de, fr, tr, it.
 pub fn names(locale: &str) -> Option<&'static Names> {
+    // a region the CLDR tailors has its own names
+    if let Some(r) = crate::regional::regional(locale) {
+        return Some(r.names);
+    }
     let lang = crate::language(locale);
     Some(match lang.as_str() {
         "en" | "" => &EN,

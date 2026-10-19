@@ -52,6 +52,7 @@ pub fn str_value(s: &str) -> Value {
             secs,
             nanos,
             offset_min,
+            calendar: Default::default(),
         };
     }
     Value::Str(s.to_string())

@@ -107,9 +107,9 @@ fn a_hop_reads_the_rows_it_lands_on() {
     // forward: one book, one author; neither table whole
     assert_eq!(
         loaded(
-            "/books/3::author_id--> | %(::name; b = (^/books::::loaded); \
-             a = (^/authors::::loaded); nb = (^/books::::\"n-loaded\"); \
-             na = (^/authors::::\"n-loaded\"))"
+            "/books/3::author_id--> | %(::name; b = (^/books:::loaded); \
+             a = (^/authors:::loaded); nb = (^/books:::\"n-loaded\"); \
+             na = (^/authors:::\"n-loaded\"))"
         ),
         [r#"%(name = "Homer"; b = false; a = false; nb = 1; na = 1)"#]
     );
@@ -119,8 +119,8 @@ fn a_hop_reads_the_rows_it_lands_on() {
     // are read too — but rows, never the table)
     assert_eq!(
         loaded(
-            "/authors/1<-author_id @| count | %(n = $_; b = (^/books::::loaded); \
-             few = (^/books::::\"n-loaded\") < 7)"
+            "/authors/1<-author_id @| count | %(n = $_; b = (^/books:::loaded); \
+             few = (^/books:::\"n-loaded\") < 7)"
         ),
         [r#"%(n = 2; b = false; few = true)"#]
     );
@@ -128,13 +128,13 @@ fn a_hop_reads_the_rows_it_lands_on() {
     assert_eq!(
         loaded(
             "/authors/2<--(/books/*::author_id) @| count \
-             | %(n = $_; b = (^/books::::loaded))"
+             | %(n = $_; b = (^/books:::loaded))"
         ),
         [r#"%(n = 2; b = false)"#]
     );
     // a listing is a listing: the table is read whole
     assert_eq!(
-        loaded("/books/* @| count | %(n = $_; b = (^/books::::loaded))"),
+        loaded("/books/* @| count | %(n = $_; b = (^/books:::loaded))"),
         [r#"%(n = 7; b = true)"#]
     );
     let _ = std::fs::remove_file(path);
@@ -151,7 +151,7 @@ fn a_pushed_down_filter_lists_only_and_hops_stay_exact() {
         ("/staff/*[::id < 3]<-boss<-boss", "staff", "id < 3"),
         ("/books/*[::id < 4]->author_id", "books", "id < 4"),
         (
-            "/staff/*[::id = 2] | %(::name; all = (::::table))",
+            "/staff/*[::id = 2] | %(::name; all = (:::table))",
             "staff",
             "id = 2",
         ),

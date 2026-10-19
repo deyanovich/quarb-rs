@@ -51,7 +51,7 @@ fn the_text_layer_under_the_outline() {
         ok(
             &dir,
             &[
-                "//line[2] | %(t = ::; ::::page; ::::x; ::::y)",
+                "//line[2] | %(t = ::; :::page; :::x; :::y)",
                 "text:onegin.djvu"
             ]
         ),
@@ -61,7 +61,7 @@ fn the_text_layer_under_the_outline() {
     assert_eq!(
         ok(
             &dir,
-            &["//page[!::::text-layer]::::page", "text:onegin.djvu"]
+            &["//page[!:::text-layer]:::page", "text:onegin.djvu"]
         ),
         "3"
     );

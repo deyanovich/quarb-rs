@@ -180,6 +180,7 @@ fn str_value(s: &str) -> Value {
             secs,
             nanos,
             offset_min,
+            calendar: Default::default(),
         };
     }
     Value::Str(s.to_string())
@@ -660,8 +661,8 @@ impl AstAdapter for KubernetesAdapter {
         }
     }
 
-    /// `;;;path`, `;;;n-fields` (an object's top-level field
-    /// count), and `;;;length` (element count for an array or
+    /// `:::path`, `:::n-fields` (an object's top-level field
+    /// count), and `:::length` (element count for an array or
     /// map, character count for a string).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {

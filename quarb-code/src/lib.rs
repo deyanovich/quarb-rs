@@ -19,10 +19,10 @@
 //! - **Properties** are uniform: `::signature` (the declaration
 //!   head), `::doc` (attached documentation), `::callee` (on
 //!   calls); bare `::` is the node's source text.
-//! - **Annotations**: `::::kind` (the raw backend kind — the only
-//!   place tree-sitter vocabulary survives), `::::construct`,
-//!   `::::start-line` / `::::end-line`, `::::lang`,
-//!   `::::n-children`, `::::n-params` — every one aliased to
+//! - **Annotations**: `:::kind` (the raw backend kind — the only
+//!   place tree-sitter vocabulary survives), `:::construct`,
+//!   `:::start-line` / `:::end-line`, `:::lang`,
+//!   `:::n-children`, `:::n-params` — every one aliased to
 //!   `::` (the surface is closed).
 //! - **Crosslinks**: every `call` carries `->definition` edges to
 //!   the same-file declarations matching its callee;
@@ -48,7 +48,7 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// The `::::lang` spelling.
+    /// The `:::lang` spelling.
     pub fn name(self) -> &'static str {
         match self {
             Lang::Rust => "rust",
@@ -81,7 +81,9 @@ pub fn supported(ext: &str) -> bool {
 pub enum CodeError {
     #[error("code: {0}")]
     Io(#[from] std::io::Error),
-    #[error("code: the code model has no reading for extension {0:?} (rs, py, js, mjs, cjs, jsx, c, h)")]
+    #[error(
+        "code: the code model has no reading for extension {0:?} (rs, py, js, mjs, cjs, jsx, c, h)"
+    )]
     Language(String),
     #[error(transparent)]
     Backend(#[from] quarb_tree_sitter::TreeSitterError),
@@ -105,7 +107,7 @@ pub struct Decl {
     pub name: Option<String>,
     /// Curated trait set — never backend kinds.
     pub traits: &'static [&'static str],
-    /// The raw backend kind; surfaces only as `::::kind`.
+    /// The raw backend kind; surfaces only as `:::kind`.
     pub kind: String,
     /// Byte range into the source.
     pub span: (usize, usize),
@@ -117,7 +119,7 @@ pub struct Decl {
     pub doc: Option<String>,
     /// A call's callee text (`::callee`).
     pub callee: Option<String>,
-    /// Declared parameter count, functions only (`::::n-params`).
+    /// Declared parameter count, functions only (`:::n-params`).
     pub n_params: Option<i64>,
 }
 
@@ -155,14 +157,13 @@ pub struct CodeModel {
 /// Every annotation key answers at `::` too: the property
 /// surface is closed (a source file cannot mint a property —
 /// identifiers become names), so the alias rule applies in full.
-/// Four colons stay the portable spelling.
+/// Three colons stay the portable spelling (the adapter rung).
 const ALIASED: &[&str] = &[
     "kind",
     "construct",
     "start-line",
     "end-line",
     "lang",
-    "n-children",
     "n-params",
 ];
 
@@ -431,7 +432,7 @@ impl AstAdapter for CodeModel {
 
     /// The uniform property set: `::signature`, `::doc`,
     /// `::callee` — the identifier is NOT a property (it is the
-    /// name; `:::name` answers it). Aliased annotation keys fall
+    /// name; `:name` answers it). Aliased annotation keys fall
     /// through to `metadata` via [`AstAdapter::aliased_metadata`].
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
@@ -460,7 +461,6 @@ impl AstAdapter for CodeModel {
             "start-line" => Some(Value::Int(n.lines.0 as i64)),
             "end-line" => Some(Value::Int(n.lines.1 as i64)),
             "lang" => Some(Value::Str(self.lang.name().to_string())),
-            "n-children" => Some(Value::Int(n.children.len() as i64)),
             "n-params" => n.n_params.map(Value::Int),
             _ => None,
         }

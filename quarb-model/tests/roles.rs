@@ -54,7 +54,7 @@ fn one_container_holds_both_roles() {
     // children answer to their own role, and are named for it
     assert_eq!(values(&a, "/tables/class @| count"), vec!["2"]);
     assert_eq!(
-        values(&a, "/tables/*:::name @| unique"),
+        values(&a, "/tables/*:name @| unique"),
         vec!["class", "schema"]
     );
 }

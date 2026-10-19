@@ -257,6 +257,7 @@ fn introspect(
     for name in names {
         let mut columns = Vec::new();
         let mut decodes = Vec::new();
+        let mut column_types = Vec::new();
         for r in conn.query(
             "SELECT column_name, data_type, data_scale \
              FROM user_tab_columns WHERE table_name = :1 \
@@ -269,6 +270,9 @@ fn introspect(
             let scale: Option<i32> = r.get(2)?;
             columns.push(col);
             decodes.push((decode_of(&dt, scale), dt == "DATE"));
+            // the declared type (`VARCHAR2`, `NUMBER`, `DATE`), the
+            // cells' type trait
+            column_types.push(dt);
         }
 
         let mut pk_cols = Vec::new();
@@ -316,6 +320,8 @@ fn introspect(
             columns,
             pk,
             fks,
+            json_columns: Vec::new(),
+            column_types,
         });
         all_decodes.push(decodes);
     }

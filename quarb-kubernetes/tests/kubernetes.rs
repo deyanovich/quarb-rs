@@ -81,5 +81,5 @@ fn mock_cluster() {
     // listings.
     assert_eq!(v("/pods/*<pod> @| count"), ["3"]);
     assert_eq!(v("/namespaces/default::phase"), ["Active"]);
-    assert_eq!(v("/namespaces/default::::n-fields"), ["3"]);
+    assert_eq!(v("/namespaces/default:::n-fields"), ["3"]);
 }

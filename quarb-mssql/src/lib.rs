@@ -313,6 +313,12 @@ async fn introspect(conn: &mut Conn) -> Result<(Vec<TableSpec>, Vec<Vec<Decode>>
                     .unwrap_or(Decode::Text)
             })
             .collect();
+        // the declared type (`nvarchar`, `int`, `bit`), the cells'
+        // type trait
+        let column_types: Vec<String> = cols
+            .iter()
+            .map(|r| r.get::<&str, _>(1).unwrap_or_default().to_string())
+            .collect();
 
         // The primary key (single-column keys name the rows).
         let pk_rows = conn
@@ -377,6 +383,8 @@ async fn introspect(conn: &mut Conn) -> Result<(Vec<TableSpec>, Vec<Vec<Decode>>
             columns,
             pk,
             fks,
+            json_columns: Vec::new(),
+            column_types,
         });
         all_decodes.push(decodes);
     }

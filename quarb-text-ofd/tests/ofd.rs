@@ -121,10 +121,11 @@ fn pages_and_lines_without_an_outline() {
         values("/page[2]/line::", &a),
         ["CHAPTER II", "Saturday morning was come.", "Tom appeared."]
     );
-    assert_eq!(values("/page[2]::::page", &a), ["2"]);
-    assert_eq!(values("/page[2]::::number", &a), ["2"]);
-    assert_eq!(values("/page[1]::::width", &a), ["210"]);
-    assert_eq!(values("^::::n-pages", &a), ["2"]);
+    assert_eq!(values("/page[2]:::page", &a), ["2"]);
+    assert_eq!(values("/page[2]:::number", &a), ["2"]);
+    // A page extent is a length in the page's millimetres.
+    assert_eq!(values("/page[1]:::width", &a), ["210_mm"]);
+    assert_eq!(values("^:::n-pages", &a), ["2"]);
 }
 
 #[test]
@@ -133,10 +134,10 @@ fn geometry_is_the_bounding_box_in_page_units() {
     // The joined line spans both codes' boundaries.
     assert_eq!(
         values(
-            r#"//line[:: = "“TOM!” No answer."] | %(::::page; ::::x; ::::y; ::::width; ::::height; ::::baseline)"#,
+            r#"//line[:: = "“TOM!” No answer."] | %(:::page; :::x; :::y; :::width; :::height; :::baseline)"#,
             &a
         ),
-        ["%(page = 1; x = 30; y = 30; width = 42; height = 5; baseline = 34)"]
+        ["%(page = 1; x = 30_mm; y = 30_mm; width = 42_mm; height = 5_mm; baseline = 34_mm)"]
     );
 }
 
@@ -168,8 +169,8 @@ fn the_outline_derives_the_sections() {
         values("/section[2]//line::", &a),
         ["CHAPTER II", "Saturday morning was come.", "Tom appeared."]
     );
-    assert_eq!(values("/section[1]/section::::level", &a), ["2"]);
-    assert_eq!(values("/section[2]//line::::page", &a), ["2", "2", "2"]);
+    assert_eq!(values("/section[1]/section:::level", &a), ["2"]);
+    assert_eq!(values("/section[2]//line:::page", &a), ["2", "2", "2"]);
 }
 
 #[test]

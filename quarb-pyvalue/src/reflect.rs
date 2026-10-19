@@ -606,12 +606,20 @@ impl Reflective {
             let options: Vec<(String, String)> = get("options")
                 .and_then(|v| v.extract().ok())
                 .unwrap_or_default();
-            let variadic: bool = get("variadic").and_then(|v| v.extract().ok()).unwrap_or(false);
+            let variadic: bool = get("variadic")
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false);
             let open: bool = get("open").and_then(|v| v.extract().ok()).unwrap_or(false);
-            let doc: String = get("doc").and_then(|v| v.extract().ok()).unwrap_or_default();
-            let returns: String = get("returns").and_then(|v| v.extract().ok()).unwrap_or_default();
+            let doc: String = get("doc")
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_default();
+            let returns: String = get("returns")
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_default();
             let input_at: usize = get("input").and_then(|v| v.extract().ok()).unwrap_or(0);
-            let instance: bool = get("instance").and_then(|v| v.extract().ok()).unwrap_or(false);
+            let instance: bool = get("instance")
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false);
             let mut ops: Vec<OperandSpec> = operands
                 .into_iter()
                 .map(|(n, d, required)| OperandSpec {

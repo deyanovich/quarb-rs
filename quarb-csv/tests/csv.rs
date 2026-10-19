@@ -37,8 +37,8 @@ fn rows_and_columns() {
     // a quoted cell keeps its embedded comma
     assert_eq!(values("/row[4]::dept"), vec!["ops, misc"]);
     // table shape
-    assert_eq!(values("^::::n-rows"), vec!["4"]);
-    assert_eq!(values("^::::columns"), vec!["name, dept, age, salary"]);
+    assert_eq!(values("^:::n-rows"), vec!["4"]);
+    assert_eq!(values("^:::columns"), vec!["name, dept, age, salary"]);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn filtering_and_arithmetic() {
     assert_eq!(values("/row[::salary div ::age > 3000]::name"), vec!["Ada"]);
     // computed column, aggregated
     assert_eq!(
-        values("/row[::dept = \"eng\"] | .(::salary + 0) @| sum"),
+        values("/row[::dept = \"eng\"] | .(::salary + 0) | $. @| sum"),
         vec!["215000"]
     );
 }
@@ -220,7 +220,7 @@ fn group_members() {
 
 /// `$ordinal` / `$ord` — the capsa's 1-based position in the
 /// current context: ephemeral order, unlike the tree fact
-/// `:::index`.
+/// `:index`.
 #[test]
 fn ordinal() {
     // a computed rank column after a sort
@@ -447,8 +447,13 @@ fn the_fields_push_takes_a_record() {
     let err = quarb::run("/row | ::age | .% | %.", &adapter)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("the fields push '| .%' takes a record topic, not text"), "{err}");
-    let err = quarb::run("/row | .% | %.", &adapter).unwrap_err().to_string();
+    assert!(
+        err.contains("the fields push '| .%' takes a record topic, not text"),
+        "{err}"
+    );
+    let err = quarb::run("/row | .% | %.", &adapter)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("not a node with no topic"), "{err}");
 }
 
@@ -618,7 +623,7 @@ fn correlated_subqueries() {
     );
     // `_` is the served node inside the body — its core metadata too
     assert_eq!(
-        values("/row @| [..2] | ::age | .t(^/row[:::index = _:::index]::name) | $.t"),
+        values("/row @| [..2] | ::age | .t(^/row[:index = $$__:index]::name) | $.t"),
         vec!["Ada", "Bo"]
     );
     // an unset recall is null at any level

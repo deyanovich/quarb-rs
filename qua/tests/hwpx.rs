@@ -94,7 +94,7 @@ fn lit_refuses_and_the_plain_mount_is_the_package() {
         "{err}"
     );
     assert_eq!(
-        ok_(&dir, &["/* | :::name", "emma.hwpx"]),
+        ok_(&dir, &["/* | :name", "emma.hwpx"]),
         "mimetype\nMETA-INF\nContents"
     );
 }

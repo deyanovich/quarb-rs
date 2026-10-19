@@ -12,13 +12,13 @@
 //!   `<number>`, `<boolean>`, `<bytes>`, `<null>`, `<instant>`.
 //! - Byte strings are scalars whose value is the lowercase hex
 //!   rendering (Quarb's `hex` built-in speaks the same), with
-//!   `;;;length` answering the raw byte count.
+//!   `:::size` answering the raw byte count as a size in bytes.
 //! - Standard time tags decode to *instants*: tag 0 (RFC 3339
 //!   text) and tag 1 (epoch seconds, integer or float), so
 //!   `[::when > 2026-01-01]` is a calendar comparison. Other
 //!   tags are transparent — the node is its content — with the
-//!   tag number answering as `;;;tag`.
-//! - `;;;type` and `;;;length` as in the JSON adapter.
+//!   tag number answering as `:::tag`.
+//! - `:::type` and `:::length` (a count) as in the JSON adapter.
 //!
 //! Map entries keep document order. Non-finite floats and
 //! bignums render as strings rather than lying about precision.
@@ -67,7 +67,7 @@ struct Node {
     /// The scalar value for a primitive; `Value::Null` for
     /// containers.
     scalar: Value,
-    /// Raw byte count for byte strings (`;;;length`).
+    /// Raw byte count for byte strings (`:::size`, a quantity).
     bytes_len: Option<usize>,
     /// The enclosing tag number, when one wrapped this node.
     tag: Option<u64>,
@@ -123,17 +123,20 @@ fn time_instant(tag: u64, inner: &Cbor) -> Option<Value> {
                 secs,
                 nanos,
                 offset_min,
+                calendar: Default::default(),
             })
         }
         (1, Cbor::Integer(i)) => Some(Value::Instant {
             secs: i128::from(*i) as i64,
             nanos: 0,
             offset_min: None,
+            calendar: Default::default(),
         }),
         (1, Cbor::Float(f)) => Some(Value::Instant {
             secs: f.floor() as i64,
             nanos: ((f - f.floor()) * 1e9) as u32,
             offset_min: None,
+            calendar: Default::default(),
         }),
         _ => None,
     }
@@ -148,7 +151,7 @@ fn build(
 ) -> NodeId {
     // A tag wraps its content: time tags become instant scalars,
     // any other tag passes through to its content node, which
-    // remembers the number for `;;;tag`.
+    // remembers the number for `:::tag`.
     if let Cbor::Tag(t, inner) = value {
         if let Some(v) = time_instant(*t, inner) {
             let id = NodeId(nodes.len() as u64);
@@ -467,18 +470,23 @@ impl AstAdapter for CborAdapter {
         }
     }
 
-    /// `;;;type`, `;;;length` (entries for containers, raw byte
-    /// count for byte strings, characters for text), and
-    /// `;;;tag` (the enclosing CBOR tag number, when any).
+    /// `:::type`; `:::length`, a count (entries for containers,
+    /// characters for text); `:::size`, a byte string's raw byte
+    /// count as the size quantity (spec: adapter metadata, draft
+    /// 157: a size is a quantity in bytes, a length a count); and
+    /// `:::tag` (the enclosing CBOR tag number, when any).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
             "type" => Some(Value::Str(n.kind.name().to_string())),
+            "size" => match n.kind {
+                Kind::Bytes => Some(Value::bytes(n.bytes_len? as i64)),
+                _ => None,
+            },
             "length" => match n.kind {
                 Kind::Map | Kind::Array => Some(Value::Int(
                     (n.children.len() + n.fields.len() + n.items.len()) as i64,
                 )),
-                Kind::Bytes => Some(Value::Int(n.bytes_len? as i64)),
                 Kind::String => match &n.scalar {
                     Value::Str(s) => Some(Value::Int(s.chars().count() as i64)),
                     _ => None,
@@ -544,7 +552,7 @@ mod tests {
         assert_eq!(v(&a, "/tracks/*::art"), ["c0ffee"]);
         assert_eq!(v(&a, "/tracks/*::42"), ["int-keyed"]);
         assert_eq!(v(&a, "/tracks/*::added | year"), ["2023"]);
-        assert_eq!(v(&a, "/tracks/0::::length"), ["5"]);
+        assert_eq!(v(&a, "/tracks/0:::length"), ["5"]);
     }
 
     #[test]
@@ -552,22 +560,25 @@ mod tests {
         let a = CborAdapter::parse(&music()).unwrap();
         assert_eq!(v(&a, "/tracks/0/title::"), ["Mars"]);
         assert_eq!(v(&a, "/tracks/0::price"), ["1.29"]);
-        assert_eq!(v(&a, "/tracks::::length"), ["1"]);
+        assert_eq!(v(&a, "/tracks:::length"), ["1"]);
     }
 
     #[test]
     fn time_tags_become_instants() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/added::::type"), ["instant"]);
+        assert_eq!(v(&a, "/tracks/0/added:::type"), ["instant"]);
         assert_eq!(v(&a, "/tracks/*[::added > 2023-01-01] @| count"), ["1"]);
-        assert_eq!(v(&a, "/tracks/0/added::::tag"), ["1"]);
+        assert_eq!(v(&a, "/tracks/0/added:::tag"), ["1"]);
     }
 
     #[test]
     fn bytes_render_hex_with_raw_length() {
         let a = CborAdapter::parse(&music()).unwrap();
         assert_eq!(v(&a, "/tracks/0/art::"), ["c0ffee"]);
-        assert_eq!(v(&a, "/tracks/0/art::::length"), ["3"]);
+        // a byte string's raw byte count is its size, a quantity;
+        // length is the count of entries or characters elsewhere
+        assert_eq!(v(&a, "/tracks/0/art:::size"), ["3_B"]);
+        assert_eq!(v(&a, "/tracks/0/art:::length"), [""]);
         assert_eq!(v(&a, "/tracks/0/*<bytes> @| count"), ["1"]);
     }
 
@@ -584,6 +595,6 @@ mod tests {
             Cbor::Tag(0, Box::new(Cbor::Text("2026-07-20T12:00:00Z".into()))),
         )]));
         let a = CborAdapter::parse(&doc).unwrap();
-        assert_eq!(v(&a, "/when::::type"), ["instant"]);
+        assert_eq!(v(&a, "/when:::type"), ["instant"]);
     }
 }

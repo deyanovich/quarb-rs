@@ -22,10 +22,10 @@ fn gcs_public_listing() {
 fn s3_public_listing_and_content() {
     let a = ObjstoreAdapter::connect("s3://noaa-ghcn-pds").unwrap();
     assert_eq!(
-        values(&a, "/*[:::name = \"ghcnd-states.txt\"]::::size"),
+        values(&a, "/*[:name = \"ghcnd-states.txt\"]:::size"),
         ["1086"]
     );
-    let content = values(&a, "/*[:::name = \"ghcnd-countries.txt\"]::");
+    let content = values(&a, "/*[:name = \"ghcnd-countries.txt\"]::");
     assert!(content[0].contains("Afghanistan"));
 }
 
@@ -39,7 +39,7 @@ fn s3_public_listing_and_content() {
 fn s3_signed_listing_and_content() {
     let target = std::env::var("QUARB_S3_TEST").expect("QUARB_S3_TEST target");
     let a = ObjstoreAdapter::connect(&target).unwrap();
-    let names = values(&a, "/configs/*:::name");
+    let names = values(&a, "/configs/*:name");
     assert!(
         names.contains(&"services.json".to_string()),
         "listing under a signed prefix: {names:?}"
@@ -58,7 +58,7 @@ fn s3_signed_listing_and_content() {
 fn azure_shared_key_listing_and_content() {
     let target = std::env::var("QUARB_AZ_TEST").expect("QUARB_AZ_TEST target");
     let a = ObjstoreAdapter::connect(&target).unwrap();
-    let names = values(&a, "/*:::name");
+    let names = values(&a, "/*:name");
     assert!(
         names.contains(&"readme.md".to_string()),
         "signed listing: {names:?}"

@@ -1,6 +1,6 @@
 //! The temporal fragment: ISO-8601 parsing and formatting, and the
-//! civil-calendar arithmetic behind `Value::Instant` and
-//! `Value::Duration`.
+//! civil-calendar arithmetic behind `Value::Instant` and the span of
+//! time, the quantity of dimension T.
 //!
 //! An instant is a point on the UTC timeline (seconds + nanoseconds
 //! since the epoch); a source's UTC offset is preserved for display
@@ -363,53 +363,122 @@ fn parse_iso_duration(s: &str) -> Option<i128> {
 }
 
 /// A systemd time-span body (`5d 3h 5min`, `5d3h5min`, `1.5h`), as
-/// total nanoseconds: decimal components glued to unit names,
-/// whitespace between components optional, summing in any order.
-/// Units (with long forms): ns us ms s m h d w — no months or
-/// years (calendar notions), and no default unit (a bare number is
-/// not a span).
+/// total nanoseconds: decimal components glued to (or spaced from)
+/// unit names, whitespace between components optional, summing in
+/// any order. Units (with long forms): ns us ms s m h d w — no
+/// months or years (calendar notions), and no default unit (a bare
+/// number is not a span). Every locale's duration designations
+/// ([`crate::durnames`]: `сут ч мин`, `Tg. Std. Min.`, `天 小时`,
+/// `j`, `giorni`, …) read always, so the mixed form any output
+/// locale prints reads back under any locale; a number-less form
+/// (Arabic's one and two days) carries its count.
 fn parse_systemd_span(s: &str) -> Option<i128> {
-    let mut rest = s;
+    let mut rest = s.trim_start();
     let mut total: i128 = 0;
     let mut any = false;
     while !rest.is_empty() {
         let num_end = rest
             .find(|c: char| !(c.is_ascii_digit() || c == '.'))
             .unwrap_or(rest.len());
-        if num_end == 0 {
-            return None;
-        }
         let num = &rest[..num_end];
-        rest = &rest[num_end..];
-        let unit_end = rest
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .unwrap_or(rest.len());
-        if unit_end == 0 {
-            return None; // a bare number has no default unit
-        }
-        let unit = &rest[..unit_end];
-        rest = rest[unit_end..].trim_start();
-        let ns_per: i128 = match unit {
-            "ns" | "nsec" => 1,
-            "us" | "usec" => 1_000,
-            "ms" | "msec" => 1_000_000,
-            "s" | "sec" | "second" | "seconds" => NS,
-            // SI discipline: bare `m` is meters (the quantital
-            // fragment), never minutes — `min` is the only short
-            // minute unit (2026-07-12 ruling).
-            "min" | "minute" | "minutes" => 60 * NS,
-            "h" | "hr" | "hour" | "hours" => 3_600 * NS,
-            "d" | "day" | "days" => 86_400 * NS,
-            "w" | "week" | "weeks" => 604_800 * NS,
-            _ => return None,
+        rest = rest[num_end..].trim_start();
+        let (unit_ns, len, implied) = match_span_unit(rest)?;
+        rest = rest[len..].trim_start();
+        let count = match (num.is_empty(), implied) {
+            (false, _) => num,
+            (true, Some(n)) => n,
+            (true, None) => return None, // a unit without a number
         };
-        total = total.checked_add(scale_component(num, ns_per)?)?;
+        total = total.checked_add(scale_component(count, unit_ns)?)?;
         any = true;
     }
     if !any {
         return None;
     }
     Some(total)
+}
+
+/// The unit at the start of `rest`: its nanoseconds, the matched
+/// byte length, and the count a number-less form implies. The
+/// longest spelling wins (`Min.` before `min`, `dias` before `d`),
+/// case folded.
+fn match_span_unit(rest: &str) -> Option<(i128, usize, Option<&'static str>)> {
+    const LATIN: &[(&str, i128)] = &[
+        ("ns", 1),
+        ("nsec", 1),
+        ("us", 1_000),
+        ("usec", 1_000),
+        ("ms", 1_000_000),
+        ("msec", 1_000_000),
+        ("s", NS),
+        ("sec", NS),
+        ("second", NS),
+        ("seconds", NS),
+        // SI discipline: bare `m` is meters (the quantity
+        // fragment), never minutes — `min` is the only short
+        // minute unit (2026-07-12 ruling).
+        ("min", 60 * NS),
+        ("minute", 60 * NS),
+        ("minutes", 60 * NS),
+        ("h", 3_600 * NS),
+        ("hr", 3_600 * NS),
+        ("hour", 3_600 * NS),
+        ("hours", 3_600 * NS),
+        ("d", 86_400 * NS),
+        ("day", 86_400 * NS),
+        ("days", 86_400 * NS),
+        ("w", 604_800 * NS),
+        ("week", 604_800 * NS),
+        ("weeks", 604_800 * NS),
+    ];
+    const UNIT_NS: [i128; 7] = [86_400 * NS, 3_600 * NS, 60 * NS, NS, 1_000_000, 1_000, 1];
+    let mut best: Option<(i128, usize, Option<&'static str>)> = None;
+    let mut best_chars = 0;
+    for (text, ns) in LATIN {
+        if let Some(len) = prefix_fold(rest, text) {
+            let chars = text.chars().count();
+            if chars > best_chars {
+                best = Some((*ns, len, None));
+                best_chars = chars;
+            }
+        }
+    }
+    for (text, unit, implied) in crate::durnames::designations() {
+        if let Some(len) = prefix_fold(rest, text) {
+            let chars = text.chars().count();
+            // A word written both with and without a number (Arabic's
+            // one day, `يوم`): the number-less form carries its count
+            // and wins the tie.
+            let counted_tie = chars == best_chars
+                && implied.is_some()
+                && best.is_some_and(|(_, _, i)| i.is_none());
+            if chars > best_chars || counted_tie {
+                let implied = implied.map(|n| match n {
+                    0 => "0",
+                    2 => "2",
+                    _ => "1",
+                });
+                best = Some((UNIT_NS[*unit], len, implied));
+                best_chars = chars;
+            }
+        }
+    }
+    best
+}
+
+/// `text` at the start of `rest`, case folded: the matched byte
+/// length in `rest`.
+fn prefix_fold(rest: &str, text: &str) -> Option<usize> {
+    let mut bytes = 0;
+    let mut rc = rest.chars();
+    for t in text.chars() {
+        let r = rc.next()?;
+        if r != t && !r.to_lowercase().eq(t.to_lowercase()) {
+            return None;
+        }
+        bytes += r.len_utf8();
+    }
+    Some(bytes)
 }
 
 /// Parse span text (spec: The Durational Reading): an ISO-8601
@@ -502,8 +571,10 @@ pub fn iso_week(secs: i64) -> (i64, u32) {
 /// `strftime`-style formatting (the C/POSIX standard Perl, Python,
 /// and Ruby share), in the instant's own offset (UTC when none).
 /// Supported: %Y %y %C %m %d %e %H %I %p %M %S %j %a %A %b %B %u %w
-/// %V %G %g %F %T %R %D %s %z %Z %n %t %%. An unknown specifier
-/// passes through literally.
+/// %V %G %g %F %T %R %D %s %z %Z %n %t %%, and glibc's `-` flag on
+/// a numeric field for the value without padding (`%-d`, `%-m`,
+/// `%-e`, `%-H`, `%-I`, `%-M`, `%-S`, `%-j`: `5 March 2024`,
+/// `2:07 PM`). An unknown specifier passes through literally.
 pub fn strftime(fmt: &str, secs: i64, nanos: u32, offset_min: Option<i16>) -> String {
     strftime_in(fmt, secs, nanos, offset_min, &crate::datenames::EN)
 }
@@ -521,7 +592,9 @@ pub fn strftime_in(
     // A month's form: the date form (`6 октября`) where the format
     // carries a day, the stand-alone (`октябрь 1899`) where it does
     // not, as the locale's data distinguishes them.
-    let has_day = ["%d", "%e", "%F", "%D"].iter().any(|d| fmt.contains(d));
+    let has_day = ["%d", "%e", "%-d", "%-e", "%F", "%D"]
+        .iter()
+        .any(|d| fmt.contains(d));
     strftime_form(fmt, secs, nanos, offset_min, names, has_day)
 }
 
@@ -536,6 +609,102 @@ pub fn strftime_form(
     names: &crate::datenames::Names,
     has_day: bool,
 ) -> String {
+    strftime_cal_form(
+        fmt,
+        secs,
+        nanos,
+        offset_min,
+        names,
+        has_day,
+        Default::default(),
+        None,
+    )
+}
+
+/// [`strftime_in`] with the date fields read in a calendar (spec:
+/// Calendars): `%Y %m %d %e %j %B %b %F %D` mean that calendar's
+/// fields and names, `%Y` the year in its era; `%EC` writes the era's
+/// name, `%Ey` the year in the era, `%Er` the related Gregorian year
+/// and `%EU` the cyclic year name of a lunisolar calendar. The names
+/// come from `calnames` where given, else the Gregorian month names
+/// by ordinal (the Julian calendar's).
+pub fn strftime_cal(
+    fmt: &str,
+    secs: i64,
+    nanos: u32,
+    offset_min: Option<i16>,
+    names: &crate::datenames::Names,
+    calendar: crate::calendar::Calendar,
+    calnames: Option<&crate::calnames::CalNames>,
+) -> String {
+    let has_day = ["%d", "%e", "%-d", "%-e", "%F", "%D"]
+        .iter()
+        .any(|d| fmt.contains(d));
+    strftime_cal_form(
+        fmt, secs, nanos, offset_min, names, has_day, calendar, calnames,
+    )
+}
+
+/// The name of a month in a calendar's table: by its code, the
+/// leap-year names first in a leap year, a derived leap-month name
+/// where the calendar builds it from the base month's.
+fn cal_month_name(
+    cn: &crate::calnames::CalNames,
+    date: &crate::calendar::CalendarDate,
+    wide: bool,
+) -> Option<String> {
+    let pick = |row: &(&str, &str, &str)| if wide { row.1 } else { row.2 }.to_string();
+    if date.leap_year
+        && let Some(row) = cn.leap_year_months.iter().find(|(c, _, _)| *c == date.code)
+    {
+        return Some(pick(row));
+    }
+    if let Some(row) = cn.months.iter().find(|(c, _, _)| *c == date.code) {
+        return Some(pick(row));
+    }
+    if date.leap_month()
+        && let Some((pw, pa)) = cn.leap_pattern
+        && let Some(base) = date.code.strip_suffix('L')
+        && let Some(row) = cn.months.iter().find(|(c, _, _)| *c == base)
+    {
+        let pattern = if wide { pw } else { pa };
+        return Some(pattern.replace("{0}", pick(row).as_str()));
+    }
+    None
+}
+
+/// The era's name in a calendar's table, the code itself where the
+/// table has none; the Gregorian eras take the locale's names where
+/// a table carries them.
+fn era_name(
+    cn: Option<&crate::calnames::CalNames>,
+    names: &crate::datenames::Names,
+    era: &str,
+) -> String {
+    if let Some(cn) = cn
+        && let Some((_, n)) = cn.eras.iter().find(|(c, _)| *c == era)
+    {
+        return n.to_string();
+    }
+    let _ = names;
+    match era {
+        "ce" => "CE".to_string(),
+        "bce" => "BCE".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn strftime_cal_form(
+    fmt: &str,
+    secs: i64,
+    nanos: u32,
+    offset_min: Option<i16>,
+    names: &crate::datenames::Names,
+    has_day: bool,
+    calendar: crate::calendar::Calendar,
+    calnames: Option<&crate::calnames::CalNames>,
+) -> String {
     let _ = nanos;
     let month_form = |forms: &'static [&'static str]| {
         if has_day {
@@ -545,10 +714,45 @@ pub fn strftime_form(
         }
     };
     let local = secs.saturating_add(offset_min.unwrap_or(0) as i64 * 60);
-    let (y, mo, d, h, mi, se) = components(local);
+    let (gy0, gmo, gd, h, mi, se) = components(local);
     let wd = weekday(local); // 1 = Monday
-    let doy = local.div_euclid(86400) - days_from_civil(y, 1, 1) + 1;
     let (gy, gw) = iso_week(local);
+    // The date fields: the calendar's where one is read, else the
+    // Gregorian ones.
+    let cal_date = (calendar != Default::default())
+        .then(|| crate::calendar::date(calendar, local.div_euclid(86400)))
+        .flatten();
+    let (y, mo, d, doy) = match &cal_date {
+        Some(cd) => (
+            cd.year,
+            u32::from(cd.month),
+            u32::from(cd.day),
+            i64::from(cd.day_of_year),
+        ),
+        None => (
+            gy0,
+            gmo,
+            gd,
+            local.div_euclid(86400) - days_from_civil(gy0, 1, 1) + 1,
+        ),
+    };
+    let month_name = |wide: bool| -> String {
+        if let Some(cd) = &cal_date
+            && let Some(cn) = calnames
+            && let Some(n) = cal_month_name(cn, cd, wide)
+        {
+            return n;
+        }
+        let table = if wide {
+            &names.months
+        } else {
+            &names.months_abbr
+        };
+        match table.get((mo as usize).wrapping_sub(1)) {
+            Some(forms) => month_form(forms).to_string(),
+            None => mo.to_string(),
+        }
+    };
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
@@ -556,26 +760,82 @@ pub fn strftime_form(
             out.push(c);
             continue;
         }
-        match chars.next() {
+        // glibc's `-` flag: the numeric field without padding; its
+        // `E` flag: the era forms (%EC the era name, %Ey the year in
+        // the era) and, here, %Er and %EU for the lunisolar calendars.
+        let (spec, bare, era) = match chars.next() {
+            Some('-') => (chars.next(), true, false),
+            Some('E') => (chars.next(), false, true),
+            other => (other, false, false),
+        };
+        if era {
+            match spec {
+                Some('C') => {
+                    let code = cal_date
+                        .as_ref()
+                        .and_then(|cd| cd.era.clone())
+                        .unwrap_or_else(|| if gy0 > 0 { "ce".into() } else { "bce".into() });
+                    out.push_str(&era_name(calnames, names, &code));
+                }
+                Some('y') => out.push_str(&y.to_string()),
+                Some('r') => out.push_str(
+                    &cal_date
+                        .as_ref()
+                        .map_or(gy0, |cd| cd.related_iso)
+                        .to_string(),
+                ),
+                Some('U') => {
+                    let cyclic = cal_date.as_ref().and_then(|cd| cd.cyclic_year);
+                    match (cyclic, calnames) {
+                        (Some(n), Some(cn))
+                            if (1..=60).contains(&n) && cn.cyclic_years.len() == 60 =>
+                        {
+                            out.push_str(cn.cyclic_years[usize::from(n) - 1])
+                        }
+                        (Some(n), _) => out.push_str(&n.to_string()),
+                        (None, _) => out.push_str(&y.to_string()),
+                    }
+                }
+                Some(other) => {
+                    out.push_str("%E");
+                    out.push(other);
+                }
+                None => out.push_str("%E"),
+            }
+            continue;
+        }
+        let field = |value: i64, width: usize| {
+            if bare {
+                value.to_string()
+            } else {
+                format!("{value:0width$}")
+            }
+        };
+        match spec {
+            // the Gregorian year zero-padded to four digits as C has
+            // it; a calendar's year in its era as the calendar counts
+            // it (Reiwa 6, not 0006)
+            Some('Y') if cal_date.is_some() => out.push_str(&y.to_string()),
             Some('Y') => out.push_str(&format!("{y:04}")),
             Some('y') => out.push_str(&format!("{:02}", y.rem_euclid(100))),
             Some('C') => out.push_str(&format!("{:02}", y.div_euclid(100))),
-            Some('m') => out.push_str(&format!("{mo:02}")),
-            Some('d') => out.push_str(&format!("{d:02}")),
+            Some('m') => out.push_str(&field(mo as i64, 2)),
+            Some('d') => out.push_str(&field(d as i64, 2)),
+            Some('e') if bare => out.push_str(&d.to_string()),
             Some('e') => out.push_str(&format!("{d:2}")),
-            Some('H') => out.push_str(&format!("{h:02}")),
+            Some('H') => out.push_str(&field(h as i64, 2)),
             Some('I') => {
                 let h12 = if h % 12 == 0 { 12 } else { h % 12 };
-                out.push_str(&format!("{h12:02}"));
+                out.push_str(&field(h12 as i64, 2));
             }
-            Some('p') => out.push_str(if h < 12 { "AM" } else { "PM" }),
-            Some('M') => out.push_str(&format!("{mi:02}")),
-            Some('S') => out.push_str(&format!("{se:02}")),
-            Some('j') => out.push_str(&format!("{doy:03}")),
+            Some('p') => out.push_str(names.periods[usize::from(h >= 12)][0]),
+            Some('M') => out.push_str(&field(mi as i64, 2)),
+            Some('S') => out.push_str(&field(se as i64, 2)),
+            Some('j') => out.push_str(&field(doy, 3)),
             Some('a') => out.push_str(names.days_abbr[(wd - 1) as usize][0]),
             Some('A') => out.push_str(names.days[(wd - 1) as usize][0]),
-            Some('b') => out.push_str(month_form(names.months_abbr[(mo - 1) as usize])),
-            Some('B') => out.push_str(month_form(names.months[(mo - 1) as usize])),
+            Some('b') => out.push_str(&month_name(false)),
+            Some('B') => out.push_str(&month_name(true)),
             Some('u') => out.push_str(&wd.to_string()),
             Some('w') => out.push_str(&(wd % 7).to_string()),
             Some('V') => out.push_str(&format!("{gw:02}")),
@@ -601,9 +861,12 @@ pub fn strftime_form(
             Some('%') => out.push('%'),
             Some(other) => {
                 out.push('%');
+                if bare {
+                    out.push('-');
+                }
                 out.push(other);
             }
-            None => out.push('%'),
+            None => out.push_str(if bare { "%-" } else { "%" }),
         }
     }
     out
@@ -632,9 +895,27 @@ pub fn strptime_in(
     fmt: &str,
     names: &crate::datenames::Names,
 ) -> Option<(i64, u32, Option<i16>)> {
+    strptime_cal(input, fmt, names, Default::default(), None)
+}
+
+/// [`strptime_in`] with the date fields read in a calendar (spec:
+/// Calendars): `%Y` is the year in the calendar's current era unless
+/// `%EC` names one, `%m` the month's ordinal, `%B %b` its name in
+/// the calendar's table (a leap month's name reads as that month),
+/// `%d` the day. Padded and unpadded fields read alike.
+pub fn strptime_cal(
+    input: &str,
+    fmt: &str,
+    names: &crate::datenames::Names,
+    calendar: crate::calendar::Calendar,
+    calnames: Option<&crate::calnames::CalNames>,
+) -> Option<(i64, u32, Option<i16>)> {
     let inb = input.as_bytes();
     let mut i = 0usize; // input cursor
     let (mut year, mut mo, mut d) = (1970i64, 1u32, 1u32);
+    let in_calendar = calendar != Default::default();
+    let mut era: Option<String> = None;
+    let mut month_code: Option<String> = None;
     let (mut h, mut mi, mut se) = (0u32, 0u32, 0u32);
     let mut century: Option<i64> = None;
     let mut h12: Option<u32> = None;
@@ -676,8 +957,40 @@ pub fn strptime_in(
             }
             return None;
         }
-        match chars.next() {
-            Some('Y') => year = digits(inb, &mut i, 4, false)?,
+        // glibc's `-` flag asks for no padding when writing; reading
+        // takes a padded and an unpadded field alike, so the flag is
+        // accepted and makes no difference. The `E` flag reads the
+        // era forms: %EC an era name, %Ey the year in the era.
+        let (spec, era_flag) = match chars.next() {
+            Some('-') => (chars.next(), false),
+            Some('E') => (chars.next(), true),
+            other => (other, false),
+        };
+        if era_flag {
+            match spec {
+                Some('C') => {
+                    // the era names of the calendar's table, the
+                    // Gregorian CE/BCE besides
+                    let mut rows: Vec<(String, Vec<&str>)> = Vec::new();
+                    if let Some(cn) = calnames {
+                        for (code, name) in cn.eras {
+                            rows.push((code.to_string(), vec![name]));
+                        }
+                    }
+                    rows.push(("ce".into(), vec!["CE", "AD"]));
+                    rows.push(("bce".into(), vec!["BCE", "BC"]));
+                    let entries: Vec<&[&str]> = rows.iter().map(|(_, v)| v.as_slice()).collect();
+                    let (k, len) = crate::datenames::match_name(&input[i..], &entries)?;
+                    i += len;
+                    era = Some(rows[k].0.clone());
+                }
+                Some('y') => year = digits(inb, &mut i, 6, false)?,
+                _ => return None,
+            }
+            continue;
+        }
+        match spec {
+            Some('Y') => year = digits(inb, &mut i, 6, false)?,
             Some('y') => {
                 let v = digits(inb, &mut i, 2, false)?;
                 year = if v >= 69 { 1900 + v } else { 2000 + v };
@@ -689,7 +1002,13 @@ pub fn strptime_in(
             Some('H') => h = digits(inb, &mut i, 2, false)? as u32,
             Some('I') => h12 = Some(digits(inb, &mut i, 2, false)? as u32),
             Some('p') => {
-                let (k, len) = crate::datenames::match_name(&input[i..], &[&["AM"], &["PM"]])?;
+                // the locale's day periods, the Latin AM/PM besides
+                let am: Vec<&str> = names.periods[0].iter().copied().chain(["AM"]).collect();
+                let pm_names: Vec<&str> = names.periods[1].iter().copied().chain(["PM"]).collect();
+                let (k, len) = crate::datenames::match_name(
+                    &input[i..],
+                    &[am.as_slice(), pm_names.as_slice()],
+                )?;
                 i += len;
                 pm = Some(k == 1);
             }
@@ -700,6 +1019,36 @@ pub fn strptime_in(
                 let (_, len) = crate::datenames::match_name(&input[i..], &names.days)
                     .or_else(|| crate::datenames::match_name(&input[i..], &names.days_abbr))?;
                 i += len;
+            }
+            Some('b') | Some('B') if in_calendar && calnames.is_some() => {
+                // the calendar's month names, by code: every row's
+                // wide and abbreviated forms, the leap-year names,
+                // and the derived leap-month names
+                let cn = calnames.expect("checked");
+                let mut rows: Vec<(String, Vec<String>)> = Vec::new();
+                for (code, wide, abbr) in cn.months {
+                    rows.push((code.to_string(), vec![wide.to_string(), abbr.to_string()]));
+                    if let Some((pw, pa)) = cn.leap_pattern
+                        && let Some(n) = code.strip_prefix('M')
+                        && !code.ends_with('L')
+                    {
+                        rows.push((
+                            format!("M{n}L"),
+                            vec![pw.replace("{0}", wide), pa.replace("{0}", abbr)],
+                        ));
+                    }
+                }
+                for (code, wide, abbr) in cn.leap_year_months {
+                    rows.push((code.to_string(), vec![wide.to_string(), abbr.to_string()]));
+                }
+                let owned: Vec<Vec<&str>> = rows
+                    .iter()
+                    .map(|(_, v)| v.iter().map(String::as_str).collect())
+                    .collect();
+                let entries: Vec<&[&str]> = owned.iter().map(Vec::as_slice).collect();
+                let (k, len) = crate::datenames::match_name(&input[i..], &entries)?;
+                i += len;
+                month_code = Some(rows[k].0.clone());
             }
             Some('b') | Some('B') => {
                 let (k, len) = crate::datenames::match_name(&input[i..], &names.months)
@@ -825,6 +1174,42 @@ pub fn strptime_in(
             Some(false) => hh % 12,
             None => hh,
         };
+    }
+    if in_calendar {
+        // the calendar's own fields to a day of the timeline
+        if h > 23 || mi > 59 || se > 60 || d == 0 || d > 31 {
+            return None;
+        }
+        let day = u8::try_from(d).ok()?;
+        let days = match &month_code {
+            Some(code) => {
+                crate::calendar::days_from_code(calendar, era.as_deref(), year, code, day)?
+            }
+            None => crate::calendar::days_from_ordinal(
+                calendar,
+                era.as_deref(),
+                year,
+                u8::try_from(mo).ok()?,
+                day,
+            )?,
+        };
+        let mut secs = days * 86400 + h as i64 * 3600 + mi as i64 * 60 + se as i64;
+        if let Some(m) = offset {
+            secs -= m as i64 * 60;
+        }
+        return Some((secs, 0, offset));
+    }
+    if let Some(code) = &month_code {
+        mo = code
+            .trim_start_matches('M')
+            .trim_end_matches('L')
+            .parse()
+            .ok()?;
+    }
+    if let Some(e) = &era
+        && e == "bce"
+    {
+        year = 1 - year;
     }
     if !(1..=12).contains(&mo)
         || d < 1
@@ -964,6 +1349,101 @@ mod tests {
         );
         assert_eq!(strftime("%G-w%V day %u", s, n, o), "2024-w07 day 4");
         assert_eq!(strftime("%I:%M %p %z %Z", s, n, o), "01:26 PM +0000 UTC");
+        // glibc's `-` flag: no padding
+        assert_eq!(strftime("%-I:%M %p", s, n, o), "1:26 PM");
+        let (s5, n5, o5) = parse_iso("2024-03-05T09:05:07Z").unwrap();
+        assert_eq!(
+            strftime("%-d %B %Y %-H:%M:%S", s5, n5, o5),
+            "5 March 2024 9:05:07"
+        );
+        assert_eq!(
+            strftime("%-m/%-d/%y %-M %-S %-j", s5, n5, o5),
+            "3/5/24 5 7 65"
+        );
+        assert_eq!(strftime("%-e|%e|%d", s5, n5, o5), "5| 5|05");
+        assert_eq!(strftime("%-q", s5, n5, o5), "%-q");
+        // reading takes padded and unpadded alike, flag or no flag
+        assert_eq!(
+            strptime("5 March 2024", "%-d %B %Y"),
+            strptime("05 March 2024", "%d %B %Y")
+        );
+        assert_eq!(
+            strptime("9:05:07", "%-H:%M:%S"),
+            strptime("09:05:07", "%H:%M:%S")
+        );
+        // the locale's day periods
+        let ar = crate::datenames::names("ar").unwrap();
+        assert_eq!(strftime_in("%-I:%M %p", s, n, o, ar), "1:26 م");
+        assert_eq!(
+            strptime_in("1:26 م", "%-I:%M %p", ar),
+            strptime("1:26 PM", "%I:%M %p")
+        );
+        assert_eq!(
+            strptime_in("1:26 PM", "%I:%M %p", ar),
+            strptime("1:26 PM", "%I:%M %p")
+        );
+        let es = crate::datenames::names("es").unwrap();
+        assert_eq!(strftime_in("%-I:%M %p", s, n, o, es), "1:26 p. m.");
+        // a region's names: en-AU abbreviates June and July in full,
+        // writes am/pm, and still reads the language's spellings
+        let au = crate::datenames::names("en-AU").unwrap();
+        let (sj, nj, oj) = parse_iso("2024-06-05T13:26:40Z").unwrap();
+        assert_eq!(
+            strftime_in("%-d %b %Y %-I:%M %p", sj, nj, oj, au),
+            "5 June 2024 1:26 pm"
+        );
+        assert_eq!(
+            strptime_in("5 Jun 2024", "%d %b %Y", au),
+            strptime("5 Jun 2024", "%d %b %Y")
+        );
+        assert_eq!(
+            strptime_in("5 June 2024", "%d %b %Y", au),
+            strptime("5 Jun 2024", "%d %b %Y")
+        );
+        let gb = crate::datenames::names("en-GB").unwrap();
+        assert_eq!(strftime_in("%b %p", s5, n5, o5, gb), "Mar am");
+        assert_eq!(
+            strftime_in("%b", parse_iso("2024-09-05").unwrap().0, 0, None, gb),
+            "Sept"
+        );
+        assert!(crate::datenames::names("en-US").is_some());
+        assert_eq!(crate::regional::locale_id("en_gb"), "en-GB");
+        assert_eq!(crate::regional::locale_id("EN-GB.UTF-8"), "en-GB");
+        assert_eq!(crate::regional::locale_id("zh-TW"), "zh-Hant");
+        assert_eq!(crate::regional::locale_id("zh_Hant_TW"), "zh-Hant");
+        assert_eq!(crate::regional::locale_id("zh-HK"), "zh-Hant-HK");
+        assert_eq!(crate::regional::locale_id("zh-CN"), "zh");
+        assert_eq!(crate::regional::locale_id("ru_RU.UTF-8@petr1708"), "ru-RU");
+        assert_eq!(crate::regional::locale_id("es-419"), "es-419");
+        assert!(crate::regional::regional("en-US").is_none());
+        assert!(crate::regional::regional("ru-RU").is_none());
+        assert_eq!(
+            crate::regional::regional("en-GB").unwrap().instant,
+            "%-d %b %Y, %H:%M:%S"
+        );
+        assert_eq!(
+            crate::regional::regional("fr-CA").unwrap().instant,
+            "%-d %b %Y, %H h %M min %S s"
+        );
+        assert_eq!(
+            crate::regional::regional("zh-Hant-TW").unwrap().tag,
+            "zh-Hant"
+        );
+        assert_eq!(
+            crate::regional::regional("zh-MO").unwrap().tag,
+            "zh-Hant-MO"
+        );
+        assert_eq!(crate::regional::regional("de-CH").unwrap().group, "'");
+        assert_eq!(crate::regional::regional("de-CH").unwrap().decimal, '.');
+        assert!(
+            crate::regional::REGIONAL
+                .windows(2)
+                .all(|w| w[0].tag < w[1].tag)
+        );
+        assert_eq!(
+            strptime_in("1:26 p.m.", "%I:%M %p", es),
+            strptime("1:26 PM", "%I:%M %p")
+        );
         assert_eq!(strftime("100%% %q", s, n, o), "100% %q");
         let (s, n, o) = parse_iso("2024-02-15T14:26:40+01:00").unwrap();
         assert_eq!(strftime("%T %z", s, n, o), "14:26:40 +0100");
@@ -1002,6 +1482,38 @@ mod tests {
         assert_eq!(parse_span("2w"), Some((1209600, 0)));
         assert_eq!(parse_span("250ms"), Some((0, 250_000_000)));
         assert_eq!(parse_span("1s500ms"), Some((1, 500_000_000)));
+        // The GOST Cyrillic designations read always: the mixed form
+        // a Russian locale prints reads back, glued or spaced.
+        assert_eq!(parse_span("1ч 30мин"), Some((5400, 0)));
+        assert_eq!(parse_span("1ч30мин"), Some((5400, 0)));
+        assert_eq!(parse_span("1 ч 30 мин"), Some((5400, 0)));
+        assert_eq!(parse_span("5сут 3ч 5мин"), Some((443100, 0)));
+        assert_eq!(parse_span("1с 500мс"), Some((1, 500_000_000)));
+        assert_eq!(parse_span("2мкс"), Some((0, 2_000)));
+        assert_eq!(parse_span("1м"), None);
+        // Every locale's designations read, glued or spaced, dotted
+        // or worded; a number-less Arabic form carries its count.
+        for text in [
+            "5 j 3 h 5 min",
+            "5 Tg. 3 Std. 5 Min.",
+            "5 Tg.3 Std.5 Min.",
+            "5天3小时5分钟",
+            "5 日 3 時間 5 分",
+            "5 gün 3 sa. 5 dk.",
+            "5 dias 3 h 5 min",
+            "5 giorni 3 h 5 min",
+            "5 أيام 3 س 5 د",
+            "5 сут 3 ч 5 мин",
+            "5\u{a0}j 3\u{202f}h 5 min",
+        ] {
+            assert_eq!(parse_span(text), Some((443100, 0)), "{text}");
+        }
+        assert_eq!(parse_span("يوم"), Some((86400, 0)));
+        assert_eq!(parse_span("يومان 3 س"), Some((183600, 0)));
+        assert_eq!(parse_span("1 giorno"), Some((86400, 0)));
+        assert_eq!(parse_span("500 ملي ث"), Some((0, 500_000_000)));
+        assert_eq!(parse_span("2 μs"), Some((0, 2_000)));
+        assert_eq!(parse_span("5 sa"), None);
         // ISO-8601 form, round-tripping format_duration.
         assert_eq!(parse_span("P5DT3H5M"), Some((443100, 0)));
         assert_eq!(parse_span("PT0S"), Some((0, 0)));
@@ -1152,6 +1664,34 @@ mod tests {
             strptime_in("6 de outubro de 1899", "%d de %B de %Y", pt),
             Some((s, 0, None))
         );
+        // Turkish capitalizes the names inside a date, as CLDR's
+        // format forms do; reading stays case-folded.
+        let tr = crate::datenames::names("tr").unwrap();
+        assert_eq!(
+            strftime_in("%d %B %Y %A", s, 0, None, tr),
+            "06 Ekim 1899 Cuma"
+        );
+        assert_eq!(
+            strptime_in("6 ekim 1899", "%d %B %Y", tr),
+            Some((s, 0, None))
+        );
+        // German reads CLDR's undotted stand-alone abbreviations too.
+        let de = crate::datenames::names("de").unwrap();
+        for text in ["6 Okt. 1899", "6 Okt 1899"] {
+            assert_eq!(
+                strptime_in(text, "%d %b %Y", de),
+                Some((s, 0, None)),
+                "{text}"
+            );
+        }
+        let (sep, _, _) = parse_iso("1899-09-05").unwrap();
+        for text in ["5 Sept. 1899", "5 Sep. 1899", "5 Sep 1899"] {
+            assert_eq!(
+                strptime_in(text, "%d %b %Y", de),
+                Some((sep, 0, None)),
+                "{text}"
+            );
+        }
         let zh = crate::datenames::names("zh").unwrap();
         assert_eq!(
             strptime_in("1899年10月6日", "%Y年%B%d日", zh),

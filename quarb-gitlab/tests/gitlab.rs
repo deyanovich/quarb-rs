@@ -49,21 +49,28 @@ fn mock_gitlab() {
     assert_eq!(v("/tesslab//*<repo>::name @| sort"), ["gauge", "kettle"]);
     assert_eq!(v("/tesslab/kettle::stars"), ["128"]);
     assert_eq!(
-        v("/tesslab/kettle<thermo>::description"),
+        v("/tesslab/kettle<topic:thermo>::description"),
         ["Boils anything. Library."]
     );
 
-    // Issues: the open listing, labels as traits (scoped labels
-    // included), closed by direct address.
+    // Issues: the open listing, labels as traits in the label
+    // namespace (a scoped label's `::` is the segment colon),
+    // closed by direct address.
     assert_eq!(v("/tesslab/kettle/issues/* @| count"), ["2"]);
     assert_eq!(
-        v("/tesslab/kettle/issues/*<bug>::title"),
+        v("/tesslab/kettle/issues/*<label:bug>::title"),
         ["Whistle never stops"]
     );
+    assert_eq!(v("/tesslab/kettle/issues/*<bug> @| count"), ["0"]);
     assert_eq!(
-        v("/tesslab/kettle/issues/*<'temp::high'>::author"),
+        v("/tesslab/kettle/issues/*<label:temp:high>::author"),
         ["grace"]
     );
+    assert_eq!(
+        v("/tesslab/kettle/issues/*<label:temp:.>::author"),
+        ["grace"]
+    );
+    assert_eq!(v("/tesslab/kettle/issues/*<label:*> @| count"), ["2"]);
     assert_eq!(v("/tesslab/kettle/issues/2::state"), ["closed"]);
     assert_eq!(
         v("/tesslab/kettle/issues/4::"),
@@ -89,7 +96,7 @@ fn mock_gitlab() {
 
     // The file tree; content is the value.
     assert_eq!(
-        v("/tesslab/kettle/files/src/main.rs::::path"),
+        v("/tesslab/kettle/files/src/main.rs:path"),
         ["/tesslab/kettle/files/src/main.rs"]
     );
     assert_eq!(

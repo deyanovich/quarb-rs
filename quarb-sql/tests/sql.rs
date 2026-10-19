@@ -25,7 +25,7 @@ fn translations() {
             "SELECT al.title, t.title FROM albums al JOIN tracks t ON t.album_id = al.id \
            WHERE t.secs > 400"
         ),
-        "/albums/* <=> /tracks/*[::album_id = _::id && ::secs > 400] \
+        "/albums/* <=> /tracks/*[::album_id = $$0::id && ::secs > 400] \
          | %(::title; \"t.title\" = $$1::title)"
     );
     assert_eq!(
@@ -218,7 +218,7 @@ fn export_translations() {
     );
     assert_eq!(
         x(
-            "/albums/* <=> /tracks/*[::album_id = _::id && ::secs > 400] \
+            "/albums/* <=> /tracks/*[::album_id = $$0::id && ::secs > 400] \
            | %(album = ::title; $$1::title)"
         ),
         "SELECT albums.title AS album, tracks.title FROM albums \
@@ -262,7 +262,7 @@ fn export_details() {
     // A terminal projection on the joined branch selects from the
     // result context's table (it used to be silently dropped).
     assert_eq!(
-        x("/albums/* <=> /tracks/*[::album_id = _::id] | %($$1::title)"),
+        x("/albums/* <=> /tracks/*[::album_id = $$0::id] | %($$1::title)"),
         "SELECT tracks.title FROM albums JOIN tracks ON tracks.album_id = albums.id"
     );
     // `<=>?` keeps the unmatched driver rows: a LEFT JOIN, and the
@@ -270,13 +270,13 @@ fn export_details() {
     // stand in the ON (in a WHERE they would discard the unmatched
     // rows again).
     assert_eq!(
-        x("/tracks/* <=>? /albums/*[::id = _::album_id] | %(::title; a = $$1::title)"),
+        x("/tracks/* <=>? /albums/*[::id = $$0::album_id] | %(::title; a = $$1::title)"),
         "SELECT tracks.title, albums.title AS a FROM tracks LEFT JOIN albums \
          ON albums.id = tracks.album_id"
     );
     assert_eq!(
         x(
-            "/tracks/* <=>? /albums/*[::id = _::album_id && ::year > 1900] \
+            "/tracks/* <=>? /albums/*[::id = $$0::album_id && ::year > 1900] \
              | %(::title; a = $$1::title)"
         ),
         "SELECT tracks.title, albums.title AS a FROM tracks LEFT JOIN albums \
@@ -311,7 +311,7 @@ fn identifiers_are_gated() {
     assert!(pushdown("/t/*[::\"a OR b\" = 5] | ::x").is_none());
     assert!(pushdown("/\"t; DROP TABLE u\"/*[::a = 5] | ::x").is_none());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::aid = _::\"album-id\"] | %(t = $$1::title)").is_none()
+        pushdown("/albums/* <=> /tracks/*[::aid = $$0::\"album-id\"] | %(t = $$1::title)").is_none()
     );
     // The display translation double-quotes (ANSI) with a note.
     let t = export("/t/*[::\"a OR b\" = 5] | ::x").unwrap();
@@ -406,7 +406,7 @@ fn pushdown_gate() {
     assert!(pushdown("/tracks/* @| count").is_some());
     assert!(pushdown("/tracks/*[::price < 1] | %(::title)").is_some());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::album_id = _::id] | %(::title; track = $$1::title)")
+        pushdown("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(::title; track = $$1::title)")
             .is_some()
     );
     // Aggregates carry no order table; row selections order by the
@@ -454,8 +454,8 @@ fn partial_pushdown_gate() {
     assert!(partial_pushdown("/t/*[::a = 1] | .n(^/t/* @| count) | $.n", None).is_none());
     // Crosslink/resolution axes = out.
     assert!(partial_pushdown("/t/*[::a = 1]::b-->::c", None).is_none());
-    // Metadata = out (a filtered ;;;n-rows would lie).
-    assert!(partial_pushdown("/t/*[::a = 1] | ::::table", None).is_none());
+    // Metadata = out (a filtered :::n-rows would lie).
+    assert!(partial_pushdown("/t/*[::a = 1] | :::table", None).is_none());
     // Non-strict predicates (LIKE folding) = out.
     assert!(
         partial_pushdown(
@@ -473,7 +473,7 @@ fn pushdown_join_soundness_metadata() {
     // so the driver can verify uniqueness (SQL JOIN multiplies
     // rows when several joined rows match one FROM row; Quarb's
     // existential binding never does).
-    let p = pushdown("/albums/* <=> /tracks/*[::album_id = _::id] | %(a = ::title)")
+    let p = pushdown("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(a = ::title)")
         .expect("canonical witness join pushes down");
     let (table, cols) = p.join_left.expect("join carries its obligation");
     assert_eq!(table, "tracks");
@@ -493,7 +493,7 @@ fn pushdown_refuses_keyword_aliases() {
     // `AS order` is an SQL syntax error; quoting portably differs
     // by dialect, so strict pushdown refuses outright.
     let Err(err) =
-        pushdown_explained("/albums/* <=> /tracks/*[::album_id = _::id] | %(order = $$1::title)")
+        pushdown_explained("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(order = $$1::title)")
     else {
         panic!("keyword alias must refuse")
     };
@@ -509,7 +509,7 @@ fn refuses_the_internal_left_marker() {
     // join's left table: query text containing it would be
     // rewritten inside its own literals and could spoof the join
     // obligation, so it stays on the scan path.
-    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id' && ::album_id = _::id] | %($$1::title)";
+    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id' && ::album_id = $$0::id] | %($$1::title)";
     assert!(pushdown(q).is_none());
     let Err(err) = pushdown_explained(q) else {
         panic!("marker in a literal must refuse")
@@ -527,7 +527,7 @@ fn join_projections_qualify_by_operand_index() {
     // to render as one table, compiling invalid SQL that only the
     // driver's runtime refusal caught.
     let p = pushdown(
-        "/albums/* <=> /tracks/*[::album_id = _::id] \
+        "/albums/* <=> /tracks/*[::album_id = $$0::id] \
          | %(a = ::title; t = $$1::title)",
     )
     .expect("two-sided projection pushes down");
@@ -535,7 +535,7 @@ fn join_projections_qualify_by_operand_index() {
     assert!(p.sql.contains("tracks.title AS t"), "{}", p.sql);
     // Beyond the joined operand there is no verified mapping.
     assert!(
-        pushdown_explained("/albums/* <=> /tracks/*[::album_id = _::id] | %(x = $$2::title)")
+        pushdown_explained("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(x = $$2::title)")
             .is_err()
     );
 }
@@ -555,9 +555,9 @@ fn a_plan_records_the_column_types_it_assumes() {
     assert_eq!(plan.tables, ["books"]);
     let catalog = |pages: bool, genre: bool| {
         vec![
-            ("title".to_string(), false),
-            ("Pages".to_string(), pages),
-            ("genre".to_string(), genre),
+            ("title".to_string(), false, false),
+            ("Pages".to_string(), pages, false),
+            ("genre".to_string(), genre, false),
         ]
     };
     assert!(plan.column_types.unmet(&catalog(true, false)).is_empty());

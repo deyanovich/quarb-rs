@@ -63,15 +63,15 @@ fn groups_in_operand_position() {
     assert_eq!(canon("/*[(::a = 1 || ::b)]"), "/*[(::a = 1 || ::b)]");
     assert_eq!(canon("/*[(!::a && ::b)]"), "/*[(!::a && ::b)]");
     for q in [
-        "//order::amt <=>? //user[::id = _::uid] | ...?",
+        "//order::amt <=>? //user[::id = $$0::uid] | ...?",
         "//u <=> //v <=>? //order[::uid = $$1::id]",
-        "//commit[::::short = ^/tags/*::::short]",
+        "//commit[:::short = ^/tags/*:::short]",
         "/movie .m <-ACTED_IN[::born > $$.m::released] | %(::name; $$.m::title)",
         "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
-        "/tags/* | .t(:::name) | `cloc --git ${$.t}` | %($.t; lines = $_)",
+        "/tags/* | .t(:name) | `cloc --git ${$.t}` | %($.t; lines = $_)",
         "/x::v | base64 | decode(\"base64\")",
         "/x::v @| sort(\"ru-RU\")",
-        "/a/*[^//error] | %(n = :::name; of = (^//*.rs @| count))",
+        "/a/*[^//error] | %(n = :name; of = (^//*.rs @| count))",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
@@ -102,7 +102,7 @@ fn edge_accessor_round_trips() {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
     // core/adapter metadata do not live on edges
-    assert!(refuse("/a->e[$-:::depth = 1]").contains("plain properties"));
+    assert!(refuse("/a->e[$-:depth = 1]").contains("plain properties"));
 }
 
 #[test]
@@ -139,19 +139,19 @@ fn arrived_edges_round_trip() {
     for q in ["/a->e | .(@-::qty)", "/a->e | .(@-)", "/a | %(::x; l = @-)"] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
-    assert!(refuse("/a | .(@-:::depth)").contains("plain properties"));
+    assert!(refuse("/a | .(@-:depth)").contains("plain properties"));
 }
 
 #[test]
 fn context_and_piped_round_trip() {
     for q in [
-        "/a | .p((::x div (@*::x @| sum) * 100 | round))",
-        "/a | %(::n; all = (@*:::name @| sort @| join(\", \")))",
-        "/a[@* = null]",
+        "/a | .p((::x div (@@_::x @| sum) * 100 | round))",
+        "/a | %(::n; all = (@@_:name @| sort @| join(\", \")))",
+        "/a[@_ = null]",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
-    assert!(refuse("/a | .x((@* | .bad))").contains("real capsae"));
+    assert!(refuse("/a | .x((@_ | .bad))").contains("real capsae"));
 }
 
 #[test]
@@ -179,9 +179,26 @@ fn trait_algebra_round_trip() {
         "/a<Person && !Employee>",
         "/a<!*>",
         "/a<(a || b) && !c>",
+        // segment wildcards: a whole segment `.` or `*`
+        "/a<tag:.>",
+        "/a<tag:*>",
+        "/a<.:draft>",
+        "/a<*:draft>",
+        "/a<.>",
+        "/a<*>",
+        "/a<a:.:b>",
+        "/a<tag:. || .>",
+        "/a<!tag:*>",
+        // signs inside a segment are literal name characters
+        "/a<head*>",
+        "/a<v1.2>",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
+    // the rounded spelling reads the same segments
+    assert_eq!(canon("/a(:tag:.)"), "/a<tag:.>");
+    assert_eq!(canon("/a(:.:draft)"), "/a<.:draft>");
+    assert_eq!(canon("/a(:tag:*)::x"), "/a<tag:*>::x");
     // stacking still parses; canonical form is one bracket
     assert_eq!(canon("/a<x><y>"), "/a<x && y>");
     // distribution: OR over AND normalizes to CNF
@@ -194,7 +211,7 @@ fn trait_algebra_round_trip() {
 fn spread_round_trip() {
     for q in [
         "/a->e | @-::roles | ... | ...",
-        "/a | (@*::x | ...) @| count",
+        "/a | (@@_::x | ...) @| count",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
@@ -242,7 +259,7 @@ fn headless_arrow_round_trips() {
 #[test]
 fn resolution_respell_canonicalizes() {
     // `-->` / `<--` are canonical; the tilde forms remain accepted
-    // and canonicalize on unparse, like `;;;` to `::::`.
+    // and canonicalize on unparse.
     assert_eq!(
         canon("/tracks/1::album_id-->::title"),
         "/tracks/1::album_id-->::title"
@@ -441,12 +458,12 @@ fn rounded_pipes_registers_anchors_canonicalize() {
     assert_eq!(canon("/a __ ...?"), canon("/a | ...?"));
     // the correlation, mirrored like the arrows
     assert_eq!(
-        canon("//user :=: //order(?::uid = _::id)"),
-        canon("//user <=> //order[::uid = _::id]")
+        canon("//user :=: //order(?::uid = $$0::id)"),
+        canon("//user <=> //order[::uid = $$0::id]")
     );
     assert_eq!(
-        canon("//order::amt :=:? //user(?::id = _::uid) __ ...?"),
-        canon("//order::amt <=>? //user[::id = _::uid] | ...?")
+        canon("//order::amt :=:? //user(?::id = $$0::uid) __ ...?"),
+        canon("//order::amt <=>? //user[::id = $$0::uid] | ...?")
     );
     // the value side: single parens
     assert_eq!(canon("/a ,__ (?(_) .maior. 2)"), canon("/a $| [$_ > 2]"));
@@ -457,8 +474,8 @@ fn rounded_pipes_registers_anchors_canonicalize() {
         canon("/a->b[$-::w > 1]")
     );
     assert_eq!(
-        canon("/users/* :=: /orders/*(?/uid:: = _/id::) __ %(::name; amt = ((1))/amt::)"),
-        canon("/users/* <=> /orders/*[/uid:: = _/id::] | %(::name; amt = $$1/amt::)")
+        canon("/users/* :=: /orders/*(?/uid:: = $$0/id::) __ %(::name; amt = ((1))/amt::)"),
+        canon("/users/* <=> /orders/*[/uid:: = $$0/id::] | %(::name; amt = $$1/amt::)")
     );
     // the node side: double parens are canonical, single parens the
     // deprecated alias — and `(.)` is now the register file
@@ -570,7 +587,9 @@ fn record_field_colon_canonicalizes() {
         "/a | [%+:year > 2000]"
     );
     // a node has properties, not fields
-    assert!(refuse("/user/*:name").contains("::name"));
+    // Draft 157: the single colon on a node is the core rung.
+    assert_eq!(canon("/user/*:name"), "/user/*:name");
+    assert!(refuse("/user/*:::name").contains("':name'"));
     // the else colon is spaced; glued, it reads as a field
     assert_eq!(canon("/x | (::a ?= 1 ? 2 : 0)"), "/x | (::a ?= 1 ? 2 : 0)");
     assert!(refuse("/x | (::a ?= 1 ? 2 :zero)").contains("':'"));
@@ -619,8 +638,8 @@ fn operand_paths_ascend_and_step_sideways() {
     // (a key in the flat form is a quoted string — a bare word in
     // a body names a command; canonical output bares the key)
     assert_eq!(
-        canon("/p | %(dir = \\*:::name; me = ::city)"),
-        "/p | %(dir = \\:::name; me = ::city)"
+        canon("/p | %(dir = \\*:name; me = ::city)"),
+        "/p | %(dir = \\:name; me = ::city)"
     );
     assert_eq!(canon("/a[;-*::x = 1]"), "/a[>*::x = 1]");
     assert_eq!(canon("/a[>>?*::x = 1]"), "/a[>>?*::x = 1]");
@@ -733,10 +752,10 @@ fn decimal_comma_and_group_underscores_canonicalize() {
         "/a | .t(::x) <=> /b[::y = $.t] | %(::z)"
     );
     assert_eq!(
-        canon("/a <=> /b[::y = _::t] | .t(::x)"),
-        "/a <=> /b[::y = _::t] | .t(::x)"
+        canon("/a <=> /b[::y = $$0::t] | .t(::x)"),
+        "/a <=> /b[::y = $$0::t] | .t(::x)"
     );
-    assert_eq!(canon("/a | _::x | _/kid::y"), "/a | _::x | _/kid::y");
+    assert_eq!(canon("/a | $$__::x | $$__/kid::y"), "/a | $$__::x | $$__/kid::y");
     // the parent and the ancestors take no name: bare is canonical,
     // the star accepted; the rounded ascent is a hop in name position
     assert_eq!(canon("/a/b\\*/d::"), "/a/b\\/d::");

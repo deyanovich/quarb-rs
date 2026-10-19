@@ -16,9 +16,11 @@
 //! **metadata** splits by kind: counts and scalars are
 //! properties (`::stars`, `::language`, timestamps as
 //! instants), while boolean flags (`<fork>`, `<archived>`,
-//! `<open>`, `<merged>`), issue labels (`<bug>`), and repo
-//! topics (`<cli>`) are traits — unary facts filter, values
-//! compare.
+//! `<open>`, `<merged>`), issue labels (`<label:bug>`), and repo
+//! topics (`<topic:cli>`) are traits — unary facts filter, values
+//! compare. Labels and topics sit in their own namespaces, so a
+//! label never collides with a fixed trait like `<draft>`, and
+//! `<label:*>` / `<topic:*>` sweep each family.
 //!
 //! Direct addressing skips enumeration: `/rust-lang/rust` is
 //! one GET, `/rust-lang/rust/issues/12345` another (closed
@@ -120,9 +122,32 @@ fn str_value(s: &str) -> Value {
             secs,
             nanos,
             offset_min,
+            calendar: Default::default(),
         };
     }
     Value::Str(s.to_string())
+}
+
+/// A byte count as the size quantity (spec: a measured property is
+/// minted as a quantity in the source's unit); anything but a whole
+/// number passes through.
+fn bytes(v: Value) -> Value {
+    match v {
+        Value::Int(n) => Value::bytes(n),
+        other => other,
+    }
+}
+
+/// A kibibyte count as a size quantity written in KiB.
+fn kib(v: Value) -> Value {
+    match v {
+        Value::Int(n) => Value::Quantity {
+            value: n as f64 * 8192.0,
+            base: "b".to_string(),
+            written: Some((n as f64, "KiB".to_string())),
+        },
+        other => other,
+    }
 }
 
 fn json_scalar(v: &Json) -> Option<Value> {
@@ -691,7 +716,11 @@ impl AstAdapter for GithubAdapter {
                     }
                 }
                 if let Some(topics) = d.and_then(|d| d.get("topics")).and_then(|v| v.as_array()) {
-                    ts.extend(topics.iter().filter_map(|t| t.as_str().map(str::to_string)));
+                    ts.extend(
+                        topics
+                            .iter()
+                            .filter_map(|t| t.as_str().map(|t| format!("topic:{t}"))),
+                    );
                 }
                 ts
             }
@@ -721,7 +750,9 @@ impl AstAdapter for GithubAdapter {
                 }
                 if let Some(labels) = d.and_then(|d| d.get("labels")).and_then(|v| v.as_array()) {
                     ts.extend(labels.iter().filter_map(|l| {
-                        l.get("name").and_then(|v| v.as_str()).map(str::to_string)
+                        l.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|l| format!("label:{l}"))
                     }));
                 }
                 ts
@@ -815,7 +846,10 @@ impl AstAdapter for GithubAdapter {
                             "language" => "/language",
                             "default-branch" => "/default_branch",
                             "homepage" => "/homepage",
-                            "size" => "/size",
+                            // The API reports a repository's size in
+                            // kibibytes; minted in that unit (spec:
+                            // adapters mint a measure as a quantity).
+                            "size" => return at(&d, "/size").map(kib),
                             "created" => "/created_at",
                             "updated" => "/updated_at",
                             "pushed" => "/pushed_at",
@@ -864,7 +898,8 @@ impl AstAdapter for GithubAdapter {
             Shape::Entry => {
                 let d = self.data(node)?;
                 match name {
-                    "size" => at(&d, "/size"),
+                    // An entry's size in bytes, a quantity.
+                    "size" => at(&d, "/size").map(bytes),
                     "type" => at(&d, "/type"),
                     _ => None,
                 }
@@ -1133,7 +1168,7 @@ mod tests {
         );
         assert_eq!(
             a.traits(issue),
-            ["issue", "open", "bug", "good first issue"]
+            ["issue", "open", "label:bug", "label:good first issue"]
         );
         let pull = a.push_node(
             Kind::Item,
@@ -1177,7 +1212,7 @@ mod tests {
             Some(json!({"fork": true, "archived": false,
                 "topics": ["cli", "rust"]})),
         );
-        assert_eq!(a.traits(r), ["repo", "fork", "cli", "rust"]);
+        assert_eq!(a.traits(r), ["repo", "fork", "topic:cli", "topic:rust"]);
     }
 
     #[test]

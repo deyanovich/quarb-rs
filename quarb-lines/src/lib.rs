@@ -16,8 +16,8 @@
 //! - `<blank>` traits whitespace-only lines, so the trait
 //!   algebra reads the way the question is asked:
 //!   `//line<!blank> @| count`.
-//! - Annotations: `::::n` (1-based ordinal), `::::blank`;
-//!   root carries `::::n-lines` and `::::n-blank`.
+//! - Annotations: `:::n` (1-based ordinal), `:::blank`;
+//!   root carries `:::n-lines` and `:::n-blank`.
 //! - Lines have no properties at all — a closed surface — so
 //!   the annotations alias at `::` under the alias rule: `::n` and
 //!   `::blank` just work, and can never shadow anything.
@@ -111,7 +111,7 @@ impl AstAdapter for LinesAdapter {
         self.line(node).map(|l| Value::Str(l.to_string()))
     }
 
-    /// `::::n-lines` / `::::n-blank` (root); `::::n` / `::::blank`
+    /// `:::n-lines` / `:::n-blank` (root); `:::n` / `:::blank`
     /// (line).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {

@@ -245,7 +245,7 @@ impl TextModel {
     /// current position; the first line that does not match is
     /// refused by its number naming the text found, and the first
     /// block the file leaves uncovered by its path. Line k is then
-    /// the sentence with `::::n` k.
+    /// the sentence with `:::n` k.
     pub fn tokenize_given(&mut self, sentences: &str) -> Result<(), String> {
         self.mutated();
         if self.is_tokenized() && !self.tiered {
@@ -614,7 +614,7 @@ impl TextModel {
     pub(super) fn v_metadata(&self, v: Virt, key: &str) -> Option<Value> {
         match v {
             Virt::Ann { row } => self.a_metadata(row, key),
-            // `::::at` / `::::end`: the character offset and end in
+            // `:::at` / `:::end`: the character offset and end in
             // the block's text, the coordinate that survives a
             // resegmentation (two mounts of one text join by span).
             Virt::Sentence { block, k } => match key {

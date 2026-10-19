@@ -33,9 +33,9 @@ fn live_falkordb() {
     let a = FalkorAdapter::connect(&target).unwrap();
 
     // Labels at the root, nodes named by ?key=.
-    assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
-    assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
+    assert_eq!(values(&a, "/*:name"), ["City", "Person"]);
+    assert_eq!(values(&a, "/Person:::n-rows"), ["2"]);
+    assert_eq!(values(&a, "/Person/*:name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::role"), ["engineer"]);
     assert_eq!(
         values(&a, "/City/*[::country = \"RS\"]::name"),

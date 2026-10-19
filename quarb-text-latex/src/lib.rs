@@ -22,7 +22,7 @@
 //!   `\sidenotetext` are footnotes whose renderer puts them in
 //!   the margin — placement is presentation, so they join the
 //!   footnote family (sharing its counters and namespace) and
-//!   carry `::::form = "margin"` on both ends.
+//!   carry `:::form = "margin"` on both ends.
 //! - **Margin content** — `\marginpar` / `\marginnote`, the
 //!   unnumbered anchored forms — is litogramma's aside family:
 //!   an `aside` deixis at the flow point, the body at the
@@ -872,7 +872,7 @@ impl<'a> Lower<'a> {
 }
 
 /// `side*` commands are footnotes in the margin — family
-/// footnote, `::::form` carries the spelling.
+/// footnote, `:::form` carries the spelling.
 fn family_of(command: &str) -> NoteFamily {
     if command.starts_with("end") {
         NoteFamily::Endnote

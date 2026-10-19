@@ -499,7 +499,7 @@ impl Parser {
                 match self.bump() {
                     // `self::name` filters the current node by name.
                     Some(Tok::Name(n, false)) if axis == "self" => {
-                        write!(out, "[:::name = {}]", quarb_literal(&n)?).unwrap();
+                        write!(out, "[:name = {}]", quarb_literal(&n)?).unwrap();
                     }
                     Some(Tok::Star) if axis == "self" => {}
                     Some(Tok::Name(n, false)) => {
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(t("//image/parent::chapter"), "//image\\chapter");
         assert_eq!(t("//image/.."), "//image\\*");
         assert_eq!(t("//image/../title"), "//image\\*/title");
-        assert_eq!(t("//p/self::p"), "//p[:::name = \"p\"]");
+        assert_eq!(t("//p/self::p"), "//p[:name = \"p\"]");
     }
 
     #[test]

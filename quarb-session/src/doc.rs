@@ -453,7 +453,7 @@ impl Doc {
             mounts.push(quarb_mount::Mount {
                 name,
                 // Assembled from text/bytes: no real-world address to
-                // record — the mount name stands in for :::source.
+                // record — the mount name stands in for :source.
                 target: None,
                 adapter: doc.into_boxed()?,
             });

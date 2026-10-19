@@ -13,11 +13,11 @@
 //!   `line`. Words are a line's text. A declared paragraph is kept
 //!   (unlike the PDF reading, the format declares them); none is
 //!   minted.
-//! - **Geometry** as adapter metadata on every zone: `::::page`,
-//!   `::::x`, `::::y`, `::::width`, `::::height`, in the page's
+//! - **Geometry** as adapter metadata on every zone: `:::page`,
+//!   `:::x`, `:::y`, `:::width`, `:::height`, in the page's
 //!   pixel coordinates (top-left origin).
 //! - A page with no text layer has no zones; the document still
-//!   mounts with its pages, and `::::text-layer` on the document
+//!   mounts with its pages, and `:::text-layer` on the document
 //!   node says whether any page carries text. No refusal.
 //! - A multi-page file is one document, bundled or indirect (the
 //!   indirect form resolves its components beside the index). The

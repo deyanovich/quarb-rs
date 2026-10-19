@@ -10,29 +10,29 @@
 //! - Containers (namespace segments, array elements) are nodes;
 //!   fields are typed *properties* on their container AND leaf
 //!   child nodes, so per-field provenance is addressable:
-//!   `/@results/0::age` reads the value, `/@results/0/age::::dpid`
+//!   `/@results/0::age` reads the value, `/@results/0/age:dpid`
 //!   reads where it came from.
 //! - Core types mint typed values (`!int` → integer, `!bool` →
 //!   boolean, `!null` → null); the std/time types with a date part
 //!   mint *instants* (a `datetime`'s written offset is kept for
 //!   display); `!b64` and any other named type ride as text with
-//!   the type name in `::::type`.
+//!   the type name in `:::type`.
 //! - Unit-annotated types (`!float:km`) mint QUANTITIES: the value
 //!   scales to its dimension's base through kaiv's frozen unit
 //!   table, so `42 km` filters against `5000 m` or `30mi` and a
 //!   criterion may be written in any compatible unit (spec: The
 //!   Quantital Fragment). Pure-time units mint Durations; the
-//!   written unit stays on display and in `::::unit`.
+//!   written unit stays on display and in `:::unit`.
 //! - Provenance surfaces twice. Raw, as leaf adapter metadata:
-//!   `::::source` (the declared id), `::::source-uri` (its declared
-//!   URI), `::::timestamp` (the instant as written), `::::dpid` —
+//!   `:::source-id` (the declared id), `:::source-uri` (its declared
+//!   URI), `:::timestamp` (the instant as written), `:dpid` —
 //!   the first entry's, where a leaf lists several sources
-//!   (`?a;b;+N`) — and `::::sources` (every listed id). And
-//!   resolved, as the core data-provenance keys: `:::source` (the
-//!   URI), `:::instant` (a typed Instant; the newest of a list),
-//!   `:::dpid`, their composite `:::provenance` (the whole list,
-//!   `;`-separated, the elision marker kept), `:::@provenance` (one
-//!   record per entry) and `:::elided`.
+//!   (`?a;b;+N`) — and `:::sources` (every listed id). And
+//!   resolved, as the core data-provenance keys: `:source` (the
+//!   URI), `:instant` (a typed Instant; the newest of a list),
+//!   `:dpid`, their composite `:provenance` (the whole list,
+//!   `;`-separated, the elision marker kept), `:@provenance` (one
+//!   record per entry) and `:elided`.
 //! - Authored sugar (variables, blocks, `+:=`, maps, units,
 //!   named-type imports) is resolved by kaiv's own compiler before
 //!   mounting, and `$field` references are denormalized to their
@@ -217,7 +217,7 @@ fn unquote(name: &str) -> String {
     }
 }
 
-/// The typed value for a canonical type name, plus the `::::type`
+/// The typed value for a canonical type name, plus the `:::type`
 /// metadata where the name is worth keeping (non-core, named
 /// types). Named types from kaiv's embedded standard libraries
 /// resolve through their declared ordering class: `..num` mints
@@ -269,6 +269,7 @@ fn typed_value(ty: &str, raw: &str) -> (Value, Option<String>) {
                         secs,
                         nanos,
                         offset_min,
+                        calendar: Default::default(),
                     })
                     .unwrap_or_else(|| Value::Str(raw.to_string())),
                 _ => Value::Str(raw.to_string()),
@@ -374,7 +375,7 @@ impl KaivAdapter {
         // import's `.faiv` definitions join the customs table, so
         // custom units scale to base exactly like built-ins; an
         // unresolvable library is skipped, and its units keep the
-        // text-plus-`::::unit` fallback.
+        // text-plus-`:::unit` fallback.
         let mut layer1: Vec<(String, String)> = Vec::new();
         let mut unit_libs: Vec<String> = Vec::new();
         for line in &lines {
@@ -416,21 +417,16 @@ impl KaivAdapter {
                     // (one ontology per dimension of time), a
                     // dimensionless one stays a plain number, and
                     // an unresolvable custom unit keeps the old
-                    // text-plus-::::unit behavior (the .faiv
+                    // text-plus-:::unit behavior (the .faiv
                     // registry route is a recorded seam).
                     let minted = l.unit.and_then(|unit| {
                         let n: f64 = value.trim().parse().ok()?;
-                        let (factor, base) = kaiv::unit::scale_with(unit, &a.customs)?;
+                        let (_factor, base) = kaiv::unit::scale_with(unit, &a.customs)?;
                         if base == "1" {
                             return None;
                         }
-                        if base == "s" {
-                            let total = n * factor;
-                            return Some(Value::Duration {
-                                secs: total.floor() as i64,
-                                nanos: ((total - total.floor()) * 1e9) as u32,
-                            });
-                        }
+                        // the engine's base (the bit for information)
+                        let (factor, base) = engine_scale(unit, &a.customs)?;
                         Some(Value::Quantity {
                             value: n * factor,
                             base,
@@ -586,13 +582,15 @@ impl AstAdapter for KaivAdapter {
         let n = self.node(node)?;
         let l = n.leaf.as_ref()?;
         // The raw tier reads the first (anchoring) entry; the list
-        // as a whole is `::::sources` and the core tier.
+        // as a whole is `:::sources` and the core tier.
         let first = l.prov.first();
         let source = first.map(|e| e.source.as_str()).filter(|s| !s.is_empty());
         match key {
             "type" => l.ty.clone().map(Value::Str),
             "unit" => l.unit.clone().map(Value::Str),
-            "source" => source.map(|s| Value::Str(s.to_string())),
+            // the declared id, raw (`source` is the core rung's: the
+            // resolved provenance, so the raw id is `source-id`)
+            "source-id" => source.map(|s| Value::Str(s.to_string())),
             "source-uri" => {
                 let id = source?;
                 self.sources
@@ -608,16 +606,15 @@ impl AstAdapter for KaivAdapter {
                     .collect(),
             )),
             "timestamp" => first.and_then(|e| e.timestamp.clone()).map(Value::Str),
-            "dpid" => first.and_then(|e| e.dpid.clone()).map(Value::Str),
             _ => None,
         }
     }
 
-    /// The resolved data-provenance triple (`:::source` /
-    /// `:::instant` / `:::dpid`): the leaf's anchoring (first)
+    /// The resolved data-provenance triple (`:source` /
+    /// `:instant` / `:dpid`): the leaf's anchoring (first)
     /// entry, with the source id resolved through the document's
     /// `.?` declarations to its URI (the id alone does not travel
-    /// across mounts; the raw id stays on `::::source`) and the
+    /// across mounts; the raw id stays on `:source`) and the
     /// timestamp — dashed, or the deprecated compact form — bridged
     /// to a typed Instant. Containers answer nothing — a mount layer
     /// above fills what it knows.
@@ -663,8 +660,46 @@ impl AstAdapter for KaivAdapter {
     /// `[::range < '50kellicam']` means what the mounted document
     /// says a kellicam is.
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
-        kaiv::unit::scale_with(expr, &self.customs)
+        engine_scale(expr, &self.customs)
     }
+}
+
+/// A unit expression on the engine's table, kaiv's customs (`.faiv`
+/// definitions) resolving the names the table lacks. kaiv's base of
+/// information is the byte and the engine's the bit, so a custom's
+/// expansion crosses over: each `B` factor becomes eight bits.
+fn engine_scale(
+    expr: &str,
+    customs: &std::collections::BTreeMap<String, kaiv::faiv::UnitDef>,
+) -> Option<(f64, String)> {
+    quarb::quantity::scale_expr_with(expr, &|name| {
+        if !customs.contains_key(name) {
+            return None;
+        }
+        let (mut factor, base) = kaiv::unit::scale_with(name, customs)?;
+        let mut rebuilt = String::new();
+        for (i, (n, e)) in quarb::quantity::base_factors(&base).into_iter().enumerate() {
+            let n = if n == "B" {
+                factor *= 8f64.powi(e as i32);
+                "b"
+            } else {
+                n
+            };
+            if i > 0 {
+                rebuilt.push('*');
+            }
+            rebuilt.push_str(n);
+            if e != 1 {
+                rebuilt.push('^');
+                rebuilt.push_str(&e.to_string());
+            }
+        }
+        if rebuilt.is_empty() {
+            rebuilt.push('1');
+        }
+        let (f, canonical) = quarb::quantity::scale_expr(&rebuilt)?;
+        Some((factor * f, canonical))
+    })
 }
 
 #[cfg(test)]
@@ -721,83 +756,83 @@ mod tests {
         .unwrap();
         assert_eq!(values(&a, "/readings::temp"), ["100"]);
         assert_eq!(values(&a, "/readings/temp::"), ["100"]);
-        assert_eq!(values(&a, "/readings/temp::::source"), ["sensor1"]);
+        assert_eq!(values(&a, "/readings/temp:::source-id"), ["sensor1"]);
         assert_eq!(
-            values(&a, "/readings/temp::::source-uri"),
+            values(&a, "/readings/temp:::source-uri"),
             ["https://sensors.example.com/1"]
         );
-        assert_eq!(values(&a, "/readings/temp::::dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/readings/temp:dpid"), ["req-42"]);
         // The resolved core tier: URI-resolved source, the compact
         // timestamp bridged to a typed Instant (displays dashed),
         // dpid passed through, and the composite. The raw string
-        // stays on the adapter tier (`::::timestamp` above).
+        // stays on the adapter tier (`:::timestamp` above).
         assert_eq!(
-            values(&a, "/readings/temp:::source"),
+            values(&a, "/readings/temp:source"),
             ["https://sensors.example.com/1"]
         );
         assert_eq!(
-            values(&a, "/readings/temp:::instant"),
+            values(&a, "/readings/temp:instant"),
             ["2025-01-15T09:30:00Z"]
         );
-        assert_eq!(values(&a, "/readings/temp:::dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/readings/temp:dpid"), ["req-42"]);
         assert_eq!(
-            values(&a, "/readings/temp:::provenance"),
+            values(&a, "/readings/temp:provenance"),
             ["?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42"]
         );
         assert_eq!(
-            values(&a, "/readings/temp::::timestamp"),
+            values(&a, "/readings/temp:::timestamp"),
             ["20250115T093000Z"]
         );
         // A typed temporal criterion over the bridged instant (the
         // list-carrying leaf's newest entry qualifies it too).
         assert_eq!(
-            values(&a, "//*[:::instant > 2025-01-01]::"),
+            values(&a, "//*[:instant > 2025-01-01]::"),
             ["100", "21.7"]
         );
         // A leaf listing several sources: the raw tier reads the
         // first entry and names every id; the core tier answers the
         // whole list, the newest instant, and the elision count.
-        assert_eq!(values(&a, "/readings/mean::::source"), ["sensor1"]);
-        assert_eq!(values(&a, "/readings/mean::::dpid"), ["req-42"]);
-        assert_eq!(values(&a, "/readings/mean::::sources"), ["sensor1, backup"]);
-        assert_eq!(values(&a, "/readings/mean::::sources | count"), ["2"]);
+        assert_eq!(values(&a, "/readings/mean:::source-id"), ["sensor1"]);
+        assert_eq!(values(&a, "/readings/mean:dpid"), ["req-42"]);
+        assert_eq!(values(&a, "/readings/mean:::sources"), ["sensor1, backup"]);
+        assert_eq!(values(&a, "/readings/mean:::sources | count"), ["2"]);
         assert_eq!(
-            values(&a, "/readings/mean:::provenance"),
+            values(&a, "/readings/mean:provenance"),
             [
                 "?https://sensors.example.com/1@2025-01-15T09:30:00Z#req-42;https://sensors.example.com/2@2025-01-16T09:30:00Z#req-43;+3"
             ]
         );
         assert_eq!(
-            values(&a, "/readings/mean:::source"),
+            values(&a, "/readings/mean:source"),
             ["https://sensors.example.com/1"]
         );
         assert_eq!(
-            values(&a, "/readings/mean:::instant"),
+            values(&a, "/readings/mean:instant"),
             ["2025-01-16T09:30:00Z"]
         );
-        assert_eq!(values(&a, "/readings/mean:::@provenance | count"), ["2"]);
-        assert_eq!(values(&a, "/readings/mean:::elided"), ["3"]);
-        assert_eq!(values(&a, "/readings/temp:::elided"), ["0"]);
+        assert_eq!(values(&a, "/readings/mean:@provenance | count"), ["2"]);
+        assert_eq!(values(&a, "/readings/mean:elided"), ["3"]);
+        assert_eq!(values(&a, "/readings/temp:elided"), ["0"]);
         // Containers and provenance-less leaves answer null (which
         // displays as the empty string).
-        assert_eq!(values(&a, "/readings:::provenance"), [""]);
-        assert_eq!(values(&a, "/trip/length:::source"), [""]);
-        assert_eq!(values(&a, "/trip/length::::unit"), ["km"]);
+        assert_eq!(values(&a, "/readings:provenance"), [""]);
+        assert_eq!(values(&a, "/trip/length:source"), [""]);
+        assert_eq!(values(&a, "/trip/length:::unit"), ["km"]);
         // Unit-annotated: a quantity, filterable in ANY compatible
         // unit — the criterion converts through the same table.
-        assert_eq!(values(&a, "/trip[::length > 26mi]/length::"), ["42 km"]);
-        assert_eq!(values(&a, "/trip[::length = 42000]::length"), ["42 km"]);
-        assert_eq!(values(&a, "/trip | ::length + 500m"), ["42500 m"]);
+        assert_eq!(values(&a, "/trip[::length > 26mi]/length::"), ["42_km"]);
+        assert_eq!(values(&a, "/trip[::length = 42_km]::length"), ["42_km"]);
+        assert_eq!(values(&a, "/trip | ::length + 500m"), ["42.5_km"]);
         // The kW criterion against a W-minted value, and the
         // explicit conversion command.
-        assert_eq!(values(&a, "/rig[::power > 0.2kW]::power"), ["290 W"]);
-        assert_eq!(values(&a, "/rig | ::power | convert(kW)"), ["0.29 kW"]);
+        assert_eq!(values(&a, "/rig[::power > 0.2kW]::power"), ["290_W"]);
+        assert_eq!(values(&a, "/rig | ::power | convert(kW)"), ["0.29_kW"]);
         // Dimension mismatch: the comparison fails, never lies.
         assert_eq!(
             values(&a, "/rig[::power > 5km]::power"),
             Vec::<String>::new()
         );
-        assert_eq!(values(&a, "/net/host::::type"), ["acme/net/label"]);
+        assert_eq!(values(&a, "/net/host:::type"), ["acme/net/label"]);
         assert_eq!(values(&a, "/net::host"), ["web-01"]);
     }
 
@@ -811,7 +846,7 @@ mod tests {
         .unwrap();
         // Minted: temporal comparison and arithmetic apply directly.
         assert_eq!(values(&a, "/msg[::at > 2026-07-01]::day"), ["2026-07-06"]);
-        assert_eq!(values(&a, "/msg | ::at - 2026-07-06"), ["PT17H20M"]);
+        assert_eq!(values(&a, "/msg | ::at - 2026-07-06"), ["17h 20min"]);
     }
 
     #[test]
@@ -852,26 +887,26 @@ mod tests {
         // Custom units scale to base: criteria in built-in units.
         assert_eq!(
             values(&a, "/bridge[::length > 0.5km]/length::"),
-            ["364.4 smoot"]
+            ["364.4_smoot"]
         );
         assert_eq!(
             values(&a, "/@contacts/*[::range < 100km] | ::range | convert(km)"),
-            ["90 km"]
+            ["90_km"]
         );
         // Criterion text in the document's OWN units — unit_scale
         // answers from the customs — and compound criteria, quoted
         // (`/` is a navigation operator in query text).
         assert_eq!(
             values(&a, "/@contacts/*[::range > '40kellicam']::range"),
-            ["45 kellicam"]
+            ["45_kellicam"]
         );
         assert_eq!(
             values(&a, "/@contacts/*[::speed > '1km/h']::speed"),
-            ["2 kellicam/h"]
+            ["2_kellicam/h"]
         );
         assert_eq!(
             values(&a, "/@contacts/0 | ::speed | convert('km/h')"),
-            ["4 km/h"]
+            ["4_km/h"]
         );
         // Without the import resolving, the value stays text.
         let b = KaivAdapter::parse_daiv(
@@ -879,7 +914,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(values(&b, "/bridge::length"), ["364.4"]);
-        assert_eq!(values(&b, "/bridge/length::::unit"), ["smoot"]);
+        assert_eq!(values(&b, "/bridge/length:::unit"), ["smoot"]);
     }
 
     #[test]

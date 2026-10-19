@@ -183,6 +183,7 @@ fn decode_rec(o: &Json) -> Option<Rec> {
                         secs: sec,
                         nanos: nano,
                         offset_min,
+                        calendar: Default::default(),
                     }
                 } else {
                     Value::Str(s.clone())
@@ -363,6 +364,7 @@ impl AstAdapter for CflAdapter {
                 secs: rec.secs,
                 nanos: rec.nanos,
                 offset_min: None,
+                calendar: Default::default(),
             }),
             _ => get(name),
         }
@@ -468,7 +470,7 @@ mod tests {
             run("/entry[::EdgeResponseStatus = 500]::ray"),
             vec!["8a1b2c3d4e5f0001"]
         );
-        assert_eq!(run("/entry[::::cache = 'hit'] @| count"), vec!["1"]);
+        assert_eq!(run("/entry[:::cache = 'hit'] @| count"), vec!["1"]);
         // The typed instant.
         assert_eq!(run("/entry[::timestamp > 2026-07-25] @| count"), vec!["2"]);
     }

@@ -38,7 +38,7 @@ fn values(query: &str) -> Vec<String> {
 
 #[test]
 fn mounts_are_named_children() {
-    assert_eq!(values("/*:::name"), vec!["people", "cities"]);
+    assert_eq!(values("/*:name"), vec!["people", "cities"]);
     assert_eq!(values("/people/row::name"), vec!["Ada", "Bo"]);
     assert_eq!(values("/cities/cities/*/country::"), vec!["FR", "UK"]);
 }
@@ -51,7 +51,7 @@ fn cross_document_join() {
     // ON clause reaching the driver as `$$`), and the witness's
     // country projects in the pipeline.
     assert_eq!(
-        values(r#"//people/row <=> //cities/cities/*[/city:: = _::city] | $$1/country::"#),
+        values(r#"//people/row <=> //cities/cities/*[/city:: = $$0::city] | $$1/country::"#),
         vec!["FR", "UK"]
     );
 }
@@ -133,7 +133,7 @@ fn graph_values(query: &str) -> Vec<String> {
 /// named `alias`.
 #[test]
 fn mount_forwards_children_named_alias() {
-    assert_eq!(graph_values("/g/alias:::name"), vec!["a"]);
+    assert_eq!(graph_values("/g/alias:name"), vec!["a"]);
 }
 
 /// A mounted adapter's edge properties (`$-::prop`) must survive the
@@ -142,23 +142,23 @@ fn mount_forwards_children_named_alias() {
 #[test]
 fn mount_forwards_link_property() {
     assert_eq!(
-        graph_values("/g/a->knows[$-::since = 2016]:::name"),
+        graph_values("/g/a->knows[$-::since = 2016]:name"),
         vec!["b"]
     );
 }
 
-/// The mount layer fills a missing `:::source` — target where one
+/// The mount layer fills a missing `:source` — target where one
 /// was recorded, mount name otherwise — and an inner adapter's own
 /// components always win.
 #[test]
 fn mount_fills_provenance_source() {
     // Target recorded → the real-world address, not the alias.
-    assert_eq!(values("/people/row[1]:::source"), vec!["data/people.csv"]);
+    assert_eq!(values("/people/row[1]:source"), vec!["data/people.csv"]);
     // No target → the mount name stands in.
-    assert_eq!(values("/cities:::source"), vec!["cities"]);
+    assert_eq!(values("/cities:source"), vec!["cities"]);
     // No inner instant/dpid to inherit, so the composite is source-only.
     assert_eq!(
-        values("/people/row[1]:::provenance"),
+        values("/people/row[1]:provenance"),
         vec!["?data/people.csv"]
     );
 
@@ -189,13 +189,13 @@ fn mount_fills_provenance_source() {
         target: Some("bundle.tar".into()),
         adapter: Box::new(Sourced),
     }]);
-    let got = match quarb::run("/s/leaf:::source", &adapter).unwrap() {
+    let got = match quarb::run("/s/leaf:source", &adapter).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };
     assert_eq!(got, vec!["sensor://23"]);
     // The mount root itself has no inner source — the target fills.
-    let got = match quarb::run("/s:::source", &adapter).unwrap() {
+    let got = match quarb::run("/s:source", &adapter).unwrap() {
         quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
         _ => panic!("expected values"),
     };

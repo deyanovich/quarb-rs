@@ -31,13 +31,13 @@ fn live_sparql() {
     let a = SparqlAdapter::connect(&target).unwrap();
 
     // rdf:type plays the tables; the listing is complete.
-    assert_eq!(values(&a, "/*:::name"), ["City", "Person"]);
-    assert_eq!(values(&a, "/Person::::complete"), ["true"]);
-    assert_eq!(values(&a, "/Person::::n-rows"), ["2"]);
+    assert_eq!(values(&a, "/*:name"), ["City", "Person"]);
+    assert_eq!(values(&a, "/Person:::complete"), ["true"]);
+    assert_eq!(values(&a, "/Person:::n-rows"), ["2"]);
 
     // ?key=rdfs:label names resources; typed literals answer as
     // properties.
-    assert_eq!(values(&a, "/Person/*:::name"), ["Ada", "Bo"]);
+    assert_eq!(values(&a, "/Person/*:name"), ["Ada", "Bo"]);
     assert_eq!(values(&a, "/Person/Ada::jobTitle"), ["engineer"]);
     assert_eq!(
         values(&a, "/City/*[::population > 500000]::label"),
@@ -57,5 +57,5 @@ fn live_sparql() {
     assert_eq!(values(&a, "/Person/Bo<-knows::jobTitle"), ["engineer"]);
 
     // The full IRI rides the metadata channel.
-    assert_eq!(values(&a, "/Person/Ada::::iri"), ["http://example.org/ada"]);
+    assert_eq!(values(&a, "/Person/Ada:::iri"), ["http://example.org/ada"]);
 }

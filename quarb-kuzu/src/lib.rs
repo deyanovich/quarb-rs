@@ -67,6 +67,7 @@ fn cell_value(v: &kuzu::Value) -> Value {
             secs: (d.to_julian_day() as i64 - 2_440_588) * 86_400,
             nanos: 0,
             offset_min: None,
+            calendar: Default::default(),
         },
         K::Timestamp(t)
         | K::TimestampTz(t)
@@ -76,6 +77,7 @@ fn cell_value(v: &kuzu::Value) -> Value {
             secs: t.unix_timestamp(),
             nanos: t.nanosecond(),
             offset_min: None,
+            calendar: Default::default(),
         },
         K::Interval(d) => {
             let mut secs = d.whole_seconds();
@@ -84,10 +86,7 @@ fn cell_value(v: &kuzu::Value) -> Value {
                 secs -= 1;
                 nanos += 1_000_000_000;
             }
-            Value::Duration {
-                secs,
-                nanos: nanos as u32,
-            }
+            Value::seconds(secs, nanos as u32)
         }
         K::List(_, items) | K::Array(_, items) => {
             Value::list(items.iter().map(cell_value).collect())
@@ -578,7 +577,8 @@ mod tests {
             Value::Instant {
                 secs: 0,
                 nanos: 0,
-                offset_min: None
+                offset_min: None,
+                calendar: Default::default()
             }
         );
     }

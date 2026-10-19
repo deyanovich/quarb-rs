@@ -21,8 +21,8 @@
 //! - **The default value** (`::`) is the raw message for text
 //!   events, or the `message`/`logMessage` convention inside
 //!   JSON payloads.
-//! - **Metadata**: `;;;group` (the full log-group name),
-//!   `;;;stream`, `;;;received` (ingestion instant), `;;;id`
+//! - **Metadata**: `:::group` (the full log-group name),
+//!   `:::stream`, `:::received` (ingestion instant), `:::id`
 //!   (the event id).
 //!
 //! **Transport and auth**: SigV4-signed calls to the
@@ -566,6 +566,7 @@ impl AstAdapter for CwlAdapter {
                     secs: e.secs,
                     nanos: e.nanos,
                     offset_min: None,
+                    calendar: Default::default(),
                 }),
                 "logStream" => e.stream.clone().map(Value::Str),
                 _ => None,
@@ -628,6 +629,7 @@ impl AstAdapter for CwlAdapter {
                 secs,
                 nanos,
                 offset_min: None,
+                calendar: Default::default(),
             }),
             "id" => e.id.clone().map(Value::Str),
             _ => None,

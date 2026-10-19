@@ -10,7 +10,7 @@
 //! symmetric under SPARQL, so backlinks are first-class).
 //!
 //! Resources and predicates go by their IRI's **local name**
-//! (fragment, else last path segment), full IRIs at `;;;iri`;
+//! (fragment, else last path segment), full IRIs at `:::iri`;
 //! `?key=PRED` (e.g. `rdfs:label`) nominates a naming predicate
 //! instead. Typed literals keep their types — `xsd:integer` is
 //! an integer, `xsd:dateTime` mints an instant, `xsd:duration`
@@ -19,7 +19,7 @@
 //!
 //! Public endpoints are unbounded, so listings carry an explicit
 //! cap (`?limit=`, default 1000) and announce truncation at
-//! `;;;complete` on the class node — a capped listing must never
+//! `:::complete` on the class node — a capped listing must never
 //! read as a full one.
 //!
 //! **Target**: `sparql:URL[#limit=N&key=PRED&lang=L]` — adapter
@@ -110,12 +110,13 @@ fn literal_value(term: &Json) -> Value {
                 secs,
                 nanos,
                 offset_min,
+                calendar: Default::default(),
             },
             None => Value::Str(value.to_string()),
         },
         "duration" | "dayTimeDuration" | "yearMonthDuration" => {
             match quarb::temporal::parse_span(value) {
-                Some((secs, nanos)) => Value::Duration { secs, nanos },
+                Some((secs, nanos)) => Value::seconds(secs, nanos),
                 None => Value::Str(value.to_string()),
             }
         }

@@ -16,7 +16,7 @@
 //! **Loading model: catalog eager, rows lazy, hops by key.** The
 //! schema is read once at open. A table is read *whole* only when a
 //! query asks for all of it — navigating into its rows (`/t/*`), its
-//! `;;;n-rows`, a walk — via the driver-supplied [`Fetcher`]. A hop
+//! `:::n-rows`, a walk — via the driver-supplied [`Fetcher`]. A hop
 //! reads the rows it lands on: a `-->` or `->` target, `/t/KEY`, the
 //! referrers of `<-` and `<--`, through the driver's [`KeyFetcher`]
 //! (`WHERE key IN (…)`, one statement per frontier where the engine
@@ -26,7 +26,7 @@
 //! table that has answered [`KEYED_BUDGET`] keyed statements read
 //! whole, as before. Untouched tables are never read. A fetch failure
 //! surfaces as an empty table plus a warning on stderr (the adapter
-//! trait has no error channel mid-navigation); `;;;loaded` on a
+//! trait has no error channel mid-navigation); `:::loaded` on a
 //! table node reports whether it has materialized.
 //! [`RelationalModel::build`] remains the fully-eager form (used by
 //! in-memory loads and tests).
@@ -90,6 +90,78 @@ pub struct TableSpec {
     /// Declared foreign keys: (column index, target table, target
     /// column; an empty target column means the target's key).
     pub fks: Vec<(usize, String, String)>,
+    /// The columns the schema types json or jsonb: their cells
+    /// declare the JSON notation and graft as JSON (spec: Grafting).
+    pub json_columns: Vec<usize>,
+    /// Each column's declared type as the catalog spells it
+    /// (`VARCHAR(20)`, `integer`, `timestamp with time zone`), one
+    /// per column, empty where the source declares none; the cells
+    /// carry it as a trait (spec: adapter traits, [`type_traits`]).
+    pub column_types: Vec<String>,
+}
+
+/// The traits a declared SQL type gives a cell (spec: adapter
+/// traits): the type name lowercased and stripped of its parameters
+/// (`VARCHAR(20)` → `varchar`, `DECIMAL(18,3)` → `decimal`,
+/// `INTEGER[]` → `integer`), and beside it the derived kind —
+/// `number` for integer and floating-point types, `string` for the
+/// character types, `boolean` for the boolean ones — so one spelling
+/// selects the kind whatever the source. An empty declaration gives
+/// no trait.
+pub fn type_traits(declared: &str) -> Vec<String> {
+    let raw = declared.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let name = raw
+        .split(['(', '['])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let kind = if raw.starts_with("tinyint(1)") || raw == "bit(1)" {
+        // MySQL's BOOLEAN is tinyint(1); SQL Server's is bit.
+        Some("boolean")
+    } else {
+        match name.as_str() {
+            "boolean" | "bool" | "bit" => Some("boolean"),
+            "int" | "integer" | "smallint" | "bigint" | "tinyint" | "mediumint" | "int2"
+            | "int4" | "int8" | "serial" | "bigserial" | "smallserial" | "real" | "float"
+            | "float4" | "float8" | "double" | "double precision" | "numeric" | "decimal"
+            | "number" | "dec" | "hugeint" | "ubigint" | "uinteger" | "usmallint"
+            | "utinyint" | "float64" | "int64" | "numeric64" | "bignumeric" | "binary_float"
+            | "binary_double" => Some("number"),
+            "char" | "character" | "varchar" | "character varying" | "nvarchar" | "nchar"
+            | "varchar2" | "nvarchar2" | "text" | "ntext" | "clob" | "nclob" | "tinytext"
+            | "mediumtext" | "longtext" | "string" | "bpchar" | "citext" | "name" => {
+                Some("string")
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            // SQLite's declared types are free text under its
+            // affinity rules (`UNSIGNED BIG INT`, `VARYING CHARACTER`).
+            if name.contains("int") {
+                Some("number")
+            } else if name.contains("char") || name.contains("clob") || name.contains("text") {
+                Some("string")
+            } else if name.contains("bool") {
+                Some("boolean")
+            } else if name.contains("real") || name.contains("floa") || name.contains("doub") {
+                Some("number")
+            } else {
+                None
+            }
+        })
+    };
+    let mut out = vec![name];
+    if let Some(k) = kind {
+        out.push(k.to_string());
+    }
+    out
 }
 
 /// One row: an engine-side row identifier (SQLite's `rowid`, or an
@@ -333,6 +405,8 @@ impl RelationalModel {
                         columns: spec.columns.clone(),
                         pk: spec.pk,
                         fks: spec.fks.clone(),
+                        json_columns: Vec::new(),
+                        column_types: spec.column_types.clone(),
                     },
                     data: Default::default(),
                 })
@@ -385,7 +459,7 @@ impl RelationalModel {
     /// literal against a strictly typed number column) declines it
     /// too. Declined means: that table is read whole, as before.
     /// Keyed rows carry no row id ("position unknown");
-    /// `::::rowid` then reads the table to find it.
+    /// `:::rowid` then reads the table to find it.
     pub fn lazy_where(
         specs: Vec<TableSpec>,
         fetch: WhereFetcher,
@@ -843,6 +917,30 @@ impl RelationalModel {
 }
 
 impl AstAdapter for RelationalModel {
+    /// A cell carries its column's declared type and the derived
+    /// kind (spec: adapter traits); tables and rows carry none.
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        let Some((t, _, c)) = self.cell(node) else {
+            return Vec::new();
+        };
+        self.tables[t]
+            .spec
+            .column_types
+            .get(c)
+            .map(|d| type_traits(d))
+            .unwrap_or_default()
+    }
+
+    fn declared_notation(&self, node: NodeId) -> Option<String> {
+        // a cell of a column typed json/jsonb declares JSON
+        let (t, _, c) = self.cell(node)?;
+        self.tables[t]
+            .spec
+            .json_columns
+            .contains(&c)
+            .then(|| "json".to_string())
+    }
+
     fn root(&self) -> NodeId {
         NodeId(0)
     }
@@ -1517,6 +1615,9 @@ mod tests {
             columns: vec!["id".into(), "data".into()],
             pk: Some(0),
             fks: vec![],
+            json_columns: Vec::new(),
+            column_types: Vec::new(),
+        
         };
         let rows = vec![
             RowSpec {

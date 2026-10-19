@@ -15,7 +15,7 @@
 //!   object (`::port` where `port` holds a primitive) — dual
 //!   exposure, mirroring record substrates. Container-valued
 //!   fields answer only to navigation.
-//! - Adapter metadata exposes `;;;type` and `;;;length`.
+//! - Adapter metadata exposes `:::type` and `:::length`.
 //! - A `$ref`-style property resolves (`::'$ref'-->`) by treating its
 //!   string value as a JSON Pointer (`#/definitions/address`).
 //!
@@ -959,7 +959,7 @@ impl AstAdapter for JsonAdapter {
         }
     }
 
-    /// `;;;type` (the JSON type) and `;;;length` (element count for a
+    /// `:::type` (the JSON type) and `:::length` (element count for a
     /// container, character count for a string).
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];

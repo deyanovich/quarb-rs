@@ -18,7 +18,7 @@
 //!   aggregate riding the plain pipe and `HAVING` a filter after
 //!   it.
 //! - `JOIN t2 ON t2.b = t1.a` → correlation (driver-first): `/t1/*
-//!   <=> /t2/*[::b = $$::a]` — the FROM table drives, the ON rides
+//!   <=> /t2/*[::b = $$0::a]` — the FROM table drives, the ON rides
 //!   the joined expression — with the joined side's select columns
 //!   projected through the witness (`$$1::col`).
 //! - `ORDER BY` → `@| sort_by(…)` (`DESC` via `@| reverse`, or a
@@ -489,7 +489,7 @@ struct Scope {
     from: (String, Option<String>),
     join: Option<(String, Option<String>)>,
     /// Whether operands are being emitted inside the joined
-    /// expression's ON bracket (driver = `$$::col`, joined side
+    /// expression's ON bracket (driver = `$$0::col`, joined side
     /// bare) rather than in pipeline position (driver bare,
     /// joined side = `$$1::col`).
     on_clause: bool,
@@ -524,14 +524,14 @@ impl Scope {
     /// The operand for `col`. In pipeline position the driver's
     /// columns are bare and the joined table's ride its witness
     /// (`$$1::col`); inside the ON bracket the joined table's are
-    /// bare and the driver is reached as `$$::col`.
+    /// bare and the driver is reached as `$$0::col`.
     fn operand(&self, col: &ColRef) -> Result<String, SqlError> {
         let key = quarb_key(&col.column)?;
         Ok(match (self.join.is_some(), self.on_clause) {
             (false, _) => format!("::{key}"),
             (true, false) if self.is_left(col)? => format!("::{key}"),
             (true, false) => format!("$$1::{key}"),
-            (true, true) if self.is_left(col)? => format!("_::{key}"),
+            (true, true) if self.is_left(col)? => format!("$$0::{key}"),
             (true, true) => format!("::{key}"),
         })
     }
@@ -837,7 +837,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         let (left_col, right_col) = if scope.is_left(l)? { (l, r) } else { (r, l) };
         write!(
             q,
-            "/{}/* <=> /{}/*[::{} = _::{}",
+            "/{}/* <=> /{}/*[::{} = $$0::{}",
             quarb_key(&from_table)?,
             quarb_key(jt)?,
             quarb_key(&right_col.column)?,

@@ -12,7 +12,7 @@
 //! answering the `$-` accessor.
 //!
 //! System fields stay out of the tree and surface as metadata
-//! (`;;;id`, `;;;rev`; the `_key` is the node's name). Resolve
+//! (`:::id`, `:::rev`; the `_key` is the node's name). Resolve
 //! follows the `_id` convention: a value like `cities/oslo`
 //! resolves hint-less; a bare key resolves with the collection
 //! hint (`::city-->cities`).

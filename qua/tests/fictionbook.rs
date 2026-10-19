@@ -122,7 +122,7 @@ fn every_door_reads_fictionbook() {
         "«Мой дядя самых честных правил,"
     );
     assert_eq!(
-        qua(&dir, &["^::::encoding", "text:onegin1251.fb2"]),
+        qua(&dir, &["^:::encoding", "text:onegin1251.fb2"]),
         "windows-1251"
     );
 }
