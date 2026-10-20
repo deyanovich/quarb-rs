@@ -186,6 +186,10 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
     let mut reader = Reader::from_str(text);
+    // Decode through the reader: `unescape_value` disappears once
+    // any crate in the build turns on quick-xml's `encoding`
+    // feature (calamine 0.27 does), the decoder form reads either way.
+    let decoder = reader.decoder();
     let mut buf = Vec::new();
     let mut doctype: Option<String> = None;
     loop {
@@ -198,7 +202,7 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
                     .attributes()
                     .flatten()
                     .find(|a| a.key.as_ref() == b"xmlns")
-                    .and_then(|a| a.unescape_value().ok().map(|v| v.to_string()));
+                    .and_then(|a| a.decode_and_unescape_value(decoder).ok().map(|v| v.to_string()));
                 if let Some(ns) = xmlns.as_deref() {
                     match ns {
                         "http://www.tei-c.org/ns/1.0" => return Some("tei"),

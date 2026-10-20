@@ -3,7 +3,10 @@ name = "quarb-xlsx"
 description = "Spreadsheet (xlsx/ods) adapter for the Quarb query engine"
 keywords = ["query", "xlsx", "spreadsheet", "quarb"]
 categories = ["parser-implementations", "encoding"]
-version.workspace = true
+# 0.39.1 is a lone point release: calamine 0.27 pins zip to 2.5,
+# zip 2.6 broke calamine 0.26 and with it a fresh `cargo install qua`.
+# The next train restores `version.workspace = true`.
+version = "0.39.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -13,7 +16,7 @@ homepage.workspace = true
 [dependencies]
 quarb = { path = "../quarb", version = "0.39.0" }
 quarb-relational = { path = "../quarb-relational", version = "0.39.0" }
-calamine = "0.26"
+calamine = "0.27"
 thiserror.workspace = true
 
 [dev-dependencies]
