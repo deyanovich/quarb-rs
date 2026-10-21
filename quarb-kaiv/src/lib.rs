@@ -578,6 +578,17 @@ impl AstAdapter for KaivAdapter {
         self.node(node)?.leaf.as_ref().map(|l| l.value.clone())
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["type", "unit", "source-id", "source-uri", "sources", "timestamp"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = self.node(node)?;
         let l = n.leaf.as_ref()?;
@@ -661,6 +672,12 @@ impl AstAdapter for KaivAdapter {
     /// says a kellicam is.
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         engine_scale(expr, &self.customs)
+    }
+
+    /// The document's own units, every name its `.!units` imports
+    /// define.
+    fn unit_names(&self) -> Vec<String> {
+        self.customs.keys().cloned().collect()
     }
 }
 

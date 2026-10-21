@@ -54,6 +54,7 @@ pub(crate) fn command_reads_context(command: &Command) -> bool {
                 Operand::Topics
                     | Operand::Positions { .. }
                     | Operand::Matrix { .. }
+                    | Operand::CtxTable
                     | Operand::PeerReg { .. }
             ) {
                 self.0 = true;
@@ -287,6 +288,15 @@ pub(crate) fn apply_command<H: Host>(
         Command::Agg(call) if crate::pipeline::env::split_env(&call.name).is_some() => {
             env_agg_command(call, caps, host, trace, outer, peers)
         }
+        // `@| sum(--of=::n)` — the option's expression is read on
+        // each capsa in turn, as a key is, and the reduction runs
+        // over the results (draft 164): the capsae carry the results
+        // as their topics into the reduction's own arm.
+        Command::Agg(call) if call.of_expr().is_some() => {
+            let expr = call.of_expr().expect("checked");
+            let caps = of_values(expr, caps, host, trace, outer, peers);
+            apply_command(&Command::Agg(call.without_of()), caps, host, trace, outer)
+        }
         Command::Func(call) if call.name == "sh" && !run_option(|o| o.shell_allowed()) => {
             record_refusal("the sh(...) command runs external commands; pass --allow-shell".into());
             Vec::new()
@@ -394,15 +404,46 @@ pub(crate) fn apply_command<H: Host>(
         // `ngrams`: `@| ngrams(n)` windows the stream, `| ngrams(n)`
         // the word n-grams of a text.)
         // `| #` on a node: a `tabula` node read as a table (spec: The
-        // Table); on a value, the table reading of the value.
-        Command::Func(call) if call.name == "#" && caps.iter().any(|c| c.topic.is_none()) => caps
-            .into_iter()
+        // Table); `| %` the record of its properties (draft 164);
+        // `| @` has no reading of a node and is refused with the
+        // pointer. On a value, the readings of the value.
+        Command::Func(call)
+            if matches!(call.name.as_str(), "#" | "%" | "@" | "fields")
+                && caps.iter().any(|c| c.topic.is_none()) =>
+        {
+            caps.into_iter()
             .map(|mut c| {
                 let v = match c.topic.take() {
                     Some(t) => stdlib::apply_scalar(call, t, &|e| host.scale_of(e))
                         .into_iter()
                         .next()
                         .unwrap_or(Value::Null),
+                    // the record of the node's properties: its names,
+                    // each read as `::name` reads it
+                    None if call.name == "%" => Value::Record(
+                        host.property_names_of(&c.ext)
+                            .into_iter()
+                            .map(|n| {
+                                let v = host.property_of(&c.ext, &n).unwrap_or(Value::Null);
+                                (n, v)
+                            })
+                            .collect(),
+                    ),
+                    // `| fields` on a node: its core field projections
+                    None if call.name == "fields" => Value::list(
+                        crate::graph::navigate::CORE_FIELDS
+                            .iter()
+                            .map(|k| Value::projection(1, *k))
+                            .collect(),
+                    ),
+                    None if call.name == "@" => {
+                        record_refusal(
+                            "@: a node has no row reading; '| %' reads its properties as a \
+                             record, '| #' a tabula node as a table"
+                                .into(),
+                        );
+                        Value::Null
+                    }
                     None => match host.node_table(&c.ext) {
                         Ok(t) => Value::table(t),
                         Err(why) => {
@@ -415,7 +456,8 @@ pub(crate) fn apply_command<H: Host>(
                 c.topic = Some(v);
                 c
             })
-            .collect(),
+            .collect()
+        }
         Command::Func(call)
             if stdlib::known_agg(&call.name)
                 && !matches!(
@@ -423,7 +465,7 @@ pub(crate) fn apply_command<H: Host>(
                     "number" | "ngrams" | "csv" | "table" | "pretty"
                 ) =>
         {
-            agg_as_func_command(call, caps, host)
+            agg_as_func_command(call, caps, host, trace, outer, peers)
         }
         // Per-capsa scalar transform; a command may expand one topic
         // into several (e.g. `lines`), forking the capsa.
@@ -444,12 +486,6 @@ pub(crate) fn apply_command<H: Host>(
             max,
         } => repeat_command(inner, min, max, caps, host, trace, outer),
         Command::Map(inner) => map_command(inner, caps, host, trace, outer),
-        Command::Append { body, overwrite } => {
-            append_command(body, *overwrite, caps, host, trace, outer)
-        }
-        Command::AppendRow { items, overwrite } => {
-            append_row_command(items, *overwrite, caps, host, trace, outer, peers)
-        }
         // The spread: fork a list topic into one thread per
         // element; null forks to nothing, a non-list scalar passes
         // through, a record passes whole. The outer form `...?`
@@ -634,6 +670,13 @@ pub(crate) fn apply_command<H: Host>(
             out.prov = prov;
             vec![out]
         }
+        // `@| @(0; $_)`, `@| 0` — an expression over the context as
+        // a whole: the seed capsa's topic is the list of the topics,
+        // and the one capsa out holds the expression's value.
+        Command::AggExpr(expr) => {
+            let seed = seed_capsa(&caps, host);
+            expr_command(expr, vec![seed], host, trace, outer, peers)
+        }
         // `@| %.` / `@| $.name` — a register accessor after the
         // aggregation pipe reads once: the regulae every capsa
         // shares, as one capsa.
@@ -691,6 +734,11 @@ pub(crate) fn apply_command<H: Host>(
         // like `shift`.
         Command::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
             outline_command(call, caps, host, trace, outer, peers)
+        }
+        // `@| tree[(…)]` — the context drawn as a tree, one text
+        // value (spec: The tree).
+        Command::Agg(call) if call.name == "tree" => {
+            tree_command(call, caps, host, trace, outer, peers)
         }
         // `@| timeline(EXPR[; ANCHOR][; forward])` — the narrative
         // point carried from capsa to capsa. Row-aligned like
@@ -879,33 +927,86 @@ pub(crate) fn agg_as_func_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
+    let stripped = call.without_of();
+    let of = call.of_expr();
+    let call = if of.is_some() { &stripped } else { call };
     caps.into_iter()
         .map(|mut c| {
-            let mut items = match c.topic.take() {
-                Some(l @ Value::List(_)) => l.into_items().unwrap_or_default(),
-                Some(other) => vec![other],
-                None => vec![host.node_scalar(&c.ext)],
-            };
-            // `sum(:n)` over a group of records: a
-            // leading topic-field argument projects the members
-            // before the reduction — `top(3; :n)`'s spelling on
-            // the reducing side.
-            let projected;
-            let call = match call.args.first() {
-                Some(Arg::Expr(op)) if topic_field(op).is_some() => {
-                    let names = topic_field(op).expect("checked");
-                    items = items
-                        .into_iter()
-                        .map(|v| names.iter().fold(v, |v, n| record_field(v, n)))
-                        .collect();
-                    projected = FnCall {
-                        name: call.name.clone(),
-                        args: call.args[1..].to_vec(),
+            // The reducers over structures (draft 164): a record's
+            // values, a table's columns into a record; `count` of
+            // a record's fields and a table's rows.
+            if of.is_none()
+                && let Some(topic @ (Value::Record(_) | Value::Table(_))) = &c.topic
+                && let Some(v) = stdlib::reduce_structure(call, topic, &|e| host.scale_of(e))
+            {
+                c.topic = Some(v);
+                c.prov = c.prov.flat();
+                c.members = Vec::new();
+                return c;
+            }
+            let items = match of {
+                // `| sum(--of=:n)` after `group`: the expression is
+                // read on each member in turn (each its own capsa),
+                // or on each item of a list topic as the topic, a
+                // table's rows, a record's values (draft 164).
+                Some(expr) => {
+                    let members = std::mem::take(&mut c.members);
+                    let threads: Vec<Thread<H::Ext>> = if !members.is_empty() {
+                        c.topic.take();
+                        members
+                    } else {
+                        let as_thread = |topic: Option<Value>, prov: Prov| Thread::<H::Ext> {
+                            prov,
+                            register: c.register.clone(),
+                            topic,
+                            members: Vec::new(),
+                            captures: c.captures.clone(),
+                            named: c.named.clone(),
+                            ext: c.ext.clone(),
+                        };
+                        match c.topic.take() {
+                            Some(l @ Value::List(_)) => l
+                                .into_items()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, v)| as_thread(Some(v), c.prov.item(i)))
+                                .collect(),
+                            Some(Value::Table(t)) => t
+                                .as_ref()
+                                .clone()
+                                .into_records()
+                                .into_items()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, v)| as_thread(Some(v), c.prov.item(i)))
+                                .collect(),
+                            Some(Value::Record(fields)) => fields
+                                .into_iter()
+                                .map(|(k, v)| {
+                                    let prov = c.prov.part(&k);
+                                    as_thread(Some(v), prov)
+                                })
+                                .collect(),
+                            Some(other) => vec![as_thread(Some(other), c.prov.clone())],
+                            None => vec![as_thread(None, c.prov.clone())],
+                        }
                     };
-                    &projected
+                    of_values(expr, threads, host, trace, outer, peers)
+                        .into_iter()
+                        .map(|t| t.topic.unwrap_or(Value::Null))
+                        .collect()
                 }
-                _ => call,
+                None => match c.topic.take() {
+                    Some(l @ Value::List(_)) => l.into_items().unwrap_or_default(),
+                    Some(other) => vec![other],
+                    None => vec![host.node_scalar(&c.ext)],
+                },
             };
             let mut out = stdlib::apply(call, items, &|e| host.scale_of(e));
             c.topic = Some(match out.len() {
@@ -1145,8 +1246,18 @@ pub(crate) fn order_command<H: Host>(
     caps: Vec<Thread<H::Ext>>,
     host: &H,
 ) -> Vec<Thread<H::Ext>> {
+    // `first` / `last` over an empty context: an empty input
+    // reduces to null (spec: Aggregate Commands), a thread with no
+    // position.
+    if caps.is_empty() && matches!(call.name.as_str(), "first" | "last") {
+        return vec![Thread::bare(host.unplaced_ext(), Some(Value::Null))];
+    }
     // Which capsae are still nodes (no topic yet): `unique`
-    // tells nodes apart by identity, values by value.
+    // tells nodes apart by identity, values by value. An ordering
+    // reduction over nodes acts on the NODES and yields node
+    // threads (spec: Lists, draft 164): a node stands by its name
+    // for the ordering, but no name is materialized as its topic —
+    // `@| reverse | :name` reads the core field as before.
     let is_node: Vec<bool> = caps.iter().map(|c| c.topic.is_none()).collect();
     let mut caps: Vec<Thread<H::Ext>> = caps
         .into_iter()
@@ -1154,11 +1265,14 @@ pub(crate) fn order_command<H: Host>(
             if c.topic.is_none() {
                 c.prov = host.prov_at(&c.ext);
             }
-            c.topic = Some(c.topic.take().unwrap_or_else(|| host.node_scalar(&c.ext)));
             c
         })
         .collect();
-    let topic_of = |c: &Thread<H::Ext>| c.topic.clone().unwrap_or(Value::Null);
+    let topic_of = |c: &Thread<H::Ext>| {
+        c.topic
+            .clone()
+            .unwrap_or_else(|| host.node_scalar(&c.ext))
+    };
     match call.name.as_str() {
         // With a locale argument, topics sort by their text
         // under that locale's collation (colligo; codepoint
@@ -1379,81 +1493,6 @@ pub(crate) fn map_command<H: Host>(
         .collect()
 }
 
-/// `+| body` — the append pipe (spec: The Append Pipe): per capsa,
-/// the body runs over the topic as the segment after `|` would, and
-/// every value it yields is appended to the topic by the shape
-/// rule; the capsa goes on with the new topic. A refusal nulls it.
-pub(crate) fn append_command<H: Host>(
-    body: &Command,
-    overwrite: bool,
-    caps: Vec<Thread<H::Ext>>,
-    host: &H,
-    trace: &H::Trace,
-    outer: Option<&Scope<'_, H::Ext>>,
-) -> Vec<Thread<H::Ext>> {
-    caps.into_iter()
-        .map(|mut c| {
-            let topic = c.topic.clone().unwrap_or(Value::Null);
-            let pseudo = vec![Thread::<H::Ext> {
-                prov: c.prov.clone(),
-                register: c.register.clone(),
-                topic: Some(topic.clone()),
-                members: Vec::new(),
-                captures: c.captures.clone(),
-                named: c.named.clone(),
-                ext: c.ext.clone(),
-            }];
-            let items: Vec<Value> = apply_command(body, pseudo, host, trace, outer)
-                .into_iter()
-                .map(|p| p.topic.unwrap_or(Value::Null))
-                .collect();
-            c.topic = Some(
-                match crate::stdlib::append_values(topic, items, overwrite) {
-                    Ok(v) => v,
-                    Err(why) => {
-                        crate::pipeline::record_refusal(format!("+|: {why}"));
-                        Value::Null
-                    }
-                },
-            );
-            c
-        })
-        .collect()
-}
-
-/// `+| %(…)` — the append pipe with a row: the items evaluated per
-/// capsa, the row placed under the table literal's rules against the
-/// topic's header; a named row is a record on a record or a list.
-pub(crate) fn append_row_command<H: Host>(
-    items: &[(Option<String>, Operand)],
-    overwrite: bool,
-    caps: Vec<Thread<H::Ext>>,
-    host: &H,
-    trace: &H::Trace,
-    outer: Option<&Scope<'_, H::Ext>>,
-    peers: Option<&Peers<H::Ext>>,
-) -> Vec<Thread<H::Ext>> {
-    caps.into_iter()
-        .enumerate()
-        .map(|(i, mut c)| {
-            let scope = c.scope(Some(i + 1), peers, outer);
-            let row: Vec<(Option<String>, Value)> = items
-                .iter()
-                .map(|(name, e)| (name.clone(), operand_value(host, &c.ext, e, trace, scope)))
-                .collect();
-            let topic = c.topic.take().unwrap_or(Value::Null);
-            c.topic = Some(match crate::stdlib::append_row(topic, row, overwrite) {
-                Ok(v) => v,
-                Err(why) => {
-                    crate::pipeline::record_refusal(format!("+|: {why}"));
-                    Value::Null
-                }
-            });
-            c
-        })
-        .collect()
-}
-
 /// `| [cond]` as a command — `apply_command`'s filter arm.
 pub(crate) fn filter_command<H: Host>(
     cond: &PredExpr,
@@ -1502,6 +1541,30 @@ pub(crate) fn filter_command<H: Host>(
 }
 
 /// `@| f(...)` — an aggregate over the whole context (or each partition): `apply_command`'s aggregate arm.
+/// `--of=expr` (spec: Aggregating Pipe, draft 164): the expression
+/// read on each capsa in turn — its own topic, position and memory
+/// in reach — as the value the reduction takes; a null result is a
+/// missing value, as the reduction treats one.
+fn of_values<H: Host>(
+    expr: &Operand,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    caps.into_iter()
+        .enumerate()
+        .map(|(i, mut c)| {
+            let scope = c.scope(Some(i + 1), peers, outer);
+            let (value, o) = capture(|| group_value(host, &c.ext, expr, trace, scope));
+            c.topic = Some(value);
+            c.prov = Prov::leaf(o);
+            c
+        })
+        .collect()
+}
+
 pub(crate) fn agg_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,
@@ -1591,9 +1654,11 @@ pub(crate) fn agg_command<H: Host>(
             None => origins.insert(host.origin_at(&c.ext)),
         }
     }
-    let node = caps
-        .first()
-        .map_or_else(|| host.root_ext(), |c| c.ext.bare());
+    // The reduction's one thread has no position (spec: Aggregating
+    // Pipe): `$$_` and `$-` are null after it, and navigation
+    // continues only where the query says from where (`$$__/…`, a
+    // mark).
+    let node = host.unplaced_ext();
     // A reduction that hands back one of its inputs (max,
     // min, first, last, unique, sort, reverse) keeps that
     // input's origins, so `((!$_:%origin:id))` after `@| max`

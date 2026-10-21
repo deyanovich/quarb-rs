@@ -51,7 +51,7 @@ fn close(a: &[f64], b: &[f64]) {
 fn zscore_standardizes_the_context() {
     // 2, 4, 6: sample sd 2 → −1, 0, 1; population scores sum to 0
     // and agree with the arithmetic spelled out.
-    close(&floats("/n/* | :: @| zscore(sample)"), &[-1.0, 0.0, 1.0]);
+    close(&floats("/n/* | :: @| zscore(--sample)"), &[-1.0, 0.0, 1.0]);
     let pop = floats("/n/* | :: @| zscore");
     assert!(pop.iter().sum::<f64>().abs() < 1e-12);
     let sd = (8.0f64 / 3.0).sqrt();
@@ -62,7 +62,7 @@ fn zscore_standardizes_the_context() {
         &[-1.0, 1.0, -1.0, 1.0],
     );
     close(
-        &floats("/g/* | ::x @| zscore(sample; ::k)"),
+        &floats("/g/* | ::x @| zscore(::k; --sample)"),
         &[
             -1.0 / 2f64.sqrt(),
             1.0 / 2f64.sqrt(),
@@ -81,12 +81,12 @@ fn zscore_standardizes_the_context() {
 
 #[test]
 fn sample_dispersion() {
-    close(&floats("/n/* | :: @| stddev(sample)"), &[2.0]);
+    close(&floats("/n/* | :: @| stddev(--sample)"), &[2.0]);
     close(&floats("/n/* | :: @| stddev"), &[(8.0f64 / 3.0).sqrt()]);
-    close(&floats("/n/* | :: @| variance(sample)"), &[4.0]);
+    close(&floats("/n/* | :: @| variance(--sample)"), &[4.0]);
     // Per group of records, with the group projection.
     assert_eq!(
-        values("/g/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(:x; sample)"),
+        values("/g/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(--sample --of=:x)"),
         ["0.5", "0.5"]
     );
     let e = quarb::run("/n/* | :: @| stddev(2)", &doc()).unwrap_err();

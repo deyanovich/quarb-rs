@@ -35,8 +35,8 @@ fn qc_in(args: &[&str], input: Option<&str>) -> (bool, String) {
 
 #[test]
 fn the_head_is_accepted_and_not_required() {
-    assert_eq!(qc(&["= @(1; 2) +| 3"]), (true, "@(1; 2; 3)\n".to_string()));
-    assert_eq!(qc(&["@(1; 2) +| 3"]), (true, "@(1; 2; 3)\n".to_string()));
+    assert_eq!(qc(&["= @(1; 2) ++ 3"]), (true, "@(1; 2; 3)\n".to_string()));
+    assert_eq!(qc(&["@(1; 2) ++ 3"]), (true, "@(1; 2; 3)\n".to_string()));
     assert_eq!(qc(&["2 + 3 * 4"]), (true, "14\n".to_string()));
     // Unquoted: the arguments are joined with spaces, and a leading
     // negative number is a value, not an option.
@@ -44,7 +44,7 @@ fn the_head_is_accepted_and_not_required() {
     assert_eq!(qc(&["-3", "+", "5"]), (true, "2\n".to_string()));
     assert_eq!(qc(&["=", "2", "*", "-4"]), (true, "-8\n".to_string()));
     assert_eq!(
-        qc(&["@(1; 2)", "+|", "3"]),
+        qc(&["@(1; 2)", "++", "3"]),
         (true, "@(1; 2; 3)\n".to_string())
     );
     assert_eq!(

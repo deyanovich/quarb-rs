@@ -1483,6 +1483,14 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    fn metadata_keys(&self, node: NodeId) -> Vec<String> {
+        match self.decode(node) {
+            Some((_, 0)) => vec!["n-rows".to_string()],
+            Some(_) => Vec::new(),
+            None => self.base.metadata_keys(node),
+        }
+    }
+
     /// Model nodes add their own annotations (`n-rows`); base nodes
     /// keep the mounted adapter's, aliases included. A model node's
     /// id means nothing to the base, so it is never passed down
@@ -1857,6 +1865,16 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             return quarb::quantity::scale_expr_with(expr, &|name| customs.get(name).cloned());
         }
         self.base.unit_scale(expr)
+    }
+
+    /// Every spelling the libraries declare, then the source's own.
+    fn unit_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = match &self.units {
+            Ok(customs) => customs.keys().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        names.extend(self.base.unit_names());
+        names
     }
 }
 

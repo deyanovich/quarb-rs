@@ -26,6 +26,7 @@ pub(crate) fn navigate_paths(
             node: start,
             bindings: Vec::new(),
             arrived: Vec::new(),
+            unplaced: false,
         },
         seed_register.to_vec(),
     )];
@@ -56,6 +57,7 @@ pub(crate) fn navigate_paths(
                                 node: s,
                                 bindings: Vec::new(),
                                 arrived,
+                                unplaced: false,
                             },
                             register.clone(),
                         )
@@ -67,6 +69,7 @@ pub(crate) fn navigate_paths(
                             node,
                             bindings: Vec::new(),
                             arrived: Vec::new(),
+                            unplaced: false,
                         },
                         visited: vec![node],
                         register: register.clone(),
@@ -203,6 +206,7 @@ impl GPath {
                 node,
                 bindings: Vec::new(),
                 arrived: Vec::new(),
+                unplaced: false,
             },
             visited,
             register: self.register.clone(),
@@ -683,7 +687,15 @@ pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection
     match proj {
         Projection::Property(Some(name)) => property_or_alias(adapter, node, name),
         Projection::Property(None) => adapter.default_value(node).unwrap_or(Value::Null),
-        Projection::CoreMeta(key) => core_meta(adapter, node, key).unwrap_or(Value::Null),
+        // An unknown core field is refused naming the core fields
+        // (draft 164), as an unknown unit is; `:fields` lists them.
+        Projection::CoreMeta(key) => core_meta(adapter, node, key).unwrap_or_else(|| {
+            crate::value::ambient::record_refusal(format!(
+                "':{key}' is no core field; the core fields are {} (':fields' lists them); a property is '::{key}', adapter metadata ':::{key}'",
+                crate::graph::navigate::CORE_FIELDS.join(", ")
+            ));
+            Value::Null
+        }),
         Projection::AdapterMeta(key) => adapter.metadata(node, key).unwrap_or(Value::Null),
     }
 }

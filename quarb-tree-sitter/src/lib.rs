@@ -311,6 +311,17 @@ impl AstAdapter for TreeSitterAdapter {
         ))
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["kind", "field", "start-line", "end-line"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

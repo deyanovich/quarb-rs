@@ -81,6 +81,8 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
         Value::Int(i) => i.into_py_any(py)?,
         Value::Float(f) => f.into_py_any(py)?,
         Value::Str(s) => s.into_py_any(py)?,
+        // a projection coerces to text as its bare key
+        Value::Projection { key, .. } => key.clone().into_py_any(py)?,
         Value::List(items) => {
             let list = PyList::empty(py);
             for item in items.iter() {

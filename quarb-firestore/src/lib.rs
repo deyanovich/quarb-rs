@@ -517,6 +517,17 @@ impl AstAdapter for FirestoreAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["path", "n-fields"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
             "path" => Some(Value::Str(self.locator(node))),

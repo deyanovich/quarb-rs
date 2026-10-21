@@ -1055,6 +1055,23 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    fn metadata_keys(&self, node: NodeId) -> Vec<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().metadata_keys(inner),
+            None => {
+                let mut keys = self.outer.metadata_keys(node);
+                if self.graft_at(node).is_some() {
+                    for k in ["encoding", "replaced"] {
+                        if self.metadata(node, k).is_some() && !keys.iter().any(|x| x == k) {
+                            keys.push(k.to_string());
+                        }
+                    }
+                }
+                keys
+            }
+        }
+    }
+
     /// A graft's own aliases are not merged: a node either belongs
     /// to the outer document or to a graft, and the alias list is
     /// consulted only after the owning adapter's `property` misses.

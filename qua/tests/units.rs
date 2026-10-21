@@ -24,6 +24,14 @@ fn run(q: &str) -> quarb::Result<Vec<String>> {
     })
 }
 
+/// The refusal's text.
+fn refused(q: &str) -> String {
+    match run(q) {
+        Ok(v) => panic!("{q}: expected a refusal, got {v:?}"),
+        Err(e) => e.to_string(),
+    }
+}
+
 fn one(q: &str) -> String {
     let v = run(q).unwrap();
     assert_eq!(v.len(), 1, "{q}: {v:?}");
@@ -72,6 +80,90 @@ fn the_bit_is_the_base_of_information() {
     assert_eq!(one("= '5 KB' | quantity"), "");
     assert_eq!(one("= '5 mB' | quantity"), "");
     assert_eq!(one("= '5 KiB' | quantity | dimension"), "B");
+}
+
+#[test]
+fn the_operand_of_a_conversion_must_be_a_known_unit() {
+    // spec: The conversion (draft 161) — `KB` is no unit, and the
+    // refusal says what the two readings are
+    let e = refused("= 548_B | convert(KB)");
+    assert!(e.contains("convert(KB): no unit 'KB'"), "{e}");
+    assert!(e.contains("kB is 1000 B, KiB is 1024 B"), "{e}");
+    assert_eq!(one("= 548_B | convert(kB)"), "0.548_kB");
+    assert_eq!(one("= 548_B | convert(KiB) | round(3)"), "0.535_KiB");
+    let e = refused("= 5 | unit(KB)");
+    assert!(e.contains("unit(KB): no unit 'KB'"), "{e}");
+    let e = refused("= 5_km | magnitude(KM)");
+    assert!(
+        e.contains("magnitude(KM): no unit 'KM' (the nearest: km)"),
+        "{e}"
+    );
+    // a compound operand checks each factor
+    let e = refused("= 3_EUR/kg | convert(EUR/lbs)");
+    assert!(
+        e.contains("convert(EUR/lbs): no unit 'lbs' (the nearest: lb)"),
+        "{e}"
+    );
+    assert_eq!(
+        one("= 3_EUR/kg | convert(EUR/lb) | round(3)"),
+        "1.361_EUR/lb"
+    );
+    // the call operand is the pipe form
+    let e = refused("= convert(548_B, KB)");
+    assert!(e.contains("convert(KB): no unit 'KB'"), "{e}");
+    assert_eq!(one("= convert(548_B, kB)"), "0.548_kB");
+    // in a record item, where the silent null was found
+    let e = refused("/rows/* | %(::id; size = convert(::size, KB))");
+    assert!(e.contains("no unit 'KB'"), "{e}");
+    // a known unit of another dimension stays null, as the spec says
+    assert_eq!(one("= 548_B | convert(km)"), "");
+    assert_eq!(one("= 5_km | unit(kg)"), "");
+    // a value's unknown unit still reads as an opaque unit; the
+    // operand alone must be known
+    assert_eq!(one("= 3_apples/kg | dimension"), "apples/M");
+    assert_eq!(one("= '12_apples' | quantity | unit"), "apples");
+    let e = refused("= 3_apples | convert(apples)");
+    assert!(e.contains("convert(apples): no unit 'apples'"), "{e}");
+    // no operand: the base form, unchecked
+    assert_eq!(one("= 5_km | convert"), "5000_m");
+}
+
+#[test]
+fn a_fragment_body_spelling_a_unit_is_judged_at_the_splice() {
+    // a definitions file parses without a dataset: the body's
+    // operands wait for the splice site, which names the fragment
+    let defs = quarb::parse_defs(
+        "def &kilo: | convert(KB);\ndef &viakilo: | &kilo;\ndef &fine: | convert(kB);\n",
+    )
+    .unwrap();
+    let run = quarb::Run::ambient();
+    // (a body invoking the fragment defers once more, and the
+    // refusal names the fragment the query invoked)
+    for (q, name) in [
+        ("= 548_B | &kilo", "kilo"),
+        ("= 548_B | &viakilo", "viakilo"),
+    ] {
+        let e = quarb::Query::parse_with(q, &defs, &doc(), &run)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&format!(
+                "in expansion of '&{name}': convert(KB): no unit 'KB'"
+            )),
+            "{q}: {e}"
+        );
+    }
+    let out = quarb::Query::parse_with("= 548_B | &fine", &defs, &doc(), &run)
+        .unwrap()
+        .run(&doc(), &run)
+        .unwrap();
+    assert_eq!(
+        match out.result {
+            QueryResult::Values(vs) => vs.iter().map(Value::display_form).collect::<Vec<_>>(),
+            _ => vec![],
+        },
+        ["0.548_kB"]
+    );
 }
 
 #[test]

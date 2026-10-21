@@ -214,8 +214,16 @@ def _first_line(o):
     return line.rstrip(".")
 
 def _synopsis(root, classes, path, dynamic):
+    """A parameter is reachable as Python takes it (spec: "Reflected
+    commands"): operands fill the positional parameters in signature
+    order — the required ones of every call on the path, then the
+    defaulted ones of the first call, where surplus operands go —
+    and `--name=` fills the parameter so named wherever it stands;
+    positional-only is an operand alone, keyword-only an option
+    alone; `*args` admits surplus operands, `**kwargs` any option."""
     start, segs = _plan(root, classes, path, dynamic)
     operands, options, seen = [], [], set()
+    deferred = []
     variadic = open_ = False
     first = True
     if start == "input":
@@ -226,28 +234,44 @@ def _synopsis(root, classes, path, dynamic):
                 variadic = open_ = True
                 first = False
                 continue
+            leading = _first_positional(s)
             for p in s.params:
                 if p.kind == p.VAR_POSITIONAL:
                     variadic = True
-                elif p.kind == p.VAR_KEYWORD:
+                    continue
+                if p.kind == p.VAR_KEYWORD:
                     open_ = True
-                elif p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
-                    operands.append((p.name, "", True))
-                elif p.kind == p.POSITIONAL_ONLY:
-                    if first:
-                        variadic = True
-                else:
-                    if p.kind == p.POSITIONAL_OR_KEYWORD and first:
-                        variadic = True
+                    continue
+                required = p.default is p.empty
+                d = p.default
+                shown = "" if required or repr(d).startswith("<") else repr(d)
+                doc = f"default {shown}" if shown else ""
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                    if required:
+                        operands.append((p.name, "", True))
+                    elif first and p is leading and p.name in _DATA_NAMES:
+                        # A class or function whose first parameter is
+                        # its data, defaulted (`DataFrame(data=None)`):
+                        # the input's slot, ahead of the rest.
+                        operands.append((p.name, doc, False))
+                    elif first:
+                        deferred.append((p.name, doc, False))
+                if p.kind != p.POSITIONAL_ONLY:
                     long = p.name.replace("_", "-")
                     if long not in seen:
                         seen.add(long)
-                        d = p.default
-                        shown = "" if d is p.empty or repr(d).startswith("<") else repr(d)
-                        options.append((long, f"default {shown}" if shown else ""))
+                        options.append((long, doc))
             first = False
         elif s.kind == "unknown":
             variadic = open_ = True
+    # The slot the input fills: the receiver of a method; else the
+    # first parameter named as data (`X` in `cross_val_score(estimator,
+    # X, y)`, `data` of a constructor), else the first — judged before
+    # the first call's defaulted positionals join the operands.
+    input_at = 0
+    if start != "input":
+        input_at = next((i for i, (n, _, _) in enumerate(operands) if n in _DATA_NAMES), 0)
+    operands += deferred
     last = segs[-1]
     if last.kind == "module":
         raise AttributeError(
@@ -263,12 +287,6 @@ def _synopsis(root, classes, path, dynamic):
             pass
     elif last.kind == "class":
         returns = last.obj.__name__
-    # The slot the input fills: the receiver of a method; else the
-    # first required parameter named as data (`X` in
-    # `cross_val_score(estimator, X, y)`), else the first required.
-    input_at = 0
-    if start != "input":
-        input_at = next((i for i, (n, _, _) in enumerate(operands) if n in _DATA_NAMES), 0)
     # A path that opens with a class may take the input as the
     # instance itself (a fitted estimator before `.predict(X)`).
     calls = [s for s in segs if s.kind in ("class", "function", "method", "unknown")]
@@ -429,10 +447,14 @@ def _construct(x, mode):
 
 _DATA_NAMES = {"data", "object", "a", "x", "X", "values", "arr", "obj", "shape"}
 
-def _required(s):
+def _required(s, named=()):
+    """How many operands a call takes as its required positional
+    parameters, those filled by name left out."""
     if s.params is None:
         return 0
-    return sum(1 for p in s.params if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
+    return sum(1 for p in s.params
+               if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+               and p.name not in named)
 
 _plans = {}
 
@@ -491,20 +513,9 @@ def _call(root, classes, path, construct, dynamic, args, kwargs, input_at=None):
                 if first is not None and first.name in _DATA_NAMES and first.default is not first.empty:
                     pos[id(calls[0])].append(queue.pop(0))
                     taken(1)
-        for s in calls:
-            need = 0 if (instance is not None and s is calls[0]) else _required(s)
-            pos[id(s)], queue = pos[id(s)] + queue[:need], queue[need:]
-            taken(need)
-        if queue:
-            if not calls:
-                raise TypeError(f"{path}: {len(queue)} operand(s) given, none taken (an attribute)")
-            # The input passing a bare constructor that takes no data
-            # (an estimator, built from its options alone) is not
-            # handed to it: the instance is the result.
-            if (input_at is not None and input_at < len(queue) and calls[0].kind == "class"
-                    and instance is None and not _takes_data(calls[0])):
-                del queue[input_at]
-            pos[id(calls[0])] += queue
+        # An option fills the parameter so named on the first call
+        # that declares it, else one taking **kwargs; a required
+        # parameter it fills is not taken from the operands.
         kw = {id(s): {} for s in segs}
         for k, v in kwargs.items():
             target = None
@@ -520,6 +531,20 @@ def _call(root, classes, path, construct, dynamic, args, kwargs, input_at=None):
             if target is None:
                 raise TypeError(f"{path}: no parameter named '{k.replace('_', '-')}'")
             kw[id(target)][k] = v
+        for s in calls:
+            need = 0 if (instance is not None and s is calls[0]) else _required(s, kw[id(s)])
+            pos[id(s)], queue = pos[id(s)] + queue[:need], queue[need:]
+            taken(need)
+        if queue:
+            if not calls:
+                raise TypeError(f"{path}: {len(queue)} operand(s) given, none taken (an attribute)")
+            # The input passing a bare constructor that takes no data
+            # (an estimator, built from its options alone) is not
+            # handed to it: the instance is the result.
+            if (input_at is not None and input_at < len(queue) and calls[0].kind == "class"
+                    and instance is None and not _takes_data(calls[0])):
+                del queue[input_at]
+            pos[id(calls[0])] += queue
         cur = receiver if start == "input" else importlib.import_module(root)
         for s in segs:
             a = _attr(cur, s.name)

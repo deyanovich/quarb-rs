@@ -1239,6 +1239,17 @@ impl AstAdapter for RelationalModel {
         self.row_at(t, r)?.values.get(c).cloned()
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["n-rows", "columns", "loaded", "n-loaded", "table", "rowid"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match self.entry(node) {
             Some((t, None)) => match key {

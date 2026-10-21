@@ -618,6 +618,17 @@ impl AstAdapter for Neo4jAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["out-degree"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         match (&nodes[node.0 as usize].kind, key) {

@@ -91,8 +91,22 @@ fn every_listed_spelling_reads() {
     );
     assert!((mag(&a, "/грузы/0 | ::вес + 1пуд") - 3.0).abs() < 1e-9);
     assert!((mag(&a, "/грузы/* | ::вес | quantity @| sum") - 3.5).abs() < 1e-9);
-    // a unit the library does not list has no reading
-    assert_eq!(values(&a, "/грузы/0::вес | convert(золотник)"), [""]);
+    // the declared unit is a conversion's operand; a name the
+    // library does not list is refused there, the nearest declared
+    // spelling named (spec: The conversion)
+    assert_eq!(values(&a, "/грузы/0::вес | convert(пуда)"), ["2_пуда"]);
+    assert!((mag(&a, "/грузы/1::вес | convert(пуд)") - 0.5).abs() < 1e-9);
+    let e = quarb::run("/грузы/0::вес | convert(пудъ)", &a)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("convert(пудъ): no unit 'пудъ' (the nearest: пуд"),
+        "{e}"
+    );
+    let e = quarb::run("/грузы/0::вес | convert(золотник)", &a)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no unit 'золотник'"), "{e}");
 }
 
 #[test]
@@ -105,8 +119,10 @@ fn a_typed_column_reads_the_declared_units() {
         values(&a, "/грузы/* | %(::что; ::вес) @| # | type"),
         ["text, quantity"]
     );
+    // (the row is a record, its field `:вес`; the table reduction
+    // leaves no position for a `::` property to read)
     assert_eq!(
-        values(&a, "/грузы/* | %(::вес) @| # | [1] | ::вес | convert(kg)"),
+        values(&a, "/грузы/* | %(::вес) @| # | [1] | :вес | convert(kg)"),
         ["32.7609928_kg"]
     );
     // without the import the same column is text

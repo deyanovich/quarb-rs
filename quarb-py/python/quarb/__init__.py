@@ -75,6 +75,8 @@ highlight = _ext.highlight
 closes_with_table = _ext.closes_with_table
 TABLE_CSS = _ext.TABLE_CSS
 parse_defs = _ext.parse_defs
+defs_only = _ext.defs_only
+man = _ext.man
 
 # The string-faithful layer: the qua CLI's exact rendering.
 run = _ext.run
@@ -86,6 +88,8 @@ __all__ = [
     "translate",
     "highlight",
     "parse_defs",
+    "defs_only",
+    "man",
     "__version__",
     "Document",
     "Quantity",

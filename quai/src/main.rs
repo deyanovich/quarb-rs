@@ -887,6 +887,15 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
         }
         return false;
     }
+    if line == ":man" || line.starts_with(":man ") {
+        let rest = line.strip_prefix(":man").unwrap_or_default();
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        match quarb::man::man(&args) {
+            Ok(text) => println!("{text}"),
+            Err(e) => println!("{e}"),
+        }
+        return false;
+    }
     match line {
         ":q" | ":quit" => return true,
         ":help" | ":?" => {
@@ -899,6 +908,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
                  :plan QUERY   price a query before it runs: its static plan as kaiv (--budget sets the bound)\n  \
+                 :man [NAME]   the command inventory: every command, or one command's page (:man @| for a pipe, --ru for Russian)\n  \
                  :history      show the macro table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"

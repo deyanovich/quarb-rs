@@ -6,6 +6,7 @@ pub mod ast;
 pub(crate) mod expand;
 pub mod highlight;
 pub mod lexer;
+pub mod man;
 pub mod parser;
 pub mod registry;
 pub mod unparse;

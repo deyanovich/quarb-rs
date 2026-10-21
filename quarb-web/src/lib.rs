@@ -818,6 +818,17 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["n-sites", "lowering", "n-pages", "n-links", "base", "hierarchy", "path", "depth", "rank", "kind", "key", "redirect", "category"]
+
+    }
+
+
     fn metadata(&self, id: NodeId, key: &str) -> Option<Value> {
         match self.decode(id) {
             Node::Root => match key {

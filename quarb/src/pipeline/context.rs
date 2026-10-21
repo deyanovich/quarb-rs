@@ -287,6 +287,60 @@ pub(crate) fn timeline_command<H: Host>(
 /// `@| number[(level)]`: each capsa's topic becomes its dotted number
 /// (`1`, `1.1`, `1.2`, `2`) in the stream of levels — the level
 /// expression read per capsa, or the value at hand without one.
+/// `@| tree[(operands)]` — the context drawn as a tree (spec: The
+/// tree): one text value, the mount root on top, every context node
+/// a starting point. A value context is refused: the tree draws
+/// nodes. `apply_command`'s arm.
+pub(crate) fn tree_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    if let Some(c) = caps.iter().find(|c| c.topic.is_some()) {
+        record_refusal(format!(
+            "tree draws nodes, and the context holds values ({}): draw the \
+             nodes before projecting them",
+            c.topic.as_ref().map_or(Value::Null, stdlib::type_of)
+        ));
+        return Vec::new();
+    }
+    let spec = crate::graph::tree::TreeSpec::from_call(call);
+    // The scope a column expression evaluates under: the first
+    // capsa's (its register is the context's); the root's where the
+    // context is empty, the top line still printing.
+    let anchor = caps
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Thread::bare(host.root_ext(), None));
+    let column = |ext: &H::Ext, op: &Operand| {
+        operand_value(host, ext, op, trace, anchor.scope(None, peers, outer))
+    };
+    let starts: Vec<H::Ext> = caps.iter().map(|c| c.ext.bare()).collect();
+    let mut origins = Origins::default();
+    for c in &caps {
+        origins.insert(host.origin_at(&c.ext));
+    }
+    match host.render_tree(&starts, &spec, &column) {
+        Ok(text) => vec![Thread::<H::Ext> {
+            prov: Prov::leaf(origins),
+            register: shared_register(&caps),
+            topic: Some(Value::Str(text)),
+            members: Vec::new(),
+            captures: Vec::new(),
+            named: Vec::new(),
+            // the drawing's one thread has no position
+            ext: host.unplaced_ext(),
+        }],
+        Err(why) => {
+            record_refusal(why);
+            Vec::new()
+        }
+    }
+}
+
 /// `@| outline(level; text)` prints the line instead: the text
 /// indented by its depth below the shallowest level, and behind its
 /// number when the style `"1."` is given. Bare `outline` reads the
@@ -523,9 +577,9 @@ pub(crate) fn association_command<H: Host>(
             None => origins.insert(host.origin_at(&c.ext)),
         }
     }
-    let node = caps
-        .first()
-        .map_or_else(|| host.root_ext(), |c| c.ext.bare());
+    // the measure's one thread has no position (spec: Aggregating
+    // Pipe)
+    let node = host.unplaced_ext();
     vec![Thread::<H::Ext> {
         prov: Prov::leaf(origins),
         register: Vec::new(),

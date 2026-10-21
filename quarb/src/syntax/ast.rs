@@ -62,6 +62,9 @@ pub enum Anchor {
     /// `(.)` — the most recent mark, named or not (the top of
     /// the mark array, mirroring the register's `$.`).
     MarkTop,
+    /// `$$.-N` / `((.-N))` — the mark N places back from the latest
+    /// (`$$.-2` the penultimate, also `$$..` / `((..))`).
+    MarkBack(usize),
     /// `(@)` — every mark in the thread's array, in push order:
     /// the navigation forks into one thread per marked node,
     /// registers and marks carried (the sigil law's plural — it
@@ -153,6 +156,12 @@ pub enum Command {
     /// and the result is one capsa whose topic is the record (the
     /// enriched form opens with the shared named regulae).
     AggRecord { call: FnCall, enriched: bool },
+    /// `@| @(0; $_)`, `@| 0`, `@| %(…) ++ %(…)` — a literal or a
+    /// constructor after the aggregation pipe opens an expression
+    /// over the context as a whole (spec: Literals and
+    /// constructors): `$_` is the list of the topics, and the
+    /// result is one capsa holding the expression's value.
+    AggExpr(Operand),
     /// `@| %.`, `@| $.name`, `@| @.` — a register accessor after the
     /// aggregation pipe reads once: the regulae every capsa shares,
     /// as one capsa.
@@ -211,23 +220,6 @@ pub enum Command {
     /// mode exactly like a branch projection. Refused under `@|`
     /// and `$|`: hops are per-thread.
     Nav(Branch),
-    /// `+| body` — the append pipe (spec: The Append Pipe): the body
-    /// is evaluated per capsa with the topic, as the segment after
-    /// `|` is, and every value it yields is appended to the topic —
-    /// a value of the topic's own shape merged (a list
-    /// concatenated, a table's rows added, a record's fields added),
-    /// anything else as one element. `overwrite` is `+|!`, which
-    /// lets a record's field be replaced; `+|` never overwrites.
-    Append { body: Box<Command>, overwrite: bool },
-    /// `+| %(…)` — the append pipe with a row on its right, under
-    /// the table literal's rules: an item positional by the topic's
-    /// header or named, resolved at run time; on a record or a list
-    /// a named row is the record it spells, a positional one is
-    /// refused by kind.
-    AppendRow {
-        items: Vec<(Option<String>, Operand)>,
-        overwrite: bool,
-    },
     /// `$| command` — the iteration pipe, the scope-dual of `@|`: where
     /// `@|` hands its command ALL topics at once (the context), `$|`
     /// hands it ONE element at a time, within the topic — per
@@ -301,6 +293,9 @@ pub enum RegRef {
     /// `$.N` — the N-th value regula (1-based, references not
     /// counted).
     Index(usize),
+    /// `$.-N` — the N-th value regula counted back from the latest
+    /// (`$.-1` is `$.`, `$.-2` the penultimate, also `$..`).
+    Back(usize),
     /// `$.name` — the latest regula under the name, whatever its
     /// kind (a reference reads as its locator).
     Named(String),
@@ -311,21 +306,22 @@ pub enum RegRef {
     /// value pushed under that name. Unnamed regulae are invisible
     /// to it (they stay reachable positionally).
     Record,
-    /// `%..` — the FULL value view, as a record: the named regulae
+    /// `%.*` — the FULL value view, as a record: the named regulae
     /// exactly as `%.` renders them, plus every anonymous value
     /// regula keyed `.N` by its value position (the same number
     /// `$.N` recalls it by). `.` cannot head a push name, so the
     /// keys cannot collide — names themselves MAY be numeric (the
     /// pivot macro writes data-valued column names). Spelled `%%.`
-    /// before draft 153.
+    /// before draft 153 and `%..` before draft 163.
     FullRecord,
     /// `@@.` — the node references in filing order, as a list.
     NodeWhole,
     /// `%%.` — the named view of the references: the latest
     /// reference per name, as a record.
     NodeRecord,
-    /// `%%..` — the full node view: the named references plus the
-    /// anonymous ones keyed `.N` by their reference position.
+    /// `%%.*` — the full node view: the named references plus the
+    /// anonymous ones keyed `.N` by their reference position
+    /// (`%%..` before draft 163).
     NodeFullRecord,
 }
 
@@ -334,6 +330,34 @@ pub enum RegRef {
 pub struct FnCall {
     pub name: String,
     pub args: Vec<Arg>,
+}
+
+impl FnCall {
+    /// The `--of=expr` / `-o=expr` option of a reducing aggregate
+    /// (spec: Aggregating Pipe, draft 164): the expression read on
+    /// each item of the input in turn before the reduction.
+    pub fn of_expr(&self) -> Option<&Operand> {
+        self.args.iter().find_map(|a| match a {
+            Arg::Opt {
+                name,
+                value: Some(e),
+            } if name == "--of" || name == "-o" => Some(e),
+            _ => None,
+        })
+    }
+
+    /// The call without its `--of` option, for the reduction itself.
+    pub fn without_of(&self) -> FnCall {
+        FnCall {
+            name: self.name.clone(),
+            args: self
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { name, .. } if name == "--of" || name == "-o"))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 /// One command operand: a literal, a value expression evaluated
@@ -431,7 +455,7 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
 pub enum Projection {
     /// `::name` (a named property) or `::` (the default projection).
     Property(Option<String>),
-    /// `:key` — engine-computed core metadata.
+    /// `:key` — a core field, the fields the engine gives every node.
     CoreMeta(String),
     /// `:::key` — adapter-defined metadata.
     AdapterMeta(String),
@@ -622,8 +646,27 @@ pub enum Operand {
         left: Box<Operand>,
         right: Box<Operand>,
     },
+    /// `a ++ b`, `a ++! b`, `a +@+ b` — concatenation (spec: Value
+    /// Expressions, Concatenation): a binary operator at the
+    /// additive level, the left side giving the shape — a list, a
+    /// record, a table or a text; null on either side is null.
+    Concat {
+        mode: ConcatMode,
+        left: Box<Operand>,
+        right: Box<Operand>,
+    },
+    /// `%(…)` on the right of a concatenation: a row under the table
+    /// literal's rules, its items positional by the left side's
+    /// header or named, resolved at run time; on a record or a list
+    /// a named row is the record it spells. Nowhere else an operand.
+    Row(Vec<(Option<String>, Operand)>),
     /// Unary minus.
     Neg(Box<Operand>),
+    /// The first argument of a reducing callee (`sum(/*::n)`): the
+    /// values it reaches, gathered into one list as the command's
+    /// input would be (spec: Value Expressions, draft 164); one
+    /// value passes as it is. Transparent in reflection and unparse.
+    Gathered(Box<Operand>),
     /// A parenthesized sub-expression used as a value; a boolean
     /// group in operand position is its truth value.
     Group(Box<PredExpr>),
@@ -632,6 +675,11 @@ pub enum Operand {
     Recall(RegRef),
     /// `$_` — the topic: the current pipeline value.
     Topic,
+    /// `_` — the cursor (spec: The Cursor): the record of the two
+    /// cursor operands, `%(topic = $_; position = $$_)`; `_:topic`
+    /// and `_:position` read as the sigils do, and `_::k` is refused
+    /// (the position's property is `_:position::k` or `$$_::k`).
+    Cursor,
     /// `base:name` — a field of a record value: the
     /// bottom rung of the colon ladder, a value's field below a
     /// node's property. A leading `:name` reads the topic's field.
@@ -744,12 +792,19 @@ pub enum Operand {
     /// plural of `$$_`; a glued projection (`@@_::prop`) maps over
     /// them. Rounded `((*_))`.
     Positions { projection: Option<Projection> },
-    /// `#*` / `##*` — the context as a table: one row per thread in
-    /// context order, one column per value regula (`node` false) or
-    /// node regula (`node` true), named as the `%..` / `%%..` views
-    /// name them; a view built when read, columns typed by the
-    /// table rule (spec: Context Accessors).
-    Matrix { node: bool },
+    /// `#.` / `#.*` / `##.` / `##.*` — the context as a table: one
+    /// row per thread in context order, one column per named value
+    /// regula (`#.`, as `%.` names them) or per every regula (`#.*`,
+    /// the anonymous ones as `.N`, as `%.*` names them); `node` the
+    /// reference face. A view built when read, columns typed by the
+    /// table rule (spec: Context Accessors). `#*` and `##*` before
+    /// draft 163.
+    Matrix { node: bool, full: bool },
+    /// `#_` — the context table (spec: The Cursor): one row per
+    /// thread in context order, the columns `topic` and `position`,
+    /// so `#_:topic` is `@_` and `#_:position` is `@@_`; the
+    /// aggregate input, beside `_` the cursor record.
+    CtxTable,
     /// The seed of a subcontext body: the enclosing capsa as the
     /// control operator that feeds the body hands it to a command
     /// — the topic (`$_`) on its node, the register readable. It
@@ -879,6 +934,32 @@ impl ArithOp {
             ArithOp::IDiv => "idiv",
             ArithOp::Mod => "mod",
             ArithOp::MatMul => "x",
+        }
+    }
+}
+
+/// The concatenation operators (spec: Concatenation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcatMode {
+    /// `++` — a right side of the left's own shape merges, anything
+    /// else is appended as one element; a text takes the right
+    /// side's text; a record's duplicate field is refused.
+    Merge,
+    /// `++!` — records only: the right side's field replaces the
+    /// left's.
+    Overwrite,
+    /// `+@+` — lists only: the right side goes in as one item
+    /// whatever it is.
+    Item,
+}
+
+impl ConcatMode {
+    /// The operator as written.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ConcatMode::Merge => "++",
+            ConcatMode::Overwrite => "++!",
+            ConcatMode::Item => "+@+",
         }
     }
 }

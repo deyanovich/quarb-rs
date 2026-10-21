@@ -699,9 +699,13 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                     })
                     .collect())
             }
-            Command::Agg(_) | Command::AggRecord { .. } | Command::AggRecall(_) => {
+            Command::Agg(_)
+            | Command::AggRecord { .. }
+            | Command::AggExpr(_)
+            | Command::AggRecall(_) => {
                 let name = match st {
                     Command::Agg(call) => call.name.clone(),
+                    Command::AggExpr(e) => unparse::operand(e),
                     Command::AggRecord { enriched: true, .. } => "%%(…)".to_string(),
                     Command::AggRecord { .. } => "%(…)".to_string(),
                     Command::AggRecall(r) => unparse::reg(r),

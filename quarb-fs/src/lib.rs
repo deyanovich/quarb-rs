@@ -319,6 +319,12 @@ impl AstAdapter for FsAdapter {
     /// Filesystem metadata (`:::key`): `size`, `modified`,
     /// `extension`, `is-dir`, `is-file`, and (on Unix) `mode` and
     /// `permissions`.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["size", "is-dir", "is-file", "modified", "extension", "mode", "permissions"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let path = &self.paths[node.0 as usize];
         let md = std::fs::metadata(path).ok()?;

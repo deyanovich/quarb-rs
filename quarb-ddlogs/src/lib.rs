@@ -562,6 +562,17 @@ impl AstAdapter for DdlAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["severity", "id", "index"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let i = self.entry_of(node)?;
         let e = &self.events[i];

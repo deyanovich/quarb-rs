@@ -72,105 +72,124 @@ fn dimension_symbol(base: &str) -> &str {
     }
 }
 
-/// The full names of the table, each with its exact factor to the
-/// base expansion of its dimension (the appendix's rows).
+/// The full names of the table, each row the spellings of one unit
+/// with its exact factor to the base expansion of its dimension
+/// (the appendix's rows); the currencies and their prefix signs
+/// stand apart below.
+const UNIT_TABLE: &[(&[&str], f64, &str)] = &[
+    // the base units
+    (&["m"], 1.0, "m"),
+    (&["kg"], 1.0, "kg"),
+    (&["s"], 1.0, "s"),
+    (&["A"], 1.0, "A"),
+    (&["K"], 1.0, "K"),
+    (&["mol"], 1.0, "mol"),
+    (&["cd"], 1.0, "cd"),
+    (&["b", "bit", "bits"], 1.0, "b"),
+    (&["g"], 0.001, "kg"),
+    (&["B", "byte", "bytes"], 8.0, "b"),
+    // the named derived units, coherent
+    (&["rad", "sr"], 1.0, "1"),
+    (&["Hz", "Bq"], 1.0, "1/s"),
+    (&["N"], 1.0, "kg*m/s^2"),
+    (&["Pa"], 1.0, "kg/m/s^2"),
+    (&["J"], 1.0, "kg*m^2/s^2"),
+    (&["W"], 1.0, "kg*m^2/s^3"),
+    (&["C"], 1.0, "A*s"),
+    (&["V"], 1.0, "kg*m^2/A/s^3"),
+    (&["F"], 1.0, "A^2*s^4/kg/m^2"),
+    (&["ohm"], 1.0, "kg*m^2/A^2/s^3"),
+    (&["S"], 1.0, "A^2*s^3/kg/m^2"),
+    (&["Wb"], 1.0, "kg*m^2/A/s^2"),
+    (&["T"], 1.0, "kg/A/s^2"),
+    (&["H"], 1.0, "kg*m^2/A^2/s^2"),
+    (&["lm"], 1.0, "cd"),
+    (&["lx"], 1.0, "cd/m^2"),
+    (&["Gy", "Sv"], 1.0, "m^2/s^2"),
+    (&["kat"], 1.0, "mol/s"),
+    (&["L"], 0.001, "m^3"),
+    // non-SI, exact by definition; time units as factors of
+    // compounds only (pure time is a Duration)
+    // the time units and their long forms (spec: Duration);
+    // `m` is the metre, `min` the only short minute
+    (&["sec", "second", "seconds"], 1.0, "s"),
+    (&["min", "minute", "minutes"], 60.0, "s"),
+    (&["h", "hr", "hour", "hours"], 3600.0, "s"),
+    (&["d", "day", "days"], 86400.0, "s"),
+    (&["w", "week", "weeks"], 604_800.0, "s"),
+    (&["au"], 149_597_870_700.0, "m"),
+    (&["ha"], 10_000.0, "m^2"),
+    (&["t"], 1000.0, "kg"),
+    (&["eV"], 1.602_176_634e-19, "kg*m^2/s^2"),
+    (&["bar"], 100_000.0, "kg/m/s^2"),
+    (&["atm"], 101_325.0, "kg/m/s^2"),
+    (&["cal"], 4.184, "kg*m^2/s^2"),
+    (&["kcal"], 4184.0, "kg*m^2/s^2"),
+    (&["in"], 0.0254, "m"),
+    // The typographic point, 1/72 inch (spec: Units).
+    (&["pt"], 0.0254 / 72.0, "m"),
+    (&["ft"], 0.3048, "m"),
+    (&["yd"], 0.9144, "m"),
+    (&["mi"], 1609.344, "m"),
+    (&["nmi"], 1852.0, "m"),
+    (&["ac"], 4046.856_422_4, "m^2"),
+    (&["lb"], 0.453_592_37, "kg"),
+    (&["oz"], 0.028_349_523_125, "kg"),
+    (&["st"], 6.350_293_18, "kg"),
+    (&["gal"], 0.003_785_411_784, "m^3"),
+    (&["floz"], 2.957_352_956_25e-5, "m^3"),
+    (&["cup"], 2.365_882_365e-4, "m^3"),
+    (&["psi"], 6894.757_293_168, "kg/m/s^2"),
+    (&["kn"], 1852.0 / 3600.0, "m/s"),
+    (&["mph"], 1609.344 / 3600.0, "m/s"),
+    // the telecom spellings: decimal bits per second
+    (&["bps"], 1.0, "b/s"),
+    (&["kbps"], 1e3, "b/s"),
+    (&["Mbps"], 1e6, "b/s"),
+    (&["Gbps"], 1e9, "b/s"),
+    (&["Tbps"], 1e12, "b/s"),
+];
+
+/// The currency signs a prefix alias reads (`$12`, `€ 12.50`): the
+/// sign with its trailing dash, and the ISO 4217 code it stands for.
+const CURRENCY_SIGNS: &[(&str, &str)] = &[
+    ("$-", "USD"),
+    ("€-", "EUR"),
+    ("£-", "GBP"),
+    ("¥-", "JPY"),
+    ("₩-", "KRW"),
+    ("₹-", "INR"),
+    ("₽-", "RUB"),
+    ("₦-", "NGN"),
+    ("₱-", "PHP"),
+    ("₺-", "TRY"),
+    ("฿-", "THB"),
+    ("₴-", "UAH"),
+    ("₸-", "KZT"),
+    ("₪-", "ILS"),
+    ("₲-", "PYG"),
+    ("₾-", "GEL"),
+    ("₮-", "MNT"),
+    ("֏-", "AMD"),
+];
+
+/// The scale of one full name: a row of the table, a currency code
+/// (spec: Currencies — a base unit of its own dimension), or a
+/// currency sign.
 fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
-    Some(match name {
-        // the base units
-        "m" => (1.0, "m"),
-        "kg" => (1.0, "kg"),
-        "s" => (1.0, "s"),
-        "A" => (1.0, "A"),
-        "K" => (1.0, "K"),
-        "mol" => (1.0, "mol"),
-        "cd" => (1.0, "cd"),
-        "b" | "bit" | "bits" => (1.0, "b"),
-        "g" => (0.001, "kg"),
-        "B" | "byte" | "bytes" => (8.0, "b"),
-        // the named derived units, coherent
-        "rad" | "sr" => (1.0, "1"),
-        "Hz" | "Bq" => (1.0, "1/s"),
-        "N" => (1.0, "kg*m/s^2"),
-        "Pa" => (1.0, "kg/m/s^2"),
-        "J" => (1.0, "kg*m^2/s^2"),
-        "W" => (1.0, "kg*m^2/s^3"),
-        "C" => (1.0, "A*s"),
-        "V" => (1.0, "kg*m^2/A/s^3"),
-        "F" => (1.0, "A^2*s^4/kg/m^2"),
-        "ohm" => (1.0, "kg*m^2/A^2/s^3"),
-        "S" => (1.0, "A^2*s^3/kg/m^2"),
-        "Wb" => (1.0, "kg*m^2/A/s^2"),
-        "T" => (1.0, "kg/A/s^2"),
-        "H" => (1.0, "kg*m^2/A^2/s^2"),
-        "lm" => (1.0, "cd"),
-        "lx" => (1.0, "cd/m^2"),
-        "Gy" | "Sv" => (1.0, "m^2/s^2"),
-        "kat" => (1.0, "mol/s"),
-        "L" => (0.001, "m^3"),
-        // non-SI, exact by definition; time units as factors of
-        // compounds only (pure time is a Duration)
-        // the time units and their long forms (spec: Duration);
-        // `m` is the metre, `min` the only short minute
-        "sec" | "second" | "seconds" => (1.0, "s"),
-        "min" | "minute" | "minutes" => (60.0, "s"),
-        "h" | "hr" | "hour" | "hours" => (3600.0, "s"),
-        "d" | "day" | "days" => (86400.0, "s"),
-        "w" | "week" | "weeks" => (604_800.0, "s"),
-        "au" => (149_597_870_700.0, "m"),
-        "ha" => (10_000.0, "m^2"),
-        "t" => (1000.0, "kg"),
-        "eV" => (1.602_176_634e-19, "kg*m^2/s^2"),
-        "bar" => (100_000.0, "kg/m/s^2"),
-        "atm" => (101_325.0, "kg/m/s^2"),
-        "cal" => (4.184, "kg*m^2/s^2"),
-        "kcal" => (4184.0, "kg*m^2/s^2"),
-        "in" => (0.0254, "m"),
-        // The typographic point, 1/72 inch (spec: Units).
-        "pt" => (0.0254 / 72.0, "m"),
-        "ft" => (0.3048, "m"),
-        "yd" => (0.9144, "m"),
-        "mi" => (1609.344, "m"),
-        "nmi" => (1852.0, "m"),
-        "ac" => (4046.856_422_4, "m^2"),
-        "lb" => (0.453_592_37, "kg"),
-        "oz" => (0.028_349_523_125, "kg"),
-        "st" => (6.350_293_18, "kg"),
-        "gal" => (0.003_785_411_784, "m^3"),
-        "floz" => (2.957_352_956_25e-5, "m^3"),
-        "cup" => (2.365_882_365e-4, "m^3"),
-        "psi" => (6894.757_293_168, "kg/m/s^2"),
-        "kn" => (1852.0 / 3600.0, "m/s"),
-        "mph" => (1609.344 / 3600.0, "m/s"),
-        // the common currencies (spec: Currencies): base units of
-        // their own dimensions, the ISO 4217 code the dimension
-        code if CURRENCIES.contains(&code) => (1.0, intern_base_name(code)),
-        // their prefix aliases, standing before the magnitude
-        "$-" => (1.0, "USD"),
-        "€-" => (1.0, "EUR"),
-        "£-" => (1.0, "GBP"),
-        "¥-" => (1.0, "JPY"),
-        "₩-" => (1.0, "KRW"),
-        "₹-" => (1.0, "INR"),
-        "₽-" => (1.0, "RUB"),
-        "₦-" => (1.0, "NGN"),
-        "₱-" => (1.0, "PHP"),
-        "₺-" => (1.0, "TRY"),
-        "฿-" => (1.0, "THB"),
-        "₴-" => (1.0, "UAH"),
-        "₸-" => (1.0, "KZT"),
-        "₪-" => (1.0, "ILS"),
-        "₲-" => (1.0, "PYG"),
-        "₾-" => (1.0, "GEL"),
-        "₮-" => (1.0, "MNT"),
-        "֏-" => (1.0, "AMD"),
-        // the telecom spellings: decimal bits per second
-        "bps" => (1.0, "b/s"),
-        "kbps" => (1e3, "b/s"),
-        "Mbps" => (1e6, "b/s"),
-        "Gbps" => (1e9, "b/s"),
-        "Tbps" => (1e12, "b/s"),
-        _ => return None,
-    })
+    if let Some((_, factor, base)) = UNIT_TABLE
+        .iter()
+        .find(|(names, _, _)| names.contains(&name))
+    {
+        return Some((*factor, base));
+    }
+    if CURRENCIES.contains(&name) {
+        return Some((1.0, intern_base_name(name)));
+    }
+    CURRENCY_SIGNS
+        .iter()
+        .find(|(sign, _)| *sign == name)
+        .map(|(_, code)| (1.0, *code))
 }
 
 /// Every currency ISO 4217 lists as circulating (spec: Currencies),
@@ -195,42 +214,13 @@ pub const CURRENCIES: &[&str] = &[
 
 /// The units a decimal prefix attaches to: the base units, the
 /// derived units, the gram, the litre, the bit and the byte.
+const PREFIXABLE: &[&str] = &[
+    "B", "b", "bit", "byte", "m", "s", "g", "A", "K", "mol", "cd", "L", "rad", "sr", "Hz", "N",
+    "Pa", "J", "W", "C", "V", "F", "ohm", "S", "Wb", "T", "H", "lm", "lx", "Bq", "Gy", "Sv", "kat",
+];
+
 fn prefixable(stem: &str) -> bool {
-    matches!(
-        stem,
-        "B" | "b"
-            | "bit"
-            | "byte"
-            | "m"
-            | "s"
-            | "g"
-            | "A"
-            | "K"
-            | "mol"
-            | "cd"
-            | "L"
-            | "rad"
-            | "sr"
-            | "Hz"
-            | "N"
-            | "Pa"
-            | "J"
-            | "W"
-            | "C"
-            | "V"
-            | "F"
-            | "ohm"
-            | "S"
-            | "Wb"
-            | "T"
-            | "H"
-            | "lm"
-            | "lx"
-            | "Bq"
-            | "Gy"
-            | "Sv"
-            | "kat"
-    )
+    PREFIXABLE.contains(&stem)
 }
 
 /// What the table says of one name.
@@ -537,6 +527,165 @@ pub fn unit_scale(name: &str) -> Option<(f64, &'static str)> {
     match lookup(name) {
         Lookup::Scaled(f, base) => Some((f, base)),
         _ => None,
+    }
+}
+
+/// Every spelling the built-in table reads as a unit operand: the
+/// full names, the currency codes, and the prefixed forms the
+/// prefixes admit (a prefix below one never on the bit or the byte).
+pub fn builtin_unit_names() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (names, _, _) in UNIT_TABLE {
+        out.extend(names.iter().map(|n| n.to_string()));
+    }
+    out.extend(CURRENCIES.iter().map(|c| c.to_string()));
+    for (prefix, pow) in PREFIX_POWERS {
+        for stem in PREFIXABLE {
+            if *pow < 0 && matches!(*stem, "B" | "b" | "bit" | "byte") {
+                continue;
+            }
+            out.push(format!("{prefix}{stem}"));
+        }
+    }
+    for (prefix, _) in BINARY_PREFIXES {
+        for stem in ["B", "b", "bit", "byte"] {
+            out.push(format!("{prefix}{stem}"));
+        }
+    }
+    out
+}
+
+/// The known symbols nearest to `name`: the spellings within a
+/// short edit distance of it, a slip of case counting a third of
+/// an edit (`KBps` is `kbps`, `mB` is `MB` before `Mb`, `KM` is
+/// `km` before `K`), the budget growing with the name's length;
+/// when one edit or less reaches a symbol, only the symbols that
+/// near. `declared` (a model's declarations, a source's own units)
+/// stands beside the built-in table. At most four, nearest first.
+pub fn nearest_units(name: &str, declared: &[String]) -> Vec<String> {
+    // distances in thirds of an edit
+    let budget = match name.chars().count() {
+        0..=3 => 3,
+        4..=6 => 6,
+        _ => 9,
+    };
+    let mut hits: Vec<(usize, String)> = declared
+        .iter()
+        .cloned()
+        .chain(builtin_unit_names())
+        .filter(|cand| cand != name)
+        .filter_map(|cand| {
+            let d = case_distance(name, &cand);
+            (d <= budget).then_some((d, cand))
+        })
+        .collect();
+    hits.sort();
+    hits.dedup();
+    if let Some(&(best, _)) = hits.first()
+        && best <= 3
+    {
+        hits.retain(|(d, _)| *d == best);
+    }
+    hits.into_iter().map(|(_, c)| c).take(4).collect()
+}
+
+/// The edit distance of two names in thirds of an edit: an
+/// insertion, a deletion or a substitution counts three, a
+/// substitution that changes case alone counts one.
+fn case_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).map(|j| 3 * j).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = 3 * (i + 1);
+        for (j, cb) in b.iter().enumerate() {
+            let sub = if ca == cb {
+                0
+            } else if ca.to_lowercase().eq(cb.to_lowercase()) {
+                1
+            } else {
+                3
+            };
+            cur[j + 1] = (prev[j] + sub).min(prev[j + 1] + 3).min(cur[j] + 3);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// What refuses a unit operand (`convert(U)`, `unit(U)`; spec: The
+/// conversion): None when every factor of `expr` names a unit the
+/// query knows — the built-in table or `declared` (a model's
+/// declarations, an adapter's minted units) — else the refusal's
+/// text: the first factor that is no unit, with the nearest known
+/// symbols, or the table's own reason for refusing the spelling.
+/// A value's unknown unit stays opaque; only the operand must be
+/// known.
+pub fn unit_operand_refusal(expr: &str, declared: &[String]) -> Option<String> {
+    for factor in operand_factors(expr) {
+        if declared.iter().any(|d| d == factor) {
+            continue;
+        }
+        match lookup(factor) {
+            Lookup::Scaled(..) => {}
+            Lookup::Refused => return Some(refused_spelling(factor, declared)),
+            Lookup::Unknown => {
+                return Some(with_nearest(
+                    format!("no unit '{factor}'"),
+                    &nearest_units(factor, declared),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The factor names of a unit expression operand, in order: `EUR/lb`
+/// is EUR and lb, `kg*m/s^2` is kg, m and s; the identity `1` and
+/// the exponents are no names.
+fn operand_factors(expr: &str) -> Vec<&str> {
+    expr.split(['*', '/'])
+        .map(|f| f.split_once('^').map_or(f, |(n, _)| n))
+        .map(str::trim)
+        .filter(|f| !f.is_empty() && *f != "1")
+        .collect()
+}
+
+fn with_nearest(mut msg: String, near: &[String]) -> String {
+    if !near.is_empty() {
+        msg.push_str(" (the nearest: ");
+        msg.push_str(&near.join(", "));
+        msg.push(')');
+    }
+    msg
+}
+
+/// The refusal of a spelling the table refuses by name (see
+/// [`Lookup::Refused`]): the ambiguous kilobyte and kilobit, in
+/// Latin and in Cyrillic, say what the two readings are; a prefix
+/// below one on the bit or the byte says so.
+fn refused_spelling(name: &str, declared: &[String]) -> String {
+    match name {
+        "KB" => "no unit 'KB' (kB is 1000 B, KiB is 1024 B)".to_string(),
+        "Kb" => "no unit 'Kb' (kb is 1000 b, Kib is 1024 b)".to_string(),
+        "Кбайт" => "no unit 'Кбайт' (кбайт is 1000 байт, Кибайт is 1024 байт)".to_string(),
+        "Кбит" => "no unit 'Кбит' (кбит is 1000 бит, Кибит is 1024 бит)".to_string(),
+        _ => {
+            let stem = if name.ends_with('B') || name.ends_with("byte") {
+                "byte"
+            } else {
+                "bit"
+            };
+            let near = nearest_units(name, declared);
+            let mut msg = format!("no unit '{name}' (no prefix below one on the {stem}");
+            if !near.is_empty() {
+                msg.push_str("; the nearest: ");
+                msg.push_str(&near.join(", "));
+            }
+            msg.push(')');
+            msg
+        }
     }
 }
 
@@ -1373,6 +1522,64 @@ mod tests {
         assert_eq!(unit_scale("hours"), Some((3600.0, "s")));
         assert_eq!(unit_scale("m"), Some((1.0, "m")));
         assert_eq!(unit_scale("parsec"), None);
+    }
+
+    #[test]
+    fn a_unit_operand_must_be_known() {
+        // the table, prefixed forms and compounds pass
+        for ok in [
+            "kB", "KiB", "km/h", "kg*m/s^2", "EUR/lb", "mi^2", "USD", "Mbps", "1/s",
+        ] {
+            assert_eq!(unit_operand_refusal(ok, &[]), None, "{ok}");
+        }
+        // the ambiguous kilobyte names its two readings
+        assert_eq!(
+            unit_operand_refusal("KB", &[]).as_deref(),
+            Some("no unit 'KB' (kB is 1000 B, KiB is 1024 B)")
+        );
+        assert_eq!(
+            unit_operand_refusal("Kb", &[]).as_deref(),
+            Some("no unit 'Kb' (kb is 1000 b, Kib is 1024 b)")
+        );
+        assert_eq!(
+            unit_operand_refusal("Кбайт", &[]).as_deref(),
+            Some("no unit 'Кбайт' (кбайт is 1000 байт, Кибайт is 1024 байт)")
+        );
+        // (the readings the message names do read)
+        assert_eq!(unit_scale("кбайт"), Some((8000.0, "b")));
+        assert_eq!(unit_scale("Кибайт"), Some((8192.0, "b")));
+        assert_eq!(unit_scale("кбит"), Some((1000.0, "b")));
+        assert_eq!(unit_scale("Кибит"), Some((1024.0, "b")));
+        // a prefix below one on the byte
+        assert_eq!(
+            unit_operand_refusal("mB", &[]).as_deref(),
+            Some("no unit 'mB' (no prefix below one on the byte; the nearest: MB)")
+        );
+        // a case slip finds its spelling; a typo its neighbours
+        assert_eq!(
+            unit_operand_refusal("KBps", &[]).as_deref(),
+            Some("no unit 'KBps' (the nearest: kbps)")
+        );
+        assert_eq!(
+            unit_operand_refusal("EUR/lbs", &[]).as_deref(),
+            Some("no unit 'lbs' (the nearest: lb)")
+        );
+        assert_eq!(
+            unit_operand_refusal("kilometer", &[]).as_deref(),
+            Some("no unit 'kilometer'")
+        );
+        // a declared unit is known, and a neighbour of one
+        let mery = vec!["пуд".to_string(), "верста".to_string()];
+        assert_eq!(unit_operand_refusal("пуд", &mery), None);
+        assert_eq!(unit_operand_refusal("EUR/пуд", &mery), None);
+        assert_eq!(
+            unit_operand_refusal("пудъ", &mery).as_deref(),
+            Some("no unit 'пудъ' (the nearest: пуд)")
+        );
+        // every name the table lists resolves
+        for name in builtin_unit_names() {
+            assert!(unit_scale(&name).is_some(), "{name}");
+        }
     }
 
     #[test]

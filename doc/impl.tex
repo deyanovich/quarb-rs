@@ -1012,8 +1012,8 @@ regulae, a regula any value, node references included. A mark
 with the node's coordinate and its locator), so there is no mark
 store beside the register and one name pool over both kinds. The
 reads split by side: \texttt{\$.} \texttt{@.} \texttt{\%.}
-\texttt{\%..} see the regulae that are not references, \texttt{\$\$.}
-\texttt{@@.} \texttt{\%\%.} \texttt{\%\%..} the references, positions
+\texttt{\%.*} see the regulae that are not references, \texttt{\$\$.}
+\texttt{@@.} \texttt{\%\%.} \texttt{\%\%.*} the references, positions
 counting on each side; a name reads whatever was filed under it last
 (\texttt{pipeline/register.rs}). The dedup key of a walk is the node
 and the merged sequence, so the interleaving of values and
@@ -1518,10 +1518,10 @@ they stood (\texttt{pipeline\_projected} treats no push as
 value-typing). The context family reads the command's input
 snapshot (spec draft 157): \texttt{@\_} the peers' topics,
 \texttt{@@\_} their positions (\texttt{Host::positions}; a glued
-projection maps over them), \texttt{\#*} and \texttt{\#\#*} the
+projection maps over them), \texttt{\#.*} and \texttt{\#\#.*} the
 context as a table of the value or the node regulae
 (\texttt{pipeline::operand::matrix}, one row per thread, the columns
-as \texttt{\%..} names them, typed by the table rule); the old
+as \texttt{\%.*} names them, typed by the table rule; \texttt{\#.} and \texttt{\#\#.} the named regulae alone); the old
 \texttt{@*} refuses with the pointer. A
 push quantified \texttt{\{N\}} repeats over the whole context, each
 round seeing the last (the iteration loop); \texttt{X:.r} reads the

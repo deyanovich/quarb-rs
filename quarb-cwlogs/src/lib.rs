@@ -617,6 +617,17 @@ impl AstAdapter for CwlAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["group", "stream", "received", "id"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let (g, i) = self.event_at(node)?;
         let groups = self.groups.borrow();

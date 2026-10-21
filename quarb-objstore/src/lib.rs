@@ -582,6 +582,12 @@ impl AstAdapter for ObjstoreAdapter {
     }
 
     /// `:::size`, `:::updated`, `:::key`.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["size", "updated", "key"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();
         let n = &nodes[node.0 as usize];

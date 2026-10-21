@@ -107,11 +107,19 @@ pub(crate) fn eval_operand<H: Host>(
         // A field read on a list of records reads each:
         // a group's member list projects to the members' values, so
         // `@| group(...) | :n | sum` sums a field per group.
-        // A leading `:name` reads the topic's field when the topic
-        // has fields (a record, a list of records, a table); on a
-        // thread with no topic, or a scalar one, it is the node's
-        // core property (draft 157: the ladder counts from the
-        // core, `:name`; `$$_:name` says the node outright).
+        // A leading `:name` on a thread (spec: Field Projections,
+        // draft 164), by the topic: a RECORD → its field, null when
+        // absent; a LIST → the field of each item as a list (node
+        // items their core field); the NODE (no value topic) → the
+        // core field, an unknown key refused; any OTHER value (text,
+        // number, null, …) → the POSITION's core field, since the
+        // thread still stands at a node, a key that is no core
+        // field answering null without a refusal (`| :name |
+        // indent(:depth - 1)`, `bibref(cmos) | :genus`).
+        Operand::Field { base, name } if matches!(**base, Operand::Topic) && scope.topic.is_none() => {
+            note(host.origin_at(ext).position);
+            vec![host.project(ext, &Projection::CoreMeta(name.clone()))]
+        }
         Operand::Field { base, name }
             if matches!(**base, Operand::Topic)
                 && !matches!(
@@ -119,8 +127,12 @@ pub(crate) fn eval_operand<H: Host>(
                     Some(Value::Record(_) | Value::List(_) | Value::Table(_))
                 ) =>
         {
-            note(host.origin_at(ext).position);
-            vec![host.project(ext, &Projection::CoreMeta(name.clone()))]
+            if crate::graph::navigate::CORE_FIELDS.contains(&name.as_str()) {
+                note(host.origin_at(ext).position);
+                vec![host.project(ext, &Projection::CoreMeta(name.clone()))]
+            } else {
+                vec![Value::Null]
+            }
         }
         Operand::Field { base, name } => eval_operand(host, ext, base, trace, scope)
             .into_iter()
@@ -285,7 +297,8 @@ pub(crate) fn eval_operand<H: Host>(
         }
         Operand::Topics => host.capsae(scope, None),
         Operand::Positions { projection } => host.positions(scope, projection.as_ref()),
-        Operand::Matrix { node } => matrix(scope, *node),
+        Operand::Matrix { node, full } => matrix(scope, *node, *full),
+        Operand::CtxTable => ctx_table(host, scope),
         Operand::Piped { expr, commands } => {
             // A capsa of the tail: this scope's register, captures,
             // marks, witness and arrivals, standing at `n` with
@@ -475,6 +488,19 @@ pub(crate) fn eval_operand<H: Host>(
         Operand::Position(inner) if bare_cursor(inner) => {
             host.node_ref(ext).into_iter().collect()
         }
+        // `_` — the cursor record: the topic and the position, each
+        // as its sigil reads it (null where it has none).
+        Operand::Cursor => {
+            let topic = operand_value(host, ext, &Operand::Topic, trace, scope);
+            let position = host.node_ref(ext).unwrap_or(Value::Null);
+            vec![Value::Record(vec![
+                ("topic".to_string(), topic),
+                ("position".to_string(), position),
+            ])]
+        }
+        // navigated or projected from a thread with no position
+        // (after a reduction): nothing, by construction
+        Operand::Position(inner) if !host.placed(ext) => Vec::new(),
         Operand::Position(inner) => eval_operand(host, ext, inner, trace, scope),
         // `$$0` — the driver of the correlation whose join
         // condition this is (the parser refuses it elsewhere).
@@ -546,34 +572,91 @@ pub(crate) fn eval_operand<H: Host>(
             projection,
             anchor,
         } => host.rel(ext, steps, anchor, projection.as_ref(), trace, scope),
+        // An operand that reaches several values forks the
+        // expression (spec: Value Expressions, draft 164): one result
+        // per value, each its own row; two forking operands give the
+        // direct product, the left changing slowest; an operand that
+        // reaches nothing is null. Over a list, a record or a table
+        // the operator broadcasts (spec: Arithmetic over structures);
+        // a shape mismatch is a refusal, not a null.
         Operand::Arith { op, left, right } => {
             let scale = |e: &str| host.scale_of(e);
-            let l = operand_scalar(host, ext, left, trace, scope);
-            let r = operand_scalar(host, ext, right, trace, scope);
-            let l = retype_shaped_lit(left, l, &scale);
-            let r = retype_shaped_lit(right, r, &scale);
-            // Over a list, a record or a table the operator
-            // broadcasts (spec: Arithmetic over structures); a shape
-            // mismatch is a refusal, not a null.
-            vec![match crate::stdlib::arith::broadcast(*op, &l, &r, &scale) {
-                Ok(v) => v,
-                Err(why) => {
-                    crate::pipeline::record_refusal(why);
-                    Value::Null
+            let ls = forking(eval_operand(host, ext, left, trace, scope));
+            let rs = forking(eval_operand(host, ext, right, trace, scope));
+            let mut out = Vec::with_capacity(ls.len() * rs.len());
+            for l in &ls {
+                let l = retype_shaped_lit(left, l.clone(), &scale);
+                for r in &rs {
+                    let r = retype_shaped_lit(right, r.clone(), &scale);
+                    out.push(match crate::stdlib::arith::broadcast(*op, &l, &r, &scale) {
+                        Ok(v) => v,
+                        Err(why) => {
+                            crate::pipeline::record_refusal(why);
+                            Value::Null
+                        }
+                    });
                 }
-            }]
+            }
+            out
         }
-        Operand::Neg(inner) => {
-            let v = operand_scalar(host, ext, inner, trace, scope);
-            vec![match v.numeric_reading() {
+        // The concatenation (spec: Concatenation): the left side
+        // gives the shape; a forking operand forks the expression as
+        // for every binary operator; a row on the right is laid under
+        // the left's header, its items gathered as a constructor's
+        // are. A refusal nulls the result.
+        Operand::Concat { mode, left, right } => {
+            let ls = forking(eval_operand(host, ext, left, trace, scope));
+            let rs: Vec<Result<Value, String>> = match right.as_ref() {
+                Operand::Row(items) => {
+                    let row: Vec<(Option<String>, Value)> = items
+                        .iter()
+                        .map(|(name, e)| {
+                            (name.clone(), gathered(eval_operand(host, ext, e, trace, scope)))
+                        })
+                        .collect();
+                    ls.iter()
+                        .map(|l| crate::stdlib::concat_row(*mode, l.clone(), row.clone()))
+                        .collect()
+                }
+                _ => {
+                    let rs = forking(eval_operand(host, ext, right, trace, scope));
+                    let mut out = Vec::with_capacity(ls.len() * rs.len());
+                    for l in &ls {
+                        for r in &rs {
+                            out.push(crate::stdlib::concat(*mode, l.clone(), r.clone()));
+                        }
+                    }
+                    out
+                }
+            };
+            rs.into_iter()
+                .map(|out| match out {
+                    Ok(v) => v,
+                    Err(why) => {
+                        crate::pipeline::record_refusal(format!("{}: {why}", mode.symbol()));
+                        Value::Null
+                    }
+                })
+                .collect()
+        }
+        // A row stands only on a concatenation's right, where the
+        // arm above reads it.
+        Operand::Row(_) => vec![Value::Null],
+        Operand::Neg(inner) => forking(eval_operand(host, ext, inner, trace, scope))
+            .into_iter()
+            .map(|v| match v.numeric_reading() {
                 Some(Value::Int(n)) => n
                     .checked_neg()
                     .map(Value::Int)
                     .unwrap_or(Value::Float(-(n as f64))),
                 Some(Value::Float(f)) => Value::Float(-f),
                 _ => Value::Null,
-            }]
-        }
+            })
+            .collect(),
+        // A reducing callee's first argument: the values it reaches
+        // as one list, as the command's input would be; one value as
+        // it is (draft 164).
+        Operand::Gathered(inner) => vec![gathered(eval_operand(host, ext, inner, trace, scope))],
         // A boolean group in operand position is its truth value.
         Operand::Group(e) => vec![Value::Bool(discard(|| {
             eval_pred_expr(host, ext, e, trace, scope)
@@ -602,6 +685,26 @@ pub(crate) fn bare_cursor(inner: &Operand) -> bool {
 
 /// Evaluate a value expression against `node`, reduced to its first
 /// value (null when it selects nothing).
+/// A binary operand's values: an operand that reaches nothing is
+/// null, one value (draft 164).
+fn forking(values: Vec<Value>) -> Vec<Value> {
+    if values.is_empty() {
+        vec![Value::Null]
+    } else {
+        values
+    }
+}
+
+/// Several values gathered into one list, as a constructor's item
+/// and a reducing callee's input take them; one value as it is.
+fn gathered(mut values: Vec<Value>) -> Value {
+    if values.len() == 1 {
+        values.pop().expect("one")
+    } else {
+        Value::list(values)
+    }
+}
+
 pub(crate) fn operand_scalar<H: Host>(
     host: &H,
     ext: &H::Ext,
@@ -1071,14 +1174,49 @@ fn holds(
 /// cells absent on a thread are null; the columns are typed by the
 /// table rule as the literal's are. A view built when read: `$.n`
 /// keeps a pushed value's own type. Null where no context exists.
-pub(crate) fn matrix<X: crate::thread::Attachment>(scope: Scope<'_, X>, node: bool) -> Vec<Value> {
+/// `#_` — the context table: one row per thread in context order,
+/// the columns `topic` and `position` (spec: The Cursor); null
+/// where no context is at hand, as `#*` is.
+pub(crate) fn ctx_table<H: Host>(host: &H, scope: Scope<'_, H::Ext>) -> Vec<Value> {
+    if scope.peers.is_none() {
+        return vec![Value::Null];
+    }
+    let items = |vs: Vec<Value>| match vs.into_iter().next() {
+        Some(v @ Value::List(_)) => v.into_items().unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let topics = items(host.capsae(scope, None));
+    let positions = items(host.positions(scope, None));
+    let rows: Vec<Vec<Value>> = topics
+        .into_iter()
+        .zip(positions)
+        .map(|(t, p)| vec![t, p])
+        .collect();
+    vec![Value::table(crate::value::Table::new(
+        Some(vec!["topic".to_string(), "position".to_string()]),
+        rows,
+    ))]
+}
+
+pub(crate) fn matrix<X: crate::thread::Attachment>(
+    scope: Scope<'_, X>,
+    node: bool,
+    full: bool,
+) -> Vec<Value> {
     let Some(peers) = scope.peers else {
         return vec![Value::Null];
     };
-    let part = if node {
-        RegRef::NodeFullRecord
-    } else {
-        RegRef::FullRecord
+    let part = match (node, full) {
+        (false, false) => RegRef::Record,
+        (false, true) => RegRef::FullRecord,
+        (true, false) => RegRef::NodeRecord,
+        (true, true) => RegRef::NodeFullRecord,
+    };
+    let spelled = match (node, full) {
+        (false, false) => "#.",
+        (false, true) => "#.*",
+        (true, false) => "##.",
+        (true, true) => "##.*",
     };
     let mut header: Vec<String> = Vec::new();
     let mut records: Vec<Vec<(String, Value)>> = Vec::new();
@@ -1108,8 +1246,7 @@ pub(crate) fn matrix<X: crate::thread::Attachment>(scope: Scope<'_, X>, node: bo
                 Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Foreign(_)
             ) {
                 record_refusal(format!(
-                    "'{}' holds {} under '{h}': a table cell is flat (read the regula with '$.{h}' instead)",
-                    if node { "##*" } else { "#*" },
+                    "'{spelled}' holds {} under '{h}': a table cell is flat (read the regula with '$.{h}' instead)",
                     crate::stdlib::kind_of(&v)
                 ));
                 return vec![Value::Null];

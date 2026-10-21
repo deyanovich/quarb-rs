@@ -47,6 +47,13 @@ pub(crate) fn recall_part<T: Clone>(
             .nth(n.saturating_sub(1))
             .map(|r| part(r).clone())
             .unwrap_or(none),
+        RegRef::Back(n) => side(false)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .nth(n.saturating_sub(1))
+            .map(|r| part(r).clone())
+            .unwrap_or(none),
         RegRef::Named(name) => register
             .iter()
             .rev()
@@ -117,6 +124,7 @@ pub(crate) fn recall_field_origins(register: &[Reg], r: &RegRef, name: &str) -> 
     let reg = match r {
         RegRef::Top => register.last(),
         RegRef::Index(n) => register.get(n.saturating_sub(1)),
+        RegRef::Back(n) => register.iter().rev().nth(n.saturating_sub(1)),
         RegRef::Named(key) => register
             .iter()
             .rev()

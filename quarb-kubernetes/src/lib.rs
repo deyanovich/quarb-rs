@@ -664,6 +664,12 @@ impl AstAdapter for KubernetesAdapter {
     /// `:::path`, `:::n-fields` (an object's top-level field
     /// count), and `:::length` (element count for an array or
     /// map, character count for a string).
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["path", "n-fields", "length"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
             "path" => Some(Value::Str(self.locator(node))),

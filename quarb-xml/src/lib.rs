@@ -359,6 +359,12 @@ impl AstAdapter for XmlAdapter {
     /// `:::tag`, `:::local-name`, `:::ns-prefix`, and `:::n-attrs`
     /// — facts about the element, never its data: attributes are
     /// properties (`::pages`), text is the bare projection.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["tag", "local-name", "ns-prefix", "n-attrs"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

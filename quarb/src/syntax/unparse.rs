@@ -146,6 +146,7 @@ fn anchor(a: &crate::syntax::ast::Anchor) -> String {
         Anchor::Mark(m) => format!("$$.{m}"),
         Anchor::MarkIndex(n) => format!("$$.{n}"),
         Anchor::MarkTop => "$$.".to_string(),
+        Anchor::MarkBack(n) => format!("$$.-{n}"),
         Anchor::MarksAll => "((@))".to_string(),
         Anchor::MarksNamed(m) => format!("((@{m}))"),
         Anchor::Id(op) => format!("((!{}))", operand(op)),
@@ -633,6 +634,23 @@ fn cmp(op: CmpOp) -> &'static str {
 
 /// The canonical text of one operand form (macro argument splicing
 /// and the expansion arbor's `::form` property).
+/// `#(--width=3)` / `#(--header=@(a; b; c))` — the reshape's
+/// option, long, the header's names bare.
+fn reshape_text(call: &crate::syntax::ast::FnCall) -> String {
+    match &call.args[0] {
+        Arg::Lit(Value::List(names)) => format!(
+            "#(--header=@({}))",
+            names
+                .iter()
+                .map(|n| name_text(&n.to_string()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Arg::Lit(v) => format!("#(--width={})", v.to_quarb()),
+        _ => fn_call(call),
+    }
+}
+
 pub(crate) fn operand_text(o: &Operand) -> String {
     operand(o)
 }
@@ -695,16 +713,37 @@ pub(crate) fn operand(o: &Operand) -> String {
                 arith_term(right, *op, true)
             )
         }
+        // The concatenation stands at the additive level: a looser
+        // operand under it is parenthesized, and so is one of the
+        // same level on its right (the parse is left-associative).
+        Operand::Concat { mode, left, right } => format!(
+            "{} {} {}",
+            arith_term(left, ArithOp::Add, false),
+            mode.symbol(),
+            arith_term(right, ArithOp::Add, true)
+        ),
+        Operand::Row(items) => {
+            let inner: Vec<String> = items
+                .iter()
+                .map(|(n, e)| match n {
+                    Some(n) => format!("{n} = {}", body_text(e)),
+                    None => body_text(e),
+                })
+                .collect();
+            format!("%({})", inner.join("; "))
+        }
         Operand::Neg(inner) => format!(
             "- {}",
             match **inner {
-                Operand::Arith { .. } => parens(&operand(inner)),
+                Operand::Arith { .. } | Operand::Concat { .. } => parens(&operand(inner)),
                 _ => operand(inner),
             }
         ),
+        Operand::Gathered(inner) => operand(inner),
         Operand::Group(e) => parens(&pred_expr(e)),
         Operand::Recall(r) => reg(r),
         Operand::Topic => "$_".to_string(),
+        Operand::Cursor => "_".to_string(),
         // The seed never stands alone in parsed text; a headless
         // body pipeline prints without it (see `body_text`).
         Operand::Seed => "$_".to_string(),
@@ -718,7 +757,7 @@ pub(crate) fn operand(o: &Operand) -> String {
         }
         Operand::NamedCaptures => "%+".to_string(),
         Operand::List(items) => {
-            let inner: Vec<String> = items.iter().map(body_text).collect();
+            let inner: Vec<String> = items.iter().map(|i| grouped(body_text(i))).collect();
             format!("@({})", inner.join("; "))
         }
         Operand::Coalesce { left, right } => {
@@ -802,8 +841,23 @@ pub(crate) fn operand(o: &Operand) -> String {
             Some(p) => format!("@@_{}", projection(p)),
             None => "@@_".to_string(),
         },
-        Operand::Matrix { node: false } => "#*".to_string(),
-        Operand::Matrix { node: true } => "##*".to_string(),
+        Operand::Matrix {
+            node: false,
+            full: false,
+        } => "#.".to_string(),
+        Operand::Matrix {
+            node: false,
+            full: true,
+        } => "#.*".to_string(),
+        Operand::Matrix {
+            node: true,
+            full: false,
+        } => "##.".to_string(),
+        Operand::Matrix {
+            node: true,
+            full: true,
+        } => "##.*".to_string(),
+        Operand::CtxTable => "#_".to_string(),
         Operand::Piped { expr, commands } if matches!(**expr, Operand::Seed) => {
             parens(&headless(commands))
         }
@@ -912,16 +966,16 @@ pub(crate) fn operand(o: &Operand) -> String {
 /// `1 + 1 + 1 + …` therefore prints flat, within the nesting the
 /// parser accepts.
 fn arith_term(o: &Operand, parent: ArithOp, right: bool) -> String {
-    match o {
-        Operand::Arith { op, .. } => {
-            let (inner, outer) = (arith_precedence(*op), arith_precedence(parent));
-            if inner < outer || (right && inner == outer) {
-                parens(&operand(o))
-            } else {
-                operand(o)
-            }
-        }
-        _ => operand(o),
+    let inner = match o {
+        Operand::Arith { op, .. } => arith_precedence(*op),
+        Operand::Concat { .. } => arith_precedence(ArithOp::Add),
+        _ => return operand(o),
+    };
+    let outer = arith_precedence(parent);
+    if inner < outer || (right && inner == outer) {
+        parens(&operand(o))
+    } else {
+        operand(o)
     }
 }
 
@@ -1038,19 +1092,11 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Func(call) if is_record_call(&call.name) => {
             format!("| %{}", record_args(call, "; "))
         }
-        // `| #(3)` / `| #(@(a; b; c))` — the reshape, its header bare.
-        Command::Func(call) if call.name == "#" && !call.args.is_empty() => match &call.args[0] {
-            Arg::Lit(Value::List(names)) => format!(
-                "| #(@({}))",
-                names
-                    .iter()
-                    .map(|n| name_text(&n.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            Arg::Lit(v) => format!("| #({})", v.to_quarb()),
-            _ => format!("| {}", fn_call(call)),
-        },
+        // `| #(--width=3)` / `| #(--header=@(a; b; c))` — the
+        // reshape, its option long, its header bare.
+        Command::Func(call) if call.name == "#" && !call.args.is_empty() => {
+            format!("| {}", reshape_text(call))
+        }
         Command::Func(call) => format!("| {}", fn_call(call)),
         // `%%(...)`: the record sigil's enriched register view.
         Command::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
@@ -1072,6 +1118,9 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Agg(call) if call.name == "group" => {
             format!("@| group{}", record_args(call, "; "))
         }
+        Command::Agg(call) if call.name == "#" && !call.args.is_empty() => {
+            format!("@| {}", reshape_text(call))
+        }
         Command::Agg(call) => format!("@| {}", fn_call(call)),
         Command::Spread { outer: false } => "| ...".to_string(),
         Command::Spread { outer: true } => "| ...?".to_string(),
@@ -1086,47 +1135,6 @@ pub(crate) fn command(st: &Command) -> String {
                 None => format!("{{{min};}}"),
             };
             format!("{}{quant}", command(inner))
-        }
-        Command::Append { body, overwrite } => {
-            // A value body prints as the value (`+| 3`); any other
-            // command as it prints after `|`.
-            let body = match &**body {
-                Command::Expr(e) => {
-                    let text = operand(e);
-                    let bare = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
-                        || text.starts_with("@-")
-                        || text.starts_with("@(")
-                        || text.starts_with("@%(")
-                        || text.starts_with("#(")
-                        || matches!(text.as_str(), "null" | "true" | "false")
-                        || text.starts_with(|c: char| c.is_ascii_digit())
-                        || (text.starts_with('-')
-                            && text[1..].starts_with(|c: char| c.is_ascii_digit()));
-                    if bare { text } else { format!("({text})") }
-                }
-                other => {
-                    let text = command(other);
-                    text.strip_prefix("@| ")
-                        .or_else(|| text.strip_prefix("| "))
-                        .unwrap_or(&text)
-                        .to_string()
-                }
-            };
-            format!("+|{} {body}", if *overwrite { "!" } else { "" })
-        }
-        Command::AppendRow { items, overwrite } => {
-            let inner: Vec<String> = items
-                .iter()
-                .map(|(n, e)| match n {
-                    Some(n) => format!("{n} = {}", body_text(e)),
-                    None => body_text(e),
-                })
-                .collect();
-            format!(
-                "+|{} %({})",
-                if *overwrite { "!" } else { "" },
-                inner.join("; ")
-            )
         }
         Command::Map(inner) => {
             let body = command(inner);
@@ -1152,11 +1160,14 @@ pub(crate) fn command(st: &Command) -> String {
         // must keep parens, or the reparse reads it as a command
         // name. A bare PATH must keep parens too: unparenthesized
         // it would reparse as a navigation command.
+        // A literal stands bare after a pipe (draft 164): `| 0`,
+        // never `| (0)`, which is the rounded register.
         Command::Expr(e) => {
             let text = operand(e);
             let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
                 || text.starts_with("@-")
-                || text.starts_with("@(");
+                || text.starts_with("@(")
+                || matches!(e, Operand::Lit(_));
             if delimited {
                 format!("| {text}")
             } else {
@@ -1176,6 +1187,18 @@ pub(crate) fn command(st: &Command) -> String {
             if *enriched { "%%" } else { "%" },
             record_args(call, "; ")
         ),
+        Command::AggExpr(e) => {
+            let text = operand(e);
+            let delimited = text.starts_with(['(', '\'', '"', '$', '%', '#'])
+                || text.starts_with("@(")
+                || text.starts_with("@%(")
+                || matches!(e, Operand::Lit(_));
+            if delimited {
+                format!("@| {text}")
+            } else {
+                format!("@| ({text})")
+            }
+        }
         Command::AggRecall(r) => format!("@| {}", reg(r)),
         Command::Select(p) => format!("@| {}", predicate(p)),
         Command::Filter(e) => format!("| [{}]", pred_expr(e)),
@@ -1236,12 +1259,25 @@ fn record_args(call: &crate::syntax::ast::FnCall, sep: &str) -> String {
                 i += 2;
             }
             a => {
-                out.push(arg_text(a));
+                out.push(grouped(arg_text(a)));
                 i += 1;
             }
         }
     }
     format!("({})", out.join(sep))
+}
+
+/// A field's text, in the path group when it is dash-led (`-x`,
+/// `--author`, `--`): the group keeps the operand reading, where the
+/// bare field would open the option segment (draft 164). A negative
+/// number is no dash-led word.
+fn grouped(text: String) -> String {
+    let head = text.split([' ', '=', '/', ':', '[']).next().unwrap_or("");
+    if text.starts_with("--") || crate::syntax::lexer::is_option_word(head) {
+        format!("({text})")
+    } else {
+        text
+    }
 }
 
 /// A headless body pipeline's text: the commands with the first
@@ -1326,7 +1362,11 @@ fn fn_call(call: &crate::syntax::ast::FnCall) -> String {
         .into_iter()
         .zip(call.args.iter())
         .partition(|(_, a)| !matches!(a, Arg::Opt { .. }));
-    let mut fields: Vec<String> = operands.into_iter().map(|(t, _)| t).collect();
+    // A hop as an operand prints as the path group, `f((--author))`
+    // — the canonical spelling (draft 164), a dash-led field being
+    // the option segment on the reparse; the trailing separator,
+    // `f(--author;)`, is an input spelling only.
+    let mut fields: Vec<String> = operands.into_iter().map(|(t, _)| grouped(t)).collect();
     if !options.is_empty() {
         let mut segment: Vec<String> = options.into_iter().map(|(t, _)| t).collect();
         let opens = segment[0] == "--"
@@ -1344,13 +1384,14 @@ pub(crate) fn reg(r: &RegRef) -> String {
     match r {
         RegRef::Top => "$.".to_string(),
         RegRef::Index(n) => format!("$.{n}"),
+        RegRef::Back(n) => format!("$.-{n}"),
         RegRef::Named(n) => format!("$.{n}"),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
-        RegRef::FullRecord => "%..".to_string(),
+        RegRef::FullRecord => "%.*".to_string(),
         RegRef::NodeWhole => "@@.".to_string(),
         RegRef::NodeRecord => "%%.".to_string(),
-        RegRef::NodeFullRecord => "%%..".to_string(),
+        RegRef::NodeFullRecord => "%%.*".to_string(),
     }
 }
 
@@ -1400,13 +1441,16 @@ mod tests {
             "= 0..8..2",
             "= @(1..(2 + 1))",
             "= @((1 + 1)..4..(1 + 0))",
-            "= @(1..12) | #(3)",
-            "= @(1..6) | #(@(a; b; c)) | :b",
+            "= @(1..12) | #(--width=3)",
+            "= @(1..6) | #(--header=@(a; b; c)) | :b",
+            "= @(1..6) | #(%(1; 2); %(3; 4)) ++ %(5; 6)",
+            "/row | 0 + $_ | \"x\" | %(v = $_) ++ %(w = 1) @| @(0; $_) @| (10 + $_)",
+            "/row @| %(v = $_) ++ %(w = 1) | 1",
             "= @(1; @(2)) | flatten(1)",
             "= %(@(a; b) = @(1; 2))",
             "= %(id = 7; $.k = $.v) | keys",
             "/a | %($.k = $_) | values",
-            "= 1..6 @| #(2) | dim",
+            "= 1..6 @| #(--width=2) | dim",
         ] {
             assert_fixpoint(q);
         }
@@ -1422,23 +1466,31 @@ mod tests {
         ] {
             assert_fixpoint(q);
         }
-        // the operator in command position is the topic's expression
+        // the operator after a pipe is the topic's expression
         assert_eq!(rt("= 1 | * 2"), "= 1 | $_ * 2");
         assert_eq!(rt("= 1 | + 2 * 3"), "= 1 | $_ + 2 * 3");
     }
 
     #[test]
-    fn append_pipe_round_trips() {
+    fn concatenation_round_trips() {
         for q in [
-            "= @(1; 2) +| 3",
-            "/a | %(a = ::x) +|! %(a = 2)",
-            "= #(@(a; b); %(1; 2)) +| %(3; b = 4)",
-            "/a | @(::x) +| ::y | count",
-            "= @(0) +| (/rows/*::x)",
+            "= @(1; 2) ++ 3",
+            "/a | %(a = ::x) | ++! %(a = 2)",
+            "= #(@(a; b); %(1; 2)) ++ %(3; b = 4)",
+            "/a | @(::x) ++ ::y | count",
+            "/a | @(::x) | ++ ::y | count",
+            "= @(0) ++ (/rows/*::x)",
+            "= @(1; 2) +@+ @(3; 4)",
+            "= @(1) ++ (2 + 3)",
+            "= @(1) ++ 2 * 3",
+            "= (1 + 2) ++ 3",
         ] {
             assert_fixpoint(q);
         }
-        assert_eq!(rt("= @(1) +__ 2"), "= @(1) +| 2");
+        // the concatenation sits at the additive level, left-associative
+        assert_eq!(rt("= @(1) ++ (@(2) ++ 3)"), "= @(1) ++ (@(2) ++ 3)");
+        assert_eq!(rt("= (@(1) ++ @(2)) ++ 3"), "= @(1) ++ @(2) ++ 3");
+        assert_eq!(rt("= (@(1) ++ 2) * 3"), "= (@(1) ++ 2) * 3");
     }
 
     #[test]

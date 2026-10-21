@@ -123,12 +123,14 @@ fn a_text_where_an_integer_is_due_refuses() {
 }
 
 #[test]
-fn an_unknown_unit_converts_to_null() {
+fn an_unknown_unit_operand_is_refused() {
+    // once a silent null; since draft 161 the operand must name a
+    // unit the query knows (spec: The conversion)
     let a = Items(vec![Value::Str("3 km".into())]);
-    assert_eq!(
-        values("/item:: | convert(\"furlongs-per-fortnight\")", &a),
-        [Value::Null]
-    );
+    let e = quarb::run("/item:: | convert(\"furlongs-per-fortnight\")", &a)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no unit 'furlongs-per-fortnight'"), "{e}");
 }
 
 #[test]

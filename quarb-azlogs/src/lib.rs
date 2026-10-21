@@ -634,6 +634,17 @@ impl AstAdapter for AzlAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["table", "workspace", "type"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let (t, i) = self.entry_at(node)?;
         match key {

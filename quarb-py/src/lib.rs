@@ -633,6 +633,23 @@ fn parse_defs(text: &str) -> PyResult<()> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Whether `text` is definitions and nothing else: False when a
+/// query follows its `def`/`macro` statements (the query path reads
+/// such text whole), ValueError when a definition is malformed.
+/// The command inventory's text (`qua man`): every command, one
+/// pipe's, or one command's page; `--ru` for the Russian line.
+#[pyfunction]
+#[pyo3(signature = (*args))]
+fn man(args: Vec<String>) -> PyResult<String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    quarb::man::man(&args).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+#[pyfunction]
+fn defs_only(text: &str) -> PyResult<bool> {
+    quarb::defs_only(text).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Execute `query` against `input` parsed as `format` and return
 /// the result lines as strings — the qua CLI's exact rendering.
 /// The low-level layer; prefer [`loads`] + [`Document`] for typed
@@ -687,6 +704,8 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mount, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
     m.add_function(wrap_pyfunction!(parse_defs, m)?)?;
+    m.add_function(wrap_pyfunction!(defs_only, m)?)?;
+    m.add_function(wrap_pyfunction!(man, m)?)?;
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_file, m)?)?;

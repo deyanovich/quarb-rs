@@ -114,7 +114,18 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         // `group` produces list topics (value-typed); the other keyed
         // aggregates only reorder or filter. (`ungroup` is handled by
         // the fold in [`pipeline_projected`].)
-        Command::Agg(call) => !stdlib::known_keyed(&call.name) || call.name == "group",
+        // An ordering reduction (sort, unique, reverse, first, last)
+        // acts on the nodes and yields node threads (spec: Lists,
+        // draft 164); over values the runtime any-topic check types
+        // the result.
+        Command::Agg(call) => {
+            !(stdlib::known_keyed(&call.name)
+                || matches!(
+                    call.name.as_str(),
+                    "sort" | "unique" | "reverse" | "first" | "last"
+                ))
+                || call.name == "group"
+        }
         _ => true,
     }
 }

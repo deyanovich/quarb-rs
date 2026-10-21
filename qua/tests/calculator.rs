@@ -199,11 +199,11 @@ fn transpose_yields_a_matrix_of_one_type() {
         r#"@("text"; "text")"#
     );
     assert_eq!(
-        one("= @(1..6) | #(3) | transpose"),
+        one("= @(1..6) | #(-w=3) | transpose"),
         "#(%(1; 4);\n  %(2; 5);\n  %(3; 6))"
     );
     assert_eq!(
-        one("= @(1..6) | #(3) | transpose | transpose"),
+        one("= @(1..6) | #(-w=3) | transpose | transpose"),
         "#(%(1; 2; 3);\n  %(4; 5; 6))"
     );
     // a frame is refused, pointing at values; a ragged grid by position; a list of records by kind
@@ -235,34 +235,34 @@ fn flatten_opens_nested_lists_and_a_tables_cells() {
 
 #[test]
 fn the_reshaping_constructor_lays_a_list_into_columns() {
-    assert_eq!(one("= @(1..12) | #(3) | dim"), "@(4; 3)");
-    assert_eq!(one("= @(1..6) | #(3)"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
+    assert_eq!(one("= @(1..12) | #(--width=3) | dim"), "@(4; 3)");
+    assert_eq!(one("= @(1..6) | #(-w=3)"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
     assert_eq!(
-        one("= @(1..6) | #(@(a; b; c)) | header"),
+        one("= @(1..6) | #(--header=@(a; b; c)) | header"),
         r#"@("a"; "b"; "c")"#
     );
-    assert_eq!(one("= @(1..6) | #(@(a; b; c)) | :b"), "@(2; 5)");
+    assert_eq!(one("= @(1..6) | #(-h=@(a; b; c)) | :b"), "@(2; 5)");
     // the columns type by the rule
     assert_eq!(
-        one(r#"= @("1"; "x"; "2"; "y") | #(2) | type"#),
+        one(r#"= @("1"; "x"; "2"; "y") | #(-w=2) | type"#),
         r#"@("int"; "text")"#
     );
     // round trips
     assert_eq!(
-        one("= #(%(1; 2); %(3; 4)) | flatten | #(2)"),
+        one("= #(%(1; 2); %(3; 4)) | flatten | #(-w=2)"),
         "#(%(1; 2);\n  %(3; 4))"
     );
-    assert_eq!(one("= @(1..12) | #(3) x @(1; 1; 1)"), "@(6; 15; 24; 33)");
+    assert_eq!(one("= @(1..12) | #(-w=3) x @(1; 1; 1)"), "@(6; 15; 24; 33)");
     // over the stream
-    assert_eq!(one("= 1..6 @| #(2) | dim"), "@(3; 2)");
+    assert_eq!(one("= 1..6 @| #(-w=2) | dim"), "@(3; 2)");
     // the refusals: a count that does not divide, no list topic, a nested item
-    assert!(refuse("= @(1..5) | #(3)").contains("5 items do not divide into rows of 3"));
+    assert!(refuse("= @(1..5) | #(-w=3)").contains("5 items do not divide into rows of 3"));
     // a stream of values is the list it lays out: one value, one item
-    assert!(refuse("= 7 | #(3)").contains("1 items do not divide into rows of 3"));
-    assert_eq!(one("= 7 | #(1) | dim"), "@(1; 1)");
-    assert!(refuse("= %(a = 1) | #(1)").contains("is not a list"));
-    assert!(refuse("= @(1; @(2)) | #(2)").contains("flat"));
-    // a literal with rows in command position is still the value
+    assert!(refuse("= 7 | #(-w=3)").contains("1 items do not divide into rows of 3"));
+    assert_eq!(one("= 7 | #(-w=1) | dim"), "@(1; 1)");
+    assert!(refuse("= %(a = 1) | #(-w=1)").contains("is not a list"));
+    assert!(refuse("= @(1; @(2)) | #(-w=2)").contains("flat"));
+    // a literal with rows after a pipe is still the value
     assert_eq!(one("= 1 | #(@(a); %(1)) | dim"), "@(1; 1)");
     assert_eq!(one("= #(@(a; b)) | dim"), "@(0; 2)");
 }

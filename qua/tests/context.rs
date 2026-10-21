@@ -1,5 +1,5 @@
 //! The context family (spec: Context Accessors): `@_` the topics,
-//! `@@_` the positions, `#*` / `##*` the context as a table; `@*`
+//! `@@_` the positions, `#.*` / `##.*` the context as a table; `@*`
 //! retired.
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,30 +66,30 @@ fn the_topics_and_the_positions() {
     );
 }
 
-/// `#*` is the context as a table of the value regulae, one row
-/// per thread, the columns named as `%..` names them; `##*` the
+/// `#.*` is the context as a table of the value regulae, one row
+/// per thread, the columns named as `%.*` names them; `##.*` the
 /// node regulae. A view: typed by the table rule when read.
 #[test]
 fn the_context_as_a_table() {
     let d = fixture();
     let q = "/a/* | .k(::k) | .v(::x * 2) | ";
     assert_eq!(
-        ok(&d, &format!("{q}#* @| first")),
+        ok(&d, &format!("{q}#.* @| first")),
         "#(@(k; v);\n  %(1; 20);\n  %(2; 40);\n  %(3; 60))"
     );
-    assert_eq!(ok(&d, &format!("{q}#*:v @| first")), "@(20; 40; 60)");
-    assert_eq!(ok(&d, &format!("{q}#*:2 @| first")), "@(20; 40; 60)");
+    assert_eq!(ok(&d, &format!("{q}#.*:v @| first")), "@(20; 40; 60)");
+    assert_eq!(ok(&d, &format!("{q}#.*:2 @| first")), "@(20; 40; 60)");
     assert_eq!(
-        ok(&d, "/a/* | .k(::k) | .(::x) | #* @| first"),
+        ok(&d, "/a/* | .k(::k) | .(::x) | #.* @| first"),
         "#(@(k; .2);\n  %(1; 10);\n  %(2; 20);\n  %(3; 30))"
     );
     assert_eq!(
-        ok(&d, "/a/* | .A | .k(::k) | ##* @| first"),
+        ok(&d, "/a/* | .A | .k(::k) | ##.* @| first"),
         "#(@(A);\n  %(\"/a/0\");\n  %(\"/a/1\");\n  %(\"/a/2\"))"
     );
     // A regula that is no cell refuses by name.
     assert!(
-        err(&d, "/a/* | .l(@(1; 2)) | #*").contains("'#*' holds a list under 'l'")
+        err(&d, "/a/* | .l(@(1; 2)) | #.*").contains("'#.*' holds a list under 'l'")
     );
 }
 

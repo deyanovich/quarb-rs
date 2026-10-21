@@ -17,7 +17,7 @@
 use crate::error::{QuarbError, Result};
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, FnCall, Group, IndexSpec, InterpSeg,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec, InterpSeg,
     LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr, Predicate, Projection,
     PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath, Step, TableRow, TraitClause,
 };
@@ -123,6 +123,24 @@ pub fn parse_defs(tokens: &[Token]) -> Result<Defs> {
     Ok(p.defs)
 }
 
+/// Whether `tokens` are definitions and nothing else: the leading
+/// `def`/`macro` statements parse (a malformed one is the error),
+/// and `Ok(false)` says a query follows them — text the query path
+/// reads whole, leading definitions included. Session layers use it
+/// to tell a definitions cell from a query cell with a preamble.
+pub fn defs_only(tokens: &[Token]) -> Result<bool> {
+    let expander = crate::graph::reflect::Reflector::new(None);
+    let mut p = Parser::new(tokens, Defs::default(), &expander);
+    while p.at_def() || p.at_macro() {
+        if p.at_def() {
+            p.parse_def()?;
+        } else {
+            p.parse_macro()?;
+        }
+    }
+    Ok(p.peek().is_none())
+}
+
 /// A table of named fragments (`def &name: body;`), expanded at
 /// parse time. Names are unique; a definition may invoke only
 /// *earlier* definitions, so recursion is impossible by
@@ -163,8 +181,66 @@ struct Def {
     /// Data-aware (`macro &name!`): the body reads the dataset,
     /// mounted as `/data`, and every invocation spells the `!`.
     data_aware: bool,
+    /// The body names `$$0` (directly, or through a fragment it
+    /// invokes). Its placement is judged where the expansion lands:
+    /// a join condition admits it, anywhere else the invocation is
+    /// the parse error.
+    uses_driver: bool,
+    /// The unit operands the body spells (`convert(U)`, `unit(U)`,
+    /// `magnitude(U)`: the command and the operand), when the body
+    /// parsed without a dataset to judge them by (a definitions
+    /// file); the splice site judges them (spec: The conversion).
+    unit_operands: Vec<(String, String)>,
     body: DefBody,
 }
+
+/// The value-side capsa read after `$.` (spec: The Capsa): `$.` the
+/// latest regula, `$.N` the N-th, `$.-N` the N-th back from the
+/// latest, `$..` the penultimate, `$.name` the latest under a name;
+/// any other shape is refused with the forms.
+fn reg_ref(rest: &str) -> Result<RegRef> {
+    if rest.is_empty() {
+        return Ok(RegRef::Top);
+    }
+    if rest == "." {
+        return Ok(RegRef::Back(2));
+    }
+    if let Some(d) = rest.strip_prefix('-') {
+        if let Ok(n) = d.parse::<usize>()
+            && n >= 1
+            && d.bytes().all(|c| c.is_ascii_digit())
+        {
+            return Ok(RegRef::Back(n));
+        }
+    } else if rest.bytes().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = rest.parse::<usize>()
+            && n >= 1
+        {
+            return Ok(RegRef::Index(n));
+        }
+    } else if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && rest.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Ok(RegRef::Named(rest.to_string()));
+    }
+    Err(QuarbError::parse(format!(
+        "'$.{rest}' is no capsa read: '$.' is the latest value regula, '$.N' the N-th, \
+         '$.-N' the N-th back from the latest, '$..' the penultimate, '$.name' the latest \
+         under a name"
+    )))
+}
+
+/// A node projection written on the cursor, as the parse error says
+/// it: the cursor is a record, its position the node.
+const CURSOR_PROJECTION: &str = "'_' is the cursor: the position's property is '_:position::k' or '$$_::k'; the driver of a join is '$$0::k'";
+
+/// The driver's placement rule, as the parse error says it.
+const DRIVER_PLACEMENT: &str = "'$$0' names the driver of a correlation inside its \
+                                join condition; elsewhere the invoking position is \
+                                '$$__' and the position '$$_'";
 
 /// A fragment body: a navigation query (which may carry its own
 /// pipeline), a pipeline fragment (each command's pipe is implied by
@@ -188,6 +264,7 @@ fn command_pipe(command: &Command) -> &'static str {
         | Command::Select(_)
         | Command::AggPush { .. }
         | Command::AggRecord { .. }
+        | Command::AggExpr(_)
         | Command::AggRecall(_) => "@|",
         _ => "|",
     }
@@ -238,6 +315,16 @@ struct Parser<'a> {
     /// How many correlations enclose the cursor: `$$0` names the
     /// driver only inside a join condition.
     correlation_depth: usize,
+    /// Inside a fragment body: `$$0` is admitted here and judged at
+    /// the splice site instead (see [`Def::uses_driver`]).
+    in_def_body: bool,
+    /// Set while a fragment body parses when `$$0` appears outside
+    /// any join of the body's own, directly or through a fragment
+    /// the body invokes.
+    body_uses_driver: bool,
+    /// The unit operands a fragment body spelled that no dataset
+    /// could judge yet (see [`Def::unit_operands`]).
+    body_unit_operands: Vec<(String, String)>,
     /// How deeply the recursive-descent constructs (parenthesized
     /// expressions, path groups, `!` chains) are nested right now.
     /// Bounded by [`MAX_NEST`]: unbounded, a long run of `(` is a
@@ -389,13 +476,12 @@ fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::Expr(_)
         | Command::Agg(_)
         | Command::AggRecord { .. }
+        | Command::AggExpr(_)
         | Command::AggRecall(_)
         | Command::Recall(_)
         | Command::RecordWith(_)
         | Command::Spread { .. }
-        | Command::Map(_)
-        | Command::Append { .. }
-        | Command::AppendRow { .. } => PipeMode::Scalar,
+        | Command::Map(_) => PipeMode::Scalar,
         Command::Repeat { command, .. } => command_mode_out(command, cur),
     }
 }
@@ -429,6 +515,9 @@ impl<'a> Parser<'a> {
             pattern_depth: 0,
             predicate_depth: 0,
             correlation_depth: 0,
+            in_def_body: false,
+            body_uses_driver: false,
+            body_unit_operands: Vec::new(),
             nest_depth: 0,
             subquery_depth: 0,
             arg_depth: 0,
@@ -449,6 +538,7 @@ impl<'a> Parser<'a> {
     {
         Ok(Parser {
             nest_depth: self.sub_depth()?,
+            in_def_body: self.in_def_body,
             ..Parser::new(toks, defs, self.expander)
         })
     }
@@ -492,13 +582,39 @@ impl Parser<'_> {
         }
         let query = self.parse_chain()?;
         if let Some(tok) = self.peek() {
-            // `:name` after a path: a node has properties, not
-            // fields.
+            // `:name` spaced after a path: a core field glues to
+            // its step.
             if matches!(tok, Token::Field)
                 && let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 1)
             {
                 return Err(QuarbError::parse(format!(
-                    "':{text}' reads a record's field; a node's property is '::{text}'"
+                    "':{text}' stands apart from its path: a core field glues to the step \
+                     ('/x:{text}'; ':fields' lists them), a property is '::{text}'"
+                )));
+            }
+            // `= 12 h`, `| 12 km`: a literal head continues only with
+            // an operator; the spellings a reader wants are the
+            // quantity and the text.
+            if self.pos > 0
+                && let Some(Token::Name {
+                    text: prev,
+                    quoted: false,
+                    ..
+                }) = self.toks.get(self.pos - 1)
+                && let Token::Name {
+                    text: word,
+                    quoted: false,
+                    ..
+                } = tok
+                && is_word(word)
+                && matches!(
+                    literal_value(prev, false, &|e| self.expander.unit_scale(e)),
+                    Value::Int(_) | Value::Float(_)
+                )
+            {
+                return Err(QuarbError::parse(format!(
+                    "'{prev} {word}' is no expression: a literal head continues only with an \
+                     operator — write {prev}_{word} for the quantity, \"{prev} {word}\" for the text"
                 )));
             }
             return Err(QuarbError::parse(format!(
@@ -827,54 +943,6 @@ impl Parser<'_> {
                     mode = command_mode_out(&command, mode);
                     pipeline.push(command);
                 }
-                // `+| body` — the append pipe: the body a scalar-mode
-                // command over the topic (a path parenthesized, as
-                // an expression).
-                Some(Token::AppendPipe { overwrite }) => {
-                    let overwrite = *overwrite;
-                    self.pos += 1;
-                    // `+| %(…)` — a row under the table literal's
-                    // rules, positional by the topic's header or
-                    // named, resolved at run time.
-                    if matches!(self.peek(), Some(Token::Percent))
-                        && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
-                    {
-                        self.pos += 2;
-                        let items = self.record_row()?;
-                        let command = Command::AppendRow { items, overwrite };
-                        mode = command_mode_out(&command, mode);
-                        pipeline.push(command);
-                        continue;
-                    }
-                    // A bare literal is the value appended (`+| 3`,
-                    // `+| "x"`, `+| null`); anything else reads as
-                    // the segment after `|` would.
-                    let literal = match self.peek() {
-                        Some(Token::Name { quoted: true, .. }) => true,
-                        Some(Token::Name {
-                            text,
-                            quoted: false,
-                            ..
-                        }) => {
-                            matches!(text.as_str(), "null" | "true" | "false")
-                                || text.starts_with(|c: char| c.is_ascii_digit())
-                                || (text.starts_with('-')
-                                    && text[1..].starts_with(|c: char| c.is_ascii_digit()))
-                        }
-                        _ => false,
-                    };
-                    let body = if literal {
-                        Command::Expr(self.additive()?)
-                    } else {
-                        self.pipe_item(PipeMode::Scalar)?
-                    };
-                    let command = Command::Append {
-                        body: Box::new(body),
-                        overwrite,
-                    };
-                    mode = command_mode_out(&command, mode);
-                    pipeline.push(command);
-                }
                 // `$| command` — the map pipe.
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
                     self.pos += 2;
@@ -917,6 +985,17 @@ impl Parser<'_> {
                                 ));
                             }
                         }
+                    }
+                    // A literal or a constructor after `@|` opens an
+                    // expression over the context as a whole (spec:
+                    // Literals and constructors): `@| @(0; $_)` builds
+                    // one list as `@| %(…)` builds one record, `@| 0`
+                    // is one value; `#(--width=n)` stays the reshape.
+                    if self.expr_head_ahead() {
+                        let command = Command::AggExpr(self.additive()?);
+                        mode = command_mode_out(&command, mode);
+                        pipeline.push(command);
+                        continue;
                     }
                     if let Some(command) = self.agg_sigil_command()? {
                         mode = command_mode_out(&command, mode);
@@ -969,7 +1048,7 @@ impl Parser<'_> {
             && let Some(op) = arith_word(text)
             && !matches!(
                 self.toks.get(self.pos + 1),
-                None | Some(Token::Pipe | Token::RParen | Token::AppendPipe { .. })
+                None | Some(Token::Pipe | Token::RParen)
             )
             && !(matches!(self.toks.get(self.pos + 1), Some(Token::At | Token::Dollar))
                 && matches!(self.toks.get(self.pos + 2), Some(Token::Pipe)))
@@ -993,6 +1072,13 @@ impl Parser<'_> {
                     })?
                 }
             };
+            return Ok(Command::Expr(self.additive_from(left)?));
+        }
+        // `| ++ x`, `| ++! x`, `| +@+ x` — a concatenation operator
+        // after a pipe takes the topic as its left side like every
+        // binary operator (spec: Concatenation, "After a pipe").
+        if let Some(mode) = self.concat_word_ahead() {
+            let left = self.concat_rest(mode, Operand::Topic)?;
             return Ok(Command::Expr(self.additive_from(left)?));
         }
         // A command that starts like a path is a navigation command —
@@ -1055,11 +1141,17 @@ impl Parser<'_> {
             // `| :name` — the topic record's field; `| %+` — the
             // named-captures record.
             Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.additive()?)),
-            // `| @_`, `| @@_::prop`, `| #*`, `| ##*` — the context
-            // family as the command's expression.
-            Some(Token::Topics | Token::Positions | Token::Matrix | Token::NodeMatrix) => {
-                Ok(Command::Expr(self.additive()?))
-            }
+            // `| @_`, `| @@_::prop`, `| #*`, `| ##*`, `| #_` — the
+            // context family as the command's expression; `| _` the
+            // cursor record.
+            Some(
+                Token::Topics
+                | Token::Positions
+                | Token::Matrix { .. }
+                | Token::NodeMatrix { .. }
+                | Token::CtxTable
+                | Token::Cursor,
+            ) => Ok(Command::Expr(self.additive()?)),
             // `| @(a; b)` — a list literal as the command's
             // expression; `| @%(…)` the record array.
             Some(Token::At)
@@ -1090,8 +1182,9 @@ impl Parser<'_> {
                 if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "*") {
                     return Err(QuarbError::parse(
                         "'@*' is retired: the context is '@_' (the topics), '@@_' \
-                         (the positions; '@@_::prop' maps over them), '#*' (the \
-                         table of the value regulae) or '##*' (of the node regulae)",
+                         (the positions; '@@_::prop' maps over them), '#.' / '#.*' (the \
+                         table of the named / of every value regula) or '##.' / '##.*' \
+                         (of the node regulae)",
                     ));
                 }
                 // `| @` bare — the row reading (spec: Command
@@ -1155,6 +1248,7 @@ impl Parser<'_> {
             // args win on a shared name); `| %%.` — the named node
             // view; `| %%..` — the full node view.
             Some(Token::Percent) => {
+                let head = self.pos;
                 self.pos += 1;
                 if matches!(self.peek(), Some(Token::Percent)) {
                     self.pos += 1;
@@ -1175,6 +1269,14 @@ impl Parser<'_> {
                 }
                 if matches!(self.peek(), Some(Token::LParen)) {
                     let call = self.record_args()?;
+                    // `| %(v = $_) ++ %(w = 1)` — the constructor is
+                    // the head of an expression that continues past
+                    // its closing parenthesis (spec: Literals and
+                    // constructors).
+                    if self.expr_continues() {
+                        self.pos = head;
+                        return Ok(Command::Expr(self.additive()?));
+                    }
                     validate_record(&call)?;
                     return Ok(Command::Func(call));
                 }
@@ -1402,18 +1504,30 @@ impl Parser<'_> {
                 | Token::LParen
                 | Token::Interp(_),
             ) => Ok(Command::Expr(self.additive()?)),
-            // A quoted string is a constant-topic command (`| 'text'`);
-            // unquoted names remain command calls.
+            // A literal where a command name would stand opens an
+            // expression (spec: Literals and constructors): `| 0`
+            // yields 0 per thread, `| 10 + $_` is `| + 10`, `| "x"`
+            // the text; a bare word stays a command call.
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if !matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                && self.literal_word(text) =>
+            {
+                Ok(Command::Expr(self.additive()?))
+            }
             Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.additive()?)),
             _ => {
                 let call = self.func_call()?;
-                // `now()` refuses command position: it takes no topic.
+                // `now()` refuses to stand after a pipe: it takes no topic.
                 if call.name == "now" {
                     return Err(QuarbError::parse(
                         "now() is a call operand (the invocation instant); it takes no \
                          topic — use it in expression position: [::date > now() - 12h]",
                     ));
                 }
+                self.check_unit_call(&call)?;
                 func_command(call)
             }
         }
@@ -1462,7 +1576,10 @@ impl Parser<'_> {
                 quoted: false,
                 ..
             }) => {
-                matches!(text.as_str(), "+" | "-" | "*" | "div" | "idiv" | "mod")
+                matches!(
+                    text.as_str(),
+                    "+" | "-" | "*" | "div" | "idiv" | "mod" | "++" | "+@+"
+                )
             }
             Some(Token::Question { .. }) => true,
             // `| <-link:.v` — a path with a register accessor glued
@@ -1493,17 +1610,22 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(1)
             }
-            Some(Token::Name { text, .. }) if text == ".." => {
+            // `%.*` — the full view (draft 163; `%..` is retired,
+            // the doubled dot being the penultimate).
+            Some(Token::Name { text, .. }) if text == ".*" => {
                 self.pos += 1;
                 Ok(2)
             }
+            Some(Token::Name { text, .. }) if text == ".." => Err(QuarbError::parse(format!(
+                "'{sigil}..' is retired: the full view is '{sigil}.*' (the doubled dot is the penultimate regula, '$..')"
+            ))),
             _ => Err(QuarbError::parse(format!("expected '.' after '{sigil}'"))),
         }
     }
 
-    /// Whether the next token is a view's dot or dots.
+    /// Whether the next token is a view's dot, star or dots.
     fn at_view_dots(&self) -> bool {
-        matches!(self.peek(), Some(Token::Name { text, .. }) if text == "." || text == "..")
+        matches!(self.peek(), Some(Token::Name { text, .. }) if text == "." || text == ".*" || text == "..")
     }
 
     /// Parse one `||` branch: navigation and an optional projection.
@@ -1572,6 +1694,12 @@ impl Parser<'_> {
         self.expect_separator("':' between the fragment name and its body")?;
 
         self.def_params = params.clone();
+        // The body is spliced text: `$$0` in it is judged where the
+        // expansion lands, so the body itself admits it and records
+        // that it does (ruling of 2026-10-20).
+        let outer_body = std::mem::replace(&mut self.in_def_body, true);
+        let outer_uses = std::mem::replace(&mut self.body_uses_driver, false);
+        let outer_units = std::mem::take(&mut self.body_unit_operands);
         // A body starting with a pipe is a pipeline fragment; one
         // starting with `[` is a predicate fragment (a reusable
         // guard); anything else is a navigation query (which may
@@ -1619,6 +1747,10 @@ impl Parser<'_> {
             })?)
         };
         self.def_params.clear();
+        let uses_driver = self.body_uses_driver;
+        let unit_operands = std::mem::replace(&mut self.body_unit_operands, outer_units);
+        self.in_def_body = outer_body;
+        self.body_uses_driver = outer_uses;
         self.expect(Token::Semi, "';' to end the definition")?;
         self.defs.entries.push((
             name,
@@ -1626,6 +1758,8 @@ impl Parser<'_> {
                 params,
                 rest: None,
                 data_aware: false,
+                uses_driver,
+                unit_operands,
                 body,
             },
         ));
@@ -1742,6 +1876,8 @@ impl Parser<'_> {
                 params,
                 rest,
                 data_aware,
+                uses_driver: false,
+                unit_operands: Vec::new(),
                 body: DefBody::Macro(body),
             },
         ));
@@ -1986,7 +2122,39 @@ impl Parser<'_> {
 
     /// Enforce the `!` signage both ways: a data-aware macro must be
     /// invoked as `&name!`, and nothing else may carry the bang.
-    fn check_bang(&self, name: &str, def: &Def, bang: bool) -> Result<()> {
+    fn check_bang(&mut self, name: &str, def: &Def, bang: bool) -> Result<()> {
+        // The splice site judges the body's `$$0`: a join condition
+        // admits it; elsewhere the invocation is the parse error.
+        // Inside another body, the verdict is deferred once more.
+        if def.uses_driver && self.correlation_depth == 0 {
+            if self.in_def_body {
+                self.body_uses_driver = true;
+            } else {
+                return Err(QuarbError::parse(format!(
+                    "in expansion of '&{name}': {DRIVER_PLACEMENT}"
+                )));
+            }
+        }
+        // The body's unit operands, likewise: judged here when a
+        // dataset is at hand, deferred once more inside another body.
+        if !def.unit_operands.is_empty() {
+            match self.expander.unit_names() {
+                Some(names) => {
+                    for (command, operand) in &def.unit_operands {
+                        if let Some(why) = unit_operand_refusal(command, operand, &names) {
+                            return Err(QuarbError::parse(format!(
+                                "in expansion of '&{name}': {why}"
+                            )));
+                        }
+                    }
+                }
+                None if self.in_def_body => {
+                    self.body_unit_operands
+                        .extend(def.unit_operands.iter().cloned());
+                }
+                None => {}
+            }
+        }
         if def.data_aware && !bang {
             return Err(QuarbError::parse(format!(
                 "macro '&{name}' is data-aware (its expansion reads the \
@@ -2000,6 +2168,36 @@ impl Parser<'_> {
             )));
         }
         Ok(())
+    }
+
+    /// The operand of `convert(U)`, `unit(U)` and `magnitude(U)` must
+    /// name a unit the query knows (spec: The conversion): the
+    /// built-in table, a model's declarations, an adapter's minted
+    /// units. With a dataset at hand the operand is judged here; a
+    /// fragment body parsed without one (a definitions file) records
+    /// it for the splice site.
+    fn check_unit_call(&mut self, call: &FnCall) -> Result<()> {
+        if !matches!(call.name.as_str(), "convert" | "unit" | "magnitude") {
+            return Ok(());
+        }
+        let Some(Arg::Lit(Value::Str(operand))) = call.args.first() else {
+            return Ok(());
+        };
+        if operand.is_empty() {
+            return Ok(());
+        }
+        match self.expander.unit_names() {
+            Some(names) => match unit_operand_refusal(&call.name, operand, &names) {
+                Some(why) => Err(QuarbError::parse(why)),
+                None => Ok(()),
+            },
+            None if self.in_def_body => {
+                self.body_unit_operands
+                    .push((call.name.clone(), operand.clone()));
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     /// Bind invocation arguments to a fragment's parameters.
@@ -2052,23 +2250,13 @@ impl Parser<'_> {
                      condition ('[&{name}]')"
                 )));
             }
-            // A macro expands to text, reparsed here as a query.
+            // A macro expands to text, reparsed here as a query with
+            // the splice site's scopes (a joined position admits its
+            // `$$0`).
             DefBody::Macro(_) => {
                 let invited = invites_of(self.expander, &args);
                 let text = self.expand_macro_path_text(&name, &def, args)?;
-                let wrap = |e: QuarbError| {
-                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
-                        .wrapping(e)
-                };
-                let tokens = lexer::lex(&text).map_err(wrap)?;
-                if matches!(tokens.first(), Some(Token::Pipe | Token::At)) {
-                    return Err(QuarbError::expansion(format!(
-                        "macro '&{name}' expanded to a pipeline fragment \
-                         ('{text}'); invoke it after a pipe"
-                    )));
-                }
-                let q = parse_with_data(&tokens, self.defs.before(&name), self.expander)
-                    .map_err(wrap)?;
+                let q = self.parse_expansion_query(&name, &text)?;
                 self.record_captures(&name, &invited, self.expander.usage_of_query(&q));
                 q
             }
@@ -2676,6 +2864,18 @@ impl Parser<'_> {
                 if text == "." {
                     // `(.)` — the latest mark (the array's top).
                     Some((Anchor::MarkTop, 3))
+                } else if text == ".." {
+                    // `$$..` / `((..))` — the penultimate mark.
+                    Some((Anchor::MarkBack(2), 3))
+                } else if let Some(n) = text
+                    .strip_prefix(".-")
+                    .or_else(|| text.strip_prefix('-'))
+                    .and_then(|d| d.parse::<usize>().ok())
+                    .filter(|&n| n >= 1)
+                {
+                    // `$$.-N` / `((.-N))` — the mark N back from the
+                    // latest.
+                    Some((Anchor::MarkBack(n), 3))
                 } else if text.chars().all(|c| c.is_ascii_digit()) {
                     if continues(self.pos + 3) {
                         text.parse()
@@ -2737,6 +2937,15 @@ impl Parser<'_> {
             if matches!(self.peek(), Some(Token::RParen)) {
                 self.pos += 1;
                 break;
+            }
+            // A constructor takes no option yet (spec: Literals and
+            // constructors): a dash-led last field is refused by
+            // name; a hop as an item is `@((--x))` or `@(--x;)`.
+            if let Some(opt) = self.option_item() {
+                return Err(QuarbError::parse(format!(
+                    "'@(…)' takes no option ('{opt}' given); its items are values — a hop as \
+                     an item is written '@((--x))' or '@(--x;)'"
+                )));
             }
             let word = match (self.peek(), self.toks.get(self.pos + 1)) {
                 (
@@ -2820,6 +3029,14 @@ impl Parser<'_> {
                     self.pos += 2;
                     rows.push(TableRow::Record(self.record_row()?));
                 }
+                _ if self.option_item().is_some() => {
+                    let opt = self.option_item().expect("checked");
+                    return Err(QuarbError::parse(format!(
+                        "'#(…)' takes its option alone, and '{opt}' stands beside an item: the \
+                         rows of a reshape come through the pipe ('| #(--width=n)'); a \
+                         literal's rows are written in it, without an option"
+                    )));
+                }
                 _ => {
                     return Err(QuarbError::parse(
                         "a table holds record rows %(…) after an optional header list of names: #(@(name; age); %(\"Braund\"; 22)), or #(%(1; 2); %(3; 4)) for an array",
@@ -2842,45 +3059,310 @@ impl Parser<'_> {
 
     /// Whether `#` is followed by a parenthesized integer, which the
     /// lexer hands over as the rounded register `(n)`: `$` and the
-    /// digits.
+    /// digits. The spelling `#(n)` is retired (draft 164).
     fn table_count_ahead(&self) -> bool {
         matches!(self.toks.get(self.pos + 1), Some(Token::Dollar))
             && matches!(self.toks.get(self.pos + 2), Some(Token::Name { text, quoted: false, .. }) if text.parse::<i64>().is_ok())
     }
 
-    /// `| #(…)` in command position: `#(n)` lays the list topic into
-    /// rows of `n` columns, `#(@(a; b; c))` into the frame of those
-    /// columns (the header first, as in the literal, the rows coming
-    /// through the pipe); a literal with rows is the value it builds.
-    fn table_command(&mut self) -> Result<Command> {
-        // `#(3)`: the lexer reads a parenthesized integer as the
-        // rounded register `(3)`, so the count arrives as `$3`.
-        let call = if self.table_count_ahead()
+    /// The pointer for the retired `#(n)`: a number is no row; the
+    /// width is the option.
+    fn retired_table_count(&self) -> Option<QuarbError> {
+        if self.table_count_ahead()
             && let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 2)
-            && let Ok(n) = text.parse::<i64>()
         {
-            self.pos += 3;
-            FnCall {
-                name: "#".into(),
-                args: vec![Arg::Lit(Value::Int(n))],
+            return Some(QuarbError::parse(format!(
+                "'#({text})' is retired: a number is no row; write '#(--width={text})' \
+                 ('-w={text}') to lay the list in rows of {text}"
+            )));
+        }
+        None
+    }
+
+    /// Whether `#(` opens on an option (`--width=n`, `-w=n`,
+    /// `--header=list`, `-h=list`): the reshape, not the literal.
+    fn table_option_ahead(&self) -> bool {
+        matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            && match self.toks.get(self.pos + 2) {
+                Some(Token::DashDash) => true,
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) => lexer::is_option_word(text),
+                _ => false,
             }
-        } else {
-            let expr = self.additive()?;
-            match &expr {
-                Operand::Table {
-                    header: Some(h),
-                    rows,
-                } if rows.is_empty() => FnCall {
-                    name: "#".into(),
-                    args: vec![Arg::Lit(Value::list(
-                        h.iter().cloned().map(Value::Str).collect(),
-                    ))],
-                },
-                _ => return Ok(Command::Expr(expr)),
+    }
+
+    /// The option a constructor's item slot holds, if any (spec:
+    /// Call Operands, draft 164 — one rule for every parenthesis): a
+    /// dash-led field opens the option segment, in `@(…)` / `%(…)` /
+    /// `#(…)` as in a command's parenthesis, unless the trailing
+    /// separator keeps its operand reading (`@(--author;)`, the
+    /// hop's targets; `@((--author))` likewise, a group being no
+    /// dash-led field). The spelling, for the refusal.
+    fn option_item(&self) -> Option<String> {
+        if !self.option_ahead() || self.trailing_separator_ahead() {
+            return None;
+        }
+        Some(match (self.peek(), self.toks.get(self.pos + 1)) {
+            (
+                Some(Token::DashDash),
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                }),
+            ) => format!("--{text}"),
+            (Some(Token::DashDash), _) => "--".to_string(),
+            (Some(Token::Name { text, .. }), _) => text.clone(),
+            _ => "-".to_string(),
+        })
+    }
+
+    /// Whether the field at the cursor is followed by the trailing
+    /// separator: a `;` (or `,`) at this depth whose next token is
+    /// the closing `)`. That empty last field closes the operands,
+    /// so no option segment opens and a dash-led operand keeps its
+    /// reading (`f(--author;)`, `@(--author;)`); a `;` followed by
+    /// an operand after a dash-led field stays refused.
+    fn trailing_separator_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match t {
+                Token::LParen | Token::LBracket | Token::MarkOpen | Token::IdAnchorOpen => {
+                    depth += 1
+                }
+                Token::RParen | Token::RBracket => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Token::Semi | Token::Comma if depth == 0 => {
+                    return matches!(self.toks.get(i + 1), Some(Token::RParen));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// `#(--width=n)` / `#(-w=n)` / `#(--header=list)` / `#(-h=list)`
+    /// (spec: Literals and constructors): the reshape's option,
+    /// standing alone in the parenthesis, as the `#` command's
+    /// argument — the column count, or the header's names (their
+    /// count the width). An item beside the option is refused, as
+    /// is an option the constructor does not take.
+    fn table_options(&mut self) -> Result<FnCall> {
+        self.pos += 2; // `#` `(`
+        let mut opts: Vec<(String, Option<Operand>)> = Vec::new();
+        loop {
+            let name = match (self.peek(), self.toks.get(self.pos + 1)) {
+                (Some(Token::RParen), _) => {
+                    self.pos += 1;
+                    break;
+                }
+                (
+                    Some(Token::DashDash),
+                    Some(Token::Name {
+                        text,
+                        quoted: false,
+                        glued: true,
+                    }),
+                ) => {
+                    let t = format!("--{text}");
+                    self.pos += 2;
+                    t
+                }
+                (
+                    Some(Token::Name {
+                        text,
+                        quoted: false,
+                        ..
+                    }),
+                    _,
+                ) if text.starts_with('-') => {
+                    let t = text.clone();
+                    self.pos += 1;
+                    t
+                }
+                _ => {
+                    let opt = opts
+                        .last()
+                        .map_or("the option".to_string(), |(n, _)| format!("'{n}'"));
+                    return Err(QuarbError::parse(format!(
+                        "'#(…)' takes its option alone, and an item stands beside {opt}: the \
+                         rows of a reshape come through the pipe ('| #(--width=n)'); a \
+                         literal's rows are written in it, without an option"
+                    )));
+                }
+            };
+            let value = if matches!(self.peek(), Some(Token::OptEq)) {
+                self.pos += 1;
+                // The header's names read bare or quoted, as a
+                // literal's header does.
+                if matches!(self.peek(), Some(Token::At))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                {
+                    self.pos += 2;
+                    let (items, _) = self.list_items(true)?;
+                    Some(Operand::List(items))
+                } else {
+                    Some(self.unary()?)
+                }
+            } else {
+                None
+            };
+            opts.push((name, value));
+        }
+        let mut width: Option<i64> = None;
+        let mut header: Option<Vec<String>> = None;
+        for (name, value) in opts {
+            match name.as_str() {
+                "--width" | "-w" => {
+                    width = Some(match value {
+                        Some(Operand::Lit(Value::Int(n))) => n,
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=n)' takes the column count, a number"
+                            )));
+                        }
+                    });
+                }
+                "--header" | "-h" => {
+                    let items = match value {
+                        Some(Operand::List(items)) => items,
+                        Some(Operand::Lit(Value::List(l))) => {
+                            l.iter().cloned().map(Operand::Lit).collect()
+                        }
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=list)' takes the column names as a list: \
+                                 '#({name}=@(a; b; c))'"
+                            )));
+                        }
+                    };
+                    let mut names = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item {
+                            Operand::Lit(Value::Str(s)) => names.push(s),
+                            Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
+                                names.push(v.to_string())
+                            }
+                            _ => {
+                                return Err(QuarbError::parse(
+                                    "a header is a list of names, bare or quoted \
+                                     ('#(--header=@(name; age))'); a value computed there \
+                                     names nothing",
+                                ));
+                            }
+                        }
+                    }
+                    header = Some(names);
+                }
+                other => {
+                    return Err(QuarbError::parse(format!(
+                        "'#(…)' takes '--width=n' ('-w=n') or '--header=list' ('-h=list'); \
+                         '{other}' given"
+                    )));
+                }
+            }
+        }
+        let arg = match (width, header) {
+            (Some(_), Some(_)) => {
+                return Err(QuarbError::parse(
+                    "'#(…)' takes one option: '--width=n' lays the list in rows of n, \
+                     '--header=list' names the columns (their count the width); both given",
+                ));
+            }
+            (Some(n), None) => Arg::Lit(Value::Int(n)),
+            (None, Some(h)) => Arg::Lit(Value::list(h.into_iter().map(Value::Str).collect())),
+            (None, None) => {
+                return Err(QuarbError::parse(
+                    "'#(…)' names no option: '#(--width=n)' ('-w=n') lays the list in rows \
+                     of n, '#(--header=list)' ('-h=list') names its columns",
+                ));
             }
         };
-        // `| #(3) x v` — the reshaped topic as the left operand of
-        // the expression that follows.
+        Ok(FnCall {
+            name: "#".into(),
+            args: vec![arg],
+        })
+    }
+
+    /// Whether a literal or a constructor stands where a command
+    /// name would (spec: Literals and constructors): a number, a
+    /// quoted string, `null`, `true`, `false`, a quantity literal,
+    /// `@(…)`, `@%(…)`, or `#(…)` as a literal — not the bare sigils
+    /// (the readings), not `#(--width=n)` (the reshape), and not
+    /// `%(…)`, which keeps its own arm. A parenthesized group is
+    /// admitted after `@|` as the expression's own delimiter.
+    fn expr_head_ahead(&self) -> bool {
+        match self.peek() {
+            Some(Token::LParen) => true,
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => {
+                !matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    && self.literal_word(text)
+            }
+            Some(Token::Name { quoted: true, .. } | Token::Interp(_)) => true,
+            Some(Token::At) => {
+                matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    || (matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                        && matches!(self.toks.get(self.pos + 2), Some(Token::LParen)))
+            }
+            Some(Token::Hash) => {
+                matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    && !self.table_option_ahead()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a bare word reads as a literal rather than text: a
+    /// number, `null`, `true`, `false`, a quantity or a span.
+    fn literal_word(&self, text: &str) -> bool {
+        !matches!(
+            literal_value(text, false, &|e| self.expander.unit_scale(e)),
+            Value::Str(_)
+        )
+    }
+
+    /// `| #(…)` after a pipe (spec: Literals and constructors): the
+    /// option form `#(--width=n)` / `#(--header=list)` is the reshape
+    /// of the list topic, a command; a literal with rows is its
+    /// value, the head of an expression. `#(n)` and a header alone,
+    /// `#(@(a; b; c))`, are retired with the pointer to the option.
+    fn table_command(&mut self) -> Result<Command> {
+        if let Some(err) = self.retired_table_count() {
+            return Err(err);
+        }
+        if !self.table_option_ahead() {
+            let expr = self.additive()?;
+            if let Operand::Table {
+                header: Some(h),
+                rows,
+            } = &expr
+                && rows.is_empty()
+            {
+                let names = h.join("; ");
+                return Err(QuarbError::parse(format!(
+                    "'#(@({names}))' alone is retired: a header written as an item has its \
+                     rows beside it; write '#(--header=@({names}))' ('-h=…') to name the \
+                     columns of the list topic"
+                )));
+            }
+            return Ok(Command::Expr(expr));
+        }
+        let call = self.table_options()?;
+        // `| #(-w=3) x v` — the reshaped topic as the left operand
+        // of the expression that follows.
         if let Some(Token::Name {
             text,
             quoted: false,
@@ -3000,6 +3482,10 @@ impl Parser<'_> {
                 self.record_item(&mut args, true)?;
                 if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                     self.pos += 1;
+                    // the trailing separator: the empty last field
+                    if matches!(self.peek(), Some(Token::RParen)) {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -3015,7 +3501,9 @@ impl Parser<'_> {
     fn func_call(&mut self) -> Result<FnCall> {
         // `@| @` and `@| %` bare — the row and column readings of
         // the stream (spec: Command Libraries, "A library value").
-        // `@| #(n)` / `@| #(@(a; b))` — the reshape of the stream.
+        // `@| #(--width=n)` / `@| #(--header=list)` — the reshape of
+        // the stream (a literal with rows heads an expression, taken
+        // before this).
         if matches!(self.peek(), Some(Token::Hash))
             && (matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
                 || self.table_count_ahead())
@@ -3023,7 +3511,7 @@ impl Parser<'_> {
             return match self.table_command()? {
                 Command::Func(call) => Ok(call),
                 _ => Err(QuarbError::parse(
-                    "after '@|' the table sigil takes a column count or a header list: '@| #(3)', '@| #(@(a; b))'; a table literal is a value, written after '|'",
+                    "after '@|' the table sigil takes an option: '@| #(--width=n)' lays the stream in rows of n, '@| #(--header=list)' names its columns",
                 )),
             };
         }
@@ -3163,8 +3651,11 @@ impl Parser<'_> {
                 loop {
                     // The option segment: the last `;`-field, opened
                     // by a dash-led word, `--` or the void `-=`; it
-                    // runs to the closing parenthesis.
-                    if self.option_ahead() {
+                    // runs to the closing parenthesis. The trailing
+                    // separator closes the operands with an empty
+                    // field instead, and a dash-led operand keeps its
+                    // reading: `f(--author;)` (draft 164).
+                    if self.option_ahead() && !self.trailing_separator_ahead() {
                         self.option_segment(name, args)?;
                         break;
                     }
@@ -3197,6 +3688,17 @@ impl Parser<'_> {
                             value: Value::Str(delimiter.to_string()),
                         });
                         self.pos += 1;
+                    } else if name == "tree"
+                        && matches!(self.peek(), Some(Token::Percent))
+                        && matches!(
+                            self.toks.get(self.pos + 1),
+                            Some(Token::Comma | Token::Semi | Token::RParen)
+                        )
+                    {
+                        // `tree(%)`: the bare record sign asks for the
+                        // properties as a record (spec: The tree).
+                        args.push(Arg::Lit(Value::Str("%".into())));
+                        self.pos += 1;
                     } else if matches!(
                         name,
                         "convert" | "unit" | "magnitude" | "exchange" | "dimension"
@@ -3211,8 +3713,12 @@ impl Parser<'_> {
                     }
                     // `;` is the argument separator; `,` is sugar
                     // (spaced, so the decimal comma stays a number).
+                    // Trailing, it is the empty last field.
                     if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
                         self.pos += 1;
+                        if matches!(self.peek(), Some(Token::RParen)) {
+                            break;
+                        }
                     } else {
                         break;
                     }
@@ -3317,7 +3823,13 @@ impl Parser<'_> {
                 // One value, as an operand reads (a bare word a
                 // string, a sigil an expression); the options are
                 // whitespace-separated, so it ends at the space.
-                Some(self.unary()?)
+                // `--of=expr` reads a whole expression (`--of=:price
+                // * :qty`), the last option it is.
+                if matches!(name.as_str(), "--of" | "-o") {
+                    Some(self.additive()?)
+                } else {
+                    Some(self.unary()?)
+                }
             } else {
                 None
             };
@@ -3337,12 +3849,31 @@ impl Parser<'_> {
         // them; every other one is refused by name. An environment
         // command's options are the callee's to judge.
         let declared: &[&str] = crate::syntax::registry::spec(&name).map_or(&[], |s| s.options);
+        // Every reducing aggregate takes `--of=expr` (`-o=expr`),
+        // the expression read on each item before the reduction
+        // (draft 164); it needs its expression.
+        let takes_of = crate::syntax::registry::takes_of(&name);
         for arg in &args {
+            if let Arg::Opt { name: opt, value } = arg
+                && takes_of
+                && matches!(opt.as_str(), "--of" | "-o")
+            {
+                if value.is_none() {
+                    return Err(QuarbError::parse(format!(
+                        "'{name}({opt}=expr)' takes the expression to reduce: '{name}(--of=:n)'"
+                    )));
+                }
+                continue;
+            }
             if let Arg::Opt { name: opt, .. } = arg
                 && crate::syntax::registry::split_env(&name).is_none()
                 && !declared.contains(&opt.as_str())
             {
-                return Err(QuarbError::parse(if declared.is_empty() {
+                return Err(QuarbError::parse(if takes_of {
+                    format!(
+                        "'{name}' takes '--of=expr' ('-o=expr'), the expression to reduce; '{opt}' given"
+                    )
+                } else if declared.is_empty() {
                     format!(
                         "'{name}' takes no options; its parentheses hold operands ('{opt}' given)"
                     )
@@ -3383,6 +3914,12 @@ impl Parser<'_> {
     /// retired (2026-10-11), so a bare string in a record is refused
     /// where it was once the name of the field after it.
     fn record_item(&mut self, args: &mut Vec<Arg>, record: bool) -> Result<()> {
+        if record && let Some(opt) = self.option_item() {
+            return Err(QuarbError::parse(format!(
+                "'%(…)' takes no option ('{opt}' given); its items are fields — a hop as a \
+                 field's value is written '%(k = (--x))'"
+            )));
+        }
         if let Some(Token::Name { text, .. }) = self.peek()
             && matches!(self.toks.get(self.pos + 1), Some(Token::Eq))
         {
@@ -3526,7 +4063,7 @@ impl Parser<'_> {
             // from the core); `:%provenance` the shaped read.
             Some(Token::Field) => {
                 self.pos += 1;
-                Projection::CoreMeta(self.require_projection_name("the core property `:`")?)
+                Projection::CoreMeta(canonical_core_field(self.require_projection_name("the core field `:`")?))
             }
             Some(Token::ColonColon) => {
                 self.pos += 1;
@@ -4671,9 +5208,15 @@ impl Parser<'_> {
         self.additive_from(left)
     }
 
-    /// The additive loop from a left operand already read.
+    /// The additive loop from a left operand already read. The
+    /// concatenation operators `++`, `++!` and `+@+` stand at this
+    /// level with `+` and `-`, left-associative (spec: Concatenation).
     fn additive_from(&mut self, mut left: Operand) -> Result<Operand> {
         loop {
+            if let Some(mode) = self.concat_word_ahead() {
+                left = self.concat_rest(mode, left)?;
+                continue;
+            }
             let op = match self.peek() {
                 Some(Token::Name {
                     text,
@@ -4699,6 +5242,48 @@ impl Parser<'_> {
             };
         }
         Ok(left)
+    }
+
+    /// A concatenation operator at the cursor: the spaced word `++`
+    /// (`++!` with the bang glued, as `+|!` was) or `+@+`.
+    fn concat_word_ahead(&self) -> Option<ConcatMode> {
+        let Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) = self.peek()
+        else {
+            return None;
+        };
+        match text.as_str() {
+            "++" if matches!(self.toks.get(self.pos + 1), Some(Token::Bang)) => {
+                Some(ConcatMode::Overwrite)
+            }
+            "++" => Some(ConcatMode::Merge),
+            "+@+" => Some(ConcatMode::Item),
+            _ => None,
+        }
+    }
+
+    /// The concatenation after its operator: the right side at the
+    /// multiplicative level, or `%(…)` as a row under the table
+    /// literal's rules (positional by the left side's header, named,
+    /// or both).
+    fn concat_rest(&mut self, mode: ConcatMode, left: Operand) -> Result<Operand> {
+        self.pos += if mode == ConcatMode::Overwrite { 2 } else { 1 };
+        let right = if matches!(self.peek(), Some(Token::Percent))
+            && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+        {
+            self.pos += 2;
+            Operand::Row(self.record_row()?)
+        } else {
+            self.multiplicative()?
+        };
+        Ok(Operand::Concat {
+            mode,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
     }
 
     /// An arithmetic operator spaced on one side only, after a
@@ -4837,21 +5422,21 @@ impl Parser<'_> {
                 "@." => RegRef::Whole,
                 "@@." => RegRef::NodeWhole,
                 "%." => RegRef::Record,
-                "%.." => RegRef::FullRecord,
+                "%.*" => RegRef::FullRecord,
                 "%%." => RegRef::NodeRecord,
-                "%%.." => RegRef::NodeFullRecord,
-                b if b.starts_with(['@', '%']) => {
+                "%%.*" => RegRef::NodeFullRecord,
+                "%.." | "%%.." => {
                     return Err(QuarbError::parse(format!(
-                        "':{b}' is not a register view: the views are :@. :@@. :%. :%.. :%%. :%%.."
+                        "':{body}' is retired: the full view is ':{}.*'",
+                        body.trim_end_matches('.')
                     )));
                 }
-                b => {
-                    let rest = &b[1..];
-                    match rest.parse::<usize>() {
-                        Ok(n) => RegRef::Index(n),
-                        Err(_) => RegRef::Named(rest.to_string()),
-                    }
+                b if b.starts_with(['@', '%']) => {
+                    return Err(QuarbError::parse(format!(
+                        "':{b}' is not a register view: the views are :@. :@@. :%. :%.* :%%. :%%.*"
+                    )));
                 }
+                b => reg_ref(&b[1..])?,
             };
             let bare = |o: &Operand| {
                 matches!(
@@ -4897,7 +5482,7 @@ impl Parser<'_> {
                         ..
                     } = &mut o
                     {
-                        *projection = Some(Projection::CoreMeta(name));
+                        *projection = Some(Projection::CoreMeta(canonical_core_field(name)));
                         continue;
                     }
                     // `:%provenance` / `:@origin` on a value: its
@@ -4994,7 +5579,6 @@ impl Parser<'_> {
                         | Token::Comma
                         | Token::RBracket
                         | Token::Pipe
-                        | Token::AppendPipe { .. }
                 )
             })
         {
@@ -5447,6 +6031,7 @@ impl Parser<'_> {
                 Ok(Some(Command::AggPush { name, body }))
             }
             Some(Token::Percent) => {
+                let head = self.pos;
                 self.pos += 1;
                 let enriched = if matches!(self.peek(), Some(Token::Percent)) {
                     self.pos += 1;
@@ -5456,6 +6041,12 @@ impl Parser<'_> {
                 };
                 if matches!(self.peek(), Some(Token::LParen)) {
                     let call = self.record_args()?;
+                    // `@| %(v = $_) ++ %(w = 1)` — the constructor
+                    // heads an expression over the context.
+                    if !enriched && self.expr_continues() {
+                        self.pos = head;
+                        return Ok(Some(Command::AggExpr(self.additive()?)));
+                    }
                     validate_record(&call)?;
                     return Ok(Some(Command::AggRecord { call, enriched }));
                 }
@@ -5958,7 +6549,18 @@ impl Parser<'_> {
                     name: call.name,
                     args: args.collect(),
                 };
-                let command = func_command(command_call)?;
+                // A reducing callee takes the values its first
+                // argument reaches gathered into one list, as its
+                // input would be (`sum(/*::n)` = 6, `count(/*)` = 3);
+                // a scalar callee takes them one at a time and forks
+                // (`upper(/*::k)`) — draft 164.
+                let first = if crate::syntax::registry::takes_of(&command_call.name) {
+                    Operand::Gathered(Box::new(first))
+                } else {
+                    first
+                };
+                self.check_unit_call(&command_call)?;
+                let command = func_command_at(command_call, true)?;
                 Ok(Operand::Piped {
                     expr: Box::new(first),
                     commands: vec![command],
@@ -6040,8 +6642,20 @@ impl Parser<'_> {
                     commands: vec![Command::Func(call)],
                 })
             }
-            // `#(…)` — the table literal.
+            // `#(…)` — the table literal; `#(--width=n)` /
+            // `#(--header=list)` the reshape of the topic where it
+            // stands, as `%(…)` reads its topic there.
             Some(Token::Hash) => {
+                if let Some(err) = self.retired_table_count() {
+                    return Err(err);
+                }
+                if self.table_option_ahead() {
+                    let call = self.table_options()?;
+                    return Ok(Operand::Piped {
+                        expr: Box::new(Operand::Topic),
+                        commands: vec![Command::Func(call)],
+                    });
+                }
                 self.pos += 1;
                 return self.table_literal();
             }
@@ -6057,13 +6671,19 @@ impl Parser<'_> {
                 let projection = self.projection()?;
                 Ok(Operand::Positions { projection })
             }
-            Some(Token::Matrix) => {
+            Some(Token::Matrix { full }) => {
+                let full = *full;
                 self.pos += 1;
-                Ok(Operand::Matrix { node: false })
+                Ok(Operand::Matrix { node: false, full })
             }
-            Some(Token::NodeMatrix) => {
+            Some(Token::NodeMatrix { full }) => {
+                let full = *full;
                 self.pos += 1;
-                Ok(Operand::Matrix { node: true })
+                Ok(Operand::Matrix { node: true, full })
+            }
+            Some(Token::CtxTable) => {
+                self.pos += 1;
+                Ok(Operand::CtxTable)
             }
             // `@-` — all arrived-by edges (bare: labels; projected:
             // each edge's property); `@.` — the value regulae; `@@.`
@@ -6137,6 +6757,39 @@ impl Parser<'_> {
             Some(Token::Position) => {
                 self.pos += 1;
                 return self.position();
+            }
+            // `_` — the cursor record; `_:topic` is `$_`, `_:position`
+            // is `$$_` with its tail, any other `_:k` a field miss.
+            Some(Token::Cursor) => {
+                self.pos += 1;
+                if matches!(
+                    self.peek(),
+                    Some(Token::ColonColon | Token::ColonColonColon)
+                ) {
+                    return Err(QuarbError::parse(CURSOR_PROJECTION));
+                }
+                if matches!(self.peek(), Some(Token::Field)) {
+                    match self.toks.get(self.pos + 1) {
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "position" => {
+                            self.pos += 2;
+                            return self.position();
+                        }
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text == "topic" => {
+                            self.pos += 2;
+                            return Ok(Operand::Topic);
+                        }
+                        _ => {}
+                    }
+                }
+                return Ok(Operand::Cursor);
             }
             Some(Token::Invoking) => {
                 self.pos += 1;
@@ -6217,14 +6870,7 @@ impl Parser<'_> {
                         }) if text.starts_with('.') => {
                             let rest = text[1..].to_string();
                             self.pos += 1;
-                            let r = if rest.is_empty() {
-                                RegRef::Top
-                            } else if let Ok(n) = rest.parse::<usize>() {
-                                RegRef::Index(n)
-                            } else {
-                                RegRef::Named(rest)
-                            };
-                            return Ok(Operand::Recall(r));
+                            return Ok(Operand::Recall(reg_ref(&rest)?));
                         }
                         // `$_` — the topic (the current pipeline value).
                         Some(Token::Name {
@@ -6340,6 +6986,10 @@ impl Parser<'_> {
             // any path operand), a piped body under the inline
             // rules, a macro by its expansion.
             Some(Token::Amp) => self.splice_operand_fragment(),
+            None => Err(QuarbError::parse(
+                "the query ends where a value is expected: a binary operator takes a right \
+                 side (12 x @(1; 2)); a quantity literal is written 12_h, a text \"12 h\"",
+            )),
             other => Err(QuarbError::parse(format!(
                 "expected a value or path in a predicate, found {other:?}"
             ))),
@@ -6633,10 +7283,12 @@ impl Parser<'_> {
     /// a parse error rather than a silent null.
     fn driver(&mut self) -> Result<Operand> {
         if self.correlation_depth == 0 {
-            return Err(QuarbError::parse(
-                "'$$0' names the driver of a correlation inside its join condition; \
-                 elsewhere the invoking position is '$$__' and the position '$$_'",
-            ));
+            if !self.in_def_body {
+                return Err(QuarbError::parse(DRIVER_PLACEMENT));
+            }
+            // Inside a body, outside any join of the body's own:
+            // the splice site decides.
+            self.body_uses_driver = true;
         }
         Ok(Operand::Driver(self.cursor_tail()?))
     }
@@ -6808,15 +7460,15 @@ impl Parser<'_> {
                      with an expression head: '= expr')"
                 )));
             }
-            // `:name` after a step: a node has properties, not
-            // fields.
+            // `:name` spaced after a step: a core field glues to it.
             Some(Token::Field) => {
                 let name = match self.peek() {
                     Some(Token::Name { text, .. }) => text.clone(),
                     _ => "name".to_string(),
                 };
                 return Err(QuarbError::parse(format!(
-                    "':{name}' reads a record's field; a node's property is '::{name}'"
+                    "':{name}' stands apart from its step: a core field glues to it \
+                     ('/x:{name}'; ':fields' lists them), a property is '::{name}'"
                 )));
             }
             _ => {
@@ -6905,7 +7557,7 @@ fn range_head(text: &str) -> Option<(i64, Vec<String>)> {
 }
 
 /// The arithmetic operator a bare word spells, for the operator in
-/// command position.
+/// after a pipe.
 fn arith_word(text: &str) -> Option<ArithOp> {
     Some(match text {
         "+" => ArithOp::Add,
@@ -7024,9 +7676,16 @@ fn agg_command(call: FnCall) -> Result<Command> {
     if call.name == "ungroup" && !call.args.is_empty() {
         return Err(QuarbError::parse("'ungroup' takes no arguments"));
     }
+    check_operand_bound(&call, false, true)?;
+    // The shape checks see the operands; `--of=expr` is read apart.
+    let shaped = if crate::syntax::registry::takes_of(&call.name) {
+        call.without_of()
+    } else {
+        call.clone()
+    };
     match spec.check {
-        crate::syntax::registry::Check::Command => validate_window_shift(&call)?,
-        crate::syntax::registry::Check::Keyed => validate_keyed(&call)?,
+        crate::syntax::registry::Check::Command => validate_window_shift(&shaped)?,
+        crate::syntax::registry::Check::Keyed => validate_keyed(&shaped)?,
         _ => {}
     }
     Ok(Command::Agg(call))
@@ -7037,12 +7696,129 @@ fn agg_command(call: FnCall) -> Result<Command> {
 /// ::v)`), a reducing one on a list topic (`@| group(::k) | mean`).
 /// A whole-context command (`ungroup`, `window`, `shift`) never takes
 /// the plain pipe. The arguments pass the registry's check.
+/// The refusal of a unit operand nobody knows, in the command's
+/// words: `convert(KB): no unit 'KB' (kB is 1000 B, KiB is 1024 B)`.
+fn unit_operand_refusal(command: &str, operand: &str, names: &[String]) -> Option<String> {
+    crate::value::quantity::unit_operand_refusal(operand, names)
+        .map(|why| format!("{command}({operand}): {why}"))
+}
+
+/// The adjacency rule (spec: Pipelines, "Stdin"): a built-in after
+/// a pipe reads its input from the pipe and never names it, so a
+/// surplus operand is refused with the synopsis — and when the
+/// surplus is `$_`, the pointer says where the input comes from.
+/// Inside an expression the first argument rides as the input, and
+/// the rest is held to the same bound. Environment callees (`py:`,
+/// `sh:`) keep the `$_` input-slot placement, and a library's own
+/// gate counts its operands.
+fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
+    if !call
+        .name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Ok(());
+    }
+    let Some(max) = crate::syntax::man::operand_bound(&call.name) else {
+        return Ok(());
+    };
+    // The retired positional word `sample` points at its switch
+    // before any count is held against it (draft 164).
+    if crate::syntax::registry::spec(&call.name).is_some_and(|s| s.options.contains(&"--sample"))
+        && call
+            .args
+            .iter()
+            .any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample"))
+    {
+        return Err(QuarbError::parse(format!(
+            "'sample' is an option: write {0}(--sample)",
+            call.name
+        )));
+    }
+    // A reducing aggregate reads the field to reduce through its
+    // `--of=expr` option (draft 164: `@| group(::k) | sum(--of=:n)`);
+    // a key written as an operand is a surplus operand, refused with
+    // the synopsis, and `$_` among them is the input misplaced.
+    let spec = crate::syntax::registry::spec(&call.name);
+    let reducing =
+        spec.is_some_and(|s| matches!(s.agg, Some(crate::syntax::registry::Agg::Reducing)));
+    // A keyed aggregate (`sort_by`, `group`, `top`, `unique_by`)
+    // takes `$_` as a key — the topic itself — never as the input
+    // placed: a surplus there is a count, not a misplaced input.
+    let keyed_agg =
+        spec.is_some_and(|s| matches!(s.agg, Some(crate::syntax::registry::Agg::Keyed)));
+    let places_input = !keyed_agg
+        && call
+            .args
+            .iter()
+            .any(|a| matches!(a, Arg::Expr(Operand::Topic)));
+    let is_operand = |a: &Arg| !matches!(a, Arg::Opt { .. } | Arg::Named { .. });
+    let written = call.args.iter().filter(|a| is_operand(a)).count();
+    if written <= max && !(reducing && places_input && !nested) {
+        return Ok(());
+    }
+    let synopsis = crate::syntax::man::synopsis(&call.name).unwrap_or_default();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    if !nested && places_input {
+        let stripped = FnCall {
+            name: call.name.clone(),
+            args: call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Expr(Operand::Topic)))
+                .cloned()
+                .collect(),
+        };
+        let command = if agg {
+            Command::Agg(stripped)
+        } else {
+            Command::Func(stripped)
+        };
+        return Err(QuarbError::parse(format!(
+            "{} reads its input from the pipe: write {}",
+            call.name,
+            crate::syntax::unparse::command(&command)
+        )));
+    }
+    let takes = match max {
+        0 => "no operand".to_string(),
+        n => format!("{n} operand{} at most", plural(n)),
+    };
+    Err(QuarbError::parse(if nested {
+        format!(
+            "'{}' inside an expression takes its input and {takes} after it, {written} given; the synopsis: {synopsis}",
+            call.name
+        )
+    } else {
+        format!(
+            "'{}' takes {takes}, {written} given; the synopsis: {synopsis}",
+            call.name
+        )
+    }))
+}
+
+/// The canonical spelling of a core field (draft 164): `:props` for
+/// `:properties`, `:meta` for `:metadata`; unparse prints the short
+/// forms.
+fn canonical_core_field(name: String) -> String {
+    match name.as_str() {
+        "properties" => "props".to_string(),
+        "metadata" => "meta".to_string(),
+        _ => name,
+    }
+}
+
 fn func_command(call: FnCall) -> Result<Command> {
+    func_command_at(call, false)
+}
+
+fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
     use crate::syntax::registry::{Agg, Check};
     // An environment command runs once per capsa after `|`.
     if crate::syntax::registry::split_env(&call.name).is_some() {
         return Ok(Command::Func(call));
     }
+    check_operand_bound(&call, nested, false)?;
     let spec = crate::syntax::registry::spec(&call.name);
     let stands = spec.is_some_and(|s| {
         s.scalar
@@ -7056,15 +7832,44 @@ fn func_command(call: FnCall) -> Result<Command> {
             return Err(QuarbError::parse(pointer));
         }
         let err = QuarbError::unsupported(format!("pipeline command '{}'", call.name));
+        // `| 12h`: a number glued to a unit is a bare word, a
+        // command lookup; the quantity literal takes the underscore.
+        let digits: String = call
+            .name
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let unit = &call.name[digits.len()..];
+        if !digits.is_empty()
+            && digits.starts_with(|c: char| c.is_ascii_digit())
+            && !unit.is_empty()
+            && unit.chars().all(char::is_alphabetic)
+            && !matches!(
+                literal_value(&format!("{digits}_{unit}"), false, &|_| None),
+                Value::Str(_)
+            )
+        {
+            return Err(err.with_hint(format!(
+                " (a bare word after a pipe names a command; the quantity literal is written \
+                 {digits}_{unit}, the text \"{}\")",
+                call.name
+            )));
+        }
         return Err(if spec.is_some_and(|s| s.agg == Some(Agg::Context)) {
             err.with_hint(format!(" ('{}' uses '@|')", call.name))
         } else {
             err
         });
     }
+    // The shape checks see the operands; `--of=expr` is read apart.
+    let shaped = if crate::syntax::registry::takes_of(&call.name) {
+        call.without_of()
+    } else {
+        call.clone()
+    };
     match spec.map(|s| s.check) {
-        Some(Check::Keyed) => validate_keyed(&call)?,
-        _ => validate_record(&call)?,
+        Some(Check::Keyed) => validate_keyed(&shaped)?,
+        _ => validate_record(&shaped)?,
     }
     Ok(Command::Func(call))
 }
@@ -7425,6 +8230,30 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 ))
             }
         }
+        // `tree[(operands)]` — a depth, the words traits and props,
+        // `%`, and column expressions, in any order.
+        "tree" => {
+            let ok = call.args.iter().all(|a| match a {
+                Arg::Lit(Value::Int(n)) => *n >= 0,
+                Arg::Lit(Value::Str(s)) => matches!(s.as_str(), "traits" | "props" | "%"),
+                Arg::Expr(_) => true,
+                _ => false,
+            }) && call
+                .args
+                .iter()
+                .filter(|a| matches!(a, Arg::Lit(Value::Int(_))))
+                .count()
+                <= 1;
+            if ok {
+                Ok(())
+            } else {
+                Err(QuarbError::parse(
+                    "tree takes a depth, the words traits and props, % for the \
+                     properties record, and column expressions, in any order: \
+                     tree(2), tree(traits; :::size), tree(%)",
+                ))
+            }
+        }
         // `outline[(level; text[; "1."])]` — the two expressions, then
         // the numbering style; bare over a record stream.
         "outline" => match call.args.as_slice() {
@@ -7435,21 +8264,34 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                  style: outline(:depth; ::lemma), outline(:depth; ::lemma; \"1.\")",
             )),
         },
-        // `zscore([sample][; key])` — the word `sample` selects the
-        // n − 1 spread, an expression partitions the standardizing.
+        // `zscore([key]; [--sample])` — the switch selects the n − 1
+        // spread (draft 164; the positional word is retired), an
+        // expression partitions the standardizing.
         "zscore" => {
-            let ok = match call.args.split_first() {
-                None => true,
-                Some((Arg::Lit(Value::Str(s)), rest)) if s == "sample" => key_ok(rest),
-                Some((Arg::Expr(_), [])) => true,
+            let operands: Vec<&Arg> = call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { .. }))
+                .collect();
+            if operands
+                .iter()
+                .any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample"))
+            {
+                return Err(QuarbError::parse(
+                    "'sample' is an option: write zscore(--sample), zscore(key; --sample)",
+                ));
+            }
+            let ok = match operands.as_slice() {
+                [] => true,
+                [Arg::Expr(_)] => true,
                 _ => false,
             };
             if ok {
                 Ok(())
             } else {
                 Err(QuarbError::parse(
-                    "zscore takes the word sample and/or a partition key: \
-                     zscore, zscore(sample), zscore($.w), zscore(sample; $.w)",
+                    "zscore takes a partition key and the switch --sample: \
+                     zscore, zscore($.w), zscore(--sample), zscore($.w; --sample)",
                 ))
             }
         }
@@ -7465,20 +8307,27 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
 fn validate_stat_args(call: &FnCall) -> Result<()> {
     match call.name.as_str() {
         "std" | "var" | "stddev" | "variance" => {
-            let rest = match call.args.split_first() {
-                Some((Arg::Expr(_), rest)) => rest,
-                _ => &call.args,
-            };
-            let ok = match rest {
-                [] => true,
-                [Arg::Lit(Value::Str(s))] => s == "sample",
-                _ => false,
-            };
-            if ok {
+            // The options (`--of=expr`) are not the word; a leading
+            // expression is left to the operand bound's refusal.
+            let operands: Vec<&Arg> = call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { .. }))
+                .collect();
+            let rest = operands.as_slice();
+            // The positional word is retired (draft 164): the n − 1
+            // spread is the switch; the field to reduce is `--of`.
+            if rest.iter().any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample")) {
+                return Err(QuarbError::parse(format!(
+                    "'sample' is an option: write {0}(--sample)",
+                    call.name
+                )));
+            }
+            if rest.is_empty() {
                 Ok(())
             } else {
                 Err(QuarbError::parse(format!(
-                    "{0} takes only the word sample: {0}, {0}(sample)",
+                    "{0} takes no operand, the switch --sample and --of=expr: {0}, {0}(--sample), {0}(--sample --of=:x)",
                     call.name
                 )))
             }
@@ -7739,9 +8588,10 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
                 }
             }
         }
-        Command::Expr(e) | Command::ExprPush { expr: e, .. } | Command::AggPush { body: e, .. } => {
-            subst_operand(e, map)
-        }
+        Command::Expr(e)
+        | Command::AggExpr(e)
+        | Command::ExprPush { expr: e, .. }
+        | Command::AggPush { body: e, .. } => subst_operand(e, map),
         Command::AggRecord { call, .. } => {
             for arg in &mut call.args {
                 if let Arg::Expr(e) | Arg::Opt { value: Some(e), .. } = arg {
@@ -7760,14 +8610,7 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         Command::Subcontext { body, .. } => subst_query(body, map),
         Command::Filter(e) => subst_pred_expr(e, map),
         Command::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
-        Command::Map(inner)
-        | Command::Append { body: inner, .. }
-        | Command::Repeat { command: inner, .. } => subst_command(inner, map),
-        Command::AppendRow { items, .. } => {
-            for (_, i) in items {
-                subst_operand(i, map);
-            }
-        }
+        Command::Map(inner) | Command::Repeat { command: inner, .. } => subst_command(inner, map),
         Command::Select(_)
         | Command::Push(_)
         | Command::FieldsPush
@@ -7827,11 +8670,16 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 subst_elem(elem, map);
             }
         }
-        Operand::Arith { left, right, .. } => {
+        Operand::Arith { left, right, .. } | Operand::Concat { left, right, .. } => {
             subst_operand(left, map);
             subst_operand(right, map);
         }
-        Operand::Neg(inner) => subst_operand(inner, map),
+        Operand::Row(items) => {
+            for (_, i) in items {
+                subst_operand(i, map);
+            }
+        }
+        Operand::Neg(inner) | Operand::Gathered(inner) => subst_operand(inner, map),
         Operand::Field { base, .. }
         | Operand::ValueMeta { base, .. }
         | Operand::Index { base, .. } => subst_operand(base, map),
@@ -7905,6 +8753,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         Operand::Lit(_)
         | Operand::Recall(_)
         | Operand::Topic
+        | Operand::Cursor
         | Operand::Seed
         | Operand::Ordinal
         | Operand::Edge { .. }
@@ -7912,6 +8761,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         | Operand::Topics
         | Operand::Positions { .. }
         | Operand::Matrix { .. }
+        | Operand::CtxTable
         | Operand::Capture(_)
         | Operand::Now => {}
     }
@@ -8108,6 +8958,7 @@ impl visit::Visitor for Outer {
                     Anchor::Mark(_)
                     | Anchor::MarkIndex(_)
                     | Anchor::MarkTop
+                    | Anchor::MarkBack(_)
                     | Anchor::MarksAll
                     | Anchor::MarksNamed(_),
                 ..
@@ -8222,6 +9073,19 @@ mod tests {
         // Distinct names stay fine, literal or auto-named.
         let toks = lexer::lex("/r/* | %(::name; other = ::name)").unwrap();
         assert!(parse(&toks).is_ok());
+    }
+
+    /// `defs_only` tells a definitions cell from a query cell with
+    /// a definitions preamble, and reports a malformed definition.
+    #[test]
+    fn defs_only_classifies_cells() {
+        let only = "# it's a note\ndef &a: /x ;\nmacro &m: ^ | \"/y\" ;";
+        assert_eq!(crate::defs_only(only).unwrap(), true);
+        let preamble = "macro &pivot($c): /x | $c @| unique ;\n^ | &pivot(::k) | %.";
+        assert_eq!(crate::defs_only(preamble).unwrap(), false);
+        let bad = "def &a: /x[ ;";
+        assert!(crate::defs_only(bad).is_err());
+        assert_eq!(crate::defs_only("# only").unwrap(), true);
     }
 
     #[test]

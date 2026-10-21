@@ -42,7 +42,7 @@ use crate::graph::adapter::{AstAdapter, NodeId};
 use crate::graph::host::{QueryResult, eval};
 use crate::pipeline::gate;
 use crate::syntax::ast::{
-    Anchor, Arg, Axis, Branch, Command, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
+    Anchor, Arg, Axis, Branch, Command, ConcatMode, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
     Projection, PushBody, Query, Reach, RefProp, RegRef, Step, TraitClause,
 };
 pub(crate) use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
@@ -64,6 +64,7 @@ fn anchor_props(anchor: &Anchor) -> Vec<(String, Value)> {
             vec![("mark-index".to_string(), Value::Int(*n as i64))]
         }
         Anchor::MarkTop => vec![("mark-top".to_string(), Value::Bool(true))],
+        Anchor::MarkBack(n) => vec![("mark-back".to_string(), Value::Int(*n as i64))],
         Anchor::MarksAll => vec![("marks-all".to_string(), Value::Bool(true))],
         Anchor::MarksNamed(m) => {
             vec![("marks-name".to_string(), Value::Str(m.clone()))]
@@ -473,10 +474,36 @@ impl QueryArbor {
                 self.walk_operand(left, id);
                 self.walk_operand(right, id);
             }
+            // `a ++ b` reflects as `concat` over its two sides;
+            // `overwrite` marks `++!`, `item` marks `+@+`.
+            Operand::Concat { mode, left, right } => {
+                let props = match mode {
+                    ConcatMode::Merge => Vec::new(),
+                    ConcatMode::Overwrite => vec![("overwrite".to_string(), Value::Bool(true))],
+                    ConcatMode::Item => vec![("item".to_string(), Value::Bool(true))],
+                };
+                let id = self.intern(Some("concat"), props, Some(parent));
+                self.walk_operand(left, id);
+                self.walk_operand(right, id);
+            }
+            // The row on a concatenation's right reflects as the
+            // record it spells: a named item as its name and value,
+            // a positional one as its value alone.
+            Operand::Row(items) => {
+                let id = self.intern(Some("record-with"), Vec::new(), Some(parent));
+                for (name, item) in items {
+                    if let Some(n) = name {
+                        self.walk_args(&[Arg::Lit(Value::Str(n.clone()))], id);
+                    }
+                    self.walk_operand(item, id);
+                }
+            }
             Operand::Neg(inner) => {
                 let id = self.intern(Some("neg"), Vec::new(), Some(parent));
                 self.walk_operand(inner, id);
             }
+            // the gathering is the callee's input reading, no node
+            Operand::Gathered(inner) => self.walk_operand(inner, parent),
             Operand::Group(e) => {
                 let id = self.intern(Some("parens"), Vec::new(), Some(parent));
                 self.walk_pred_expr(e, id);
@@ -490,6 +517,20 @@ impl QueryArbor {
             }
             Operand::Topic => {
                 self.intern(Some("topic"), Vec::new(), Some(parent));
+            }
+            // `_` — the cursor: the record of the two cursor
+            // operands, reflected as that record is.
+            Operand::Cursor => {
+                let id = self.intern(Some("record-with"), Vec::new(), Some(parent));
+                self.walk_operand(&Operand::Topic, id);
+                self.walk_operand(
+                    &Operand::Position(Box::new(Operand::Rel {
+                        steps: Vec::new(),
+                        projection: None,
+                        anchor: Anchor::Current,
+                    })),
+                    id,
+                );
             }
             Operand::Seed => {
                 self.intern(Some("seed"), Vec::new(), Some(parent));
@@ -603,11 +644,24 @@ impl QueryArbor {
                     self.walk_projection(p, id);
                 }
             }
-            Operand::Matrix { node } => {
+            Operand::Matrix { node, full } => {
                 let side = if *node { "node" } else { "value" };
+                let view = if *full { "full" } else { "named" };
                 self.intern(
                     Some("matrix"),
-                    vec![("side".to_string(), Value::Str(side.to_string()))],
+                    vec![
+                        ("side".to_string(), Value::Str(side.to_string())),
+                        ("view".to_string(), Value::Str(view.to_string())),
+                    ],
+                    Some(parent),
+                );
+            }
+            // `#_` — the context table: the table view of the
+            // context, a matrix of the cursor's side.
+            Operand::CtxTable => {
+                self.intern(
+                    Some("matrix"),
+                    vec![("side".to_string(), Value::Str("context".to_string()))],
                     Some(parent),
                 );
             }
@@ -821,6 +875,10 @@ impl QueryArbor {
                 let id = self.intern(Some("agg-record"), props, Some(parent));
                 self.walk_args(&call.args, id);
             }
+            Command::AggExpr(e) => {
+                let id = self.intern(Some("agg-expr"), Vec::new(), Some(parent));
+                self.walk_operand(e, id);
+            }
             Command::AggRecall(r) => {
                 self.intern(
                     Some("agg-recall"),
@@ -873,26 +931,6 @@ impl QueryArbor {
             Command::Map(inner) => {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
                 self.walk_command(inner, id);
-            }
-            Command::Append { body, overwrite } => {
-                let props = if *overwrite {
-                    vec![("overwrite".to_string(), Value::Bool(true))]
-                } else {
-                    Vec::new()
-                };
-                let id = self.intern(Some("append"), props, Some(parent));
-                self.walk_command(body, id);
-            }
-            Command::AppendRow { items, overwrite } => {
-                let props = if *overwrite {
-                    vec![("overwrite".to_string(), Value::Bool(true))]
-                } else {
-                    Vec::new()
-                };
-                let id = self.intern(Some("append"), props, Some(parent));
-                for (_, item) in items {
-                    self.walk_operand(item, id);
-                }
             }
             Command::Repeat { command, min, max } => {
                 let mut props = vec![("min".to_string(), Value::Int(*min as i64))];
@@ -1439,6 +1477,10 @@ impl AstAdapter for ExpansionAdapter<'_> {
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.data.unit_scale(expr)
     }
+
+    fn unit_names(&self) -> Vec<String> {
+        self.data.unit_names()
+    }
 }
 
 /// The default projection of each node kind: its most characteristic
@@ -1494,6 +1536,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Foreign(_) => "library",
         Value::Table(_) => "table",
         Value::Node(_) => "node",
+        Value::Projection { .. } => "projection",
     }
 }
 
@@ -1559,13 +1602,14 @@ fn reg_spelling(r: &RegRef) -> String {
     match r {
         RegRef::Top => "$.".to_string(),
         RegRef::Index(n) => format!("$.{n}"),
+        RegRef::Back(n) => format!("$.-{n}"),
         RegRef::Named(n) => format!("$.{n}"),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
-        RegRef::FullRecord => "%..".to_string(),
+        RegRef::FullRecord => "%.*".to_string(),
         RegRef::NodeWhole => "@@.".to_string(),
         RegRef::NodeRecord => "%%.".to_string(),
-        RegRef::NodeFullRecord => "%%..".to_string(),
+        RegRef::NodeFullRecord => "%%.*".to_string(),
     }
 }
 
@@ -2025,6 +2069,9 @@ impl Expander for Reflector<'_> {
             Some(a) => a.unit_scale(expr),
             None => crate::value::quantity::scale_expr(expr),
         }
+    }
+    fn unit_names(&self) -> Option<Vec<String>> {
+        self.data.map(|a| a.unit_names())
     }
     fn usage_of_query(&self, q: &Query) -> RegUsage {
         usage_of_query(q)

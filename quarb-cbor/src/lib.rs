@@ -475,6 +475,12 @@ impl AstAdapter for CborAdapter {
     /// count as the size quantity (spec: adapter metadata, draft
     /// 157: a size is a quantity in bytes, a length a count); and
     /// `:::tag` (the enclosing CBOR tag number, when any).
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["type", "size", "length", "tag"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

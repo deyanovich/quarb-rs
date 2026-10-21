@@ -113,6 +113,12 @@ impl AstAdapter for LinesAdapter {
 
     /// `:::n-lines` / `:::n-blank` (root); `:::n` / `:::blank`
     /// (line).
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["n-lines", "n-blank", "n", "blank"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             return match key {

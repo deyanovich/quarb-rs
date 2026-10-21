@@ -18,6 +18,12 @@ pub(crate) struct GraphExt {
     /// The edges that reached this node on the walk's final hop —
     /// the `@-` operand, aggregated across merged crossings.
     pub(crate) arrived: Vec<EdgeCtx>,
+    /// No position (spec: Aggregating Pipe): the one thread a
+    /// reduction leaves stands nowhere — `$$_` and `$-` are null,
+    /// and navigation continues only where the query says from
+    /// where (`$$__/…`, a mark). `node` then holds the root as a
+    /// placeholder the host never answers for.
+    pub(crate) unplaced: bool,
 }
 
 /// What a scope says of the graph's state beyond the attachment it
@@ -36,14 +42,17 @@ impl crate::thread::Attachment for GraphExt {
     type Key = NodeId;
     fn view(&self) -> GraphView {
         GraphView {
-            node: Some(self.node),
+            node: (!self.unplaced).then_some(self.node),
         }
     }
     fn key(&self) -> NodeId {
         self.node
     }
     fn bare(&self) -> GraphExt {
-        GraphExt::at(self.node)
+        GraphExt {
+            unplaced: self.unplaced,
+            ..GraphExt::at(self.node)
+        }
     }
     fn standing(view: &GraphView) -> bool {
         view.node.is_some()
@@ -58,6 +67,15 @@ impl GraphExt {
             node,
             bindings: Vec::new(),
             arrived: Vec::new(),
+            unplaced: false,
+        }
+    }
+
+    /// Standing nowhere: the thread a reduction leaves.
+    pub(crate) fn unplaced(root: NodeId) -> GraphExt {
+        GraphExt {
+            unplaced: true,
+            ..GraphExt::at(root)
         }
     }
 }
@@ -189,6 +207,13 @@ pub(crate) fn anchor_nodes(
             .collect(),
         Anchor::MarkIndex(n) => references(register).nth(n - 1).into_iter().collect(),
         Anchor::MarkTop => references(register).last().into_iter().collect(),
+        Anchor::MarkBack(n) => references(register)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .nth(n - 1)
+            .into_iter()
+            .collect(),
         Anchor::MarksAll => references(register).collect(),
         Anchor::MarksNamed(m) => register
             .iter()
@@ -222,8 +247,49 @@ pub(crate) const NEXT: &str = "[next]";
 
 pub(crate) const PREV: &str = "[prev]";
 
-/// Engine-computed core metadata (`:key`), derived from the
-/// navigation surface and independent of the adapter's domain.
+/// The core fields every node answers (`:fields`, as projection
+/// values), in the order
+/// `core_meta` reads them; an unknown `:key` is refused naming them.
+pub(crate) const CORE_FIELDS: &[&str] = &[
+    "name",
+    "id",
+    "index",
+    "depth",
+    "parent-name",
+    "parent-id",
+    "parent-index",
+    "n-children",
+    "n-descendants",
+    "n-siblings",
+    "traits",
+    "props",
+    "meta",
+    "fields",
+    "is-leaf",
+    "is-root",
+    "is-first-child",
+    "is-last-child",
+    "is-top-level",
+    "is-non-tree",
+    "name-path",
+    "index-path",
+    "id-path",
+    "source",
+    "path",
+    "instant",
+    "dpid",
+    "provenance",
+    "%provenance",
+    "@provenance",
+    "origin",
+    "%origin",
+    "@origin",
+    "elided",
+];
+
+/// The core fields (`:key`), the fields the engine gives every
+/// node, derived from the navigation surface and independent of the
+/// adapter's domain.
 pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> Option<Value> {
     let index = || index_of(adapter, node);
     let n_siblings = || {
@@ -256,6 +322,25 @@ pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> O
         "n-children" => Some(Value::Int(adapter.children(node).len() as i64)),
         "n-descendants" => Some(Value::Int(n_descendants(adapter, node) as i64)),
         "n-siblings" => Some(n_siblings().map_or(Value::Null, |n| Value::Int(n as i64))),
+        // The inspection fields (draft 164): the names of the three
+        // ladders, each listable from the node.
+        "props" | "properties" => Some(Value::list(
+            adapter
+                .property_names(node)
+                .into_iter()
+                .map(|k| Value::projection(2, k))
+                .collect(),
+        )),
+        "meta" | "metadata" => Some(Value::list(
+            adapter
+                .metadata_keys(node)
+                .into_iter()
+                .map(|k| Value::projection(3, k))
+                .collect(),
+        )),
+        "fields" => Some(Value::list(
+            CORE_FIELDS.iter().map(|k| Value::projection(1, *k)).collect(),
+        )),
         "traits" => Some(Value::list(
             adapter.traits(node).into_iter().map(Value::Str).collect(),
         )),

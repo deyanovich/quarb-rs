@@ -25,6 +25,7 @@ from . import (
     closes_with_table as _closes_with_table,
     mount as _mount,
     open as _open,
+    defs_only as _defs_only,
     parse_defs as _parse_defs,
 )
 
@@ -137,16 +138,22 @@ class Session:
     # -- definitions ---------------------------------------------
     @staticmethod
     def is_defs(text: str) -> bool:
-        """Whether `text` is definitions only (a defs-file shape)."""
+        """Whether `text` is definitions and nothing else.
+
+        A cell whose statements are all `def`/`macro` (comment lines
+        aside) extends the session table; a cell that carries a
+        query after its definitions runs as a query, which reads the
+        leading definitions itself. A cell that is definitions-shaped
+        but holds a malformed definition raises that parse error
+        here, instead of running as a query and reporting the query
+        lexer's confusion (a `#` comment holding an apostrophe read
+        as "unterminated quoted name").
+        """
         head = text.lstrip()
         if not (head.startswith("def ") or head.startswith("macro ")
                 or head.startswith("#")):
             return False
-        try:
-            _parse_defs(text)
-        except ValueError:
-            return False
-        return True
+        return _defs_only(text)
 
     def add_defs(self, text: str) -> str:
         """Add `def`/`macro` statements to the session's table.

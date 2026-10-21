@@ -2451,17 +2451,17 @@ fn group_and_ungroup_carry_origins() {
 
 #[test]
 fn a_group_sums_a_record_field() {
-    // Ruling #66: a reducing aggregate over a group of records
-    // takes the field to reduce — `sum(:n)` — and a field read
-    // on the group's list projects each member, so `:n | sum`
-    // says the same. Both agree with grouping the values.
+    // A reducing aggregate over a group of records reads the field
+    // to reduce through `--of` (draft 164: `sum(--of=:n)`), and a
+    // field read on the group's list projects each member, so
+    // `:n | sum` says the same. Both agree with grouping the values.
     let t = MockTree::sample();
     let by_value = traced(
         "/*/* | .d(\\:name) | :index @| group(d = $.d) | sum",
         &t,
     );
     let keyed = traced(
-        "/*/* | .d(\\:name) | %(n = :index) @| group(d = $.d) | sum(:n)",
+        "/*/* | .d(\\:name) | %(n = :index) @| group(d = $.d) | sum(--of=:n)",
         &t,
     );
     let read = traced(
@@ -2672,7 +2672,7 @@ fn peer_read_is_by_location() {
     let t2 = MockTree::sample();
     assert_eq!(
         vals(
-            "//*<file> | .v(:index) | .w(:name) | ->ref:. | (:name = \"x.rs\" ? $_ : \"-\")",
+            "//*<file> | .v(:index) | .w(:name) | ->ref:. | ($$_:name = \"x.rs\" ? $_ : \"-\")",
             &t2
         ),
         vec![

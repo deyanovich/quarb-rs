@@ -197,10 +197,18 @@ pub(crate) trait Host {
     type Trace: Default;
     /// The attachment of a thread standing at the root.
     fn root_ext(&self) -> Self::Ext;
+    /// The attachment of a thread with no position (spec:
+    /// Aggregating Pipe): what a reduction leaves.
+    fn unplaced_ext(&self) -> Self::Ext;
+    /// Whether the thread stands somewhere: false after a reduction
+    /// and at the calculator.
+    fn placed(&self, ext: &Self::Ext) -> bool;
     /// A unit's scale, for quantities.
     fn scale_of(&self, expr: &str) -> Option<(f64, String)>;
     fn property_of(&self, ext: &Self::Ext, name: &str) -> Option<Value>;
     fn properties_of(&self, ext: &Self::Ext) -> Vec<(String, Value)>;
+    /// The node's property names (`:props`), in the adapter's order.
+    fn property_names_of(&self, ext: &Self::Ext) -> Vec<String>;
     /// The properties a command will read on every thread: a remote
     /// host may fetch them for the whole frontier first.
     fn prefetch(&self, threads: &[Thread<Self::Ext>], names: &[&str]);
@@ -313,6 +321,15 @@ pub(crate) trait Host {
     fn render_node(&self, ext: &Self::Ext, kind: &str) -> String;
     /// Values rendered through the same vocabulary.
     fn render_values(&self, values: &[Value], kind: &str) -> String;
+    /// `@| tree`: the context's nodes drawn as a tree (spec: The
+    /// tree); `column` evaluates a column expression at a node. Err
+    /// where the host has no nodes to draw.
+    fn render_tree(
+        &self,
+        starts: &[Self::Ext],
+        spec: &crate::graph::tree::TreeSpec,
+        column: &dyn Fn(&Self::Ext, &Operand) -> Value,
+    ) -> Result<String, String>;
     /// A value as an XML element named `tag`.
     fn value_to_xml(&self, v: &Value, tag: &str) -> String;
 }

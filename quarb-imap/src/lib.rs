@@ -512,6 +512,12 @@ impl AstAdapter for ImapAdapter {
     }
 
     /// `:::epoch`, `:::uid`; `:::n-messages` on folders.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["n-messages", "uid", "epoch"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
             "n-messages" => match &self.nodes.borrow()[node.0 as usize].kind {

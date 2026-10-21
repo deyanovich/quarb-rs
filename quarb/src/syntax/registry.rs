@@ -66,6 +66,19 @@ pub enum Layer {
     Node,
 }
 
+/// What a scalar answers to a null topic (spec: the inventory's
+/// rule — a null topic has no coercion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnNull {
+    /// Null: the reading has nothing to read.
+    Null,
+    /// Nothing: an expander yields no capsa.
+    Nothing,
+    /// The command reads null on purpose (`default`, `type`, the
+    /// serializers) and answers in its own arm.
+    Keep,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FnSpec {
     pub name: &'static str,
@@ -79,6 +92,8 @@ pub struct FnSpec {
     pub check: Check,
     /// One line for people: completion, the manual.
     pub doc: &'static str,
+    /// The answer to a null topic on the plain pipe.
+    pub null: OnNull,
     /// The options the command declares, as a utility's synopsis
     /// lists them (`-i`, `--locale`); any other option in its
     /// segment is refused by name. No built-in declares one yet:
@@ -94,8 +109,22 @@ const fn scalar(name: &'static str, doc: &'static str) -> FnSpec {
         agg: None,
         check: Check::None,
         doc,
+        null: OnNull::Null,
         options: &[],
     }
+}
+
+/// The command's answer to a null topic, where it is not null.
+const fn with_null(spec: FnSpec, null: OnNull) -> FnSpec {
+    FnSpec { null, ..spec }
+}
+
+/// Whether the command takes `--of=expr` (`-o=expr`): every
+/// reducing aggregate of the inventory (spec: Aggregating Pipe,
+/// draft 164) — the expression is read on each item of the input in
+/// turn, and the reduction runs over the results.
+pub fn takes_of(name: &str) -> bool {
+    spec(name).is_some_and(|s| matches!(s.agg, Some(Agg::Reducing)) && !s.scalar)
 }
 
 const fn reducing(name: &'static str, doc: &'static str) -> FnSpec {
@@ -106,6 +135,7 @@ const fn reducing(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Reducing),
         check: Check::None,
         doc,
+        null: OnNull::Keep,
         options: &[],
     }
 }
@@ -118,6 +148,7 @@ const fn context(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Context),
         check: Check::None,
         doc,
+        null: OnNull::Keep,
         options: &[],
     }
 }
@@ -139,6 +170,7 @@ const fn keyed(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Keyed),
         check: Check::Keyed,
         doc,
+        null: OnNull::Keep,
         options: &[],
     }
 }
@@ -151,6 +183,7 @@ const fn assoc(name: &'static str, agreement: bool, doc: &'static str) -> FnSpec
         agg: Some(Agg::Association { agreement }),
         check: Check::Stat,
         doc,
+        null: OnNull::Keep,
         options: &[],
     }
 }
@@ -163,8 +196,14 @@ const fn both(name: &'static str, doc: &'static str) -> FnSpec {
         agg: Some(Agg::Reducing),
         check: Check::None,
         doc,
+        null: OnNull::Null,
         options: &[],
     }
+}
+
+/// The options a command declares beyond `--of` (draft 164).
+const fn with_options(spec: FnSpec, options: &'static [&'static str]) -> FnSpec {
+    FnSpec { options, ..spec }
 }
 
 const fn with_check(spec: FnSpec, check: Check) -> FnSpec {
@@ -196,13 +235,22 @@ pub const SPECS: &[FnSpec] = &[
     scalar("wc", "the count of words"),
     scalar("lc", "the count of lines"),
     scalar("sc", "the count of sentences"),
-    scalar("lines", "the lines of the text, one capsa each"),
-    scalar("words", "the words of the text, one capsa each"),
+    with_null(
+        scalar("lines", "the lines of the text, one capsa each"),
+        OnNull::Nothing,
+    ),
+    with_null(
+        scalar("words", "the words of the text, one capsa each"),
+        OnNull::Nothing,
+    ),
     with_check(
-        both(
-            "ngrams",
-            "the word n-grams of the text: ngrams(N); as an aggregate, the \
+        with_null(
+            both(
+                "ngrams",
+                "the word n-grams of the text: ngrams(N); as an aggregate, the \
              adjacent N-windows of the stream, full windows only",
+            ),
+            OnNull::Nothing,
         ),
         Check::Command,
     ),
@@ -211,10 +259,13 @@ pub const SPECS: &[FnSpec] = &[
         "jaro_winkler",
         "the Jaro–Winkler similarity to the argument, 0 to 1",
     ),
-    scalar(
-        "tokens",
-        "the corpus tier's tokens of the text as a list; tokens(word) the \
+    with_null(
+        scalar(
+            "tokens",
+            "the corpus tier's tokens of the text as a list; tokens(word) the \
          word class alone",
+        ),
+        OnNull::Nothing,
     ),
     scalar("casefold", "Unicode case folding (ß to ss, final sigma)"),
     scalar(
@@ -231,9 +282,12 @@ pub const SPECS: &[FnSpec] = &[
         "s",
         "regex substitution: s/pattern/replacement/mods (mods from g, i, m, s, x)",
     ),
-    scalar(
-        "split",
-        "the pieces between a separator (whitespace unless given)",
+    with_null(
+        scalar(
+            "split",
+            "the pieces between a separator (whitespace unless given)",
+        ),
+        OnNull::Nothing,
     ),
     scalar("substr", "the codepoints of a range: substr(a..b)"),
     scalar("pad", "the text padded on the right to a width"),
@@ -241,11 +295,17 @@ pub const SPECS: &[FnSpec] = &[
     scalar("rpad", "the text padded on the right to a width"),
     scalar("repeat", "the text repeated N times"),
     scalar("indent", "every line indented by N spaces"),
-    scalar(
-        "sentences",
-        "the sentences of the text, under the session's bonds",
+    with_null(
+        scalar(
+            "sentences",
+            "the sentences of the text, under the session's bonds",
+        ),
+        OnNull::Nothing,
     ),
-    scalar("default", "the argument where the topic is null"),
+    with_null(
+        scalar("default", "the argument where the topic is null"),
+        OnNull::Keep,
+    ),
     // Unicode, stress, transliteration, spelling.
     scalar("nfc", "the text in Unicode NFC"),
     scalar("nfd", "the text in Unicode NFD"),
@@ -270,6 +330,7 @@ pub const SPECS: &[FnSpec] = &[
     // Numbers.
     FnSpec {
         name: "number",
+        null: OnNull::Null,
         layer: Layer::Value,
         scalar: true,
         agg: Some(Agg::Context),
@@ -327,9 +388,12 @@ pub const SPECS: &[FnSpec] = &[
     ),
     // The two readings of a table (spec: Command Libraries, "A
     // library value") and the reshapes that need no algorithm.
-    both(
-        "@",
-        "the row reading: a library value as its rows, a record of lists as a list of records",
+    with_null(
+        both(
+            "@",
+            "the row reading: a library value as its rows, a record of lists as a list of records",
+        ),
+        OnNull::Nothing,
     ),
     both(
         "%",
@@ -343,9 +407,12 @@ pub const SPECS: &[FnSpec] = &[
         "#",
         "the table reading: a list of records as a frame, a list of lists as an array, a list of values as a sample",
     ),
-    both(
-        "rows",
-        "the row reading of a table or a library value, as '| @'",
+    with_null(
+        both(
+            "rows",
+            "the row reading of a table or a library value, as '| @'",
+        ),
+        OnNull::Nothing,
     ),
     both(
         "columns",
@@ -361,16 +428,26 @@ pub const SPECS: &[FnSpec] = &[
         "a record's field names as a list, in order; a table's header",
     ),
     both(
+        "fields",
+        "the field projections of the topic as a list (:a): a record's fields, a table's columns, a node's core fields",
+    ),
+    both(
         "values",
         "a record's values as a list, in order; a table's rows as an array, columns and types kept",
     ),
-    both(
-        "flatten",
-        "every nested list opened to any depth (flatten(n): n levels), scalars and nulls in order; a table's cells row by row",
+    with_null(
+        both(
+            "flatten",
+            "every nested list opened to any depth (flatten(n): n levels), scalars and nulls in order; a table's cells row by row",
+        ),
+        OnNull::Keep,
     ),
-    both(
-        "type",
-        "a table's column types, one word per column: boolean, integer, float, instant, duration, period, quantity, text",
+    with_null(
+        both(
+            "type",
+            "a table's column types, one word per column: boolean, integer, float, instant, duration, period, quantity, text",
+        ),
+        OnNull::Keep,
     ),
     both(
         "[]",
@@ -391,6 +468,7 @@ pub const SPECS: &[FnSpec] = &[
     ),
     FnSpec {
         name: "melt",
+        null: OnNull::Nothing,
         layer: Layer::Value,
         scalar: true,
         agg: Some(Agg::Reducing),
@@ -399,12 +477,21 @@ pub const SPECS: &[FnSpec] = &[
         options: &["--name", "--value"],
     },
     // Serializations.
-    both("json", "the topic (per capsa) or the context (@|) as JSON"),
-    both(
-        "jsonl",
-        "the topic (per capsa) or the context (@|) as JSON Lines",
+    with_null(
+        both("json", "the topic (per capsa) or the context (@|) as JSON"),
+        OnNull::Keep,
     ),
-    both("kaiv", "the topic (per capsa) or the context (@|) as kaiv"),
+    with_null(
+        both(
+            "jsonl",
+            "the topic (per capsa) or the context (@|) as JSON Lines",
+        ),
+        OnNull::Keep,
+    ),
+    with_null(
+        both("kaiv", "the topic (per capsa) or the context (@|) as kaiv"),
+        OnNull::Keep,
+    ),
     on_node(scalar("link", "the node's link address")),
     scalar("xml", "the node as XML"),
     scalar("markdown", "the node as Markdown"),
@@ -413,10 +500,16 @@ pub const SPECS: &[FnSpec] = &[
     scalar("conllu", "the node as CoNLL-U"),
     scalar("bibref", "the reference parsed into its fields"),
     with_check(
-        scalar("record", "retired: the record is %(…)"),
+        with_null(
+            scalar("record", "retired: the record is %(…)"),
+            OnNull::Keep,
+        ),
         Check::Record,
     ),
-    with_check(scalar("rec", "retired: the record is %(…)"), Check::Record),
+    with_check(
+        with_null(scalar("rec", "retired: the record is %(…)"), OnNull::Keep),
+        Check::Record,
+    ),
     // The temporal fragment.
     scalar("datetime", "the instant read from text"),
     scalar("epoch", "the instant as seconds since the epoch"),
@@ -459,7 +552,10 @@ pub const SPECS: &[FnSpec] = &[
         "the instant written under a format and a locale",
     ),
     scalar("tfmt", "strftime, short"),
-    scalar("timex", "the time expressions of the text"),
+    with_null(
+        scalar("timex", "the time expressions of the text"),
+        OnNull::Nothing,
+    ),
     scalar(
         "time_anchor",
         "the time expression resolved against an anchor",
@@ -501,11 +597,11 @@ pub const SPECS: &[FnSpec] = &[
         Check::Stat,
     ),
     with_check(
-        reducing("var", "the variance (sample with the word sample)"),
+        with_options(reducing("var", "the variance (n − 1 with --sample)"), &["--sample"]),
         Check::Stat,
     ),
-    with_check(reducing("stddev", "std, alias"), Check::Stat),
-    with_check(reducing("variance", "var, alias"), Check::Stat),
+    with_check(with_options(reducing("stddev", "std, alias"), &["--sample"]), Check::Stat),
+    with_check(with_options(reducing("variance", "var, alias"), &["--sample"]), Check::Stat),
     reducing(
         "entropy",
         "the Shannon entropy, bits: of a stream of counts, or of the \
@@ -605,7 +701,7 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        context("zscore", "each value standardized over the context"),
+        with_options(context("zscore", "each value standardized over the context"), &["--sample"]),
         Check::Command,
     ),
     with_check(
@@ -614,6 +710,13 @@ pub const SPECS: &[FnSpec] = &[
     ),
     with_check(
         context("timeline", "the context ordered on its time anchors"),
+        Check::Command,
+    ),
+    with_check(
+        on_node(context(
+            "tree",
+            "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth, traits, props, % for the properties record, column expressions",
+        )),
         Check::Command,
     ),
     with_check(

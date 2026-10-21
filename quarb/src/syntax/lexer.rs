@@ -65,10 +65,6 @@ pub enum Token {
     /// (spec: The Conditional, "The null default"); spaced on both
     /// sides like every binary operator.
     Coalesce,
-    /// `+|` — the append pipe (spec: The Append Pipe): the body's
-    /// values appended to the topic; `+|!` the overwriting form,
-    /// for a record's fields. Rounded `+__` / `+__!`.
-    AppendPipe { overwrite: bool },
     /// `!` — distal suffix.
     Bang,
     /// `^` — root anchor; or its rounded spelling, the empty double
@@ -109,6 +105,9 @@ pub enum Token {
     Driver,
     /// `$$_` / `((_))` — the position: the node the thread stands on.
     Position,
+    /// `_` — the cursor: the record of the topic and the position
+    /// (spec: The Cursor), `_:topic` and `_:position` its fields.
+    Cursor,
     /// `$$__` / `((__))` — the invoking position: the node at the
     /// last query-body invocation.
     Invoking,
@@ -157,10 +156,14 @@ pub enum Token {
     /// `@@_` — the context's positions as node references
     /// (rounded `((*_))`); a glued projection maps over them.
     Positions,
-    /// `#*` — the context as a table of the value regulae.
-    Matrix,
-    /// `##*` — the context as a table of the node regulae.
-    NodeMatrix,
+    /// `#.` / `#.*` — the context as a table of the named / of
+    /// every value regula.
+    Matrix { full: bool },
+    /// `##.` / `##.*` — the same of the node regulae.
+    NodeMatrix { full: bool },
+    /// `#_` — the context table: one row per thread, the columns
+    /// `topic` and `position` (spec: The Cursor).
+    CtxTable,
     /// `%` — the record sigil (`%.`, the named register view).
     Percent,
     /// `&` — the fragment sigil (`&name` invokes a `def`).
@@ -241,6 +244,8 @@ pub(crate) fn is_quantity_head(text: &str) -> bool {
     let Some((mag, unit)) = text.split_once('_') else {
         return false;
     };
+    // a signed literal is a quantity, as `-1` is a number
+    let mag = mag.strip_prefix(['-', '+']).unwrap_or(mag);
     !mag.is_empty()
         && mag.chars().all(|c| c.is_ascii_digit() || c == '.')
         && mag.chars().any(|c| c.is_ascii_digit())
@@ -742,20 +747,28 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Pipe);
                 i += 3;
             }
-            // `+|` / `+|!` — the append pipe and its overwriting
-            // form; `+__` / `+__!` the rounded spellings.
-            '+' if at(i + 1) == Some('|') => {
-                let overwrite = at(i + 2) == Some('!');
-                tokens.push(Token::AppendPipe { overwrite });
-                i += if overwrite { 3 } else { 2 };
-            }
-            '+' if at(i + 1) == Some('_')
-                && at(i + 2) == Some('_')
-                && !at(i + 3).is_some_and(|c| is_name_char(c) && c != '!') =>
+            // `+|` / `+|!` / `+|^` and the rounded `+__` / `+__!` —
+            // the append pipe, retired (draft 163): concatenation is
+            // the binary operator `++` (spec: Concatenation).
+            '+' if at(i + 1) == Some('|')
+                || (at(i + 1) == Some('_')
+                    && at(i + 2) == Some('_')
+                    && !at(i + 3).is_some_and(|c| is_name_char(c) && c != '!')) =>
             {
-                let overwrite = at(i + 3) == Some('!');
-                tokens.push(Token::AppendPipe { overwrite });
-                i += if overwrite { 4 } else { 3 };
+                return Err(QuarbError::lex(
+                    "'+|' is retired: write '| ++ x' (one item: '| +@+ x'; overwrite: '| ++! x')",
+                ));
+            }
+            // `+@+` — the element append (spec: Concatenation): a
+            // binary operator at the additive level, handed over as
+            // the word the parser reads beside `++`.
+            '+' if at(i + 1) == Some('@') && at(i + 2) == Some('+') => {
+                tokens.push(Token::Name {
+                    text: "+@+".to_string(),
+                    quoted: false,
+                    glued: false,
+                });
+                i += 3;
             }
             // `*(a; b)` — the rounded list literal (`*` stands in for
             // `@`, as in `*__` and `(*)`). A list literal follows
@@ -766,17 +779,48 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::At);
                 i += 1;
             }
-            // `#*` / `##*` — the context as a table of the value or
-            // the node regulae (spec: Context Accessors).
+            // `#.` / `#.*` / `##.` / `##.*` — the context as a table
+            // of the named or of every value or node regula (spec:
+            // Context Accessors); `#*` / `##*` are retired.
             '#' if at(i + 1) == Some('#')
+                && at(i + 2) == Some('.')
+                && at(i + 3) == Some('*')
+                && !at(i + 4).is_some_and(is_name_char) =>
+            {
+                tokens.push(Token::NodeMatrix { full: true });
+                i += 4;
+            }
+            '#' if at(i + 1) == Some('#')
+                && at(i + 2) == Some('.')
+                && !at(i + 3).is_some_and(is_name_char) =>
+            {
+                tokens.push(Token::NodeMatrix { full: false });
+                i += 3;
+            }
+            '#' if at(i + 1) == Some('.')
                 && at(i + 2) == Some('*')
                 && !at(i + 3).is_some_and(is_name_char) =>
             {
-                tokens.push(Token::NodeMatrix);
+                tokens.push(Token::Matrix { full: true });
                 i += 3;
             }
-            '#' if at(i + 1) == Some('*') && !at(i + 2).is_some_and(is_name_char) => {
-                tokens.push(Token::Matrix);
+            '#' if at(i + 1) == Some('.') && !at(i + 2).is_some_and(is_name_char) => {
+                tokens.push(Token::Matrix { full: false });
+                i += 2;
+            }
+            '#' if (at(i + 1) == Some('*') && !at(i + 2).is_some_and(is_name_char))
+                || (at(i + 1) == Some('#')
+                    && at(i + 2) == Some('*')
+                    && !at(i + 3).is_some_and(is_name_char)) =>
+            {
+                return Err(QuarbError::lex(
+                    "'#*' and '##*' are retired: the matrix of every regula is '#.*' (the node \
+                     face '##.*'), of the named ones '#.' ('##.')",
+                ));
+            }
+            // `#_` — the context table, the cursor's plural.
+            '#' if at(i + 1) == Some('_') && !at(i + 2).is_some_and(is_name_char) => {
+                tokens.push(Token::CtxTable);
                 i += 2;
             }
             // `#(…)` — the table literal: a header list and rows;
@@ -792,7 +836,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 if !after_whitespace(&chars, i)
                     && !matches!(
                         tokens.last(),
-                        Some(Token::IdAnchorOpen | Token::LParen | Token::Semi | Token::Comma)
+                        Some(
+                            Token::IdAnchorOpen
+                                | Token::LParen
+                                | Token::Semi
+                                | Token::Comma
+                                | Token::OptEq
+                        )
                     )
                 {
                     return Err(QuarbError::lex(
@@ -1063,15 +1113,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     "'$$_N' is retired: the join's N-th node is '$$N'",
                 ));
             }
-            // `_` — retired (draft 153): the invoking position is
-            // `$$__`, the driver `$$0`, the position `$$_`.
+            // `_` — the cursor (the record of the topic and the
+            // position; the pre-153 driver spelling, reused). Glued
+            // after `$` or `@` it is the topic's or the context's
+            // sigil body, read with them.
             '_' if !at(i + 1).is_some_and(|c| is_name_char(c) || c == '(')
                 && !(glued && matches!(tokens.last(), Some(Token::Dollar | Token::At))) =>
             {
-                return Err(QuarbError::lex(
-                    "'_' is retired: the invoking position is '$$__' ('$$__::prop'), \
-                     the driver of a join condition '$$0', the position '$$_'",
-                ));
+                tokens.push(Token::Cursor);
+                i += 1;
             }
             '$' if at(i + 1) == Some('$') && at(i + 2) == Some('.') => {
                 let mut k = i + 3;
@@ -1084,10 +1134,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     k += 1;
                 }
                 let spec: String = chars[i + 3..k].iter().collect();
-                let body = if spec.is_empty() {
-                    ".".to_string()
-                } else {
-                    spec
+                // `$$.` the latest mark, `$$..` the penultimate.
+                let body = match spec.as_str() {
+                    "" => ".".to_string(),
+                    "." => "..".to_string(),
+                    _ => spec,
                 };
                 tokens.push(Token::MarkOpen);
                 tokens.push(Token::Name {
@@ -1188,10 +1239,16 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 while j < chars.len() && matches!(chars[j], '@' | '%') {
                     j += 1;
                 }
-                // The dot — or the two of a full view (`:%..`,
-                // `:%%..`); a sigil-less `.name` takes one.
+                // The dot — then the star of a full view (`:%.*`,
+                // `:%%.*`), the second dot of the penultimate
+                // (`:..`) or of the retired full view, the minus of
+                // a count back (`:.-2`), or a name.
                 j += 1;
-                if j > start + 1 && at(j) == Some('.') {
+                if j > start + 1 && at(j) == Some('*') {
+                    j += 1;
+                } else if at(j) == Some('.') {
+                    j += 1;
+                } else if at(j) == Some('-') && at(j + 1).is_some_and(|c| c.is_ascii_digit()) {
                     j += 1;
                 }
                 while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {

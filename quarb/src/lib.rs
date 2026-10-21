@@ -59,7 +59,7 @@ pub use quarb_time::{calendar, calnames, datenames, durnames, regional};
 pub use quarb_time::{period, temporal, timex};
 pub use stdlib::{tabulate, tabulate_in, tabulate_with};
 use syntax::{ast, lexer, parser, unparse};
-pub use syntax::{highlight, registry};
+pub use syntax::{highlight, man, registry};
 pub use thread::prov::{ORIGIN_CAP, Origin, Origins, Prov};
 pub use value::encoding::{base64, base64_decode, sha256, sha256_hex};
 pub use value::split_seconds_pub;
@@ -484,6 +484,14 @@ pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<gra
 pub fn parse_defs(text: &str) -> Result<Defs> {
     let tokens = lexer::lex(&strip_defs_comments(text))?;
     parser::parse_defs(&tokens)
+}
+
+/// Whether `text` is definitions and nothing else (`#` comments
+/// allowed): `Ok(false)` when a query follows the definitions, an
+/// error when a definition itself is malformed.
+pub fn defs_only(text: &str) -> Result<bool> {
+    let tokens = lexer::lex(&strip_defs_comments(text))?;
+    parser::defs_only(&tokens)
 }
 
 /// Blank out the `#` comment lines of a defs file, preserving line

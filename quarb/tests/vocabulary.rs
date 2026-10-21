@@ -45,10 +45,15 @@ const CORPUS: &[&str] = &[
     // register recalls, topic, ordinal filter, positional selection
     "/x | .n(::a * ::b) | $.n | .named | . | .(::a + 1) \
      | [$ord mod 2 = 1] @| [2..-1] @| [3]",
-    "/x | $_ | @. | %. | %.. | $. | $.2",
+    "/x | $_ | @. | %. | %.* | $. | $.2",
+    // v2 additive growth (2026-10-20, draft 163): the capsa counted
+    // back on both faces, the cursor record, the context table, a
+    // signed quantity literal
+    "/x | .a | .b | $.-2 | $.. | (.-2) | (..) | _ | _:topic | _:position::k | #_ | (-1_km + 1_km)",
+    "/x/* | .M | .N | ((.-2))/y | ((..)) | %(a = $$..::k; b = $$.-2::k) | #. | ##. | #.:M",
     // the node side of the capsa: marks as references, the node
     // views, the position as a value (`$$_`) and its tail
-    "/x/* | .M | @@. | %%. | %%.. | %(me = $$_; k = $$_::k; up = $$__::k)",
+    "/x/* | .M | @@. | %%. | %%.* | %(me = $$_; k = $$_::k; up = $$__::k)",
     "/row | [::n == (/(?<y>\\d+)/)] | %+ | .% | $.y",
     // subcontexts, named and bare
     "/users/* | .total(/orders/*/amt:: @| sum) | .(//y @| count)",
@@ -96,7 +101,7 @@ const CORPUS: &[&str] = &[
     "/a | .p((::x div (@@_::x @| sum) | round))",
     // the context family: the topics, the positions, the tables
     "/a/* | ::x | %(pct = $_ * 100 div sum(@_); who = @@_; n = (@_ @| count))",
-    "/a/* | .k(::x) | .v(::x * 2) | #*:k | ##* | (*_) | ((*_))::x",
+    "/a/* | .k(::x) | .v(::x * 2) | #.*:k | ##.* | (*_) | ((*_))::x",
     // the conditional, chained
     "/a | %(::n; bin = (::x < 2 ? \"lo\" : ::x < 9 ? \"mid\" : \"hi\"))",
     // the spread
@@ -149,12 +154,22 @@ const CORPUS: &[&str] = &[
     "/row | .r%(::x; n = 1) | .%%(k = 2) | $.r:n",
     // the list literal
     "/row | %(tags = @(::a; ::b); n = 1) | @(1; 2)",
+    // concatenation (2026-10-20, draft 163): `++` merges by the
+    // left side's shape, `++!` overwrites a record's fields (a row
+    // on the right reflects as the record it spells), `+@+` appends
+    // one item
+    "/row | @(::a) ++ @(1) | ++! %(k = 2; ::b) | +@+ @(2; 3)",
+    // the expression head (2026-10-21, draft 164): a literal or a
+    // constructor after a pipe opens an expression; after `@|` it
+    // is one expression over the context
+    "/row | 0 + $_ | %(v = $_) ++ %(w = 1) @| @(0; $_) ++ @(1)",
 ];
 
 /// kind → sorted property keys, as locked. `param` is reserved
 /// (never emitted: reflection sees expanded queries).
 const VOCABULARY: &[(&str, &[&str])] = &[
     ("agg", &["lib", "name"]),
+    ("agg-expr", &[]),
     ("agg-push", &["name"]),
     ("agg-recall", &["ref"]),
     ("agg-record", &["enriched"]),
@@ -165,11 +180,14 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: mark key (2026-07-11, the (name)
     // anchor); the mark-array anchor keys (2026-07-24, marks
     // symmetry: (N), (.), (@), (@name)).
+    // v2 additive growth: mark-back (2026-10-20, draft 163: the
+    // mark counted back from the latest, `$$.-N` / `$$..`).
     (
         "branch",
         &[
             "anchored",
             "mark",
+            "mark-back",
             "mark-index",
             "mark-top",
             "marks-all",
@@ -185,6 +203,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("cmd", &["lib", "name"]),
     ("compare", &["op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
+    // v2 additive growth: concat (2026-10-20, draft 163: `++`,
+    // `++!` with overwrite, `+@+` with item).
+    ("concat", &["item", "overwrite"]),
     ("cond", &[]),
     ("context", &["index"]),
     // v1 additive growth: edge (2026-07-09, the $- accessor).
@@ -217,8 +238,11 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // a branch in command position; its contents reflect with the
     // ordinary branch kinds).
     // v2 additive growth: the context family (2026-10-19, draft
-    // 157): matrix (#* / ##*, ::side), positions (@@_), topics (@_)
-    ("matrix", &["side"]),
+    // 157): matrix (#* / ##*, ::side), positions (@@_), topics (@_).
+    // v2 additive growth: view (2026-10-20, draft 163: `#.` the named
+    // regulae, `#.*` every one; the context table `#_` a matrix of
+    // the side `context`).
+    ("matrix", &["side", "view"]),
     ("nav", &[]),
     ("neg", &[]),
     ("not", &[]),
@@ -237,6 +261,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
         &[
             "anchored",
             "mark",
+            "mark-back",
             "mark-index",
             "mark-top",
             "marks-all",
@@ -258,6 +283,10 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("query", &["outer", "role"]),
     ("recall", &["ref"]),
     ("record-push", &["enriched", "name"]),
+    // v2 additive growth: record-with as an operand (2026-10-20,
+    // draft 162: the cursor record `_`, reflected as the record of
+    // the topic and the position).
+    ("record-with", &[]),
     // v1 additive growth: repeat (2026-09-07, the quantified push —
     // the iteration loop).
     ("repeat", &["max", "min"]),
@@ -385,7 +414,7 @@ fn spellings_are_locked() {
     assert_eq!(collect("span", "kind"), set(&["range"]));
     assert_eq!(
         collect("literal", "type"),
-        set(&["bool", "float", "int", "null", "text"])
+        set(&["bool", "float", "int", "null", "quantity", "text"])
     );
 }
 

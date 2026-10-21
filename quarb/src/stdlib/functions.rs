@@ -7,7 +7,7 @@
 //! - **Aggregate** commands (`@|`) reduce the whole context's topics
 //!   to a new list.
 
-use crate::syntax::ast::{Arg, FnCall, IndexSpec};
+use crate::syntax::ast::{Arg, ConcatMode, FnCall, IndexSpec};
 #[cfg(test)]
 use crate::syntax::registry::{known_agg, known_keyed, known_scalar};
 use crate::value::Value;
@@ -211,13 +211,14 @@ pub fn agreement(name: &str) -> bool {
     })
 }
 
-/// Whether the call carries the bare word `sample` (a string
-/// literal, as the parser reads a bare name): the dispersion
+/// Whether the call carries the switch `--sample` (draft 164; the
+/// positional word is retired with a pointer): the dispersion
 /// measures divide by n − 1 instead of n.
 pub fn sample_flag(call: &FnCall) -> bool {
-    call.args
-        .iter()
-        .any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample"))
+    call.args.iter().any(|a| {
+        matches!(a, Arg::Opt { name, value: None } if name == "--sample")
+            || matches!(a, Arg::Lit(Value::Str(s)) if s == "sample")
+    })
 }
 
 /// Whether the call carries the bare word `atergo`: the a tergo
@@ -569,6 +570,17 @@ pub fn apply_scalar(
                 crate::value::ambient::record_refusal(refusal);
                 return vec![Value::Null];
             }
+        }
+    }
+    // A null topic has no coercion (spec: the inventory's rule): a
+    // scalar reading it answers null, an expander nothing; the
+    // commands that read null on purpose (`default`, `type`, the
+    // serializers) answer in their own arms.
+    if matches!(topic, Value::Null) && reads_topic(call) {
+        match crate::syntax::registry::spec(&call.name).map(|s| s.null) {
+            Some(crate::syntax::registry::OnNull::Null) => return vec![Value::Null],
+            Some(crate::syntax::registry::OnNull::Nothing) => return Vec::new(),
+            _ => {}
         }
     }
     let text = topic.to_string();
@@ -1360,7 +1372,7 @@ pub fn apply_scalar(
         // `duration(FROM; TO)` (spec: Duration): the duration from
         // one instant to another, TO − FROM, negative when TO
         // precedes FROM; both take the instant coercion, null when
-        // either does not. In command position the topic fills
+        // either does not. After a pipe the topic fills
         // FROM: `::born | duration(::died)`.
         "duration" | "td" if !call.args.is_empty() => {
             // two arguments: FROM and TO as given, the topic only the
@@ -1657,11 +1669,17 @@ pub fn apply_scalar(
             Value::Int(n) => n
                 .checked_abs()
                 .map_or(Value::Float(-(n as f64)), Value::Int),
-            // A quantity has no numeric reading and only the rounders
-            // are quantity-aware (spec: The Quantital Fragment), so
-            // `abs` over a quantity is null rather than silently
-            // dropping its unit to a bare base-magnitude float.
-            Value::Quantity { .. } => Value::Null,
+            // quantity-aware like the rounders: the magnitude's
+            // absolute value in the written unit
+            Value::Quantity {
+                value,
+                base,
+                written,
+            } => Value::Quantity {
+                value: value.abs(),
+                base,
+                written: written.map(|(v, u)| (v.abs(), u)),
+            },
             other => numeric_scalar(&other, |n| Value::Float(n.abs())),
         }],
         // The elementary functions over the numeric reading: an
@@ -2036,6 +2054,20 @@ fn bibref_scalar(call: &FnCall, topic: Value) -> Vec<Value> {
     }]
 }
 
+/// Whether a call reads its topic: the full-argument form of a
+/// command that takes its operands as arguments (`levenshtein(a;
+/// b)`, `duration(FROM; TO)`, `haversine(lat1; lon1; lat2; lon2)`)
+/// reads only them, so a null topic says nothing about its answer.
+fn reads_topic(call: &FnCall) -> bool {
+    let n = call.args.len();
+    match call.name.as_str() {
+        "levenshtein" | "jaro_winkler" | "pow" | "log" | "duration" => n < 2,
+        "log_dice" | "dice" => n < 3,
+        "haversine" | "loglik" | "chi2" | "mi" | "t_score" => n < 4,
+        _ => true,
+    }
+}
+
 /// `convert(unit)`. `apply_scalar`'s arm.
 /// A quantity, or unit text lifted to one; None for anything else.
 fn lift_quantity(topic: Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Option<Value> {
@@ -2231,6 +2263,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             | "header-to-row"
             | "flatten"
             | "keys"
+            | "fields"
             | "values"
             | "json"
             | "jsonl"
@@ -2261,18 +2294,33 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // stream of records as the list of them.
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "type"
         | "types" | "[]" | "cell" | "row-to-header" | "header-to-row" | "flatten" | "keys"
-        | "values" => {
+        | "fields" | "values" => {
             // One library value, or one record (a record of lists
             // after `|`, whose items the executor hands here), is
             // the whole; anything else is the stream as a list.
+            // A stream of several values read as rows (`@| @`) is
+            // the list of them, one value (a stream of records is
+            // the record array), where one library value opens
+            // into its rows.
+            let stream = input.len() > 1 && matches!(call.name.as_str(), "@" | "rows" | "fields");
+            // A command whose output is a list answers the list, a
+            // list of one included (`%(a = 1) | keys` → @("a")): the
+            // spread of a lone list into the thread is for the
+            // readings that yield rows, never for these.
+            let listed = input.len() == 1
+                && matches!(
+                    call.name.as_str(),
+                    "keys" | "values" | "fields" | "header" | "flatten"
+                );
             let whole = match input.as_slice() {
                 [Value::Foreign(_)] | [Value::Table(_)] | [Value::Record(_)] => {
                     input.into_iter().next().expect("one")
                 }
                 // `| [n]` indexes the one topic as it stands (a list,
                 // a table, or a scalar that refuses); `| type` names
-                // the one value in front of it.
-                [_] if call.name == "[]" || call.name == "type" => {
+                // the one value in front of it; `| flatten` opens the
+                // one value, a scalar passing through.
+                [_] if matches!(call.name.as_str(), "[]" | "type" | "flatten") => {
                     input.into_iter().next().expect("one")
                 }
                 _ => Value::list(input),
@@ -2285,6 +2333,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                     "#" => table_command(call, whole),
                     "flatten" => flatten_value(call, whole),
                     "keys" => keys_reading(whole),
+                    "fields" => fields_reading(whole),
                     "values" => values_reading(whole),
                     "header" => table_meta(whole, "header"),
                     "dim" => table_meta(whole, "dim"),
@@ -2297,7 +2346,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 },
             );
             match out {
-                Value::List(_) => out.into_items().unwrap_or_default(),
+                Value::List(_) if !stream && !listed => out.into_items().unwrap_or_default(),
                 other => vec![other],
             }
         }
@@ -2315,6 +2364,20 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 vec![Value::Null]
             }
         },
+        // A numeric reducer over lists and no number: each list is
+        // a value it cannot coerce, so the answer is null — said,
+        // not silent, with the two spellings that reduce the lists.
+        name @ ("sum" | "product" | "mean" | "avg" | "median" | "percentile" | "std"
+        | "stddev" | "var" | "variance")
+            if !input.iter().any(|v| v.numeric().is_some())
+                && input.iter().any(|v| matches!(v, Value::List(_))) =>
+        {
+            crate::value::ambient::record_refusal(format!(
+                "{name}: the input holds lists, not numbers — '| {name}' reduces each list, \
+                 '| ... @| {name}' reduces all their items"
+            ));
+            vec![Value::Null]
+        }
         "count" => vec![Value::Int(input.len() as i64)],
         "sum" => vec![sum(&input, scale)],
         "product" => vec![product(&input)],
@@ -2658,7 +2721,9 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 .filter(|v| seen.insert(v.sort_key_with(scale)))
                 .collect()
         }
-        // `first` / `last`: one value, or the first / last n.
+        // `first` / `last`: one value, or the first / last n; an
+        // empty input reduces to null.
+        "first" | "last" if input.is_empty() => vec![Value::Null],
         "first" => {
             let n = arg_int(call, 0).unwrap_or(1).max(0) as usize;
             input.into_iter().take(n).collect()
@@ -3757,7 +3822,7 @@ const TYPES_RETIRED: &str = "'types' is retired: the type of a table's columns i
 
 /// `type`: the type of a value as one word (spec: Quantity Commands);
 /// a table's one word per column, in header order.
-fn type_of(v: &Value) -> Value {
+pub(crate) fn type_of(v: &Value) -> Value {
     match v {
         Value::Table(t) => t.types_value(),
         Value::Null => Value::Str("null".into()),
@@ -3773,6 +3838,7 @@ fn type_of(v: &Value) -> Value {
         Value::Record(_) => Value::Str("record".into()),
         Value::Foreign(_) => Value::Str("opaque".into()),
         Value::Node(_) => Value::Str("node".into()),
+        Value::Projection { .. } => Value::Str("projection".into()),
     }
 }
 
@@ -3791,6 +3857,7 @@ pub(crate) fn kind_of(v: &Value) -> String {
         Value::Foreign(f) => f.kind(),
         Value::Table(t) => t.kind(),
         Value::Node(_) => "a node reference".into(),
+        Value::Projection { .. } => "a projection".into(),
     }
 }
 
@@ -3969,122 +4036,134 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
     }
 }
 
-/// `header` and `dim` of a table: the list of names (null on the
-/// array face) and `@(rows; columns)`; a list of records answers as
-/// its table reading would.
-/// The append pipe's shape rule (spec: The Append Pipe): `items`
-/// appended to `topic` — a list concatenates a list and takes any
-/// other value as one element; a table takes a record as one more
-/// row under the literal's rules and a table row by row (columns by
-/// name on a frame, by position on an array), its columns re-typed;
-/// a record takes a record's fields in order, a duplicate name
-/// refused unless `overwrite` (`+|!`, records only). Any other topic
-/// is refused by kind.
-pub(crate) fn append_values(
-    topic: Value,
-    items: Vec<Value>,
-    overwrite: bool,
-) -> Result<Value, String> {
-    match topic {
-        Value::List(l) => {
-            if overwrite {
-                return Err("'+|!' overwrites a record's fields; a list takes '+|'".into());
-            }
+/// The concatenation's shape rule (spec: Concatenation): `right`
+/// joined to `left`, the left side giving the shape. Under `++` a
+/// list concatenates a list and takes any other value as one
+/// element; a table takes a record as one more row under the
+/// literal's rules and a table row by row (columns by name on a
+/// frame, by position on an array), its columns re-typed; a record
+/// takes a record's fields in order, a duplicate name refused; a
+/// text takes the right side's text (a structure by its output
+/// form). `++!` is for records and lets a field be replaced; `+@+`
+/// is for lists and takes the right side as one item whatever it
+/// is. Null on either side is null, as in arithmetic; any other
+/// left side is refused by kind.
+pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Value, String> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (mode, left) {
+        (ConcatMode::Item, Value::List(l)) => {
             let mut out = l.to_vec();
-            for item in items {
-                match item {
-                    Value::List(more) => out.extend(more.iter().cloned()),
-                    other => out.push(other),
-                }
+            out.push(right);
+            Ok(Value::list(out))
+        }
+        (ConcatMode::Item, other) => Err(format!(
+            "'+@+' appends one item to a list; {} takes '++'",
+            kind_of(&other)
+        )),
+        (ConcatMode::Overwrite, Value::Record(fields)) => record_concat(fields, right, true),
+        (ConcatMode::Overwrite, other) => Err(format!(
+            "'++!' overwrites a record's fields; {} takes '++'",
+            kind_of(&other)
+        )),
+        (ConcatMode::Merge, Value::List(l)) => {
+            let mut out = l.to_vec();
+            match right {
+                Value::List(more) => out.extend(more.iter().cloned()),
+                other => out.push(other),
             }
             Ok(Value::list(out))
         }
-        Value::Table(t) => {
-            if overwrite {
-                return Err("'+|!' overwrites a record's fields; a table takes '+|'".into());
-            }
-            let mut header = t.header.clone();
-            let mut rows = t.rows.clone();
-            for item in items {
-                let n = rows.len() + 1;
-                match item {
-                    Value::Record(fields) => {
-                        let row = place_named(&mut header, &mut rows, &fields, n)?;
-                        rows.push(row);
-                    }
-                    Value::Table(more) => match (&header, &more.header) {
-                        (Some(_), Some(h2)) => {
-                            for r in &more.rows {
-                                let fields: Vec<(String, Value)> =
-                                    h2.iter().cloned().zip(r.iter().cloned()).collect();
-                                let n = rows.len() + 1;
-                                let row = place_named(&mut header, &mut rows, &fields, n)?;
-                                rows.push(row);
-                            }
-                        }
-                        (None, None) => {
-                            let w = t.width();
-                            for r in &more.rows {
-                                let n = rows.len() + 1;
-                                if r.len() > w {
-                                    return Err(format!(
-                                        "row {n} has {} values, the table {w} columns",
-                                        r.len()
-                                    ));
-                                }
-                                let mut row = r.clone();
-                                row.resize(w, Value::Null);
-                                rows.push(row);
-                            }
-                        }
-                        (Some(_), None) => {
-                            return Err("a frame takes rows by column name; the array appended has none (give it a header)".into());
-                        }
-                        (None, Some(_)) => {
-                            return Err("an array takes rows by position; the frame appended names its columns (take its rows with '| @' first)".into());
-                        }
-                    },
-                    other => {
-                        return Err(format!(
-                            "a table appends a record as a row, or a table row by row, not {}",
-                            kind_of(&other)
-                        ));
-                    }
-                }
-            }
-            Ok(Value::table(crate::Table::new(header, rows)))
-        }
-        Value::Record(mut fields) => {
-            for item in items {
-                match item {
-                    Value::Record(more) => {
-                        for (k, v) in more {
-                            match fields.iter_mut().find(|(n, _)| *n == k) {
-                                Some((_, slot)) if overwrite => *slot = v,
-                                Some(_) => {
-                                    return Err(format!(
-                                        "'{k}' is already a field of the record; '+|' never overwrites ('+|!' does)"
-                                    ));
-                                }
-                                None => fields.push((k, v)),
-                            }
-                        }
-                    }
-                    other => {
-                        return Err(format!(
-                            "a record appends fields; {} has no name to be one",
-                            kind_of(&other)
-                        ));
-                    }
-                }
-            }
-            Ok(Value::Record(fields))
-        }
-        other => Err(format!(
-            "{} takes no append: the left side of '+|' is a list, a record or a table, which gives the shape",
+        (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right),
+        (ConcatMode::Merge, Value::Record(fields)) => record_concat(fields, right, false),
+        (ConcatMode::Merge, Value::Str(s)) => Ok(Value::Str(format!("{s}{}", right.display_form()))),
+        (ConcatMode::Merge, other) => Err(format!(
+            "{} takes no concatenation: the left side of '++' is a list, a record, a table or a text, which gives the shape",
             kind_of(&other)
         )),
     }
+}
+
+/// A record's fields joined by a record's, in order; a duplicate
+/// name is refused under `++` and replaced under `++!`.
+fn record_concat(
+    mut fields: Vec<(String, Value)>,
+    right: Value,
+    overwrite: bool,
+) -> Result<Value, String> {
+    let Value::Record(more) = right else {
+        return Err(format!(
+            "a record appends fields; {} has no name to be one",
+            kind_of(&right)
+        ));
+    };
+    for (k, v) in more {
+        match fields.iter_mut().find(|(n, _)| *n == k) {
+            Some((_, slot)) if overwrite => *slot = v,
+            Some(_) => {
+                return Err(format!(
+                    "'{k}' is already a field of the record; '++' never overwrites ('++!' does)"
+                ));
+            }
+            None => fields.push((k, v)),
+        }
+    }
+    Ok(Value::Record(fields))
+}
+
+/// A table's rows joined by a record (one row under the literal's
+/// rules) or by a table (row by row, columns by name on a frame, by
+/// position on an array); the columns re-type after.
+fn table_concat(t: &crate::Table, right: Value) -> Result<Value, String> {
+    let mut header = t.header.clone();
+    let mut rows = t.rows.clone();
+    let n = rows.len() + 1;
+    match right {
+        Value::Record(fields) => {
+            let row = place_named(&mut header, &mut rows, &fields, n)?;
+            rows.push(row);
+        }
+        Value::Table(more) => match (&header, &more.header) {
+            (Some(_), Some(h2)) => {
+                for r in &more.rows {
+                    let fields: Vec<(String, Value)> =
+                        h2.iter().cloned().zip(r.iter().cloned()).collect();
+                    let n = rows.len() + 1;
+                    let row = place_named(&mut header, &mut rows, &fields, n)?;
+                    rows.push(row);
+                }
+            }
+            (None, None) => {
+                let w = t.width();
+                for r in &more.rows {
+                    let n = rows.len() + 1;
+                    if r.len() > w {
+                        return Err(format!(
+                            "row {n} has {} values, the table {w} columns",
+                            r.len()
+                        ));
+                    }
+                    let mut row = r.clone();
+                    row.resize(w, Value::Null);
+                    rows.push(row);
+                }
+            }
+            (Some(_), None) => {
+                return Err("a frame takes rows by column name; the array appended has none (give it a header)".into());
+            }
+            (None, Some(_)) => {
+                return Err("an array takes rows by position; the frame appended names its columns (take its rows with '| @' first)".into());
+            }
+        },
+        other => {
+            return Err(format!(
+                "a table appends a record as a row, or a table row by row, not {}",
+                kind_of(&other)
+            ));
+        }
+    }
+    Ok(Value::table(crate::Table::new(header, rows)))
 }
 
 /// One row of named fields laid under a table's header by name, a
@@ -4133,22 +4212,20 @@ fn place_named(
     Ok(row)
 }
 
-/// `+| %(…)`: a row appended under the table literal's rules — on a
+/// `++ %(…)`: a row joined under the table literal's rules — on a
 /// table, positional items by the header's order (or by position on
 /// the array face) and named ones by name, a short row null-padded,
 /// a long row or an unknown name refused; on a record or a list, a
 /// named row is the record it spells, a positional one has no
 /// field to be.
-pub(crate) fn append_row(
-    topic: Value,
+pub(crate) fn concat_row(
+    mode: ConcatMode,
+    left: Value,
     row: Vec<(Option<String>, Value)>,
-    overwrite: bool,
 ) -> Result<Value, String> {
-    match topic {
-        Value::Table(t) => {
-            if overwrite {
-                return Err("'+|!' overwrites a record's fields; a table takes '+|'".into());
-            }
+    match left {
+        Value::Null => Ok(Value::Null),
+        Value::Table(t) if mode == ConcatMode::Merge => {
             let w = t.width();
             let n = t.rows.len() + 1;
             let mut header = t.header.clone();
@@ -4209,7 +4286,7 @@ pub(crate) fn append_row(
                     }
                 }
             }
-            append_values(other, vec![Value::Record(fields)], overwrite)
+            concat(mode, other, Value::Record(fields))
         }
     }
 }
@@ -4226,13 +4303,13 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
     };
     let (width, header): (usize, Option<Vec<String>>) = match arg {
         Arg::Lit(Value::Int(n)) if *n >= 1 => (*n as usize, None),
-        Arg::Lit(Value::Int(n)) => return Err(format!("#({n}): a table has at least one column")),
+        Arg::Lit(Value::Int(n)) => return Err(format!("#(--width={n}): a table has at least one column")),
         Arg::Lit(Value::List(names)) => (
             names.len(),
             Some(names.iter().map(|n| n.to_string()).collect()),
         ),
         _ => return Err(
-            "#(…) in command position takes a column count or a header list: #(3), #(@(a; b; c))"
+            "#(…) after a pipe takes an option: #(--width=n) lays the list in rows of n, #(--header=list) names its columns"
                 .into(),
         ),
     };
@@ -4242,25 +4319,25 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
             return Err(format!(
                 "#({}) lays out a list into rows; {} is not a list",
                 match &header {
-                    Some(h) => format!("@({})", h.join("; ")),
-                    None => width.to_string(),
+                    Some(h) => format!("--header=@({})", h.join("; ")),
+                    None => format!("--width={width}"),
                 },
                 kind_of(&other)
             ));
         }
     };
     if width == 0 {
-        return Err("#(@()): a header names at least one column".into());
+        return Err("#(--header=@()): a header names at least one column".into());
     }
     if items.len() % width != 0 {
         return Err(format!(
-            "#({width}): {} items do not divide into rows of {width}",
+            "#(--width={width}): {} items do not divide into rows of {width}",
             items.len()
         ));
     }
     if let Some((i, v)) = items.iter().enumerate().find(|(_, v)| !flat_cell(v)) {
         return Err(format!(
-            "#({width}): item {} holds {}; a table is flat, its cell a scalar or null",
+            "#(--width={width}): item {} holds {}; a table is flat, its cell a scalar or null",
             i + 1,
             kind_of(v)
         ));
@@ -4314,6 +4391,42 @@ pub(crate) fn flatten_value(call: &FnCall, v: Value) -> Result<Value, String> {
 
 /// `| keys`: a record's field names as a list, in order; a table's
 /// header under another name.
+/// `| fields` (spec: Projection Value, draft 164): the field
+/// projections of the topic as a list of projection values — a
+/// record's fields (`:a`), a table's columns (`:name`, or `:1` by
+/// position on the array face), a list of records' union of fields
+/// in first-seen order (the stream after `@|`, as `header` reads);
+/// a node's core fields are answered where the node is met.
+pub(crate) fn fields_reading(v: Value) -> Result<Value, String> {
+    let projections = |names: Vec<String>| {
+        Value::list(names.into_iter().map(|k| Value::projection(1, k)).collect())
+    };
+    match v {
+        Value::Record(f) => Ok(projections(f.into_iter().map(|(k, _)| k).collect())),
+        Value::Table(t) => Ok(projections(match &t.header {
+            Some(h) => h.clone(),
+            None => (1..=t.width()).map(|i| i.to_string()).collect(),
+        })),
+        Value::List(l) if !l.is_empty() && l.iter().all(|v| matches!(v, Value::Record(_))) => {
+            let mut names: Vec<String> = Vec::new();
+            for r in l.iter() {
+                if let Value::Record(f) = r {
+                    for (k, _) in f {
+                        if !names.contains(k) {
+                            names.push(k.clone());
+                        }
+                    }
+                }
+            }
+            Ok(projections(names))
+        }
+        other => Err(format!(
+            "fields reads a record's fields, a table's columns or a node's core fields, not {}",
+            kind_of(&other)
+        )),
+    }
+}
+
 pub(crate) fn keys_reading(v: Value) -> Result<Value, String> {
     match v {
         Value::Record(f) => Ok(Value::list(f.into_iter().map(|(k, _)| Value::Str(k)).collect())),
@@ -4802,6 +4915,37 @@ fn word_args(call: &FnCall) -> Vec<&str> {
         }
     }
     out
+}
+
+/// The reducers over structures (spec: Aggregating Pipe, draft
+/// 164): the numeric and statistical reducers over a record reduce
+/// its values, over a table each column into a record keyed by the
+/// header (a column with no numeric value is null); `count` counts a
+/// record's fields and a table's rows. `None` for every other
+/// pairing, which reads the structure as one value.
+pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Option<Value> {
+    const NUMERIC: [&str; 12] = [
+        "sum", "product", "min", "max", "mean", "avg", "median", "percentile", "std", "stddev",
+        "var", "variance",
+    ];
+    let name = call.name.as_str();
+    let one = |items: Vec<Value>| apply(call, items, scale).into_iter().next().unwrap_or(Value::Null);
+    match topic {
+        Value::Record(fields) if name == "count" => Some(Value::Int(fields.len() as i64)),
+        Value::Table(t) if name == "count" => Some(Value::Int(t.rows.len() as i64)),
+        Value::Record(fields) if NUMERIC.contains(&name) => {
+            Some(one(fields.iter().map(|(_, v)| v.clone()).collect()))
+        }
+        Value::Table(t) if NUMERIC.contains(&name) => match t.columns_value() {
+            Value::Record(cols) => Some(Value::Record(
+                cols.into_iter()
+                    .map(|(k, col)| (k, one(col.into_items().unwrap_or_default())))
+                    .collect(),
+            )),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// A declared option's literal text, when written.
@@ -5574,7 +5718,10 @@ mod tests {
     fn sample(name: &str) -> FnCall {
         FnCall {
             name: name.into(),
-            args: vec![Arg::Lit(Value::Str("sample".into()))],
+            args: vec![Arg::Opt {
+                name: "--sample".into(),
+                value: None,
+            }],
         }
     }
 
@@ -6077,15 +6224,72 @@ mod tests {
     }
 
     #[test]
-    fn abs_over_quantity_is_null() {
-        // A quantity has no numeric reading and `abs` is not a
-        // rounder, so it is null rather than a bare base float.
+    fn abs_over_quantity_keeps_its_unit() {
+        // quantity-aware like the rounders (the inventory's rule)
         let q = Value::Quantity {
             value: -5000.0,
             base: "m".into(),
             written: Some((-5.0, "km".into())),
         };
-        assert_eq!(sc("abs", q), vec![Value::Null]);
+        assert_eq!(
+            sc("abs", q),
+            vec![Value::Quantity {
+                value: 5000.0,
+                base: "m".into(),
+                written: Some((5.0, "km".into())),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_null_topic_has_no_reading() {
+        // a scalar reading a null topic answers null, an expander
+        // nothing; the commands that read null on purpose keep theirs
+        for name in [
+            "upper", "cc", "gc", "bc", "wc", "lc", "sc", "sha256", "repeat", "nfc",
+        ] {
+            assert_eq!(sc(name, Value::Null), vec![Value::Null], "{name}");
+        }
+        let n = |i: i64| crate::syntax::ast::Arg::Lit(Value::Int(i));
+        let a = crate::syntax::ast::Arg::Lit(Value::Str("a".into()));
+        assert_eq!(
+            scalar_with("pad", Value::Null, vec![n(3)]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            scalar_with("lpad", Value::Null, vec![n(3)]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            scalar_with("indent", Value::Null, vec![n(2)]),
+            vec![Value::Null]
+        );
+        assert_eq!(
+            scalar_with("levenshtein", Value::Null, vec![a]),
+            vec![Value::Null]
+        );
+        for name in ["split", "tokens", "lines", "words", "sentences"] {
+            assert_eq!(sc(name, Value::Null), Vec::<Value>::new(), "{name}");
+        }
+        assert_eq!(sc("type", Value::Null), vec![Value::Str("null".into())]);
+        assert_eq!(sc("json", Value::Null), vec![Value::Str("null".into())]);
+        // first and last of an empty input reduce to null
+        let first = FnCall {
+            name: "first".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            apply(&first, Vec::new(), &crate::value::quantity::scale_expr),
+            vec![Value::Null]
+        );
+        let last = FnCall {
+            name: "last".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            apply(&last, Vec::new(), &crate::value::quantity::scale_expr),
+            vec![Value::Null]
+        );
     }
 
     #[test]

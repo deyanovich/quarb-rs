@@ -84,6 +84,12 @@ pub enum Value {
     /// Two library values are equal only when they are the same
     /// object.
     Foreign(ForeignValue),
+    /// A projection as a value (spec: Projection Value, draft 164):
+    /// a ladder — 1 the core field `:`, 2 the property `::`, 3 the
+    /// adapter metadata `:::` — and its key. It prints as the
+    /// projection is written (`::title`, the key quoted where it is
+    /// no identifier) and coerces to text as the bare key.
+    Projection { ladder: u8, key: String },
     /// A node reference (spec: The Capsa, "Node references"): an
     /// engine-minted value naming one node of the arbor. It prints
     /// and exports as the node's locator, two references to one node
@@ -675,6 +681,33 @@ impl std::fmt::Debug for ForeignValue {
 
 impl Value {
     /// A list value from its elements.
+    /// A projection value: the ladder (1 `:`, 2 `::`, 3 `:::`) and
+    /// its key.
+    pub fn projection(ladder: u8, key: impl Into<String>) -> Value {
+        Value::Projection {
+            ladder,
+            key: key.into(),
+        }
+    }
+
+    /// A projection value's spelling, as the projection is written:
+    /// the colons and the key, quoted where it is no identifier.
+    pub fn projection_spelling(ladder: u8, key: &str) -> String {
+        // an identifier, or a position (`:1`, `::0`), stands bare
+        let bare = {
+            let mut cs = key.chars();
+            (matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+                && cs.all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
+                || (!key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let key = if bare {
+            key.to_string()
+        } else {
+            format!("'{}'", key.replace('\\', "\\\\").replace('\'', "\\'"))
+        };
+        format!("{}{key}", ":".repeat(usize::from(ladder.clamp(1, 3))))
+    }
+
     pub fn list(items: Vec<Value>) -> Value {
         Value::List(std::sync::Arc::new(items))
     }
@@ -734,6 +767,7 @@ impl Value {
             }
             // A reference names a node: true.
             Value::Node(_) => true,
+            Value::Projection { .. } => true,
         }
     }
 
@@ -905,6 +939,7 @@ impl Value {
             Value::Table(t) => t.to_quarb(),
             // A library value has no Quarb form that reads back; its
             // text is the object's own display.
+            Value::Projection { ladder, key } => Value::projection_spelling(*ladder, key),
             other => other.to_string(),
         }
     }
@@ -928,6 +963,7 @@ impl Value {
     pub fn display_form(&self) -> String {
         match self {
             Value::List(_) | Value::Record(_) => self.to_quarb(),
+            Value::Projection { ladder, key } => Value::projection_spelling(*ladder, key),
             Value::Table(t) => t.to_quarb_lines(),
             other => other.to_string(),
         }
@@ -970,6 +1006,9 @@ impl Value {
             },
             // The locator text: no JSON form keeps nodeness.
             Value::Node(n) => json_string(&n.locator),
+            Value::Projection { ladder, key } => {
+                json_string(&Value::projection_spelling(*ladder, key))
+            }
         }
     }
 
@@ -1003,6 +1042,8 @@ impl Value {
             Value::Bool(b) => Some(format!("b:{b}")),
             Value::Null => Some("0:".to_string()),
             Value::Node(n) => Some(format!("node:{}", n.id)),
+            // a projection coerces to text as its bare key
+            Value::Projection { key, .. } => Some(format!("s:{key}")),
             _ => None,
         }
     }
@@ -1217,6 +1258,8 @@ fn sort_key(v: &Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey
         // A node reference keys by its locator, after lists and
         // records: references sort in locator order.
         Value::Node(n) => SortKey::RecordText(format!("\u{0}node:{}", n.locator)),
+        // a projection orders and equals as its bare key's text
+        Value::Projection { key, .. } => sort_key(&Value::Str(key.clone()), scale),
         // A table keys by its literal, after lists and records.
         Value::Table(t) => SortKey::RecordText(format!("\u{0}table:{}", t.to_quarb())),
         // A string has at most one reading — numeric text carries
@@ -1254,6 +1297,7 @@ impl fmt::Display for Value {
             Value::Int(n) => write!(f, "{n}"),
             Value::Float(x) => write!(f, "{}", format_float(*x)),
             Value::Str(s) => write!(f, "{s}"),
+            Value::Projection { key, .. } => write!(f, "{key}"),
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "{}", parts.join(", "))

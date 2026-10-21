@@ -588,6 +588,28 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
     }
 
+    // `qua man [--ru] [NAME | '|' | @|]` and `qc man`: the command
+    // inventory, before the query grammar sees the words (`man` is
+    // reserved as a first argument); `--commands` lists the
+    // registry as TSV for the documentation gate.
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.get(1).map(String::as_str) {
+        Some("man") => {
+            let args: Vec<&str> = argv[2..].iter().map(String::as_str).collect();
+            return match quarb::man::man(&args) {
+                Ok(text) => {
+                    println!("{text}");
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            };
+        }
+        Some("--commands") => {
+            print!("{}", quarb::man::registry_tsv());
+            return Ok(());
+        }
+        _ => {}
+    }
     let mut cli = match profile {
         Profile::Qua => Cli::parse(),
         // The calculator's help names it, and says what it is.
@@ -604,7 +626,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
                 .mut_arg("query", |a| {
                     a.value_name("EXPRESSION")
                         .allow_negative_numbers(true)
-                        .help("The expression, e.g. '2 + 3 * 4' or '@(1; 2) +| 3'; the head `=` is accepted and not required")
+                        .help("The expression, e.g. '2 + 3 * 4' or '@(1; 2) ++ 3'; the head `=` is accepted and not required")
                 })
                 .mut_arg("paths", |a| {
                     a.value_name("WORD")
@@ -945,7 +967,7 @@ fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
     // stands; any other body is a command of its own.
     // A body that opens with a pipe stands for `$_ | …`: the topic
     // (the input) is what it pipes from.
-    let opens_with_pipe = ["|", "@|", "+|", "__", "@__", "+__"]
+    let opens_with_pipe = ["|", "@|", "__", "@__"]
         .iter()
         .any(|p| body.starts_with(p));
     cli.query = match (cli.lines, opens_with_pipe) {

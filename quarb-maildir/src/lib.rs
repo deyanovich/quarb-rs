@@ -446,6 +446,12 @@ impl AstAdapter for MaildirAdapter {
     /// `:::epoch` (the Date header as a unix timestamp),
     /// `:::date` (the same, minted as an instant),
     /// `:::n-headers`; `:::n-messages` on the root.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["n-messages", "encoding", "replaced", "new", "epoch", "date", "n-headers"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             return match key {

@@ -12,6 +12,12 @@ impl<A: AstAdapter> Host for A {
     fn root_ext(&self) -> GraphExt {
         GraphExt::at(self.root())
     }
+    fn unplaced_ext(&self) -> GraphExt {
+        GraphExt::unplaced(self.root())
+    }
+    fn placed(&self, ext: &GraphExt) -> bool {
+        !ext.unplaced
+    }
     fn scale_of(&self, expr: &str) -> Option<(f64, String)> {
         self.unit_scale(expr)
     }
@@ -21,19 +27,32 @@ impl<A: AstAdapter> Host for A {
     fn properties_of(&self, ext: &GraphExt) -> Vec<(String, Value)> {
         self.properties(ext.node)
     }
+    fn property_names_of(&self, ext: &GraphExt) -> Vec<String> {
+        self.property_names(ext.node)
+    }
     fn prefetch(&self, threads: &[Thread<GraphExt>], names: &[&str]) {
         let nodes: Vec<NodeId> = threads.iter().map(|c| c.ext.node).collect();
         self.prefetch_properties(&nodes, names);
     }
     fn prov_at(&self, ext: &GraphExt) -> Prov {
+        if ext.unplaced {
+            return Prov::at(Position::default(), command_now());
+        }
         Prov::at(ext.node.into(), command_now())
     }
     fn origins_at(&self, ext: &GraphExt) -> Origins {
+        if ext.unplaced {
+            return Origins::at(Position::default(), command_now());
+        }
         Origins::at(ext.node.into(), command_now())
     }
     fn origin_at(&self, ext: &GraphExt) -> Origin {
         Origin {
-            position: (ext.node).into(),
+            position: if ext.unplaced {
+                Position::default()
+            } else {
+                (ext.node).into()
+            },
             command: command_now(),
         }
     }
@@ -41,15 +60,21 @@ impl<A: AstAdapter> Host for A {
         quantifier_bound(self)
     }
     fn node_ref(&self, ext: &GraphExt) -> Option<Value> {
-        Some(node_ref(self, ext.node))
+        (!ext.unplaced).then(|| node_ref(self, ext.node))
     }
     fn witnessed(&self, ext: &GraphExt) -> bool {
         !ext.bindings.is_empty()
     }
     fn node_scalar(&self, ext: &GraphExt) -> Value {
+        if ext.unplaced {
+            return Value::Null;
+        }
         node_scalar(self, ext.node)
     }
     fn project(&self, ext: &GraphExt, proj: &Projection) -> Value {
+        if ext.unplaced {
+            return Value::Null;
+        }
         project(self, ext.node, proj)
     }
     fn origins_meta(&self, o: &Origins, key: &str) -> Option<Value> {
@@ -86,6 +111,7 @@ impl<A: AstAdapter> Host for A {
                     Anchor::Mark(_)
                         | Anchor::MarkIndex(_)
                         | Anchor::MarkTop
+                        | Anchor::MarkBack(_)
                         | Anchor::MarksAll
                         | Anchor::MarksNamed(_)
                 ) =>
@@ -254,6 +280,7 @@ impl<A: AstAdapter> Host for A {
             node: at.node,
             bindings: scope.ext.bindings.clone(),
             arrived: scope.ext.arrived.clone(),
+            unplaced: at.unplaced,
         }
     }
     fn exists_binding(
@@ -350,6 +377,17 @@ impl<A: AstAdapter> Host for A {
         let kind = crate::graph::koine::Render::from_name(kind)
             .expect("command names are valid render names");
         crate::graph::koine::render_values(values, kind)
+    }
+    fn render_tree(
+        &self,
+        starts: &[GraphExt],
+        spec: &crate::graph::tree::TreeSpec,
+        column: &dyn Fn(&GraphExt, &Operand) -> Value,
+    ) -> Result<String, String> {
+        let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
+        Ok(crate::graph::tree::render(self, &nodes, spec, &|n, op| {
+            column(&GraphExt::at(n), op)
+        }))
     }
 }
 
@@ -639,11 +677,18 @@ impl Host for Calc {
     type Trace = ();
 
     fn root_ext(&self) {}
+    fn unplaced_ext(&self) {}
+    fn placed(&self, _: &()) -> bool {
+        false
+    }
     fn scale_of(&self, expr: &str) -> Option<(f64, String)> {
         crate::value::quantity::scale_expr(expr)
     }
     fn property_of(&self, _: &(), _: &str) -> Option<Value> {
         None
+    }
+    fn property_names_of(&self, _: &()) -> Vec<String> {
+        Vec::new()
     }
     fn properties_of(&self, _: &()) -> Vec<(String, Value)> {
         Vec::new()
@@ -817,6 +862,14 @@ impl Host for Calc {
         let kind = crate::graph::koine::Render::from_name(kind)
             .expect("command names are valid render names");
         crate::graph::koine::render_values(values, kind)
+    }
+    fn render_tree(
+        &self,
+        _: &[()],
+        _: &crate::graph::tree::TreeSpec,
+        _: &dyn Fn(&(), &Operand) -> Value,
+    ) -> Result<String, String> {
+        Err(no_arbor("the command `tree`"))
     }
 }
 

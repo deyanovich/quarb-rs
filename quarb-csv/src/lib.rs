@@ -294,6 +294,12 @@ impl AstAdapter for CsvAdapter {
     /// `:::columns` (root), `:::n-rows` (root), `:::delimiter` and
     /// `:::decimal` (root, as decided), `:::n-fields` (row), and any
     /// column by name.
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["delimiter", "decimal", "columns", "n-rows", "n-fields"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if node.0 == 0 {
             match key {

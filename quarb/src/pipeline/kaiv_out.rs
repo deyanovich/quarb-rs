@@ -119,6 +119,7 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         | Value::Foreign(_)
         | Value::Table(_)
         | Value::Node(_) => ("str", v.to_string()),
+        Value::Projection { ladder, key } => ("str", Value::projection_spelling(*ladder, key)),
     }
 }
 

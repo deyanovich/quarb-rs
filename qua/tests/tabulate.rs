@@ -50,7 +50,7 @@ fn table_aligns_under_a_rule() {
         "title       year\n----------  ----\nEmma        1815\nPersuasion  1817"
     );
     assert_eq!(
-        one("/books/* | %(::title; ::year) @| [..2] @| table(year)"),
+        one("/books/* | %(::title; ::year) @| [..2] @| pretty(year)"),
         "year\n----\n1815\n1817"
     );
 }

@@ -1173,6 +1173,24 @@ pub trait AstAdapter {
         None
     }
 
+    /// The `:::` keys this node answers (spec: the `:meta` core
+    /// field, draft 164): the adapter's catalogue filtered by what
+    /// the node answers. A composite adapter delegates to the
+    /// adapter that owns the node.
+    fn metadata_keys(&self, node: NodeId) -> Vec<String> {
+        self.metadata_catalogue()
+            .iter()
+            .filter(|k| self.metadata(node, k).is_some())
+            .map(|k| k.to_string())
+            .collect()
+    }
+
+    /// Every `:::` key this adapter can answer, for `metadata_keys`;
+    /// an adapter with none declared lists none.
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Metadata keys this adapter also answers at `::` (ruling
     /// #29), for the given node — per node, because a composite
     /// adapter (a multi-mount, a graft) answers for whichever
@@ -1182,7 +1200,7 @@ pub trait AstAdapter {
     /// where a JSON object can sprout anything. Data always wins:
     /// the engine consults `property` first and falls through only
     /// when it answers `None` for that node, so an alias can never
-    /// shadow a document. Core metadata (`:`) is never aliased —
+    /// shadow a document. A core field (`:`) is never aliased —
     /// `name`, `id` and `index` exist on every node, and aliasing
     /// them would change what `::name` means wherever a document
     /// happens to lack that field.
@@ -1439,6 +1457,16 @@ pub trait AstAdapter {
         crate::value::quantity::scale_expr(expr)
     }
 
+    /// The unit names the mounted source adds to the built-in
+    /// table, every spelling (a model's declarations, a kaiv
+    /// document's own units); empty by default. The parser judges
+    /// the operand of `convert(U)` and `unit(U)` against the table
+    /// and this list (spec: The conversion): an unknown name there
+    /// is refused, where a value's unknown unit stays opaque.
+    fn unit_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The notation the substrate declares for a leaf's text (spec:
     /// Grafting): a column typed json or jsonb answers `json`, an
     /// HTTP response its content type's notation. The composition
@@ -1487,6 +1515,7 @@ macro_rules! forward_ast_adapter {
             property_names resolves_references index_lookup
             index_referrers non_tree_nodes child_host children_named
             answers_to has_trait default_value metadata
+            metadata_keys metadata_catalogue
             aliased_metadata links backlinks resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
@@ -1494,7 +1523,7 @@ macro_rules! forward_ast_adapter {
             prefetch_properties
             prefetch_links quantifier_bound
             provenance has_node
-            provenance_list unit_scale declared_notation
+            provenance_list unit_scale unit_names declared_notation
         );
     };
     (@each [$inner:tt] $ex:tt $($m:ident)*) => {
@@ -1527,6 +1556,8 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [has_trait $($r:ident)*] has_trait) => {};
     (@unless [$i:tt] [default_value $($r:ident)*] default_value) => {};
     (@unless [$i:tt] [metadata $($r:ident)*] metadata) => {};
+    (@unless [$i:tt] [metadata_keys $($r:ident)*] metadata_keys) => {};
+    (@unless [$i:tt] [metadata_catalogue $($r:ident)*] metadata_catalogue) => {};
     (@unless [$i:tt] [aliased_metadata $($r:ident)*] aliased_metadata) => {};
     (@unless [$i:tt] [links $($r:ident)*] links) => {};
     (@unless [$i:tt] [backlinks $($r:ident)*] backlinks) => {};
@@ -1551,6 +1582,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [has_node $($r:ident)*] has_node) => {};
     (@unless [$i:tt] [provenance_list $($r:ident)*] provenance_list) => {};
     (@unless [$i:tt] [unit_scale $($r:ident)*] unit_scale) => {};
+    (@unless [$i:tt] [unit_names $($r:ident)*] unit_names) => {};
     (@unless [$i:tt] [declared_notation $($r:ident)*] declared_notation) => {};
     // Another method heads the list: look further down.
     (@unless [$i:tt] [$x:ident $($r:ident)*] $m:ident) => {
@@ -1699,6 +1731,16 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] metadata) => {
         fn metadata(&self, node: $crate::NodeId, key: &str) -> Option<$crate::Value> {
             $crate::forward_ast_adapter!(@target self $i).metadata(node, key)
+        }
+    };
+    (@fwd [$i:tt] metadata_keys) => {
+        fn metadata_keys(&self, node: $crate::NodeId) -> Vec<String> {
+            $crate::forward_ast_adapter!(@target self $i).metadata_keys(node)
+        }
+    };
+    (@fwd [$i:tt] metadata_catalogue) => {
+        fn metadata_catalogue(&self) -> &'static [&'static str] {
+            $crate::forward_ast_adapter!(@target self $i).metadata_catalogue()
         }
     };
     (@fwd [$i:tt] aliased_metadata) => {
@@ -1870,6 +1912,11 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).unit_scale(expr)
         }
     };
+    (@fwd [$i:tt] unit_names) => {
+        fn unit_names(&self) -> Vec<String> {
+            $crate::forward_ast_adapter!(@target self $i).unit_names()
+        }
+    };
 }
 
 impl AstAdapter for Box<dyn AstAdapter> {
@@ -2030,6 +2077,12 @@ mod forwarding {
         fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
             Some(Value::Str(format!("meta:{}:{key}", node.0)))
         }
+        fn metadata_keys(&self, node: NodeId) -> Vec<String> {
+            vec![format!("k{}", node.0)]
+        }
+        fn metadata_catalogue(&self) -> &'static [&'static str] {
+            &["k"]
+        }
         fn aliased_metadata(&self, node: NodeId) -> &'static [&'static str] {
             if node.0 == 5 { &["size"] } else { &["other"] }
         }
@@ -2149,6 +2202,9 @@ mod forwarding {
         fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
             Some((expr.len() as f64, format!("scale:{expr}")))
         }
+        fn unit_names(&self) -> Vec<String> {
+            vec!["probe".to_string()]
+        }
     }
 
     thread_local! {
@@ -2191,6 +2247,8 @@ mod forwarding {
         same!(has_trait, n(4), "talias");
         same!(default_value, n(2));
         same!(metadata, n(2), "key");
+        same!(metadata_keys, n(2));
+        same!(metadata_catalogue);
         same!(aliased_metadata, n(5));
         same!(links, n(2));
         same!(backlinks, n(2));
@@ -2239,6 +2297,7 @@ mod forwarding {
         same!(has_node, n(9));
         same!(provenance_list, n(2));
         same!(unit_scale, "km");
+        same!(unit_names);
     }
 
     #[test]

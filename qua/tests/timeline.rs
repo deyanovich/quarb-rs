@@ -165,8 +165,11 @@ fn the_point_is_carried_from_capsa_to_capsa() {
         ),
         "value,when,from\n+P1D,,\n1897-05-03,1897-05-03,\n+P1W,1897-05-10,2"
     );
+    // a surplus `$_` among the operands gets the adjacency pointer
     let (_, err) = qua(&dir, &["= 1 @| timeline($_; 1; 2; 3)"]);
-    assert!(err.contains("timeline takes the time expression"), "{err}");
+    assert!(err.contains("timeline reads its input from the pipe"), "{err}");
+    let (_, err) = qua(&dir, &["= 1 @| timeline(1; 2; 3; 4)"]);
+    assert!(err.contains("'timeline' takes 3 operands at most, 4 given"), "{err}");
 }
 
 #[test]

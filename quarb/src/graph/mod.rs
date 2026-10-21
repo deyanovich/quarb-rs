@@ -22,6 +22,7 @@ pub mod target;
 #[cfg(test)]
 mod tests;
 pub mod trace;
+pub(crate) mod tree;
 
 // The graph's namespace: the pipeline's, and every module of its own,
 // so a module of the layer writes `use super::*;` and sees both.

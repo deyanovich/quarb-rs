@@ -1118,6 +1118,17 @@ impl AstAdapter for GitlabAdapter {
         self.file_content(&proj, &path).map(Value::Str)
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["path", "url", "member", "access"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {
             "path" => Some(Value::Str(self.locator(node))),

@@ -568,6 +568,13 @@ impl AstAdapter for MountAdapter {
         self.adapter(m).metadata(inner, key)
     }
 
+    fn metadata_keys(&self, node: NodeId) -> Vec<String> {
+        match self.decode(node) {
+            Some((m, inner)) => self.adapter(m).metadata_keys(inner),
+            None => Vec::new(),
+        }
+    }
+
     /// Per node, because each mount brings its own list: a git
     /// mount aliases `short`, the JSON mount beside it aliases
     /// nothing.

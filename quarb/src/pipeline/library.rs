@@ -314,20 +314,66 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
             if room == 1 { "" } else { "s" }
         ));
     }
-    let required = syn
+    // Where the written operands land among the synopsis's: in
+    // order, stepping over the input's slot when the pipe fills it.
+    let slot = syn.input.operand_index().filter(|_| slot_takes);
+    let filled: Vec<usize> = (0..written_operands)
+        .map(|j| match slot {
+            Some(s) if j >= s => j + 1,
+            _ => j,
+        })
+        .collect();
+    let option_names: Vec<String> = call
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Opt { name: opt, .. } => syn
+                .options
+                .iter()
+                .find(|o| o.matches(opt))
+                .map(|o| o.long.replace('-', "_")),
+            _ => None,
+        })
+        .collect();
+    // A parameter reachable both ways (spec: "Reflected commands")
+    // is filled once: as an operand or by name, not both.
+    for &i in &filled {
+        if let Some(op) = syn.operands.get(i)
+            && option_names.iter().any(|n| n == op.name)
+        {
+            return Err(format!(
+                "'{prefix}:{name}' takes '{}' once: it is operand {} and --{}= here; the synopsis: {shown}",
+                op.name,
+                i + 1,
+                op.name.replace('_', "-")
+            ));
+        }
+    }
+    // A parameter without a default is filled one way or the other.
+    let missing: Vec<&str> = syn
         .operands
         .iter()
         .enumerate()
         .filter(|(i, op)| {
             op.required
                 && op.name != "..."
-                && !(slot_takes && syn.input.operand_index() == Some(*i))
+                && Some(*i) != slot
+                && !filled.contains(i)
+                && !option_names.iter().any(|n| n == op.name)
         })
-        .count();
-    if written_operands < required {
+        .map(|(_, op)| op.name)
+        .collect();
+    if !missing.is_empty() {
+        let required = syn
+            .operands
+            .iter()
+            .enumerate()
+            .filter(|(i, op)| op.required && op.name != "..." && Some(*i) != slot)
+            .count();
         return Err(format!(
-            "'{prefix}:{name}' needs {required} operand{}, {written_operands} given; the synopsis: {shown}",
-            if required == 1 { "" } else { "s" }
+            "'{prefix}:{name}' needs {required} operand{}, {written_operands} given ({} unfilled); the synopsis: {shown}",
+            if required == 1 { "" } else { "s" },
+            missing.join(", ")
         ));
     }
     for arg in &call.args {

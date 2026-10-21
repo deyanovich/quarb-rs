@@ -885,6 +885,17 @@ impl AstAdapter for GitAdapter {
         ]
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["short", "n-parents", "n-changed", "tags", "n-tags", "type", "mode", "hash", "size"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         if let Some(hash) = self.commit_of(node) {
             return match key {

@@ -961,6 +961,12 @@ impl AstAdapter for JsonAdapter {
 
     /// `:::type` (the JSON type) and `:::length` (element count for a
     /// container, character count for a string).
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+    /// a node answers).
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["type", "length"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {

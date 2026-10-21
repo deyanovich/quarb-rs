@@ -540,6 +540,17 @@ impl AstAdapter for KafkaAdapter {
         }
     }
 
+    /// The `:::` keys this adapter answers (`:meta` lists the ones
+
+    /// a node answers).
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+
+        &["partitions", "key", "partition", "offset", "topic", "ts"]
+
+    }
+
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Topic { partitions, .. } => match key {

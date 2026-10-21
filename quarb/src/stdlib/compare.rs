@@ -90,6 +90,14 @@ pub(crate) fn set_probe(ys: &std::sync::Arc<Vec<Value>>, needle: &str) -> Option
 }
 
 pub(crate) fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
+    // A projection value compares as its bare key's text (spec:
+    // Projection Value, draft 164).
+    if let Value::Projection { key, .. } = a {
+        return compare(&Value::Str(key.clone()), op, b, scale);
+    }
+    if let Value::Projection { key, .. } = b {
+        return compare(a, op, &Value::Str(key.clone()), scale);
+    }
     match op {
         CmpOp::Within => return within(a, b, scale),
         CmpOp::Encloses => return within(b, a, scale),

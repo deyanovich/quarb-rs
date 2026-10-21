@@ -18,7 +18,8 @@ queries against the session's mounts; a small directive family
   served by ``qua --resident`` (for arbors too large to rebuild
   per notebook; needs the qua binary on PATH).
 - ``%use NAME`` — switch the default document.
-- ``%docs`` — list what's mounted.
+- ``%docs`` — list what's mounted; ``%docs NAME`` — a command's
+  page from the inventory (``%docs @|`` one pipe's commands).
 - ``%translate LANG QUERY`` — show a jq / xpath / sql query as
   Quarb text.
 
@@ -102,6 +103,10 @@ def _make_kernel_class():
                 self.qsession.default = rest
                 return f"default: {rest}"
             if word == "docs":
+                if rest:
+                    # the command inventory, as `qua man` prints it
+                    from . import man
+                    return man(*rest.split())
                 pool = sorted([*self.qsession.docs, *self.qsession.resident])
                 return ", ".join(pool) or "(nothing mounted)"
             if word == "translate":

@@ -91,21 +91,15 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         | Command::RecordWith(call)
         | Command::RecordPush { call, .. } => v.call(call),
         Command::Subcontext { body, .. } => v.query(body),
-        Command::Expr(e) | Command::ExprPush { expr: e, .. } | Command::AggPush { body: e, .. } => {
-            v.operand(e)
-        }
+        Command::Expr(e)
+        | Command::AggExpr(e)
+        | Command::ExprPush { expr: e, .. }
+        | Command::AggPush { body: e, .. } => v.operand(e),
         Command::AggRecord { call, .. } => v.call(call),
         Command::Select(p) => v.predicate(p),
         Command::Filter(e) => v.pred(e),
         Command::Nav(b) => v.branch(b),
-        Command::Map(inner)
-        | Command::Append { body: inner, .. }
-        | Command::Repeat { command: inner, .. } => v.command(inner),
-        Command::AppendRow { items, .. } => {
-            for (_, i) in items {
-                v.operand(i);
-            }
-        }
+        Command::Map(inner) | Command::Repeat { command: inner, .. } => v.command(inner),
         Command::Push(_)
         | Command::Recall(_)
         | Command::AggRecall(_)
@@ -175,11 +169,17 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                 v.elem(e);
             }
         }
-        Operand::Arith { left, right, .. } => {
+        Operand::Arith { left, right, .. } | Operand::Concat { left, right, .. } => {
             v.operand(left);
             v.operand(right);
         }
+        Operand::Row(items) => {
+            for (_, i) in items {
+                v.operand(i);
+            }
+        }
         Operand::Neg(inner)
+        | Operand::Gathered(inner)
         | Operand::Invoking(inner)
         | Operand::Position(inner)
         | Operand::Driver(inner) => v.operand(inner),
@@ -266,6 +266,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         | Operand::Lit(_)
         | Operand::Recall(_)
         | Operand::Topic
+        | Operand::Cursor
         | Operand::Seed
         | Operand::NamedCaptures
         | Operand::Ordinal
@@ -275,6 +276,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         | Operand::Topics
         | Operand::Positions { .. }
         | Operand::Matrix { .. }
+        | Operand::CtxTable
         | Operand::Now
         | Operand::Edges { .. } => {}
     }

@@ -24,6 +24,14 @@ pub(crate) trait Expander {
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         crate::value::quantity::scale_expr(expr)
     }
+    /// The unit names the dataset adds to the built-in table (a
+    /// model's declarations, a document's own units), for the
+    /// operand of `convert(U)` and `unit(U)`; None when no dataset
+    /// is at hand to ask, and the operand is judged at the splice
+    /// site instead (a definitions file parses without one).
+    fn unit_names(&self) -> Option<Vec<String>> {
+        None
+    }
     fn usage_of_query(&self, q: &Query) -> RegUsage;
     fn usage_of_operand(&self, op: &Operand) -> RegUsage;
     fn usage_of_commands(&self, commands: &[Command]) -> RegUsage;

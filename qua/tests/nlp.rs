@@ -94,10 +94,12 @@ fn skipgrams_and_jaccard() {
         values("/words/* | :: @| jaccard(@(\"the\"; \"cat\"; \"dog\"))"),
         ["0.4"]
     );
-    assert_eq!(
-        values("/words/* | :: @| jaccard(\"the\"; \"cat\"; \"dog\")"),
-        ["0.4"]
-    );
+    // the other sample is one list operand; a flat spelling is a
+    // surplus of operands (the adjacency rule)
+    let e = quarb::run("/words/* | :: @| jaccard(\"the\"; \"cat\"; \"dog\")", &doc())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("'jaccard' takes 1 operand at most, 3 given"), "{e}");
 }
 
 #[test]
