@@ -65,6 +65,15 @@ fn base64(input: &[u8]) -> String {
 }
 
 /// A JSON scalar as a Quarb value.
+/// The kind word of a JSON value held by a field node (spec: Traits).
+fn json_kind(v: &Json) -> &'static str {
+    match v {
+        Json::Object(_) => "map",
+        Json::Array(_) => "array",
+        v => quarb::adapter::value_kind(&cell_value(v)),
+    }
+}
+
 fn cell_value(v: &Json) -> Value {
     match v {
         Json::Null => Value::Null,
@@ -486,10 +495,16 @@ impl AstAdapter for ArangoAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["database".to_string()],
             Kind::Collection { .. } => vec!["collection".to_string()],
-            Kind::Doc { collection, .. } => vec![collection.clone()],
-            Kind::Field { .. } => Vec::new(),
+            Kind::Doc { collection, .. } => {
+                let mut t = vec!["document".to_string()];
+                if collection != "document" {
+                    t.push(collection.clone());
+                }
+                t
+            }
+            Kind::Field { value } => vec![json_kind(value).to_string()],
         }
     }
 

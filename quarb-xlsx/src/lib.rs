@@ -146,6 +146,29 @@ impl AstAdapter for XlsxAdapter {
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.model.parent(node)
     }
+    /// The kind first (spec: Traits), by depth in the workbook:
+    /// `<workbook>` at the root, `<sheet>`, `<row>`, `<cell>`; the
+    /// model's own traits follow (the kind not repeated).
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        let root = self.model.root();
+        let kind = if node == root {
+            "workbook"
+        } else {
+            match self.model.parent(node) {
+                Some(p) if p == root => "sheet",
+                Some(p) => match self.model.parent(p) {
+                    Some(pp) if pp == root => "row",
+                    _ => "cell",
+                },
+                None => "workbook",
+            }
+        };
+        // the workbook's words replace the relational model's kind
+        // (database/table/row/cell); its other traits follow
+        let mut out = vec![kind.to_string()];
+        out.extend(self.model.traits(node).into_iter().skip(1).filter(|t| t != kind));
+        out
+    }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.model.property(node, name)
     }

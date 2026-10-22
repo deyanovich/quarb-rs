@@ -642,9 +642,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
     fn traits(&self, id: NodeId) -> Vec<String> {
         match self.decode(id) {
             Node::Site(_) => vec!["site".to_string()],
+            // the kind first (spec: Traits): the row's page kind, a
+            // row the store cannot read a bare `row`
             Node::Row(k, 0) => {
                 let Some(r) = self.row(k) else {
-                    return Vec::new();
+                    return vec!["row".to_string()];
                 };
                 let mut out = vec![r.kind.name().to_string()];
                 if r.kind == PageKind::Redirect {
@@ -689,9 +691,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
             }
             Node::Row(..) => match self.graft_node(id) {
                 Some((_, g, n)) => g.traits(n),
-                None => Vec::new(),
+                None => vec!["text".to_string()],
             },
-            _ => Vec::new(),
+            Node::Root => vec!["web".to_string()],
+            Node::Sites => vec!["sites".to_string()],
+            Node::Container(..) => vec!["listing".to_string()],
         }
     }
 

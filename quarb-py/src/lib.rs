@@ -145,6 +145,12 @@ impl Doc {
     }
 
     fn execute(&self, query: &str) -> Result<QueryResult, String> {
+        self.execute_html(query).map(|(r, _)| r)
+    }
+
+    /// Run `query`, keeping the HTML form a closing drawing
+    /// (`@| tree`, `@| histogram`) leaves beside its text.
+    fn execute_html(&self, query: &str) -> Result<(QueryResult, Option<String>), String> {
         let (secs, nanos) = now_parts();
         let run = quarb::Run {
             now: Some((secs, nanos)),
@@ -154,7 +160,7 @@ impl Doc {
             ($a:expr) => {{
                 quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
                     .and_then(|q| q.run($a, &run))
-                    .map(|o| o.result)
+                    .map(|o| (o.result, o.html))
                     .map_err(|e| e.to_string())
             }};
         }
@@ -169,7 +175,7 @@ impl Doc {
         }
     }
 
-    /// Run `query` with its closing `@| table` taken off: the rows
+    /// Run `query` with its closing `@| pretty` taken off: the rows
     /// (a koine `table` node as its rows' records), the text table,
     /// and the HTML grid.
     fn table(&self, query: &str) -> Result<(Vec<Value>, String, String), String> {
@@ -186,7 +192,7 @@ impl Doc {
                 let closing = out
                     .closing
                     .filter(|c| !c.csv)
-                    .ok_or_else(|| "the query does not close in @| table".to_string())?;
+                    .ok_or_else(|| "the query does not close in @| pretty".to_string())?;
                 let rows: Vec<Value> =
                     quarb::table_rows_of($a, out.result, &closing.columns, &|n| self.render(n));
                 let columns = (!closing.columns.is_empty()).then_some(closing.columns.as_slice());
@@ -410,6 +416,41 @@ impl Document {
         }
     }
 
+    /// Execute `query` closing in a drawing (`@| tree`,
+    /// `@| histogram`): the values as `values` gives them (the
+    /// drawing's text) and the HTML form the browser hosts render,
+    /// None when the query closes in no drawing. Dress the HTML with
+    /// `quarb.TABLE_CSS`.
+    #[pyo3(signature = (query, budget=None))]
+    fn values_html(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        budget: Option<&str>,
+    ) -> PyResult<(Vec<Py<PyAny>>, Option<String>)> {
+        if let Some(spec) = budget {
+            let b = quarb::plan::Budget::parse(spec).map_err(PyValueError::new_err)?;
+            let plan = self
+                .doc
+                .plan(query, Some(&b))
+                .map_err(PyValueError::new_err)?;
+            if let Some(why) = b.exceeded_by(&plan) {
+                return Err(PyValueError::new_err(
+                    quarb::QuarbError::refused(why).to_string(),
+                ));
+            }
+        }
+        let (result, html) = self.doc.execute_html(query).map_err(PyValueError::new_err)?;
+        let values = match result {
+            QueryResult::Values(vs) => vs.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?,
+            QueryResult::Nodes(ns) => ns
+                .into_iter()
+                .map(|n| self.doc.render(n).into_py_any(py))
+                .collect::<PyResult<Vec<_>>>()?,
+        };
+        Ok((values, html))
+    }
+
     /// Execute `query` expecting at most one value: the typed
     /// value, or None when the result is empty. More than one
     /// value raises `ValueError` — use `values` for streams.
@@ -462,13 +503,13 @@ impl Document {
         }
     }
 
-    /// Run a query whose closing command is `@| table` and return
+    /// Run a query whose closing command is `@| pretty` and return
     /// `(rows, text, html)`: the rows as typed values (records as
     /// dicts; a document's own table as its rows' records), the
     /// text table as `qua` prints it, and the HTML grid every
     /// browser host renders (dress it with `quarb.TABLE_CSS`).
     /// Raises `ValueError` when the query does not close in
-    /// `@| table`, or when `budget` refuses it.
+    /// `@| pretty`, or when `budget` refuses it.
     #[pyo3(signature = (query, budget=None))]
     fn table(
         &self,
@@ -683,7 +724,7 @@ fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
     }
 }
 
-/// Whether `query` closes in `@| table` — the rule under which a
+/// Whether `query` closes in `@| pretty` — the rule under which a
 /// result renders as the HTML grid in every browser host, and the
 /// notebook's rich display switches on the same condition.
 #[pyfunction]
@@ -691,11 +732,20 @@ fn closes_with_table(query: &str) -> bool {
     quarb::closes_with_table(query)
 }
 
+/// Whether `query` closes in a drawing — `@| tree` or
+/// `@| histogram` — whose HTML form `Document.values_html` returns
+/// beside the text.
+#[pyfunction]
+fn closes_with_drawing(query: &str) -> bool {
+    quarb::closes_with_drawing(query)
+}
+
 #[pymodule]
 fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TABLE_CSS", quarb::TABLE_CSS)?;
     m.add_function(wrap_pyfunction!(closes_with_table, m)?)?;
+    m.add_function(wrap_pyfunction!(closes_with_drawing, m)?)?;
     m.add_class::<Document>()?;
     m.add_class::<Quantity>()?;
     m.add_function(wrap_pyfunction!(loads, m)?)?;

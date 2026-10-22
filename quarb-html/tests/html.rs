@@ -56,9 +56,12 @@ fn attributes_as_properties() {
     assert_eq!(values("//p:::classes"), vec!["intro"]);
     assert_eq!(values("//h1::id"), vec!["top"]);
     assert_eq!(values("//h1:::tag"), vec!["h1"]);
-    // core-meta `:traits` is the node's trait list
-    assert_eq!(values("//strong:traits"), vec!["inline"]);
-    assert_eq!(values("//h1:traits"), vec!["block, heading"]);
+    // `:traits` is the node's trait list, the kind (the tag) first;
+    // `:kind` is that first word
+    assert_eq!(values("//strong:traits"), vec!["strong, inline"]);
+    assert_eq!(values("//h1:traits"), vec!["h1, block, heading"]);
+    assert_eq!(values("//h1:kind"), vec!["h1"]);
+    assert_eq!(values("/html:kind"), vec!["html"]);
 }
 
 /// `:::attrs` enumerates attribute NAMES, in document order — the

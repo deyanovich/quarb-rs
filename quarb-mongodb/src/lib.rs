@@ -417,7 +417,7 @@ impl AstAdapter for MongodbAdapter {
     /// dates).
     fn traits(&self, node: NodeId) -> Vec<String> {
         let t = match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => return Vec::new(),
+            Kind::Root => "database",
             Kind::Collection { .. } => "collection",
             Kind::Doc { .. } => "document",
             Kind::Field { value } => match value {

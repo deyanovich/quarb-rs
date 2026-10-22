@@ -425,9 +425,11 @@ impl AstAdapter for MaildirAdapter {
         (node.0 != 0).then_some(NodeId(0))
     }
 
+    /// The kind (spec: Traits): `<mailbox>` at the root, `<message>`
+    /// under it.
     fn traits(&self, node: NodeId) -> Vec<String> {
         if node.0 == 0 {
-            return Vec::new();
+            return vec!["mailbox".to_string()];
         }
         vec!["message".to_string()]
     }

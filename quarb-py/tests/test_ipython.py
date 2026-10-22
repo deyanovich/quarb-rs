@@ -30,8 +30,16 @@ def test_mount_and_query(shell, tmp_path_factory):
     con.commit()
     con.close()
     shell.run_line_magic("quarb_mount", str(db))
-    r = shell.run_line_magic("quarb", "/tracks/1::artist_id~>::name")
+    r = shell.run_line_magic("quarb", "/tracks/1::artist_id-->::name")
     assert r.values == ["Holst"]
+    # a query closing in a drawing renders rich, as a table does
+    r = shell.run_line_magic("quarb", "/tracks/* @| tree(0; -k)")
+    html = r._repr_html_()
+    assert "quarb-tree" in html and "expand all" in html and "<details" in html
+    assert repr(r).startswith("/ <database>")
+    r = shell.run_line_magic("quarb", "/tracks/*::artist_id @| histogram")
+    assert "quarb-histogram" in r._repr_html_()
+    assert "█" in repr(r)
 
 
 def test_cell_magic_records_and_df(shell, tmp_path_factory):
@@ -43,7 +51,7 @@ def test_cell_magic_records_and_df(shell, tmp_path_factory):
     )
     shell.run_line_magic("quarb_mount", str(lab))
     r = shell.run_cell_magic(
-        "quarb", "lab", '/@hosts/* | rec("name", /name::, "draw", ::draw)'
+        "quarb", "lab", '/@hosts/* | %(name = /name::; draw = ::draw) @| pretty'
     )
     assert [rec["name"] for rec in r.records] == ["web-01", "db-01"]
     assert "table" in r._repr_html_()
@@ -70,7 +78,7 @@ def test_cross_cell_defs(shell, tmp_path_factory):
     # ...and a later cell resolves the name. The fragment's tp()
     # yields a typed instant, which lands as a datetime.
     r = shell.run_cell_magic(
-        "quarb", "", '/crew/* | rec(::name, "g", (::born | &gregorian))'
+        "quarb", "", '/crew/* | %(::name; g = (::born | &gregorian))'
     )
     assert [rec["g"].date().isoformat() for rec in r.records] == ["1882-01-06"]
 
@@ -120,5 +128,5 @@ def test_session_multimount_joins(tmp_path):
     s = Session()
     msg = s.mount(f"{tmp_path / 'a.yaml'} {db}")
     assert "a+b" in msg and "/a" in msg and "/b" in msg
-    r = s.run("/b/t/* <=> /a/rows/*[/k:: = $$::k] | rec('k', $*1/k::, 'v', ::v)")
+    r = s.run("/b/t/* <=> /a/rows/*[::k = $$0::k] | %(k = $$1::k; v = ::v)")
     assert r.records == [{"k": "x", "v": 1}, {"k": "y", "v": 2}]

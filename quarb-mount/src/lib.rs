@@ -138,6 +138,10 @@ impl AstAdapter for Empty {
     fn name(&self, _node: NodeId) -> Option<String> {
         None
     }
+    /// Its one node is an `<empty>` root (spec: Traits).
+    fn traits(&self, _node: NodeId) -> Vec<String> {
+        vec!["empty".to_string()]
+    }
 }
 
 /// The inner id standing for a latent mount's root before the
@@ -546,9 +550,11 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    /// The root over the mounts is a `<forest>` (spec: Traits); a
+    /// mounted node answers with its own adapter's traits.
     fn traits(&self, node: NodeId) -> Vec<String> {
         match self.decode(node) {
-            None => Vec::new(),
+            None => vec!["forest".to_string()],
             Some((m, inner)) => self.adapter(m).traits(inner),
         }
     }

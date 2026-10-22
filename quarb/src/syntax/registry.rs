@@ -306,6 +306,18 @@ pub const SPECS: &[FnSpec] = &[
         scalar("default", "the argument where the topic is null"),
         OnNull::Keep,
     ),
+    with_check(
+        with_options(
+            scalar(
+                "project",
+                "the operand's value with every projection value in it, at any depth, replaced by \
+                 that projection's reading on the cursor (project(:name) is | :name, project(:props; -r) \
+                 is | %); --record (-r) keys a list by its projections' bare keys",
+            ),
+            &["--record", "-r"],
+        ),
+        Check::Command,
+    ),
     // Unicode, stress, transliteration, spelling.
     scalar("nfc", "the text in Unicode NFC"),
     scalar("nfd", "the text in Unicode NFD"),
@@ -580,7 +592,13 @@ pub const SPECS: &[FnSpec] = &[
          sh(tr a-z A-Z) (needs --allow-shell)",
     ),
     // Reductions.
-    reducing("count", "how many"),
+    with_options(
+        reducing(
+            "count",
+            "how many; --values (-v) the non-null values alone, --nulls (-n) the nulls alone",
+        ),
+        &["--values", "-v", "--nulls", "-n"],
+    ),
     reducing("sum", "the sum"),
     reducing("product", "the product"),
     reducing("min", "the least"),
@@ -637,10 +655,35 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
+        with_options(
+            reducing(
+                "frequencies",
+                "each distinct value with its count, most frequent first, as \
+                 records (value, n); frequencies(K) keeps the top K; --nulls (-n) adds a \
+                 row for the nulls, --values (-v) the default without it",
+            ),
+            &["--values", "-v", "--nulls", "-n"],
+        ),
+        Check::Command,
+    ),
+    with_check(
         reducing(
-            "frequencies",
-            "each distinct value with its count, most frequent first, as \
-             records (value, n); frequencies(K) keeps the top K",
+            "bins",
+            "the numbers of the stream binned: n equal-width bins over min..max \
+             (10 unless given) as the table #(@(from; to; count)), the nulls a last row",
+        ),
+        Check::Command,
+    ),
+    with_check(
+        with_options(
+            reducing(
+                "histogram",
+                "the stream drawn as bars, one text value: numbers in n equal-width \
+                 bins (10 unless given), other values one bar per distinct value, most \
+                 frequent first (n the most shown, the rest one 'other' bar), the nulls \
+                 last; --width (-w) the longest bar in cells (40)",
+            ),
+            &["--width", "-w"],
         ),
         Check::Command,
     ),
@@ -713,10 +756,13 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        on_node(context(
-            "tree",
-            "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth, traits, props, % for the properties record, column expressions",
-        )),
+        with_options(
+            on_node(context(
+                "tree",
+                "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth and column expressions; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
+            )),
+            &["--kind", "-k", "--traits", "-t", "--props", "-p", "--record", "-r", "--sample", "-s"],
+        ),
         Check::Command,
     ),
     with_check(
@@ -730,13 +776,6 @@ pub const SPECS: &[FnSpec] = &[
         rendering(
             "pretty",
             "the records as an aligned table (closing: the tool renders it); after a value, the value pretty-printed: a table the grid, a record one field per line, a list one item per line",
-        ),
-        Check::Command,
-    ),
-    with_check(
-        rendering(
-            "table",
-            "the aligned table, as 'pretty' (accepted through 0.37; retired after)",
         ),
         Check::Command,
     ),

@@ -452,7 +452,7 @@ impl AstAdapter for DatastoreAdapter {
     /// scalar's JSON kind.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let t = match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => return Vec::new(),
+            Kind::Root => "database",
             Kind::KindDir { .. } => "kind",
             Kind::Entity { .. } => "entity",
             Kind::Field { value } => match value {

@@ -224,7 +224,7 @@ def test_repr():
 
 def test_document_table_is_the_grid_rule():
     doc = quarb.loads(BOOKS_JSON, "json")
-    q = "/books/* | %(t = /title::; p = /price::) @| table"
+    q = "/books/* | %(t = /title::; p = /price::) @| pretty"
     assert quarb.closes_with_table(q)
     assert not quarb.closes_with_table("/books/*/title::")
     rows, text, html = doc.table(q)

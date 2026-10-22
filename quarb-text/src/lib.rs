@@ -3990,15 +3990,16 @@ impl AstAdapter for TextModel {
         Some(out)
     }
 
-    /// The `<block>` family on every block node, plus `<table>` on
-    /// a list that denormalizes a table. Kinds are node names, not
-    /// traits.
+    /// The kind first (spec: Traits) — the node's name word, the
+    /// document's `document` — then the `<block>` family on every
+    /// block node, plus `<table>` on a list that denormalizes a
+    /// table.
     fn traits(&self, node: NodeId) -> Vec<String> {
         if let Some(v) = tier::virt(node) {
             return self.v_traits(v);
         }
         let n = &self.nodes[node.0 as usize];
-        let mut out = Vec::new();
+        let mut out = vec![n.kind.name().unwrap_or("document").to_string()];
         // The document wears its declared classification: one
         // trait per tag and one for the category — the LDAP rule,
         // where a multi-valued classifying attribute is the node's

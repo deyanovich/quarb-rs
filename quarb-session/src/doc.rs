@@ -313,7 +313,7 @@ impl Doc {
         }
     }
 
-    /// Run `query` with a closing `@| table` taken off
+    /// Run `query` with a closing `@| pretty` taken off
     /// ([`quarb::Query::without_closing`]): what stands before it in
     /// the outcome's result, the closing command in `closing`, for a
     /// host that draws the table itself.

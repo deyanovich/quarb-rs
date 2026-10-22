@@ -208,7 +208,7 @@ fn pandas_frames_chain_and_export() {
         run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | [2] | :x"#).unwrap();
     assert_eq!(out, vec!["3.75"]);
     let out =
-        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | header"#).unwrap();
+        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | keys"#).unwrap();
     assert_eq!(out, vec![r#"@("index"; "x"; "y")"#]);
     // The row reading carries the index back as the first field.
     let out =

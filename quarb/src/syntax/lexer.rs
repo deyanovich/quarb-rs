@@ -864,12 +864,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 // A row of a table literal, or an argument, glues to
                 // the opener or the separator before it, as a list
                 // literal does; the record array's `@%(` glues to
-                // its `@`.
+                // its `@`; an option's value to its `=`
+                // (`#(--header=%(a = "int"))`).
                 if !after_whitespace(&chars, i)
                     && !after_push_dot(&chars, i)
                     && !matches!(
                         tokens.last(),
-                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At)
+                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At | Token::OptEq)
                     )
                 {
                     return Err(QuarbError::lex(

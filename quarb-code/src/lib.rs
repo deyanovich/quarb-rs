@@ -422,12 +422,20 @@ impl AstAdapter for CodeModel {
         self.nodes[node.0 as usize].parent
     }
 
+    /// The kind first (spec: Traits): the construct word (`function`,
+    /// `if`, `else`, `impl`, `field`, …), the file root's being
+    /// `file`; then the category the grammar table gives it
+    /// (`loop`, `conditional`).
     fn traits(&self, node: NodeId) -> Vec<String> {
-        self.nodes[node.0 as usize]
-            .traits
-            .iter()
-            .map(|t| t.to_string())
-            .collect()
+        let n = &self.nodes[node.0 as usize];
+        let kind = if n.construct.is_empty() { "file" } else { n.construct };
+        let mut out = vec![kind.to_string()];
+        for t in n.traits {
+            if *t != kind {
+                out.push(t.to_string());
+            }
+        }
+        out
     }
 
     /// The uniform property set: `::signature`, `::doc`,

@@ -1423,25 +1423,37 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// The kind first, the adapter's word (spec: Traits): an aliased
+    /// node is the source wearing a role, so the source's traits
+    /// lead and the role's trait follows; an elevated value node has
+    /// its container's trait as its kind, so mixed-type walk results
+    /// self-describe (`[<ip>]`). The model's declared traits come
+    /// after the adapter's, in declaration order, and never change
+    /// what `:kind` answers.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let mut out = match self.decode(node) {
-            // Each derived value node carries its container's trait,
-            // so mixed-type walk results self-describe (`[<ip>]`).
             Some((c, v)) if v > 0 => {
-                let mut out = vec![self.containers()[c].trait_of(v).to_string()];
-                // An aliased node is the source wearing a role, so it
-                // keeps the traits the source already carried.
-                if let Some(base) = self.aliased(node) {
-                    out.extend(self.base.traits(base));
+                let role = self.containers()[c].trait_of(v).to_string();
+                match self.aliased(node) {
+                    Some(base) => {
+                        let mut out = self.base.traits(base);
+                        if !out.contains(&role) {
+                            out.push(role);
+                        }
+                        out
+                    }
+                    None => vec![role],
                 }
-                out
             }
             Some(_) => Vec::new(),
             None => self.base.traits(node),
         };
-        // The model's declared traits, decided at the node.
         if !self.model.traits.is_empty() {
-            out.extend(self.declared_traits_of(node));
+            for t in self.declared_traits_of(node) {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
         }
         out
     }

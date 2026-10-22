@@ -1013,12 +1013,13 @@ impl AstAdapter for AtrepAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         let n = self.node(node);
-        let mut out = Vec::new();
-        if let Some(family) = n.kind.family() {
+        // the kind first (spec: Traits), the root's being the
+        // document; then the family it belongs to
+        let mut out = vec![n.kind.trait_name().unwrap_or("document").to_string()];
+        if let Some(family) = n.kind.family()
+            && !out.iter().any(|t| t == family)
+        {
             out.push(family.to_string());
-        }
-        if let Some(kind) = n.kind.trait_name() {
-            out.push(kind.to_string());
         }
         if let Some(r) = &n.reference {
             out.push("ref".to_string());

@@ -655,7 +655,8 @@ impl AstAdapter for GithubAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// Type traits (`<user>`, `<repo>`, `<issue>`…), boolean
+    /// The kind first (spec: Traits): `<forge>` at the root, then
+    /// type traits (`<user>`, `<repo>`, `<issue>`…), boolean
     /// flags (`<fork>`, `<archived>`, `<open>`, `<merged>`,
     /// `<draft>`, `<prerelease>`), issue labels verbatim
     /// (`<bug>`), and repository topics (`<cli>`).
@@ -668,7 +669,7 @@ impl AstAdapter for GithubAdapter {
             File,
         }
         let shape = match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => return Vec::new(),
+            Kind::Root => Shape::Fixed("forge"),
             Kind::Section { .. } => Shape::Fixed("section"),
             Kind::Dir { .. } => Shape::Fixed("dir"),
             Kind::User { login } => Shape::User(login.clone()),

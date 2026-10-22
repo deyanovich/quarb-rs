@@ -122,16 +122,29 @@ fn pivot_goes_long_to_wide_and_melt_back() {
     .unwrap_err()
     .to_string();
     assert!(e.contains("two values for row 'a', column 'm'"), "{e}");
+    // a predicate on the table value filters its rows, each tested
+    // as the cursor record; the rows that hold answer as a table
+    assert_eq!(one("/rows/* @| # | [:x > 2] | dim"), "@(2; 3)");
+    assert_eq!(one("/rows/* @| # | [:x > 2] | :book"), r#"@("b"; "c")"#);
+    assert_eq!(one("/rows/* @| # | [:x > 200] | dim"), "@(0; 3)");
+    assert_eq!(one(r#"/rows/* @| # | [:book = "a" || :y = 6] | :x"#), "@(1; 5)");
+    assert_eq!(one("= #(%(1; 2); %(3; 4)) | [:1 > 2] | @"), "@(3; 4)");
+    // melt on the table value: the long table itself, the ids
+    // then `variable` and `value`
+    assert_eq!(
+        one("/rows/* @| # | melt(book)"),
+        "#(@(book; variable; value);\n  %(\"a\"; \"x\"; 1);\n  %(\"a\"; \"y\"; 2);\n  %(\"b\"; \"x\"; 3);\n  %(\"b\"; \"y\"; 4);\n  %(\"c\"; \"x\"; 5);\n  %(\"c\"; \"y\"; 6))"
+    );
     // melt: one record per non-id field.
     assert_eq!(
         run(r#"/rows/* | %(::book; ::x; ::y) @| melt(book)"#).unwrap(),
         vec![
-            r#"%(book = "a"; name = "x"; value = 1)"#,
-            r#"%(book = "a"; name = "y"; value = 2)"#,
-            r#"%(book = "b"; name = "x"; value = 3)"#,
-            r#"%(book = "b"; name = "y"; value = 4)"#,
-            r#"%(book = "c"; name = "x"; value = 5)"#,
-            r#"%(book = "c"; name = "y"; value = 6)"#
+            r#"%(book = "a"; variable = "x"; value = 1)"#,
+            r#"%(book = "a"; variable = "y"; value = 2)"#,
+            r#"%(book = "b"; variable = "x"; value = 3)"#,
+            r#"%(book = "b"; variable = "y"; value = 4)"#,
+            r#"%(book = "c"; variable = "x"; value = 5)"#,
+            r#"%(book = "c"; variable = "y"; value = 6)"#
         ]
     );
     assert_eq!(
@@ -174,7 +187,7 @@ fn the_table_literal_its_laws_and_its_readings() {
     let refuse = |q: &str| run(q).unwrap_err().to_string();
     assert!(refuse(r#"= #(@(name; age); @("Braund"; 22))"#).contains("a table's rows are records"));
     // a number in the header names its column by its text
-    assert_eq!(one("= #(@(1; 2); %(3; 4)) | header"), r#"@("1"; "2")"#);
+    assert_eq!(one("= #(@(1; 2); %(3; 4)) | header"), r#"%("1" = "int"; "2" = "int")"#);
     assert!(refuse("= #(@(1; 2); %(a = 1))").contains("'a' is not a column"));
     // positional rows without a header are the array face
     assert_eq!(one(r#"= #(%("Braund"; 22))"#), r#"#(%("Braund"; 22))"#);
@@ -203,7 +216,13 @@ fn the_table_literal_its_laws_and_its_readings() {
         one("= #(%(1; 2); %(3; 4)) | transpose"),
         "#(%(1; 3);\n  %(2; 4))"
     );
-    assert!(refuse(&format!("{t} | transpose")).contains("names its columns"));
+    // a frame transposes to a frame: the names as the column
+    // `column`, the old rows as columns by position (a mixed column
+    // takes the text form)
+    assert_eq!(
+        one(&format!("{t} | transpose")),
+        "#(@(column; \"1\"; \"2\");\n  %(\"name\"; \"Braund\"; \"Allen\");\n  %(\"age\"; \"22\"; \"35\"))"
+    );
     assert!(refuse(&format!("{t} | upper")).contains("is a table; '| @' reads its rows"));
     // `| #` — the table reading of a stream: records a frame (the
     // names in order of first appearance, a hole where one lacks),
@@ -242,7 +261,8 @@ fn the_table_literal_its_laws_and_its_readings() {
         one(&format!("{t} | [..1]")),
         "#(@(name; age);\n  %(\"Braund\"; 22))"
     );
-    assert_eq!(one(&format!("{t} | header")), r#"@("name"; "age")"#);
+    assert_eq!(one(&format!("{t} | header")), r#"%(name = "text"; age = "int")"#);
+    assert_eq!(one(&format!("{t} | keys")), r#"@("name"; "age")"#);
     assert_eq!(one(&format!("{t} | dim")), "@(2; 2)");
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | header"), "");
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | rows"), "@(@(1; 2); @(3; 4))");
@@ -257,7 +277,7 @@ fn the_table_literal_its_laws_and_its_readings() {
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | [1]"), "@(1; 2)");
     assert!(refuse("= 5 | [2]").contains("whole-context"));
     // over nodes, each contributes the record of its properties
-    assert_eq!(one("/rows/* @| # | header"), r#"@("book"; "x"; "y")"#);
+    assert_eq!(one("/rows/* @| # | header"), r#"%(book = "text"; x = "int"; y = "int")"#);
     assert_eq!(one("/rows/* @| # | dim"), "@(3; 3)");
     assert_eq!(one("/rows/* @| # | [2]"), r#"%(book = "b"; x = 3; y = 4)"#);
     // on a list value, `| [n]` is the item and `| [a..b]` the sublist
@@ -306,7 +326,7 @@ fn the_table_literal_its_laws_and_its_readings() {
         "#(%(\"name\"; \"age\");\n  %(\"Braund\"; \"22\");\n  %(\"Allen\"; \"35\"))"
     );
     assert_eq!(
-        one(&format!("= {t3} | header-to-row | row-to-header | header")),
+        one(&format!("= {t3} | header-to-row | row-to-header | keys")),
         r#"@("name"; "age")"#
     );
     // one record is one row; a record of lists the columns
@@ -322,7 +342,7 @@ fn the_table_literal_its_laws_and_its_readings() {
     let grid = "name    age\n------  ---\nBraund  22\nAllen   35";
     assert_eq!(one(&format!("{t} | pretty")), grid);
     assert_eq!(one(&format!("{t} @| pretty")), grid);
-    assert_eq!(one(&format!("{t} @| table")), grid);
+    assert_eq!(one(&format!("{t} @| pretty")), grid);
     assert_eq!(one(&format!("{t} | csv")), "name,age\nBraund,22\nAllen,35");
     // the column list selects and orders on either pipe
     assert_eq!(one(&format!("{t} | pretty(age)")), "age\n---\n22\n35");
@@ -338,7 +358,18 @@ fn the_table_literal_its_laws_and_its_readings() {
         one(r#"= %(a = 1; b = "x") | pretty"#),
         "%(a = 1;\n  b = \"x\")"
     );
-    assert_eq!(one("= @(1; 2) | pretty"), "@(1;\n  2)");
+    // a list stays on one line when it fits and holds no record;
+    // a record opens at every depth, two spaces per level
+    assert_eq!(one("= @(1; 2) | pretty"), "@(1; 2)");
+    assert_eq!(
+        one(r#"= %(a = 1; b = @(1; 2; 3); c = %(d = "x"; e = null)) | pretty"#),
+        "%(a = 1;\n  b = @(1; 2; 3);\n  c = %(d = \"x\";\n        e = null))"
+    );
+    assert_eq!(
+        one("= @(%(a = 1; n = %(k = 2)); %(a = 2)) | pretty"),
+        "@(%(a = 1;\n    n = %(k = 2));\n  %(a = 2))"
+    );
+    assert!(one("= %(long = @(1..40)) | pretty").starts_with("%(long = @(1;\n           2;"));
     assert_eq!(
         one("= #(%(1; 2); %(3; 4)) | pretty"),
         "1  2\n-  -\n1  2\n3  4"
@@ -347,7 +378,7 @@ fn the_table_literal_its_laws_and_its_readings() {
     // a list constructor names the ids of a melt
     assert_eq!(
         run("/rows/* | %(::book; ::x; ::y) @| melt(@(book; x)) @| [1]").unwrap(),
-        [r#"%(book = "a"; x = 1; name = "y"; value = 2)"#]
+        [r#"%(book = "a"; x = 1; variable = "y"; value = 2)"#]
     );
     // the result line shows the header and each row on its own line
     assert_eq!(
@@ -497,5 +528,79 @@ fn table_columns_are_typed() {
     assert_eq!(
         one(r#"= #(@(name; age); %("Braund"; 22)) | header-to-row | :2"#),
         r#"@("age"; "22")"#
+    );
+}
+
+/// `| header` is the typed header (spec: The Table): one record, the
+/// column names as keys, the column types as values; `keys` and
+/// `type` are its two lists. `#(--header=record)` builds under a
+/// declared header, casting the declared columns.
+#[test]
+fn the_header_is_typed_and_a_declared_header_casts() {
+    let refuse = |q: &str| run(q).unwrap_err().to_string();
+    let t = r#"= #(@(name; age); %("Braund"; 22); %("Allen"; 35))"#;
+    assert_eq!(one(&format!("{t} | header")), r#"%(name = "text"; age = "int")"#);
+    assert_eq!(one(&format!("{t} | header | :age")), "int");
+    assert_eq!(one(&format!("{t} | header | keys")), r#"@("name"; "age")"#);
+    assert_eq!(one(&format!("{t} | header | values")), r#"@("text"; "int")"#);
+    assert_eq!(one(&format!("{t} | type")), r#"@("text"; "int")"#);
+    // a list of records: the union, typed over the records
+    assert_eq!(
+        one(r#"= @(%(a = 1); %(a = 2.5; b = "x")) | header"#),
+        r#"%(a = "float"; b = "text")"#
+    );
+    assert_eq!(one("= null | header"), "");
+    assert_eq!(one("= #(%(1; 2); %(3; 4)) | header"), "");
+    assert!(refuse("= 5 | header").contains("keys and type are the two lists"));
+    assert!(refuse("/rows/* @| header").contains("not a list of records"));
+    // the declared header over a flat list: the keys name, the
+    // types cast
+    assert_eq!(
+        one(r#"= @("1"; "2.5"; "true"; "x") | #(--header=%(n = "int"; f = "float"; b = "bool"; t = "text")) | header"#),
+        r#"%(n = "int"; f = "float"; b = "bool"; t = "text")"#
+    );
+    assert_eq!(
+        one(r#"= @("1"; "2"; "3"; "4") | #(-h=%(a = "text"; b = "float"))"#),
+        "#(@(a; b);\n  %(\"1\"; 2);\n  %(\"3\"; 4))"
+    );
+    // a cell that does not cast refuses naming the column and the row
+    let e = refuse(r#"= @("1"; "x"; "2"; "3") | #(-h=%(a = "int"; b = "int"))"#);
+    assert!(e.contains("column 'b' is declared int, and row 1 holds \"x\""), "{e}");
+    // over a table: the declared columns cast and stand first, the
+    // others follow as built; a declared column the data lacks refuses
+    assert_eq!(
+        one(&format!("{t} | #(--header=%(age = \"float\")) | header")),
+        r#"%(age = "float"; name = "text")"#
+    );
+    assert_eq!(
+        one(r#"= @(%(a = "1"; b = "x"); %(a = "2"; b = "y")) | #(--header=%(b = "text"; a = "float")) | :a"#),
+        "@(1; 2)"
+    );
+    let e = refuse(&format!("{t} | #(--header=%(zip = \"text\"))"));
+    assert!(e.contains("column 'zip' is declared, and the data has no such column"), "{e}");
+    // the words are checked when the query is read
+    let e = refuse(r#"= @(1; 2) | #(-h=%(n = "number"))"#);
+    assert!(e.contains("'number' is no column type"), "{e}");
+    let e = refuse(r#"= @(1; 2) | #(-h=%(1; 2))"#);
+    assert!(e.contains("an unnamed item names no column"), "{e}");
+    // a header computed elsewhere: the round trip through a capsa
+    assert_eq!(
+        one(r#"= @(1..4) | .t(#(-h=@(a; b))) | @("5"; "6"; "7"; "8") | #(-h=($.t | header)) | header"#),
+        r#"%(a = "int"; b = "int")"#
+    );
+    assert_eq!(
+        one(r#"= @(1..4) | .t(#(-h=@(a; b))) | @(5; 6; 7; 8) | #(-h=($.t | keys)) | dim"#),
+        "@(2; 2)"
+    );
+    assert_eq!(
+        one(r#"= @(1..4) | .h(%(a = "float"; b = "int")) | @(5; 6; 7; 8) | #(-h=$.h) | header"#),
+        r#"%(a = "float"; b = "int")"#
+    );
+    let e = refuse(r#"= @(1..4) | .h(5) | @(5; 6) | #(-h=$.h)"#);
+    assert!(e.contains("the computed one is a number"), "{e}");
+    // after @| the stream builds under the declared header
+    assert_eq!(
+        one(r#"= 1..4 @| #(--header=%(a = "float"; b = "int")) | header"#),
+        r#"%(a = "float"; b = "int")"#
     );
 }

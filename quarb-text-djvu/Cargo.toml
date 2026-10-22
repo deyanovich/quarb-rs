@@ -11,10 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.40.1" }
+quarb = { path = "../quarb", version = "0.41.0" }
 djvu-rs = { version = "0.41", default-features = false, features = ["std"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-quarb = { path = "../quarb", version = "0.40.1" }
+quarb = { path = "../quarb", version = "0.41.0" }
 djvu-rs = { version = "0.41", default-features = false, features = ["std"] }

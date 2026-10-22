@@ -551,9 +551,17 @@ impl AstAdapter for CwlAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
+            Kind::Root => vec!["log".into()],
             Kind::Group(_) => vec!["group".into()],
             Kind::Event { .. } => vec!["entry".into()],
-            _ => Vec::new(),
+            Kind::Field(f) => vec![
+                match f {
+                    Field::Map(_) => "map",
+                    Field::List(_) => "array",
+                    Field::Scalar(v) => quarb::adapter::value_kind(v),
+                }
+                .into(),
+            ],
         }
     }
 

@@ -237,7 +237,7 @@ pub(crate) fn node_table(adapter: &impl AstAdapter, node: NodeId) -> Result<Tabl
 /// [`Query::without_closing`](crate::Query::without_closing): values
 /// as they are; a node that is a document's own table as its rows'
 /// records ([`table_node_records`]); any other node as the record
-/// of the columns asked of it (`@| table(title; price)` over nodes
+/// of the columns asked of it (`@| pretty(title; price)` over nodes
 /// reads each node's properties), else as its locator from
 /// `render`.
 pub fn table_rows_of(

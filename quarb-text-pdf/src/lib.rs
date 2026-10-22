@@ -810,6 +810,19 @@ impl AstAdapter for PdfText {
             Node::Line { .. } => "line".into(),
         })
     }
+    /// The kind (spec: Traits): `<document>` at the root, then
+    /// `<section>`, `<page>`, `<line>`.
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        vec![
+            match &self.nodes[node.0 as usize] {
+                Node::Root { .. } => "document",
+                Node::Section { .. } => "section",
+                Node::Page { .. } => "page",
+                Node::Line { .. } => "line",
+            }
+            .to_string(),
+        ]
+    }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         match &self.nodes[node.0 as usize] {
             Node::Root { .. } => None,

@@ -266,6 +266,12 @@ impl AstAdapter for CsvAdapter {
         if node.0 == 0 { None } else { Some(NodeId(0)) }
     }
 
+    /// The kind (spec: Traits): the root is a `<table>`, every node
+    /// under it a `<row>`.
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        vec![if node.0 == 0 { "table" } else { "row" }.to_string()]
+    }
+
     /// A column cell, by header name. Empty cells are missing. Under
     /// a declared decimal convention a cell with a numeric reading
     /// arrives in canonical form, so every reading of it downstream

@@ -410,6 +410,15 @@ impl CosmosAdapter {
     }
 }
 
+/// The kind word of a JSON value held by a field node (spec: Traits).
+fn json_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Object(_) => "map",
+        serde_json::Value::Array(_) => "array",
+        v => scalar(v).map(|s| quarb::adapter::value_kind(&s)).unwrap_or("null"),
+    }
+}
+
 fn scalar(v: &serde_json::Value) -> Option<Value> {
     match v {
         serde_json::Value::String(s) => Some(Value::Str(s.clone())),
@@ -443,10 +452,10 @@ impl AstAdapter for CosmosAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["database".into()],
             Kind::Container { .. } => vec!["container".into()],
             Kind::Doc { .. } => vec!["document".into()],
-            Kind::Field { .. } => Vec::new(),
+            Kind::Field { value } => vec![json_kind(value).into()],
         }
     }
 

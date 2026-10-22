@@ -345,7 +345,7 @@ impl AstAdapter for CflAdapter {
     fn traits(&self, node: NodeId) -> Vec<String> {
         match self.entry_of(node) {
             Some(_) => vec!["entry".into()],
-            None => Vec::new(),
+            None => vec!["log".into()],
         }
     }
 

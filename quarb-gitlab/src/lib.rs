@@ -876,8 +876,9 @@ impl AstAdapter for GitlabAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// Kinds, visibility, flags, topics, labels (scoped labels
-    /// included), and pipeline/job statuses, all as traits.
+    /// The kind first (spec: Traits; `<forge>` at the root), then
+    /// visibility, flags, topics, labels (scoped labels included),
+    /// and pipeline/job statuses, all as traits.
     fn traits(&self, node: NodeId) -> Vec<String> {
         enum Shape {
             Fixed(&'static str),
@@ -888,7 +889,7 @@ impl AstAdapter for GitlabAdapter {
             Entry(&'static str),
         }
         let shape = match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => return Vec::new(),
+            Kind::Root => Shape::Fixed("forge"),
             Kind::Section { .. } => Shape::Fixed("section"),
             Kind::User { .. } => Shape::Fixed("user"),
             Kind::Group { .. } => Shape::Group,

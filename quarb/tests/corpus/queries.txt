@@ -1158,7 +1158,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):name
 /продажи/*[1] | %(::книг; ::выручка)
 /продажи/* | ::выручка @| sum
 /продажи/* | %(::город; ::выручка) @| csv | sha256
-/продажи/* | %(::город; ::выручка) @| table
+/продажи/* | %(::город; ::выручка) @| pretty
 /продажи/* | %(::город; ::выручка) @| csv
 /продажи/* | %(::город; ::выручка) @| csv(","; город; выручка)
 /продажи/* | %(::город; ::выручка) @| jsonl
@@ -1172,7 +1172,7 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):name
 /sales/*[1] | %(::books; ::takings)
 /sales/* | ::takings @| sum
 /sales/* | %(::city; ::takings) @| csv | sha256
-/sales/* | %(::city; ::takings) @| table
+/sales/* | %(::city; ::takings) @| pretty
 /sales/* | %(::city; ::takings) @| csv
 /sales/* | %(::city; ::takings) @| csv(","; city; takings)
 /sales/* | %(::city; ::takings) @| jsonl
@@ -1187,21 +1187,21 @@ def &above($col, $min): [$col >= $min]; //*<function>&above(::n-params, 3):name
 /* | @(::name; ::fare)
 /* | @(::name; ::fare) | join(": ")
 //row[::полка = "Б1"] | %(::название; ::жанр; ::полка)
-//row[::полка = "Б1"] | %(::название; ::жанр; ::полка) @| table
-//row[::год < 1840] | %(::название; ::жанр; ::год) @| table(год; название)
+//row[::полка = "Б1"] | %(::название; ::жанр; ::полка) @| pretty
+//row[::год < 1840] | %(::название; ::жанр; ::год) @| pretty(год; название)
 //row[::год < 1840] | %(::название; ::год) @| csv
 //row[::жанр = "поэма"] | %(::название; ::полка) @| json
-//row @| group(жанр = ::жанр) | count | %($.жанр; книг = $_) @| top(3; :книг) @| table
+//row @| group(жанр = ::жанр) | count | %($.жанр; книг = $_) @| top(3; :книг) @| pretty
 //row[::жанр = "поэма"] | %(::название; ::полка)
-//row[::полка = "Б1"] | %(::название; ::жанр) @| table @| count
+//row[::полка = "Б1"] | %(::название; ::жанр) @| pretty @| count
 //row[::shelf = "A1"] | %(::title; ::genre; ::shelf)
-//row[::shelf = "A1"] | %(::title; ::genre; ::shelf) @| table
-//row[::year] | %(::title; ::genre; ::year) @| table(year; title)
+//row[::shelf = "A1"] | %(::title; ::genre; ::shelf) @| pretty
+//row[::year] | %(::title; ::genre; ::year) @| pretty(year; title)
 //row[::year] | %(::title; ::year) @| csv
 //row[::genre = "epic"] | %(::title; ::shelf) @| json
-//row @| group(genre = ::genre) | count | %($.genre; books = $_) @| top(3; :books) @| table
+//row @| group(genre = ::genre) | count | %($.genre; books = $_) @| top(3; :books) @| pretty
 //row[::genre = "epic"] | %(::title; ::shelf)
-//row[::shelf = "A1"] | %(::title; ::genre) @| table @| count
+//row[::shelf = "A1"] | %(::title; ::genre) @| pretty @| count
 //paragraph[:: = >paragraph::]::
 //paragraph[:: = (>paragraph){2}::] | :: | substr(1..40)
 //paragraph[:: = (>paragraph){1;4}::] | %(text = substr(::; 1..40); at = :index)

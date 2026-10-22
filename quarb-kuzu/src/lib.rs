@@ -429,9 +429,11 @@ impl AstAdapter for KuzuAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["graph".to_string()],
             Kind::Table { .. } => vec!["table".to_string()],
-            Kind::Entity { table, .. } => vec![table.clone()],
+            Kind::Entity { table, .. } => std::iter::once("node".to_string())
+                .chain(std::iter::once(table.clone()).filter(|t| t != "node"))
+                .collect(),
         }
     }
 

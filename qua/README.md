@@ -127,7 +127,7 @@ node reads it as a table: the header where the format declares one
 model's cells), the array face otherwise, a spanned cell repeated,
 an empty cell null, a number read as one; nothing is parsed until
 asked. `pretty` is the renderer: `@| pretty` over a stream of
-records (as `@| table` was; `table` and `--table` stay accepted
+records (as `@| pretty` was; `table` and `--table` stay accepted
 through 0.37), `| pretty` after a table value for the aligned grid,
 and on any value a pretty print, a record one field per line, a list
 one item per line; `| csv` after a table value serializes it as

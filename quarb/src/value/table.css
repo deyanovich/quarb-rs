@@ -1,4 +1,4 @@
-/* The Quarb table: the grid a result closing in `@| table` renders
+/* The Quarb table: the grid a result closing in `@| pretty` renders
    as in every browser host (the notebook cell, the playground, the
    extension's panel, quarb.org/search). Scoped under the class so a
    host's own theme never fights it; colours come from the host's
@@ -51,4 +51,98 @@
   text-align: left;
   font-size: 0.9em;
   opacity: 0.6;
+}
+
+/* The histogram (`@| histogram`): one row per bar, the bar a block
+   whose width is the count's share of the scale; the "other" and
+   null bars stand aside, in grey. */
+.quarb-histogram td.label {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.quarb-histogram td.bar {
+  width: 18em;
+  padding: 0.3em 0.5em;
+}
+.quarb-histogram td.bar div {
+  height: 1em;
+  min-width: 2px;
+  background: var(--quarb-accent, rgba(70, 130, 180, 0.8));
+  border-radius: 2px;
+}
+.quarb-histogram tr.aside td.bar div {
+  background: var(--quarb-aside, rgba(128, 128, 128, 0.45));
+}
+.quarb-histogram tbody tr:nth-child(even) {
+  background: transparent;
+}
+
+/* The tree (`@| tree`): every node with children folds and unfolds
+   (the browser's own disclosure), a leaf is a plain line, a stub
+   the skipped path in a dotted hand, a crosslink its own line. */
+.quarb-tree {
+  font-family: var(--quarb-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--quarb-tree-size, 0.92em);
+  line-height: 1.5;
+  color: var(--quarb-fg, inherit);
+}
+.quarb-tree details {
+  margin-left: 0;
+}
+.quarb-tree details > details,
+.quarb-tree details > div {
+  margin-left: 1.4em;
+}
+.quarb-tree summary {
+  cursor: pointer;
+  list-style: none;
+  white-space: pre;
+}
+.quarb-tree summary::-webkit-details-marker {
+  display: none;
+}
+.quarb-tree summary::before {
+  content: "−";
+  display: inline-block;
+  width: 1.1em;
+  color: var(--quarb-muted, rgba(128, 128, 128, 0.9));
+}
+.quarb-tree details:not([open]) > summary::before {
+  content: "+";
+}
+.quarb-tree div.node::before,
+.quarb-tree div.stub::before,
+.quarb-tree div.link::before {
+  content: "";
+  display: inline-block;
+  width: 1.1em;
+}
+.quarb-tree div {
+  white-space: pre;
+}
+.quarb-tree .stub > summary,
+.quarb-tree div.stub {
+  color: var(--quarb-muted, rgba(128, 128, 128, 0.9));
+  text-decoration: underline dotted;
+}
+.quarb-tree .link {
+  color: var(--quarb-link, rgba(70, 130, 180, 0.95));
+}
+.quarb-tree .controls {
+  margin: 0 0 0.3em 0;
+  font-family: var(--quarb-font, inherit);
+  font-size: 0.85em;
+}
+.quarb-tree .controls button {
+  margin-right: 0.4em;
+  padding: 0.1em 0.6em;
+  font: inherit;
+  color: var(--quarb-fg, inherit);
+  background: var(--quarb-zebra, rgba(128, 128, 128, 0.12));
+  border: 1px solid var(--quarb-rule, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  cursor: pointer;
+}
+.quarb-tree .controls button:hover {
+  background: var(--quarb-hover, rgba(128, 128, 128, 0.25));
 }

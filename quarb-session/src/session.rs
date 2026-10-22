@@ -129,7 +129,7 @@ impl Session {
         self.executor.run(&q)
     }
 
-    /// Evaluate a line, and when its closing command is `@| table`,
+    /// Evaluate a line, and when its closing command is `@| pretty`,
     /// hand back the HTML grid beside the cells (the text table as
     /// one cell) — the browser hosts' path; see
     /// [`crate::Executor::run_table`].

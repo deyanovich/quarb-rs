@@ -1,5 +1,5 @@
 //! A session hands the browser hosts the grid of a result closing in
-//! `@| table`, and text for everything else.
+//! `@| pretty`, and text for everything else.
 use quarb_session::doc::Doc;
 use quarb_session::{LocalExecutor, MemStore, Session};
 
@@ -20,9 +20,9 @@ fn a_table_result_carries_the_grid_and_the_text() {
         .unwrap(),
     );
     let (cells, html) = s
-        .eval_table("/books/* | %(t = /title::; p = /price::) @| table")
+        .eval_table("/books/* | %(t = /title::; p = /price::) @| pretty")
         .unwrap();
-    let html = html.expect("a closing @| table renders the grid");
+    let html = html.expect("a closing @| pretty renders the grid");
     assert!(html.starts_with("<table class=\"quarb-table\">"), "{html}");
     assert!(
         html.contains("<td>Emma</td><td class=\"num\">25</td>"),
@@ -47,7 +47,7 @@ fn a_documents_own_table_renders_through_the_same_path() {
             .or_else(|_| Doc::parse(md, "markdown"))
             .unwrap(),
     );
-    let (cells, html) = s.eval_table("//*<tabula> @| table").unwrap();
+    let (cells, html) = s.eval_table("//*<tabula> @| pretty").unwrap();
     let html = html.expect("a koine table node renders as the grid");
     assert!(html.contains("<th>title</th>"), "{html}");
     assert!(html.contains("<td>Emma</td>"), "{html}");

@@ -481,14 +481,16 @@ impl AstAdapter for HtmlAdapter {
         self.nodes[node.0 as usize].parent
     }
 
-    /// Structural traits: `<block>` or `<inline>`, plus `<heading>`
-    /// for `h1`–`h6` and `<link>` for an anchor with an `href`.
+    /// The kind first (spec: Traits) — the element's tag, the
+    /// document's `document` — then the structural traits:
+    /// `<block>` or `<inline>`, plus `<heading>` for `h1`–`h6` and
+    /// `<link>` for an anchor with an `href`.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let n = &self.nodes[node.0 as usize];
         let Some(tag) = n.tag.map(|t| self.names.get(t)) else {
-            return Vec::new();
+            return vec!["document".to_string()];
         };
-        let mut out = Vec::new();
+        let mut out = vec![tag.to_string()];
         if BLOCK.contains(&tag) {
             out.push("block".to_string());
         } else {

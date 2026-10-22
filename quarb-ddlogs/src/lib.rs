@@ -505,9 +505,17 @@ impl AstAdapter for DdlAdapter {
     }
 
     fn traits(&self, node: NodeId) -> Vec<String> {
-        match self.entry_of(node) {
-            Some(i) => vec!["entry".into(), self.events[i].status.to_ascii_lowercase()],
-            None => Vec::new(),
+        match &self.nodes.borrow()[node.0 as usize].kind {
+            Kind::Root => vec!["log".into()],
+            Kind::Entry(i) => vec!["entry".into(), self.events[*i].status.to_ascii_lowercase()],
+            Kind::Field(f) => vec![
+                match f {
+                    Field::Map(_) => "map",
+                    Field::List(_) => "array",
+                    Field::Scalar(v) => quarb::adapter::value_kind(v),
+                }
+                .into(),
+            ],
         }
     }
 

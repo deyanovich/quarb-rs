@@ -48,19 +48,23 @@ fn adapter() -> SqliteAdapter {
     SqliteAdapter::load(&conn).unwrap()
 }
 
-/// A cell carries its column's declared type as a trait, lowercased
-/// and stripped of parameters, and the derived kind beside it (spec:
-/// adapter traits); tables and rows carry none.
+/// A cell's kind is `cell` (spec: Traits), then its column's
+/// declared type as a trait, lowercased and stripped of parameters,
+/// and the derived kind beside it (spec: adapter traits); tables and
+/// rows carry their kinds alone.
 #[test]
 fn cells_carry_their_columns_type_traits() {
-    assert_eq!(values("/tracks/1/price:traits"), ["real, number"]);
-    assert_eq!(values("/tracks/1/title:traits"), ["text, string"]);
-    assert_eq!(values("/tracks/1/secs:traits"), ["integer, number"]);
+    assert_eq!(values("/tracks/1/price:traits"), ["cell, real, number"]);
+    assert_eq!(values("/tracks/1/title:traits"), ["cell, text, string"]);
+    assert_eq!(values("/tracks/1/secs:traits"), ["cell, integer, number"]);
+    assert_eq!(values("/tracks/1/secs:kind"), ["cell"]);
+    assert_eq!(values("/tracks/1:kind"), ["row"]);
+    assert_eq!(values("/tracks:kind"), ["table"]);
     assert_eq!(values("/tracks/1/*<number> @| count"), ["4"]);
     assert_eq!(values("/tracks/1/*<integer>:name @| join(\", \")"), ["id, album_id, secs"]);
     assert_eq!(values("/tracks/*/*<string> @| count"), values("/tracks/* @| count"));
-    assert_eq!(values("/tracks:traits"), [""]);
-    assert_eq!(values("/tracks/1:traits"), [""]);
+    assert_eq!(values("/tracks:traits"), ["table"]);
+    assert_eq!(values("/tracks/1:traits"), ["row"]);
 }
 
 fn values(query: &str) -> Vec<String> {

@@ -583,9 +583,20 @@ impl AstAdapter for RedisAdapter {
     /// A key node's trait is its Redis type.
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Path { key: Some(k), .. } => vec![self.type_of(k)],
+            Kind::Root => vec!["database".to_string()],
+            Kind::Path { key: None, .. } => vec!["namespace".to_string()],
+            Kind::Path { key: Some(k), .. } => {
+                let mut t = vec!["key".to_string()];
+                let ty = self.type_of(k);
+                if ty != "none" && ty != "key" {
+                    t.push(ty);
+                }
+                t
+            }
+            Kind::Named { .. } => vec!["field".to_string()],
+            Kind::Item { .. } => vec!["item".to_string()],
+            Kind::Scored { .. } => vec!["member".to_string()],
             Kind::Entry { .. } => vec!["entry".to_string()],
-            _ => Vec::new(),
         }
     }
 

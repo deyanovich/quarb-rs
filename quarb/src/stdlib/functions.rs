@@ -21,7 +21,7 @@ use unicode_segmentation::UnicodeSegmentation;
 type Scale<'a> = &'a dyn Fn(&str) -> Option<(f64, String)>;
 
 /// The internal aggregate standing in for a closing `@| csv` /
-/// `@| table` while a tool renders it (see `run_for_rendering`).
+/// `@| pretty` while a tool renders it (see `run_for_rendering`).
 pub(crate) const ROWS_FOR_RENDERING: &str = "\u{1}rows";
 
 /// Records as columns: the named columns in their order, or the
@@ -509,6 +509,10 @@ pub fn apply_scalar(
                     _ => transpose_reading(topic),
                 },
             )];
+        }
+        // `| melt` on a table value answers the long table itself
+        "melt" if matches!(topic, Value::Table(_)) => {
+            return vec![refusing(call, melt(call, vec![topic]).map(|mut v| v.pop().unwrap_or(Value::Null)))];
         }
         "pivot" | "melt" => {
             let items = match topic {
@@ -2261,6 +2265,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             | "cell"
             | "row-to-header"
             | "header-to-row"
+            | "melt"
             | "flatten"
             | "keys"
             | "fields"
@@ -2285,7 +2290,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
     };
     match call.name.as_str() {
         // What `run_for_rendering` leaves where a closing `@| csv` /
-        // `@| table` stood: the rows themselves, for the tool to
+        // `@| pretty` stood: the rows themselves, for the tool to
         // tabulate. Not a name a query can write.
         ROWS_FOR_RENDERING => input,
         // The stream as a table, read by rows or by columns, or
@@ -2320,7 +2325,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 // a table, or a scalar that refuses); `| type` names
                 // the one value in front of it; `| flatten` opens the
                 // one value, a scalar passing through.
-                [_] if matches!(call.name.as_str(), "[]" | "type" | "flatten") => {
+                [_] if matches!(call.name.as_str(), "[]" | "type" | "flatten" | "header") => {
                     input.into_iter().next().expect("one")
                 }
                 _ => Value::list(input),
@@ -2378,7 +2383,22 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             ));
             vec![Value::Null]
         }
-        "count" => vec![Value::Int(input.len() as i64)],
+        // `count`: how many; `--values` (`-v`) the non-null values
+        // alone, `--nulls` (`-n`) the nulls alone (spec: Aggregate
+        // Commands).
+        "count" => {
+            let switch = |long: &str, short: &str| {
+                call.args.iter().any(|a| matches!(a, Arg::Opt { name, value: None } if name == long || name == short))
+            };
+            let nulls = input.iter().filter(|v| matches!(v, Value::Null)).count();
+            vec![Value::Int(if switch("--nulls", "-n") {
+                nulls as i64
+            } else if switch("--values", "-v") {
+                (input.len() - nulls) as i64
+            } else {
+                input.len() as i64
+            })]
+        }
         "sum" => vec![sum(&input, scale)],
         "product" => vec![product(&input)],
         "min" => extreme(input, std::cmp::Ordering::Less, scale),
@@ -2549,7 +2569,7 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             // delimiter (a bare word is a column, so no collision).
             // The command is a value like any other and never
             // depends on a locale: a tool that prints under one
-            // takes a closing `@| csv` / `@| table` off the query
+            // takes a closing `@| csv` / `@| pretty` off the query
             // and renders it itself (`run_for_rendering`).
             let (delimiter, args) = split_csv_delimiter(call);
             let columns: Vec<String> = args
@@ -2649,11 +2669,19 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // equal counts by value, as records; `frequencies(k)` keeps
         // the top k.
         "frequencies" => {
+            // `--nulls` (`-n`) adds a row for the nulls, `%(value =
+            // null; n = k)`, last; `--values` (`-v`) is the default
+            let with_nulls = call
+                .args
+                .iter()
+                .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--nulls" || name == "-n"));
+            let mut nulls = 0i64;
             let mut counts: Vec<(Value, i64)> = Vec::new();
             let mut index: std::collections::HashMap<crate::value::SortKey, usize> =
                 std::collections::HashMap::new();
             for v in input {
                 if matches!(v, Value::Null) {
+                    nulls += 1;
                     continue;
                 }
                 let key = v.sort_key_with(scale);
@@ -2672,6 +2700,9 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 counts.truncate(e);
                 counts.drain(..s);
             }
+            if with_nulls && nulls > 0 {
+                counts.push((Value::Null, nulls));
+            }
             counts
                 .into_iter()
                 .map(|(v, n)| {
@@ -2682,6 +2713,13 @@ pub fn apply(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 })
                 .collect()
         }
+        // `@| bins(n)`: the numbers binned into n equal-width bins
+        // over min..max, as the table of (from; to; count), the
+        // nulls counted in a last row. `@| histogram(n; --width=w)`:
+        // the same bins drawn as bars, one text value; a stream of
+        // other values draws one bar per distinct value.
+        "bins" => vec![refusing(call, binned(call, input, scale).map(|b| b.table()))],
+        "histogram" => vec![refusing(call, histogram(call, input, scale))],
         "combinations" | "pairs" | "triples" => {
             let n = match call.name.as_str() {
                 "pairs" => 2,
@@ -3902,22 +3940,57 @@ pub(crate) fn tabulate_table(
 }
 
 /// `| pretty` — a value pretty-printed: a table as the grid, a record
-/// one field per line, a list one item per line, a scalar as it is.
+/// one field per line at every depth (a nested record opens under
+/// its field, indented two spaces per level), a list on one line
+/// when it fits and holds no record, else one item per line, a
+/// scalar as it is.
 pub(crate) fn pretty_value(v: &Value) -> String {
     match v {
         Value::Table(t) => tabulate_table(t, false, None, b','),
+        Value::Record(_) | Value::List(_) => pretty_at(v, 0),
+        other => other.display_form(),
+    }
+}
+
+/// The width a list may take on one line, from its indent.
+const PRETTY_WIDTH: usize = 72;
+
+/// A record or a list pretty-printed with its opening sigil at
+/// column `col`: the items on lines of their own, each starting
+/// under the first (two past the sigil), so a nested record's keys
+/// align under its first key wherever the field began; the closing
+/// parenthesis after the last item.
+fn pretty_at(v: &Value, col: usize) -> String {
+    let pad = " ".repeat(col + 2);
+    match v {
         Value::Record(fields) => {
+            if fields.is_empty() {
+                return "%()".to_string();
+            }
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{} = {}", crate::value::quarb_key(k), v.to_quarb()))
+                .map(|(k, v)| {
+                    let key = crate::value::quarb_key(k);
+                    // the value's sigil stands after `key = `
+                    let at = col + 2 + key.chars().count() + 3;
+                    format!("{key} = {}", pretty_at(v, at))
+                })
                 .collect();
-            format!("%({})", inner.join(";\n  "))
+            format!("%({})", inner.join(&format!(";\n{pad}")))
         }
         Value::List(items) => {
-            let inner: Vec<String> = items.iter().map(Value::to_quarb).collect();
-            format!("@({})", inner.join(";\n  "))
+            let line = v.to_quarb();
+            let opens = items
+                .iter()
+                .any(|i| matches!(i, Value::Record(f) if !f.is_empty()))
+                || col + line.chars().count() > PRETTY_WIDTH;
+            if !opens {
+                return line;
+            }
+            let inner: Vec<String> = items.iter().map(|i| pretty_at(i, col + 2)).collect();
+            format!("@({})", inner.join(&format!(";\n{pad}")))
         }
-        other => other.display_form(),
+        other => other.to_quarb(),
     }
 }
 
@@ -4308,8 +4381,15 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
             names.len(),
             Some(names.iter().map(|n| n.to_string()).collect()),
         ),
+        Arg::Lit(Value::Record(fields)) => return typed_table(fields, v),
+        Arg::Expr(_) => {
+            return Err(
+                "#(--header=…) with a computed header is read in the pipeline; here it has no value"
+                    .into(),
+            );
+        }
         _ => return Err(
-            "#(…) after a pipe takes an option: #(--width=n) lays the list in rows of n, #(--header=list) names its columns"
+            "#(…) after a pipe takes an option: #(--width=n) lays the list in rows of n, #(--header=list) names its columns, #(--header=record) names and types them"
                 .into(),
         ),
     };
@@ -4344,6 +4424,472 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
     }
     let rows: Vec<Vec<Value>> = items.chunks(width).map(|c| c.to_vec()).collect();
     Ok(Value::table(crate::Table::new(header, rows)))
+}
+
+/// A header computed for `#(--header=…)`: a list of names or a
+/// record of names and type words, as the literal forms are;
+/// anything else refuses.
+pub(crate) fn computed_header(v: Value) -> Result<Arg, String> {
+    match v {
+        Value::List(names) if !names.is_empty() && names.iter().all(|n| matches!(n, Value::Str(_))) => {
+            Ok(Arg::Lit(Value::List(names)))
+        }
+        Value::Record(fields) if !fields.is_empty() => {
+            for (k, w) in &fields {
+                match w {
+                    Value::Str(word) if crate::value::ColumnType::from_word(word).is_some() => {}
+                    other => {
+                        return Err(format!(
+                            "#(--header=…): the computed header gives column '{k}' {}, not a type word ({})",
+                            other.display_form(),
+                            crate::value::ColumnType::words().join(", ")
+                        ));
+                    }
+                }
+            }
+            Ok(Arg::Lit(Value::Record(fields)))
+        }
+        other => Err(format!(
+            "#(--header=…): a header is a list of names or a record of names and types; the computed one is {}",
+            kind_of(&other)
+        )),
+    }
+}
+
+/// `#(--header=%(a = "int"; b = "text"))` (spec: The Table): the
+/// typed header. Over a flat list the record's keys name the columns
+/// (its length the width) and every column is cast to its type.
+/// Over a table, or a list of records, the declared columns are cast
+/// and stand first in the record's order, the others follow inferred
+/// as built; a declared column the data lacks refuses.
+fn typed_table(fields: &[(String, Value)], v: Value) -> Result<Value, String> {
+    use crate::value::ColumnType;
+    let declared: Vec<(String, ColumnType)> = fields
+        .iter()
+        .map(|(k, w)| {
+            let word = match w {
+                Value::Str(s) => s.as_str(),
+                _ => "",
+            };
+            ColumnType::from_word(word)
+                .map(|t| (k.clone(), t))
+                .ok_or_else(|| format!("#(--header=…): '{word}' is no column type for '{k}'"))
+        })
+        .collect::<Result<_, _>>()?;
+    let spelled = || {
+        format!(
+            "--header=%({})",
+            declared
+                .iter()
+                .map(|(k, t)| format!("{k} = \"{}\"", t.word()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    };
+    let wrap = |e: String| format!("#({}): {e}", spelled());
+    match v {
+        // the flat list laid in rows of the record's width
+        Value::List(items) if items.iter().all(flat_cell) => {
+            let width = declared.len();
+            if items.len() % width != 0 {
+                return Err(format!(
+                    "#({}): {} items do not divide into rows of {width}",
+                    spelled(),
+                    items.len()
+                ));
+            }
+            let rows: Vec<Vec<Value>> = items.chunks(width).map(|c| c.to_vec()).collect();
+            let header = declared.iter().map(|(k, t)| (k.clone(), Some(*t))).collect();
+            crate::Table::declared(header, rows).map(Value::table).map_err(wrap)
+        }
+        // a table, or what reads as one: the declared columns cast,
+        // first, the others as they are
+        Value::Table(_) | Value::Foreign(_) | Value::List(_) | Value::Record(_) => {
+            let t = match table_reading(v)? {
+                Value::Table(t) => t,
+                other => return Err(wrap(format!("{} is no table", kind_of(&other)))),
+            };
+            let Some(names) = &t.header else {
+                return Err(wrap("the table has no header to declare columns of: it is on its array face".into()));
+            };
+            let mut order: Vec<(usize, Option<ColumnType>)> = Vec::new();
+            for (k, ty) in &declared {
+                match names.iter().position(|n| n == k) {
+                    Some(j) => order.push((j, Some(*ty))),
+                    None => {
+                        return Err(wrap(format!(
+                            "column '{k}' is declared, and the data has no such column (its columns: {})",
+                            names.join(", ")
+                        )));
+                    }
+                }
+            }
+            for j in 0..names.len() {
+                if !order.iter().any(|(o, _)| *o == j) {
+                    order.push((j, None));
+                }
+            }
+            let header = order.iter().map(|(j, ty)| (names[*j].clone(), *ty)).collect();
+            let rows = t
+                .rows
+                .iter()
+                .map(|r| order.iter().map(|(j, _)| r.get(*j).cloned().unwrap_or(Value::Null)).collect())
+                .collect();
+            crate::Table::declared(header, rows).map(Value::table).map_err(wrap)
+        }
+        other => Err(wrap(format!("{} lays out no table", kind_of(&other)))),
+    }
+}
+
+/// The bins of a number stream (spec: Aggregate Commands, bins).
+struct Binned {
+    /// `(from, to, count)` per bin, in order; `to` is open except
+    /// on the last bin.
+    bins: Vec<(f64, f64, i64)>,
+    nulls: i64,
+    /// Whether every edge is a whole number (printed bare then).
+    whole: bool,
+}
+
+impl Binned {
+    fn edge(&self, x: f64) -> Value {
+        if self.whole {
+            Value::Int(x as i64)
+        } else {
+            Value::Float(x)
+        }
+    }
+
+    fn table(&self) -> Value {
+        let mut rows: Vec<Vec<Value>> = self
+            .bins
+            .iter()
+            .map(|(a, b, n)| vec![self.edge(*a), self.edge(*b), Value::Int(*n)])
+            .collect();
+        if self.nulls > 0 {
+            rows.push(vec![Value::Null, Value::Null, Value::Int(self.nulls)]);
+        }
+        Value::table(crate::Table::new(
+            Some(vec!["from".into(), "to".into(), "count".into()]),
+            rows,
+        ))
+    }
+
+    /// The bin's label, `a–b`, the edges to a precision that tells
+    /// adjacent edges apart.
+    fn labels(&self) -> Vec<String> {
+        if self.whole {
+            return self
+                .bins
+                .iter()
+                .map(|(a, b, _)| format!("{}–{}", *a as i64, *b as i64))
+                .collect();
+        }
+        let width = self
+            .bins
+            .first()
+            .map(|(a, b, _)| b - a)
+            .unwrap_or(1.0)
+            .abs();
+        let decimals = if width <= 0.0 {
+            2
+        } else {
+            ((-width.log10()).ceil() as i64 + 1).clamp(0, 6) as usize
+        };
+        self.bins
+            .iter()
+            .map(|(a, b, _)| format!("{a:.decimals$}–{b:.decimals$}"))
+            .collect()
+    }
+}
+
+/// The bin count asked for: the first positional number, 10 unless
+/// given; fewer than one refuses.
+fn bin_count(call: &FnCall) -> Result<usize, String> {
+    let first = call.args.iter().find_map(|a| match a {
+        Arg::Lit(Value::Int(n)) => Some(Ok(*n)),
+        Arg::Lit(other) => Some(Err(format!(
+            "{}({}): the bin count is a number",
+            call.name,
+            other.display_form()
+        ))),
+        _ => None,
+    });
+    match first.transpose()? {
+        None => Ok(10),
+        Some(n) if n >= 1 => Ok(n as usize),
+        Some(n) => Err(format!("{}({n}): at least one bin", call.name)),
+    }
+}
+
+/// The number a stream value reads as, under the column coercion
+/// (a CSV cell's "24" is a number here), `None` for text that is
+/// no number.
+fn number_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        Value::Str(_) => match v.numeric_reading() {
+            Some(Value::Int(i)) => Some(i as f64),
+            Some(Value::Float(f)) => Some(f),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn binned(call: &FnCall, input: Vec<Value>, scale: Scale) -> Result<Binned, String> {
+    let n = bin_count(call)?;
+    let mut xs: Vec<f64> = Vec::with_capacity(input.len());
+    let mut nulls = 0;
+    let mut all_int = true;
+    for v in &input {
+        match (v, number_of(v)) {
+            (Value::Null, _) => nulls += 1,
+            (_, Some(x)) => {
+                if x.fract() != 0.0 {
+                    all_int = false;
+                }
+                xs.push(x);
+            }
+            (other, None) => {
+                return Err(format!(
+                    "{} bins numbers, and the stream holds {}; a stream of other values draws one bar per distinct value under histogram",
+                    call.name,
+                    kind_of(other)
+                ));
+            }
+        }
+    }
+    let _ = scale;
+    if xs.is_empty() {
+        return Ok(Binned {
+            bins: Vec::new(),
+            nulls,
+            whole: true,
+        });
+    }
+    let min = xs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = max - min;
+    let n = if span == 0.0 { 1 } else { n };
+    let width = if n == 0 { 0.0 } else { span / n as f64 };
+    let mut counts = vec![0i64; n];
+    for x in &xs {
+        let i = if width == 0.0 {
+            0
+        } else {
+            (((x - min) / width).floor() as usize).min(n - 1)
+        };
+        counts[i] += 1;
+    }
+    // the edges to a precision that tells them apart and no
+    // further, so the table prints 60.105, not 60.105000000000004
+    let decimals = if width <= 0.0 {
+        0
+    } else {
+        ((-width.log10()).ceil() as i64 + 3).clamp(0, 12) as i32
+    };
+    let scale10 = 10f64.powi(decimals);
+    let edges: Vec<f64> = (0..=n)
+        .map(|k| {
+            let e = if k == n { max } else { min + width * k as f64 };
+            (e * scale10).round() / scale10
+        })
+        .collect();
+    let whole = all_int && edges.iter().all(|e| e.fract() == 0.0);
+    Ok(Binned {
+        bins: (0..n)
+            .map(|k| (edges[k], edges[k + 1], counts[k]))
+            .collect(),
+        nulls,
+        whole,
+    })
+}
+
+/// A bar of up to `width` cells for `n` of `max`, in eighth blocks:
+/// any count shows at least one eighth, and a count past the scale
+/// (the "other" and null bars stand outside it) fills the width.
+fn bar(n: i64, max: i64, width: usize) -> String {
+    if max <= 0 || n <= 0 {
+        return String::new();
+    }
+    let eighths = ((n as f64 / max as f64 * width as f64 * 8.0).round() as usize)
+        .clamp(1, width * 8);
+    let mut s = "█".repeat(eighths / 8);
+    const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    s.push_str(PARTS[eighths % 8]);
+    s
+}
+
+fn histogram(call: &FnCall, input: Vec<Value>, scale: Scale) -> Result<Value, String> {
+    let width = call
+        .args
+        .iter()
+        .find_map(|a| match a {
+            Arg::Opt { name, value } if name == "--width" || name == "-w" => Some(value),
+            _ => None,
+        })
+        .map(|v| match v {
+            Some(crate::syntax::ast::Operand::Lit(Value::Int(w))) if *w >= 1 => Ok(*w as usize),
+            _ => Err("histogram(--width=n): the longest bar in cells, a number of at least 1".to_string()),
+        })
+        .transpose()?
+        .unwrap_or(40);
+    // numbers, or text that reads as numbers throughout, bin; any
+    // other value makes it a bar per distinct value
+    let numeric = input.iter().any(|v| !matches!(v, Value::Null))
+        && input
+            .iter()
+            .all(|v| matches!(v, Value::Null) || number_of(v).is_some());
+    // whole numbers taking no more distinct values than bins draw
+    // one bar per value, in numeric order (a 1/2/3 class column)
+    let few_wholes = numeric && {
+        let n = bin_count(call)?;
+        let mut seen: Vec<i64> = Vec::new();
+        let mut whole = true;
+        for v in &input {
+            if let Some(x) = number_of(v) {
+                if x.fract() != 0.0 {
+                    whole = false;
+                    break;
+                }
+                let i = x as i64;
+                if !seen.contains(&i) {
+                    seen.push(i);
+                }
+            }
+        }
+        whole && !seen.is_empty() && seen.len() <= n
+    };
+    // the rows and whether each sets the scale: the "other" and
+    // null bars stand outside it, so the values keep their shape
+    let rows: Vec<(String, i64, bool)> = if few_wholes {
+        let mut counts: Vec<(i64, i64)> = Vec::new();
+        let mut nulls = 0;
+        for v in &input {
+            match number_of(v) {
+                Some(x) => {
+                    let i = x as i64;
+                    match counts.iter_mut().find(|(k, _)| *k == i) {
+                        Some(c) => c.1 += 1,
+                        None => counts.push((i, 1)),
+                    }
+                }
+                None => nulls += 1,
+            }
+        }
+        counts.sort_by_key(|(k, _)| *k);
+        let mut rows: Vec<(String, i64, bool)> =
+            counts.into_iter().map(|(k, c)| (k.to_string(), c, true)).collect();
+        if nulls > 0 {
+            rows.push(("null".to_string(), nulls, false));
+        }
+        rows
+    } else if numeric {
+        let b = binned(call, input, scale)?;
+        let mut rows: Vec<(String, i64, bool)> = b
+            .labels()
+            .into_iter()
+            .zip(b.bins.iter().map(|(_, _, n)| *n))
+            .map(|(l, n)| (l, n, true))
+            .collect();
+        if b.nulls > 0 {
+            rows.push(("null".to_string(), b.nulls, false));
+        }
+        rows
+    } else {
+        // one bar per distinct value, the most frequent first, the
+        // top n shown and the rest one bar
+        let n = bin_count(call)?;
+        let mut counts: Vec<(Value, i64)> = Vec::new();
+        let mut index: std::collections::HashMap<crate::value::SortKey, usize> =
+            std::collections::HashMap::new();
+        let mut nulls = 0;
+        for v in input {
+            if matches!(v, Value::Null) {
+                nulls += 1;
+                continue;
+            }
+            let key = v.sort_key_with(scale);
+            match index.get(&key) {
+                Some(&i) => counts[i].1 += 1,
+                None => {
+                    index.insert(key, counts.len());
+                    counts.push((v, 1));
+                }
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.compare_with(&b.0, scale)));
+        let mut rows: Vec<(String, i64, bool)> = Vec::new();
+        let mut other = 0;
+        for (i, (v, c)) in counts.into_iter().enumerate() {
+            if i < n {
+                rows.push((v.display_form(), c, true));
+            } else {
+                other += c;
+            }
+        }
+        if other > 0 {
+            rows.push(("other".to_string(), other, false));
+        }
+        if nulls > 0 {
+            rows.push(("null".to_string(), nulls, false));
+        }
+        rows
+    };
+    let max = rows
+        .iter()
+        .filter(|(_, _, scaled)| *scaled)
+        .map(|(_, n, _)| *n)
+        .max()
+        .or_else(|| rows.iter().map(|(_, n, _)| *n).max())
+        .unwrap_or(0);
+    let label_w = rows
+        .iter()
+        .map(|(l, _, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count_w = rows
+        .iter()
+        .map(|(_, n, _)| n.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(label, n, _)| {
+            let pad = " ".repeat(label_w - label.chars().count());
+            let b = bar(*n, max, width);
+            let fill = " ".repeat(width.saturating_sub(b.chars().count()));
+            format!("{label}{pad}  {b}{fill}  {n:>count_w$}")
+        })
+        .collect();
+    crate::pipeline::set_drawing_html(histogram_html(&rows, max));
+    Ok(Value::Str(lines.join("\n")))
+}
+
+/// The HTML form of a histogram: a grid in the table's dress, one
+/// row per bar — the label, the bar as a block whose width is the
+/// count's share of the scale (any count at least a sliver, a
+/// count past the scale the full width), the count — the "other"
+/// and null bars marked `aside`.
+fn histogram_html(rows: &[(String, i64, bool)], max: i64) -> String {
+    use crate::value::table::escape;
+    let mut out = String::from("<table class=\"quarb-table quarb-histogram\"><tbody>");
+    for (label, n, scaled) in rows {
+        let share = if max <= 0 || *n <= 0 {
+            0.0
+        } else {
+            (*n as f64 / max as f64 * 100.0).clamp(1.0, 100.0)
+        };
+        out.push_str(&format!(
+            "<tr{}><td class=\"label\">{}</td><td class=\"bar\"><div style=\"width:{share:.1}%\"></div></td><td class=\"num\">{n}</td></tr>",
+            if *scaled { "" } else { " class=\"aside\"" },
+            escape(label)
+        ));
+    }
+    out.push_str("</tbody></table>");
+    out
 }
 
 /// `| flatten` / `| flatten(n)`: every nested list opened to any
@@ -4462,32 +5008,89 @@ pub(crate) fn values_reading(v: Value) -> Result<Value, String> {
 }
 
 pub(crate) fn table_meta(v: Value, what: &str) -> Result<Value, String> {
-    // A list of records has the collection's header — the union of
-    // the names in order of first appearance, what the record array
-    // prints — whether or not it reads as a table.
-    if what == "header"
-        && let Value::List(l) = &v
-        && !l.is_empty()
-        && l.iter().all(|v| matches!(v, Value::Record(_)))
-    {
-        let mut names: Vec<Value> = Vec::new();
-        for r in l.iter() {
-            if let Value::Record(f) = r {
-                for (k, _) in f {
-                    if !names.iter().any(|n| matches!(n, Value::Str(s) if s == k)) {
-                        names.push(Value::Str(k.clone()));
+    // `| header` is the typed header, one record: the column names
+    // as keys, the column types as values (spec: The Table). A list
+    // of records reads as the table it builds — the union of the
+    // names in first-seen order, each with the least coercible type
+    // across the records. Null on the array face; anything else
+    // refuses naming the two views.
+    if what == "header" {
+        let t = match &v {
+            Value::Null => return Ok(Value::Null),
+            Value::Table(_) | Value::Foreign(_) => table_reading(v)?,
+            // the union of the names in first-seen order, each
+            // column typed over the records' cells (a column holding
+            // a structure takes that kind's word)
+            Value::List(l) if !l.is_empty() && l.iter().all(|v| matches!(v, Value::Record(_))) => {
+                let mut names: Vec<String> = Vec::new();
+                for r in l.iter() {
+                    if let Value::Record(f) = r {
+                        for (k, _) in f {
+                            if !names.contains(k) {
+                                names.push(k.clone());
+                            }
+                        }
                     }
                 }
+                let fields = names
+                    .into_iter()
+                    .map(|name| {
+                        let cells: Vec<Value> = l
+                            .iter()
+                            .map(|r| match r {
+                                Value::Record(f) => f
+                                    .iter()
+                                    .find(|(k, _)| *k == name)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or(Value::Null),
+                                _ => Value::Null,
+                            })
+                            .collect();
+                        let word = if cells.iter().all(flat_cell) {
+                            crate::value::type_column(cells).0.word().to_string()
+                        } else {
+                            match cells.iter().find(|c| !flat_cell(c)) {
+                                Some(c) => type_of(c).to_string(),
+                                None => "text".to_string(),
+                            }
+                        };
+                        (name, Value::Str(word))
+                    })
+                    .collect();
+                return Ok(Value::Record(fields));
             }
-        }
-        return Ok(Value::list(names));
+            Value::List(_) => {
+                return Err(
+                    "header reads a table's column names against their types (keys and type are the two lists); this list is not a list of records"
+                        .into(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "header reads a table's column names against their types (keys and type are the two lists), not {}",
+                    kind_of(other)
+                ));
+            }
+        };
+        let Value::Table(t) = t else {
+            return Err(format!("{} has no header", kind_of(&t)));
+        };
+        return Ok(match &t.header {
+            Some(names) => Value::Record(
+                names
+                    .iter()
+                    .cloned()
+                    .zip(t.types().into_iter().map(|ty| Value::Str(ty.word().to_string())))
+                    .collect(),
+            ),
+            None => Value::Null,
+        });
     }
     let t = match table_reading(v)? {
         Value::Table(t) => t,
         other => return Err(format!("{} has no {what}", kind_of(&other))),
     };
     Ok(match what {
-        "header" => t.header_value(),
         "types" => t.types_value(),
         _ => t.shape(),
     })
@@ -4810,6 +5413,24 @@ pub(crate) fn columns_reading(v: Value) -> Result<Value, String> {
 
 /// `transpose` — a list of lists with its rows and columns
 /// exchanged; the rows must be of one length.
+/// A frame transposed: the header as the first column (`column`),
+/// each old row a column numbered by position.
+fn transposed_frame(t: &crate::Table) -> Value {
+    let names = t.header.clone().unwrap_or_default();
+    let mut header = vec!["column".to_string()];
+    header.extend((1..=t.rows.len()).map(|i| i.to_string()));
+    let rows: Vec<Vec<Value>> = names
+        .iter()
+        .enumerate()
+        .map(|(j, name)| {
+            let mut row = vec![Value::Str(name.clone())];
+            row.extend(t.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)));
+            row
+        })
+        .collect();
+    Value::table(crate::Table::new(Some(header), rows))
+}
+
 pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
     // The rows of one width, from an array or a list of lists.
     let rows: Vec<Vec<Value>> = match v {
@@ -4821,22 +5442,33 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
         }
         Value::Table(t) => match &t.header {
             None => t.rows.clone(),
-            // A frame's header is no row: shed it first.
-            Some(_) => {
-                return Err(format!(
-                    "{} names its columns, and the header is no row; '| values' sheds it (t | values | transpose)",
-                    t.kind()
-                ));
-            }
+            // A frame transposes to a frame (spec: Tables and
+            // Reshapes): the header becomes the first column, named
+            // `column`, each old row a column numbered by position;
+            // `| values | transpose` is the matrix of the cells alone.
+            Some(_) => return Ok(transposed_frame(&t)),
         },
+        // A record of lists is a frame's column reading, and a list
+        // of records its row reading: both transpose as the frame.
+        Value::Record(fields)
+            if !fields.is_empty() && fields.iter().all(|(_, v)| matches!(v, Value::List(_))) =>
+        {
+            match table_reading(Value::Record(fields))? {
+                Value::Table(t) => return Ok(transposed_frame(&t)),
+                other => return Err(format!("{} is no table", kind_of(&other))),
+            }
+        }
+        Value::List(items)
+            if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Record(_))) =>
+        {
+            match table_reading(Value::List(items))? {
+                Value::Table(t) => return Ok(transposed_frame(&t)),
+                other => return Err(format!("{} is no table", kind_of(&other))),
+            }
+        }
         Value::List(items) => {
             if items.is_empty() {
                 return Ok(Value::table(crate::Table::new(None, Vec::new())));
-            }
-            if items.iter().all(|v| matches!(v, Value::Record(_))) {
-                return Err(
-                    "transpose takes an array or a list of lists; a list of records reads as a table first ('| #'), and its values as the array ('| values')".into(),
-                );
             }
             let mut rows: Vec<Vec<Value>> = Vec::with_capacity(items.len());
             for (i, v) in items.iter().enumerate() {
@@ -5061,8 +5693,22 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
 /// `--value=` rename them).
 fn melt(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
     let ids = word_args(call);
-    let name_field = opt_text(call, "--name").unwrap_or_else(|| "name".into());
+    let name_field = opt_text(call, "--name").unwrap_or_else(|| "variable".into());
     let value_field = opt_text(call, "--value").unwrap_or_else(|| "value".into());
+    // A table value melts its rows and answers the long table (spec:
+    // Tables and Reshapes).
+    if let [Value::Table(_)] = input.as_slice() {
+        let t = input.into_iter().next().expect("one");
+        let records = match rows_reading(t)? {
+            Value::List(l) => l.to_vec(),
+            other => vec![other],
+        };
+        let long = melt(call, records)?;
+        return match table_reading(Value::list(long))? {
+            t @ Value::Table(_) => Ok(vec![t]),
+            other => Ok(vec![other]),
+        };
+    }
     let mut out = Vec::new();
     for (i, v) in input.iter().enumerate() {
         let Value::Record(fields) = v else {

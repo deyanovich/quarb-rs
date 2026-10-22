@@ -44,6 +44,11 @@ pub enum PdfError {
 }
 
 struct Node {
+    /// The kind word (spec: Traits): what the node is in the PDF
+    /// object model — `document`, `trailer`, `section`, a declared
+    /// `/Type` (`page`, `catalog`, `font`...), else `dictionary`,
+    /// `stream`, `array`, or a scalar's value kind.
+    kind: &'static str,
     name: Option<String>,
     parent: Option<usize>,
     children: Vec<usize>,
@@ -67,15 +72,15 @@ impl PdfAdapter {
             nodes: Vec::new(),
             back: Vec::new(),
         };
-        let root = a.push(None, None);
+        let root = a.push("document", None, None);
         // One node per indirect object, allocated up front so
         // references can link forward.
         let mut by_id: HashMap<lopdf::ObjectId, usize> = HashMap::new();
-        let trailer = a.push(Some("trailer".into()), Some(root));
-        let objects = a.push(Some("objects".into()), Some(root));
+        let trailer = a.push("trailer", Some("trailer".into()), Some(root));
+        let objects = a.push("section", Some("objects".into()), Some(root));
         a.nodes[root].children = vec![trailer, objects];
         for id in doc.objects.keys() {
-            let n = a.push(Some("object".into()), Some(objects));
+            let n = a.push("dictionary", Some("object".into()), Some(objects));
             a.nodes[objects].children.push(n);
             by_id.insert(*id, n);
         }
@@ -87,12 +92,19 @@ impl PdfAdapter {
             match obj {
                 Object::Dictionary(d) => {
                     if let Some(t) = type_name(d) {
+                        if let Some(k) = type_kind(&t) {
+                            a.nodes[n].kind = k;
+                        }
                         a.nodes[n].name = Some(t);
                     }
                     a.fill_dict(n, d, &by_id);
                 }
                 Object::Stream(s) => {
+                    a.nodes[n].kind = "stream";
                     if let Some(t) = type_name(&s.dict) {
+                        if let Some(k) = type_kind(&t) {
+                            a.nodes[n].kind = k;
+                        }
                         a.nodes[n].name = Some(t);
                     }
                     a.nodes[n]
@@ -102,10 +114,15 @@ impl PdfAdapter {
                     a.fill_dict(n, &dict, &by_id);
                 }
                 Object::Array(items) => {
+                    a.nodes[n].kind = "array";
                     let items = items.clone();
                     a.fill_array(n, &items, &by_id, n, "item");
                 }
-                other => a.nodes[n].value = scalar(other),
+                other => {
+                    let val = scalar(other);
+                    a.nodes[n].kind = val.as_ref().map_or("null", quarb::adapter::value_kind);
+                    a.nodes[n].value = val;
+                }
             }
         }
         a.fill_dict(trailer, &doc.trailer.clone(), &by_id);
@@ -118,8 +135,9 @@ impl PdfAdapter {
         Ok(a)
     }
 
-    fn push(&mut self, name: Option<String>, parent: Option<usize>) -> usize {
+    fn push(&mut self, kind: &'static str, name: Option<String>, parent: Option<usize>) -> usize {
         self.nodes.push(Node {
+            kind,
             name,
             parent,
             children: Vec::new(),
@@ -141,12 +159,12 @@ impl PdfAdapter {
                     }
                 }
                 Object::Dictionary(inner) => {
-                    let c = self.push(Some(key), Some(n));
+                    let c = self.push("dictionary", Some(key), Some(n));
                     self.nodes[n].children.push(c);
                     self.fill_dict(c, &inner.clone(), by_id);
                 }
                 Object::Array(items) => {
-                    let c = self.push(Some(key.clone()), Some(n));
+                    let c = self.push("array", Some(key.clone()), Some(n));
                     self.nodes[n].children.push(c);
                     self.fill_array(c, &items.clone(), by_id, n, &key);
                 }
@@ -180,18 +198,19 @@ impl PdfAdapter {
                     }
                 }
                 Object::Dictionary(inner) => {
-                    let c = self.push(Some("item".into()), Some(n));
+                    let c = self.push("dictionary", Some("item".into()), Some(n));
                     self.nodes[n].children.push(c);
                     self.fill_dict(c, &inner.clone(), by_id);
                 }
                 Object::Array(inner) => {
-                    let c = self.push(Some("item".into()), Some(n));
+                    let c = self.push("array", Some("item".into()), Some(n));
                     self.nodes[n].children.push(c);
                     self.fill_array(c, &inner.clone(), by_id, link_node, link_label);
                 }
                 other => {
                     if let Some(val) = scalar(other) {
-                        let c = self.push(Some("item".into()), Some(n));
+                        let kind = quarb::adapter::value_kind(&val);
+                        let c = self.push(kind, Some("item".into()), Some(n));
                         self.nodes[n].children.push(c);
                         self.nodes[c].value = Some(val);
                     }
@@ -216,6 +235,41 @@ impl PdfAdapter {
         parts.reverse();
         format!("/{}", parts.join("/"))
     }
+}
+
+/// The kind word of an object declaring `/Type`: the type name
+/// itself, interned (`page`, `pages`, `catalog`, `font`...), the
+/// outline root as `outline`; a type outside the interned set keeps
+/// the object's structural word (`dictionary` or `stream`).
+fn type_kind(t: &str) -> Option<&'static str> {
+    Some(match t {
+        "catalog" => "catalog",
+        "pages" => "pages",
+        "page" => "page",
+        "outlines" | "outline" => "outline",
+        "font" => "font",
+        "fontdescriptor" => "fontdescriptor",
+        "xobject" => "xobject",
+        "annot" => "annot",
+        "action" => "action",
+        "extgstate" => "extgstate",
+        "metadata" => "metadata",
+        "objstm" => "objstm",
+        "xref" => "xref",
+        "encoding" => "encoding",
+        "pattern" => "pattern",
+        "shading" => "shading",
+        "structtreeroot" => "structtreeroot",
+        "structelem" => "structelem",
+        "ocg" => "ocg",
+        "ocmd" => "ocmd",
+        "embeddedfile" => "embeddedfile",
+        "filespec" => "filespec",
+        "group" => "group",
+        "sig" => "sig",
+        "xobjectgroup" => "xobjectgroup",
+        _ => return None,
+    })
 }
 
 /// The declared /Type, lowercased, as the node's name.
@@ -280,6 +334,13 @@ impl AstAdapter for PdfAdapter {
     }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.nodes[node.0 as usize].parent.map(|i| NodeId(i as u64))
+    }
+    /// The kind (spec: Traits): `<document>` at the root, `<trailer>`,
+    /// `<section>` over the objects, a declared type (`<page>`,
+    /// `<catalog>`, `<outline>`...), else `<dictionary>`, `<stream>`,
+    /// `<array>`, or a scalar's value kind.
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        vec![self.nodes[node.0 as usize].kind.to_string()]
     }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.nodes[node.0 as usize]

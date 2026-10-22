@@ -726,13 +726,15 @@ impl AstAdapter for MetathecaAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// `<state>`, `<genesis>`, `<head>`; `<dir>`; `<entry>`,
+    /// The kind first (spec: Traits): `<store>` at the root; `<dir>`
+    /// for the listings; `<state>`, `<genesis>`, `<head>`; `<entry>`,
     /// `<orphan>`, `<changed>`; `<fact>`.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let kind = self.nodes.borrow()[node.0 as usize].kind.clone();
         match kind {
-            Kind::Root | Kind::StatesDir | Kind::EntriesDir { .. } | Kind::PathsDir { .. } => {
-                Vec::new()
+            Kind::Root => vec!["store".to_string()],
+            Kind::StatesDir | Kind::EntriesDir { .. } | Kind::PathsDir { .. } => {
+                vec!["dir".to_string()]
             }
             Kind::Head => vec!["state".to_string(), "head".to_string()],
             Kind::State { hash } => {

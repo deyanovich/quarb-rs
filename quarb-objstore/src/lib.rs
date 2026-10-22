@@ -566,12 +566,13 @@ impl AstAdapter for ObjstoreAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// `<object>` / `<prefix>`.
+    /// The kind (spec: Traits): `<bucket>` at the root, `<object>` /
+    /// `<prefix>` under it.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let nodes = self.nodes.borrow();
         let n = &nodes[node.0 as usize];
         if n.parent.is_none() {
-            return Vec::new();
+            return vec!["bucket".to_string()];
         }
         vec![if n.is_object { "object" } else { "prefix" }.to_string()]
     }

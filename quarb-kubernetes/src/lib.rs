@@ -602,11 +602,11 @@ impl AstAdapter for KubernetesAdapter {
     /// (`<instant>` for timestamps).
     fn traits(&self, node: NodeId) -> Vec<String> {
         let t = match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => return Vec::new(),
+            Kind::Root => "cluster".to_string(),
             Kind::Listing { .. } => "resource".to_string(),
             Kind::Object { key } => match self.object(key) {
                 Some(info) => info.kind.to_lowercase(),
-                None => return Vec::new(),
+                None => "object".to_string(),
             },
             Kind::Field { value } => match value {
                 Field::Map(_) => "map",

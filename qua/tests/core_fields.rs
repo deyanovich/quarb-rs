@@ -45,10 +45,16 @@ fn the_inspection_fields_list_the_three_ladders_as_projections() {
     assert_eq!(rows("/a:metadata"), meta);
     // the core fields themselves, the same list on every node
     let fields = rows("/a:fields");
-    for k in [":name;", ":id;", ":index;", ":traits;", ":props;", ":meta;", ":fields;"] {
+    for k in [":name;", ":id;", ":index;", ":traits;", ":kind;", ":props;", ":meta;", ":fields;"] {
         assert!(fields[0].contains(k), "{k} in {fields:?}");
     }
     assert_eq!(rows("/b:fields"), fields);
+    // the kind: the first trait, the word that says what the node
+    // is in its adapter's model (spec: Traits); never null
+    assert_eq!(rows("/a:kind"), ["object"]);
+    assert_eq!(rows("/b:kind"), ["array"]);
+    assert_eq!(rows("/a/*:kind"), rows("/a/* | :traits | first"));
+    assert_eq!(rows("/a/*[:kind = \"number\"] | :name"), rows("/a/*<number> | :name"));
     // the canonical spellings print short
     for (q, canon) in [("/a:properties", "/a:props"), ("/a:metadata", "/a:meta")] {
         assert_eq!(quarb::Query::parse(q, &doc()).unwrap().canonical(), canon);
@@ -83,7 +89,7 @@ fn the_fields_command_reads_any_topic() {
     assert_eq!(rows("= %(a = 1) | fields"), ["@(:a)"]);
     assert_eq!(rows("= %(a = 1) | keys"), [r#"@("a")"#]);
     assert_eq!(rows("= %(a = 1) | values"), ["@(1)"]);
-    assert_eq!(rows("= #(%(a = 1)) | header"), [r#"@("a")"#]);
+    assert_eq!(rows("= #(%(a = 1)) | header"), [r#"%(a = "int")"#]);
     assert_eq!(rows("= @(@(1)) | flatten"), ["@(1)"]);
     let e = refuse("= 7 | fields");
     assert!(e.contains("fields reads a record's fields"), "{e}");

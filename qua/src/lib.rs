@@ -2958,7 +2958,7 @@ fn run_wrapped<A: AstAdapter>(
     // Buffered: one flush at the end, not a syscall per line.
     let out = OutSink::new(oc.encoding.clone());
     let mode = oc.output;
-    // Under an output locale a closing `@| csv` / `@| table` is the
+    // Under an output locale a closing `@| csv` / `@| pretty` is the
     // tool's to render: the rows come back as they stand before it.
     let outcome = match oc.locale.map(|(l, _)| l) {
         Some(_) if mode == Output::Quarb => run_query(&parsed.for_rendering())?,
@@ -2969,6 +2969,7 @@ fn run_wrapped<A: AstAdapter>(
         closing,
         refs,
         plan: _,
+        html: _,
     } = outcome;
     // The unresolved references follow the result (the sink flushes
     // first), as the transcripts read them.
@@ -3082,7 +3083,7 @@ fn emit_values(
     Ok(())
 }
 
-/// Records as columns, as the `@| table` and `@| csv` commands print
+/// Records as columns, as the `@| pretty` and `@| csv` commands print
 /// them: `--table` and `--csv` are the query with the command appended.
 fn write_table(
     out: &mut impl std::io::Write,

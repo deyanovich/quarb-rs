@@ -508,10 +508,17 @@ impl AstAdapter for KafkaAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["cluster".into()],
             Kind::Topic { .. } => vec!["topic".into()],
             Kind::Message { .. } => vec!["message".into()],
-            Kind::Field { .. } => Vec::new(),
+            Kind::Field { value } => vec![
+                match value {
+                    Field::Map(_) => "map",
+                    Field::List(_) => "array",
+                    Field::Scalar(v) => quarb::adapter::value_kind(v),
+                }
+                .into(),
+            ],
         }
     }
 

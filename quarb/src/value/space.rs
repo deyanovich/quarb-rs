@@ -205,6 +205,17 @@ impl ColumnType {
         }
     }
 
+    /// The type named by its word, as a declared header names it
+    /// (`#(--header=%(age = "int"))`); `None` for no such word.
+    pub fn from_word(word: &str) -> Option<ColumnType> {
+        ColumnType::ORDER.into_iter().find(|t| t.word() == word)
+    }
+
+    /// The words, in lattice order, for a refusal to list.
+    pub fn words() -> Vec<&'static str> {
+        ColumnType::ORDER.iter().map(|t| t.word()).collect()
+    }
+
     const ORDER: [ColumnType; 8] = [
         ColumnType::Boolean,
         ColumnType::Integer,
@@ -324,7 +335,7 @@ fn coerce_cell(v: &Value, t: ColumnType) -> Option<Value> {
 /// cell coerces to, and the cells coerced. A quantity column is of
 /// one dimension; cells of several fall through to text. An
 /// all-null column is text.
-fn type_column(cells: Vec<Value>) -> (ColumnType, Vec<Value>) {
+pub(crate) fn type_column(cells: Vec<Value>) -> (ColumnType, Vec<Value>) {
     for t in ColumnType::ORDER {
         let coerced: Option<Vec<Value>> = cells.iter().map(|c| coerce_cell(c, t)).collect();
         let Some(coerced) = coerced else { continue };
@@ -374,6 +385,74 @@ impl Table {
             }
         }
         t
+    }
+
+    /// A table built under a declared header (spec: The Table,
+    /// `#(--header=record)`): a column declared with a type has every
+    /// cell cast to it, and a cell that does not cast refuses the
+    /// build naming the column and the first offending row; a column
+    /// declared without a type is typed as `new` types it. The rows
+    /// are expected flat and of the header's width.
+    pub fn declared(
+        header: Vec<(String, Option<ColumnType>)>,
+        rows: Vec<Vec<Value>>,
+    ) -> Result<Table, String> {
+        let names: Vec<String> = header.iter().map(|(n, _)| n.clone()).collect();
+        let mut t = Table { header: Some(names), rows };
+        let w = header.len();
+        if t.rows.is_empty() {
+            return Ok(t);
+        }
+        for (j, (name, declared)) in header.iter().enumerate() {
+            let cells: Vec<Value> = t
+                .rows
+                .iter()
+                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                .collect();
+            let coerced = match declared {
+                Some(ty) => {
+                    let mut out = Vec::with_capacity(cells.len());
+                    for (i, c) in cells.iter().enumerate() {
+                        // a whole-valued float is an integer under
+                        // a declared int (the cast is lossless)
+                        let cast = coerce_cell(c, *ty).or_else(|| match (c, ty) {
+                            (Value::Float(f), ColumnType::Integer) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
+                                Some(Value::Int(*f as i64))
+                            }
+                            _ => None,
+                        });
+                        match cast {
+                            Some(v) => out.push(v),
+                            None => {
+                                let held = match c {
+                                    Value::Str(s) => format!("\"{s}\""),
+                                    other => other.display_form(),
+                                };
+                                return Err(format!(
+                                    "column '{name}' is declared {}, and row {} holds {held}, which does not cast to it",
+                                    ty.word(),
+                                    i + 1,
+                                ));
+                            }
+                        }
+                    }
+                    out
+                }
+                None => type_column(cells).1,
+            };
+            for (r, c) in t.rows.iter_mut().zip(coerced) {
+                if j < r.len() {
+                    r[j] = c;
+                } else {
+                    r.resize(j, Value::Null);
+                    r.push(c);
+                }
+            }
+        }
+        for r in &mut t.rows {
+            r.resize(w, Value::Null);
+        }
+        Ok(t)
     }
 
     /// A matrix from rows of one width: every cell coerced TOGETHER

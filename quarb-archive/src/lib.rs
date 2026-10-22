@@ -1563,10 +1563,11 @@ impl AstAdapter for ArchiveAdapter {
         self.nodes[node.0 as usize].parent
     }
 
-    /// `<file>` or `<dir>`.
+    /// The kind (spec: Traits): `<archive>` at the root, `<file>` or
+    /// `<dir>` under it.
     fn traits(&self, node: NodeId) -> Vec<String> {
         if node.0 == 0 {
-            return Vec::new();
+            return vec!["archive".to_string()];
         }
         let t = if self.nodes[node.0 as usize].entry.is_some() {
             "file"

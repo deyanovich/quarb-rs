@@ -757,11 +757,14 @@ impl AstAdapter for GitAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// `<commit>`, `<branch>`, `<tag>`, `<tree>`, `<blob>`.
+    /// The kind first (spec: Traits): `<repository>` at the root,
+    /// `<dir>` for a listing, then `<commit>`, `<branch>`, `<tag>`,
+    /// `<tree>`, `<blob>`.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let nodes = self.nodes.borrow();
         let t = match &nodes[node.0 as usize].kind {
-            Kind::Root | Kind::Dir(_) => return Vec::new(),
+            Kind::Root => "repository",
+            Kind::Dir(_) => "dir",
             Kind::Commit(_) => "commit",
             Kind::Ref { .. } => match nodes[node.0 as usize].parent {
                 Some(TAGS) => "tag",

@@ -45,10 +45,10 @@ fn segment_wildcards_over_a_documents_traits() {
     let dir = fixture("html");
     std::fs::write(dir.join("one.html"), PAGE).unwrap();
     let count = |q: &str| qua(&dir, &[&format!("{q} @| count"), "page=text:one.html"]);
-    // the document carries three tags and one category
+    // the document's kind first, then its three tags and one category
     assert_eq!(
         qua(&dir, &["/page:traits", "page=text:one.html"]),
-        r#"@("tag:Lydia"; "tag:Croesus"; "tag:Persia"; "category:Histories")"#
+        r#"@("document"; "tag:Lydia"; "tag:Croesus"; "tag:Persia"; "category:Histories")"#
     );
     assert_eq!(count("//*<tag:Lydia>"), "1");
     assert_eq!(count("//*<tag:.>"), "1");
@@ -60,8 +60,9 @@ fn segment_wildcards_over_a_documents_traits() {
     assert_eq!(count("//*<tag>"), "0");
     assert_eq!(count("//*<tag*>"), "0");
     assert_eq!(count("//*<Lyd*>"), "0");
-    // `.` is one unnamespaced segment: the blocks, not the document
-    assert_eq!(count("//*<.>"), "2");
+    // `.` is one unnamespaced segment: the blocks and the document
+    // (its kind is one); without a tag, the blocks alone
+    assert_eq!(count("//*<.>"), "3");
     assert_eq!(count("//*<. && !tag:*>"), "2");
     // the rounded spelling reads the same
     assert_eq!(count("//*(:tag:.)"), "1");

@@ -232,7 +232,7 @@ fn a_closing_table_renders_and_the_value_never_changes() {
     let dir = fixture("commands");
     let ru = ["--locale", "ru-RU"];
     let q = |tail: &str| format!("/rows/* | %(::city; ::n) {tail}");
-    // a closing @| csv / @| table renders as the flags do
+    // a closing @| csv / @| pretty renders as the flags do
     assert_eq!(
         ok(&dir, &[], &[ru[0], ru[1], &q("@| csv"), "sales.json"]),
         "city;n\nЯрославль;1234567,5\nЁлкино;42\nЕлец;0,5"

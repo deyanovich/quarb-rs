@@ -917,18 +917,22 @@ impl RelationalModel {
 }
 
 impl AstAdapter for RelationalModel {
-    /// A cell carries its column's declared type and the derived
-    /// kind (spec: adapter traits); tables and rows carry none.
+    /// The kind first (spec: Traits): `database`, `table`, `row`,
+    /// `cell`; a cell then carries its column's declared type and
+    /// the derived kind (spec: adapter traits).
     fn traits(&self, node: NodeId) -> Vec<String> {
-        let Some((t, _, c)) = self.cell(node) else {
-            return Vec::new();
-        };
-        self.tables[t]
-            .spec
-            .column_types
-            .get(c)
-            .map(|d| type_traits(d))
-            .unwrap_or_default()
+        if let Some((t, _, c)) = self.cell(node) {
+            let mut out = vec!["cell".to_string()];
+            if let Some(d) = self.tables[t].spec.column_types.get(c) {
+                out.extend(type_traits(d));
+            }
+            return out;
+        }
+        match self.entry(node) {
+            Some((_, Some(_))) => vec!["row".to_string()],
+            Some((_, None)) => vec!["table".to_string()],
+            None => vec!["database".to_string()],
+        }
     }
 
     fn declared_notation(&self, node: NodeId) -> Option<String> {

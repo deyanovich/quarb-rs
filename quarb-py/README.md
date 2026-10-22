@@ -101,7 +101,12 @@ license at your option. Both texts are bundled in the package.
 `%%quarb [NAME]` runs a cell-sized query against a named mount;
 results render as HTML tables, iterate as typed values
 (quantities keep magnitude + unit), and convert with `.df` /
-`.df_magnitudes()`.
+`.df_magnitudes()`. A query closing in a drawing renders rich
+too: `@| tree` as a folding outline (every node with children
+opens and closes, with *expand all* / *collapse all* on top),
+`@| histogram` as a bar grid — the text the terminal prints
+stays the plain form (`Document.values_html` answers both,
+`quarb.closes_with_drawing` says when a query has a drawing).
 
 For a notebook where *every* cell is a query, install the
 dedicated kernel and pick **Quarb** in the launcher:

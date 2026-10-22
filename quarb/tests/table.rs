@@ -77,14 +77,14 @@ fn text_is_escaped_and_nested_values_are_marked() {
 
 #[test]
 fn the_rule_is_the_closing_command() {
-    assert!(closes_with_table("/books/* | %(t = /title::) @| table"));
+    assert!(closes_with_table("/books/* | %(t = /title::) @| pretty"));
     assert!(closes_with_table("/books/* @| pretty(title; price)"));
-    assert!(closes_with_table("//*<tabula> @| table"));
+    assert!(closes_with_table("//*<tabula> @| pretty"));
     assert!(closes_with_table(
-        "//a[::href] | %(t = ::; h = ::href) @| table"
+        "//a[::href] | %(t = ::; h = ::href) @| pretty"
     ));
     assert!(!closes_with_table("/books/* @| csv"));
-    assert!(!closes_with_table("/books/* @| table | first"));
+    assert!(!closes_with_table("/books/* @| pretty | first"));
     assert!(!closes_with_table("/books/* | table"));
     assert!(!closes_with_table("/books/*"));
     assert!(!closes_with_table("not a query ]["));

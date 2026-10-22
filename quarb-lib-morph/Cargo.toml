@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.40.1" }
-quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.40.1" }
+quarb = { path = "../quarb", version = "0.41.0" }
+quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.41.0" }
 # `auto-initialize`: the engine embeds CPython and starts it on the
 # first call; the host links against the local Python at build
 # time, behind the host's feature.

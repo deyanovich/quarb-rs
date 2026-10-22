@@ -458,12 +458,14 @@ impl TextModel {
     pub(super) fn v_traits(&self, v: Virt) -> Vec<String> {
         match v {
             Virt::Ann { row } => self.a_traits(row),
-            Virt::Sentence { .. } => vec!["derived".to_string()],
+            // the kind first (spec: Traits): a sentence, a token,
+            // then the class
+            Virt::Sentence { .. } => vec!["sentence".to_string(), "derived".to_string()],
             Virt::Token { block, k } => {
                 let Some(t) = self.tok(block, k) else {
-                    return Vec::new();
+                    return vec!["token".to_string()];
                 };
-                let mut out = vec![t.class.name().to_string()];
+                let mut out = vec!["token".to_string(), t.class.name().to_string()];
                 if t.class == TokenClass::Punct && is_quote(self.form(block, &t)) {
                     out.push("quote".to_string());
                 }

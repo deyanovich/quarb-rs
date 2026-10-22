@@ -430,9 +430,9 @@ impl AstAdapter for SparqlAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["graph".to_string()],
             Kind::Class { .. } => vec!["class".to_string()],
-            Kind::Resource { .. } => Vec::new(),
+            Kind::Resource { .. } => vec!["resource".to_string()],
         }
     }
 

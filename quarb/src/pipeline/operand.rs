@@ -590,6 +590,42 @@ pub(crate) fn eval_operand<H: Host>(
                 .map(|s| Value::Str(s.clone()))
                 .unwrap_or(Value::Null),
         ],
+        // The descriptors (spec: Field Projections): on a record, a
+        // table or a list of records, `:::key` reads a descriptor of
+        // the value — fields, keys, header, type, dim, nrows, ncols,
+        // what the commands of those names answer — any other key
+        // null. `::key` stays the position's property whatever the
+        // topic (the double colon picks up from navigation), and a
+        // record's field has the single colon alone.
+        Operand::Rel {
+            steps,
+            projection: Some(Projection::AdapterMeta(key)),
+            anchor: Anchor::Current,
+        } if steps.is_empty()
+            && (matches!(scope.topic, Some(Value::Record(_) | Value::Table(_)))
+                || matches!(scope.topic, Some(Value::List(l)) if !l.is_empty() && l.iter().all(|x| matches!(x, Value::Record(_))))) =>
+        {
+            let topic = scope.topic.cloned().unwrap_or(Value::Null);
+            if let Some(prov) = scope.prov {
+                note_all(&prov.origins);
+            }
+            use crate::stdlib as sl;
+            vec![match key.as_str() {
+                "fields" => sl::fields_reading(topic).unwrap_or(Value::Null),
+                "keys" => sl::keys_reading(topic).unwrap_or(Value::Null),
+                "header" => sl::table_meta(topic, "header").unwrap_or(Value::Null),
+                "type" => sl::type_of(&topic),
+                "dim" => sl::table_meta(topic, "dim").unwrap_or(Value::Null),
+                "nrows" | "ncols" => match sl::table_meta(topic, "dim") {
+                    Ok(Value::List(d)) => d
+                        .get(usize::from(key == "ncols"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
+                _ => Value::Null,
+            }]
+        }
         Operand::Rel {
             steps,
             projection,

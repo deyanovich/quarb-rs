@@ -551,9 +551,10 @@ impl TextModel {
 
     pub(super) fn a_traits(&self, row: u32) -> Vec<String> {
         let Some(r) = self.ann.get(row as usize) else {
-            return Vec::new();
+            return vec!["token".to_string()];
         };
-        let mut out = Vec::new();
+        // the kind first (spec: Traits), then the class
+        let mut out = vec!["token".to_string()];
         if r.empty {
             out.push("empty".to_string());
         } else {

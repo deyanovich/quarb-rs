@@ -224,7 +224,7 @@ fn envelope_refs(
 }
 
 /// [`envelope_refs`], carrying the HTML grid of a result whose
-/// closing command is `@| table` (`html`, null otherwise): the
+/// closing command is `@| pretty` (`html`, null otherwise): the
 /// host draws it in place of the lines, dressed by
 /// [`table_css`] once.
 fn envelope_html(

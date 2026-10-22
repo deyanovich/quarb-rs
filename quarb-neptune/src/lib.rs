@@ -440,9 +440,11 @@ impl AstAdapter for NeptuneAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["graph".to_string()],
             Kind::Label { .. } => vec!["label".to_string()],
-            Kind::Entity { labels, .. } => labels.clone(),
+            Kind::Entity { labels, .. } => std::iter::once("node".to_string())
+                .chain(labels.iter().filter(|l| l.as_str() != "node").cloned())
+                .collect(),
         }
     }
 

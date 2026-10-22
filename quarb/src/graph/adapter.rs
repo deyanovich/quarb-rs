@@ -866,6 +866,31 @@ mod probe {
     }
 }
 
+/// The kind word of a value held by a node (spec: Traits): the one
+/// structural word an adapter leads its traits with when the node
+/// is a field holding that value — what JSON's adapter mints for
+/// its scalars and containers, so every store's fields answer
+/// `:kind` alike.
+pub fn value_kind(v: &crate::Value) -> &'static str {
+    use crate::Value;
+    match v {
+        Value::Record(_) => "map",
+        Value::List(_) => "array",
+        Value::Str(_) => "string",
+        Value::Int(_) | Value::Float(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
+        Value::Instant { .. } => "instant",
+        Value::Quantity { base, .. } if base == "s" => "duration",
+        Value::Period { .. } => "period",
+        Value::Quantity { .. } => "quantity",
+        Value::Table(_) => "table",
+        Value::Foreign(_) => "opaque",
+        Value::Node(_) => "node",
+        Value::Projection { .. } => "projection",
+    }
+}
+
 /// The interface a data source implements to be queried by Quarb.
 ///
 /// An adapter maps its native structure onto the arbor model: a tree

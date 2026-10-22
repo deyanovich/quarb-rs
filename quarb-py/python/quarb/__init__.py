@@ -40,7 +40,7 @@ ranges), and ``budget="nodes=1M,bytes=2GiB"`` on ``values`` /
 passes the bound before anything is read (``strict`` refuses an
 unknown estimate too) — the ``qua --plan`` / ``--budget`` pair.
 
-A query whose closing command is ``@| table`` has a second form:
+A query whose closing command is ``@| pretty`` has a second form:
 ``doc.table(query)`` returns ``(rows, text, html)`` — the rows as
 typed values, the text table as ``qua`` prints it, and the HTML
 grid every browser host renders, dressed with ``quarb.TABLE_CSS``.
@@ -73,6 +73,7 @@ mount = _ext.mount
 translate = _ext.translate
 highlight = _ext.highlight
 closes_with_table = _ext.closes_with_table
+closes_with_drawing = _ext.closes_with_drawing
 TABLE_CSS = _ext.TABLE_CSS
 parse_defs = _ext.parse_defs
 defs_only = _ext.defs_only

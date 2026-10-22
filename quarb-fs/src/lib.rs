@@ -256,6 +256,9 @@ impl AstAdapter for FsAdapter {
     /// dot.
     fn traits(&self, node: NodeId) -> Vec<String> {
         let path = &self.paths[node.0 as usize];
+        // The kind first (spec: Traits): the file type; a fifo, a
+        // socket or a device is `special`, an entry whose metadata
+        // cannot be read `entry`.
         let mut out = Vec::new();
         let mut is_file = false;
         if let Ok(md) = std::fs::symlink_metadata(path) {
@@ -267,7 +270,11 @@ impl AstAdapter for FsAdapter {
             } else if ft.is_file() {
                 out.push("file".into());
                 is_file = true;
+            } else {
+                out.push("special".into());
             }
+        } else {
+            out.push("entry".into());
         }
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let ext = ext.to_ascii_lowercase();

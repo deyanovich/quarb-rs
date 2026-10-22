@@ -559,10 +559,17 @@ impl AstAdapter for DynamodbAdapter {
 
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["database".into()],
             Kind::Table { .. } => vec!["table".into()],
             Kind::Item { .. } => vec!["item".into()],
-            Kind::Field { .. } => Vec::new(),
+            Kind::Field { value } => vec![
+                match value {
+                    Field::Map(_) => "map",
+                    Field::List(_) => "array",
+                    Field::Scalar(v) => quarb::adapter::value_kind(v),
+                }
+                .into(),
+            ],
         }
     }
 

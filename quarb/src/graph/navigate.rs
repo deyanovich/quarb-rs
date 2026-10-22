@@ -262,6 +262,7 @@ pub(crate) const CORE_FIELDS: &[&str] = &[
     "n-descendants",
     "n-siblings",
     "traits",
+    "kind",
     "props",
     "meta",
     "fields",
@@ -343,6 +344,17 @@ pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> O
         )),
         "traits" => Some(Value::list(
             adapter.traits(node).into_iter().map(Value::Str).collect(),
+        )),
+        // The kind (spec: Traits): the first trait, the one word
+        // that says what the node is in its adapter's model. Every
+        // adapter owes every node one; a node without traits is
+        // the adapter's defect, answered as the bare word `node`.
+        "kind" => Some(Value::Str(
+            adapter
+                .traits(node)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "node".to_string()),
         )),
         "is-leaf" => Some(Value::Bool(adapter.children(node).is_empty())),
         "is-root" => Some(Value::Bool(adapter.parent(node).is_none())),

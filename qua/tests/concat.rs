@@ -99,7 +99,7 @@ fn a_table_takes_rows_and_retypes() {
     assert_eq!(one("= #(@(a; b); %(1; 2)) ++ %(b = 5) | :a"), "@(1; null)");
     // a name the header lacks extends it, null in the rows before
     assert_eq!(
-        one("= #(@(a; b); %(1; 2)) ++ %(a = 1; c = 2; b = 3; d = 4) | header"),
+        one("= #(@(a; b); %(1; 2)) ++ %(a = 1; c = 2; b = 3; d = 4) | keys"),
         r#"@("a"; "b"; "c"; "d")"#
     );
     assert_eq!(
@@ -141,7 +141,7 @@ fn a_row_on_the_right_follows_the_literal_rules() {
     // a short row is null-padded, a long row refused
     assert_eq!(one(r#"= #(@(a; b); %(1; 2)) ++ %(3) | :b"#), "@(2; null)");
     assert_eq!(
-        one(r#"= #(@(a; b); %(1; 2)) ++ %(3; c = 9) | header"#),
+        one(r#"= #(@(a; b); %(1; 2)) ++ %(3; c = 9) | keys"#),
         r#"@("a"; "b"; "c")"#
     );
     assert!(refuse(r#"= #(@(a; b); %(1; 2)) ++ %(3; 4; 5)"#).contains("more values"));

@@ -360,9 +360,15 @@ impl AstAdapter for LdapAdapter {
     fn traits(&self, node: NodeId) -> Vec<String> {
         let entries = self.entries.borrow();
         let e = &entries[self.entry_of(node)];
-        e.get("objectclass")
-            .map(|vs| vs.iter().map(|v| v.to_ascii_lowercase()).collect())
-            .unwrap_or_default()
+        std::iter::once("entry".to_string())
+            .chain(
+                e.get("objectclass")
+                    .into_iter()
+                    .flatten()
+                    .map(|v| v.to_ascii_lowercase())
+                    .filter(|v| v != "entry"),
+            )
+            .collect()
     }
 
     /// An attribute: a single value as a scalar, several as a

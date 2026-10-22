@@ -1,4 +1,4 @@
-//! `@| csv` and `@| table` (lang/TODO.md): the whole stream as one
+//! `@| csv` and `@| pretty` (lang/TODO.md): the whole stream as one
 //! CSV document or one aligned table, with an optional column list.
 
 use quarb::{QueryResult, Value};
@@ -46,7 +46,7 @@ fn named_columns_select_and_order() {
 #[test]
 fn table_aligns_under_a_rule() {
     assert_eq!(
-        one("/books/* | %(::title; ::year) @| [..2] @| table"),
+        one("/books/* | %(::title; ::year) @| [..2] @| pretty"),
         "title       year\n----------  ----\nEmma        1815\nPersuasion  1817"
     );
     assert_eq!(

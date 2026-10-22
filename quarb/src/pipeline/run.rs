@@ -118,6 +118,11 @@ pub(crate) struct RunState {
     /// progress (0 during navigation and at the branch level);
     /// the second coordinate of an origin.
     pub(crate) command: u32,
+    /// The HTML form of the run's drawing (`@| tree`,
+    /// `@| histogram`), beside the text it answers: a browser host
+    /// renders it where the terminal prints the text. The last
+    /// drawing wins.
+    pub(crate) drawing_html: Option<String>,
 }
 
 thread_local! {
@@ -260,6 +265,16 @@ pub(crate) fn record_ref(id: String) {
 /// Drain the unresolved external references recorded since the
 /// last clear: the identifiers of documents queries referenced
 /// but could not reach.
+/// Record the HTML form of a drawing the run produced.
+pub(crate) fn set_drawing_html(html: String) {
+    with_run(|s| s.drawing_html = Some(html));
+}
+
+/// The HTML form of the last finished run's drawing, taken once.
+pub(crate) fn take_drawing_html() -> Option<String> {
+    FINISHED.with(|f| f.borrow_mut().drawing_html.take())
+}
+
 pub(crate) fn take_refs() -> Vec<String> {
     FINISHED.with(|f| {
         std::mem::take(&mut f.borrow_mut().refs)

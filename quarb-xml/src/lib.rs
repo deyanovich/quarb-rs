@@ -297,19 +297,22 @@ impl AstAdapter for XmlAdapter {
             .map(|t| self.names.get(t).to_string())
     }
 
-    /// A `table` element (TEI, DocBook, HTML in XML) carries
-    /// `tabula`, the one trait a table has in every substrate (spec:
-    /// The Table): `//*<tabula>` finds it, `| #` reads it.
+    /// The kind first (spec: Traits): `document` for the root,
+    /// `element` for every element (its name is the document's
+    /// vocabulary, not the adapter's). A `table` element (TEI,
+    /// DocBook, HTML in XML) then carries `tabula`, the one trait
+    /// a table has in every substrate (spec: The Table):
+    /// `//*<tabula>` finds it, `| #` reads it.
     fn traits(&self, node: NodeId) -> Vec<String> {
-        let local = self
-            .name(node)
-            .map(|n| n.rsplit(':').next().unwrap_or("").to_string())
-            .unwrap_or_default();
+        let Some(name) = self.name(node) else {
+            return vec!["document".to_string()];
+        };
+        let local = name.rsplit(':').next().unwrap_or("");
+        let mut out = vec!["element".to_string()];
         if local == "table" {
-            vec!["tabula".to_string()]
-        } else {
-            Vec::new()
+            out.push("tabula".to_string());
         }
+        out
     }
 
     fn parent(&self, node: NodeId) -> Option<NodeId> {

@@ -146,7 +146,7 @@ pub fn table_css() -> String {
 }
 
 /// The lines a result prints, and — when the query's closing
-/// command is `@| table` — the HTML grid the host draws instead
+/// command is `@| pretty` — the HTML grid the host draws instead
 /// ([`quarb::table_html`]); the lines are then the text table.
 fn go<A: AstAdapter>(
     query: &str,

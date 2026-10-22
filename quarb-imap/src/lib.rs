@@ -487,10 +487,11 @@ impl AstAdapter for ImapAdapter {
         self.nodes.borrow()[node.0 as usize].parent
     }
 
-    /// `<folder>` / `<message>`.
+    /// The kind (spec: Traits): `<mailbox>` at the root, `<folder>`,
+    /// `<message>`.
     fn traits(&self, node: NodeId) -> Vec<String> {
         match &self.nodes.borrow()[node.0 as usize].kind {
-            Kind::Root => Vec::new(),
+            Kind::Root => vec!["mailbox".to_string()],
             Kind::Folder { .. } => vec!["folder".to_string()],
             Kind::Msg { .. } => vec!["message".to_string()],
         }

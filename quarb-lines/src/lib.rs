@@ -98,12 +98,17 @@ impl AstAdapter for LinesAdapter {
         if node.0 == 0 { None } else { Some(NodeId(0)) }
     }
 
+    /// The kind first (spec: Traits): the root is the `text`, every
+    /// other node a `line`, a blank one `blank` too.
     fn traits(&self, node: NodeId) -> Vec<String> {
-        if node.0 != 0 && self.is_blank(node) {
-            vec!["blank".to_string()]
-        } else {
-            Vec::new()
+        if node.0 == 0 {
+            return vec!["text".to_string()];
         }
+        let mut out = vec!["line".to_string()];
+        if self.is_blank(node) {
+            out.push("blank".to_string());
+        }
+        out
     }
 
     /// The line's text, verbatim.
@@ -165,9 +170,11 @@ mod tests {
     #[test]
     fn blank_is_whitespace_only() {
         let a = LinesAdapter::parse(DOC);
-        assert_eq!(a.traits(NodeId(2)), vec!["blank"]);
-        assert_eq!(a.traits(NodeId(4)), vec!["blank"]); // tab-only
-        assert!(a.traits(NodeId(3)).is_empty());
+        // the kind first (spec: Traits): a line, blank or not
+        assert_eq!(a.traits(NodeId(2)), vec!["line", "blank"]);
+        assert_eq!(a.traits(NodeId(4)), vec!["line", "blank"]); // tab-only
+        assert_eq!(a.traits(NodeId(3)), vec!["line"]);
+        assert_eq!(a.traits(NodeId(0)), vec!["text"]);
     }
 
     #[test]

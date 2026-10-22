@@ -1,10 +1,10 @@
-//! The HTML table: the grid a result closing in `@| table` renders as
+//! The HTML table: the grid a result closing in `@| pretty` renders as
 //! in every browser host — the notebook's output cell, the
 //! playground's result pane, the extension's side panel,
 //! quarb.org/search — one renderer beside the text form
 //! ([`tabulate`](crate::tabulate)) and one stylesheet ([`TABLE_CSS`])
 //! shipped with the engine, so every host draws the same grid. The
-//! rule: a result whose closing command is `@| table` renders as the
+//! rule: a result whose closing command is `@| pretty` renders as the
 //! grid, everything else stays text; no toggle.
 //!
 //! Both forms read the same record stream: the header from the

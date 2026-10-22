@@ -15,6 +15,7 @@
 //! subcontext body `.(…)`.
 
 use crate::error::{QuarbError, Result};
+use crate::value::ColumnType;
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec, InterpSeg,
@@ -3210,6 +3211,12 @@ impl Parser<'_> {
                     self.pos += 2;
                     let (items, _) = self.list_items(true)?;
                     Some(Operand::List(items))
+                } else if matches!(self.peek(), Some(Token::Percent))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                {
+                    // the typed header, a record of names and types
+                    self.pos += 2;
+                    Some(Operand::Row(self.record_row()?))
                 } else {
                     Some(self.unary()?)
                 }
@@ -3218,8 +3225,13 @@ impl Parser<'_> {
             };
             opts.push((name, value));
         }
+        enum Header {
+            Names(Vec<String>),
+            Typed(Vec<(String, String)>),
+            Computed(Operand),
+        }
         let mut width: Option<i64> = None;
-        let mut header: Option<Vec<String>> = None;
+        let mut header: Option<Header> = None;
         for (name, value) in opts {
             match name.as_str() {
                 "--width" | "-w" => {
@@ -3233,15 +3245,57 @@ impl Parser<'_> {
                     });
                 }
                 "--header" | "-h" => {
+                    // The typed header: a record of names and type
+                    // words, `%(zip = "text"; amount = "float")`,
+                    // which casts the declared columns.
+                    if let Some(Operand::Row(fields)) = &value {
+                        let mut typed = Vec::with_capacity(fields.len());
+                        for (key, op) in fields {
+                            let Some(key) = key else {
+                                return Err(QuarbError::parse(format!(
+                                    "'#({name}=%(…))' names each column with its type: \
+                                     '#({name}=%(age = \"int\"))'; an unnamed item names no column"
+                                )));
+                            };
+                            match op {
+                                Operand::Lit(Value::Str(word)) if ColumnType::from_word(word).is_some() => {
+                                    typed.push((key.clone(), word.clone()))
+                                }
+                                Operand::Lit(Value::Str(word)) => {
+                                    return Err(QuarbError::parse(format!(
+                                        "'#({name}=%(…))': '{word}' is no column type; the types are {}",
+                                        ColumnType::words().join(", ")
+                                    )));
+                                }
+                                _ => {
+                                    return Err(QuarbError::parse(format!(
+                                        "'#({name}=%(…))' gives each column its type as a word: \
+                                         '#({name}=%({key} = \"int\"))'"
+                                    )));
+                                }
+                            }
+                        }
+                        header = Some(Header::Typed(typed));
+                        continue;
+                    }
                     let items = match value {
                         Some(Operand::List(items)) => items,
                         Some(Operand::Lit(Value::List(l))) => {
                             l.iter().cloned().map(Operand::Lit).collect()
                         }
+                        // A header computed elsewhere (`(t | header)`,
+                        // a capsa): read when the table is built.
+                        Some(op @ (Operand::Group(_) | Operand::Recall(_) | Operand::Field { .. }
+                            | Operand::Rel { .. } | Operand::Param(_) | Operand::Piped { .. }
+                            | Operand::Index { .. } | Operand::PeerReg { .. } | Operand::Topic)) => {
+                            header = Some(Header::Computed(op));
+                            continue;
+                        }
                         _ => {
                             return Err(QuarbError::parse(format!(
-                                "'#({name}=list)' takes the column names as a list: \
-                                 '#({name}=@(a; b; c))'"
+                                "'#({name}=…)' takes the column names as a list, \
+                                 '#({name}=@(a; b; c))', or the typed header as a record, \
+                                 '#({name}=%(a = \"int\"; b = \"text\"))'"
                             )));
                         }
                     };
@@ -3261,7 +3315,7 @@ impl Parser<'_> {
                             }
                         }
                     }
-                    header = Some(names);
+                    header = Some(Header::Names(names));
                 }
                 other => {
                     return Err(QuarbError::parse(format!(
@@ -3279,7 +3333,13 @@ impl Parser<'_> {
                 ));
             }
             (Some(n), None) => Arg::Lit(Value::Int(n)),
-            (None, Some(h)) => Arg::Lit(Value::list(h.into_iter().map(Value::Str).collect())),
+            (None, Some(Header::Names(h))) => {
+                Arg::Lit(Value::list(h.into_iter().map(Value::Str).collect()))
+            }
+            (None, Some(Header::Typed(h))) => Arg::Lit(Value::Record(
+                h.into_iter().map(|(k, w)| (k, Value::Str(w))).collect(),
+            )),
+            (None, Some(Header::Computed(op))) => Arg::Expr(op),
             (None, None) => {
                 return Err(QuarbError::parse(
                     "'#(…)' names no option: '#(--width=n)' ('-w=n') lays the list in rows \
@@ -3695,10 +3755,12 @@ impl Parser<'_> {
                             Some(Token::Comma | Token::Semi | Token::RParen)
                         )
                     {
-                        // `tree(%)`: the bare record sign asks for the
-                        // properties as a record (spec: The tree).
-                        args.push(Arg::Lit(Value::Str("%".into())));
-                        self.pos += 1;
+                        // `tree(%)` is retired (draft 164, the one
+                        // option rule): the properties record is the
+                        // switch.
+                        return Err(QuarbError::parse(
+                            "'%' is retired as tree's operand: write --record or -r for the properties record",
+                        ));
                     } else if matches!(
                         name,
                         "convert" | "unit" | "magnitude" | "exchange" | "dimension"
@@ -3776,7 +3838,45 @@ impl Parser<'_> {
                 }) if text.starts_with('-') => {
                     let t = text.clone();
                     self.pos += 1;
-                    t
+                    // Short switches bundle as the shell bundles them
+                    // (draft 164): `-tp` is `-t -p`, in either order;
+                    // the last letter keeps the `=value` that follows,
+                    // the others take none. Digits never bundle (`-9`
+                    // stays the numeric flag), long options never
+                    // bundle, and an environment callee's options are
+                    // its own to read.
+                    let letters: Vec<char> = t[1..].chars().collect();
+                    if letters.len() >= 2
+                        && letters.iter().all(|c| c.is_alphabetic())
+                        && crate::syntax::registry::split_env(command).is_none()
+                    {
+                        let declared: &[&str] = crate::syntax::registry::spec(command)
+                            .map_or(&[], |s| s.options);
+                        let takes_of = crate::syntax::registry::takes_of(command);
+                        for c in &letters {
+                            let short = format!("-{c}");
+                            if !(declared.contains(&short.as_str()) || (takes_of && short == "-o")) {
+                                let mut shorts: Vec<&str> =
+                                    declared.iter().copied().filter(|o| !o.starts_with("--")).collect();
+                                if takes_of {
+                                    shorts.push("-o");
+                                }
+                                return Err(QuarbError::parse(format!(
+                                    "'{short}' in '{t}' is no switch of '{command}' (its short switches: {})",
+                                    if shorts.is_empty() { "none".to_string() } else { shorts.join(" ") }
+                                )));
+                            }
+                        }
+                        for c in &letters[..letters.len() - 1] {
+                            args.push(Arg::Opt {
+                                name: format!("-{c}"),
+                                value: None,
+                            });
+                        }
+                        format!("-{}", letters[letters.len() - 1])
+                    } else {
+                        t
+                    }
                 }
                 Some(Token::DashDash) => {
                     self.pos += 1;
@@ -3869,7 +3969,12 @@ impl Parser<'_> {
                 && crate::syntax::registry::split_env(&name).is_none()
                 && !declared.contains(&opt.as_str())
             {
-                return Err(QuarbError::parse(if takes_of {
+                return Err(QuarbError::parse(if takes_of && !declared.is_empty() {
+                    format!(
+                        "'{name}' takes '--of=expr' ('-o=expr'), the expression to reduce, and the options {}; '{opt}' given",
+                        declared.join(" ")
+                    )
+                } else if takes_of {
                     format!(
                         "'{name}' takes '--of=expr' ('-o=expr'), the expression to reduce; '{opt}' given"
                     )
@@ -5613,10 +5718,22 @@ impl Parser<'_> {
                 }
             }
             self.pos += 1;
-            let inner = self.cond_expr()?;
-            // An operand may carry a pipe tail inside its parens:
-            // `(expr | f @| g)` — command semantics, mirrored.
-            let commands = self.inline_pipe_tail()?;
+            // A parenthesised operand is a body, in a command's
+            // parentheses too (`tree(0; (fields))`,
+            // `project((fields); -r)`): inside it the expression
+            // grammar applies and a bare word names a command, where
+            // among the command's own operands it is a string.
+            let saved_depth = self.arg_depth;
+            self.arg_depth = 0;
+            let parsed = (|| {
+                let inner = self.cond_expr()?;
+                // An operand may carry a pipe tail inside its parens:
+                // `(expr | f @| g)` — command semantics, mirrored.
+                let commands = self.inline_pipe_tail()?;
+                Ok::<_, QuarbError>((inner, commands))
+            })();
+            self.arg_depth = saved_depth;
+            let (inner, commands) = parsed?;
             self.expect(Token::RParen, "')' to close a group")?;
             // `(n)..5` — a parenthesized lower bound of a range.
             if commands.is_empty()
@@ -7935,6 +8052,7 @@ pub(crate) fn retired_command(name: &str) -> Option<String> {
         "rec" | "record" => Some(format!("'{name}(…)' is retired: the record is '%(…)'")),
         "chars" => Some("'chars' is retired: write 'cc'".into()),
         "types" => Some("'types' is retired: the type of a table's columns is 'type'".into()),
+        "table" => Some("'table' is retired: the table is '@| pretty'".into()),
         _ => None,
     }
 }
@@ -8164,7 +8282,14 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 "skipgrams takes the window size and the skips allowed: skipgrams(2; 1)",
             )),
         },
-        "frequencies" => match call.args.as_slice() {
+        // the switches (--nulls / --values) stand beside the operand
+        "frequencies" => match call
+            .args
+            .iter()
+            .filter(|a| !matches!(a, Arg::Opt { .. }))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
             [] => Ok(()),
             [Arg::Lit(Value::Int(k))] if *k != 0 => Ok(()),
             [Arg::Range(_, _)] => Ok(()),
@@ -8230,13 +8355,34 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 ))
             }
         }
-        // `tree[(operands)]` — a depth, the words traits and props,
-        // `%`, and column expressions, in any order.
+        // `tree[(operands; switches)]` — a depth and column
+        // expressions in any order, then the display switches
+        // `--traits` (`-t`), `--props` (`-p`), `--record` (`-r`)
+        // (draft 164: a bare word in a parenthesis is a string, so
+        // the former words refuse with the switch).
         "tree" => {
+            for a in &call.args {
+                if let Arg::Lit(Value::Str(s)) = a {
+                    let switch = match s.as_str() {
+                        "kind" => Some("--kind or -k"),
+                        "traits" => Some("--traits or -t"),
+                        "props" => Some("--props or -p"),
+                        "%" | "record" => Some("--record or -r"),
+                        _ => None,
+                    };
+                    return Err(QuarbError::parse(match switch {
+                        Some(sw) => format!("'{s}' is a string here: write {sw}"),
+                        None => format!(
+                            "tree takes a depth and column expressions, then the switches \
+                             --kind, --traits, --props, --record: tree(2; -t), tree(0; -r; ::mtime) \
+                             ('{s}' is a string here)"
+                        ),
+                    }));
+                }
+            }
             let ok = call.args.iter().all(|a| match a {
                 Arg::Lit(Value::Int(n)) => *n >= 0,
-                Arg::Lit(Value::Str(s)) => matches!(s.as_str(), "traits" | "props" | "%"),
-                Arg::Expr(_) => true,
+                Arg::Expr(_) | Arg::Opt { .. } => true,
                 _ => false,
             }) && call
                 .args
@@ -8248,9 +8394,9 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 Ok(())
             } else {
                 Err(QuarbError::parse(
-                    "tree takes a depth, the words traits and props, % for the \
-                     properties record, and column expressions, in any order: \
-                     tree(2), tree(traits; :::size), tree(%)",
+                    "tree takes a depth and column expressions, then the switches \
+                     --kind (-k), --traits (-t), --props (-p), --record (-r): tree(2; -t), \
+                     tree(0; -r; ::mtime), tree(0; -t; (/* @| count))",
                 ))
             }
         }

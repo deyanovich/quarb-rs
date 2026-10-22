@@ -182,7 +182,7 @@ fn checked<T>(result: T) -> Result<T> {
 /// and targets), the ambient ones at the top.
 
 /// A query's closing serialization for people — `@| csv` or
-/// `@| table` as the last command — taken off for the tool to render.
+/// `@| pretty` as the last command — taken off for the tool to render.
 #[derive(Debug, Clone)]
 pub struct ClosingTable {
     pub csv: bool,
@@ -198,7 +198,7 @@ pub struct Outcome {
     /// A node set, or scalar values if the query ends in a
     /// projection.
     pub result: QueryResult,
-    /// The closing `@| csv` / `@| table` taken off for rendering
+    /// The closing `@| csv` / `@| pretty` taken off for rendering
     /// ([`Query::for_rendering`]), with the rows standing in
     /// `result` as they were before it.
     pub closing: Option<ClosingTable>,
@@ -209,6 +209,11 @@ pub struct Outcome {
     /// The static plan the run was made under, when the run asked
     /// for it (`Run::plan`) or held it to a budget.
     pub plan: Option<plan::Plan>,
+    /// The HTML form of the drawing the query closed in (`@| tree`,
+    /// `@| histogram`), beside the text in `result`: a browser host
+    /// renders it where the terminal prints the text
+    /// ([`closes_with_drawing`]); dressed with [`TABLE_CSS`].
+    pub html: Option<String>,
 }
 
 /// A parsed query, ready to run against an adapter under a
@@ -219,7 +224,7 @@ pub struct Query {
     closing: Option<ClosingTable>,
 }
 
-/// Whether `text` is a query whose closing command is `@| table` —
+/// Whether `text` is a query whose closing command is `@| pretty` —
 /// the browser hosts' rule: such a result renders as the HTML grid
 /// ([`table_html`]), everything else stays text. A query that does
 /// not parse closes with nothing.
@@ -229,6 +234,22 @@ pub fn closes_with_table(text: &str) -> bool {
         .ok()
         .and_then(|q| match q.pipeline.last() {
             Some(ast::Command::Agg(call)) => Some(matches!(call.name.as_str(), "table" | "pretty")),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether `text` is a query whose closing command is a drawing —
+/// `@| tree` or `@| histogram` — whose run leaves an HTML form in
+/// [`Outcome::html`] beside the text: the browser hosts render
+/// that form, as they render the grid of a query closing in
+/// `@| pretty`. A query that does not parse closes with nothing.
+pub fn closes_with_drawing(text: &str) -> bool {
+    lexer::lex(text)
+        .and_then(|tokens| parser::parse(&tokens))
+        .ok()
+        .and_then(|q| match q.pipeline.last() {
+            Some(ast::Command::Agg(call)) => Some(matches!(call.name.as_str(), "tree" | "histogram")),
             _ => None,
         })
         .unwrap_or(false)
@@ -262,7 +283,7 @@ impl Query {
     }
 
     /// For a tool that renders under an output locale: when the
-    /// query closes with `@| csv` or `@| table`, the run returns the
+    /// query closes with `@| csv` or `@| pretty`, the run returns the
     /// rows as they stand before that command, with its shape in
     /// [`Outcome::closing`], and the tool tabulates them itself
     /// (`tabulate_in` with its locale's cells and delimiter). The
@@ -296,7 +317,7 @@ impl Query {
     }
 
     /// For a host that draws the table itself (the HTML grid of the
-    /// browser hosts): when the query closes with `@| table`, the
+    /// browser hosts): when the query closes with `@| pretty`, the
     /// closing command is taken off entirely, its shape kept in
     /// [`Outcome::closing`], and the run yields what stands before
     /// it — a node set when the query selected nodes (a document's
@@ -344,6 +365,7 @@ impl Query {
             closing: self.closing.clone(),
             refs: pipeline::take_refs(),
             plan,
+            html: pipeline::take_drawing_html(),
         })
     }
 
@@ -360,6 +382,7 @@ impl Query {
             closing: self.closing.clone(),
             refs: pipeline::take_refs(),
             plan: None,
+            html: pipeline::take_drawing_html(),
         })
     }
 

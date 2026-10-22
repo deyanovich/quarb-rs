@@ -129,9 +129,12 @@ fn keys_and_values_split_a_record_and_a_frame() {
         r#"@("int"; "text")"#
     );
     // on a list of records: the header is the collection's union,
-    // keys and values answer per record
+    // typed over the records; keys and values answer per record
     let recs = "@(%(a = 1; b = 2); %(b = 3; a = 4; c = 5))";
-    assert_eq!(one(&format!("= {recs} | header")), r#"@("a"; "b"; "c")"#);
+    assert_eq!(
+        one(&format!("= {recs} | header")),
+        r#"%(a = "int"; b = "int"; c = "int")"#
+    );
     assert_eq!(
         one(&format!("= {recs} | keys")),
         r#"@(@("a"; "b"); @("b"; "a"; "c"))"#
@@ -139,7 +142,7 @@ fn keys_and_values_split_a_record_and_a_frame() {
     assert_eq!(one(&format!("= {recs} | values")), "@(@(1; 2); @(3; 4; 5))");
     assert_eq!(
         one("= @(%(a = @(1; 2)); %(b = 3)) | header"),
-        r#"@("a"; "b")"#
+        r#"%(a = "list"; b = "int")"#
     );
     assert!(refuse("= @(%(a = 1); 2) | keys").contains("not all records"));
     assert!(refuse("= @(1; 2) | keys").contains("not all records"));
@@ -206,15 +209,28 @@ fn transpose_yields_a_matrix_of_one_type() {
         one("= @(1..6) | #(-w=3) | transpose | transpose"),
         "#(%(1; 2; 3);\n  %(4; 5; 6))"
     );
-    // a frame is refused, pointing at values; a ragged grid by position; a list of records by kind
-    let e = refuse("= #(@(a; b); %(1; 2)) | transpose");
-    assert!(e.contains("'| values'"), "{e}");
+    // a frame transposes to a frame: the header as the column
+    // `column`, each old row a column numbered by position; its
+    // column reading (a record of lists) and its row reading (a
+    // list of records) the same way; `| values` keeps the matrix
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) | transpose"),
+        "#(@(column; \"1\");\n  %(\"a\"; 1);\n  %(\"b\"; 2))"
+    );
+    assert_eq!(
+        one("= %(a = @(1; 2); b = @(3; 4)) | transpose"),
+        "#(@(column; \"1\"; \"2\");\n  %(\"a\"; 1; 2);\n  %(\"b\"; 3; 4))"
+    );
+    assert_eq!(
+        one("= @(%(a = 1); %(a = 2)) | transpose"),
+        "#(@(column; \"1\"; \"2\");\n  %(\"a\"; 1; 2))"
+    );
     assert_eq!(
         one("= #(@(a; b); %(1; 2)) | values | transpose"),
         "#(%(1);\n  %(2))"
     );
+    // a ragged grid refuses by position
     assert!(refuse("= @(@(1); @(2; 3)) | transpose").contains("row 2 holds 2"));
-    assert!(refuse("= @(%(a = 1); %(a = 2)) | transpose").contains("list of records"));
 }
 
 #[test]
@@ -239,7 +255,7 @@ fn the_reshaping_constructor_lays_a_list_into_columns() {
     assert_eq!(one("= @(1..6) | #(-w=3)"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
     assert_eq!(
         one("= @(1..6) | #(--header=@(a; b; c)) | header"),
-        r#"@("a"; "b"; "c")"#
+        r#"%(a = "int"; b = "int"; c = "int")"#
     );
     assert_eq!(one("= @(1..6) | #(-h=@(a; b; c)) | :b"), "@(2; 5)");
     // the columns type by the rule

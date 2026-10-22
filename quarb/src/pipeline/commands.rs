@@ -297,6 +297,53 @@ pub(crate) fn apply_command<H: Host>(
             let caps = of_values(expr, caps, host, trace, outer, peers);
             apply_command(&Command::Agg(call.without_of()), caps, host, trace, outer)
         }
+        // `#(--header=(t | header))` — a header computed elsewhere
+        // (spec: The Table): read in the capsa's scope, then the
+        // table is built under it as under a written one. After
+        // `@|` the stream's first capsa reads it.
+        Command::Func(call) | Command::Agg(call)
+            if call.name == "#" && matches!(call.args.first(), Some(Arg::Expr(_))) =>
+        {
+            let Some(Arg::Expr(expr)) = call.args.first() else {
+                unreachable!()
+            };
+            let agg = matches!(command, Command::Agg(_));
+            let mut out = Vec::new();
+            let mut built: Option<Command> = None;
+            let n = caps.len();
+            let mut stream = Vec::with_capacity(n);
+            for (i, c) in caps.into_iter().enumerate() {
+                if built.is_none() || !agg {
+                    let scope = c.scope(Some(i + 1), peers, outer);
+                    let value = group_value(host, &c.ext, expr, trace, scope);
+                    let arg = match stdlib::computed_header(value) {
+                        Ok(arg) => arg,
+                        Err(e) => {
+                            record_refusal(e);
+                            continue;
+                        }
+                    };
+                    let rebuilt = FnCall {
+                        name: "#".into(),
+                        args: vec![arg],
+                    };
+                    built = Some(if agg {
+                        Command::Agg(rebuilt)
+                    } else {
+                        Command::Func(rebuilt)
+                    });
+                }
+                if agg {
+                    stream.push(c);
+                } else if let Some(cmd) = &built {
+                    out.extend(apply_command(cmd, vec![c], host, trace, outer));
+                }
+            }
+            if agg && let Some(cmd) = &built {
+                out.extend(apply_command(cmd, stream, host, trace, outer));
+            }
+            out
+        }
         Command::Func(call) if call.name == "sh" && !run_option(|o| o.shell_allowed()) => {
             record_refusal("the sh(...) command runs external commands; pass --allow-shell".into());
             Vec::new()
@@ -315,6 +362,13 @@ pub(crate) fn apply_command<H: Host>(
         }
         Command::Func(call) if call.name == "default" => {
             default_command(call, caps, host, trace, outer, peers)
+        }
+        // `project(expr)` (spec: Projection Values): the operand,
+        // evaluated on the cursor, is a projection value or a list of
+        // them, read on the same cursor; `--record` keys the values
+        // by the projections' bare keys.
+        Command::Func(call) if call.name == "project" => {
+            project_command(call, caps, host, trace, outer, peers)
         }
         // `record(...)` (alias `rec`) builds a record per capsa: expression fields
         // evaluate against the capsa's node, auto-named by their
@@ -1155,6 +1209,187 @@ pub(crate) fn expr_command<H: Host>(
         .collect()
 }
 
+/// `| project(expr)` / `| project(expr; --record)` (spec: Projection
+/// Values): the operand evaluated on the cursor, every projection
+/// value in it, at any depth of lists, records and tables, replaced
+/// by that projection's reading on the same cursor, every other
+/// value kept. `-r` keys a list operand's values by the projections'
+/// bare keys. `apply_command`'s arm.
+pub(crate) fn project_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    use crate::syntax::ast::{Anchor, Operand, Projection};
+    let as_record = call.args.iter().any(
+        |a| matches!(a, Arg::Opt { name, .. } if name == "--record" || name == "-r"),
+    );
+    let Some(expr) = call.args.iter().find_map(|a| match a {
+        Arg::Expr(e) => Some(e.clone()),
+        Arg::Lit(v) => Some(Operand::Lit(v.clone())),
+        _ => None,
+    }) else {
+        record_refusal(
+            "project takes the value to read the projections of: project(:fields; --record), project(%(n = :name))".into(),
+        );
+        return Vec::new();
+    };
+    // A projection written bare, `:name` / `::title` / `:::size`,
+    // as an item of a list operand: the evaluation reads it, and its
+    // key names the record's field under -r.
+    let bare = |op: &Operand| -> Option<(u8, String)> {
+        match op {
+            Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+                Some((1, name.clone()))
+            }
+            Operand::Rel {
+                steps,
+                projection: Some(p),
+                anchor: Anchor::Current,
+            } if steps.is_empty() => Some(match p {
+                Projection::CoreMeta(k) => (1, k.clone()),
+                Projection::Property(Some(k)) => (2, k.clone()),
+                Projection::Property(None) => (2, String::new()),
+                Projection::AdapterMeta(k) => (3, k.clone()),
+            }),
+            _ => None,
+        }
+    };
+    let written: Vec<Option<(u8, String)>> = match &expr {
+        Operand::List(items) => items.iter().map(bare).collect(),
+        _ => Vec::new(),
+    };
+    // the projection as it would be written on the cursor: `:key`
+    // is the field read (a record's field, a table's column, a
+    // node's core field), `::key` and `:::key` the node's ladders
+    let as_operand = |ladder: u8, key: &str| match ladder {
+        1 => Operand::Field {
+            base: Box::new(Operand::Topic),
+            name: key.to_string(),
+        },
+        _ => Operand::Rel {
+            steps: Vec::new(),
+            projection: Some(match ladder {
+                2 => Projection::Property(Some(key.to_string())),
+                _ => Projection::AdapterMeta(key.to_string()),
+            }),
+            anchor: Anchor::Current,
+        },
+    };
+    // every projection value, at any depth, read on the cursor
+    fn walk(v: Value, read: &dyn Fn(u8, &str) -> Value) -> Value {
+        match v {
+            Value::Projection { ladder, key } => read(ladder, &key),
+            Value::List(items) => Value::list(items.iter().cloned().map(|x| walk(x, read)).collect()),
+            Value::Record(fields) => {
+                Value::Record(fields.into_iter().map(|(k, x)| (k, walk(x, read))).collect())
+            }
+            Value::Table(t) => {
+                let rows = t
+                    .rows
+                    .iter()
+                    .map(|r| r.iter().cloned().map(|x| walk(x, read)).collect())
+                    .collect();
+                Value::table(crate::Table::new(t.header.clone(), rows))
+            }
+            other => other,
+        }
+    }
+    let mut out = Vec::new();
+    for (i, c) in caps.into_iter().enumerate() {
+        // the operand on the cursor; several values fork under the
+        // standing rule, each its own capsa
+        let (values, o) = capture(|| eval_operand(host, &c.ext, &expr, trace, c.scope(Some(i + 1), peers, outer)));
+        let values = if values.is_empty() { vec![Value::Null] } else { values };
+        for v in values {
+            let mut k = c.clone();
+            let read = |ladder: u8, key: &str| -> Value {
+                let op = as_operand(ladder, key);
+                capture(|| group_value(host, &k.ext, &op, trace, k.scope(Some(i + 1), peers, outer))).0
+            };
+            let answer: Result<Value, String> = if !as_record {
+                Ok(walk(v, &read))
+            } else {
+                match v {
+                    // the keys: a projection value's bare key, or the
+                    // projection written bare at that place
+                    Value::List(items) => {
+                        let mut fields: Vec<(String, Value)> = Vec::with_capacity(items.len());
+                        let mut err = None;
+                        for (j, item) in items.iter().enumerate() {
+                            let key = match (item, written.get(j)) {
+                                (Value::Projection { key, .. }, _) => Some(key.clone()),
+                                (_, Some(Some((_, key)))) => Some(key.clone()),
+                                _ => None,
+                            };
+                            let Some(key) = key else {
+                                err = Some(format!(
+                                    "project(--record): item {} of the list is no projection ({}), so it has no key",
+                                    j + 1,
+                                    item.display_form()
+                                ));
+                                break;
+                            };
+                            if fields.iter().any(|(f, _)| *f == key) {
+                                let spelled = |x: &Value, w: Option<&Option<(u8, String)>>| match (x, w) {
+                                    (Value::Projection { ladder, key }, _) => Value::projection_spelling(*ladder, key),
+                                    (_, Some(Some((l, k)))) => Value::projection_spelling(*l, k),
+                                    _ => String::new(),
+                                };
+                                let first = items
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, x)| match x {
+                                        Value::Projection { key: k2, .. } => *k2 == key,
+                                        _ => false,
+                                    })
+                                    .map(|(j2, x)| spelled(x, written.get(j2)))
+                                    .or_else(|| {
+                                        written.iter().find_map(|w| match w {
+                                            Some((l, k2)) if *k2 == key => Some(Value::projection_spelling(*l, k2)),
+                                            _ => None,
+                                        })
+                                    })
+                                    .unwrap_or_default();
+                                err = Some(format!(
+                                    "project(--record): two projections share the bare key '{key}' ({first} and {}); the record keys by it",
+                                    spelled(item, written.get(j))
+                                ));
+                                break;
+                            }
+                            fields.push((key, walk(item.clone(), &read)));
+                        }
+                        match err {
+                            Some(e) => Err(e),
+                            None => Ok(Value::Record(fields)),
+                        }
+                    }
+                    Value::Record(_) => Err(
+                        "project(--record) keys a list by its projections' bare keys; the record has its keys already"
+                            .into(),
+                    ),
+                    other => Err(format!(
+                        "project(--record) keys a list by its projections' bare keys, and {} is no list",
+                        stdlib::kind_of(&other)
+                    )),
+                }
+            };
+            match answer {
+                Ok(value) => {
+                    k.topic = Some(value);
+                    k.prov = Prov::leaf(o.clone());
+                    out.push(k);
+                }
+                Err(e) => record_refusal(e),
+            }
+        }
+    }
+    out
+}
+
 /// `.name(expr)` — push an expression's value. `apply_command`'s arm.
 pub(crate) fn expr_push_command<H: Host>(
     name: &Option<String>,
@@ -1505,6 +1740,36 @@ pub(crate) fn filter_command<H: Host>(
     caps.into_iter()
         .enumerate()
         .filter_map(|(i, mut c)| {
+            // A predicate on a table value filters its rows (spec: The
+            // Table): each row is tested as the cursor record (`:Age`
+            // its cell), and the rows that hold answer as a table
+            // under the same header; a table of none is empty, never
+            // the whole table passed through.
+            if let Some(Value::Table(t)) = &c.topic {
+                let t = t.clone();
+                let mut kept: Vec<Vec<Value>> = Vec::new();
+                for row in &t.rows {
+                    let mut probe = c.clone();
+                    // the row as the cursor record: keyed by the
+                    // header, or by position on the array face (as
+                    // `| %` keys an array's columns)
+                    probe.topic = Some(Value::Record(match &t.header {
+                        Some(h) => h.iter().cloned().zip(row.iter().cloned()).collect(),
+                        None => row
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .map(|(j, v)| ((j + 1).to_string(), v))
+                            .collect(),
+                    }));
+                    let scope = probe.scope(Some(i + 1), peers, outer);
+                    if eval_pred_expr(host, &probe.ext, cond, trace, scope) {
+                        kept.push(row.clone());
+                    }
+                }
+                c.topic = Some(Value::table(crate::Table::new(t.header.clone(), kept)));
+                return Some(c);
+            }
             let scope = c.scope(Some(i + 1), peers, outer);
             // A capsa that carries a correlation witness is
             // tested UNDER it — the pipeline filter is the
@@ -1582,7 +1847,7 @@ pub(crate) fn agg_command<H: Host>(
         );
         return Vec::new();
     }
-    // `@| csv(title; year)` / `@| table(…)` over nodes: the
+    // `@| csv(title; year)` / `@| pretty(…)` over nodes: the
     // named columns are the nodes' properties, as they are a
     // record's fields — a node stands for the record of the
     // columns asked of it.

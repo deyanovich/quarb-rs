@@ -119,7 +119,7 @@ pub trait Executor {
         anyhow::bail!("this session's executor does not support rendered export")
     }
 
-    /// A query whose closing command is `@| table`, run with that
+    /// A query whose closing command is `@| pretty`, run with that
     /// command taken off: the table's text as one cell, and the
     /// HTML grid ([`quarb::table_html`]) the browser hosts render
     /// — the rule being that such a result is the grid everywhere a

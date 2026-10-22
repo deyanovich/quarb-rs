@@ -23,6 +23,7 @@ from . import (
     Document,
     Quantity,
     closes_with_table as _closes_with_table,
+    closes_with_drawing as _closes_with_drawing,
     mount as _mount,
     open as _open,
     defs_only as _defs_only,
@@ -34,7 +35,7 @@ class QuarbResult:
     """A query result that displays well and converts willingly.
 
     The rule every browser host follows holds here too: a result
-    whose closing command is ``@| table`` renders as the engine's
+    whose closing command is ``@| pretty`` renders as the engine's
     HTML grid (``html``, dressed with ``quarb.TABLE_CSS``), and
     everything else stays text — the notebook's rich display
     switches on the same condition, no toggle. ``text`` is the
@@ -63,9 +64,10 @@ class QuarbResult:
         return "\n".join(str(v) for v in self.values)
 
     def _repr_html_(self):
-        # Only a result closing in ``@| table`` has a rich form; the
+        # A result closing in ``@| pretty`` or in a drawing
+        # (``@| tree``, ``@| histogram``) has a rich form; the
         # stylesheet travels with it, so a saved notebook keeps the
-        # grid dressed.
+        # grid and the drawing dressed.
         if self.html is None:
             return None
         return f"<style>{TABLE_CSS}</style>\n{self.html}"
@@ -97,6 +99,12 @@ def _result(doc: Document, query: str) -> QuarbResult:
         rows, text, html = doc.table(query)
         records = [r for r in rows if isinstance(r, dict)]
         return QuarbResult(rows, records, html=html, text=text)
+    if _closes_with_drawing(query):
+        # a drawing (``@| tree``, ``@| histogram``): the text as the
+        # terminal prints it, the HTML form the notebook renders
+        values, html = doc.values_html(query)
+        text = "\n".join(str(v) for v in values)
+        return QuarbResult(values, [], html=html, text=text)
     values = doc.values(query)
     if values and isinstance(values[0], dict):
         return QuarbResult(values, values)

@@ -64,7 +64,7 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
     // empty cell is a hole
     assert_eq!(ok(&["//*<tabula>::lemma", &text_md]), "\n");
     assert_eq!(
-        ok(&["//*<tabula> | # | header", &text_md]),
+        ok(&["//*<tabula> | # | keys", &text_md]),
         "@(\"name\"; \"role\"; \"age\")\n"
     );
     assert_eq!(
