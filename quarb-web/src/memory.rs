@@ -31,6 +31,8 @@ pub struct MemoryStore {
     page_categories: HashMap<PageKey, Vec<PageKey>>,
     page_tags: HashMap<PageKey, Vec<PageKey>>,
     by_url: HashMap<String, PageKey>,
+    /// target page → the redirect stubs that stand for it
+    in_redirects: HashMap<PageKey, Vec<PageKey>>,
 }
 
 /// A page as read from a file: its site-relative path and its
@@ -83,6 +85,50 @@ pub(crate) struct Found {
     /// Inside a transclusion (`typeof="mw:Transclusion"` or an
     /// `about="#mwt…"` ancestor): written by a template.
     pub transcluded: bool,
+}
+
+/// A redirect stub's target (draft 164): the URL of a meta refresh
+/// in the head (`<meta http-equiv="refresh" content="0; url=…">`),
+/// else the first quoted URL of a script that sends the browser on
+/// (`location.replace(…)`, `location.href = …`, `location.assign(…)`).
+pub(crate) fn redirect_target(doc: &scraper::Html) -> Option<String> {
+    use scraper::Selector;
+    let meta = Selector::parse("meta[http-equiv]").ok()?;
+    for m in doc.select(&meta) {
+        let v = m.value();
+        if v.attr("http-equiv")
+            .is_some_and(|h| h.eq_ignore_ascii_case("refresh"))
+            && let Some(content) = v.attr("content")
+            && let Some(i) = content.to_ascii_lowercase().find("url=")
+        {
+            let t = content[i + 4..]
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    let script = Selector::parse("script").ok()?;
+    for s in doc.select(&script) {
+        let text: String = s.text().collect();
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let sends = ["location.replace(", "location.href", "location.assign(", "location="];
+        if !sends.iter().any(|p| compact.contains(p)) {
+            continue;
+        }
+        let t = text.trim();
+        if let Some(q) = t.find(['"', '\''])
+            && let Some(end) = t[q + 1..].find(t.as_bytes()[q] as char)
+        {
+            let target = &t[q + 1..q + 1 + end];
+            if !target.is_empty() {
+                return Some(target.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn dom_links(html: &str) -> (Option<String>, Vec<Found>) {
@@ -218,6 +264,9 @@ fn infer_base(files: &[PageFile]) -> Option<String> {
 struct Built {
     row: LightRow,
     html: Option<String>,
+    /// A redirect stub's declared target, resolved once every page
+    /// is known (draft 164).
+    redirect: Option<String>,
 }
 
 impl MemoryStore {
@@ -312,6 +361,7 @@ impl MemoryStore {
                 built.push(Built {
                     row: blank(k, parent, PageKind::Dir, name, path.clone()),
                     html: None,
+                    redirect: None,
                 });
                 by_path.insert(path, built.len() - 1);
                 continue;
@@ -330,6 +380,7 @@ impl MemoryStore {
                         .map(|u| u.to_string())
                 }),
             };
+            let redirect = redirect_target(&doc);
             let mut row = blank(k, parent, PageKind::Page, name, path.clone());
             row.title = head.title.clone();
             row.url = url;
@@ -342,6 +393,7 @@ impl MemoryStore {
             built.push(Built {
                 row,
                 html: Some(html),
+                redirect,
             });
             by_path.insert(path, built.len() - 1);
         }
@@ -381,6 +433,39 @@ impl MemoryStore {
             }
         }
 
+        // 2b. Redirect stubs (spec: Text Readings, the web model,
+        // draft 164): a page whose head carries a meta refresh, or
+        // whose script sends the browser on, stands for the page its
+        // URL resolves to within the site — kind `redirect`,
+        // `->redirect` the target; its own text is no content, so
+        // its html is dropped before the lowering and the links.
+        let targets: Vec<(usize, Option<usize>)> = built
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                let href = b.redirect.as_ref()?;
+                let page_url = b.row.url.as_deref().and_then(|u| url::Url::parse(u).ok());
+                let to = page_url
+                    .and_then(|pu| pu.join(href).ok())
+                    .and_then(|mut u| {
+                        u.set_fragment(None);
+                        base.as_ref().and_then(|bs| site_path(&u, bs))
+                    })
+                    .and_then(|p| {
+                        path_variants(&p)
+                            .iter()
+                            .find_map(|v| by_path.get(v.as_str()).copied())
+                    })
+                    .filter(|&j| j != i && built[j].row.kind != PageKind::Dir);
+                Some((i, to))
+            })
+            .collect();
+        for (i, to) in targets {
+            built[i].row.kind = PageKind::Redirect;
+            built[i].row.redirect_to = to.map(|j| built[j].row.key);
+            built[i].html = None;
+        }
+
         // 3. Categories and tags as rows of their own containers.
         let mut cat_names: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut tag_names: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -396,6 +481,12 @@ impl MemoryStore {
             }
         }
         let mut rows: Vec<LightRow> = built.iter().map(|b| b.row.clone()).collect();
+        let mut in_redirects: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
+        for r in &rows {
+            if let Some(t) = r.redirect_to {
+                in_redirects.entry(t).or_default().push(r.key);
+            }
+        }
         let mut members: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
         let mut page_categories: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
         let mut page_tags: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
@@ -608,6 +699,7 @@ impl MemoryStore {
             page_categories,
             page_tags,
             by_url,
+            in_redirects,
         }
     }
 
@@ -661,7 +753,14 @@ impl WebStore for MemoryStore {
             (LinkKind::Category | LinkKind::Tag, LinkDir::In) => {
                 self.members.get(&key).cloned().unwrap_or_default()
             }
-            (LinkKind::Redirect, _) => Vec::new(),
+            (LinkKind::Redirect, LinkDir::Out) => self
+                .row_ref(key)
+                .and_then(|r| r.redirect_to)
+                .into_iter()
+                .collect(),
+            (LinkKind::Redirect, LinkDir::In) => {
+                self.in_redirects.get(&key).cloned().unwrap_or_default()
+            }
         }
     }
     fn link_rows(&self, key: PageKey) -> Vec<LinkRow> {
@@ -695,7 +794,7 @@ impl WebStore for MemoryStore {
             if r.depth <= base_depth {
                 break;
             }
-            if r.kind == kind {
+            if PageKind::answers_kind(r.kind, kind) {
                 out.push((r.key, r.depth - base_depth));
             }
         }

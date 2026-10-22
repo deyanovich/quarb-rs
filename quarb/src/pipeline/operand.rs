@@ -344,6 +344,29 @@ pub(crate) fn eval_operand<H: Host>(
                         scope.prov.cloned().unwrap_or_else(|| host.prov_at(ext)),
                     )]
                 }
+                // A reducing command over a group's seed takes the
+                // members together, as `| count` after the group does:
+                // `%(n = count)`, `($_ | sum(--of=:x))` reduce the
+                // group, never each member.
+                Operand::Topic | Operand::Seed
+                    if !scope.members.is_empty()
+                        && matches!(commands.first(), Some(Command::Func(c)) if crate::syntax::registry::takes_of(&c.name)) =>
+                {
+                    let topics: Vec<Value> = scope
+                        .members
+                        .iter()
+                        .map(|m| m.topic.clone().unwrap_or_else(|| host.node_scalar(&m.ext)))
+                        .collect();
+                    vec![Thread::<H::Ext> {
+                        prov: scope.prov.cloned().unwrap_or_else(|| host.prov_at(ext)),
+                        register: scope.register.to_vec(),
+                        topic: Some(Value::list(topics)),
+                        members: scope.members.to_vec(),
+                        captures: scope.captures.to_vec(),
+                        named: scope.named.to_vec(),
+                        ext: host.restate(&scope, ext),
+                    }]
+                }
                 // The topic of a group is its members:
                 // `($_ | ::lower @| join)` runs the commands over the
                 // rows, each on its own node.

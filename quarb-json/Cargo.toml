@@ -11,6 +11,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.40.0" }
+quarb = { path = "../quarb", version = "0.40.1" }
 serde = "1"
 serde_json.workspace = true

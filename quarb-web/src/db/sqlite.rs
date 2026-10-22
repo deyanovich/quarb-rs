@@ -359,7 +359,8 @@ impl WebStore for SqliteStore {
             None => i64::MAX,
         };
         let Ok(mut st) = conn.prepare_cached(
-            "SELECT id, depth FROM pages WHERE site_id = ?1 AND container = ?2 AND kind = ?3 AND tree_rank > ?4 AND tree_rank < ?5 ORDER BY tree_rank",
+            // a redirect stub answers `//page` too (draft 164)
+            "SELECT id, depth FROM pages WHERE site_id = ?1 AND container = ?2 AND (kind = ?3 OR (?3 = 'page' AND kind = 'redirect')) AND tree_rank > ?4 AND tree_rank < ?5 ORDER BY tree_rank",
         ) else {
             return Vec::new();
         };

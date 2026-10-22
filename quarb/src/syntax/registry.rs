@@ -590,10 +590,10 @@ pub const SPECS: &[FnSpec] = &[
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),
     with_check(
-        reducing(
+        with_options(reducing(
             "std",
             "the standard deviation (sample with the word sample)",
-        ),
+        ), &["--sample"]),
         Check::Stat,
     ),
     with_check(

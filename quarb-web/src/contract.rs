@@ -27,7 +27,8 @@ pub enum PageKind {
     Category,
     /// A tag the site declares; members are the pages that carry it.
     Tag,
-    /// A page that stands for another (`->redirect` reaches it).
+    /// A page that stands for another (`->redirect` reaches it); a
+    /// page under `//page` too, wearing the trait `<redirect>`.
     Redirect,
 }
 
@@ -40,6 +41,12 @@ impl PageKind {
             PageKind::Tag => "tag",
             PageKind::Redirect => "redirect",
         }
+    }
+
+    /// Whether a row of kind `have` answers a walk for `want`: its
+    /// own kind, and a redirect stub under `page` (draft 164).
+    pub fn answers_kind(have: PageKind, want: PageKind) -> bool {
+        have == want || (want == PageKind::Page && have == PageKind::Redirect)
     }
 }
 

@@ -364,7 +364,8 @@ impl WebStore for PostgresStore {
         };
         self.rt
             .block_on(client.query(
-                "SELECT id, depth FROM pages WHERE site_id = $1 AND container = $2 AND kind = $3 AND tree_rank > $4 AND tree_rank < $5 ORDER BY tree_rank",
+                // a redirect stub answers `//page` too (draft 164)
+                "SELECT id, depth FROM pages WHERE site_id = $1 AND container = $2 AND (kind = $3 OR ($3 = 'page' AND kind = 'redirect')) AND tree_rank > $4 AND tree_rank < $5 ORDER BY tree_rank",
                 &[&(site.0 as i64), &container.name(), &kind.name(), &from_rank, &end],
             ))
             .map(|rows| rows.iter().map(|r| (PageKey(r.get::<_, i64>(0) as u64), (r.get::<_, i64>(1) - base_depth) as u32)).collect())

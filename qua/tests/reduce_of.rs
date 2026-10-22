@@ -100,6 +100,23 @@ fn a_numeric_reducer_over_lists_says_so() {
 }
 
 #[test]
+fn a_reducer_in_a_body_over_a_group_takes_the_members_together() {
+    assert_eq!(
+        run("/rows/* | %(::k; ::x) @| group(::k) | %(k = $.k; n = count; s = ($_ | sum(--of=:x)))").unwrap(),
+        [r#"%(k = "a"; n = 2; s = 6)"#, r#"%(k = "b"; n = 1; s = 3)"#]
+    );
+    assert_eq!(
+        run("/rows/* | %(::k; ::x) @| group(::k) | %(n = ($_ | count))").unwrap(),
+        ["%(n = 2)", "%(n = 1)"]
+    );
+    // a navigation body still runs per member
+    assert_eq!(
+        run("/rows/* | %(::k; ::x) @| group(::k) | %(xs = ($_ | :x @| join(\",\")))").unwrap(),
+        [r#"%(xs = "1,5")"#, r#"%(xs = "3")"#]
+    );
+}
+
+#[test]
 fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
     let e = refuse("/rows/* @| sum(::x)");
     assert!(e.contains("'sum' takes no operand, 1 given") && e.contains("synopsis"), "{e}");

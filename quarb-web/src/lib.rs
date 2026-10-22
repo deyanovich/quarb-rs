@@ -512,10 +512,14 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 // A row answers to its kind (`//page`, `//dir`,
                 // `//tag`), to its path segment, to the segment's
                 // stem, and to its title.
+                // A redirect stub is a page that stands for another
+                // (`//page<redirect>`), answering to both words.
                 Some(r) => {
                     r.kind.name() == name
+                        || (r.kind == PageKind::Redirect && name == "page")
                         || r.name == name
-                        || (r.kind == PageKind::Page && Self::stem(&r.name) == name)
+                        || (matches!(r.kind, PageKind::Page | PageKind::Redirect)
+                            && Self::stem(&r.name) == name)
                         || r.title.as_deref() == Some(name)
                 }
                 None => false,
@@ -643,6 +647,10 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     return Vec::new();
                 };
                 let mut out = vec![r.kind.name().to_string()];
+                if r.kind == PageKind::Redirect {
+                    // a page wearing the trait (draft 164)
+                    out.insert(0, "page".to_string());
+                }
                 if r.kind == PageKind::Category {
                     for t in &r.tags {
                         if PAGE_PROPS.contains(&t.as_str()) {
@@ -1121,7 +1129,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                         .iter()
                         .chain(sc.ancestors.iter())
                         .filter_map(|k| cache.get(k))
-                        .filter(|r| r.site == s && r.container == c && r.kind == kind)
+                        .filter(|r| {
+                            r.site == s && r.container == c && PageKind::answers_kind(r.kind, kind)
+                        })
                         .map(|r| (r, r.depth))
                         .collect();
                     v.sort_by_key(|(r, _)| r.tree_rank);

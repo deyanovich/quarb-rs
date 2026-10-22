@@ -11,8 +11,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.40.0" }
-quarb-json = { path = "../quarb-json", version = "0.40.0" }
+quarb = { path = "../quarb", version = "0.40.1" }
+quarb-json = { path = "../quarb-json", version = "0.40.1" }
 ciborium.workspace = true
 thiserror.workspace = true
 

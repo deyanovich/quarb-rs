@@ -1,6 +1,6 @@
 [package]
 name = "quarb-http"
-version = "0.40.0"
+version = "0.40.1"
 edition = "2024"
 description = "The HTTP client the Quarb adapters share: one agent with timeouts"
 license = "MIT OR Apache-2.0"

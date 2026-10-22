@@ -303,3 +303,53 @@ fn extensionless_pages_and_both_link_spellings() {
     );
     assert_eq!(values("//page[::redlinks > 0] @| count"), ["0"]);
 }
+
+#[test]
+fn a_redirect_stub_stands_for_its_target() {
+    use quarb_web::{MemoryStore, PageFile, SiteInput, WebAdapter};
+    let mut files = common::files();
+    files.push(PageFile {
+        path: "spec/quarb-v1.0-draft.164.html".into(),
+        html: common::page("The spec", "", "<p>The language.</p>"),
+    });
+    // a meta refresh, with the script browsers run (extension-less,
+    // as quarb.org packs its stubs)
+    files.push(PageFile {
+        path: "spec/latest".into(),
+        html: "<!doctype html><html><head><meta charset=\"utf-8\"><title>latest</title><meta http-equiv=\"refresh\" content=\"0; url=quarb-v1.0-draft.164.html\"><script>location.replace(\"quarb-v1.0-draft.164.html\" + location.hash)</script></head><body><p>Redirecting to <a href=\"quarb-v1.0-draft.164.html\">the spec</a>.</p></body></html>".into(),
+    });
+    // a script alone, with a site-absolute target
+    files.push(PageFile {
+        path: "guide/latest".into(),
+        html: "<!doctype html><html><head><title>latest</title><script>\n  location.replace('/guides/jq.html' + location.hash);\n</script></head><body></body></html>".into(),
+    });
+    let a = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
+        files,
+    ));
+    assert_eq!(strs(&a, "//page<redirect> @| count"), ["2"]);
+    assert_eq!(
+        strs(&a, "//page<redirect>::path"),
+        ["guide/latest", "spec/latest"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/spec/latest->redirect::path"),
+        ["spec/quarb-v1.0-draft.164.html"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/spec/quarb-v1.0-draft.164.html<-redirect::path"),
+        ["spec/latest"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/guide/latest->redirect::path"),
+        ["guides/jq.html"]
+    );
+    // the stub's own text is no content: no links, no page in the graph
+    assert_eq!(strs(&a, "/sites/example.org/pages/spec/latest->link @| count"), ["0"]);
+    assert_eq!(strs(&a, "//page[:name = \"latest\"] | ->redirect:name"), ["jq.html", "quarb-v1.0-draft.164.html"]);
+    // an ordinary page is no redirect
+    assert_eq!(strs(&a, "/sites/example.org/pages/about.html->redirect @| count"), ["0"]);
+}
