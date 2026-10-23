@@ -54,7 +54,7 @@ fn a_calendar_reads_the_date_fields() {
     );
     assert_eq!(
         one("= '2024-03-05' | datetime | calendar(chinese) | era"),
-        ""
+        "null"
     );
     assert_eq!(
         one("= '2024-03-05' | datetime | calendar(islamic) | year"),

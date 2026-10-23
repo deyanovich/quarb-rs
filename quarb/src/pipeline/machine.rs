@@ -107,6 +107,11 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         | Command::AggPush { .. } => false,
         // A quantified push is its push, round after round.
         Command::Repeat { command, .. } => command_projects(command),
+        // A spliced quarq is whatever it holds: the runtime
+        // any-topic check types the result.
+        Command::Splice(_) => false,
+        // the session push files the topic and leaves the cursor untouched
+        Command::SessionPush(_) => false,
         // A navigation command re-types by its own projection —
         // handled in the [`pipeline_projected`] fold (it can also
         // RESET a projected pipeline back to nodes).

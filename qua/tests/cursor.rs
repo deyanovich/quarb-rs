@@ -76,7 +76,8 @@ fn the_invoking_position() {
         ok(&d, "/a/* | .s(/b/* | %(v = ::v; up = ($$__::k))) | $.s"),
         "@%(@(v; up); %(10; 1); %(20; 1))\n%(v = 30; up = 2)"
     );
-    assert_eq!(ok(&d, "/a/* | .s(/b/*[$$__::k = 1]::v) | $.s"), "@(10; 20)");
+    // the thread whose scoped match is empty answers null, printed
+    assert_eq!(ok(&d, "/a/* | .s(/b/*[$$__::k = 1]::v) | $.s"), "@(10; 20)\nnull");
     assert_eq!(ok(&d, "/a/* | .s(/b/* | .t(((__))::k) | $.t) | $.s"), "@(1; 1)\n2");
     // Top level: null.
     assert_eq!(ok(&d, "/a/* | ($$__::k ?? \"none\")"), "none\nnone");

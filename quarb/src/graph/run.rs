@@ -15,6 +15,8 @@ use std::rc::Rc;
 /// switch, the head's topic, the environments and the libraries.
 #[derive(Clone, Default)]
 pub struct Run {
+    /// The session memory (`| ,name`, `$,name`, `%,`), the host's.
+    pub session: Option<crate::pipeline::SessionMemory>,
     pub now: Option<(i64, u32)>,
     pub allow_shell: bool,
     pub quantifier_bound: Option<usize>,
@@ -42,6 +44,7 @@ impl Run {
     /// The pipeline's share of the options.
     pub fn options(&self) -> RunOptions {
         RunOptions {
+            session: self.session.clone(),
             now: self.now,
             allow_shell: self.allow_shell,
             quantifier_bound: self.quantifier_bound,

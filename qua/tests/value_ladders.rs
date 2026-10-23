@@ -23,24 +23,24 @@ fn the_rungs_on_a_record_a_list_and_a_table() {
     assert_eq!(rows("/a | % | :x"), ["1"]);
     assert_eq!(rows("/a | %(::y) | ++ %(x = ::x)"), [r#"%(y = "two"; x = 1)"#]);
     assert_eq!(rows(r#"/a | %(::y) | [::x = 1] | :y"#), ["two"]);
-    assert_eq!(rows("/a | % | project(%(n = ::x; t = :::type))"), [r#"%(n = 1; t = "record")"#]);
+    assert_eq!(rows("/a | % | $_:%(n = ::x; t = :::type)"), [r#"%(n = 1; t = "record")"#]);
     // the descriptors
     assert_eq!(rows("/a | % | :::fields"), ["@(:x; :y)"]);
     assert_eq!(rows("/a | % | :::keys"), [r#"@("x"; "y")"#]);
     assert_eq!(rows("/a | % | :::type"), ["record"]);
     assert_eq!(rows("/a | % | :::dim"), ["@(1; 2)"]);
-    assert_eq!(rows("/a | % | :::zzz"), [""]);
+    assert_eq!(rows("/a | % | :::zzz"), ["null"]);
     // a list of records reads through for `:` and `:::`; `::a` is
     // the position's, and a value capsa has none
     let l = "= @(%(a = 1); %(a = 2))";
-    assert_eq!(rows(&format!("{l} | ::a")), [""]);
+    assert_eq!(rows(&format!("{l} | ::a")), ["null"]);
     assert_eq!(rows(&format!("{l} | :a")), ["@(1; 2)"]);
     assert_eq!(rows(&format!("{l} | :::fields")), ["@(:a)"]);
     assert_eq!(rows(&format!("{l} | :::nrows")), ["2"]);
     // a table: the column as a list, the descriptors
     let t = r#"= #(@(name; age); %("Braund"; 22); %("Allen"; 35))"#;
     assert_eq!(rows(&format!("{t} | :age")), ["@(22; 35)"]);
-    assert_eq!(rows(&format!("{t} | :::header")), [r#"%(name = "text"; age = "int")"#]);
+    assert_eq!(rows(&format!("{t} | :::header")), ["@(:name<*; text>; :age<*; int>)"]);
     assert_eq!(rows(&format!("{t} | :::type")), [r#"@("text"; "int")"#]);
     assert_eq!(rows(&format!("{t} | :::dim")), ["@(2; 2)"]);
     assert_eq!(rows(&format!("{t} | :::nrows")), ["2"]);

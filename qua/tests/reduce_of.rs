@@ -54,7 +54,7 @@ fn the_option_reads_an_expression_on_each_item_over_the_context() {
     // the position stays in reach: a node's own property
     assert_eq!(one("/rows/* | ::k @| join(\", \"; --of=$$_::x)"), "1, 3, 5");
     // a null result is a missing value
-    assert_eq!(one("/rows/* @| sum(--of=::missing)"), "");
+    assert_eq!(one("/rows/* @| sum(--of=::missing)"), "null");
 }
 
 #[test]

@@ -62,7 +62,7 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
     // the text model: the lowered table carries tabula, its cells
     // their column as lemma; the frame is keyed by them and Bob's
     // empty cell is a hole
-    assert_eq!(ok(&["//*<tabula>::lemma", &text_md]), "\n");
+    assert_eq!(ok(&["//*<tabula>::lemma", &text_md]), "null\n");
     assert_eq!(
         ok(&["//*<tabula> | # | keys", &text_md]),
         "@(\"name\"; \"role\"; \"age\")\n"
@@ -87,7 +87,7 @@ fn a_table_is_a_tabula_in_every_substrate_and_reads_as_a_table() {
     // no header declared: the array face
     assert_eq!(
         ok(&["//*<tabula>[2] | #", &html_s]),
-        "#(%(1; 2);\n  %(3; 4))\n"
+        "#(@(1; 2);\n  @(3; 4))\n"
     );
     assert_eq!(
         ok(&["//*<tabula>[2] | # | transpose | [1]", &html_s]),

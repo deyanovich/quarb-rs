@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(cal("zh", Calendar::Chinese), "2024年正月25 14:30:00");
         assert_eq!(month("de"), "Januar Jan.");
         assert_eq!(month("zh-TW"), "1月 1月");
-        let v = Value::Record(vec![
+        let v = Value::record(vec![
             ("n".into(), Value::Float(1234.5)),
             ("t".into(), Value::Str("x".into())),
         ]);

@@ -176,6 +176,17 @@ pub enum Command {
     /// `| $.`, `| $.name`, `| @.` — recall a register value as the
     /// topic.
     Recall(RegRef),
+    /// `| &$.p` — the quarq a register holds, spliced at the recall
+    /// (spec: Quarqs): its body runs here as the next commands, late
+    /// bound, where `&name` splices a def at parse time. A register
+    /// holding no quarq refuses.
+    Splice(RegRef),
+    /// `| ,name` — the SESSION PUSH (spec: Capsa Operations, "Session
+    /// memory", draft 166): the topic filed under the name for the
+    /// rest of the session; it gathers — one thread files its topic,
+    /// several file the list of their topics — and the threads pass
+    /// on untouched.
+    SessionPush(String),
     /// `| %%(...)` — the named register view (`%.`) enriched with
     /// the given fields: register fields first in the `%.` layout,
     /// the args after in written order, an arg overriding a
@@ -243,6 +254,16 @@ pub enum Command {
     },
 }
 
+/// A row literal's key as `record_row` carries it: the text, and
+/// whether it was quoted (a quoted key stays text where a bare one
+/// reads as the literal it spells, `%(1 = …)`, `%(2013-01-01 = …)`).
+pub(crate) fn row_key(name: &str) -> (&str, bool) {
+    match name.strip_prefix('\u{0}') {
+        Some(text) => (text, true),
+        None => (name, false),
+    }
+}
+
 /// The core property names (spec: Core Properties), reserved on the
 /// adapter level: `:name` refuses with a pointer to `:name`.
 pub const CORE_KEYS: &[&str] = &[
@@ -288,6 +309,11 @@ pub const CORE_KEYS: &[&str] = &[
 /// filed under it last.
 #[derive(Debug, Clone)]
 pub enum RegRef {
+    /// `$,name` — the session memory's value under the name (spec:
+    /// Capsa Operations, "Session memory", draft 166).
+    Session(String),
+    /// `%,` — the whole session memory as a record.
+    SessionRecord,
     /// `$.` — the latest value regula.
     Top,
     /// `$.N` — the N-th value regula (1-based, references not
@@ -366,6 +392,10 @@ impl FnCall {
 /// end optional).
 #[derive(Debug, Clone)]
 pub enum Arg {
+    /// A record field's key that is no text (spec: Record, draft
+    /// 166): `%(1 = "a"; 2013-01-01 = 5)`, the value of the field
+    /// following it, as a text key's `Lit(Str)` does.
+    Key(Value),
     Lit(Value),
     Expr(Operand),
     Range(Option<i64>, Option<i64>),
@@ -408,9 +438,16 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
         return Some(n);
     }
     // `:title` — a record's field derives its name as a projection
-    // does: `group(:title)`, `%(:title, 'n', 1)`.
+    // does: `group(:title)`, `%(:title, 'n', 1)`; a projector
+    // (the head's `= %(:A; :B)`) by its bare key likewise.
     if let Operand::Field { name, .. } = op {
         return Some(name);
+    }
+    if let Operand::Typed { inner, .. } = op {
+        return auto_field_name(inner);
+    }
+    if let Operand::Lit(crate::Value::Projection { key, .. }) = op {
+        return Some(key);
     }
     if let Operand::ValueMeta { key, .. } = op {
         return Some(key);
@@ -563,6 +600,17 @@ pub enum Predicate {
     Range(Option<i64>, Option<i64>),
     /// `[expr]` — keep nodes for which `expr` is truthy.
     Expr(PredExpr),
+    /// `[2; 4; 5]`, `[1; 3..4; -1]` — a position list (spec: Index
+    /// Predicates): positions and ranges, each read as `Index` /
+    /// `Range`, the selection kept in the hop's order, a position
+    /// named twice kept once. The items are `Index` and `Range`.
+    Positions(Vec<Predicate>),
+    /// `[@(2; 4; 5)]`, `[$.pos]`, `[$.n]` — brackets that look at no
+    /// node: an expression of literals and registers alone, read at
+    /// run time as a position (an integer) or a position list (a
+    /// list of integers); any other value is taken for its
+    /// truthiness.
+    Computed(Operand),
 }
 
 /// A boolean predicate expression.
@@ -598,11 +646,42 @@ pub enum PatSeg {
 /// One index of a value (spec: Indexing a Value): a position
 /// (1-based, negative from the end), a range with either end open,
 /// or a column's name.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum IndexSpec {
     At(i64),
     Range(Option<i64>, Option<i64>),
     Name(String),
+    /// A position list: `v[2; 4; 5]`, the rows `t[@(2; 4)]`, read
+    /// in the value's order, a position named twice once.
+    List(Vec<IndexSpec>),
+    /// `[@(2; 4)]`, `[$.pos]`: an expression read when the value is
+    /// indexed, an integer the position, a list of integers the
+    /// position list; any other value a condition, judged once.
+    Expr(Box<Operand>),
+    /// `t[:A > 0]`, `v[$_ > 2]`, `t[nulls = 0]` — a condition on the
+    /// rows of a table or the items of a list (spec: Indexing a
+    /// Value, draft 166), each judged as the topic, as `| [cond]`
+    /// judges them; the table keeps its header and index.
+    Cond(Box<PredExpr>),
+    /// Three or more written coordinates, `v[2; 4; 5]`: a position
+    /// list on a list or a record; a table has two coordinates and
+    /// refuses (its listed rows are `t[@(2; 4; 5)]`).
+    Coords(Vec<IndexSpec>),
+}
+
+/// The shape after the projection operator's colon: a constructor or
+/// an expression (`@(…)`, `%(…)`, `(…)`, `$.proj`) whose value is
+/// read on the base, or the `#(…)` form, the table of the named
+/// columns (each item a bare projection or `name = expr`).
+#[derive(Debug, Clone)]
+pub enum ProjShape {
+    Value(Box<Operand>),
+    /// `#(:A; :B)`, `#(:A; :B; -i=:A)`: the columns, and the index
+    /// option naming one of them (spec: The Table, "The index").
+    Columns {
+        items: Vec<(Option<String>, Operand)>,
+        index: Option<Box<Operand>>,
+    },
 }
 
 /// One row of a table literal: a list row, or a record row whose
@@ -662,6 +741,24 @@ pub enum Operand {
     Row(Vec<(Option<String>, Operand)>),
     /// Unary minus.
     Neg(Box<Operand>),
+    /// A glued minus before a projector (`-::fare`): the
+    /// descending marker on a sort key (spec: Keyed Aggregates) —
+    /// the key descends whatever its type, and ascends under
+    /// `--desc`. Anywhere else the negation, as `Neg`.
+    Desc(Box<Operand>),
+    /// `v:@(:id; 1)`, `v:%(n = :name)`, `t:#(:A; :B)`, `v:($.cols)`,
+    /// `v:$.proj` — the projection operator (spec: The Projection
+    /// Operator, draft 166): the constructor after a glued colon is
+    /// applied to the value on its left — every projector in
+    /// it, at any depth, replaced by its reading on that value (on
+    /// each node, for a path), every other value kept. The `#`
+    /// shape is the table of the named columns.
+    Projected { base: Box<Operand>, shape: ProjShape },
+    /// `:props...` — the spread suffix on a record item: a list of
+    /// projectors spread into the record's fields, each keyed
+    /// by its bare key and read on the cursor (`%(:props...)` is what
+    /// `| %` abbreviates).
+    Spread(Box<Operand>),
     /// The first argument of a reducing callee (`sum(/*::n)`): the
     /// values it reaches, gathered into one list as the command's
     /// input would be (spec: Value Expressions, draft 164); one
@@ -684,6 +781,21 @@ pub enum Operand {
     /// bottom rung of the colon ladder, a value's field below a
     /// node's property. A leading `:name` reads the topic's field.
     Field { base: Box<Operand>, name: String },
+    /// `t[[label]]`, `t[[x; y]]`, `t[[a..b]]`, `r[[k]]` — the lookup
+    /// by label (spec: Indexing a Value, draft 166): on an indexed
+    /// table the rows carrying the label, on a record the field
+    /// under the key, compared as values; a range takes both ends
+    /// in. Where the single bracket counts positions.
+    LabelIndex { base: Box<Operand>, labels: Vec<Operand> },
+    /// `:A<int>`, `::price<float>`, `<int>` — a typed projector
+    /// (spec: Projectors, draft 166): a projection with its trait
+    /// brackets, declaring the type of the field it names; `inner`
+    /// is the projection as written (the topic alone under `map`'s
+    /// bare trait body, `map(<int>; --to=:A)`). It stands only where
+    /// a field is declared — a header item, a record key, a
+    /// structured projector's item, `map`'s body — and is refused as
+    /// a value.
+    Typed { inner: Box<Operand>, typing: crate::value::Typing },
     /// `base:key` — a value's provenance: the core-metadata rung
     /// after a register value or the topic, defined over the
     /// origins the value was read from (`source`, `instant`,

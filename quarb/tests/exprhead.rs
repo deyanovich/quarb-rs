@@ -62,6 +62,8 @@ fn calculator_detection() {
     assert!(!is_calculator("/a"));
     assert!(!is_calculator("//x::y"));
     assert!(!is_calculator("= 2 || /x"));
+    // A literal opens a head without the sigil (draft 166).
+    assert!(is_calculator("1 + 1"));
     // Unparseable text answers false; the run path owns the error.
-    assert!(!is_calculator("1 + 1"));
+    assert!(!is_calculator("+ 1"));
 }

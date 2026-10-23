@@ -56,7 +56,7 @@ fn a_forking_operand_forks_the_expression() {
     // forked once at the pipe, the pairs in step
     assert_eq!(rows("/* | (::x + ::y)"), ["11", "22", "33"]);
     // an operand that reaches nothing is null, one value
-    assert_eq!(rows("= 3 | (10 + /zzz::n)"), [""]);
+    assert_eq!(rows("= 3 | (10 + /zzz::n)"), ["null"]);
     assert_eq!(one("= 3 | (/zzz::n ?? 0)"), "0");
     // comparisons keep their existential reading
     assert_eq!(one("= 3 | (/*::n = 2)"), "true");

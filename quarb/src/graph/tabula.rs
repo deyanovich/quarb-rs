@@ -300,7 +300,7 @@ pub fn table_node_records(adapter: &dyn AstAdapter, node: NodeId) -> Option<Vec<
             fields.push((key, text(cell, "body")));
         }
         if !fields.is_empty() {
-            records.push(Value::Record(fields));
+            records.push(Value::Record(fields.into()));
         }
     }
     Some(records)

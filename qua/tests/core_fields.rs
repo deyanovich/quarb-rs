@@ -2,7 +2,7 @@
 //! field on a node as on a record; `:props` / `:properties` list the
 //! node's property projections, `:meta` / `:metadata` its adapter
 //! metadata projections, `:fields` the core field projections —
-//! lists of PROJECTION VALUES, printed as written and coercing to
+//! lists of PROJECTORS, printed as written and coercing to
 //! text as the bare key; `| fields` reads the field projections of
 //! any topic; an unknown core field refuses naming them; `| %` on a
 //! node reads the record of its properties, `| @` is refused.
@@ -62,8 +62,8 @@ fn the_inspection_fields_list_the_three_ladders_as_projections() {
 }
 
 #[test]
-fn a_projection_value_prints_as_written_and_coerces_to_its_key() {
-    assert_eq!(rows("/a:props | [1] | type"), ["projection"]);
+fn a_projector_prints_as_written_and_coerces_to_its_key() {
+    assert_eq!(rows("/a:props | [1] | type"), ["projector"]);
     assert_eq!(rows("/a:props | join(\", \")"), ["title, year"]);
     assert_eq!(rows("/a:props | [1] | ($_ = \"title\")"), ["true"]);
     assert_eq!(rows("/a:props | [1] | upper"), ["TITLE"]);
@@ -83,13 +83,13 @@ fn the_fields_command_reads_any_topic() {
         rows("= @(%(a = 1); %(b = 2; a = 3)) | ... @| fields"),
         ["@(:a; :b)"]
     );
-    // keys and header keep answering text
+    // keys keeps answering text; header the typed projectors
     assert_eq!(rows("= %(a = 1; b = 2) | keys"), [r#"@("a"; "b")"#]);
     // a list of one is a list
     assert_eq!(rows("= %(a = 1) | fields"), ["@(:a)"]);
     assert_eq!(rows("= %(a = 1) | keys"), [r#"@("a")"#]);
     assert_eq!(rows("= %(a = 1) | values"), ["@(1)"]);
-    assert_eq!(rows("= #(%(a = 1)) | header"), [r#"%(a = "int")"#]);
+    assert_eq!(rows("= #(%(a = 1)) | header"), ["@(:a<*; int>)"]);
     assert_eq!(rows("= @(@(1)) | flatten"), ["@(1)"]);
     let e = refuse("= 7 | fields");
     assert!(e.contains("fields reads a record's fields"), "{e}");
@@ -106,10 +106,10 @@ fn an_unknown_core_field_is_refused_naming_the_core_fields() {
     assert!(e.contains("':zzz' is no core field"), "{e}");
     // on a record the single colon is a field read: a miss is null;
     // a value that is no record, null among them, answers null too
-    assert_eq!(rows("= %(a = 1) | :zzz"), [""]);
-    assert_eq!(rows("= null | :zzz"), [""]);
-    assert_eq!(rows(r#"= "x" | :zzz"#), [""]);
-    assert_eq!(rows("= 3 | :zzz"), [""]);
+    assert_eq!(rows("= %(a = 1) | :zzz"), ["null"]);
+    assert_eq!(rows("= null | :zzz"), ["null"]);
+    assert_eq!(rows(r#"= "x" | :zzz"#), ["null"]);
+    assert_eq!(rows("= 3 | :zzz"), ["null"]);
     assert_eq!(rows("= 3 | %(cmos = (:: | :genus))"), ["%(cmos = null)"]);
     // the node's core field reads where the topic is the node
     assert_eq!(rows("/a | :name"), ["a"]);
@@ -117,7 +117,7 @@ fn an_unknown_core_field_is_refused_naming_the_core_fields() {
     // unknown key null: the thread still stands at its node
     assert_eq!(rows("/a | :name | :index"), ["1"]);
     assert_eq!(rows("/a | ::title | :depth"), ["1"]);
-    assert_eq!(rows("/* | :name | :zzz"), ["", ""]);
+    assert_eq!(rows("/* | :name | :zzz"), ["null", "null"]);
     // a list topic reads the field of each item
     assert_eq!(rows("= @(%(n = 1); %(n = 2)) | :n"), ["@(1; 2)"]);
     assert_eq!(rows("= %(a = 1) | :a"), ["1"]);

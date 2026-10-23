@@ -12,5 +12,5 @@ homepage.workspace = true
 
 [dependencies]
 url = "2"
-quarb = { path = "../quarb", version = "0.41.0" }
+quarb = { path = "../quarb", version = "0.42.0" }
 html5ever = "0.27"

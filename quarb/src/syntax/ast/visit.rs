@@ -79,13 +79,14 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
                 v.operand(keys);
                 v.operand(values);
             }
-            Arg::Lit(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { value: None, .. } => {}
+            Arg::Lit(_) | Arg::Key(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { value: None, .. } => {}
         }
     }
 }
 
 pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
     match s {
+        Command::SessionPush(_) => {}
         Command::Func(call)
         | Command::Agg(call)
         | Command::RecordWith(call)
@@ -102,6 +103,7 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Map(inner) | Command::Repeat { command: inner, .. } => v.command(inner),
         Command::Push(_)
         | Command::Recall(_)
+        | Command::Splice(_)
         | Command::AggRecall(_)
         | Command::Spread { .. }
         | Command::FieldsPush => {}
@@ -136,7 +138,8 @@ pub fn walk_elem<V: Visitor + ?Sized>(v: &mut V, e: &PathElem) {
 pub fn walk_predicate<V: Visitor + ?Sized>(v: &mut V, p: &Predicate) {
     match p {
         Predicate::Expr(e) => v.pred(e),
-        Predicate::Index(_) | Predicate::Range(_, _) => {}
+        Predicate::Computed(o) => v.operand(o),
+        Predicate::Positions(_) | Predicate::Index(_) | Predicate::Range(_, _) => {}
     }
 }
 
@@ -178,11 +181,34 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                 v.operand(i);
             }
         }
+        Operand::Projected { base, shape } => {
+            v.operand(base);
+            match shape {
+                crate::syntax::ast::ProjShape::Value(x) => v.operand(x),
+                crate::syntax::ast::ProjShape::Columns { items, index } => {
+                    for (_, item) in items {
+                        v.operand(item);
+                    }
+                    if let Some(i) = index {
+                        v.operand(i);
+                    }
+                }
+            }
+        }
         Operand::Neg(inner)
+        | Operand::Desc(inner)
+        | Operand::Spread(inner)
         | Operand::Gathered(inner)
         | Operand::Invoking(inner)
         | Operand::Position(inner)
         | Operand::Driver(inner) => v.operand(inner),
+        Operand::Typed { inner, .. } => v.operand(inner),
+        Operand::LabelIndex { base, labels } => {
+            v.operand(base);
+            for l in labels {
+                v.operand(l);
+            }
+        }
         Operand::Group(e) => v.pred(e),
         Operand::Field { base, .. }
         | Operand::ValueMeta { base, .. }

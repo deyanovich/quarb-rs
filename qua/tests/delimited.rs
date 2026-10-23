@@ -124,7 +124,7 @@ fn the_wrong_delimiter_is_refused_and_the_wrong_decimal_is_null() {
             &dir,
             &["/* | ::price @| sum", "prices-semicolon.csv?delimiter=;"]
         ),
-        ""
+        "null"
     );
     assert_eq!(ok_(&dir, &["/row[2]::price", "prices.tsv"]), "1,234.5");
     assert_eq!(
@@ -197,7 +197,7 @@ fn number_by_locale_and_csv_out() {
     assert_eq!(ok(&dir, &["= \"1 234,56\" | number(ru-RU)"]), "1234.56");
     assert_eq!(ok(&dir, &["= \"1'234.56\" | number(de-CH)"]), "1234.56");
     assert_eq!(ok(&dir, &["= \"1,234.56\" | number(en-US)"]), "1234.56");
-    assert_eq!(ok(&dir, &["= \"12,50\" | number(en-US)"]), "");
+    assert_eq!(ok(&dir, &["= \"12,50\" | number(en-US)"]), "null");
     assert_eq!(ok(&dir, &["= \"1,234\" | number"]), "1234");
     // out: the delimiter as the quoted first argument, numbers canonical
     assert_eq!(

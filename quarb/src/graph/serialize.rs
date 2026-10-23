@@ -138,7 +138,7 @@ pub(crate) fn node_value_from(
     if is_array {
         Value::list(entries.into_iter().map(|(_, v)| v).collect())
     } else {
-        Value::Record(entries)
+        Value::Record(entries.into())
     }
 }
 

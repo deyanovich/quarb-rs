@@ -7,6 +7,28 @@
 use super::words::is_bool_word;
 use std::fmt;
 
+/// The value of a `q(…)` literal (spec: Quarqs): the body as parsed,
+/// its canonical source, and — when the body is nothing but a
+/// structure of projectors (`q(::x)`, `q(%(::Name; ::Fare))`) — that
+/// structure, which is what the literal then answers: a projector is
+/// the simplest quarq and keeps its own type word.
+#[derive(Debug, Clone)]
+pub struct Quarq {
+    /// The canonical spelling, `q(+ 3)`.
+    pub source: String,
+    /// The commands of the body, as after a pipe.
+    pub body: std::sync::Arc<Vec<crate::syntax::ast::Command>>,
+    /// The projector or structured projector the body spells, when
+    /// it spells one and nothing else.
+    pub projector: Option<Box<Value>>,
+}
+
+impl PartialEq for Quarq {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
 /// A projected scalar value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -25,10 +47,12 @@ pub enum Value {
     /// copies a pointer, not the elements, so a large list used as a
     /// set operand costs its construction once.
     List(std::sync::Arc<Vec<Value>>),
-    /// A record: insertion-ordered named fields (spec: The Record
-    /// Scalar). Constructed by `record(...)`; field order is
-    /// significant, matching kaiv namespaces and JSON key order.
-    Record(Vec<(String, Value)>),
+    /// A record: insertion-ordered fields (spec: Record). Field
+    /// order is significant, matching kaiv namespaces and JSON key
+    /// order. The keys are scalars, text as a rule (draft 166): the
+    /// [`Record`] holds every key's text, the typed keys beside it
+    /// where any is no text, and the fields' declarations.
+    Record(Record),
     /// A table (spec: The Table Kind): rows of one width, with a
     /// header naming the columns (a frame) or without one (an
     /// array). The reading a list of same-shaped records admits,
@@ -84,12 +108,31 @@ pub enum Value {
     /// Two library values are equal only when they are the same
     /// object.
     Foreign(ForeignValue),
-    /// A projection as a value (spec: Projection Value, draft 164):
+    /// A projector (spec: Projectors, draft 164):
     /// a ladder — 1 the core field `:`, 2 the property `::`, 3 the
     /// adapter metadata `:::` — and its key. It prints as the
     /// projection is written (`::title`, the key quoted where it is
-    /// no identifier) and coerces to text as the bare key.
-    Projection { ladder: u8, key: String },
+    /// no identifier) and coerces to text as the bare key. A TYPED
+    /// projector (draft 166) carries a declared type in the trait
+    /// brackets, `:A<int>`: it declares the field it names and
+    /// stands only where a field is declared (a header item, a
+    /// record key, a structured projector's item, `map`'s body);
+    /// `:A<*; float>` is how a header reports an undeclared column
+    /// beside its inferred type, and declares nothing.
+    Projection {
+        ladder: u8,
+        key: String,
+        typing: Option<Typing>,
+    },
+    /// A quarq (spec: Quarqs, draft 166): a command as it stands
+    /// after a pipe, read as Quarb and not run — the value of the
+    /// `q(…)` literal, the sibling of `sh(…)`. It prints as its
+    /// source, two are equal when their source is, `| type` reads
+    /// `quarq`; nothing runs it but the glued colon and the commands
+    /// that take a command (`map`, the keyed aggregates), where it
+    /// is late bound: `$_`, the registers and the cursor inside it
+    /// are read where it is applied.
+    Quarq(Quarq),
     /// A node reference (spec: The Capsa, "Node references"): an
     /// engine-minted value naming one node of the arbor. It prints
     /// and exports as the node's locator, two references to one node
@@ -139,6 +182,338 @@ impl std::fmt::Debug for NodeRef {
     }
 }
 
+/// Fields whose names are paths of levels (`bar:A`, `bar:B`, `baz`)
+/// nested into a record by level (spec: The Table, "Levels of the
+/// header"): the outer names in first-met order, each holding the
+/// record of what stands under it.
+fn nest_by_levels(fields: Vec<(String, Value)>) -> Value {
+    if !fields.iter().any(|(k, _)| k.contains(':')) {
+        return Value::record(fields);
+    }
+    let mut out: Vec<(String, Value)> = Vec::new();
+    let mut groups: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+    for (k, v) in fields {
+        match k.split_once(':') {
+            Some((outer, inner)) => match groups.iter_mut().find(|(o, _)| *o == outer) {
+                Some((_, g)) => g.push((inner.to_string(), v)),
+                None => {
+                    out.push((outer.to_string(), Value::Null));
+                    groups.push((outer.to_string(), vec![(inner.to_string(), v)]));
+                }
+            },
+            None => out.push((k, v)),
+        }
+    }
+    for (o, g) in groups {
+        if let Some(slot) = out.iter_mut().find(|(k, v)| *k == o && matches!(v, Value::Null)) {
+            slot.1 = nest_by_levels(g);
+        }
+    }
+    Value::record(out)
+}
+
+/// The cells nested level by level under their labels (spec: The
+/// Table, "The index"): at each level a record keyed by the distinct
+/// values of that level in first-met order, the innermost level
+/// holding the cell.
+fn nest_levels(levels: &[Vec<Value>], cells: &[Value], depth: usize) -> Value {
+    let width = levels.first().map_or(0, Vec::len);
+    if depth + 1 >= width {
+        return Value::Record(Record::keyed(
+            levels
+                .iter()
+                .zip(cells)
+                .map(|(l, c)| (l.get(depth).cloned().unwrap_or(Value::Null), c.clone()))
+                .collect(),
+        ));
+    }
+    let mut keys: Vec<Value> = Vec::new();
+    for l in levels {
+        let k = l.get(depth).cloned().unwrap_or(Value::Null);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    Value::Record(Record::keyed(
+        keys.into_iter()
+            .map(|k| {
+                let (sub_levels, sub_cells): (Vec<Vec<Value>>, Vec<Value>) = levels
+                    .iter()
+                    .zip(cells)
+                    .filter(|(l, _)| l.get(depth) == Some(&k))
+                    .map(|(l, c)| (l.clone(), c.clone()))
+                    .unzip();
+                let v = nest_levels(&sub_levels, &sub_cells, depth + 1);
+                (k, v)
+            })
+            .collect(),
+    ))
+}
+
+/// A record's fields (spec: Record, draft 166): the key's text and
+/// the value per field, in order; beside them the keys as VALUES
+/// where any key is no text (`%(1 = "a"; 2013-01-01 = 5)`: an
+/// integer and an instant, equal as values, `1` and `"1"` two keys)
+/// and the declaration per field (`%(price<float> = …)`, the field
+/// then fixed to its type). A record with text keys and no
+/// declaration carries nothing beside its fields, the common case.
+/// It derefs to the fields, so a reader sees `Vec<(String, Value)>`
+/// as ever; a text key's value is its text.
+#[derive(Debug, Clone, Default)]
+pub struct Record {
+    fields: Vec<(String, Value)>,
+    /// The keys as values, one per field, where any is no text.
+    keys: Option<Vec<Value>>,
+    /// The declared type per field, where any field is declared.
+    declared: Option<Vec<Option<ColumnType>>>,
+}
+
+impl Record {
+    /// A record of text keys.
+    pub fn new(fields: Vec<(String, Value)>) -> Record {
+        Record {
+            fields,
+            keys: None,
+            declared: None,
+        }
+    }
+
+    /// A record keyed by values: a text key stays text, any other
+    /// scalar is held typed beside its text form.
+    pub fn keyed(pairs: Vec<(Value, Value)>) -> Record {
+        let typed = pairs.iter().any(|(k, _)| !matches!(k, Value::Str(_)));
+        let keys = typed.then(|| pairs.iter().map(|(k, _)| k.clone()).collect());
+        let fields = pairs
+            .into_iter()
+            .map(|(k, v)| (Record::key_text(&k), v))
+            .collect();
+        Record {
+            fields,
+            keys,
+            declared: None,
+        }
+    }
+
+    /// The text of a key: a text as it is, any other scalar in its
+    /// display form (the text `:name` reads it by).
+    pub fn key_text(k: &Value) -> String {
+        match k {
+            Value::Str(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The key of field `i` as a value: the typed key, or the text.
+    pub fn key(&self, i: usize) -> Value {
+        match self.keys.as_ref().and_then(|k| k.get(i)) {
+            Some(k) => k.clone(),
+            None => Value::Str(self.fields.get(i).map(|(k, _)| k.clone()).unwrap_or_default()),
+        }
+    }
+
+    /// The keys as values, in order (`| keys`).
+    pub fn key_values(&self) -> Vec<Value> {
+        (0..self.fields.len()).map(|i| self.key(i)).collect()
+    }
+
+    /// Whether any key is no text.
+    pub fn has_typed_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// The field whose key equals `k` AS A VALUE (`r[[k]]`): a text
+    /// key equals its text, a typed key its value.
+    pub fn find_key(&self, k: &Value) -> Option<usize> {
+        (0..self.fields.len()).find(|&i| self.key(i) == *k)
+    }
+
+    /// The field under the text key `k` (`:name`).
+    pub fn get(&self, k: &str) -> Option<&Value> {
+        self.fields.iter().find(|(f, _)| f == k).map(|(_, v)| v)
+    }
+
+    /// The declared type of field `i`, `Some` where it is declared.
+    pub fn declaration(&self, i: usize) -> Option<ColumnType> {
+        self.declared.as_ref().and_then(|d| d.get(i)).cloned().flatten()
+    }
+
+    /// Whether any field is declared.
+    pub fn has_declarations(&self) -> bool {
+        self.declared.as_ref().is_some_and(|d| d.iter().any(Option::is_some))
+    }
+
+    /// Field `i` declared `ty` (`None` undeclares it).
+    pub fn declare(&mut self, i: usize, ty: Option<ColumnType>) {
+        let d = self.declared.get_or_insert_with(|| vec![None; self.fields.len()]);
+        d.resize(self.fields.len(), None);
+        d[i] = ty;
+        if d.iter().all(Option::is_none) {
+            self.declared = None;
+        }
+    }
+
+    /// A field appended under a text key (a `push((k, v))` through
+    /// the deref says the same).
+    pub fn push_field(&mut self, k: String, v: Value) {
+        self.push_keyed(Value::Str(k), v, None);
+    }
+
+    /// A field appended under a key value, with its declaration.
+    pub fn push_keyed(&mut self, k: Value, v: Value, ty: Option<ColumnType>) {
+        let n = self.fields.len();
+        if !matches!(k, Value::Str(_)) {
+            let keys = self.keys.get_or_insert_with(|| vec![Value::Null; n]);
+            keys.resize(n, Value::Null);
+            // the text keys before it, held as text
+            for (i, slot) in keys.iter_mut().enumerate() {
+                if matches!(slot, Value::Null) {
+                    *slot = Value::Str(self.fields[i].0.clone());
+                }
+            }
+            keys.push(k.clone());
+        } else if let Some(keys) = &mut self.keys {
+            keys.resize(n, Value::Null);
+            keys.push(k.clone());
+        }
+        if let Some(d) = &mut self.declared {
+            d.resize(n, None);
+            d.push(ty);
+        } else if ty.is_some() {
+            let mut d = vec![None; n];
+            d.push(ty);
+            self.declared = Some(d);
+        }
+        self.fields.push((Record::key_text(&k), v));
+    }
+
+    /// The value of field `i` replaced.
+    pub fn set(&mut self, i: usize, v: Value) {
+        if let Some(f) = self.fields.get_mut(i) {
+            f.1 = v;
+        }
+    }
+
+    /// The fields alone, the keys as text.
+    pub fn into_fields(self) -> Vec<(String, Value)> {
+        self.fields
+    }
+
+    /// The record with every value replaced by `f`'s, the keys and
+    /// the declarations kept.
+    pub fn map_values(self, mut f: impl FnMut(Value) -> Value) -> Record {
+        Record {
+            fields: self.fields.into_iter().map(|(k, v)| (k, f(v))).collect(),
+            keys: self.keys,
+            declared: self.declared,
+        }
+    }
+
+    /// The record with its values replaced in order (`shift` keeps
+    /// the keys and the declarations).
+    pub fn with_values(&self, values: Vec<Value>) -> Record {
+        Record {
+            fields: self
+                .fields
+                .iter()
+                .zip(values)
+                .map(|((k, _), v)| (k.clone(), v))
+                .collect(),
+            keys: self.keys.clone(),
+            declared: self.declared.clone(),
+        }
+    }
+
+    /// The record with the fields `keep(i)` admits, the keys and
+    /// declarations kept in step.
+    pub fn filter_fields(self, mut keep: impl FnMut(usize, &(String, Value)) -> bool) -> Record {
+        let kept: Vec<bool> = self.fields.iter().enumerate().map(|(i, f)| keep(i, f)).collect();
+        let pick = |v: Vec<Value>| -> Vec<Value> {
+            v.into_iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| x).collect()
+        };
+        Record {
+            fields: self
+                .fields
+                .into_iter()
+                .zip(&kept)
+                .filter(|(_, k)| **k)
+                .map(|(f, _)| f)
+                .collect(),
+            keys: self.keys.map(pick),
+            declared: self.declared.map(|d| {
+                d.into_iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| x).collect()
+            }),
+        }
+    }
+
+    /// The key of field `i` in Quarb's text: a text key bare where
+    /// it is an identifier, quoted otherwise; a typed key as its
+    /// literal.
+    pub fn key_quarb(&self, i: usize) -> String {
+        match self.keys.as_ref().and_then(|k| k.get(i)) {
+            Some(Value::Str(_)) | None => quarb_key(&self.fields[i].0),
+            Some(k) => k.to_quarb(),
+        }
+    }
+}
+
+impl PartialEq for Record {
+    /// Two records are equal item by item: the keys as values and
+    /// the values; a declaration is no part of the value.
+    fn eq(&self, other: &Record) -> bool {
+        self.fields.len() == other.fields.len()
+            && self
+                .fields
+                .iter()
+                .zip(other.fields.iter())
+                .enumerate()
+                .all(|(i, ((_, a), (_, b)))| a == b && self.key(i) == other.key(i))
+    }
+}
+
+impl std::ops::Deref for Record {
+    type Target = Vec<(String, Value)>;
+    fn deref(&self) -> &Vec<(String, Value)> {
+        &self.fields
+    }
+}
+
+impl std::ops::DerefMut for Record {
+    /// Writes through to the fields; a push through here appends a
+    /// text, undeclared field (the accessors read a shorter `keys`
+    /// or `declared` as text and undeclared).
+    fn deref_mut(&mut self) -> &mut Vec<(String, Value)> {
+        &mut self.fields
+    }
+}
+
+impl From<Vec<(String, Value)>> for Record {
+    fn from(fields: Vec<(String, Value)>) -> Record {
+        Record::new(fields)
+    }
+}
+
+impl FromIterator<(String, Value)> for Record {
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Record {
+        Record::new(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for Record {
+    type Item = (String, Value);
+    type IntoIter = std::vec::IntoIter<(String, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Record {
+    type Item = &'a (String, Value);
+    type IntoIter = std::slice::Iter<'a, (String, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.iter()
+    }
+}
+
 /// A table: rows of one width, each cell a value, `null` the hole.
 /// With a header it is a frame (the columns named, `t:age` a
 /// column); without one an array (`#(%(1; 2); %(3; 4))`, the positions
@@ -148,6 +523,24 @@ impl std::fmt::Debug for NodeRef {
 pub struct Table {
     pub header: Option<Vec<String>>,
     pub rows: Vec<Vec<Value>>,
+    /// The declared type per column (spec: The Table, "Columns",
+    /// draft 166): `Some` where a typed projector declared the
+    /// column, which is then fixed to it; `None` where the column
+    /// is undeclared and typed by its cells. Empty when no column
+    /// is declared (the common case, every file read).
+    pub declared: Vec<Option<ColumnType>>,
+    /// The number of leading columns that are the INDEX (spec: The
+    /// Table, "The index", draft 166): 0 on a plain table, 1 where
+    /// `#(-i=:col)` named a column the labels of the rows (the
+    /// column stays a column, first in the header); more under a
+    /// composite index. The labels are the keys of the records the
+    /// table answers (`t:A`), looked up by `t[[label]]`.
+    pub index: usize,
+    /// The header's name (`#(--header=…; --name=word)`, draft 166),
+    /// read back by `:::name`; `column` is the no-name default on
+    /// both axes, so `transpose` exchanges it with the index
+    /// column's name and undoes itself.
+    pub name: Option<String>,
 }
 
 /// The keys a list of two or more records share in one order, when
@@ -178,7 +571,7 @@ fn record_array_keys(items: &[Value]) -> Option<&[(String, Value)]> {
 /// cell coerces to, tried in this order — the lattice boolean <
 /// integer < float, then the types of their own, text the top, so
 /// no column fails to type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     Boolean,
     Integer,
@@ -188,32 +581,49 @@ pub enum ColumnType {
     Period,
     Quantity,
     Text,
+    /// A TUPLE column (spec: The Table, draft 166), declared only:
+    /// `key<(int; text)>` holds lists of that arity and those types,
+    /// compared item by item, printed in the quarb form; never
+    /// inferred, it arises by declaration or as the flattened index.
+    Tuple(std::sync::Arc<Vec<ColumnType>>),
 }
 
 impl ColumnType {
-    /// The type's word, as `| types` lists it.
-    pub fn word(self) -> &'static str {
+    /// The type's word, as `| type` lists it (`(int; text)` for a
+    /// tuple).
+    pub fn word(&self) -> String {
         match self {
-            ColumnType::Boolean => "bool",
-            ColumnType::Integer => "int",
-            ColumnType::Float => "float",
-            ColumnType::Instant => "instant",
-            ColumnType::Duration => "duration",
-            ColumnType::Period => "period",
-            ColumnType::Quantity => "quantity",
-            ColumnType::Text => "text",
+            ColumnType::Boolean => "bool".to_string(),
+            ColumnType::Integer => "int".to_string(),
+            ColumnType::Float => "float".to_string(),
+            ColumnType::Instant => "instant".to_string(),
+            ColumnType::Duration => "duration".to_string(),
+            ColumnType::Period => "period".to_string(),
+            ColumnType::Quantity => "quantity".to_string(),
+            ColumnType::Text => "text".to_string(),
+            ColumnType::Tuple(items) => {
+                format!("({})", items.iter().map(ColumnType::word).collect::<Vec<_>>().join("; "))
+            }
         }
     }
 
     /// The type named by its word, as a declared header names it
-    /// (`#(--header=%(age = "int"))`); `None` for no such word.
+    /// (`#(--header=@(:age<int>))`); a tuple by its words in
+    /// parentheses, `(int; text)`; `None` for no such word.
     pub fn from_word(word: &str) -> Option<ColumnType> {
+        if let Some(inner) = word.strip_prefix('(').and_then(|w| w.strip_suffix(')')) {
+            let items: Option<Vec<ColumnType>> = inner
+                .split([';', ','])
+                .map(|w| ColumnType::from_word(w.trim()))
+                .collect();
+            return items.filter(|v| !v.is_empty()).map(|v| ColumnType::Tuple(std::sync::Arc::new(v)));
+        }
         ColumnType::ORDER.into_iter().find(|t| t.word() == word)
     }
 
     /// The words, in lattice order, for a refusal to list.
-    pub fn words() -> Vec<&'static str> {
-        ColumnType::ORDER.iter().map(|t| t.word()).collect()
+    pub fn words() -> Vec<String> {
+        ColumnType::ORDER.iter().map(ColumnType::word).collect()
     }
 
     const ORDER: [ColumnType; 8] = [
@@ -226,6 +636,12 @@ impl ColumnType {
         ColumnType::Quantity,
         ColumnType::Text,
     ];
+
+    /// The type a value is of, as a column would hold it; `None` on
+    /// null.
+    pub fn of_value(v: &Value) -> Option<ColumnType> {
+        ColumnType::of(v)
+    }
 
     /// The type a stored cell is of (null is of every type).
     fn of(v: &Value) -> Option<ColumnType> {
@@ -243,16 +659,82 @@ impl ColumnType {
     }
 }
 
+/// What a projector's trait brackets say of the field it names
+/// (spec: Projectors, draft 166): `<int>` DECLARES the type, the
+/// field then fixed to it, a value cast into it or refused; `<*>`
+/// declares nothing, and `<*; float>` is the star beside the type a
+/// header reports for an undeclared column, a report and no request
+/// (ignored where the header is applied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typing {
+    Declared(ColumnType),
+    Star(Option<ColumnType>),
+}
+
+impl Typing {
+    /// The brackets' text: `<int>`, `<(int; text)>`, `<*>`, `<*; float>`.
+    pub fn spelling(&self) -> String {
+        match self {
+            Typing::Declared(t) => format!("<{}>", t.word()),
+            Typing::Star(None) => "<*>".to_string(),
+            Typing::Star(Some(t)) => format!("<*; {}>", t.word()),
+        }
+    }
+
+    /// The type declared, `None` under the star.
+    pub fn declared(&self) -> Option<ColumnType> {
+        match self {
+            Typing::Declared(t) => Some(t.clone()),
+            Typing::Star(_) => None,
+        }
+    }
+}
+
+/// `v` cast to the declared column type `t`, `None` where it does
+/// not cast: the coercion of [`coerce_cell`], a whole-valued float
+/// under a declared integer (the cast is lossless), and under a
+/// tuple a list of the arity whose items cast each.
+pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
+    if let ColumnType::Tuple(items) = t {
+        if matches!(v, Value::Null) {
+            return Some(Value::Null);
+        }
+        let Value::List(cells) = v else { return None };
+        if cells.len() != items.len() {
+            return None;
+        }
+        let cast: Option<Vec<Value>> = cells.iter().zip(items.iter()).map(|(c, ty)| cast_cell(c, ty)).collect();
+        return cast.map(Value::list);
+    }
+    coerce_cell(v, t).or_else(|| match (v, t) {
+        (Value::Float(f), ColumnType::Integer) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
+            Some(Value::Int(*f as i64))
+        }
+        _ => None,
+    })
+}
+
+/// The cell as a refusal shows it: a text quoted, the rest in its
+/// display form.
+pub(crate) fn held_text(c: &Value) -> String {
+    match c {
+        Value::Str(s) => format!("\"{s}\""),
+        other => other.display_form(),
+    }
+}
+
 /// `v` coerced to the column type `t`, `None` where it has no such
 /// reading. Text that reads as a type counts as that type; a
 /// boolean reads as 1 and 0 among integers, an integer as a float;
 /// every scalar has a text form.
-fn coerce_cell(v: &Value, t: ColumnType) -> Option<Value> {
+fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     use ColumnType as T;
     if matches!(v, Value::Null) {
         return Some(Value::Null);
     }
     match t {
+        // a tuple is cast, never coerced: see `cast_cell`
+        T::Tuple(_) => None,
         T::Boolean => match v {
             Value::Bool(_) => Some(v.clone()),
             Value::Str(s) if s == "true" => Some(Value::Bool(true)),
@@ -337,7 +819,7 @@ fn coerce_cell(v: &Value, t: ColumnType) -> Option<Value> {
 /// all-null column is text.
 pub(crate) fn type_column(cells: Vec<Value>) -> (ColumnType, Vec<Value>) {
     for t in ColumnType::ORDER {
-        let coerced: Option<Vec<Value>> = cells.iter().map(|c| coerce_cell(c, t)).collect();
+        let coerced: Option<Vec<Value>> = cells.iter().map(|c| coerce_cell(c, &t)).collect();
         let Some(coerced) = coerced else { continue };
         if t == ColumnType::Quantity {
             let mut bases = coerced.iter().filter_map(|c| match c {
@@ -362,76 +844,69 @@ impl Table {
     /// so a column of digit strings is an integer column that
     /// prints its numbers bare. The rows are expected flat and of
     /// one width; the one routine every builder of a table calls.
+    /// Every column is undeclared.
     pub fn new(header: Option<Vec<String>>, rows: Vec<Vec<Value>>) -> Table {
-        let mut t = Table { header, rows };
-        let w = t.width();
-        if w == 0 || t.rows.is_empty() {
-            return t;
-        }
-        for j in 0..w {
-            let cells: Vec<Value> = t
-                .rows
-                .iter()
-                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                .collect();
-            let (_, coerced) = type_column(cells);
-            for (r, c) in t.rows.iter_mut().zip(coerced) {
-                if j < r.len() {
-                    r[j] = c;
-                } else {
-                    r.resize(j, Value::Null);
-                    r.push(c);
-                }
-            }
-        }
-        t
+        Table::typed(header, rows, Vec::new()).unwrap_or_else(|_| unreachable!("no column is declared"))
     }
 
     /// A table built under a declared header (spec: The Table,
-    /// `#(--header=record)`): a column declared with a type has every
-    /// cell cast to it, and a cell that does not cast refuses the
-    /// build naming the column and the first offending row; a column
-    /// declared without a type is typed as `new` types it. The rows
-    /// are expected flat and of the header's width.
+    /// `#(--header=@(:a<int>; :b))`): a column declared with a type
+    /// has every cell cast to it, and a cell that does not cast
+    /// refuses the build naming the column and the first offending
+    /// row; a column declared without a type is typed as `new` types
+    /// it. The rows are expected flat and of the header's width.
     pub fn declared(
         header: Vec<(String, Option<ColumnType>)>,
         rows: Vec<Vec<Value>>,
     ) -> Result<Table, String> {
         let names: Vec<String> = header.iter().map(|(n, _)| n.clone()).collect();
-        let mut t = Table { header: Some(names), rows };
-        let w = header.len();
+        let declared: Vec<Option<ColumnType>> = header.iter().map(|(_, t)| t.clone()).collect();
+        Table::typed(Some(names), rows, declared)
+    }
+
+    /// The one builder (spec: The Table, "Columns", draft 166): the
+    /// header, the rows, and the declaration per column (`declared`
+    /// shorter than the width is padded with undeclared columns).
+    /// A declared column has every cell cast into its type, a cell
+    /// that does not cast refusing by column and row; an undeclared
+    /// column takes the least type its cells coerce to. Rows
+    /// shorter than the width are null-padded.
+    pub fn typed(
+        header: Option<Vec<String>>,
+        rows: Vec<Vec<Value>>,
+        mut declared: Vec<Option<ColumnType>>,
+    ) -> Result<Table, String> {
+        let mut t = Table { header, rows, declared: Vec::new(), index: 0, name: None };
+        let w = t.width();
+        declared.resize(w, None);
+        if declared.iter().all(Option::is_none) {
+            declared.clear();
+        }
+        t.declared = declared;
+        if w == 0 {
+            return Ok(t);
+        }
+        for r in &mut t.rows {
+            r.resize(w, Value::Null);
+        }
         if t.rows.is_empty() {
             return Ok(t);
         }
-        for (j, (name, declared)) in header.iter().enumerate() {
-            let cells: Vec<Value> = t
-                .rows
-                .iter()
-                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                .collect();
-            let coerced = match declared {
+        for j in 0..w {
+            let cells: Vec<Value> = t.rows.iter().map(|r| r[j].clone()).collect();
+            let coerced = match t.declared.get(j).cloned().flatten() {
                 Some(ty) => {
                     let mut out = Vec::with_capacity(cells.len());
                     for (i, c) in cells.iter().enumerate() {
-                        // a whole-valued float is an integer under
-                        // a declared int (the cast is lossless)
-                        let cast = coerce_cell(c, *ty).or_else(|| match (c, ty) {
-                            (Value::Float(f), ColumnType::Integer) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
-                                Some(Value::Int(*f as i64))
-                            }
-                            _ => None,
-                        });
-                        match cast {
+                        match cast_cell(c, &ty) {
                             Some(v) => out.push(v),
                             None => {
-                                let held = match c {
-                                    Value::Str(s) => format!("\"{s}\""),
-                                    other => other.display_form(),
-                                };
                                 return Err(format!(
-                                    "column '{name}' is declared {}, and row {} holds {held}, which does not cast to it",
+                                    "column '{}' is declared {}, and row {} holds {}, which does not cast to it",
+                                    t.column_name(j),
                                     ty.word(),
                                     i + 1,
+                                    held_text(c),
                                 ));
                             }
                         }
@@ -441,18 +916,393 @@ impl Table {
                 None => type_column(cells).1,
             };
             for (r, c) in t.rows.iter_mut().zip(coerced) {
-                if j < r.len() {
-                    r[j] = c;
-                } else {
-                    r.resize(j, Value::Null);
-                    r.push(c);
-                }
+                r[j] = c;
             }
         }
-        for r in &mut t.rows {
-            r.resize(w, Value::Null);
-        }
         Ok(t)
+    }
+
+    /// The table with new rows under the same header and the same
+    /// declarations (spec: The Table, "Columns"): what every command
+    /// that keeps the columns and changes the cells rebuilds through
+    /// — a declared column casts the new cells or refuses naming it,
+    /// an undeclared one re-types by its cells.
+    pub fn rebuild(&self, rows: Vec<Vec<Value>>) -> Result<Table, String> {
+        Table::typed(self.header.clone(), rows, self.declared.clone())
+            .map(|t| t.with_index(self.index).with_name(self.name.clone()))
+    }
+
+    /// The table with `n` leading columns as its index (0 none).
+    pub fn with_index(mut self, n: usize) -> Table {
+        self.index = n.min(self.width());
+        self
+    }
+
+    /// `| #` with no option: the index role dropped.
+    pub fn drop_index(self) -> Table {
+        self.with_index(0)
+    }
+
+    /// The table indexed by the named column (spec: The Table, "The
+    /// index"): the column moved first, declared where the projector
+    /// declares it, and marked the index; a name the table lacks
+    /// refuses. On the array face the name is a position.
+    pub fn indexed_by(&self, name: &str, ty: Option<ColumnType>) -> Result<Table, String> {
+        self.indexed_by_levels(&[(name.to_string(), ty)])
+    }
+
+    /// The table indexed by several columns, the levels of a
+    /// composite index outer first (spec: The Table, "The index"):
+    /// the columns moved first in that order, each declared where its
+    /// projector declares it, and marked the index.
+    pub fn indexed_by_levels(&self, levels: &[(String, Option<ColumnType>)]) -> Result<Table, String> {
+        let w = self.width();
+        let mut order: Vec<usize> = Vec::with_capacity(w);
+        for (name, _) in levels {
+            let j = match &self.header {
+                Some(h) => h.iter().position(|c| c == name),
+                None => None,
+            }
+            .or_else(|| name.parse::<usize>().ok().filter(|j| *j >= 1 && *j <= w).map(|j| j - 1))
+            .ok_or_else(|| {
+                format!(
+                    "--index names column '{name}', and the table has no such column (its columns: {})",
+                    (0..w).map(|j| self.column_name(j)).collect::<Vec<_>>().join(", ")
+                )
+            })?;
+            if order.contains(&j) {
+                return Err(format!("--index names column '{name}' twice"));
+            }
+            order.push(j);
+        }
+        let n = order.len();
+        let chosen = order.clone();
+        order.extend((0..w).filter(|k| !chosen.contains(k)));
+        let header = self
+            .header
+            .as_ref()
+            .map(|h| order.iter().map(|k| h[*k].clone()).collect());
+        let mut declared: Vec<Option<ColumnType>> = order.iter().map(|k| self.declaration(*k)).collect();
+        for (i, (_, ty)) in levels.iter().enumerate() {
+            if ty.is_some() {
+                declared[i] = ty.clone();
+            }
+        }
+        let rows = self
+            .rows
+            .iter()
+            .map(|r| order.iter().map(|k| r.get(*k).cloned().unwrap_or(Value::Null)).collect())
+            .collect();
+        Ok(Table::typed(header, rows, declared)?.with_index(n))
+    }
+
+    /// The labels (`:::index`): the index column's cells, or under a
+    /// composite index the record of each row's levels keyed by the
+    /// level names; `None` on a table with no index.
+    pub fn labels(&self) -> Option<Vec<Value>> {
+        if self.index == 0 {
+            return None;
+        }
+        if self.index == 1 {
+            return Some(self.rows.iter().map(|r| r.first().cloned().unwrap_or(Value::Null)).collect());
+        }
+        let names: Vec<String> = (0..self.index).map(|j| self.column_name(j)).collect();
+        Some(
+            self.rows
+                .iter()
+                .map(|r| {
+                    Value::record(
+                        names
+                            .iter()
+                            .enumerate()
+                            .map(|(j, n)| (n.clone(), r.get(j).cloned().unwrap_or(Value::Null)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A row's label as one name: the levels joined by `:` (a header
+    /// path), one level its text.
+    pub fn label_name(&self, row: &[Value]) -> String {
+        row[..self.index].iter().map(Record::key_text).collect::<Vec<_>>().join(":")
+    }
+
+    /// The level names of the index, outer first.
+    pub fn level_names(&self) -> Vec<String> {
+        (0..self.index).map(|j| self.column_name(j)).collect()
+    }
+
+    /// The rows whose leading levels equal `levels`, each compared
+    /// as a value against its column's type.
+    pub fn rows_at_levels(&self, levels: &[Value]) -> Vec<usize> {
+        let types = self.types();
+        let wanted: Vec<Value> = levels
+            .iter()
+            .enumerate()
+            .map(|(j, l)| match types.get(j) {
+                Some(t) => cast_cell(l, t).unwrap_or_else(|| l.clone()),
+                None => l.clone(),
+            })
+            .collect();
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| wanted.iter().enumerate().all(|(j, w)| r.get(j) == Some(w)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The columns under the outer name `prefix` of a header with
+    /// levels (spec: The Table, "Levels of the header"): `t:bar` on a
+    /// header `bar:A`, `bar:B`, `baz:A` is the table of `A` and `B`
+    /// under the index; `None` where no column stands under the name.
+    pub fn sub_columns(&self, prefix: &str) -> Option<Table> {
+        let h = self.header.as_ref()?;
+        let lead = format!("{prefix}:");
+        let under: Vec<usize> = (self.index..self.width()).filter(|&j| h[j].starts_with(&lead)).collect();
+        if under.is_empty() {
+            return None;
+        }
+        let order: Vec<usize> = (0..self.index).chain(under.iter().copied()).collect();
+        let header: Vec<String> = order
+            .iter()
+            .map(|&j| if j < self.index { h[j].clone() } else { h[j][lead.len()..].to_string() })
+            .collect();
+        let declared: Vec<Option<ColumnType>> = order.iter().map(|&j| self.declaration(j)).collect();
+        let rows: Vec<Vec<Value>> = self
+            .rows
+            .iter()
+            .map(|r| order.iter().map(|&j| r.get(j).cloned().unwrap_or(Value::Null)).collect())
+            .collect();
+        Some(
+            Table::typed(Some(header), rows, declared)
+                .unwrap_or_else(|_| Table::new(None, Vec::new()))
+                .with_index(self.index),
+        )
+    }
+
+    /// Whether the header has levels: a column name with a colon.
+    pub fn header_has_levels(&self) -> bool {
+        self.header.as_ref().is_some_and(|h| h[self.index..].iter().any(|n| n.contains(':')))
+    }
+
+    /// `stack` (spec: The Table, "Levels of the header"): the innermost
+    /// level of the header moved into the index. A flat header makes a
+    /// one-column table, `value`, indexed by the labels and the column
+    /// name under `variable`; a header with levels keeps its outer
+    /// levels as columns. Refused where the table has no index.
+    pub fn stacked(&self) -> Result<Table, String> {
+        if self.index == 0 {
+            return Err("stack moves the header's innermost level into the index, and the table has no index: name one with #(-i=:col)".into());
+        }
+        let h = self.header.clone().unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
+        let data: Vec<usize> = (self.index..self.width()).collect();
+        // the innermost level of each data column's name, and what
+        // stands before it
+        let split = |name: &str| -> (Option<String>, String) {
+            match name.rsplit_once(':') {
+                Some((outer, inner)) => (Some(outer.to_string()), inner.to_string()),
+                None => (None, name.to_string()),
+            }
+        };
+        let mut inner_values: Vec<String> = Vec::new();
+        let mut outers: Vec<Option<String>> = Vec::new();
+        for &j in &data {
+            let (outer, inner) = split(&h[j]);
+            if !inner_values.contains(&inner) {
+                inner_values.push(inner);
+            }
+            if !outers.contains(&outer) {
+                outers.push(outer);
+            }
+        }
+        let mut header: Vec<String> = h[..self.index].to_vec();
+        header.push("variable".to_string());
+        let new_cols: Vec<Option<String>> = outers.clone();
+        header.extend(new_cols.iter().map(|o| o.clone().unwrap_or_else(|| "value".to_string())));
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        for r in &self.rows {
+            for inner in &inner_values {
+                let mut row: Vec<Value> = r[..self.index].to_vec();
+                row.push(Value::Str(inner.clone()));
+                for outer in &new_cols {
+                    let name = match outer {
+                        Some(o) => format!("{o}:{inner}"),
+                        None => inner.clone(),
+                    };
+                    let cell = h.iter().position(|n| *n == name).and_then(|j| r.get(j).cloned()).unwrap_or(Value::Null);
+                    row.push(cell);
+                }
+                rows.push(row);
+            }
+        }
+        Ok(Table::new(Some(header), rows).with_index(self.index + 1))
+    }
+
+    /// `unstack`: the innermost level of the index moved into the
+    /// header. With one data column the new columns are the level's
+    /// values; with several, paths `column:value`. Refused where the
+    /// index has no level to move.
+    pub fn unstacked(&self) -> Result<Table, String> {
+        if self.index == 0 {
+            return Err("unstack moves the index's innermost level into the header, and the table has no index level to move".into());
+        }
+        let h = self.header.clone().unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
+        let k = self.index - 1;
+        let data: Vec<usize> = (self.index..self.width()).collect();
+        let mut values: Vec<Value> = Vec::new();
+        for r in &self.rows {
+            let v = r.get(k).cloned().unwrap_or(Value::Null);
+            if !values.contains(&v) {
+                values.push(v);
+            }
+        }
+        let mut header: Vec<String> = h[..k].to_vec();
+        for &j in &data {
+            for v in &values {
+                header.push(if data.len() == 1 { Record::key_text(v) } else { format!("{}:{}", h[j], Record::key_text(v)) });
+            }
+        }
+        // one row per distinct outer label, in first-met order
+        let mut keys: Vec<Vec<Value>> = Vec::new();
+        for r in &self.rows {
+            let key = r[..k].to_vec();
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        let rows: Vec<Vec<Value>> = keys
+            .iter()
+            .map(|key| {
+                let mut row = key.clone();
+                for &j in &data {
+                    for v in &values {
+                        let cell = self
+                            .rows
+                            .iter()
+                            .find(|r| r[..k] == key[..] && r.get(k) == Some(v))
+                            .and_then(|r| r.get(j).cloned())
+                            .unwrap_or(Value::Null);
+                        row.push(cell);
+                    }
+                }
+                row
+            })
+            .collect();
+        Ok(Table::new(Some(header), rows).with_index(k))
+    }
+
+    /// The sub-table under the first `k` levels dropped: the rows
+    /// given, the leading `k` columns left out, indexed by what
+    /// remains.
+    pub fn sub_table(&self, rows: &[usize], k: usize) -> Table {
+        let header = self.header.as_ref().map(|h| h[k..].to_vec());
+        let declared: Vec<Option<ColumnType>> = (k..self.width()).map(|j| self.declaration(j)).collect();
+        let body: Vec<Vec<Value>> = rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect();
+        Table::typed(header, body, declared)
+            .unwrap_or_else(|_| Table::new(self.header.as_ref().map(|h| h[k..].to_vec()), rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect()))
+            .with_index(self.index.saturating_sub(k))
+    }
+
+    /// The rows carrying `label`, compared as a value against the
+    /// index's type (a text label cast to it where it reads).
+    pub fn rows_labelled(&self, label: &Value) -> Vec<usize> {
+        let Some(labels) = self.labels() else { return Vec::new() };
+        let ty = self.types().first().cloned();
+        let wanted = match ty {
+            Some(t) => cast_cell(label, &t).unwrap_or_else(|| label.clone()),
+            None => label.clone(),
+        };
+        labels.iter().enumerate().filter(|(_, l)| **l == wanted).map(|(i, _)| i).collect()
+    }
+
+    /// A column by name as the table answers it: on an indexed table
+    /// the RECORD of the column keyed by the labels (refused where a
+    /// label repeats, naming it), on a plain table the list; a name
+    /// no column bears is null.
+    pub fn column_value(&self, name: &str) -> Result<Value, String> {
+        let Some(list) = self.column(name) else {
+            // `t:bar` on a header with levels: the columns under the name
+            return Ok(self.sub_columns(name).map(Value::table).unwrap_or(Value::Null));
+        };
+        let Some(labels) = self.labels() else { return Ok(list) };
+        let mut seen: Vec<&Value> = Vec::with_capacity(labels.len());
+        for l in &labels {
+            if seen.contains(&l) {
+                return Err(format!(
+                    "the label {} stands on several rows, so the column '{name}' is no record keyed by it: read the rows with | @, or look the label up with [[{}]]",
+                    l.to_quarb(),
+                    l.to_quarb()
+                ));
+            }
+            seen.push(l);
+        }
+        let cells = list.into_items().unwrap_or_default();
+        if self.index == 1 {
+            return Ok(Value::Record(Record::keyed(labels.into_iter().zip(cells).collect())));
+        }
+        // a composite index nests the record level by level
+        let levels: Vec<Vec<Value>> = self
+            .rows
+            .iter()
+            .map(|r| r[..self.index].to_vec())
+            .collect();
+        Ok(nest_levels(&levels, &cells, 0))
+    }
+
+    /// The table with new rows, infallible: as [`Table::rebuild`],
+    /// and where a declared column refuses a cell the columns come
+    /// back undeclared (the callers: a filter keeping rows, an
+    /// ordering, a walk that cannot change a cell's type).
+    pub fn with_rows(&self, rows: Vec<Vec<Value>>) -> Table {
+        if self.declared.is_empty() {
+            return Table::new(self.header.clone(), rows).with_index(self.index).with_name(self.name.clone());
+        }
+        match Table::typed(self.header.clone(), rows.clone(), self.declared.clone()) {
+            Ok(t) => t.with_index(self.index).with_name(self.name.clone()),
+            Err(_) => Table::new(self.header.clone(), rows).with_index(self.index).with_name(self.name.clone()),
+        }
+    }
+
+    /// The header's name set; `column` and the empty word are none.
+    pub fn with_name(mut self, name: Option<String>) -> Table {
+        self.name = name.filter(|n| !n.is_empty() && n != "column");
+        self
+    }
+
+    /// The column's name for a message: the header's, or the
+    /// position on the array face.
+    pub fn column_name(&self, j: usize) -> String {
+        match &self.header {
+            Some(h) => h.get(j).cloned().unwrap_or_else(|| (j + 1).to_string()),
+            None => (j + 1).to_string(),
+        }
+    }
+
+    /// The declaration of column `j`: `Some` where it is declared.
+    pub fn declaration(&self, j: usize) -> Option<ColumnType> {
+        self.declared.get(j).cloned().flatten()
+    }
+
+    /// `| header` (spec: The Table, draft 166): the columns as typed
+    /// projectors, a declared column with its type (`:A<int>`), an
+    /// undeclared one with the star and the type inferred
+    /// (`:A<*; float>`); by position on a headerless table
+    /// (`:1<int>`). The list is a structured projector: applied to
+    /// another table it narrows and casts it.
+    pub fn header_projectors(&self) -> Vec<Value> {
+        let types = self.types();
+        (0..self.width())
+            .map(|j| {
+                let typing = match self.declaration(j) {
+                    Some(t) => Typing::Declared(t),
+                    None => Typing::Star(Some(types[j].clone())),
+                };
+                Value::typed_projection(1, self.column_name(j), Some(typing))
+            })
+            .collect()
     }
 
     /// A matrix from rows of one width: every cell coerced TOGETHER
@@ -468,7 +1318,7 @@ impl Table {
         } else {
             coerced.chunks(w).map(|c| c.to_vec()).collect()
         };
-        Table { header: None, rows }
+        Table { header: None, rows, declared: Vec::new(), index: 0, name: None }
     }
 
     /// The column types, one per column: the type of the cells as
@@ -476,6 +1326,11 @@ impl Table {
     pub fn types(&self) -> Vec<ColumnType> {
         (0..self.width())
             .map(|j| {
+                // a declared column answers its declaration (a tuple
+                // column's cells are lists, which no cell types)
+                if let Some(ty) = self.declaration(j) {
+                    return ty;
+                }
                 self.rows
                     .iter()
                     .find_map(|r| r.get(j).and_then(ColumnType::of))
@@ -508,7 +1363,7 @@ impl Table {
     /// The rows as the list of records a frame stands for (positional
     /// lists on the array face).
     pub fn into_records(self) -> Value {
-        let Table { header, rows } = self;
+        let Table { header, rows, .. } = self;
         Value::list(
             rows.into_iter()
                 .map(|r| match &header {
@@ -564,6 +1419,9 @@ impl Table {
 
     fn row_value(&self, row: &[Value]) -> Value {
         match &self.header {
+            Some(h) if self.header_has_levels() => {
+                nest_by_levels(h.iter().cloned().zip(row.iter().cloned()).collect())
+            }
             Some(h) => Value::Record(h.iter().cloned().zip(row.iter().cloned()).collect()),
             None if self.width() == 1 => row.first().cloned().unwrap_or(Value::Null),
             None => Value::list(row.to_vec()),
@@ -579,8 +1437,20 @@ impl Table {
     }
 
     /// The column reading: a record of lists, keyed by the header,
-    /// or by position (`1`, `2`, …) on the array face.
+    /// or by position (`1`, `2`, …) on the array face; on an indexed
+    /// table a record of records, each column keyed by the labels
+    /// (the index column itself left out).
     pub fn columns_value(&self) -> Value {
+        if self.index > 0 || self.header_has_levels() {
+            let fields: Vec<(String, Value)> = (self.index..self.width())
+                .map(|j| {
+                    let name = self.column_name(j);
+                    let v = self.column_value(&name).unwrap_or_else(|_| self.column_at(j));
+                    (name, v)
+                })
+                .collect();
+            return nest_by_levels(fields);
+        }
         let cols: Vec<Value> = (0..self.width()).map(|j| self.column_at(j)).collect();
         let keys: Vec<String> = match &self.header {
             Some(h) => h.clone(),
@@ -610,6 +1480,9 @@ impl Table {
             } else {
                 Vec::new()
             },
+            declared: self.declared.clone(),
+            index: self.index,
+            name: self.name.clone(),
         }
     }
 
@@ -621,9 +1494,12 @@ impl Table {
             let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
             parts.push(format!("@({})", names.join("; ")));
         }
+        // a headerless table is the matrix: its rows print as lists
+        // (spec: Table Construction, draft 166); a frame's as records
+        let sigil = if self.header.is_some() { '%' } else { '@' };
         for r in &self.rows {
             let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
-            parts.push(format!("%({})", cells.join("; ")));
+            parts.push(format!("{sigil}({})", cells.join("; ")));
         }
         if parts.len() <= 1 {
             return format!("#({})", parts.join(""));
@@ -691,9 +1567,10 @@ impl Table {
             let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
             parts.push(format!("@({})", names.join("; ")));
         }
+        let sigil = if self.header.is_some() { '%' } else { '@' };
         for r in &self.rows {
             let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
-            parts.push(format!("%({})", cells.join("; ")));
+            parts.push(format!("{sigil}({})", cells.join("; ")));
         }
         format!("#({})", parts.join("; "))
     }
@@ -760,25 +1637,86 @@ impl std::fmt::Debug for ForeignValue {
 
 impl Value {
     /// A list value from its elements.
-    /// A projection value: the ladder (1 `:`, 2 `::`, 3 `:::`) and
+    /// A record of text keys from its fields.
+    pub fn record(fields: Vec<(String, Value)>) -> Value {
+        Value::Record(Record::new(fields))
+    }
+
+    /// A projector: the ladder (1 `:`, 2 `::`, 3 `:::`) and
     /// its key.
     pub fn projection(ladder: u8, key: impl Into<String>) -> Value {
         Value::Projection {
             ladder,
             key: key.into(),
+            typing: None,
         }
     }
 
-    /// A projection value's spelling, as the projection is written:
+    /// A projector with its trait brackets (spec: Projectors, draft
+    /// 166): `:A<int>` declares, `:A<*; float>` reports.
+    pub fn typed_projection(ladder: u8, key: impl Into<String>, typing: Option<Typing>) -> Value {
+        Value::Projection {
+            ladder,
+            key: key.into(),
+            typing,
+        }
+    }
+
+    /// A typed projector's declared type: `Some` under `<int>`,
+    /// `None` on a bare projector, under the star, and on every
+    /// other value.
+    pub fn declared_type(&self) -> Option<ColumnType> {
+        match self {
+            Value::Projection { typing: Some(t), .. } => t.declared(),
+            _ => None,
+        }
+    }
+
+    /// A quarq from its body (spec: Quarqs): the source is the
+    /// body's canonical spelling in `q(…)`; `projector` is the
+    /// structure of projectors the body folds to, if it is one.
+    pub fn quarq(body: Vec<crate::syntax::ast::Command>, projector: Option<Value>) -> Value {
+        let source = crate::syntax::unparse::quarq_source(&body);
+        Value::Quarq(Quarq {
+            source,
+            body: std::sync::Arc::new(body),
+            projector: projector.map(Box::new),
+        })
+    }
+
+    /// Whether a projector stands in the value, at any depth of
+    /// lists, records and tables: what the glued colon and the
+    /// commands that take a held projector read on their topic.
+    pub fn holds_projector(&self) -> bool {
+        match self {
+            Value::Projection { .. } => true,
+            Value::List(items) => items.iter().any(Value::holds_projector),
+            Value::Record(fields) => fields.iter().any(|(_, v)| v.holds_projector()),
+            Value::Table(t) => t.rows.iter().flatten().any(Value::holds_projector),
+            _ => false,
+        }
+    }
+
+    /// A projector's spelling, as the projection is written:
     /// the colons and the key, quoted where it is no identifier.
+    pub fn projector_spelling(ladder: u8, key: &str, typing: Option<&Typing>) -> String {
+        let mut s = Value::projection_spelling(ladder, key);
+        if let Some(t) = typing {
+            s.push_str(&t.spelling());
+        }
+        s
+    }
+
     pub fn projection_spelling(ladder: u8, key: &str) -> String {
-        // an identifier, or a position (`:1`, `::0`), stands bare
-        let bare = {
-            let mut cs = key.chars();
+        // an identifier, a position (`:1`, `::0`), or a path of
+        // identifiers (`:bar:A`, a header level) stands bare
+        let ident = |k: &str| {
+            let mut cs = k.chars();
             (matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
                 && cs.all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
-                || (!key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))
+                || (!k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
         };
+        let bare = ident(key) || (key.contains(':') && key.split(':').all(ident));
         let key = if bare {
             key.to_string()
         } else {
@@ -847,6 +1785,7 @@ impl Value {
             // A reference names a node: true.
             Value::Node(_) => true,
             Value::Projection { .. } => true,
+            Value::Quarq(_) => true,
         }
     }
 
@@ -1011,14 +1950,16 @@ impl Value {
             Value::Record(o) => {
                 let inner: Vec<String> = o
                     .iter()
-                    .map(|(k, v)| format!("{} = {}", quarb_key(k), v.to_quarb()))
+                    .enumerate()
+                    .map(|(i, (_, v))| format!("{} = {}", o.key_quarb(i), v.to_quarb()))
                     .collect();
                 format!("%({})", inner.join("; "))
             }
             Value::Table(t) => t.to_quarb(),
             // A library value has no Quarb form that reads back; its
             // text is the object's own display.
-            Value::Projection { ladder, key } => Value::projection_spelling(*ladder, key),
+            Value::Projection { ladder, key, typing } => Value::projector_spelling(*ladder, key, typing.as_ref()),
+            Value::Quarq(q) => q.source.clone(),
             other => other.to_string(),
         }
     }
@@ -1041,8 +1982,13 @@ impl Value {
 
     pub fn display_form(&self) -> String {
         match self {
+            // a bare null prints as `null` (spec: the default print,
+            // draft 166): an empty line is the empty text's, and what
+            // a query shows reads back as what it says
+            Value::Null => "null".to_string(),
             Value::List(_) | Value::Record(_) => self.to_quarb(),
-            Value::Projection { ladder, key } => Value::projection_spelling(*ladder, key),
+            Value::Projection { ladder, key, typing } => Value::projector_spelling(*ladder, key, typing.as_ref()),
+            Value::Quarq(q) => q.source.clone(),
             Value::Table(t) => t.to_quarb_lines(),
             other => other.to_string(),
         }
@@ -1085,9 +2031,11 @@ impl Value {
             },
             // The locator text: no JSON form keeps nodeness.
             Value::Node(n) => json_string(&n.locator),
-            Value::Projection { ladder, key } => {
-                json_string(&Value::projection_spelling(*ladder, key))
+            Value::Projection { ladder, key, typing } => {
+                json_string(&Value::projector_spelling(*ladder, key, typing.as_ref()))
             }
+            // The source text: no JSON form keeps a quarq.
+            Value::Quarq(q) => json_string(&q.source),
         }
     }
 
@@ -1123,6 +2071,7 @@ impl Value {
             Value::Node(n) => Some(format!("node:{}", n.id)),
             // a projection coerces to text as its bare key
             Value::Projection { key, .. } => Some(format!("s:{key}")),
+            Value::Quarq(q) => Some(format!("q:{}", q.source)),
             _ => None,
         }
     }
@@ -1339,6 +2288,8 @@ fn sort_key(v: &Value, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> SortKey
         Value::Node(n) => SortKey::RecordText(format!("\u{0}node:{}", n.locator)),
         // a projection orders and equals as its bare key's text
         Value::Projection { key, .. } => sort_key(&Value::Str(key.clone()), scale),
+        // a quarq orders and equals as its source text
+        Value::Quarq(q) => sort_key(&Value::Str(q.source.clone()), scale),
         // A table keys by its literal, after lists and records.
         Value::Table(t) => SortKey::RecordText(format!("\u{0}table:{}", t.to_quarb())),
         // A string has at most one reading — numeric text carries
@@ -1377,6 +2328,7 @@ impl fmt::Display for Value {
             Value::Float(x) => write!(f, "{}", format_float(*x)),
             Value::Str(s) => write!(f, "{s}"),
             Value::Projection { key, .. } => write!(f, "{key}"),
+            Value::Quarq(q) => write!(f, "{}", q.source),
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "{}", parts.join(", "))
@@ -1543,6 +2495,27 @@ fn year_word(s: &str) -> Option<crate::period::Period> {
 /// otherwise (`0.001`, `1234567890123456`); a whole double prints
 /// without a fraction (`3`), the engine's policy since the first
 /// release. NaN and the infinities as Rust spells them.
+/// A float as `pretty` draws it (spec: Output Commands, draft 166):
+/// at most `precision` digits after the point, trailing zeros
+/// dropped, a whole value bare (`-25.1988`, `-1.773333`, `506`);
+/// `0` prints the value whole; NaN and the infinities as they are.
+/// The value itself is untouched: the output form, `csv` and `json`
+/// keep every digit.
+pub fn pretty_float(f: f64, precision: usize) -> String {
+    if f.is_nan() || f.is_infinite() {
+        return format_float(f);
+    }
+    let fixed = format!("{f:.precision$}");
+    match fixed.split_once('.') {
+        Some((whole, frac)) => {
+            let frac = frac.trim_end_matches('0');
+            let whole = if whole == "-0" && frac.is_empty() { "0" } else { whole };
+            if frac.is_empty() { whole.to_string() } else { format!("{whole}.{frac}") }
+        }
+        None => fixed,
+    }
+}
+
 pub(crate) fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();
@@ -1667,7 +2640,7 @@ mod tests {
 
     #[test]
     fn json_rendering() {
-        let obj = Value::Record(vec![
+        let obj = Value::record(vec![
             ("name".into(), Value::Str("A\"da\n".into())),
             ("age".into(), Value::Int(36)),
             ("score".into(), Value::Float(2.5)),
@@ -1689,12 +2662,12 @@ mod tests {
             "%(name = \"A\\\"da\n\"; age = 36; score = 2.5; ok = true; gone = null; tags = @(\"x\"; 1))"
         );
         assert_eq!(obj.to_string(), obj.to_quarb());
-        assert!(!Value::Record(Vec::new()).is_truthy());
+        assert!(!Value::record(Vec::new()).is_truthy());
         assert_eq!(Value::list(Vec::new()).to_quarb(), "@()");
-        assert_eq!(Value::Record(Vec::new()).to_quarb(), "%()");
+        assert_eq!(Value::record(Vec::new()).to_quarb(), "%()");
         // a key that is not an identifier quotes
         assert_eq!(
-            Value::Record(vec![("my-key".into(), Value::Int(1))]).to_quarb(),
+            Value::record(vec![("my-key".into(), Value::Int(1))]).to_quarb(),
             "%(\"my-key\" = 1)"
         );
         // top-level list display (string coercion) is unchanged

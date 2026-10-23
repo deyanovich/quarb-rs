@@ -543,19 +543,20 @@ fn unparse_fixpoint() {
 
 #[test]
 fn rounded_fragment_and_parameter_spellings() {
-    // `(=name)` calls a fragment, `(=name!)` a macro, `(,col)` reads a
-    // definition's parameter — each canonicalizing to the sigil.
+    // `(=name)` calls a fragment, `(=name!)` a macro, `_col` reads a
+    // definition's parameter (draft 166) — each canonicalizing to the
+    // sigil.
     assert_eq!(exp("def &load: | ::a; /* | (=load)"), "/* | ::a");
-    assert_eq!(exp("def &f($c): | (,c); /* | (=f)(::a)"), "/* | ::a");
-    assert_eq!(exp("def &f((,c)): | $c; /* | &f(::a)"), "/* | ::a");
+    assert_eq!(exp("def &f($c): | _c; /* | (=f)(::a)"), "/* | ::a");
+    assert_eq!(exp("def &f(_c): | $c; /* | &f(::a)"), "/* | ::a");
 }
 
 #[test]
 fn rounded_hole_with_a_parameter() {
-    // `"(,(,c))"` is `"${$c}"` — the hole's dollar and the parameter's,
+    // `"(_(_c))"` is `"${$c}"` — the hole's dollar and the parameter's,
     // both in their value-side digraph.
     assert_eq!(
         exp(r#"def &f($c): | "x=${$c}"; /* | &f(::a)"#),
-        exp(r#"def (=f)((,c)): | "x=(,(,c))"; /* | (=f)(::a)"#)
+        exp(r#"def (=f)(_c): | "x=(_(_c))"; /* | (=f)(::a)"#)
     );
 }

@@ -20,7 +20,7 @@ fn words<H: Host>(
 ) -> (Vec<String>, Vec<(String, Option<String>)>) {
     let text = |a: &Arg| -> Option<String> {
         match a {
-            Arg::Lit(v) => Some(v.to_string()),
+            Arg::Lit(v) | Arg::Key(v) => Some(v.to_string()),
             Arg::Expr(e) => Some(operand_scalar(host, ext, e, trace, scope).to_string()),
             Arg::Range(a, b) => Some(format!(
                 "{}..{}",
@@ -88,7 +88,7 @@ fn lib_values<H: Host>(
         .args
         .iter()
         .filter_map(|a| match a {
-            Arg::Lit(v) => Some(v.clone()),
+            Arg::Lit(v) | Arg::Key(v) => Some(v.clone()),
             Arg::Expr(e) => Some(eval(e)),
             Arg::Range(a, b) => Some(Value::list(vec![
                 a.map(Value::Int).unwrap_or(Value::Null),
@@ -137,7 +137,7 @@ fn node_record<H: Host>(host: &H, ext: &H::Ext) -> Value {
         ("text".to_string(), text),
     ];
     fields.extend(rest);
-    Value::Record(fields)
+    Value::Record(fields.into())
 }
 
 /// `| LIB:name(…)` — a command library's command once per capsa:

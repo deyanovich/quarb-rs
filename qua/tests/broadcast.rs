@@ -99,8 +99,9 @@ fn two_structures_of_one_shape_combine_cell_by_cell() {
 #[test]
 fn a_shape_mismatch_is_refused_naming_the_dimensions() {
     assert!(refuse("= @(1; 2) + @(1; 2; 3)").contains("2 and 3"));
-    let e = refuse("= %(a = 1) + %(c = 1)");
-    assert!(e.contains("fields a and c"), "{e}");
+    // two records align by key (draft 166): the union of the keys,
+    // null where a side lacks one, where a shape mismatch once refused
+    assert_eq!(one("= %(a = 1) + %(c = 1)"), "%(a = null; c = null)");
     let e = refuse("= #(@(a); %(1)) + #(@(a); %(1); %(2))");
     assert!(e.contains("1×1 and 2×1"), "{e}");
     let e = refuse("= #(@(a; b); %(1; 2)) + @(1; 2; 3)");
@@ -136,8 +137,8 @@ fn the_matrix_product() {
     assert_eq!(one("= #(%(1; 2); %(3; 4)) x @(1; 1)"), "@(3; 7)");
     assert_eq!(one("= @(1; 1) x #(%(1; 2); %(3; 4))"), "@(4; 6)");
     assert_eq!(
-        one("= #(%(1; 2); %(3; 4)) x #(%(1; 0); %(0; 1))"),
-        "#(%(1; 2);\n  %(3; 4))"
+        one("= #(@(1; 2); @(3; 4)) x #(@(1; 0); @(0; 1))"),
+        "#(@(1; 2);\n  @(3; 4))"
     );
     assert_eq!(one("= @(1; 2; 3) x @(4; 5; 6)"), "32");
     assert_eq!(one("= #(%(1.5; 2)) x @(2; 1)"), "@(5)");

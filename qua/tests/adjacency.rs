@@ -42,15 +42,18 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
     // a surplus `$_` gets the pointer, as written
     let e = refuse("= 3.14159 | round($_; 2)");
     assert!(e.contains("round reads its input from the pipe: write | round(2)"), "{e}");
-    let e = refuse("= \"a\" | upper($_)");
-    assert!(e.contains("upper reads its input from the pipe: write | upper"), "{e}");
+    // a command that takes no operand, written with a parenthesis
+    // after a pipe, is the call operand it is anywhere else (draft
+    // 166): `upper($_)` is `($_ | upper)`, `upper("b")` is `("b" | upper)`
+    assert_eq!(one("= \"a\" | upper($_)"), "A");
+    assert_eq!(one("= \"a\" | upper(\"b\")"), "B");
+    assert_eq!(one("= 1 | date(2013-01-01) + 1_d"), "2013-01-02");
+    // a reducer keeps its refusal: the key goes through --of
     let e = refuse("= @(1; 2) | sum($_)");
     assert!(e.contains("sum reads its input from the pipe: write | sum"), "{e}");
     let e = refuse("/rows/* | ::x @| count($_)");
     assert!(e.contains("count reads its input from the pipe: write @| count"), "{e}");
     // any other surplus is refused with the synopsis
-    let e = refuse("= \"a\" | upper(\"b\")");
-    assert!(e.contains("'upper' takes no operand, 1 given; the synopsis: upper"), "{e}");
     let e = refuse("= 3.14159 | round(2; 3)");
     assert!(
         e.contains("'round' takes 1 operand at most, 2 given; the synopsis: round / round(d)"),
@@ -83,7 +86,7 @@ fn a_reduction_reads_its_field_through_of_and_a_keyed_aggregate_takes_the_topic_
     );
     assert_eq!(
         run("/rows/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(--sample -o=:x)").unwrap(),
-        vec!["8", ""]
+        vec!["8", "null"]
     );
     let e = run("/rows/* | %(k = ::k; x = ::x) @| group(k = $_:k) | sum(:x)").unwrap_err();
     assert!(

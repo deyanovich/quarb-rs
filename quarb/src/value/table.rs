@@ -147,6 +147,9 @@ pub fn table_html(
 pub fn table_html_plain(values: &[Value], named: Option<&[String]>) -> String {
     table_html(values, named, &|v| match v {
         Value::Str(s) => s.clone(),
+        // a float with at most six digits after the point, as the
+        // text grid of `pretty` draws it (spec: Output Commands)
+        Value::Float(f) => crate::value::pretty_float(*f, 6),
         other => other.display_form(),
     })
 }

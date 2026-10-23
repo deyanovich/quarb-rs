@@ -80,6 +80,23 @@ pub fn entry(name: &str) -> Option<Entry> {
     entries().into_iter().find(|e| e.written() == name)
 }
 
+/// Whether the inventory lists the command as a scalar one (the
+/// `kind` column): the commands that broadcast over a structure's
+/// items (spec: Scalar commands, draft 166). Read once.
+pub fn is_scalar_kind(name: &str) -> bool {
+    static SCALARS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    SCALARS
+        .get_or_init(|| {
+            entries()
+                .into_iter()
+                .filter(|e| e.kind == "scalar")
+                .map(|e| e.written())
+                .collect()
+        })
+        .contains(name)
+}
+
 /// The manual page of one command: its line, the call forms, the
 /// pipes, the typed signature, the result on a null topic, the
 /// note and the spec section.

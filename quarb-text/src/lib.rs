@@ -4189,7 +4189,7 @@ impl AstAdapter for TextModel {
                     Some(Value::Str(t)) => t,
                     _ => String::new(),
                 };
-                return Some(Value::Record(vec![
+                return Some(Value::record(vec![
                     (
                         "title".to_string(),
                         self.document_title().map(Value::Str).unwrap_or(Value::Null),

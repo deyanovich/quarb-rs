@@ -163,6 +163,13 @@ const CORPUS: &[&str] = &[
     // constructor after a pipe opens an expression; after `@|` it
     // is one expression over the context
     "/row | 0 + $_ | %(v = $_) ++ %(w = 1) @| @(0; $_) ++ @(1)",
+    // the quarq (2026-10-23, draft 166): `q(cmd)` a literal holding
+    // a command as after a pipe, its body the node's children;
+    // `| &$.p` the held quarq spliced at the recall
+    "/row | .f(q(mean | $_ * 5.6)) | map(&$.f) | &$.f",
+    "= #(--header=@(:zip<text>; :amount<float>)) | map(<int>; --to=:amount) | %(price<float> = :amount)",
+    "= @(%(k = 1; v = 2)) | #(-i=:k) | .t | $.t[[1; 3]]:v | %(1 = $_; 2013-01-01 = 2)",
+    "= 1 | ,a | $,a + 1 | %,",
 ];
 
 /// kind → sorted property keys, as locked. `param` is reserved
@@ -225,6 +232,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // outer from 2026-07-07 to draft 151, the row renamed with the
     // spec's term, the only non-additive change in the lock)
     ("invoking", &[]),
+    ("label_index", &[]),
     ("list", &[]),
     ("literal", &["type", "value"]),
     // v1 additive growth: map (2026-07-11, the $| pipe).
@@ -278,8 +286,11 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("position", &[]),
     ("positions", &[]),
     ("predicate", &["from", "kind", "to", "value"]),
-    ("projection", &["key", "kind"]),
+    ("projection", &["key", "kind", "type"]),
     ("push", &["name"]),
+    // v2 additive growth: quarq (2026-10-23, draft 166: the `q(…)`
+    // literal; its body's commands are its children).
+    ("quarq", &["source"]),
     ("query", &["outer", "role"]),
     ("recall", &["ref"]),
     ("record-push", &["enriched", "name"]),
@@ -292,7 +303,13 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("repeat", &["max", "min"]),
     ("seed", &[]),
     ("select", &[]),
+    ("session_push", &["name"]),
+    ("session_read", &["name"]),
+    ("session_record", &[]),
     ("span", &["from", "kind", "to"]),
+    // v2 additive growth: splice (2026-10-23, draft 166: `| &$.p`,
+    // the held quarq spliced at the recall).
+    ("splice", &["ref"]),
     // v1 additive growth: spread (2026-07-11, | ... core syntax);
     // outer key added same day (| ...?, the OPTIONAL MATCH round).
     ("spread", &["outer"]),
@@ -412,10 +429,13 @@ fn spellings_are_locked() {
         set(&["expr", "index", "range"])
     );
     assert_eq!(collect("span", "kind"), set(&["range"]));
+    // the header option's list of names or projectors is one literal
     assert_eq!(
         collect("literal", "type"),
-        set(&["bool", "float", "int", "null", "quantity", "text"])
+        set(&["bool", "float", "instant", "int", "list", "null", "projector", "quantity", "text"])
     );
+    // a typed projector's declared type word, `*` under the star
+    assert_eq!(collect("projection", "type"), set(&["float", "int"]));
 }
 
 #[test]

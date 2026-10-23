@@ -337,6 +337,24 @@ impl QueryArbor {
                 );
                 self.walk_pred_expr(e, id);
             }
+            Predicate::Positions(items) => {
+                let id = self.intern(
+                    Some("predicate"),
+                    vec![("kind".to_string(), Value::Str("positions".to_string()))],
+                    Some(parent),
+                );
+                for p in items {
+                    self.walk_predicate(p, id);
+                }
+            }
+            Predicate::Computed(o) => {
+                let id = self.intern(
+                    Some("predicate"),
+                    vec![("kind".to_string(), Value::Str("computed".to_string()))],
+                    Some(parent),
+                );
+                self.walk_operand(o, id);
+            }
         }
     }
 
@@ -446,6 +464,18 @@ impl QueryArbor {
                     self.walk_projection(p, id);
                 }
             }
+            // the quarq literal: its source, the body's commands as
+            // its children (spec: Quarqs)
+            Operand::Lit(Value::Quarq(q)) => {
+                let id = self.intern(
+                    Some("quarq"),
+                    vec![("source".to_string(), Value::Str(q.source.clone()))],
+                    Some(parent),
+                );
+                for st in q.body.iter() {
+                    self.walk_command(st, id);
+                }
+            }
             Operand::Lit(v) => {
                 self.intern(
                     Some("literal"),
@@ -502,11 +532,63 @@ impl QueryArbor {
                 let id = self.intern(Some("neg"), Vec::new(), Some(parent));
                 self.walk_operand(inner, id);
             }
+            Operand::Desc(inner) => {
+                let id = self.intern(Some("desc"), Vec::new(), Some(parent));
+                self.walk_operand(inner, id);
+            }
+            // the projection operator: `project`, its `shape` the
+            // constructor's sigil (list, record, table, expr), the
+            // base first and the shape's operands after it
+            Operand::Projected { base, shape } => {
+                let (kind, items): (&str, Vec<&Operand>) = match shape {
+                    crate::syntax::ast::ProjShape::Columns { items, index } => (
+                        "table",
+                        items.iter().map(|(_, o)| o).chain(index.iter().map(|b| &**b)).collect(),
+                    ),
+                    crate::syntax::ast::ProjShape::Value(v) => (
+                        match &**v {
+                            Operand::List(_) => "list",
+                            Operand::Piped { expr, commands }
+                                if matches!(**expr, Operand::Topic)
+                                    && matches!(commands.as_slice(), [Command::Func(c)] if c.name == "rec") =>
+                            {
+                                "record"
+                            }
+                            _ => "expr",
+                        },
+                        vec![&**v],
+                    ),
+                };
+                let id = self.intern(
+                    Some("project"),
+                    vec![("shape".to_string(), Value::Str(kind.to_string()))],
+                    Some(parent),
+                );
+                self.walk_operand(base, id);
+                for item in items {
+                    self.walk_operand(item, id);
+                }
+            }
+            Operand::Spread(inner) => {
+                let id = self.intern(Some("spread"), Vec::new(), Some(parent));
+                self.walk_operand(inner, id);
+            }
             // the gathering is the callee's input reading, no node
             Operand::Gathered(inner) => self.walk_operand(inner, parent),
             Operand::Group(e) => {
                 let id = self.intern(Some("parens"), Vec::new(), Some(parent));
                 self.walk_pred_expr(e, id);
+            }
+            // `$,name` — the session read (draft 166); `%,` the memory
+            Operand::Recall(RegRef::Session(name)) => {
+                self.intern(
+                    Some("session_read"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+            }
+            Operand::Recall(RegRef::SessionRecord) => {
+                self.intern(Some("session_record"), Vec::new(), Some(parent));
             }
             Operand::Recall(r) => {
                 self.intern(
@@ -542,6 +624,44 @@ impl QueryArbor {
                     Some(parent),
                 );
                 self.walk_operand(base, id);
+            }
+            // `t[[x; y]]` — the lookup by label (draft 166): the base,
+            // then each label
+            Operand::LabelIndex { base, labels } => {
+                let id = self.intern(Some("label_index"), Vec::new(), Some(parent));
+                self.walk_operand(base, id);
+                for l in labels {
+                    self.walk_operand(l, id);
+                }
+            }
+            // A typed projector (draft 166) is a `projection` node
+            // whatever its spelling, with its declared type as
+            // `type` (`*` under the star); `map`'s bare trait body
+            // has no key.
+            Operand::Typed { inner, typing } => {
+                let (kind, key): (&str, Option<String>) = match inner.as_ref() {
+                    Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+                        ("core", Some(name.clone()))
+                    }
+                    Operand::Rel {
+                        projection: Some(p), ..
+                    } => match p {
+                        Projection::Property(k) => ("property", k.clone()),
+                        Projection::CoreMeta(k) => ("core", Some(k.clone())),
+                        Projection::AdapterMeta(k) => ("adapter", Some(k.clone())),
+                    },
+                    _ => ("core", None),
+                };
+                let mut props = vec![("kind".to_string(), Value::Str(kind.to_string()))];
+                if let Some(k) = key {
+                    props.push(("key".to_string(), Value::Str(k)));
+                }
+                let word = match typing {
+                    crate::Typing::Declared(t) => t.word().to_string(),
+                    crate::Typing::Star(_) => "*".to_string(),
+                };
+                props.push(("type".to_string(), Value::Str(word)));
+                self.intern(Some("projection"), props, Some(parent));
             }
             Operand::ValueMeta { base, key } => {
                 // `:%provenance` / `:@origin`: the shape sigil and
@@ -799,6 +919,25 @@ impl QueryArbor {
 
     fn walk_command(&mut self, command: &Command, parent: usize) {
         match command {
+            // `| ,name` — the session push (draft 166)
+            Command::SessionPush(name) => {
+                self.intern(
+                    Some("session_push"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+            }
+            // `| %,` — the session memory as a record
+            Command::Recall(RegRef::SessionRecord) => {
+                self.intern(Some("session_record"), Vec::new(), Some(parent));
+            }
+            Command::Recall(RegRef::Session(name)) => {
+                self.intern(
+                    Some("session_read"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+            }
             Command::Func(call) => {
                 // An environment command carries its alias as `lib`: the
                 // library it calls into (a mounted environment, or a
@@ -901,6 +1040,14 @@ impl QueryArbor {
                     Some(parent),
                 );
             }
+            // `| &$.p` — the held quarq spliced at the recall
+            Command::Splice(r) => {
+                self.intern(
+                    Some("splice"),
+                    vec![("ref".to_string(), Value::Str(reg_spelling(r)))],
+                    Some(parent),
+                );
+            }
             Command::RecordWith(call) => {
                 let id = self.intern(Some("record-with"), Vec::new(), Some(parent));
                 self.walk_args(&call.args, id);
@@ -946,7 +1093,8 @@ impl QueryArbor {
     fn walk_args(&mut self, args: &[Arg], parent: usize) {
         for arg in args {
             match arg {
-                Arg::Lit(v) => {
+                // a record's typed key (draft 166) is the literal it is
+                Arg::Lit(v) | Arg::Key(v) => {
                     self.intern(
                         Some("literal"),
                         vec![
@@ -1494,8 +1642,9 @@ fn default_key(kind: &str) -> Option<&'static str> {
         "step" => Some("matcher"),
         "compare" | "arith" => Some("op"),
         "chain" => Some("ops"),
-        "recall" | "peer-reg" => Some("ref"),
+        "recall" | "peer-reg" | "splice" => Some("ref"),
         "projection" => Some("key"),
+        "quarq" => Some("source"),
         _ => None,
     }
 }
@@ -1536,7 +1685,8 @@ fn type_name(v: &Value) -> &'static str {
         Value::Foreign(_) => "library",
         Value::Table(_) => "table",
         Value::Node(_) => "node",
-        Value::Projection { .. } => "projection",
+        Value::Projection { .. } => "projector",
+        Value::Quarq(_) => "quarq",
     }
 }
 
@@ -1604,6 +1754,8 @@ fn reg_spelling(r: &RegRef) -> String {
         RegRef::Index(n) => format!("$.{n}"),
         RegRef::Back(n) => format!("$.-{n}"),
         RegRef::Named(n) => format!("$.{n}"),
+        RegRef::Session(n) => format!("$,{n}"),
+        RegRef::SessionRecord => "%,".to_string(),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
         RegRef::FullRecord => "%.*".to_string(),

@@ -887,7 +887,8 @@ pub fn value_kind(v: &crate::Value) -> &'static str {
         Value::Table(_) => "table",
         Value::Foreign(_) => "opaque",
         Value::Node(_) => "node",
-        Value::Projection { .. } => "projection",
+        Value::Projection { .. } => "projector",
+        Value::Quarq(_) => "quarq",
     }
 }
 

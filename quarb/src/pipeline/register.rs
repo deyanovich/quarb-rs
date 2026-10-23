@@ -42,6 +42,8 @@ pub(crate) fn recall_part<T: Clone>(
         record(fields)
     };
     match r {
+        // the session memory is read by `recall`, before the walk
+        RegRef::Session(_) | RegRef::SessionRecord => none,
         RegRef::Top => side(false).last().map(|r| part(r).clone()).unwrap_or(none),
         RegRef::Index(n) => side(false)
             .nth(n.saturating_sub(1))
@@ -84,15 +86,48 @@ fn named_side<T: Clone>(register: &[Reg], refs: bool, part: impl Fn(&Reg) -> &T)
     fields
 }
 
+/// `$,name` / `%,` — the session memory read (spec: Capsa Operations,
+/// "Session memory", draft 166): the value filed under the name, or
+/// the whole memory as a record; a name the memory lacks refuses
+/// saying which memory it looked in, and a run with no session
+/// memory refuses naming the hosts that keep one.
+pub(crate) fn session_recall(r: &RegRef) -> Value {
+    let Some(memory) = crate::pipeline::run_option(|o| o.session.clone()) else {
+        crate::value::ambient::record_refusal(
+            "the session memory is not open in this run: '$,name' and '| ,name' live in a session (quai, the qua REPL, a .quai file); the capsa's register is '$.name'".into(),
+        );
+        return Value::Null;
+    };
+    let store = memory.borrow();
+    let memory = &store.memory;
+    match r {
+        RegRef::Session(name) => match memory.get(name) {
+            Some(v) => v.clone(),
+            None => {
+                let held: Vec<&str> = memory.keys().map(String::as_str).collect();
+                crate::value::ambient::record_refusal(format!(
+                    "no value ',{name}' in the session memory (it holds: {}); the capsa's register is '$.{name}'",
+                    if held.is_empty() { "nothing".to_string() } else { held.join(", ") }
+                ));
+                Value::Null
+            }
+        },
+        _ => Value::record(memory.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+    }
+}
+
 /// The value a register reference recalls.
 pub(crate) fn recall(register: &[Reg], r: &RegRef) -> Value {
+    if matches!(r, RegRef::Session(_) | RegRef::SessionRecord) {
+        return session_recall(r);
+    }
     recall_part(
         register,
         r,
         |r| &r.value,
         Value::Null,
         Value::list,
-        Value::Record,
+        Value::record,
     )
 }
 

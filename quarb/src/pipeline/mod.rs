@@ -351,6 +351,23 @@ pub(crate) fn split_fields(fields: Vec<(String, Value, Prov)>) -> (Vec<(String, 
 /// keeps nothing), or the inclusive span (ends optional, negative
 /// allowed, clamped to the list).
 pub(crate) fn positional<T>(items: Vec<T>, pred: &Predicate) -> Vec<T> {
+    // A position list: the union of its items' selections, in the
+    // items' own order, each once.
+    if let Predicate::Positions(parts) = pred {
+        let len = items.len();
+        let mut keep = vec![false; len];
+        for part in parts {
+            let chosen: Vec<usize> = positional((0..len).collect(), part);
+            for i in chosen {
+                keep[i] = true;
+            }
+        }
+        return items
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(it, k)| k.then_some(it))
+            .collect();
+    }
     match pred {
         Predicate::Index(n) => match resolve_pos(*n, items.len()) {
             Some(idx) => items.into_iter().nth(idx).into_iter().collect(),
@@ -381,7 +398,28 @@ pub(crate) fn positional<T>(items: Vec<T>, pred: &Predicate) -> Vec<T> {
         // Select` dispatch) route `Predicate::Expr` to per-capsa
         // filtering before it reaches here, so this arm is defensive —
         // it must never silently pass every item through as a filter.
-        Predicate::Expr(_) => items,
+        Predicate::Expr(_) | Predicate::Computed(_) | Predicate::Positions(_) => items,
+    }
+}
+
+/// The positional predicate a computed bracket's value spells (spec:
+/// Index Predicates): an integer the position, a list of integers
+/// the position list; `None` for any other value, which is then
+/// taken for its truthiness.
+pub(crate) fn positions_of(v: &Value) -> Option<Predicate> {
+    match v {
+        Value::Int(n) => Some(Predicate::Index(*n)),
+        Value::List(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                match it {
+                    Value::Int(n) => parts.push(Predicate::Index(*n)),
+                    _ => return None,
+                }
+            }
+            Some(Predicate::Positions(parts))
+        }
+        _ => None,
     }
 }
 

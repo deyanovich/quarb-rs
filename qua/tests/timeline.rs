@@ -70,10 +70,10 @@ fn an_expression_and_its_anchor() {
     assert_eq!(anchored("two months later", "1899-10-06"), "1899-12-06");
     assert_eq!(anchored("the following Monday", "1899-10-06"), "1899-10-09");
     // an offset finer than the anchor's grain has no result
-    assert_eq!(anchored("the next day", "1812"), "");
+    assert_eq!(anchored("the next day", "1812"), "null");
     // a duration and a vague expression have none either
-    assert_eq!(anchored("two weeks", "1899-10-06"), "");
-    assert_eq!(anchored("that evening", "1899-10-06"), "");
+    assert_eq!(anchored("two weeks", "1899-10-06"), "null");
+    assert_eq!(anchored("that evening", "1899-10-06"), "null");
     // the value text alone reads too; fields left out come from the anchor
     assert_eq!(
         ok(&dir, &["= 'XXXX-04-08' | time_anchor(1846-03-20)"]),
@@ -210,7 +210,7 @@ fn a_period_compares_as_an_interval() {
         ),
         "2024\n2025-10-06T14:30:00\n2025-10-31\n2025-11-02"
     );
-    assert_eq!(ok(&dir, &["= (2025-10 | period) + 1"]), "");
+    assert_eq!(ok(&dir, &["= (2025-10 | period) + 1"]), "null");
     assert_eq!(ok(&dir, &["= (2025-10 | period) | datetime"]), "2025-10-01");
     assert_eq!(
         ok(

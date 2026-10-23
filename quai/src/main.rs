@@ -17,7 +17,7 @@ use quarb_session::{
     DaemonExecutor, Doc, FileStore, LocalExecutor, MemStore, MountSpec, Options, Session, Store,
 };
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Interactive Quarb: each line becomes a reusable query macro
 /// (&1, &2, …) over a standing session.
@@ -106,6 +106,14 @@ struct Cli {
     /// prints a line's plan. In-process sessions only.
     #[arg(long, value_name = "SPEC")]
     budget: Option<String>,
+
+    /// Run the cells of a .quai file in order, non-interactively, and
+    /// print the transcript: `&N  <cell>` (continuation lines indented
+    /// four spaces), then the cell's output indented four spaces, a
+    /// blank line between cells; a cell ending in a session push
+    /// prints nothing after its line.
+    #[arg(long, value_name = "FILE.quai")]
+    run: Option<PathBuf>,
 }
 
 /// What an in-session `:mount` needs to rebuild the executor; absent
@@ -402,6 +410,9 @@ fn main() -> Result<()> {
         let b = quarb::plan::Budget::parse(spec).map_err(|e| anyhow::anyhow!("--{e}"))?;
         session.borrow_mut().set_budget(Some(b));
     }
+    if let Some(file) = &cli.run {
+        return run_file(&session, file);
+    }
     let sources = if cli.paths.is_empty() {
         "a bare root — calculator session; lines open with '= expr', :mount adds sources"
             .to_string()
@@ -422,6 +433,81 @@ fn main() -> Result<()> {
 /// Bind the invocation instant: `--now` pins it; otherwise the clock,
 /// read once, so every `now()` in the session denotes one point — and
 /// the adapters resolve their relative windows against the same one.
+/// `quai --run FILE.quai SOURCES…` (the replayer's contract): the
+/// file's cells — blocks of lines indented four spaces, a blank line
+/// between them — run in order over the session, and the transcript
+/// is printed as the guides show it: `&N  <first line>`, the
+/// continuation lines and the output indented four spaces, a blank
+/// line after each cell; a cell whose last command is a session push
+/// prints nothing after its lines; a refusal prints as `error: …`.
+fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                cells.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(line.strip_prefix("    ").unwrap_or(line).to_string());
+    }
+    if !current.is_empty() {
+        cells.push(current);
+    }
+    let mut failed = false;
+    for cell in cells {
+        let q = cell.join("\n");
+        let n = session.borrow().line_no();
+        println!("&{n}  {}", cell[0]);
+        for l in &cell[1..] {
+            println!("    {l}");
+        }
+        // a session push and a `session(…)` that sets answer nothing:
+        // no line after them (the engine yields no thread; the guard
+        // here keeps the transcript's shape whatever the host prints)
+        let silent = q
+            .rsplit('|')
+            .next()
+            .is_some_and(|last| last.trim_start().starts_with(','))
+            || (q.trim_start().starts_with("session(") && !q.contains('|'));
+        let result = session.borrow().eval_table(&q);
+        match result {
+            Ok((cells, grid)) => {
+                if !silent {
+                    match grid {
+                        Some(g) => {
+                            for l in g.lines() {
+                                println!("    {l}");
+                            }
+                        }
+                        None => {
+                            let memory = session.borrow().session_memory();
+                            for c in &cells {
+                                for l in c.display_in(memory.as_ref()).lines() {
+                                    println!("    {l}");
+                                }
+                            }
+                        }
+                    }
+                }
+                session.borrow_mut().commit(&q, cells);
+            }
+            Err(e) => {
+                failed = true;
+                println!("    error: {e:#}");
+                session.borrow_mut().commit(&q, Vec::new());
+            }
+        }
+        println!();
+    }
+    if failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn bind_now(spec: Option<&str>) -> Result<(i64, u32)> {
     let now = match spec {
         Some(text) => {

@@ -382,6 +382,9 @@ struct OutputCtx {
     /// --quantifier-bound.
     quant_bound: Option<usize>,
     allow_shell: bool,
+    /// The session memory (`| ,name`, `$,name`, `%,`): for a one-shot
+    /// run the run itself, for the REPL the whole session.
+    session: quarb::SessionMemory,
     /// The environments mounted from the command line
     /// (`go=exec:~/go/bin`, `sh=shell:`; `--allow-shell` is
     /// `sh=shell:` under its older name).
@@ -882,6 +885,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         save: cli.save.as_ref().map(|p| (p.clone(), cli.save_as.clone())),
         quant_bound: cli.quantifier_bound,
         allow_shell: cli.allow_shell,
+        session: quarb::session_memory(),
         environments: environments.clone(),
         libraries: linked_libraries(),
         reproducible: cli.reproducible,
@@ -2847,6 +2851,7 @@ impl OutputCtx {
         quarb::Run {
             now: Some(self.now),
             allow_shell: self.allow_shell,
+            session: Some(self.session.clone()),
             environments: self.environments.clone(),
             libraries: self.libraries.clone(),
             quantifier_bound: self.quant_bound,
@@ -2993,17 +2998,25 @@ fn print_result(
             QueryResult::Nodes(nodes) => nodes.into_iter().map(|n| Value::Str(render(n))).collect(),
         };
         let columns = (!t.columns.is_empty()).then_some(t.columns.as_slice());
-        writeln!(
-            out,
-            "{}",
-            quarb::tabulate_in(
+        let text = match t.pretty {
+            // `@| pretty`: floats to the digits, numeric columns
+            // right-aligned (spec: Output Commands, draft 166)
+            Some(precision) => quarb::tabulate_pretty(
+                &rows,
+                columns,
+                t.delimiter.unwrap_or(l.csv_delimiter),
+                &|v| l.cell(v),
+                precision,
+            ),
+            None => quarb::tabulate_in(
                 &rows,
                 columns,
                 t.csv,
                 t.delimiter.unwrap_or(l.csv_delimiter),
-                &|v| l.cell(v)
-            )
-        )?;
+                &|v| l.cell(v),
+            ),
+        };
+        writeln!(out, "{text}")?;
         return out.finish();
     }
     let values = match result {
@@ -3058,7 +3071,18 @@ fn emit_values(
         // an output locale, rendered in its numbers and dates.
         Output::Quarb => {
             let locale = oc.locale.map(|(l, _)| l);
+            // the session's setting: `session(--pretty=always)` prints
+            // every result through pretty, `structures` the lists,
+            // records and tables (draft 166)
+            let (mode, precision) = {
+                let s = oc.session.borrow();
+                (s.pretty, s.precision)
+            };
             for value in values {
+                if mode.applies(&value) {
+                    writeln!(out, "{}", quarb::pretty_value(&value, precision))?;
+                    continue;
+                }
                 match &locale {
                     Some(l) => writeln!(out, "{}", l.display(&value))?,
                     None => writeln!(out, "{}", value.display_form())?,
@@ -3599,10 +3623,10 @@ mod tests {
         let nested = super::emit_kaiv(
             &[row(
                 1,
-                Some(Value::Record(vec![
+                Some(Value::record(vec![
                     (
                         "r".to_string(),
-                        Value::Record(vec![
+                        Value::record(vec![
                             ("n".to_string(), Value::Str("grc.atd".into())),
                             (
                                 "size".to_string(),
@@ -3679,7 +3703,7 @@ mod tests {
         // A record whose fields were read at different nodes: each
         // leaf line carries its own prefix; a field read from two
         // nodes lists both, `;`-separated, in first-read order.
-        let rec = Value::Record(vec![
+        let rec = Value::record(vec![
             ("v".into(), Value::Int(1)),
             ("n".into(), Value::Int(2)),
             ("k".into(), Value::Int(3)),

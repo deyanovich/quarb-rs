@@ -916,7 +916,7 @@ pub fn eval_calc_traced(query: &Query, options: Option<Run>) -> Vec<Traced> {
 /// A provenance entry as a record: `%(source; path; instant;
 /// instant-from; dpid)`, absent components null.
 pub(crate) fn prov_record(p: &Provenance) -> Value {
-    Value::Record(vec![
+    Value::record(vec![
         (
             "source".to_string(),
             p.source.clone().map_or(Value::Null, Value::Str),
@@ -949,7 +949,7 @@ pub(crate) fn prov_record(p: &Provenance) -> Value {
 
 /// An origin coordinate as a record: `%(id; command)`.
 pub(crate) fn origin_record(o: Origin) -> Value {
-    Value::Record(vec![
+    Value::record(vec![
         ("id".to_string(), Value::Int(o.position.0 as i64)),
         ("command".to_string(), Value::Int(o.command as i64)),
     ])

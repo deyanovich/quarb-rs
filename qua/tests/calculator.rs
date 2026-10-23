@@ -123,7 +123,7 @@ fn keys_and_values_split_a_record_and_a_frame() {
     assert_eq!(one("= %(a = 1; b = 2) | keys"), r#"@("a"; "b")"#);
     assert_eq!(one("= %(a = 1; b = 2) | values"), "@(1; 2)");
     assert_eq!(one("= #(@(a; b); %(1; 2)) | keys"), r#"@("a"; "b")"#);
-    assert_eq!(one("= #(@(a; b); %(1; 2)) | values"), "#(%(1; 2))");
+    assert_eq!(one("= #(@(a; b); %(1; 2)) | values"), "#(@(1; 2))");
     assert_eq!(
         one(r#"= #(@(a; b); %("1"; "x")) | values | type"#),
         r#"@("int"; "text")"#
@@ -133,7 +133,7 @@ fn keys_and_values_split_a_record_and_a_frame() {
     let recs = "@(%(a = 1; b = 2); %(b = 3; a = 4; c = 5))";
     assert_eq!(
         one(&format!("= {recs} | header")),
-        r#"%(a = "int"; b = "int"; c = "int")"#
+        "@(:a<*; int>; :b<*; int>; :c<*; int>)"
     );
     assert_eq!(
         one(&format!("= {recs} | keys")),
@@ -142,7 +142,7 @@ fn keys_and_values_split_a_record_and_a_frame() {
     assert_eq!(one(&format!("= {recs} | values")), "@(@(1; 2); @(3; 4; 5))");
     assert_eq!(
         one("= @(%(a = @(1; 2)); %(b = 3)) | header"),
-        r#"%(a = "list"; b = "int")"#
+        "@(:a<*>; :b<*; int>)"
     );
     assert!(refuse("= @(%(a = 1); 2) | keys").contains("not all records"));
     assert!(refuse("= @(1; 2) | keys").contains("not all records"));
@@ -191,7 +191,7 @@ fn transpose_yields_a_matrix_of_one_type() {
     // every cell coerced together first, then the exchange
     assert_eq!(
         one("= @(@(1; 2.5); @(3; 4)) | transpose"),
-        "#(%(1; 3);\n  %(2.5; 4))"
+        "#(@(1; 3);\n  @(2.5; 4))"
     );
     assert_eq!(
         one("= @(@(1; 2.5); @(3; 4)) | transpose | type"),
@@ -203,11 +203,11 @@ fn transpose_yields_a_matrix_of_one_type() {
     );
     assert_eq!(
         one("= @(1..6) | #(-w=3) | transpose"),
-        "#(%(1; 4);\n  %(2; 5);\n  %(3; 6))"
+        "#(@(1; 4);\n  @(2; 5);\n  @(3; 6))"
     );
     assert_eq!(
         one("= @(1..6) | #(-w=3) | transpose | transpose"),
-        "#(%(1; 2; 3);\n  %(4; 5; 6))"
+        "#(@(1; 2; 3);\n  @(4; 5; 6))"
     );
     // a frame transposes to a frame: the header as the column
     // `column`, each old row a column numbered by position; its
@@ -227,7 +227,7 @@ fn transpose_yields_a_matrix_of_one_type() {
     );
     assert_eq!(
         one("= #(@(a; b); %(1; 2)) | values | transpose"),
-        "#(%(1);\n  %(2))"
+        "#(@(1);\n  @(2))"
     );
     // a ragged grid refuses by position
     assert!(refuse("= @(@(1); @(2; 3)) | transpose").contains("row 2 holds 2"));
@@ -241,7 +241,9 @@ fn flatten_opens_nested_lists_and_a_tables_cells() {
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | flatten"), "@(1; 2; 3; 4)");
     assert_eq!(one(r#"= #(@(a; b); %("x"; 1)) | flatten"#), r#"@("x"; 1)"#);
     assert_eq!(one("= 7 | flatten"), "7");
-    assert!(refuse("= %(a = 1) | flatten").contains("fields, not items"));
+    // a record flattens to the list of its values (a composite
+    // label to its levels, draft 166)
+    assert_eq!(one("= %(a = 1; b = @(2; 3)) | flatten"), "@(1; @(2; 3))");
     // over the stream: the topics' items, one row each
     assert_eq!(
         run("= @(@(1; 2); @(3)) | ... @| flatten").unwrap(),
@@ -252,10 +254,10 @@ fn flatten_opens_nested_lists_and_a_tables_cells() {
 #[test]
 fn the_reshaping_constructor_lays_a_list_into_columns() {
     assert_eq!(one("= @(1..12) | #(--width=3) | dim"), "@(4; 3)");
-    assert_eq!(one("= @(1..6) | #(-w=3)"), "#(%(1; 2; 3);\n  %(4; 5; 6))");
+    assert_eq!(one("= @(1..6) | #(-w=3)"), "#(@(1; 2; 3);\n  @(4; 5; 6))");
     assert_eq!(
         one("= @(1..6) | #(--header=@(a; b; c)) | header"),
-        r#"%(a = "int"; b = "int"; c = "int")"#
+        "@(:a<*; int>; :b<*; int>; :c<*; int>)"
     );
     assert_eq!(one("= @(1..6) | #(-h=@(a; b; c)) | :b"), "@(2; 5)");
     // the columns type by the rule
@@ -266,7 +268,7 @@ fn the_reshaping_constructor_lays_a_list_into_columns() {
     // round trips
     assert_eq!(
         one("= #(%(1; 2); %(3; 4)) | flatten | #(-w=2)"),
-        "#(%(1; 2);\n  %(3; 4))"
+        "#(@(1; 2);\n  @(3; 4))"
     );
     assert_eq!(one("= @(1..12) | #(-w=3) x @(1; 1; 1)"), "@(6; 15; 24; 33)");
     // over the stream
@@ -280,5 +282,6 @@ fn the_reshaping_constructor_lays_a_list_into_columns() {
     assert!(refuse("= @(1; @(2)) | #(-w=2)").contains("flat"));
     // a literal with rows after a pipe is still the value
     assert_eq!(one("= 1 | #(@(a); %(1)) | dim"), "@(1; 1)");
-    assert_eq!(one("= #(@(a; b)) | dim"), "@(0; 2)");
+    // a lone list of names is a header of no rows, refused (draft 166)
+    assert!(refuse("= #(@(a; b)) | dim").contains("alone is retired"));
 }

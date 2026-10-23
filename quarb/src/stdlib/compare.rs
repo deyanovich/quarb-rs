@@ -90,13 +90,20 @@ pub(crate) fn set_probe(ys: &std::sync::Arc<Vec<Value>>, needle: &str) -> Option
 }
 
 pub(crate) fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool {
-    // A projection value compares as its bare key's text (spec:
+    // A projector compares as its bare key's text (spec:
     // Projection Value, draft 164).
     if let Value::Projection { key, .. } = a {
         return compare(&Value::Str(key.clone()), op, b, scale);
     }
     if let Value::Projection { key, .. } = b {
         return compare(a, op, &Value::Str(key.clone()), scale);
+    }
+    // A quarq compares as its source text (spec: Quarqs).
+    if let Value::Quarq(q) = a {
+        return compare(&Value::Str(q.source.clone()), op, b, scale);
+    }
+    if let Value::Quarq(q) = b {
+        return compare(a, op, &Value::Str(q.source.clone()), scale);
     }
     match op {
         CmpOp::Within => return within(a, b, scale),
@@ -335,6 +342,30 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Null, Value::Null) => true,
+        // two records are equal item by item (spec: Record): the
+        // keys as values and the values, in order
+        (Value::Record(x), Value::Record(y)) => {
+            x.len() == y.len()
+                && (0..x.len()).all(|i| x.key(i) == y.key(i) && value_eq(&x[i].1, &y[i].1, scale))
+        }
+        // two tables are equal item by item (spec: Values, equality;
+        // draft 166): the headers agree (the names in order, the
+        // declared types alike, an undeclared column by its cells
+        // alone), the rows agree in order cell by cell under the
+        // coercions, the index declarations agree (labels compare as
+        // cells); the header's name does not enter
+        (Value::Table(x), Value::Table(y)) => {
+            let declared = |t: &crate::Table| -> Vec<Option<crate::value::ColumnType>> {
+                if t.declared.is_empty() { vec![None; t.width()] } else { t.declared.clone() }
+            };
+            x.header == y.header
+                && x.index == y.index
+                && declared(x) == declared(y)
+                && x.rows.len() == y.rows.len()
+                && x.rows.iter().zip(y.rows.iter()).all(|(r, s)| {
+                    r.len() == s.len() && r.iter().zip(s.iter()).all(|(a, b)| value_eq(a, b, scale))
+                })
+        }
         _ => false,
     }
 }

@@ -423,7 +423,7 @@ pub(crate) fn broadcast(
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+            Ok(Value::table(t.rebuild(rows)?))
         }
         // A list against a table: coordinate by column.
         (Value::Table(t), Value::List(v)) | (Value::List(v), Value::Table(t)) => {
@@ -475,7 +475,7 @@ pub(crate) fn broadcast(
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+            Ok(Value::table(t.rebuild(rows)?))
         }
         (Value::Table(_), Value::Record(_)) | (Value::Record(_), Value::Table(_)) => Err(format!(
             "{sym}: a record against a table has no rule; a list goes coordinate by column, a record of one shape against a record"
@@ -501,7 +501,7 @@ pub(crate) fn broadcast(
                         .collect()
                 })
                 .collect();
-            Ok(Value::table(crate::Table::new(t.header.clone(), rows)))
+            Ok(Value::table(t.rebuild(rows)?))
         }
         // Two lists: of one length, item by item; a list of lists
         // against the shorter list along the last axis.
@@ -571,32 +571,28 @@ pub(crate) fn broadcast(
                     Ok((k.clone(), v))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::Record(fields))
+            Ok(Value::Record(fields.into()))
         }
         // Two records: the same field names, field by field.
+        // Two records ALIGN BY KEY (spec: Structured Values, draft
+        // 166): the union of the keys in first-met order, as values
+        // (1 and "1" two keys), null where a side lacks one; the
+        // keys kept typed as they are.
         (Value::Record(a), Value::Record(b)) => {
-            let same = a.len() == b.len() && a.iter().all(|(k, _)| b.iter().any(|(n, _)| n == k));
-            if !same {
-                let names = |r: &Vec<(String, Value)>| {
-                    r.iter()
-                        .map(|(k, _)| k.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                return Err(format!(
-                    "{sym}: the records differ in shape, fields {} and {}",
-                    names(a),
-                    names(b)
-                ));
+            let mut keys: Vec<Value> = a.key_values();
+            for k in b.key_values() {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
             }
-            let fields = a
+            let cell = |r: &crate::value::Record, k: &Value| -> Value {
+                r.find_key(k).map(|i| r[i].1.clone()).unwrap_or(Value::Null)
+            };
+            let pairs = keys
                 .iter()
-                .map(|(k, x)| {
-                    let y = &b.iter().find(|(n, _)| n == k).expect("same names").1;
-                    Ok::<_, String>((k.clone(), broadcast(op, x, y, scale)?))
-                })
+                .map(|k| Ok::<_, String>((k.clone(), broadcast(op, &cell(a, k), &cell(b, k), scale)?)))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::Record(fields))
+            Ok(Value::Record(crate::value::Record::keyed(pairs)))
         }
         // A scalar over a list or a record: every admitting cell,
         // a nested structure recursively, the others as they are.
@@ -642,7 +638,7 @@ pub(crate) fn broadcast(
                         };
                         Ok::<_, String>((k.clone(), v))
                     })
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?.into(),
             ))
         }
         (l, r) => Ok(arith(op, l, r, scale)),

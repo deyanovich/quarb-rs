@@ -30,6 +30,9 @@ pub struct LocalExecutor {
     /// A `--model` file enriching the source with derived structure
     /// (wasm-safe — the playground uses it too).
     model: Option<quarb_model::Model>,
+    /// The session memory (`| ,name`, `$,name`, `%,`): one per
+    /// executor, outliving every query it runs.
+    session: quarb::SessionMemory,
     /// The source spec, kept so a `&N!` reading can re-materialize.
     /// `None` when the source can't be re-opened (wasm pasted text,
     /// which never drifts anyway).
@@ -38,6 +41,18 @@ pub struct LocalExecutor {
 }
 
 impl LocalExecutor {
+    /// The executor sharing a session memory with another (a remount
+    /// keeps what the session filed).
+    pub fn with_session(mut self, session: quarb::SessionMemory) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// The session memory this executor runs with.
+    pub fn session(&self) -> quarb::SessionMemory {
+        self.session.clone()
+    }
+
     /// An executor over a fixed materialized `Doc` (no live re-read).
     pub fn new(doc: Doc, now: (i64, u32), allow_shell: bool) -> Self {
         Self {
@@ -50,6 +65,7 @@ impl LocalExecutor {
             #[cfg(feature = "native")]
             respec: None,
             model: None,
+            session: quarb::session_memory(),
         }
     }
 
@@ -96,6 +112,7 @@ impl LocalExecutor {
             environments: Vec::new(),
             respec: Some((specs, opts)),
             model: None,
+            session: quarb::session_memory(),
         }
     }
 }
@@ -144,12 +161,16 @@ impl LocalExecutor {
             allow_shell: self.allow_shell,
             environments: self.environments.clone(),
             ref_targets: self.url_roots.clone(),
+            session: Some(self.session.clone()),
             ..quarb::Run::ambient()
         }
     }
 }
 
 impl Executor for LocalExecutor {
+    fn session_memory(&self) -> Option<quarb::SessionMemory> {
+        Some(self.session.clone())
+    }
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
         let run = self.run_opts();
         let (cells, refs) = if let Some(model) = &self.model {

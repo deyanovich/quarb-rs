@@ -172,6 +172,31 @@ impl AstAdapter for XlsxAdapter {
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.model.property(node, name)
     }
+    // a cell projects to its value: `@| #` over the rows builds the
+    // frame from the cells (the sibling relational adapters forward
+    // the whole model through `forward_ast_adapter!`; this one hands
+    // the traits its own words, so it forwards by hand)
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        self.model.default_value(node)
+    }
+    fn declared_notation(&self, node: NodeId) -> Option<String> {
+        self.model.declared_notation(node)
+    }
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        self.model.metadata_catalogue()
+    }
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        self.model.count(from, plan)
+    }
+    fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        self.model.estimate(scope, plan)
+    }
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        self.model.select(from, plan)
+    }
+    fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
+        self.model.select_plan(scope, plan)
+    }
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         self.model.metadata(node, key)
     }

@@ -83,6 +83,8 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
         Value::Str(s) => s.into_py_any(py)?,
         // a projection coerces to text as its bare key
         Value::Projection { key, .. } => key.clone().into_py_any(py)?,
+        // a quarq is its source text
+        Value::Quarq(q) => q.source.clone().into_py_any(py)?,
         Value::List(items) => {
             let list = PyList::empty(py);
             for item in items.iter() {
@@ -219,7 +221,7 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         for n in names {
             fields.push((n.clone(), py_to_value(&obj.getattr(n.as_str())?)?));
         }
-        return Ok(Value::Record(fields));
+        return Ok(Value::Record(fields.into()));
     }
     if obj.cast::<PyInt>().is_ok() {
         if let Ok(i) = obj.extract::<i64>() {
@@ -256,7 +258,7 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         for (k, v) in d.iter() {
             fields.push((k.str()?.to_string_lossy().into_owned(), py_to_value(&v)?));
         }
-        return Ok(Value::Record(fields));
+        return Ok(Value::Record(fields.into()));
     }
     let datetime = py.import("datetime")?;
     if obj.is_instance(&datetime.getattr("datetime")?)? {

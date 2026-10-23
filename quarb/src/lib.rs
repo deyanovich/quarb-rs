@@ -57,7 +57,10 @@ pub use pipeline::{env, library};
 pub use quarb_time::{calendar, calnames, datenames, durnames, regional};
 /// The temporal fragment (the `quarb-time` crate, at its old paths).
 pub use quarb_time::{period, temporal, timex};
-pub use stdlib::{tabulate, tabulate_in, tabulate_with};
+pub use stdlib::{pretty_precision, tabulate, tabulate_in, tabulate_pretty, tabulate_with};
+pub use pipeline::{PrettyMode, SessionMemory, SessionStore, session_memory};
+pub use stdlib::pretty_value;
+pub use value::pretty_float;
 use syntax::{ast, lexer, parser, unparse};
 pub use syntax::{highlight, man, registry};
 pub use thread::prov::{ORIGIN_CAP, Origin, Origins, Prov};
@@ -87,7 +90,7 @@ pub use value::ambient::{
     SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
     sentence_bonds, set_invocation_instant, set_sentence_bonds,
 };
-pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, Value};
+pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, Typing, Value};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or
@@ -145,7 +148,7 @@ pub fn parse_step_body(body: &str) -> Result<StepBody> {
     };
     if preds
         .iter()
-        .any(|p| matches!(p, ast::Predicate::Index(_) | ast::Predicate::Range(_, _)))
+        .any(|p| matches!(p, ast::Predicate::Index(_) | ast::Predicate::Range(_, _) | ast::Predicate::Positions(_) | ast::Predicate::Computed(_)))
     {
         return refuse("a positional predicate");
     }
@@ -190,6 +193,10 @@ pub struct ClosingTable {
     pub columns: Vec<String>,
     /// The delimiter `csv(";")` names, when it names one.
     pub delimiter: Option<u8>,
+    /// `@| pretty`: the digits after the point a float is drawn with
+    /// (spec: Output Commands, draft 166), `-p=n`; `None` under
+    /// `table` and `csv`, which keep every digit.
+    pub pretty: Option<usize>,
 }
 
 /// What a run leaves for its caller.
@@ -305,6 +312,7 @@ impl Query {
                     })
                     .collect(),
                 delimiter,
+                pretty: (call.name == "pretty").then(|| stdlib::pretty_precision(call)),
             });
             // The rows, with a node standing for the record of the
             // columns asked of it, exactly as the command would read
@@ -341,6 +349,7 @@ impl Query {
                     })
                     .collect(),
                 delimiter,
+                pretty: (call.name == "pretty").then(|| stdlib::pretty_precision(call)),
             });
             self.ast.pipeline.pop();
         }

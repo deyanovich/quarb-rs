@@ -403,7 +403,7 @@ fn universal_search_reaches_the_whole_arbor() {
     // As an operand, root-anchored like `^`.
     assert_eq!(
         vals("/a | %(n = (*//x.rs @| count); d = (//x.rs @| count))", &t),
-        vec![Value::Record(vec![
+        vec![Value::record(vec![
             ("n".to_string(), Value::Int(2)),
             ("d".to_string(), Value::Int(1)),
         ])]
@@ -922,11 +922,11 @@ fn conditionals() {
             &t
         ),
         vec![
-            Value::Record(vec![
+            Value::record(vec![
                 ("name".into(), Value::Str("x.rs".into())),
                 ("kind".into(), Value::Str("code".into())),
             ]),
-            Value::Record(vec![
+            Value::record(vec![
                 ("name".into(), Value::Str("y.txt".into())),
                 ("kind".into(), Value::Str("text".into())),
             ]),
@@ -2539,7 +2539,7 @@ fn value_side_provenance_projection() {
     // instant and the rung it came from (the mock records
     // instants without a rung), the dpid.
     let rec = |src: &str, path: &str, inst: (i64, u32, Option<i16>), dpid: &str| {
-        Value::Record(vec![
+        Value::record(vec![
             ("source".into(), Value::Str(src.into())),
             ("path".into(), Value::Str(path.into())),
             (
@@ -2586,7 +2586,7 @@ fn value_side_provenance_projection() {
     );
     assert_eq!(vals("/a/y.txt:instant", &t), vec![Value::Null]);
     let coord = |id: i64, command: i64| {
-        Value::Record(vec![
+        Value::record(vec![
             ("id".into(), Value::Int(id)),
             ("command".into(), Value::Int(command)),
         ])

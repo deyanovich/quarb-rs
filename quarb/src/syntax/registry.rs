@@ -309,15 +309,18 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         with_options(
             scalar(
-                "project",
-                "the operand's value with every projection value in it, at any depth, replaced by \
-                 that projection's reading on the cursor (project(:name) is | :name, project(:props; -r) \
-                 is | %); --record (-r) keys a list by its projections' bare keys",
+                "map",
+                "the body applied to every value one level deep — the cells of a table, the items of a list, \
+                 the fields of a record, each the topic of the body in turn — and the structure answered \
+                 with the results in place (a table re-types its columns); --to=:col, or a parenthesised \
+                 list of columns, restricts the mapping",
             ),
-            &["--record", "-r"],
+            &["--to"],
         ),
         Check::Command,
     ),
+    // (`project` is retired at 0.42.0: the projection operator, see
+    // `retired_command` in the parser)
     // Unicode, stress, transliteration, spelling.
     scalar("nfc", "the text in Unicode NFC"),
     scalar("nfd", "the text in Unicode NFD"),
@@ -525,6 +528,7 @@ pub const SPECS: &[FnSpec] = &[
     // The temporal fragment.
     scalar("datetime", "the instant read from text"),
     scalar("epoch", "the instant as seconds since the epoch"),
+    scalar("truncate", "the instant floored to a multiple of a fixed-length duration from the epoch"),
     scalar("isoformat", "the instant in ISO 8601"),
     scalar("year", "the instant's year"),
     scalar("month", "the instant's month"),
@@ -604,6 +608,14 @@ pub const SPECS: &[FnSpec] = &[
     reducing("min", "the least"),
     reducing("max", "the greatest"),
     reducing("mean", "the arithmetic mean"),
+    reducing("describe", "the summary statistics: count, mean, std, min, the quartiles, max"),
+    reducing("nulls", "the count of null fields; on a table one count per row"),
+    FnSpec {
+        options: &["--pretty", "--precision", "-p"],
+        ..scalar("session", "the session's settings: --pretty=always|structures|off prints the results through pretty, --precision=n sets its digits; alone, the settings as a record")
+    },
+    scalar("stack", "the header's innermost level moved into the index"),
+    scalar("unstack", "the index's innermost level moved into the header"),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),
@@ -696,12 +708,15 @@ pub const SPECS: &[FnSpec] = &[
         reducing("triples", "every triple of capsae"),
         Check::Command,
     ),
-    with_check(
-        reducing(
-            "sort",
-            "the capsae sorted by value (sort(LOCALE), sort(atergo))",
+    with_options(
+        with_check(
+            reducing(
+                "sort",
+                "the capsae sorted by value (sort(LOCALE), sort(atergo)); --desc (-d) descending",
+            ),
+            Check::Keyed,
         ),
-        Check::Keyed,
+        &["--desc", "-d"],
     ),
     reducing("unique", "the distinct values"),
     reducing("reverse", "the capsae in reverse order"),
@@ -740,7 +755,12 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        context("shift", "each capsa's value from N capsae back"),
+        // after `|` the value form: a list's items, a record's or an
+        // indexed table's values moved, the keys and labels kept
+        FnSpec {
+            scalar: true,
+            ..context("shift", "each capsa's value from N capsae back")
+        },
         Check::Command,
     ),
     with_check(
@@ -773,10 +793,13 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        rendering(
-            "pretty",
-            "the records as an aligned table (closing: the tool renders it); after a value, the value pretty-printed: a table the grid, a record one field per line, a list one item per line",
-        ),
+        FnSpec {
+            options: &["--precision", "-p"],
+            ..rendering(
+                "pretty",
+                "the records as an aligned table (closing: the tool renders it); after a value, the value pretty-printed: a table the grid, a record one field per line, a list one item per line; a float with at most six digits after the point (-p=n sets them), numeric columns right-aligned",
+            )
+        },
         Check::Command,
     ),
     context(
@@ -784,7 +807,10 @@ pub const SPECS: &[FnSpec] = &[
         "the output encoding (closing: the tool applies it)",
     ),
     // Keyed aggregates.
-    keyed("sort_by", "the capsae sorted by keys"),
+    with_options(
+        keyed("sort_by", "the capsae sorted by keys; --desc (-d) descending"),
+        &["--desc", "-d"],
+    ),
     keyed("unique_by", "the first capsa per distinct key"),
     keyed("min_by", "the capsa with the least key"),
     keyed("max_by", "the capsa with the greatest key"),

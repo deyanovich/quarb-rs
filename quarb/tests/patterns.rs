@@ -774,17 +774,17 @@ fn decimal_comma_and_group_underscores_canonicalize() {
 
 #[test]
 fn rounded_hole_canonicalizes() {
-    // `(,expr)` in a double-quoted string is the rounded `${expr}`;
-    // canonical text prints the pointy hole.
+    // `(_expr)` in a double-quoted string is the rounded `${expr}`
+    // (draft 166); canonical text prints the pointy hole.
     assert_eq!(
-        canon(r#"/r | "(,::name) is (,::age)""#),
+        canon(r#"/r | "(_::name) is (_::age)""#),
         canon(r#"/r | "${::name} is ${::age}""#)
     );
     assert_eq!(
-        canon(r#"/r | ::f | .f | "fare (,(.f)), doubled (,(_) * 2)""#),
+        canon(r#"/r | ::f | .f | "fare (_(.f)), doubled (_(_) * 2)""#),
         canon(r#"/r | ::f | .f | "fare ${$.f}, doubled ${$_ * 2}""#)
     );
-    assert!(canon(r#"/r | "(,::name)""#).contains("${::name}"));
+    assert!(canon(r#"/r | "(_::name)""#).contains("${::name}"));
 }
 
 #[test]

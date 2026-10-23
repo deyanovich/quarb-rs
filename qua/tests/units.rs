@@ -77,8 +77,8 @@ fn the_bit_is_the_base_of_information() {
     assert_eq!(one("= 2_кбайт | convert(bit)"), "16000_bit");
     assert_eq!(one("= '1 Mbps' | convert('kb/s')"), "1000_kb/s");
     // KB and Kb are refused, a millibyte is no unit: text stays text
-    assert_eq!(one("= '5 KB' | quantity"), "");
-    assert_eq!(one("= '5 mB' | quantity"), "");
+    assert_eq!(one("= '5 KB' | quantity"), "null");
+    assert_eq!(one("= '5 mB' | quantity"), "null");
     assert_eq!(one("= '5 KiB' | quantity | dimension"), "B");
 }
 
@@ -116,8 +116,8 @@ fn the_operand_of_a_conversion_must_be_a_known_unit() {
     let e = refused("/rows/* | %(::id; size = convert(::size, KB))");
     assert!(e.contains("no unit 'KB'"), "{e}");
     // a known unit of another dimension stays null, as the spec says
-    assert_eq!(one("= 548_B | convert(km)"), "");
-    assert_eq!(one("= 5_km | unit(kg)"), "");
+    assert_eq!(one("= 548_B | convert(km)"), "null");
+    assert_eq!(one("= 5_km | unit(kg)"), "null");
     // a value's unknown unit still reads as an opaque unit; the
     // operand alone must be known
     assert_eq!(one("= 3_apples/kg | dimension"), "apples/M");
@@ -190,7 +190,7 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '5_apples' | quantity"), "5_apples");
     // its own kind: comparable and summable with itself only
     assert_eq!(one("= 12_EUR + 3_EUR"), "15_EUR");
-    assert_eq!(one("= 12_EUR + 3_USD"), "");
+    assert_eq!(one("= 12_EUR + 3_USD"), "null");
     assert_eq!(one("= (12_EUR < 13_EUR)"), "true");
     assert_eq!(one("= (12_EUR < 13_USD)"), "false");
     // never scaled: no prefix is stripped from an opaque name
@@ -205,8 +205,8 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '¥ 500' | quantity"), "500_JPY");
     assert_eq!(one("= '12 EUR/kg' | quantity"), "12_EUR/kg");
     assert_eq!(one("= '12 EUR' | quantity | dimension"), "EUR");
-    assert_eq!(one("= ('12 EUR' | quantity) + ('3 USD' | quantity)"), "");
-    assert_eq!(one("= ('12 EUR' | quantity) | convert(USD)"), "");
+    assert_eq!(one("= ('12 EUR' | quantity) + ('3 USD' | quantity)"), "null");
+    assert_eq!(one("= ('12 EUR' | quantity) | convert(USD)"), "null");
     assert_eq!(one("= '12 UAH' | quantity"), "12_UAH");
     assert_eq!(one("= '₦500' | quantity"), "500_NGN");
     assert_eq!(one("= '12 GEL' | quantity"), "12_GEL");
@@ -214,18 +214,18 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '12 ISK' | quantity"), "12_ISK");
     assert_eq!(one("= '12 XCD' | quantity"), "12_XCD");
     // the second, retired, metal and fund codes are not units
-    assert_eq!(one("= '12 VED' | quantity"), "");
-    assert_eq!(one("= '12 XAU' | quantity"), "");
-    assert_eq!(one("= '12 HRK' | quantity"), "");
+    assert_eq!(one("= '12 VED' | quantity"), "null");
+    assert_eq!(one("= '12 XAU' | quantity"), "null");
+    assert_eq!(one("= '12 HRK' | quantity"), "null");
     assert_eq!(one("= '₸500' | quantity"), "500_KZT");
     assert_eq!(one("= '12 BYN' | quantity"), "12_BYN");
-    assert_eq!(one("= '12 usd' | quantity"), "");
+    assert_eq!(one("= '12 usd' | quantity"), "null");
     // spaced or glued, an undeclared name is text
-    assert_eq!(all("/rows/*::tag | quantity"), " |  | ");
-    assert_eq!(one("= '2nd' | quantity"), "");
-    assert_eq!(one("= '5G' | quantity"), "");
+    assert_eq!(all("/rows/*::tag | quantity"), "null | null | null");
+    assert_eq!(one("= '2nd' | quantity"), "null");
+    assert_eq!(one("= '5G' | quantity"), "null");
     assert_eq!(one("= '12 EUR' | quantity"), "12_EUR");
-    assert_eq!(one("= '12€' | quantity"), "");
+    assert_eq!(one("= '12€' | quantity"), "null");
     // the built-in units read either way
     assert_eq!(one("= '2km' | quantity"), "2_km");
     assert_eq!(one("= '2 km' | quantity"), "2_km");
@@ -237,7 +237,7 @@ fn convert_keeps_an_opaque_factor_and_scales_the_rest() {
         one("= 12_EUR/kg | convert('EUR/lb') | round(3)"),
         "5.443_EUR/lb"
     );
-    assert_eq!(one("= 12_EUR/kg | convert('USD/lb')"), "");
+    assert_eq!(one("= 12_EUR/kg | convert('USD/lb')"), "null");
     assert_eq!(one("= 12_EUR | convert(EUR)"), "12_EUR");
 }
 
@@ -249,10 +249,10 @@ fn the_dimension_names_the_base_dimensions() {
     assert_eq!(one("= '1 N' | dimension"), "M*L/T^2");
     assert_eq!(one("= '1 K' | dimension"), "Θ");
     assert_eq!(one("= '1 mol/s' | dimension"), "N/T");
-    assert_eq!(one("= 'soon' | dimension"), "");
-    assert_eq!(one("= 5 | dimension"), "");
+    assert_eq!(one("= 'soon' | dimension"), "null");
+    assert_eq!(one("= 5 | dimension"), "null");
     assert_eq!(all("/rows/*::speed | dimension @| unique"), "L/T");
-    assert_eq!(all("/rows/*::price | dimension"), "EUR | USD | ");
+    assert_eq!(all("/rows/*::price | dimension"), "EUR | USD | null");
 }
 
 #[test]
@@ -305,10 +305,10 @@ fn the_exchange_follows_the_rates_record() {
     // already in the target: passes through
     assert_eq!(one("= 12_USD | exchange(%(EUR = 1.25_USD); USD)"), "12_USD");
     // no opaque factor, two of them, or a rate the record does not reach: null
-    assert_eq!(one("= 12_kg | exchange(%(EUR = 1.25_USD); USD)"), "");
-    assert_eq!(one("= 12_EUR/GBP | exchange(%(EUR = 1.25_USD); USD)"), "");
-    assert_eq!(one("= 12_CHF | exchange(%(EUR = 1.25_USD); USD)"), "");
-    assert_eq!(one("= 'soon' | exchange(%(EUR = 1.25_USD); USD)"), "");
+    assert_eq!(one("= 12_kg | exchange(%(EUR = 1.25_USD); USD)"), "null");
+    assert_eq!(one("= 12_EUR/GBP | exchange(%(EUR = 1.25_USD); USD)"), "null");
+    assert_eq!(one("= 12_CHF | exchange(%(EUR = 1.25_USD); USD)"), "null");
+    assert_eq!(one("= 'soon' | exchange(%(EUR = 1.25_USD); USD)"), "null");
     // several entries and no target: refused by name
     let err = run("= 12_EUR | exchange(%(EUR = 1.25_USD; GBP = 1.2_EUR))")
         .unwrap_err()
@@ -371,7 +371,7 @@ fn scale_picks_the_prefix_that_brings_the_magnitude_to_one() {
     assert_eq!(one("= 3_mi | scale"), "3_mi");
     assert_eq!(one("= 12_EUR | scale"), "12_EUR");
     assert_eq!(one("= '0.5 kB' | scale"), "500_B");
-    assert_eq!(one("= 'soon' | scale"), "");
+    assert_eq!(one("= 'soon' | scale"), "null");
 }
 
 #[test]
@@ -424,8 +424,8 @@ fn a_span_of_time_is_the_quantity_of_dimension_t() {
     assert_eq!(one("= 90_s | duration"), "90_s");
     // A bare number has no durational reading: time is a dimension
     // like the others (spec: the durational coercion).
-    assert_eq!(one("= 90 | duration"), "");
-    assert_eq!(one("= 'soon' | duration"), "");
+    assert_eq!(one("= 90 | duration"), "null");
+    assert_eq!(one("= 'soon' | duration"), "null");
     // instant arithmetic: a span out, a span in
     assert_eq!(
         one("= (2026-07-12T09:00:00Z | datetime) - (2026-07-12T07:30:00Z | datetime)"),
@@ -455,7 +455,7 @@ fn scale_walks_the_time_ladder_and_dfmt_writes_two_components() {
     assert_eq!(one("= 8_d | dfmt"), "8d");
     assert_eq!(one("= 1.5_h | dfmt"), "1h 30min");
     assert_eq!(one("= 5400_s | dfmt(iso)"), "PT1H30M");
-    assert_eq!(one("= 'x' | dfmt"), "");
+    assert_eq!(one("= 'x' | dfmt"), "null");
     assert_eq!(one("= 2.5_h | dfmt"), "2h 30min");
     assert_eq!(one("= 0.0015_s | duration"), "0.0015_s");
     assert_eq!(one("= 0.0015_s | dfmt"), "1ms 500us");
@@ -478,21 +478,21 @@ fn unit_magnitude_and_the_base_form() {
     assert_eq!(one("= 5_km | unit"), "km");
     assert_eq!(one("= 12_EUR/kg | unit"), "EUR/kg");
     assert_eq!(one("= 5_km | convert(mi) | unit"), "mi");
-    assert_eq!(one("= 5 | unit"), "");
+    assert_eq!(one("= 5 | unit"), "null");
     assert_eq!(one("= 5 | unit(km)"), "5_km");
     assert_eq!(one("= 5_km | unit(m)"), "5000_m");
-    assert_eq!(one("= 5_km | unit(kg)"), "");
+    assert_eq!(one("= 5_km | unit(kg)"), "null");
     assert_eq!(all("/rows/*::id | unit(B)"), "1_B | 2_B | 3_B");
     assert_eq!(one("= 5_km | magnitude"), "5");
     assert_eq!(one("= 1.5_h | magnitude"), "1.5");
     assert_eq!(one("= 1_km | magnitude(m)"), "1000");
-    assert_eq!(one("= 1_km | magnitude(kg)"), "");
-    assert_eq!(one("= 'x' | magnitude"), "");
+    assert_eq!(one("= 1_km | magnitude(kg)"), "null");
+    assert_eq!(one("= 'x' | magnitude"), "null");
     assert_eq!(one("= 5_km | convert"), "5000_m");
     assert_eq!(one("= 60_km/h | convert | round(3)"), "16.667_m/s");
     assert_eq!(one("= 2_KiB | convert"), "16384_b");
     assert_eq!(one("= 1.5_h | convert"), "5400_s");
-    assert_eq!(one("= 'x' | convert"), "");
+    assert_eq!(one("= 'x' | convert"), "null");
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn a_duration_between_two_instants() {
         "1h 30min"
     );
     assert_eq!(one("= duration(0; 90)"), "1min 30s");
-    assert_eq!(one("= duration('x'; '1817-07-18')"), "");
+    assert_eq!(one("= duration('x'; '1817-07-18')"), "null");
     // in command position with both arguments, the topic is only the
     // capsa the expressions read
     assert_eq!(
@@ -552,7 +552,7 @@ fn a_duration_between_two_instants() {
         one("/rows/*[2] | duration(::when; '2024-01-02') | hours"),
         "24"
     );
-    assert_eq!(one("= duration('1775-12-16'; 'x')"), "");
+    assert_eq!(one("= duration('1775-12-16'; 'x')"), "null");
     assert_eq!(one("= '1h 30min' | duration"), "1h 30min");
 }
 

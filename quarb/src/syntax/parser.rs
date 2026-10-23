@@ -18,7 +18,7 @@ use crate::error::{QuarbError, Result};
 use crate::value::ColumnType;
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec, InterpSeg,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec, InterpSeg, ProjShape,
     LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr, Predicate, Projection,
     PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath, Step, TableRow, TraitClause,
 };
@@ -345,6 +345,9 @@ struct Parser<'a> {
     /// (`stem(ru)`, `sort(atergo)`); everywhere else — a body —
     /// a bare word names a command applied to the body's seed.
     arg_depth: usize,
+    /// Inside a keyed aggregate's parentheses (`sort_by(…)`): the
+    /// rounded `-:col` there is the descending core-field key.
+    keyed_args: bool,
     /// Ruling #22 (invited capture): the uninvited register pushes
     /// of each macro expansion this parser directly initiated, held
     /// for the end-of-parse sweep. `RefCell` because expansion runs
@@ -460,6 +463,8 @@ enum PipeMode {
 /// implies.
 fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
     match command {
+        // the session push leaves the cursor untouched, as a push does
+        Command::SessionPush(_) => cur,
         Command::Nav(b) => {
             if b.projection.is_some() {
                 PipeMode::Scalar
@@ -473,6 +478,8 @@ fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::FieldsPush
         | Command::Subcontext { .. } => PipeMode::Nav,
         Command::Filter(_) | Command::Select(_) | Command::AggPush { .. } => cur,
+        // a spliced quarq may navigate: the permissive mode follows
+        Command::Splice(_) => PipeMode::Nav,
         Command::Func(_)
         | Command::Expr(_)
         | Command::Agg(_)
@@ -522,6 +529,7 @@ impl<'a> Parser<'a> {
             nest_depth: 0,
             subquery_depth: 0,
             arg_depth: 0,
+            keyed_args: false,
             captures: std::cell::RefCell::new(Vec::new()),
             first_steps: std::cell::RefCell::new(Vec::new()),
         }
@@ -753,10 +761,97 @@ impl Parser<'_> {
         // try-a-query fallback sites (subquery_depth): a subcontext
         // body's value reading, anchored at the current node, is
         // the meaning there.
-        if branches.is_empty() && self.subquery_depth == 0 && matches!(self.peek(), Some(Token::Eq))
+        // `session(--pretty=always)` / `session` at the head (spec:
+        // Session settings, draft 166): the session command on the
+        // root, a pipe may follow as after `=`
+        if branches.is_empty()
+            && self.subquery_depth == 0
+            && matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "session")
+            && matches!(self.toks.get(self.pos + 1), None | Some(Token::LParen | Token::Pipe))
         {
             self.pos += 1;
-            let expr = self.additive()?;
+            let mut args: Vec<Arg> = Vec::new();
+            if matches!(self.peek(), Some(Token::LParen)) {
+                self.pos += 1;
+                loop {
+                    if matches!(self.peek(), Some(Token::RParen)) {
+                        self.pos += 1;
+                        break;
+                    }
+                    let Some(name) = self.option_item() else {
+                        return Err(QuarbError::parse(
+                            "'session(…)' takes its settings as options: 'session(--pretty=always)', 'session(--pretty=structures)', 'session(--pretty=off)', 'session(--precision=n)'",
+                        ));
+                    };
+                    match (self.peek(), self.toks.get(self.pos + 1)) {
+                        (Some(Token::DashDash), Some(Token::Name { glued: true, .. })) => self.pos += 2,
+                        _ => self.pos += 1,
+                    }
+                    let value = if matches!(self.peek(), Some(Token::OptEq)) {
+                        self.pos += 1;
+                        match self.peek() {
+                            Some(Token::Name { text, .. }) => {
+                                let text = text.clone();
+                                let v = match literal_value(&text, false, &|e| self.expander.unit_scale(e)) {
+                                    v @ Value::Int(_) => v,
+                                    _ => Value::Str(text),
+                                };
+                                self.pos += 1;
+                                Some(Operand::Lit(v))
+                            }
+                            _ => {
+                                return Err(QuarbError::parse(format!(
+                                    "'session({name}=…)' takes a word or a number"
+                                )));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    args.push(Arg::Opt { name, value });
+                    match self.peek() {
+                        Some(Token::Comma | Token::Semi) => self.pos += 1,
+                        Some(Token::RParen) => {}
+                        _ => {
+                            return Err(QuarbError::parse(
+                                "'session(…)' separates its settings with ';'",
+                            ));
+                        }
+                    }
+                }
+            }
+            branches.push(Branch {
+                steps: Vec::new(),
+                projection: None,
+                anchor: Anchor::Root,
+            });
+            pipeline.push(Command::Func(FnCall { name: "session".into(), args }));
+            return Ok(());
+        }
+        if branches.is_empty()
+            && self.subquery_depth == 0
+            && (matches!(self.peek(), Some(Token::Eq)) || self.value_only_head())
+        {
+            // the sigil may be dropped before a token that can only
+            // open a value (draft 166); the unparser prints it always
+            if matches!(self.peek(), Some(Token::Eq)) {
+                self.pos += 1;
+            }
+            // the full expression: a comparison and a bare conditional
+            // stand at the head (`= 1 = 1 ? "yes" : "no"`, draft 166);
+            // a `||` after the operand is the union the head refuses
+            let left = self.additive()?;
+            if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
+                return Err(QuarbError::parse(
+                    "an expression head stands alone; it cannot join a \
+                     union — pipe from it instead: '= expr | …'",
+                ));
+            }
+            let mut expr = self.expr_head_from(left)?;
+            // the head has no cursor: a bare projection there, of
+            // any rung, is a projector (draft 166), so
+            // `= %(::Name; ::Fare)` stores two property projections
+            head_projections(&mut expr);
             branches.push(Branch {
                 steps: Vec::new(),
                 projection: None,
@@ -840,7 +935,30 @@ impl Parser<'_> {
                 ));
             }
         } else {
-            branches.push(self.branch()?);
+            let b = self.branch()?;
+            // `//x:%(:props...)`, `//x:$.cols` — the projection
+            // operator on a path at the query head: the path is the
+            // operand, the query an expression head on each node.
+            if branches.is_empty() && matches!(self.peek(), Some(Token::ProjectColon)) {
+                self.pos += 1;
+                let shape = self.project_shape()?;
+                let base = Operand::Rel {
+                    steps: b.steps,
+                    projection: b.projection,
+                    anchor: b.anchor,
+                };
+                branches.push(Branch {
+                    steps: Vec::new(),
+                    projection: None,
+                    anchor: Anchor::Root,
+                });
+                pipeline.push(Command::Expr(Operand::Projected {
+                    base: Box::new(base),
+                    shape,
+                }));
+                return Ok(());
+            }
+            branches.push(b);
         }
         Ok(())
     }
@@ -874,7 +992,7 @@ impl Parser<'_> {
                 | Token::Backslash
                 | Token::BackslashBackslash
                 | Token::ArrowOut
-                | Token::ArrowIn
+                | Token::ArrowIn { .. }
                 | Token::DashDash
                 | Token::LParen
                 | Token::ColonColon
@@ -974,7 +1092,10 @@ impl Parser<'_> {
                     // from the whole context.
                     if matches!(self.peek(), Some(Token::LBracket)) {
                         match self.predicate()? {
-                            pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => {
+                            pred @ (Predicate::Index(_)
+                            | Predicate::Range(_, _)
+                            | Predicate::Positions(_)
+                            | Predicate::Computed(_)) => {
                                 // Select preserves the mode.
                                 pipeline.push(Command::Select(pred));
                                 continue;
@@ -1082,6 +1203,20 @@ impl Parser<'_> {
             let left = self.concat_rest(mode, Operand::Topic)?;
             return Ok(Command::Expr(self.additive_from(left)?));
         }
+        // `| ?? 0`, `| > 3 ? a : b` — the null default and the
+        // comparisons after a pipe take the topic as their left
+        // operand likewise (draft 166).
+        if matches!(self.peek(), Some(Token::Coalesce)) {
+            let cond = self.coalesce_tail(PredExpr::Truthy(Operand::Topic))?;
+            return Ok(Command::Expr(self.cond_expr_from(cond)?));
+        }
+        if self.cmp_ahead() {
+            let first = self.pred_primary_from(Operand::Topic)?;
+            let first = self.pred_and_from(first)?;
+            let cond = self.pred_or_from(first)?;
+            let cond = self.coalesce_tail(cond)?;
+            return Ok(Command::Expr(self.cond_expr_from(cond)?));
+        }
         // A command that starts like a path is a navigation command —
         // the pipeline spelling of a path continuation.
         if self.nav_command_ahead() {
@@ -1133,15 +1268,15 @@ impl Parser<'_> {
             // `| $.name`, `| $_`, `| $ord`, and any arithmetic over
             // them are value expressions; a plain recall is just the
             // single-operand case.
-            Some(Token::Dollar) => Ok(Command::Expr(self.additive()?)),
+            Some(Token::Dollar) => Ok(Command::Expr(self.expr_head()?)),
             // `| _::prop` / `| _/kid::x` — the invoking position as the
             // command's expression.
             Some(Token::Driver | Token::Position | Token::Invoking) => {
-                Ok(Command::Expr(self.additive()?))
+                Ok(Command::Expr(self.expr_head()?))
             }
             // `| :name` — the topic record's field; `| %+` — the
             // named-captures record.
-            Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.additive()?)),
+            Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.expr_head()?)),
             // `| @_`, `| @@_::prop`, `| #*`, `| ##*`, `| #_` — the
             // context family as the command's expression; `| _` the
             // cursor record.
@@ -1152,7 +1287,7 @@ impl Parser<'_> {
                 | Token::NodeMatrix { .. }
                 | Token::CtxTable
                 | Token::Cursor,
-            ) => Ok(Command::Expr(self.additive()?)),
+            ) => Ok(Command::Expr(self.expr_head()?)),
             // `| @(a; b)` — a list literal as the command's
             // expression; `| @%(…)` the record array.
             Some(Token::At)
@@ -1284,6 +1419,11 @@ impl Parser<'_> {
                 // `| %` bare — the column reading: a library value
                 // as its columns, a list of records as a record of
                 // lists.
+                // `%,` — the session memory as a record (draft 166)
+                if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",") {
+                    self.pos += 1;
+                    return Ok(Command::Recall(RegRef::SessionRecord));
+                }
                 if !self.at_view_dots() {
                     return Ok(Command::Func(FnCall {
                         name: "%".into(),
@@ -1311,6 +1451,29 @@ impl Parser<'_> {
                     false
                 };
                 Ok(Command::Spread { outer })
+            }
+            // `| ,name` — the session push (spec: Capsa Operations,
+            // "Session memory", draft 166)
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if text.starts_with(',') => {
+                let name = text[1..].to_string();
+                self.pos += 1;
+                if name.is_empty()
+                    || !name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                {
+                    return Err(QuarbError::parse(
+                        "the session push names its value: '| ,df' files the topic under 'df' for the session",
+                    ));
+                }
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    return Err(QuarbError::parse(format!(
+                        "the session push takes no body: '| ,{name}' files the topic; compute it first ('| expr | ,{name}')"
+                    )));
+                }
+                Ok(Command::SessionPush(name))
             }
             // `quoted: false`: a quoted string that happens to start
             // with a dot (`| '.gitignore'`) is a constant topic, not
@@ -1461,6 +1624,15 @@ impl Parser<'_> {
             // on a table, where `| [n]` is the row and `| [a..b]` the
             // rows (spec: The Table Kind): the stdlib decides at the
             // run, by the topic's kind.
+            // `| [[x]]`, `| [[a..b]]` — the lookup by label on the
+            // topic (spec: Indexing a Value, draft 166), beside `| [n]`
+            Some(Token::LBracket) if matches!(self.toks.get(self.pos + 1), Some(Token::LBracket)) => {
+                let labels = self.label_brackets()?;
+                return Ok(Command::Expr(Operand::LabelIndex {
+                    base: Box::new(Operand::Topic),
+                    labels,
+                }));
+            }
             Some(Token::LBracket) => {
                 let positional = || {
                     QuarbError::parse(
@@ -1482,6 +1654,28 @@ impl Parser<'_> {
                             args: vec![Arg::Range(a, b)],
                         }));
                     }
+                    // `| [2; 4; 5]` — the listed rows or items, one
+                    // argument per part; `| [$.pos]` the expression,
+                    // read per capsa.
+                    Predicate::Positions(parts) => {
+                        return Ok(Command::Func(FnCall {
+                            name: "[]".into(),
+                            args: parts
+                                .into_iter()
+                                .map(|p| match p {
+                                    Predicate::Index(n) => Arg::Lit(Value::Int(n)),
+                                    Predicate::Range(a, b) => Arg::Range(a, b),
+                                    _ => unreachable!("a position list holds positions and ranges"),
+                                })
+                                .collect(),
+                        }));
+                    }
+                    Predicate::Computed(op) => {
+                        return Ok(Command::Func(FnCall {
+                            name: "[]".into(),
+                            args: vec![Arg::Expr(op)],
+                        }));
+                    }
                 };
                 // Glued predicates chain as on a path step:
                 // `| [a][b]` ≡ `| [a] | [b]` — every capsa passes
@@ -1489,7 +1683,10 @@ impl Parser<'_> {
                 while matches!(self.peek(), Some(Token::LBracket)) {
                     match self.predicate()? {
                         Predicate::Expr(next) => e = PredExpr::And(Box::new(e), Box::new(next)),
-                        Predicate::Index(_) | Predicate::Range(_, _) => return Err(positional()),
+                        Predicate::Index(_)
+                        | Predicate::Range(_, _)
+                        | Predicate::Positions(_)
+                        | Predicate::Computed(_) => return Err(positional()),
                     }
                 }
                 Ok(Command::Filter(e))
@@ -1499,16 +1696,19 @@ impl Parser<'_> {
             // `| ::price * ::qty`, `| "${::name} (${::age})"`.
             // (A bare path start is a navigation command, handled
             // above; parenthesized paths remain expressions.)
+            // (the full expression: a comparison and a bare conditional
+            // follow the head, `| (::a = ::b) ? 1 : 0`, draft 166)
             Some(
                 Token::ColonColon
                 | Token::ColonColonColon
                 | Token::LParen
                 | Token::Interp(_),
-            ) => Ok(Command::Expr(self.additive()?)),
+            ) => Ok(Command::Expr(self.expr_head()?)),
             // A literal where a command name would stand opens an
             // expression (spec: Literals and constructors): `| 0`
             // yields 0 per thread, `| 10 + $_` is `| + 10`, `| "x"`
-            // the text; a bare word stays a command call.
+            // the text, `| 2013-01-01 + 1_d` the instant (a literal
+            // of any kind, draft 166); a bare word stays a command call.
             Some(Token::Name {
                 text,
                 quoted: false,
@@ -1516,9 +1716,37 @@ impl Parser<'_> {
             }) if !matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
                 && self.literal_word(text) =>
             {
+                Ok(Command::Expr(self.expr_head()?))
+            }
+            Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.expr_head()?)),
+            // `| date(2013-01-01) + 1_d` — a command that takes no
+            // operand of its own, written with a parenthesis holding
+            // an operand, is the call operand it is anywhere else
+            // (draft 166): the parenthesis's value piped into it, then
+            // an expression as a literal opens
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                && crate::syntax::man::operand_bound(text) == Some(0)
+                // (a reducer keeps its refusal of a key written as an
+                // operand, with the pointer to `--of`: `sum(:x)`)
+                && crate::syntax::registry::spec(text).is_some_and(|s| s.agg.is_none())
+                && !matches!(self.toks.get(self.pos + 2), Some(Token::RParen | Token::DashDash))
+                && !matches!(self.toks.get(self.pos + 2), Some(Token::Name { text: t, quoted: false, .. }) if lexer::is_option_word(t)) =>
+            {
+                Ok(Command::Expr(self.expr_head()?))
+            }
+            // `| q(cmd)` — the quarq literal stands where a literal
+            // stands (spec: Quarqs); `q` is no command.
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if text == "q" && matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
                 Ok(Command::Expr(self.additive()?))
             }
-            Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.additive()?)),
             _ => {
                 let call = self.func_call()?;
                 // `now()` refuses to stand after a pipe: it takes no topic.
@@ -1553,7 +1781,7 @@ impl Parser<'_> {
                     | Token::FollowingSiblings(_)
                     | Token::PrecedingSiblings(_)
                     | Token::ArrowOut
-                    | Token::ArrowIn
+                    | Token::ArrowIn { .. }
                     | Token::DashDash
             )
         };
@@ -1572,6 +1800,8 @@ impl Parser<'_> {
     /// `?`. Decides branch-vs-expression for a path-shaped command.
     fn expr_continues(&self) -> bool {
         match self.peek() {
+            // `| //x:%(…)` — the projection operator on the path
+            Some(Token::ProjectColon) => true,
             Some(Token::Name {
                 text,
                 quoted: false,
@@ -2272,6 +2502,19 @@ impl Parser<'_> {
         pipe: &'static str,
         pipeline: &mut Vec<Command>,
     ) -> Result<()> {
+        // `| &$.p` — the quarq a register holds, spliced at the
+        // recall (spec: Quarqs); the plain pipe only, as the body
+        // runs per capsa
+        if matches!(self.toks.get(self.pos + 1), Some(Token::Dollar)) {
+            if pipe != "|" {
+                return Err(QuarbError::parse(
+                    "a held quarq runs per capsa: splice it with '| &$.p'",
+                ));
+            }
+            self.pos += 1;
+            pipeline.push(Command::Splice(self.splice_register()?));
+            return Ok(());
+        }
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
             return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
@@ -2432,6 +2675,8 @@ impl Parser<'_> {
                     // `X:.r` — a register accessor glued to the
                     // path closes the walk: the cross-capsa read.
                     | Token::Capsa(_)
+                    // `/x:%(…)` — the projection operator closes it
+                    | Token::ProjectColon
             ) {
                 break;
             }
@@ -2651,7 +2896,7 @@ impl Parser<'_> {
                         | Token::Backslash
                         | Token::BackslashBackslash
                         | Token::ArrowOut
-                        | Token::ArrowIn
+                        | Token::ArrowIn { .. }
                         | Token::DashDash
                         | Token::LParen
                         | Token::Amp
@@ -2818,7 +3063,7 @@ impl Parser<'_> {
                         | Token::Backslash
                         | Token::BackslashBackslash
                         | Token::ArrowOut
-                        | Token::ArrowIn
+                        | Token::ArrowIn { .. }
                         | Token::DashDash
                         | Token::ColonColon
                         | Token::ColonColonColon
@@ -2984,18 +3229,40 @@ impl Parser<'_> {
         Ok((items, bare))
     }
 
-    /// `#(…)` after its sigil (spec: The Table, Table Construction):
-    /// an optional header, a `@(…)` list of names standing first
-    /// (bare or quoted; a number names its column by its text), then
-    /// rows, each a `%(…)` record. A list anywhere but first is a
-    /// syntax error: a table's rows are records. Positional rows
+    /// `#(…)` after its sigil (spec: The Table, Table Construction,
+    /// draft 166): a frame is an optional header, a `@(…)` list of
+    /// names standing first (bare or quoted; a number names its
+    /// column by its text), then rows, each a `%(…)` record; a
+    /// MATRIX is rows that are all lists, `#(@(1; 2); @(3; 4))`, a
+    /// headerless table. A list after a record row, or a record
+    /// after a list row, is refused: the rows are of one sigil. A
+    /// single list alone is a one-row matrix unless its items are
+    /// all names, which points at `--header`. Positional records
     /// without a header are the array face, the positions naming
     /// the columns; named rows without a header infer it.
     fn table_literal(&mut self) -> Result<Operand> {
         self.expect(Token::LParen, "'(' after '#'")?;
         let mut header: Option<Vec<String>> = None;
         let mut rows: Vec<TableRow> = Vec::new();
+        // the first list, held until the next item says whether it
+        // is the header (records follow) or a matrix row
+        let mut held: Option<Vec<Operand>> = None;
         let mut first = true;
+        let header_of = |items: Vec<Operand>| -> Result<Vec<String>> {
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Operand::Lit(Value::Str(s)) => names.push(s),
+                    Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => names.push(v.to_string()),
+                    _ => {
+                        return Err(QuarbError::parse(
+                            "a table's header is a list of names, bare or quoted (#(@(name; age); …)); a value computed there names nothing",
+                        ));
+                    }
+                }
+            }
+            Ok(names)
+        };
         loop {
             if matches!(self.peek(), Some(Token::RParen)) {
                 self.pos += 1;
@@ -3003,30 +3270,32 @@ impl Parser<'_> {
             }
             match (self.peek(), self.toks.get(self.pos + 1)) {
                 (Some(Token::At), Some(Token::LParen)) => {
-                    if !first {
+                    if !first && held.is_none() && !matches!(rows.last(), Some(TableRow::List(_))) {
                         return Err(QuarbError::parse(
-                            "a table's rows are records: write %(3; 4), not @(3; 4); only the header, standing first, is a list (#(@(name; age); %(\"Braund\"; 22)))",
+                            "a list after a record row: a table's rows are all records (a frame, its header the list standing first) or all lists (a matrix, #(@(1; 2); @(3; 4)))",
                         ));
                     }
                     self.pos += 2;
                     let (items, _) = self.list_items(true)?;
-                    let mut names = Vec::with_capacity(items.len());
-                    for item in items {
-                        match item {
-                            Operand::Lit(Value::Str(s)) => names.push(s),
-                            Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
-                                names.push(v.to_string())
-                            }
-                            _ => {
-                                return Err(QuarbError::parse(
-                                    "a table's header is a list of names, bare or quoted (#(@(name; age); …)); a value computed there names nothing",
-                                ));
-                            }
+                    if first {
+                        held = Some(items);
+                    } else {
+                        // a second list: the held one was a matrix row
+                        if let Some(h) = held.take() {
+                            rows.push(TableRow::List(h));
                         }
+                        rows.push(TableRow::List(items));
                     }
-                    header = Some(names);
                 }
                 (Some(Token::Percent), Some(Token::LParen)) => {
+                    if matches!(rows.last(), Some(TableRow::List(_))) {
+                        return Err(QuarbError::parse(
+                            "a record after a matrix row: a table's rows are all lists (a matrix) or all records (a frame, its header the list standing first)",
+                        ));
+                    }
+                    if let Some(h) = held.take() {
+                        header = Some(header_of(h)?);
+                    }
                     self.pos += 2;
                     rows.push(TableRow::Record(self.record_row()?));
                 }
@@ -3040,7 +3309,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     return Err(QuarbError::parse(
-                        "a table holds record rows %(…) after an optional header list of names: #(@(name; age); %(\"Braund\"; 22)), or #(%(1; 2); %(3; 4)) for an array",
+                        "a table holds record rows %(…) after an optional header list of names, #(@(name; age); %(\"Braund\"; 22)), or list rows for a matrix, #(@(1; 2); @(3; 4))",
                     ));
                 }
             }
@@ -3050,10 +3319,29 @@ impl Parser<'_> {
                 Some(Token::RParen) => {}
                 _ => {
                     return Err(QuarbError::parse(
-                        "a table separates its rows with ';': #(%(1; 2); %(3; 4))",
+                        "a table separates its rows with ';': #(@(1; 2); @(3; 4))",
                     ));
                 }
             }
+        }
+        // a single list alone: a one-row matrix, unless its items are
+        // all names, which is a header of no rows (draft 166)
+        if let Some(h) = held.take() {
+            if !h.is_empty() && h.iter().all(|i| matches!(i, Operand::Lit(Value::Str(_)))) {
+                let names: Vec<String> = h
+                    .iter()
+                    .map(|i| match i {
+                        Operand::Lit(Value::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    })
+                    .collect();
+                return Err(QuarbError::parse(format!(
+                    "'#(@({0}))' alone is retired: a header of no rows; write the rows after it, or build the table from data with '#(--header=@({1}))'",
+                    names.join("; "),
+                    names.iter().map(|n| format!(":{n}")).collect::<Vec<_>>().join("; ")
+                )));
+            }
+            rows.push(TableRow::List(h));
         }
         Ok(Operand::Table { header, rows })
     }
@@ -3161,6 +3449,10 @@ impl Parser<'_> {
         self.pos += 2; // `#` `(`
         let mut opts: Vec<(String, Option<Operand>)> = Vec::new();
         loop {
+            // the options stand apart by `;` (`#(-w=2; -i=:1)`)
+            if !opts.is_empty() && matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+                self.pos += 1;
+            }
             let name = match (self.peek(), self.toks.get(self.pos + 1)) {
                 (Some(Token::RParen), _) => {
                     self.pos += 1;
@@ -3204,8 +3496,14 @@ impl Parser<'_> {
             let value = if matches!(self.peek(), Some(Token::OptEq)) {
                 self.pos += 1;
                 // The header's names read bare or quoted, as a
-                // literal's header does.
-                if matches!(self.peek(), Some(Token::At))
+                // literal's header does; so does the header's name.
+                if matches!(name.as_str(), "--name" | "-n")
+                    && let Some(Token::Name { text, .. }) = self.peek()
+                {
+                    let text = text.clone();
+                    self.pos += 1;
+                    Some(Operand::Lit(Value::Str(text)))
+                } else if matches!(self.peek(), Some(Token::At))
                     && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
                 {
                     self.pos += 2;
@@ -3217,6 +3515,12 @@ impl Parser<'_> {
                     // the typed header, a record of names and types
                     self.pos += 2;
                     Some(Operand::Row(self.record_row()?))
+                } else if matches!(self.peek(), Some(Token::LParen))
+                    && matches!(name.as_str(), "--index" | "-i")
+                {
+                    // `-i=(:first; :second)` — the composite index, the
+                    // levels outer first (spec: The Table, "The index")
+                    Some(self.projector_list()?)
                 } else {
                     Some(self.unary()?)
                 }
@@ -3226,14 +3530,46 @@ impl Parser<'_> {
             opts.push((name, value));
         }
         enum Header {
-            Names(Vec<String>),
-            Typed(Vec<(String, String)>),
+            Names(Vec<Value>),
             Computed(Operand),
         }
         let mut width: Option<i64> = None;
         let mut header: Option<Header> = None;
+        let mut index: Option<Operand> = None;
+        let mut header_name: Option<String> = None;
         for (name, value) in opts {
             match name.as_str() {
+                // `--name=word` — the header's name (draft 166), beside
+                // `--header` or alone on an existing table
+                "--name" | "-n" => {
+                    header_name = Some(match value {
+                        Some(Operand::Lit(Value::Str(s))) if !s.is_empty() => s,
+                        Some(Operand::Lit(v @ (Value::Int(_) | Value::Float(_)))) => v.to_string(),
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=word)' names the header, a word bare or quoted"
+                            )));
+                        }
+                    });
+                }
+                // `--index=:col` / `-i=:col<int>`: the index named, a
+                // typed projector declaring it (spec: The Table)
+                "--index" | "-i" => {
+                    let Some(mut op) = value else {
+                        return Err(QuarbError::parse(format!(
+                            "'#({name}=:col)' names the index column"
+                        )));
+                    };
+                    head_projections(&mut op);
+                    match &op {
+                        Operand::Lit(Value::Projection { .. }) | Operand::Lit(Value::List(_)) => index = Some(op),
+                        Operand::Lit(Value::Str(s)) => index = Some(Operand::Lit(Value::projection(1, s.clone()))),
+                        Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
+                            index = Some(Operand::Lit(Value::projection(1, v.to_string())))
+                        }
+                        _ => index = Some(op),
+                    }
+                }
                 "--width" | "-w" => {
                     width = Some(match value {
                         Some(Operand::Lit(Value::Int(n))) => n,
@@ -3245,38 +3581,25 @@ impl Parser<'_> {
                     });
                 }
                 "--header" | "-h" => {
-                    // The typed header: a record of names and type
-                    // words, `%(zip = "text"; amount = "float")`,
-                    // which casts the declared columns.
+                    // The record form of the header, `%(zip = "text")`,
+                    // is retired (draft 166): the header is a list of
+                    // typed projectors.
                     if let Some(Operand::Row(fields)) = &value {
-                        let mut typed = Vec::with_capacity(fields.len());
-                        for (key, op) in fields {
-                            let Some(key) = key else {
-                                return Err(QuarbError::parse(format!(
-                                    "'#({name}=%(…))' names each column with its type: \
-                                     '#({name}=%(age = \"int\"))'; an unnamed item names no column"
-                                )));
-                            };
-                            match op {
-                                Operand::Lit(Value::Str(word)) if ColumnType::from_word(word).is_some() => {
-                                    typed.push((key.clone(), word.clone()))
-                                }
-                                Operand::Lit(Value::Str(word)) => {
-                                    return Err(QuarbError::parse(format!(
-                                        "'#({name}=%(…))': '{word}' is no column type; the types are {}",
-                                        ColumnType::words().join(", ")
-                                    )));
-                                }
-                                _ => {
-                                    return Err(QuarbError::parse(format!(
-                                        "'#({name}=%(…))' gives each column its type as a word: \
-                                         '#({name}=%({key} = \"int\"))'"
-                                    )));
-                                }
-                            }
-                        }
-                        header = Some(Header::Typed(typed));
-                        continue;
+                        let spelled: Vec<String> = fields
+                            .iter()
+                            .map(|(k, op)| {
+                                let word = match op {
+                                    Operand::Lit(Value::Str(w)) => w.clone(),
+                                    _ => "type".to_string(),
+                                };
+                                format!(":{}<{word}>", k.clone().unwrap_or_else(|| "name".into()))
+                            })
+                            .collect();
+                        return Err(QuarbError::parse(format!(
+                            "'#({name}=%(…))' is retired: the header is a list of typed projectors, \
+                             '#({name}=@({}))'",
+                            spelled.join("; ")
+                        )));
                     }
                     let items = match value {
                         Some(Operand::List(items)) => items,
@@ -3299,18 +3622,23 @@ impl Parser<'_> {
                             )));
                         }
                     };
+                    // the items: names, bare or quoted, or projectors,
+                    // typed or not (`:zip<text>`; a bare `:zip` names
+                    // its column undeclared, as the name does)
                     let mut names = Vec::with_capacity(items.len());
-                    for item in items {
+                    for mut item in items {
+                        head_projections(&mut item);
                         match item {
-                            Operand::Lit(Value::Str(s)) => names.push(s),
+                            Operand::Lit(Value::Str(s)) => names.push(Value::Str(s)),
                             Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
-                                names.push(v.to_string())
+                                names.push(Value::Str(v.to_string()))
                             }
+                            Operand::Lit(p @ Value::Projection { .. }) => names.push(p),
                             _ => {
                                 return Err(QuarbError::parse(
-                                    "a header is a list of names, bare or quoted \
-                                     ('#(--header=@(name; age))'); a value computed there \
-                                     names nothing",
+                                    "a header is a list of names, bare or quoted, or of projectors \
+                                     ('#(--header=@(name; age))', '#(--header=@(:zip<text>; :amount<float>))'); \
+                                     a value computed there names nothing",
                                 ));
                             }
                         }
@@ -3319,8 +3647,8 @@ impl Parser<'_> {
                 }
                 other => {
                     return Err(QuarbError::parse(format!(
-                        "'#(…)' takes '--width=n' ('-w=n') or '--header=list' ('-h=list'); \
-                         '{other}' given"
+                        "'#(…)' takes '--width=n' ('-w=n'), '--header=list' ('-h=list'), \
+                         '--index=:col' ('-i=:col') or '--name=word' ('-n=word'); '{other}' given"
                     )));
                 }
             }
@@ -3328,28 +3656,38 @@ impl Parser<'_> {
         let arg = match (width, header) {
             (Some(_), Some(_)) => {
                 return Err(QuarbError::parse(
-                    "'#(…)' takes one option: '--width=n' lays the list in rows of n, \
-                     '--header=list' names the columns (their count the width); both given",
+                    "'#(…)' takes one of '--width=n', which lays the list in rows of n, and \
+                     '--header=list', which names the columns (their count the width); both given",
                 ));
             }
-            (Some(n), None) => Arg::Lit(Value::Int(n)),
-            (None, Some(Header::Names(h))) => {
-                Arg::Lit(Value::list(h.into_iter().map(Value::Str).collect()))
-            }
-            (None, Some(Header::Typed(h))) => Arg::Lit(Value::Record(
-                h.into_iter().map(|(k, w)| (k, Value::Str(w))).collect(),
-            )),
-            (None, Some(Header::Computed(op))) => Arg::Expr(op),
+            (Some(n), None) => Some(Arg::Lit(Value::Int(n))),
+            (None, Some(Header::Names(h))) => Some(Arg::Lit(Value::list(h))),
+            (None, Some(Header::Computed(op))) => Some(Arg::Expr(op)),
+            (None, None) if index.is_some() || header_name.is_some() => None,
             (None, None) => {
                 return Err(QuarbError::parse(
                     "'#(…)' names no option: '#(--width=n)' ('-w=n') lays the list in rows \
-                     of n, '#(--header=list)' ('-h=list') names its columns",
+                     of n, '#(--header=list)' ('-h=list') names its columns, '#(--index=:col)' \
+                     ('-i=:col') names the index, '#(--name=word)' names the header",
                 ));
             }
         };
+        let mut args: Vec<Arg> = arg.into_iter().collect();
+        if let Some(op) = index {
+            args.push(Arg::Opt {
+                name: "--index".into(),
+                value: Some(op),
+            });
+        }
+        if let Some(n) = header_name {
+            args.push(Arg::Opt {
+                name: "--name".into(),
+                value: Some(Operand::Lit(Value::Str(n))),
+            });
+        }
         Ok(FnCall {
             name: "#".into(),
-            args: vec![arg],
+            args,
         })
     }
 
@@ -3368,8 +3706,9 @@ impl Parser<'_> {
                 quoted: false,
                 ..
             }) => {
-                !matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
-                    && self.literal_word(text)
+                (!matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                    && self.literal_word(text))
+                    || (text == "q" && matches!(self.toks.get(self.pos + 1), Some(Token::LParen)))
             }
             Some(Token::Name { quoted: true, .. } | Token::Interp(_)) => true,
             Some(Token::At) => {
@@ -3380,6 +3719,34 @@ impl Parser<'_> {
             Some(Token::Hash) => {
                 matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
                     && !self.table_option_ahead()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the token at the head can only open a value, so the
+    /// `=` sigil may be dropped (spec: The Expression Head, draft
+    /// 166): a literal (a number, a string, a date, a quantity,
+    /// nan/inf, true/false/null), a constructor `@(` `%(` `#(`, a
+    /// quarq `q(`, a session read `$,`. A parenthesis, a minus, a
+    /// name and a fragment call keep the sigil.
+    fn value_only_head(&self) -> bool {
+        let next_paren = matches!(self.toks.get(self.pos + 1), Some(Token::LParen));
+        match self.peek() {
+            Some(Token::Name { quoted: true, .. }) | Some(Token::Interp(_)) => true,
+            Some(Token::Name { text, quoted: false, .. }) => {
+                (text == "q" && next_paren)
+                    || (!next_paren && !text.starts_with('-') && self.literal_word(text))
+            }
+            // `@(`, `%(`, `#(`, and the record-array sugar `@%(`
+            Some(Token::At) => {
+                next_paren
+                    || (matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                        && matches!(self.toks.get(self.pos + 2), Some(Token::LParen)))
+            }
+            Some(Token::Percent | Token::Hash) => next_paren,
+            Some(Token::Dollar) => {
+                matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text.starts_with(','))
             }
             _ => false,
         }
@@ -3450,14 +3817,42 @@ impl Parser<'_> {
                 break;
             }
             let name = match (self.peek(), self.toks.get(self.pos + 1)) {
-                (Some(Token::Name { text, .. }), Some(Token::Eq)) => {
-                    let key = text.clone();
+                (Some(Token::Name { text, quoted, .. }), Some(Token::Eq)) => {
+                    // a quoted key is marked, so it stays text where a
+                    // bare one reads as the literal it spells
+                    let key = if *quoted { format!("\u{0}{text}") } else { text.clone() };
                     self.pos += 2;
                     Some(key)
                 }
                 _ => None,
             };
-            items.push((name, self.additive()?));
+            // `price<float> = 5` — the declared field: the value
+            // typed by the key's trait
+            let typed = if name.is_none() { self.typed_key()? } else { None };
+            let mut item = self.additive()?;
+            if let (Some(key), Operand::Typed { inner, typing }) = (&name, &item) {
+                return Err(typed_value_refusal(key, inner, typing.clone()));
+            }
+            let name = match typed {
+                Some((key, typing)) => {
+                    item = Operand::Typed {
+                        inner: Box::new(item),
+                        typing,
+                    };
+                    Some(key)
+                }
+                None => name,
+            };
+            // `#($.h...)` — the spread: the projectors a held list
+            // holds, each its own column (spec: Projectors, draft 166)
+            if name.is_none()
+                && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                && text == "..."
+            {
+                self.pos += 1;
+                item = Operand::Spread(Box::new(item));
+            }
+            items.push((name, item));
             match self.peek() {
                 Some(Token::Comma | Token::Semi) => self.pos += 1,
                 Some(Token::RParen) => {}
@@ -3469,6 +3864,70 @@ impl Parser<'_> {
             }
         }
         Ok(items)
+    }
+
+    /// `#(:A; :B)` / `#(:A; :B; -i=:A)` after the glued colon (spec:
+    /// Projectors; The Table, "The index"): the columns of the table
+    /// shape as a record row reads them, and the index option naming
+    /// one of them, a projector typed or not.
+    fn shape_columns(&mut self) -> Result<ProjShape> {
+        let mut items: Vec<(Option<String>, Operand)> = Vec::new();
+        let mut index: Option<Box<Operand>> = None;
+        loop {
+            if matches!(self.peek(), Some(Token::RParen)) {
+                self.pos += 1;
+                break;
+            }
+            if let Some(opt) = self.option_item() {
+                if !matches!(opt.as_str(), "--index" | "-i") {
+                    return Err(QuarbError::parse(format!(
+                        "the table shape takes one option, '--index=:col' ('-i=:col'); '{opt}' given"
+                    )));
+                }
+                self.pos += if opt.starts_with("--") { 2 } else { 1 };
+                if !matches!(self.peek(), Some(Token::OptEq)) {
+                    return Err(QuarbError::parse(
+                        "'--index' names the index column: '#(:A; :B; -i=:A)'",
+                    ));
+                }
+                self.pos += 1;
+                let mut op = if matches!(self.peek(), Some(Token::LParen)) {
+                    self.projector_list()?
+                } else {
+                    self.unary()?
+                };
+                head_projections(&mut op);
+                index = Some(Box::new(op));
+            } else {
+                let name = match (self.peek(), self.toks.get(self.pos + 1)) {
+                    (Some(Token::Name { text, .. }), Some(Token::Eq)) => {
+                        let key = text.clone();
+                        self.pos += 2;
+                        Some(key)
+                    }
+                    _ => None,
+                };
+                let mut item = self.additive()?;
+                if name.is_none()
+                    && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                    && text == "..."
+                {
+                    self.pos += 1;
+                    item = Operand::Spread(Box::new(item));
+                }
+                items.push((name, item));
+            }
+            match self.peek() {
+                Some(Token::Comma | Token::Semi) => self.pos += 1,
+                Some(Token::RParen) => {}
+                _ => {
+                    return Err(QuarbError::parse(
+                        "the table shape separates its items with ';': t:#(:A; :B)",
+                    ));
+                }
+            }
+        }
+        Ok(ProjShape::Columns { items, index })
     }
 
     /// `@%(…)` after its `@%`: the table literal's shape read as a
@@ -3492,21 +3951,34 @@ impl Parser<'_> {
         Ok(Operand::RecordArray { header, rows })
     }
 
-    /// One index inside a value's brackets: a position, a range
-    /// (`a..b`, `..n`, `n..`), or a quoted column name. A condition
-    /// there is refused (spec: Indexing a Value, until a use appears).
+    /// One index inside a value's brackets (spec: Indexing a Value,
+    /// draft 166): a position, a range (`a..b`, `..n`, `n..`), a
+    /// quoted column name, an expression of literals and registers
+    /// (`[@(2; 4)]`, `[$.pos]`), or else a CONDITION, as the brackets
+    /// on a path step read it: `t[:A > 0]`, `v[$_ > 2]`, `t[nulls = 0]`.
     fn index_spec(&mut self) -> Result<IndexSpec> {
+        let start = self.pos;
+        let ends = |p: &Self| matches!(p.peek(), Some(Token::RBracket | Token::Semi | Token::Comma));
+        // `[@(2; 4)]`, `[$.pos]` — an index read from an expression
+        // of literals and registers, when it stands alone
+        if matches!(self.peek(), Some(Token::At | Token::Dollar))
+            && let Ok(op) = self.unary()
+            && node_free(&op)
+            && ends(self)
+        {
+            return Ok(IndexSpec::Expr(Box::new(op)));
+        }
+        self.pos = start;
         let (text, quoted) = match self.peek() {
             Some(Token::Name { text, quoted, .. }) => (text.clone(), *quoted),
-            _ => {
-                return Err(QuarbError::parse(
-                    "brackets on a value hold an index: a position ([2]), a range ([2..4], [..3]), or a column name ([\"age\"]); a condition on a value is not read",
-                ));
-            }
+            _ => return self.index_condition(start),
         };
         self.pos += 1;
-        if quoted {
+        if quoted && ends(self) {
             return Ok(IndexSpec::Name(text));
+        }
+        if quoted {
+            return self.index_condition(start);
         }
         let closes = matches!(
             self.peek(),
@@ -3529,9 +4001,24 @@ impl Parser<'_> {
                 return Ok(IndexSpec::Range(end(a)?, end(b)?));
             }
         }
-        Err(QuarbError::parse(format!(
-            "'[{text}…]' on a value is not an index: a position, a range or a quoted column name indexes a value; a condition on a value is not read (write the filter on the pipe, '| [cond]')"
-        )))
+        self.index_condition(start)
+    }
+
+    /// The condition in a value's brackets, read as a step's is
+    /// (draft 166): `[:A > 0]`, `[$_ > 2]`, `[nulls = 0]`.
+    fn index_condition(&mut self, start: usize) -> Result<IndexSpec> {
+        self.pos = start;
+        let expr = self.pred_or().map_err(|e| {
+            QuarbError::parse(format!(
+                "brackets on a value hold an index — a position ([2]), a range ([2..4], [..3]), a column name ([\"age\"]) — or a condition on its rows or items ([:A > 0], [$_ > 2]): {e}"
+            ))
+        })?;
+        if !matches!(self.peek(), Some(Token::RBracket | Token::Semi | Token::Comma)) {
+            return Err(QuarbError::parse(
+                "brackets on a value close after one index or condition: ']'",
+            ));
+        }
+        Ok(IndexSpec::Cond(Box::new(expr)))
     }
 
     fn record_args(&mut self) -> Result<FnCall> {
@@ -3647,7 +4134,10 @@ impl Parser<'_> {
             if !convention {
                 self.arg_depth += 1;
             }
+            let saved_keyed = self.keyed_args;
+            self.keyed_args = crate::syntax::registry::known_keyed(&name);
             let parsed = self.func_args(&name, convention, &mut args);
+            self.keyed_args = saved_keyed;
             self.arg_depth = saved_depth;
             parsed?;
             self.expect(Token::RParen, "')' to close the command's operands")?;
@@ -3761,6 +4251,56 @@ impl Parser<'_> {
                         return Err(QuarbError::parse(
                             "'%' is retired as tree's operand: write --record or -r for the properties record",
                         ));
+                    } else if name == "pivot" && args.is_empty() && matches!(self.peek(), Some(Token::LParen)) {
+                        // `pivot((:A; :B); C; D)` — a projector list as
+                        // the row key (spec: Tables and Reshapes, draft
+                        // 166): the result indexed by it
+                        match self.projector_list()? {
+                            Operand::Lit(v) => args.push(Arg::Lit(v)),
+                            other => args.push(Arg::Expr(other)),
+                        }
+                    } else if name == "map" && args.is_empty() {
+                        // `map(round(3))`, `map(?? 0)`, `map(+ 3)`,
+                        // `map(3 + $_)`: the argument is a COMMAND, read
+                        // as if a pipe preceded it, the parentheses a
+                        // subcontext with the cell as topic; the pipe
+                        // may be written (`map(| round(3))`), same
+                        // meaning (spec: The Table, "Mapping over the
+                        // cells").
+                        if matches!(self.peek(), Some(Token::Pipe)) {
+                            self.pos += 1;
+                        }
+                        let saved_depth = self.arg_depth;
+                        self.arg_depth = 0;
+                        // `map(<int>; --to=:A)`: a trait as the body
+                        // redeclares (spec: The Table, draft 166)
+                        if matches!(self.peek(), Some(Token::Lt { spaced: false, .. }))
+                            && let Some(typing) = self.typing_brackets()?
+                        {
+                            self.arg_depth = saved_depth;
+                            args.push(Arg::Expr(Operand::Typed {
+                                inner: Box::new(Operand::Topic),
+                                typing,
+                            }));
+                        } else {
+                            let parsed = (|| {
+                                let mut commands = Vec::new();
+                                // `map(&$.f)`: the held quarq spliced
+                                if matches!(self.peek(), Some(Token::Amp)) {
+                                    self.invoke_inline_fragment("|", &mut commands)?;
+                                } else {
+                                    commands.push(self.inline_command()?);
+                                }
+                                commands.extend(self.inline_pipe_tail()?);
+                                Ok::<_, QuarbError>(commands)
+                            })();
+                            self.arg_depth = saved_depth;
+                            let commands = parsed?;
+                            args.push(Arg::Expr(Operand::Piped {
+                                expr: Box::new(Operand::Seed),
+                                commands,
+                            }));
+                        }
                     } else if matches!(
                         name,
                         "convert" | "unit" | "magnitude" | "exchange" | "dimension"
@@ -3927,6 +4467,54 @@ impl Parser<'_> {
                 // * :qty`), the last option it is.
                 if matches!(name.as_str(), "--of" | "-o") {
                     Some(self.additive()?)
+                } else if name == "--to" && matches!(self.peek(), Some(Token::LBracket)) {
+                    // `--to=[rows]`, `--to=[rows]:col` — the value
+                    // index of the structure names the cells mapped
+                    self.pos += 1;
+                    let mut coords = vec![self.index_spec()?];
+                    while matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+                        self.pos += 1;
+                        coords.push(self.index_spec()?);
+                    }
+                    self.expect(Token::RBracket, "']' to close the index of --to")?;
+                    let (rows, cols) = match coords.len() {
+                        1 => (coords.pop().unwrap(), None),
+                        2 => {
+                            let c = coords.pop().unwrap();
+                            (coords.pop().unwrap(), Some(c))
+                        }
+                        _ => (IndexSpec::Coords(coords), None),
+                    };
+                    let mut o = Operand::Index {
+                        base: Box::new(Operand::Topic),
+                        rows,
+                        cols,
+                    };
+                    if let (Some(Token::Field), Some(Token::Name { text, .. })) =
+                        (self.peek(), self.toks.get(self.pos + 1))
+                    {
+                        let name = text.clone();
+                        self.pos += 2;
+                        o = Operand::Field {
+                            base: Box::new(o),
+                            name,
+                        };
+                    }
+                    Some(o)
+                } else if name == "--to" && matches!(self.peek(), Some(Token::LParen)) {
+                    // `--to=(:a; :b)` — a parenthesised projection
+                    // list names several columns
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    loop {
+                        items.push(self.unary()?);
+                        match self.peek() {
+                            Some(Token::Semi | Token::Comma) => self.pos += 1,
+                            _ => break,
+                        }
+                    }
+                    self.expect(Token::RParen, "')' to close the column list of --to")?;
+                    Some(Operand::List(items))
                 } else {
                     Some(self.unary()?)
                 }
@@ -4020,20 +4608,104 @@ impl Parser<'_> {
     /// where it was once the name of the field after it.
     fn record_item(&mut self, args: &mut Vec<Arg>, record: bool) -> Result<()> {
         if record && let Some(opt) = self.option_item() {
+            // `%(--keys=instant; --values=int)` declares every key and
+            // every value (spec: Record, draft 166)
+            if matches!(opt.as_str(), "--keys" | "--values") {
+                self.pos += 2;
+                if !matches!(self.peek(), Some(Token::OptEq)) {
+                    return Err(QuarbError::parse(format!(
+                        "'{opt}' takes a type word: '%({opt}=int)'"
+                    )));
+                }
+                self.pos += 1;
+                let word = match self.bump() {
+                    Some(Token::Name { text, quoted: false, .. }) => text.clone(),
+                    _ => {
+                        return Err(QuarbError::parse(format!(
+                            "'{opt}' takes a type word: '%({opt}=int)'"
+                        )));
+                    }
+                };
+                if ColumnType::from_word(&word).is_none() {
+                    return Err(QuarbError::parse(format!(
+                        "'{opt}={word}': '{word}' is no type; the types are {}",
+                        ColumnType::words().join(", ")
+                    )));
+                }
+                args.push(Arg::Opt {
+                    name: opt,
+                    value: Some(Operand::Lit(Value::Str(word))),
+                });
+                return Ok(());
+            }
             return Err(QuarbError::parse(format!(
                 "'%(…)' takes no option ('{opt}' given); its items are fields — a hop as a \
                  field's value is written '%(k = (--x))'"
             )));
         }
-        if let Some(Token::Name { text, .. }) = self.peek()
+        if let Some(Token::Name { text, quoted, .. }) = self.peek()
             && matches!(self.toks.get(self.pos + 1), Some(Token::Eq))
         {
             let key = text.clone();
+            let quoted = *quoted;
             self.pos += 2;
-            args.push(Arg::Lit(Value::Str(key)));
-            args.push(self.func_arg()?);
+            // a bare key that reads as a literal — a number, an
+            // instant — is a typed key (`%(1 = "a"; 2013-01-01 = 5)`);
+            // quoted it stays text ('2013-01-01' another field)
+            let typed_key = (record && !quoted)
+                .then(|| literal_value(&key, false, &|e| self.expander.unit_scale(e)))
+                .map(|v| match v {
+                    // an ISO date or instant written bare is an
+                    // instant key (`2013-01-01 = 5`)
+                    Value::Str(s) => crate::temporal::parse_iso(&s)
+                        .map(|(secs, nanos, offset_min)| Value::Instant {
+                            secs,
+                            nanos,
+                            offset_min,
+                            calendar: Default::default(),
+                        })
+                        .unwrap_or(Value::Str(s)),
+                    other => other,
+                })
+                .filter(|v| !matches!(v, Value::Str(_)));
+            if let Some(k) = typed_key {
+                args.push(Arg::Key(k));
+                let value = self.func_arg()?;
+                if let Arg::Expr(Operand::Typed { inner, typing }) = &value {
+                    return Err(typed_value_refusal(&key, inner, typing.clone()));
+                }
+                args.push(value);
+                return Ok(());
+            }
+            args.push(Arg::Lit(Value::Str(key.clone())));
+            let value = self.func_arg()?;
+            if let Arg::Expr(Operand::Typed { inner, typing }) = &value {
+                return Err(typed_value_refusal(&key, inner, typing.clone()));
+            }
+            args.push(value);
             return Ok(());
         }
+        // `price<float> = ::price` — the declared field (spec:
+        // Record, draft 166): the key with its trait, the value cast
+        // into it
+        if record && let Some((key, typing)) = self.typed_key()? {
+            args.push(Arg::Lit(Value::Str(key)));
+            let value = match self.func_arg()? {
+                Arg::Expr(e) => e,
+                Arg::Lit(v) => Operand::Lit(v),
+                _ => {
+                    return Err(QuarbError::parse(
+                        "a declared field takes a value on the right of '=': %(price<float> = ::price)",
+                    ));
+                }
+            };
+            args.push(Arg::Expr(Operand::Typed {
+                inner: Box::new(value),
+                typing,
+            }));
+            return Ok(());
+        }
+
         // `@(a; b) = @(1; 2)` — a literal list of names on the left
         // of `=` reads its names bare or quoted, as a header does.
         if record
@@ -4062,6 +4734,22 @@ impl Parser<'_> {
                 values,
             });
             return Ok(());
+        }
+        // `%(:props...)`, `%((fields)...)` — a spread item: the list
+        // of projections it reads spreads into fields keyed by their
+        // bare keys (spec: The Projection Operator). Tried first; an
+        // item that is no spread parses again on the ordinary path.
+        if record {
+            let save = self.pos;
+            if let Ok(Arg::Expr(op)) = self.func_arg()
+                && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                && text == "..."
+            {
+                self.pos += 1;
+                args.push(Arg::Expr(Operand::Spread(Box::new(op))));
+                return Ok(());
+            }
+            self.pos = save;
         }
         // `$.k = $.v`, `$.k = $_` — any list expression on the left
         // of `=` takes a list of values pairwise. The left side is
@@ -4175,9 +4863,20 @@ impl Parser<'_> {
                 Projection::Property(self.opt_projection_name())
             }
             Some(Token::ColonColonColon) => {
+                // on a node path (after a step name, a wildcard, a
+                // closed predicate or the root) the rung is the node's
+                // metadata and the core-key guard holds; elsewhere (after
+                // a pipe, an opening parenthesis, an option's `=`, a
+                // separator) it is a descriptor of the value (`| :::index`,
+                // `sort_by(:::index)`, `--to=:::index`, `:::name`, draft 166)
+                let value_side = self.pos == 0
+                    || !matches!(
+                        self.toks.get(self.pos - 1),
+                        Some(Token::Name { .. } | Token::RBracket | Token::Caret)
+                    );
                 self.pos += 1;
                 let key = self.require_projection_name("adapter metadata `:::`")?;
-                adapter_key(key)?
+                adapter_key(key, value_side)?
             }
             _ => return Ok(None),
         };
@@ -4969,7 +5668,7 @@ impl Parser<'_> {
                     | Token::NextSibling
                     | Token::PrevSibling
                     | Token::ArrowOut
-                    | Token::ArrowIn
+                    | Token::ArrowIn { .. }
                     | Token::DashDash
                     | Token::LParen
             )
@@ -5038,12 +5737,79 @@ impl Parser<'_> {
                 }
             }
         }
+        // `[2; 4; 5]`, `[1; 3..4; -1]` — a position list: positions
+        // and ranges separated by `;`.
+        if let Some(parts) = self.position_list()? {
+            return Ok(Predicate::Positions(parts));
+        }
         let expr = self.pred_or()?;
         self.expect(
             Token::RBracket,
             "']' to close a predicate (')' for the '(?' spelling)",
         )?;
+        // Two positions joined by `||` / `&&` select nothing
+        // sensible: the position list is the spelling.
+        if let PredExpr::Or(a, b) | PredExpr::And(a, b) = &expr
+            && let (PredExpr::Truthy(Operand::Lit(Value::Int(x))), PredExpr::Truthy(Operand::Lit(Value::Int(y)))) =
+                (&**a, &**b)
+        {
+            return Err(QuarbError::parse(format!(
+                "positions are listed with ';': write '[{x}; {y}]'"
+            )));
+        }
+        // Brackets that look at no node — an expression of literals
+        // and registers alone — are read at run time as a position
+        // or a position list (spec: Index Predicates).
+        if let PredExpr::Truthy(op) = &expr
+            && node_free(op)
+        {
+            return Ok(Predicate::Computed(op.clone()));
+        }
         Ok(Predicate::Expr(expr))
+    }
+
+    /// The position list after a `[`, when the brackets hold one:
+    /// two or more bare positions / ranges separated by `;` (a
+    /// single one is `Index` / `Range`, parsed by the caller).
+    /// Consumes through the `]`; `None` leaves the tokens untouched.
+    fn position_list(&mut self) -> Result<Option<Vec<Predicate>>> {
+        let start = self.pos;
+        let mut parts = Vec::new();
+        loop {
+            let Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) = self.toks.get(self.pos)
+            else {
+                break;
+            };
+            let part = if let Ok(n) = text.parse::<i64>() {
+                Predicate::Index(n)
+            } else if let Some((a, b)) = text.split_once("..") {
+                let start = if a.is_empty() { None } else { a.parse().ok() };
+                let end = if b.is_empty() { None } else { b.parse().ok() };
+                if (a.is_empty() || start.is_some()) && (b.is_empty() || end.is_some()) {
+                    Predicate::Range(start, end)
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            };
+            parts.push(part);
+            self.pos += 1;
+            match self.toks.get(self.pos) {
+                Some(Token::Semi) => self.pos += 1,
+                Some(Token::RBracket) if parts.len() >= 2 => {
+                    self.pos += 1;
+                    return Ok(Some(parts));
+                }
+                _ => break,
+            }
+        }
+        self.pos = start;
+        Ok(None)
     }
 
     /// A bare `and` / `or` / `not` where a connective may stand is
@@ -5064,7 +5830,13 @@ impl Parser<'_> {
     }
 
     fn pred_or(&mut self) -> Result<PredExpr> {
-        let mut left = self.pred_and()?;
+        let first = self.pred_and()?;
+        self.pred_or_from(first)
+    }
+
+    /// The rest of a disjunction after its first conjunction.
+    fn pred_or_from(&mut self, first: PredExpr) -> Result<PredExpr> {
+        let mut left = first;
         self.refuse_bare_bool_word()?;
         while self.eat_word(OR_WORDS)
             || matches!(self.peek(), Some(Token::PipePipe)) && {
@@ -5080,7 +5852,13 @@ impl Parser<'_> {
     }
 
     fn pred_and(&mut self) -> Result<PredExpr> {
-        let mut left = self.pred_not()?;
+        let first = self.pred_not()?;
+        self.pred_and_from(first)
+    }
+
+    /// The rest of a conjunction after its first term.
+    fn pred_and_from(&mut self, first: PredExpr) -> Result<PredExpr> {
+        let mut left = first;
         while self.eat_word(AND_WORDS)
             || matches!(self.peek(), Some(Token::AmpAmp)) && {
                 self.pos += 1;
@@ -5114,6 +5892,16 @@ impl Parser<'_> {
 
     fn pred_primary(&mut self) -> Result<PredExpr> {
         let left = self.additive()?;
+        self.pred_primary_from(left)
+    }
+
+    /// A comparison (or chain) whose left side is already parsed —
+    /// the topic, after a pipe that opens with the operator.
+    fn pred_primary_from(&mut self, left: Operand) -> Result<PredExpr> {
+        // after a pipe or an opening parenthesis the operator opens
+        // the command (`| > 3`, `map(> 0 ? …)`): no space before it
+        let opens = self.pos > 0
+            && matches!(self.toks.get(self.pos - 1), Some(Token::Pipe | Token::LParen));
         if let Some(t @ (Token::Gt { spaced: false, .. } | Token::Lt { spaced: false, .. })) =
             self.peek()
         {
@@ -5129,8 +5917,9 @@ impl Parser<'_> {
         }
         // `::x> 3` — spaced on one side only: neither the hop nor
         // the comparison (spec: Lexical Disambiguation).
-        if let Some(t @ (Token::Gt { before: false, .. } | Token::Lt { before: false, .. })) =
-            self.peek()
+        if !opens
+            && let Some(t @ (Token::Gt { before: false, .. } | Token::Lt { before: false, .. })) =
+                self.peek()
         {
             let c = if matches!(t, Token::Gt { .. }) {
                 '>'
@@ -5333,6 +6122,13 @@ impl Parser<'_> {
                     quoted: false,
                     ..
                 }) if text == "-" => ArithOp::Sub,
+                // `a -::b`: the minus glued to a projection is the
+                // descending key marker, never a one-sided minus
+                Some(Token::Desc) => {
+                    return Err(QuarbError::parse(
+                        "a binary minus is spaced on both sides: write 'a - b' (a glued '-::key' is the descending sort key)",
+                    ));
+                }
                 _ => {
                     self.one_sided_arith(&left)?;
                     break;
@@ -5574,6 +6370,17 @@ impl Parser<'_> {
         }
         loop {
             match self.peek() {
+                // `v:@(…)`, `v:%(…)`, `t:#(…)`, `v:(…)`, `t:$.proj` —
+                // the projection operator (spec: The Projection
+                // Operator): the shape applied to the value.
+                Some(Token::ProjectColon) => {
+                    self.pos += 1;
+                    let shape = self.project_shape()?;
+                    o = Operand::Projected {
+                        base: Box::new(o),
+                        shape,
+                    };
+                }
                 Some(Token::Field) => {
                     self.pos += 1;
                     let name = match self.bump() {
@@ -5604,6 +6411,22 @@ impl Parser<'_> {
                         name,
                     };
                 }
+                // `t[[label]]`, `t[[x; y]]`, `t[[a..b]]`, `r[[k]]` — the
+                // double bracket looks up by label (spec: Indexing a
+                // Value, draft 166)
+                Some(Token::LBracket)
+                    if matches!(self.toks.get(self.pos + 1), Some(Token::LBracket))
+                        && !matches!(
+                            o,
+                            Operand::Rel { .. } | Operand::Ctx { .. } | Operand::Pattern(_)
+                        ) =>
+                {
+                    let labels = self.label_brackets()?;
+                    o = Operand::LabelIndex {
+                        base: Box::new(o),
+                        labels,
+                    };
+                }
                 // `value[i]`, `value[a..b]`, `table[i; j]` — brackets
                 // after a value expression index it (spec: Indexing a
                 // Value); a path step took its own predicates already.
@@ -5614,14 +6437,22 @@ impl Parser<'_> {
                     ) =>
                 {
                     self.pos += 1;
-                    let rows = self.index_spec()?;
-                    let cols = if matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+                    let mut coords = vec![self.index_spec()?];
+                    while matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
                         self.pos += 1;
-                        Some(self.index_spec()?)
-                    } else {
-                        None
-                    };
+                        coords.push(self.index_spec()?);
+                    }
                     self.expect(Token::RBracket, "']' to close the index")?;
+                    // one coordinate, or two (`t[i; j]`, the cell);
+                    // three or more are a position list on a list
+                    let (rows, cols) = match coords.len() {
+                        1 => (coords.pop().unwrap(), None),
+                        2 => {
+                            let c = coords.pop().unwrap();
+                            (coords.pop().unwrap(), Some(c))
+                        }
+                        _ => (IndexSpec::Coords(coords), None),
+                    };
                     o = Operand::Index {
                         base: Box::new(o),
                         rows,
@@ -5631,10 +6462,31 @@ impl Parser<'_> {
                 _ => break,
             }
         }
-        // `value:::key` — retired (draft 157): a value's provenance
-        // reads through the shape sigils only. A node path parsed
-        // its own `:::` as the adapter rung already.
+        // `value:::key` — a descriptor of the value, glued (draft
+        // 166): `$,df:::index`, `$_:::dim`, `t:::header`, what the
+        // pipe form `| :::key` answers, the value piped through it.
+        // Any other key after a value is retired (draft 157): a
+        // value's provenance reads through the shape sigils only. A
+        // node path parsed its own `:::` as the adapter rung already.
         while matches!(self.peek(), Some(Token::ColonColonColon)) {
+            if let Some(Token::Name { text, quoted: false, .. }) = self.toks.get(self.pos + 1)
+                && matches!(
+                    text.as_str(),
+                    "fields" | "keys" | "header" | "type" | "dim" | "nrows" | "ncols" | "index" | "name"
+                )
+            {
+                let key = text.clone();
+                self.pos += 2;
+                o = Operand::Piped {
+                    expr: Box::new(o),
+                    commands: vec![Command::Expr(Operand::Rel {
+                        steps: Vec::new(),
+                        projection: Some(Projection::AdapterMeta(key)),
+                        anchor: Anchor::Current,
+                    })],
+                };
+                continue;
+            }
             if !matches!(
                 o,
                 Operand::Recall(_)
@@ -5654,7 +6506,216 @@ impl Parser<'_> {
                 "':::{key}' after a value is retired: its provenance reads as ':%provenance:{key}' (the record), ':@provenance', ':%origin' or ':@origin'"
             )));
         }
+        // `:A<int>`, `::price<float>`, `:A<*>` — the typed projector
+        // (spec: Projectors, draft 166): the trait brackets glued to a
+        // bare projection declare the field it names.
+        if is_bare_projection(&o)
+            && let Some(typing) = self.typing_brackets()?
+        {
+            o = Operand::Typed {
+                inner: Box::new(o),
+                typing,
+            };
+        }
         Ok(o)
+    }
+
+    /// `(:first; :second)` — a parenthesised list of projectors, the
+    /// cursor on `(`: the composite index's levels, folded to the
+    /// literal list of projectors they spell.
+    fn projector_list(&mut self) -> Result<Operand> {
+        self.pos += 1;
+        let mut items = Vec::new();
+        loop {
+            let mut item = self.unary()?;
+            head_projections(&mut item);
+            items.push(item);
+            match self.peek() {
+                Some(Token::Semi | Token::Comma) => self.pos += 1,
+                _ => break,
+            }
+        }
+        self.expect(Token::RParen, "')' to close the list of index columns")?;
+        if items.iter().all(|i| matches!(i, Operand::Lit(_))) {
+            let values = items
+                .into_iter()
+                .map(|i| match i {
+                    Operand::Lit(v) => v,
+                    _ => unreachable!(),
+                })
+                .collect();
+            return Ok(Operand::Lit(Value::list(values)));
+        }
+        Ok(Operand::List(items))
+    }
+
+    /// `[[x; y]]`, `[[a..b]]` — the labels of a double-bracket lookup
+    /// (spec: Indexing a Value, draft 166), the cursor on the first
+    /// `[`; each label the literal it spells, a range of two both
+    /// ends in.
+    fn label_brackets(&mut self) -> Result<Vec<Operand>> {
+        self.pos += 2;
+        let mut labels = Vec::new();
+        loop {
+            if matches!(self.peek(), Some(Token::RBracket)) {
+                break;
+            }
+            // a bare word reads as the literal it spells (an ISO date
+            // the instant); a quoted label is text
+            let bare = matches!(self.peek(), Some(Token::Name { quoted: false, .. }));
+            let label = self.additive()?;
+            labels.push(if bare { label_range(label, &|e| self.expander.unit_scale(e)) } else { label });
+            match self.peek() {
+                Some(Token::Semi | Token::Comma) => self.pos += 1,
+                Some(Token::RBracket) => {}
+                _ => {
+                    return Err(QuarbError::parse(
+                        "the double bracket holds labels apart by ';': t[[x; y]], a range t[[a..b]]",
+                    ));
+                }
+            }
+        }
+        if labels.is_empty() {
+            return Err(QuarbError::parse(
+                "the double bracket names a label: t[[2013-01-02]], r[[\"a\"]]",
+            ));
+        }
+        self.pos += 1;
+        if !matches!(self.peek(), Some(Token::RBracket)) {
+            return Err(QuarbError::parse("the double bracket closes with ']]'"));
+        }
+        self.pos += 1;
+        Ok(labels)
+    }
+
+    /// The trait brackets of a typed projector, glued: `<int>`,
+    /// `<*>`, `<*; float>` (spec: Projectors, draft 166). `None`
+    /// without consuming where no bracket opens here; a word that is
+    /// no type is refused naming the types.
+    fn typing_brackets(&mut self) -> Result<Option<crate::value::Typing>> {
+        use crate::value::Typing;
+        if !matches!(self.peek(), Some(Token::Lt { spaced: false, .. })) {
+            return Ok(None);
+        }
+        let start = self.pos;
+        self.pos += 1;
+        let word = |t: Option<&Token>| match t {
+            Some(Token::Name { text, quoted: false, .. }) => Some(text.clone()),
+            _ => None,
+        };
+        // `<(int; text)>` — the tuple type, its words in parentheses
+        if matches!(self.peek(), Some(Token::LParen)) {
+            self.pos += 1;
+            let mut words = Vec::new();
+            loop {
+                let Some(w) = word(self.peek()) else {
+                    return Err(QuarbError::parse(
+                        "a tuple type lists its types in parentheses: '<(int; text)>'",
+                    ));
+                };
+                self.pos += 1;
+                words.push(w);
+                match self.peek() {
+                    Some(Token::Semi | Token::Comma) => self.pos += 1,
+                    _ => break,
+                }
+            }
+            self.expect(Token::RParen, "')' to close the tuple type")?;
+            let spelled = format!("({})", words.join("; "));
+            let ty = ColumnType::from_word(&spelled).ok_or_else(|| {
+                QuarbError::parse(format!(
+                    "'<{spelled}>': a tuple's types are {}",
+                    ColumnType::words().join(", ")
+                ))
+            })?;
+            if !matches!(self.peek(), Some(Token::Gt { .. })) {
+                return Err(QuarbError::parse("the trait brackets of a projector close with '>'"));
+            }
+            self.pos += 1;
+            return Ok(Some(Typing::Declared(ty)));
+        }
+        let Some(first) = word(self.peek()) else {
+            self.pos = start;
+            return Ok(None);
+        };
+        self.pos += 1;
+        let typing = if first == "*" {
+            let reported = if matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+                self.pos += 1;
+                let Some(w) = word(self.peek()) else {
+                    return Err(QuarbError::parse(
+                        "'<*; type>' reports the inferred type after the star: '<*; float>'",
+                    ));
+                };
+                self.pos += 1;
+                Some(ColumnType::from_word(&w).ok_or_else(|| {
+                    QuarbError::parse(format!(
+                        "'<*; {w}>': '{w}' is no type; the types are {}",
+                        ColumnType::words().join(", ")
+                    ))
+                })?)
+            } else {
+                None
+            };
+            Typing::Star(reported)
+        } else {
+            match ColumnType::from_word(&first) {
+                Some(t) => Typing::Declared(t),
+                None => {
+                    if matches!(self.peek(), Some(Token::Gt { .. })) {
+                        return Err(QuarbError::parse(format!(
+                            "'<{first}>' on a projector declares its type, and '{first}' is none; the types are {}; '<*>' declares nothing",
+                            ColumnType::words().join(", ")
+                        )));
+                    }
+                    self.pos = start;
+                    return Ok(None);
+                }
+            }
+        };
+        if !matches!(self.peek(), Some(Token::Gt { .. })) {
+            return Err(QuarbError::parse(format!(
+                "the trait brackets of a projector close with '>': '{}'",
+                typing.spelling()
+            )));
+        }
+        self.pos += 1;
+        Ok(Some(typing))
+    }
+
+    /// `name<type> =` — a record key written with its trait (spec:
+    /// Record, draft 166): the key and its typing, consumed with the
+    /// `=`; `None` without consuming otherwise.
+    fn typed_key(&mut self) -> Result<Option<(String, crate::value::Typing)>> {
+        let start = self.pos;
+        let Some(Token::Name { text, .. }) = self.peek() else {
+            return Ok(None);
+        };
+        if !matches!(self.toks.get(self.pos + 1), Some(Token::Lt { spaced: false, .. })) {
+            return Ok(None);
+        }
+        let key = text.clone();
+        self.pos += 1;
+        let typing = match self.typing_brackets() {
+            Ok(Some(t)) if matches!(self.peek(), Some(Token::Eq)) => t,
+            Ok(_) => {
+                self.pos = start;
+                return Ok(None);
+            }
+            Err(e) => {
+                if self.toks[start + 1..self.pos.max(start + 1)]
+                    .iter()
+                    .any(|t| matches!(t, Token::Gt { .. }))
+                    || matches!(self.toks.get(self.pos), Some(Token::Gt { .. }))
+                {
+                    return Err(e);
+                }
+                self.pos = start;
+                return Ok(None);
+            }
+        };
+        self.pos += 1; // the `=`
+        Ok(Some((key, typing)))
     }
 
     fn unary_primary(&mut self) -> Result<Operand> {
@@ -5694,6 +6755,35 @@ impl Parser<'_> {
         if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "-") {
             self.pos += 1;
             return Ok(Operand::Neg(Box::new(self.unary()?)));
+        }
+        // `-::fare` — the glued minus on a projection: the
+        // descending key marker (spec: Keyed Aggregates).
+        if matches!(self.peek(), Some(Token::Desc)) {
+            self.pos += 1;
+            return Ok(Operand::Desc(Box::new(self.unary()?)));
+        }
+        // `-:col` opening a keyed aggregate's argument: the
+        // descending marker on a core field (the incoming arrow is
+        // written pointy there, `<-col`; the rounded `-:` stays the
+        // arrow everywhere else).
+        if self.keyed_args
+            && self.pos > 0
+            && matches!(self.toks.get(self.pos - 1), Some(Token::LParen | Token::Semi | Token::Comma))
+            && let (
+                Some(Token::ArrowIn { rounded: true }),
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                }),
+            ) = (self.toks.get(self.pos), self.toks.get(self.pos + 1))
+        {
+            let name = text.clone();
+            self.pos += 2;
+            return Ok(Operand::Desc(Box::new(Operand::Field {
+                base: Box::new(Operand::Topic),
+                name,
+            })));
         }
         if matches!(self.peek(), Some(Token::MarkOpen)) {
             // `$$.name` followed by a path continuation is the mark
@@ -5923,6 +7013,12 @@ impl Parser<'_> {
     fn cond_expr(&mut self) -> Result<Operand> {
         let cond = self.pred_or()?;
         let cond = self.coalesce_tail(cond)?;
+        self.cond_expr_from(cond)
+    }
+
+    /// The conditional after its condition: a value match (`?= k ?
+    /// r : else`), the plain `? a : b`, or the condition alone.
+    fn cond_expr_from(&mut self, cond: PredExpr) -> Result<Operand> {
         if matches!(self.peek(), Some(Token::QuestionEq)) {
             self.pos += 1;
             let PredExpr::Truthy(scrutinee) = cond else {
@@ -6069,7 +7165,10 @@ impl Parser<'_> {
         // whose conditions the executor silently ignores.
         if matches!(self.peek(), Some(Token::LBracket)) {
             return match self.predicate()? {
-                pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => Ok(Command::Select(pred)),
+                pred @ (Predicate::Index(_)
+                | Predicate::Range(_, _)
+                | Predicate::Positions(_)
+                | Predicate::Computed(_)) => Ok(Command::Select(pred)),
                 Predicate::Expr(_) => Err(QuarbError::parse(
                     "a condition filters per capsa; write '| [cond]' \
                      ('@| [n]' selects positionally)",
@@ -6167,6 +7266,11 @@ impl Parser<'_> {
                     validate_record(&call)?;
                     return Ok(Some(Command::AggRecord { call, enriched }));
                 }
+                // `@| %,` — the session memory as a record (draft 166)
+                if !enriched && matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",") {
+                    self.pos += 1;
+                    return Ok(Some(Command::AggRecall(RegRef::SessionRecord)));
+                }
                 // `@| %` bare — the column reading of the stream.
                 if !enriched && !self.at_view_dots() {
                     return Ok(Some(Command::Agg(FnCall {
@@ -6231,7 +7335,7 @@ impl Parser<'_> {
                         | Token::NextSibling
                         | Token::PrevSibling
                         | Token::ArrowOut
-                        | Token::ArrowIn
+                        | Token::ArrowIn { .. }
                         | Token::DashDash
                         | Token::LParen
                 )
@@ -6388,7 +7492,7 @@ impl Parser<'_> {
                         | Token::NextSibling
                         | Token::PrevSibling
                         | Token::ArrowOut
-                        | Token::ArrowIn
+                        | Token::ArrowIn { .. }
                         | Token::DashDash
                         | Token::ReverseResolve
                         | Token::LParen
@@ -6435,7 +7539,7 @@ impl Parser<'_> {
                                 | Token::NextSibling
                                 | Token::PrevSibling
                                 | Token::ArrowOut
-                                | Token::ArrowIn
+                                | Token::ArrowIn { .. }
                                 | Token::DashDash
                                 | Token::LParen
                         )
@@ -6491,7 +7595,7 @@ impl Parser<'_> {
                                 | Token::NextSibling
                                 | Token::PrevSibling
                                 | Token::ArrowOut
-                                | Token::ArrowIn
+                                | Token::ArrowIn { .. }
                                 | Token::DashDash
                                 | Token::LParen
                         )
@@ -6546,7 +7650,7 @@ impl Parser<'_> {
                 | Token::NextSibling
                 | Token::PrevSibling
                 | Token::ArrowOut
-                | Token::ArrowIn
+                | Token::ArrowIn { .. }
                 | Token::DashDash,
             ) => self.rel_operand_from_step(),
             // A resolution chain in operand position: follow the
@@ -6570,7 +7674,7 @@ impl Parser<'_> {
                                 | Token::NextSibling
                                 | Token::PrevSibling
                                 | Token::ArrowOut
-                                | Token::ArrowIn
+                                | Token::ArrowIn { .. }
                                 | Token::DashDash
                                 | Token::LParen
                         )
@@ -6594,6 +7698,50 @@ impl Parser<'_> {
                     projection: Some(projection),
                     anchor: Anchor::Current,
                 })
+            }
+            // `q(cmd)` — the quarq literal (spec: Quarqs, draft 166):
+            // the body, a command as it stands after a pipe (the pipe
+            // may be written), read as Quarb and not run. Its value is
+            // the quarq — or the projector the body spells when it
+            // spells nothing else (`q(::x)`, `q(%(::Name; ::Fare))`),
+            // a projector being the simplest quarq.
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if text == "q" && matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
+                self.pos += 2;
+                if matches!(self.peek(), Some(Token::Pipe)) {
+                    self.pos += 1;
+                }
+                let saved_depth = self.arg_depth;
+                let saved_keyed = self.keyed_args;
+                self.arg_depth = 0;
+                self.keyed_args = false;
+                let saved_sub = self.subquery_depth;
+                self.subquery_depth = 0;
+                // the body may navigate (`q(//item[::n > 3])`, spliced
+                // later with `| &$.p`) and push: it is a pipeline's
+                // tail, read as the pipeline would read it
+                let parsed = (|| {
+                    let mut commands = Vec::new();
+                    if matches!(self.peek(), Some(Token::Amp)) {
+                        self.invoke_pipeline_fragment("|", &mut commands)?;
+                    } else {
+                        commands.push(self.pipe_item(PipeMode::Nav)?);
+                    }
+                    let mode = commands
+                        .iter()
+                        .fold(PipeMode::Nav, |m, c| command_mode_out(c, m));
+                    self.pipeline_items(&mut commands, mode)?;
+                    Ok::<_, QuarbError>(commands)
+                })();
+                self.arg_depth = saved_depth;
+                self.keyed_args = saved_keyed;
+                self.subquery_depth = saved_sub;
+                let commands = parsed?;
+                self.expect(Token::RParen, "')' to close the quarq")?;
+                Ok(Operand::Lit(quarq_literal(commands)))
             }
             // A call operand: a command word glued to `(` — the
             // pipe–call duality, `f(x, args) ≡ (x | f(args))`, the
@@ -6642,6 +7790,7 @@ impl Parser<'_> {
                     Some(Arg::Lit(v)) => Operand::Lit(v),
                     Some(Arg::Expr(e)) => e,
                     Some(Arg::Range(..))
+                    | Some(Arg::Key(_))
                     | Some(Arg::Named { .. })
                     | Some(Arg::Opt { .. })
                     | Some(Arg::Pairs { .. }) => {
@@ -6744,6 +7893,14 @@ impl Parser<'_> {
             Some(Token::PercentPlus) => {
                 self.pos += 1;
                 Ok(Operand::NamedCaptures)
+            }
+            // `%,` — the session memory as a record, a value wherever
+            // a register stands (draft 166)
+            Some(Token::Percent)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == ",") =>
+            {
+                self.pos += 2;
+                Ok(Operand::Recall(RegRef::SessionRecord))
             }
             // `%(a = 1; ::x)` — the record literal as a value: a
             // field of another record, an item of a list, an
@@ -6989,6 +8146,21 @@ impl Parser<'_> {
                             self.pos += 1;
                             return Ok(Operand::Recall(reg_ref(&rest)?));
                         }
+                        // `$,name` — the session read (draft 166)
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) if text.starts_with(',') => {
+                            let rest = text[1..].to_string();
+                            self.pos += 1;
+                            if rest.is_empty() {
+                                return Err(QuarbError::parse(
+                                    "the session read names its value: '$,df' (the capsa's register is '$.df')",
+                                ));
+                            }
+                            return Ok(Operand::Recall(RegRef::Session(rest)));
+                        }
                         // `$_` — the topic (the current pipeline value).
                         Some(Token::Name {
                             text,
@@ -7114,7 +8286,27 @@ impl Parser<'_> {
     }
 
     /// Expand a fragment invocation in operand position.
+    /// The register after `&`: `&$.p` splices the quarq it holds.
+    fn splice_register(&mut self) -> Result<RegRef> {
+        match self.operand()? {
+            Operand::Recall(r) => Ok(r),
+            _ => Err(QuarbError::parse(
+                "'&' before a register splices the quarq it holds: &$.p, &$.",
+            )),
+        }
+    }
+
     fn splice_operand_fragment(&mut self) -> Result<Operand> {
+        // `&$.p` as an operand: the held quarq run on the capsa, as
+        // a piped body would be (spec: Quarqs)
+        if matches!(self.toks.get(self.pos + 1), Some(Token::Dollar)) {
+            self.pos += 1;
+            let r = self.splice_register()?;
+            return Ok(Operand::Piped {
+                expr: Box::new(Operand::Seed),
+                commands: vec![Command::Splice(r)],
+            });
+        }
         let (name, args, bang, quant) = self.invocation()?;
         let Some(def) = self.defs.get(&name).cloned() else {
             return Err(QuarbError::parse(format!("unknown fragment '&{name}'")));
@@ -7279,19 +8471,80 @@ impl Parser<'_> {
         })
     }
 
+    /// The shape after the projection operator's colon: `#(…)` the
+    /// table of the named columns (bare projections or `name =
+    /// expr`), else a constructor, a parenthesised expression or a
+    /// register, read as an operand.
+    fn project_shape(&mut self) -> Result<ProjShape> {
+        let saved_depth = self.arg_depth;
+        self.arg_depth = 0;
+        let shape = if matches!(self.peek(), Some(Token::Hash))
+            && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+        {
+            self.pos += 2;
+            self.shape_columns()
+        } else {
+            // a typed projector in the shape is the typed value, so
+            // the shape applied casts the column it reads (`t:@(:A<int>)`)
+            self.unary().map(|mut v| {
+                fold_typed(&mut v);
+                ProjShape::Value(Box::new(v))
+            })
+        };
+        self.arg_depth = saved_depth;
+        shape
+    }
+
+    /// An expression heading a command (`| $_ + 1`, `| :n ?? 0`):
+    /// the additive expression with a null-default tail.
+    fn expr_head(&mut self) -> Result<Operand> {
+        let left = self.additive()?;
+        self.expr_head_from(left)
+    }
+
+    /// The rest of an expression head after its first operand.
+    fn expr_head_from(&mut self, left: Operand) -> Result<Operand> {
+        // a comparison, a boolean connective, a null default or a
+        // conditional may follow (`| $_ = null`, `| $_ > 3 ? $_ :
+        // null`, `| $_ ?? 0`): the full expression
+        if self.cmp_ahead()
+            || matches!(self.peek(), Some(Token::Coalesce | Token::AmpAmp | Token::PipePipe | Token::Question { .. } | Token::QuestionEq))
+        {
+            let first = self.pred_primary_from(left)?;
+            let first = self.pred_and_from(first)?;
+            let cond = self.pred_or_from(first)?;
+            let cond = self.coalesce_tail(cond)?;
+            return self.cond_expr_from(cond);
+        }
+        Ok(left)
+    }
+
+    /// Whether a comparison operator stands next (without taking it).
+    fn cmp_ahead(&mut self) -> bool {
+        let save = self.pos;
+        let ahead = self.cmp_op().is_some();
+        self.pos = save;
+        ahead
+    }
+
     fn cmp_op(&mut self) -> Option<CmpOp> {
+        // after a pipe or an opening parenthesis the operator opens
+        // the command (`| > 3`, `map(> 0 ? …)`): nothing stands
+        // before it to be spaced from
+        let opens = self.pos > 0
+            && matches!(self.toks.get(self.pos - 1), Some(Token::Pipe | Token::LParen));
         let op = match self.peek()? {
             Token::Eq => CmpOp::Eq,
             Token::Ne => CmpOp::Ne,
             Token::Lt {
                 spaced: true,
-                before: true,
-            } => CmpOp::Lt,
+                before,
+            } if *before || opens => CmpOp::Lt,
             Token::Le => CmpOp::Le,
             Token::Gt {
                 spaced: true,
-                before: true,
-            } => CmpOp::Gt,
+                before,
+            } if *before || opens => CmpOp::Gt,
             Token::Ge => CmpOp::Ge,
             Token::MatchEq => CmpOp::Match,
             Token::NotMatchEq => CmpOp::NotMatch,
@@ -7568,7 +8821,7 @@ impl Parser<'_> {
             Some(Token::FollowingSiblings(mark)) => Axis::FollowingSiblings(mark_reach(*mark)),
             Some(Token::PrecedingSiblings(mark)) => Axis::PrecedingSiblings(mark_reach(*mark)),
             Some(Token::ArrowOut) => Axis::OutLink,
-            Some(Token::ArrowIn) => Axis::InLink,
+            Some(Token::ArrowIn { .. }) => Axis::InLink,
             Some(Token::DashDash) => Axis::BothLink,
             Some(Token::Name { text, .. }) => {
                 return Err(QuarbError::parse(format!(
@@ -7649,6 +8902,12 @@ impl Parser<'_> {
             Some(Token::Regex(pat)) => Regex::new(pat)
                 .map(Matcher::Regex)
                 .map_err(|e| QuarbError::parse(format!("bad regex '~({pat})': {e}"))),
+            // a bare `/` before a pipe or at the end: the root alone
+            // is the anchor `^` (`^ | …` is what `= …` sugars)
+            Some(Token::Pipe) | None => Err(QuarbError::parse(
+                "a navigation operator must be followed by a name; the root alone is the \
+                 anchor '^' ('^ | …')",
+            )),
             _ => Err(QuarbError::parse(
                 "a navigation operator must be followed by a name",
             )),
@@ -8053,6 +9312,11 @@ pub(crate) fn retired_command(name: &str) -> Option<String> {
         "chars" => Some("'chars' is retired: write 'cc'".into()),
         "types" => Some("'types' is retired: the type of a table's columns is 'type'".into()),
         "table" => Some("'table' is retired: the table is '@| pretty'".into()),
+        // retired at 0.42.0 (spec: Projectors, the projection operator)
+        "project" => Some(
+            "'project(…)' is retired: the projection operator — 'v:%(…)', 't:#(:A; :B)', 'v:$.p' — and '| %' for a node's record"
+                .into(),
+        ),
         _ => None,
     }
 }
@@ -8091,7 +9355,8 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
     while i < call.args.len() {
         match &call.args[i] {
             // A literal string names the following argument (the
-            // parser's spelling of `key = value`).
+            // parser's spelling of `key = value`); a typed key (draft
+            // 166) likewise.
             Arg::Lit(Value::Str(name)) => {
                 if i + 1 >= call.args.len() {
                     return Err(QuarbError::parse(format!(
@@ -8100,6 +9365,22 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
                 }
                 check(name)?;
                 i += 2;
+            }
+            Arg::Key(_) => {
+                if i + 1 >= call.args.len() {
+                    return Err(QuarbError::parse(format!(
+                        "{what} has a trailing field name with no value"
+                    )));
+                }
+                i += 2;
+            }
+            // `--keys=T` / `--values=T` declare the fields (draft 166)
+            Arg::Opt { name, .. } if matches!(name.as_str(), "--keys" | "--values") => {
+                i += 1;
+            }
+            // a spread item names its fields by their projections
+            Arg::Expr(Operand::Spread(_)) => {
+                i += 1;
             }
             Arg::Expr(e) => {
                 let Some(name) = crate::syntax::ast::auto_field_name(e) else {
@@ -8181,7 +9462,13 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
             Ok(())
         };
         let atergo = |v: &Value| matches!(v, Value::Str(s) if s == "atergo");
-        match call.args.as_slice() {
+        // `--desc` is an option, not a locale or mode word
+        let positional: Vec<&Arg> = call
+            .args
+            .iter()
+            .filter(|a| !matches!(a, Arg::Opt { .. }))
+            .collect();
+        match positional.as_slice() {
             [] => return Ok(()),
             [Arg::Lit(v)] if atergo(v) => return Ok(()),
             [Arg::Lit(v)] => return locale(v),
@@ -8216,8 +9503,10 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
             call.name, call.name, call.name, call.name
         )));
     }
-    let mut keys = args.peekable();
-    if keys.peek().is_none() || keys.any(|a| matches!(a, Arg::Lit(_))) {
+    // the options (`--desc`) are not keys
+    let mut keys = args.filter(|a| !matches!(a, Arg::Opt { .. })).peekable();
+    // a quarq written as a key is applied on each capsa (spec: Quarqs)
+    if keys.peek().is_none() || keys.any(|a| matches!(a, Arg::Lit(v) if !matches!(v, Value::Quarq(_)))) {
         return Err(QuarbError::parse(format!(
             "{} needs value-expression keys, e.g. {}(::age)",
             call.name, call.name
@@ -8528,7 +9817,7 @@ fn is_word(text: &str) -> bool {
         && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn literal_value(text: &str, quoted: bool, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Value {
+pub(crate) fn literal_value(text: &str, quoted: bool, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Value {
     if quoted {
         return Value::Str(text.to_string());
     }
@@ -8558,7 +9847,25 @@ fn literal_value(text: &str, quoted: bool, scale: &dyn Fn(&str) -> Option<(f64, 
         "true" => return Value::Bool(true),
         "false" => return Value::Bool(false),
         "null" => return Value::Null,
+        // the float literals a printed value reads back as (spec:
+        // Numbers, draft 166)
+        "nan" => return Value::Float(f64::NAN),
+        "inf" => return Value::Float(f64::INFINITY),
+        "-inf" => return Value::Float(f64::NEG_INFINITY),
         _ => {}
+    }
+    // an ISO date or instant written bare is the instant literal
+    // (spec: Numbers, draft 166: a literal of any kind)
+    if text.len() >= 10
+        && text.as_bytes()[4] == b'-'
+        && let Some((secs, nanos, offset_min)) = crate::temporal::parse_iso(text)
+    {
+        return Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+            calendar: Default::default(),
+        };
     }
     if let Some(norm) = numeric_text(text) {
         if let Ok(n) = norm.parse::<i64>() {
@@ -8628,8 +9935,14 @@ fn numeric_text(text: &str) -> Option<String> {
 /// The adapter rung with a core key is refused: the core names are
 /// reserved on the adapter level (spec: Metadata, draft 157), so an
 /// old `:::name` points at `:name` instead of reading metadata.
-fn adapter_key(key: String) -> Result<Projection> {
-    if crate::syntax::ast::CORE_KEYS.contains(&key.as_str()) {
+fn adapter_key(key: String, value_side: bool) -> Result<Projection> {
+    // `:::index` is a table's labels and `:::name` its header's name
+    // (draft 166), value-side forms: the guard that points a core
+    // property back to `:` does not fire on them after a pipe (nor
+    // glued to a value, which never reaches it)
+    if crate::syntax::ast::CORE_KEYS.contains(&key.as_str())
+        && !(value_side && matches!(key.as_str(), "index" | "name"))
+    {
         return Err(QuarbError::parse(format!(
             "':::{key}' is the adapter metadata, and '{key}' is a core property: write ':{key}' (the ladder counts from the core: ':name', '::p', ':::k')"
         )));
@@ -8724,6 +10037,7 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
 
 fn subst_command(command: &mut Command, map: &Subst<'_>) {
     match command {
+        Command::SessionPush(_) => {}
         Command::Func(call)
         | Command::Agg(call)
         | Command::RecordWith(call)
@@ -8761,6 +10075,7 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         | Command::Push(_)
         | Command::FieldsPush
         | Command::Recall(_)
+        | Command::Splice(_)
         | Command::AggRecall(_)
         | Command::Spread { .. } => {}
     }
@@ -8786,6 +10101,13 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
     match o {
         // A pattern literal holds no operands: nothing to splice.
         Operand::Pattern(_) => {}
+        // A quarq's body is source: a def's parameters are spliced
+        // into it as into any body, and the literal is rebuilt.
+        Operand::Lit(Value::Quarq(q)) => {
+            let mut body = (*q.body).clone();
+            body.iter_mut().for_each(|c| subst_command(c, map));
+            *o = Operand::Lit(quarq_literal(body));
+        }
         Operand::Match {
             scrutinee,
             arms,
@@ -8825,7 +10147,30 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 subst_operand(i, map);
             }
         }
-        Operand::Neg(inner) | Operand::Gathered(inner) => subst_operand(inner, map),
+        Operand::Neg(inner) | Operand::Desc(inner) | Operand::Gathered(inner) | Operand::Spread(inner) => {
+            subst_operand(inner, map)
+        }
+        Operand::Projected { base, shape } => {
+            subst_operand(base, map);
+            match shape {
+                ProjShape::Value(v) => subst_operand(v, map),
+                ProjShape::Columns { items, index } => {
+                    for (_, item) in items {
+                        subst_operand(item, map);
+                    }
+                    if let Some(i) = index {
+                        subst_operand(i, map);
+                    }
+                }
+            }
+        }
+        Operand::Typed { inner, .. } => subst_operand(inner, map),
+        Operand::LabelIndex { base, labels } => {
+            subst_operand(base, map);
+            for l in labels {
+                subst_operand(l, map);
+            }
+        }
         Operand::Field { base, .. }
         | Operand::ValueMeta { base, .. }
         | Operand::Index { base, .. } => subst_operand(base, map),
@@ -8956,6 +10301,186 @@ impl visit::Visitor for MaxCtx {
     }
 }
 
+/// At the expression head (`= expr`) every bare projection — `:k`,
+/// `::k`, `:::k` — becomes the projector it spells (spec: The
+/// Projection Operator, draft 166: the head has no cursor), through
+/// the constructors and operators that hold it; a projection
+/// operator's shape is left to be read on its base, and a path with
+/// steps stays a path.
+/// The quarq literal from its body (spec: Quarqs): the quarq, holding
+/// the projector or structured projector the body spells when it is
+/// nothing but projectors and literals in a list or a record —
+/// `q(::x)` answers the projector `::x`, `q(%(::Name; ::Fare))` the
+/// structured projector the `=` head gives. A read, a register, a
+/// command or a pipe in the body leaves it a quarq, applied later;
+/// the body is kept as written.
+fn quarq_literal(commands: Vec<Command>) -> Value {
+    use crate::syntax::ast::{Anchor, Projection};
+    let projector = match commands.as_slice() {
+        [Command::Expr(op)] => {
+            let mut folded = op.clone();
+            head_projections(&mut folded);
+            fold_closed(&folded)
+        }
+        // `q(::x)` read as the pipeline reads `| ::x`: the projection
+        // alone on the cursor
+        [Command::Nav(b)] if b.steps.is_empty() && matches!(b.anchor, Anchor::Current) => {
+            match &b.projection {
+                Some(Projection::CoreMeta(k)) => Some(Value::projection(1, k.clone())),
+                Some(Projection::Property(Some(k))) => Some(Value::projection(2, k.clone())),
+                Some(Projection::AdapterMeta(k)) => Some(Value::projection(3, k.clone())),
+                _ => None,
+            }
+        }
+        // `q(%(::Name; ::Fare))` read as the pipeline reads `| %(…)`
+        [Command::Func(call)] if matches!(call.name.as_str(), "rec" | "record") => {
+            let mut args = call.args.clone();
+            for a in &mut args {
+                if let Arg::Expr(e) = a {
+                    head_projections(e);
+                }
+            }
+            fold_record(&args)
+        }
+        _ => None,
+    }
+    .filter(Value::holds_projector);
+    Value::quarq(commands, projector)
+}
+
+/// A constant operand's value: a literal, a list of constants, a
+/// record constructor of constants; anything read at run time is
+/// `None`.
+fn fold_closed(op: &Operand) -> Option<Value> {
+    match op {
+        Operand::Lit(v) => Some(v.clone()),
+        Operand::List(items) => Some(Value::list(
+            items.iter().map(fold_closed).collect::<Option<Vec<_>>>()?,
+        )),
+        Operand::Piped { expr, commands }
+            if matches!(**expr, Operand::Topic | Operand::Seed)
+                && let [Command::Func(call)] = commands.as_slice()
+                && matches!(call.name.as_str(), "rec" | "record") =>
+        {
+            fold_record(&call.args)
+        }
+        _ => None,
+    }
+}
+
+/// A record constructor's constant value from its arguments (the
+/// record convention: `name = value` pairs, bare projections keyed
+/// by their own name); `None` where a field is read at run time.
+fn fold_record(args: &[Arg]) -> Option<Value> {
+    let mut fields = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg {
+            Arg::Lit(Value::Str(name)) => {
+                let value = match args.next()? {
+                    Arg::Expr(e) => fold_closed(e)?,
+                    Arg::Lit(v) => v.clone(),
+                    _ => return None,
+                };
+                fields.push((name.clone(), value));
+            }
+            Arg::Expr(e) => {
+                let name = crate::syntax::ast::auto_field_name(e)?.to_string();
+                fields.push((name, fold_closed(e)?));
+            }
+            _ => return None,
+        }
+    }
+    Some(Value::Record(fields.into()))
+}
+
+fn head_projections(op: &mut Operand) {
+    use crate::syntax::ast::{Anchor, Projection, TableRow};
+    if let Operand::Typed { inner, typing } = op {
+        let typing = typing.clone();
+        head_projections(inner);
+        if let Operand::Lit(Value::Projection { ladder, key, .. }) = inner.as_ref() {
+            *op = Operand::Lit(Value::typed_projection(*ladder, key.clone(), Some(typing)));
+        }
+        return;
+    }
+    let spelled = match op {
+        Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+            Some(Value::projection(1, name.clone()))
+        }
+        Operand::Rel {
+            steps,
+            projection: Some(p),
+            anchor: Anchor::Current,
+        } if steps.is_empty() => match p {
+            Projection::CoreMeta(k) => Some(Value::projection(1, k.clone())),
+            Projection::Property(Some(k)) => Some(Value::projection(2, k.clone())),
+            Projection::AdapterMeta(k) => Some(Value::projection(3, k.clone())),
+            Projection::Property(None) => None,
+        },
+        _ => None,
+    };
+    if let Some(v) = spelled {
+        *op = Operand::Lit(v);
+        return;
+    }
+    match op {
+        Operand::List(items) => items.iter_mut().for_each(head_projections),
+        Operand::Table { rows, .. } => {
+            for row in rows {
+                match row {
+                    TableRow::List(items) => items.iter_mut().for_each(head_projections),
+                    TableRow::Record(items) => {
+                        items.iter_mut().for_each(|(_, o)| head_projections(o))
+                    }
+                }
+            }
+        }
+        // a constructor at the head (`%(…)` is the pipe form
+        // `($_ | %(…))` without the pipe): its fields
+        Operand::Piped { expr, commands } if matches!(**expr, Operand::Topic | Operand::Seed) => {
+            for command in commands {
+                match command {
+                    Command::Func(call) => {
+                        for a in &mut call.args {
+                            if let Arg::Expr(e) = a {
+                                head_projections(e);
+                            }
+                        }
+                    }
+                    Command::Expr(e) => head_projections(e),
+                    _ => {}
+                }
+            }
+        }
+        Operand::Projected { base, .. } => head_projections(base),
+        Operand::Index { base, .. } => head_projections(base),
+        Operand::Spread(inner) | Operand::Neg(inner) | Operand::Desc(inner) => {
+            head_projections(inner)
+        }
+        Operand::Arith { left, right, .. }
+        | Operand::Concat { left, right, .. }
+        | Operand::Coalesce { left, right } => {
+            head_projections(left);
+            head_projections(right);
+        }
+        _ => {}
+    }
+}
+
+/// Whether an operand looks at no node: literals and registers
+/// alone, lists and arithmetic of them (spec: Index Predicates —
+/// such brackets are positional).
+pub(crate) fn node_free(op: &Operand) -> bool {
+    match op {
+        Operand::Lit(_) | Operand::Recall(_) => true,
+        Operand::List(items) => items.iter().all(node_free),
+        Operand::Arith { left, right, .. } => node_free(left) && node_free(right),
+        Operand::Neg(inner) | Operand::Desc(inner) => node_free(inner),
+        _ => false,
+    }
+}
+
 fn validate_keyed_commands(q: &Query) -> Result<()> {
     let mut grouped = false;
     for command in &q.pipeline {
@@ -9037,7 +10562,12 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
                         {
                             seen_corr = true;
                         }
-                        Predicate::Index(_) | Predicate::Range(_, _) if seen_corr => {
+                        Predicate::Index(_)
+                        | Predicate::Range(_, _)
+                        | Predicate::Positions(_)
+                        | Predicate::Computed(_)
+                            if seen_corr =>
+                        {
                             return Err(QuarbError::parse(
                                 "positional selection after a join condition \
                                  is ambiguous — select before the join \
@@ -9441,14 +10971,17 @@ mod tests {
     }
 
     #[test]
-    fn bare_inf_and_nan_are_not_numbers() {
-        // Rust's f64 parser accepts the words; the query language
-        // does not — a bare word in a body names a command, and
-        // `inf` is none, so it is refused rather than read as a
-        // number (or, as before, as text).
+    fn bare_inf_and_nan_are_float_literals() {
+        // `nan`, `inf` and `-inf` are the float literals a printed
+        // value reads back as (spec: Numbers, draft 166); quoted,
+        // the words are text.
         let toks = lexer::lex("/x[::status = inf]").unwrap();
-        let err = parse(&toks).unwrap_err().to_string();
-        assert!(err.contains("'inf' is not a command"), "got {err}");
+        let q = parse(&toks).unwrap();
+        let dbg = format!("{q:?}");
+        assert!(dbg.contains("Lit(Float(inf))"), "got {dbg}");
+        let toks = lexer::lex("/x[::status = nan]").unwrap();
+        let dbg = format!("{:?}", parse(&toks).unwrap());
+        assert!(dbg.contains("Lit(Float(NaN))"), "got {dbg}");
         let toks = lexer::lex("/x[::status = \"inf\"]").unwrap();
         let q = parse(&toks).unwrap();
         let dbg = format!("{q:?}");
@@ -9664,5 +11197,104 @@ fn universalize(elem: &mut PathElem) -> Result<()> {
         _ => Err(QuarbError::parse(
             "'*//' is the universal search: follow it with a name, a pattern, or '*'",
         )),
+    }
+}
+
+/// `a = :x<int>` — a typed projector right of `=` is refused (spec:
+/// Projectors, draft 166): a trait describes a field, never a value;
+/// the pointer names the declared key and the cast.
+fn typed_value_refusal(key: &str, inner: &Operand, typing: crate::value::Typing) -> QuarbError {
+    let value = crate::syntax::unparse::operand(inner);
+    let cast = match typing.declared() {
+        Some(t) => format!(", or cast the value, '{key} = {}({value})'", t.word()),
+        None => String::new(),
+    };
+    QuarbError::parse(format!(
+        "'{value}{}' right of '=' declares nothing: a trait describes a field, never a value; declare the key, '{key}{} = {value}'{cast}",
+        typing.spelling(),
+        typing.spelling()
+    ))
+}
+
+/// A label written bare in the double bracket read as the literal it
+/// spells: an ISO date or instant (`2013-01-02`, one word to the
+/// lexer, text as an operand) is the instant, and a range of two
+/// such literals (`2013-01-02..2013-01-04`) the range operand of its
+/// bounds; a quoted label and any other label stay as written.
+fn label_range(label: Operand, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Operand {
+    let Operand::Lit(Value::Str(text)) = &label else { return label };
+    let instant = |t: &str| {
+        crate::temporal::parse_iso(t).map(|(secs, nanos, offset_min)| Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+            calendar: Default::default(),
+        })
+    };
+    let Some((a, b)) = text.split_once("..") else {
+        return match instant(text) {
+            Some(v) => Operand::Lit(v),
+            None => label,
+        };
+    };
+    if a.is_empty() || b.is_empty() || b.contains("..") {
+        return label;
+    }
+    let bound = |t: &str| match literal_value(t, false, scale) {
+        Value::Str(s) => instant(&s).unwrap_or(Value::Str(s)),
+        v => v,
+    };
+    Operand::Range {
+        from: Box::new(Operand::Lit(bound(a))),
+        to: Box::new(Operand::Lit(bound(b))),
+        step: None,
+    }
+}
+
+/// Whether an operand is a bare projection — `:name` on the topic,
+/// `::k` / `:::k` with no steps on the current node — the spelling a
+/// typed projector's brackets glue to.
+fn is_bare_projection(o: &Operand) -> bool {
+    use crate::syntax::ast::{Anchor, Projection};
+    match o {
+        Operand::Field { base, .. } => matches!(**base, Operand::Topic),
+        Operand::Rel {
+            steps,
+            projection: Some(p),
+            anchor: Anchor::Current,
+        } => steps.is_empty() && !matches!(p, Projection::Property(None)),
+        _ => false,
+    }
+}
+
+/// Every typed projector written in a structured projector's shape
+/// becomes the typed projector value (spec: Projectors, draft 166),
+/// through the lists, records and tables that hold it; the bare
+/// projections beside it are read on the base as before.
+fn fold_typed(op: &mut Operand) {
+    use crate::syntax::ast::TableRow;
+    match op {
+        Operand::Typed { .. } => head_projections(op),
+        Operand::List(items) => items.iter_mut().for_each(fold_typed),
+        Operand::Table { rows, .. } => {
+            for row in rows {
+                match row {
+                    TableRow::List(items) => items.iter_mut().for_each(fold_typed),
+                    TableRow::Record(items) => items.iter_mut().for_each(|(_, o)| fold_typed(o)),
+                }
+            }
+        }
+        Operand::Piped { expr, commands } if matches!(**expr, Operand::Topic | Operand::Seed) => {
+            for command in commands {
+                if let Command::Func(call) = command {
+                    for a in &mut call.args {
+                        if let Arg::Expr(e) = a {
+                            fold_typed(e);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }

@@ -773,7 +773,7 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     "mutual_degree" | "mutual-degree" => Some(Value::Int(a.mutual_degree as i64)),
                     "pagerank" => Some(Value::Float(a.pagerank)),
                     "redlinks" => Some(Value::Int(a.redlinks as i64)),
-                    "link" if r.kind == PageKind::Page => Some(Value::Record(vec![
+                    "link" if r.kind == PageKind::Page => Some(Value::record(vec![
                         (
                             "title".to_string(),
                             r.title.clone().map(Value::Str).unwrap_or(Value::Null),

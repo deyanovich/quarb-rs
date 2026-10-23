@@ -656,7 +656,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
                     }
                     let more = fields.len() > 6;
                     let shown: Vec<(String, Value)> = fields.into_iter().take(6).collect();
-                    let mut text = Value::Record(shown).display_form();
+                    let mut text = Value::Record(shown.into()).display_form();
                     if more {
                         text.pop();
                         text.push_str("; …)");

@@ -212,7 +212,7 @@ pub(crate) fn timeline_command<H: Host>(
         .enumerate()
         .map(|(i, c)| {
             let read = |a: &Arg| match a {
-                Arg::Lit(v) => v.clone(),
+                Arg::Lit(v) | Arg::Key(v) => v.clone(),
                 Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => {
                     Value::Null
                 }
@@ -272,7 +272,7 @@ pub(crate) fn timeline_command<H: Host>(
             }
             let mut fields = match expr {
                 Value::Record(fields) => fields,
-                other => vec![("value".to_string(), other)],
+                other => vec![("value".to_string(), other)].into(),
             };
             fields.retain(|(k, _)| k != "when" && k != "from");
             fields.push(("when".to_string(), when.map_or(Value::Null, Value::period)));

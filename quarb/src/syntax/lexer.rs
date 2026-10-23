@@ -141,10 +141,19 @@ pub enum Token {
     Contains,
     /// `->` — outgoing crosslink.
     ArrowOut,
-    /// `<-` — incoming crosslink.
-    ArrowIn,
+    /// `<-` — incoming crosslink; `rounded` for the tail-colon
+    /// spelling `-:` (inside a keyed aggregate's parentheses the
+    /// rounded form is the descending core-field key).
+    ArrowIn { rounded: bool },
     /// `--` — either-direction crosslink (the headless arrow).
     DashDash,
+    /// A lone `-` glued to a `::` / `:::` projection (`-::fare`):
+    /// the descending marker on a sort key.
+    Desc,
+    /// A colon glued on its left to a value and on its right to a
+    /// constructor or a register (`v:@(…)`, `v:%(…)`, `t:#(…)`,
+    /// `v:(…)`, `t:$.proj`): the projection operator.
+    ProjectColon,
     /// `@` — register/aggregation sigil.
     At,
     /// `@@` glued before a dot, the node-reference views (`@@.`);
@@ -313,9 +322,9 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
     let double = chars.get(i + 1) == Some(&'(');
     let start = if double { i + 2 } else { i + 1 };
     let mut j = start;
-    // `(=name)` / `(=name!)` / `(,name)` — the fragment sigil and a
-    // definition's parameter, rounded: a leading `=` or `,`, and a
-    // trailing `!` for the macro marker.
+    // `(=name)` / `(=name!)` / `(,name)` — the fragment sigil and the
+    // session read, rounded: a leading `=` or `,`, and a trailing `!`
+    // for the macro marker.
     if !double && matches!(chars.get(j), Some('=') | Some(',')) {
         j += 1;
     }
@@ -377,6 +386,8 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
         // `(.name)` — the register pushed by `.name`; `(.N)` the
         // N-th register (a float is written `0.5`, never `(.5)`).
         b if b.starts_with('.') => vec![Token::Dollar, name(b)],
+        // `(,name)` — the session read `$,name`, rounded (draft 166)
+        b if b.starts_with(',') && b.len() > 1 => vec![Token::Dollar, name(b)],
         // `(N)` — the N-th match capture `$N` (a value; the mark at
         // position N is `((N))`).
         b if !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit()) => {
@@ -394,14 +405,6 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
                 t.push(Token::Bang);
             }
             t
-        }
-        // `(,name)` — a definition's parameter `$name`.
-        b if b.starts_with(',') && b.len() > 1 => {
-            let stem = &b[1..];
-            if !stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return None;
-            }
-            vec![Token::Dollar, name(stem)]
         }
         // A bare name is a group — the parser's call.
         _ => return None,
@@ -457,7 +460,7 @@ fn after_axis(tokens: &[Token]) -> bool {
                 | Token::FollowingSiblings(_)
                 | Token::PrecedingSiblings(_)
                 | Token::ArrowOut
-                | Token::ArrowIn
+                | Token::ArrowIn { .. }
                 | Token::DashDash
                 | Token::Resolve
                 | Token::ReverseResolve
@@ -622,6 +625,10 @@ fn option_name_before(tokens: &[Token]) -> bool {
 /// A short option's spelling: a dash, then a letter, then word
 /// characters (`-n`, `-casefold`). A dash before a digit is minus.
 pub fn is_option_word(text: &str) -> bool {
+    // `-inf` is the float literal (spec: Numbers, draft 166)
+    if text == "-inf" {
+        return false;
+    }
     let mut chars = text.chars();
     chars.next() == Some('-')
         && chars.next().is_some_and(|c| c.is_alphabetic())
@@ -671,6 +678,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             continue;
         }
         let glued = !spaced;
+        // an operator right after an opening parenthesis opens a
+        // command (`map(= null)`, `map(> 0 ? …)`, `(?? 0)`): nothing
+        // before it to be spaced from
+        let opens = i > 0 && chars[i - 1] == '(';
         spaced = false;
         match c {
             // A `/.../` regex literal on the right of `=~` / `!~`,
@@ -839,9 +850,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                         Some(
                             Token::IdAnchorOpen
                                 | Token::LParen
+                                | Token::LBracket
                                 | Token::Semi
                                 | Token::Comma
                                 | Token::OptEq
+                                | Token::ProjectColon
                         )
                     )
                 {
@@ -870,7 +883,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     && !after_push_dot(&chars, i)
                     && !matches!(
                         tokens.last(),
-                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At | Token::OptEq)
+                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At | Token::OptEq | Token::ProjectColon)
                     )
                 {
                     return Err(QuarbError::lex(
@@ -925,7 +938,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 && at(i + 2) != Some(':')
                 && !after_accessor(&tokens, glued) =>
             {
-                tokens.push(Token::ArrowIn);
+                tokens.push(Token::ArrowIn { rounded: true });
                 i += 2;
             }
             // `-;;` / `-;` — the preceding-siblings reach and the
@@ -954,7 +967,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `<<=` / `>>=` — the containment comparisons; longest
             // match, before the sibling hops and `<=` / `>=`.
             '<' if at(i + 1) == Some('<') && at(i + 2) == Some('=') => {
-                binary("<<=", glued, at(i + 3))?;
+                binary("<<=", glued && !opens, at(i + 3))?;
                 tokens.push(Token::Within);
                 i += 3;
             }
@@ -984,7 +997,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // matching the spaced `< -3`. A digit is never a
             // crosslink target, so only a non-digit keeps `<-`.
             '<' if at(i + 1) == Some('-') && !at(i + 2).is_some_and(|c| c.is_ascii_digit()) => {
-                tokens.push(Token::ArrowIn);
+                tokens.push(Token::ArrowIn { rounded: false });
                 i += 2;
             }
             '<' if at(i + 1) == Some('~') => {
@@ -995,7 +1008,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 3;
             }
             '<' if at(i + 1) == Some('=') => {
-                binary("<=", glued, at(i + 2))?;
+                binary("<=", glued && !opens, at(i + 2))?;
                 tokens.push(Token::Le);
                 i += 2;
             }
@@ -1008,7 +1021,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 1;
             }
             '>' if at(i + 1) == Some('>') && at(i + 2) == Some('=') => {
-                binary(">>=", glued, at(i + 3))?;
+                binary(">>=", glued && !opens, at(i + 3))?;
                 tokens.push(Token::Encloses);
                 i += 3;
             }
@@ -1024,7 +1037,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 2;
             }
             '>' if at(i + 1) == Some('=') => {
-                binary(">=", glued, at(i + 2))?;
+                binary(">=", glued && !opens, at(i + 2))?;
                 tokens.push(Token::Ge);
                 i += 2;
             }
@@ -1041,11 +1054,14 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             '?' => {
                 if chars.get(i + 1) == Some(&'?') {
-                    binary("??", glued, at(i + 2))?;
+                    // after an opening parenthesis the operator opens
+                    // the command (`map(?? 0)`): nothing before it to
+                    // be spaced from
+                    binary("??", glued && !opens, at(i + 2))?;
                     tokens.push(Token::Coalesce);
                     i += 2;
                 } else if chars.get(i + 1) == Some(&'=') {
-                    binary("?=", glued, at(i + 2))?;
+                    binary("?=", glued && !opens, at(i + 2))?;
                     tokens.push(Token::QuestionEq);
                     i += 2;
                 } else {
@@ -1055,12 +1071,12 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 }
             }
             '!' if at(i + 1) == Some('=') && at(i + 2) == Some('=') => {
-                binary("!==", glued, at(i + 3))?;
+                binary("!==", glued && !opens, at(i + 3))?;
                 tokens.push(Token::NotMatchEq);
                 i += 3;
             }
             '!' if at(i + 1) == Some('=') => {
-                binary("!=", glued, at(i + 2))?;
+                binary("!=", glued && !opens, at(i + 2))?;
                 tokens.push(Token::Ne);
                 i += 2;
             }
@@ -1124,6 +1140,29 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Cursor);
                 i += 1;
             }
+            // `_p` — a definition's parameter `$p`, rounded (draft 166:
+            // the cursor's underscore before the name, a parameter
+            // being the fragment's cursor): at a token's start, never
+            // glued to a name, a path or a colon (`/_x`, `::_id`,
+            // `x_y` stay names)
+            '_' if at(i + 1).is_some_and(|c| c.is_alphabetic())
+                && (i == 0
+                    || !(is_name_char(chars[i - 1])
+                        || matches!(chars[i - 1], '/' | ':' | '\\' | '>' | '-' | '\'' | '"' | '@' | '$'))) =>
+            {
+                let mut j = i + 1;
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let text: String = chars[i + 1..j].iter().collect();
+                tokens.push(Token::Dollar);
+                tokens.push(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                });
+                i = j;
+            }
             '$' if at(i + 1) == Some('$') && at(i + 2) == Some('.') => {
                 let mut k = i + 3;
                 // A hyphen belongs to the name unless it opens an
@@ -1172,6 +1211,23 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             {
                 tokens.push(Token::ArrowOut);
                 i += 2;
+            }
+            // `v:@(…)`, `v:%(…)`, `t:#(…)`, `v:(…)`, `t:$.proj` — the
+            // projection operator (draft 166): a colon glued on its
+            // left to a value, on its right to a constructor or a
+            // register. (`:(*.)` is the rounded accessor below;
+            // `:%provenance` / `:@origin`, a name after the sigil,
+            // stay the core fields.)
+            ':' if i > 0
+                && (is_name_char(chars[i - 1])
+                    || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\''))
+                && ((matches!(at(i + 1), Some('@' | '%' | '#')) && at(i + 2) == Some('('))
+                    || (at(i + 1) == Some('(')
+                        && !(at(i + 2) == Some('*') && at(i + 3) == Some('.') && at(i + 4) == Some(')')))
+                    || (at(i + 1) == Some('$') && at(i + 2) == Some('.'))) =>
+            {
+                tokens.push(Token::ProjectColon);
+                i += 1;
             }
             // `:%provenance`, `:@origin` — the shaped reads of a
             // value's or a node's provenance (spec: Record Fields,
@@ -1260,7 +1316,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             ':' => i = lex_colons(&chars, i, glued, &mut tokens)?,
             '|' if at(i + 1) == Some('|') => {
-                binary("||", glued, at(i + 2))?;
+                binary("||", glued && !opens, at(i + 2))?;
                 tokens.push(Token::PipePipe);
                 i += 2;
             }
@@ -1272,7 +1328,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // glob is handled by the name-char arm below; `=` cannot
             // appear unescaped in a name, so this never steals one.
             '*' if at(i + 1) == Some('=') => {
-                binary("*=", glued, at(i + 2))?;
+                binary("*=", glued && !opens, at(i + 2))?;
                 tokens.push(Token::Contains);
                 i += 2;
             }
@@ -1281,7 +1337,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // never a regex literal: `(/…/)` is the one regex
             // spelling there.
             '=' if at(i + 1) == Some('=') => {
-                binary("==", glued, at(i + 2))?;
+                binary("==", glued && !opens, at(i + 2))?;
                 tokens.push(Token::MatchEq);
                 i += 2;
             }
@@ -1310,7 +1366,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     continue;
                 }
                 if !tokens.is_empty() {
-                    binary("=", glued, at(i + 1))?;
+                    binary("=", glued && !opens, at(i + 1))?;
                 }
                 tokens.push(Token::Eq);
                 i += 1;
@@ -1413,7 +1469,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Regex(body));
                 i = next;
             }
-            '(' if at(i + 1) == Some('?') => {
+            '(' if at(i + 1) == Some('?') && at(i + 2) != Some('?') => {
                 openers.push(Opener::RoundedPredicate);
                 tokens.push(Token::LBracket);
                 i += 2;
@@ -1432,6 +1488,8 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // glued to its hop.
             '(' if at(i + 1) == Some(':')
                 && glued
+                // `#(:A)` after the projection operator holds columns
+                && !(i > 0 && chars[i - 1] == '#')
                 && !matches!(at(i + 2), Some(':' | '-'))
                 && trait_body_ahead(&chars, i + 2)
                 && !(after_call_head(&tokens, glued)
@@ -1536,6 +1594,26 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // The comma is separator sugar for `;` and stands
             // before whitespace: `f(a, b)` — a glued `a,b` is not a
             // separator (in a digit run it is the decimal comma).
+            // `,name` — the session memory's sigil (draft 166): after a
+            // pipe the session push, after `$` the session read, glued
+            // to its name; `%,` the memory as a record (the name token
+            // is the lone comma)
+            ',' if at(i + 1).is_some_and(|c| c.is_alphabetic() || c == '_')
+                || (matches!(tokens.last(), Some(Token::Percent))
+                    && at(i + 1).is_none_or(|c| !c.is_alphanumeric())) =>
+            {
+                let mut j = i + 1;
+                while j < chars.len() && (chars[j].is_alphanumeric() || matches!(chars[j], '_' | '-')) {
+                    j += 1;
+                }
+                let text: String = chars[i..j].iter().collect();
+                tokens.push(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                });
+                i = j;
+            }
             ',' => {
                 if at(i + 1).is_some_and(|c| !c.is_whitespace()) {
                     return Err(QuarbError::lex(
@@ -1612,7 +1690,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 1;
             }
             '&' if at(i + 1) == Some('&') => {
-                binary("&&", glued, at(i + 2))?;
+                binary("&&", glued && !opens, at(i + 2))?;
                 tokens.push(Token::AmpAmp);
                 i += 2;
             }
@@ -1832,6 +1910,33 @@ fn lex_name(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) 
             "a push dot is never glued to a name: write `{} .(…)` (glued, the dot is part of the name)",
             &text[..text.len() - 1]
         )));
+    }
+    // `:props...` — a trailing spread on a name is its own token
+    // (the record item's spread suffix, draft 166).
+    if text.len() > 3 && text.ends_with("...") && !text.ends_with("....") {
+        let stem = text[..text.len() - 3].to_string();
+        tokens.push(Token::Name {
+            text: stem,
+            quoted: false,
+            glued,
+        });
+        tokens.push(Token::Name {
+            text: "...".to_string(),
+            quoted: false,
+            glued: true,
+        });
+        return Ok(i);
+    }
+    // A lone dash glued to a projection rung (`-::fare`) is the
+    // descending key marker; spaced (`- ::n`) it stays the minus.
+    // (`-:name` is the rounded incoming arrow, lexed above.)
+    if text == "-"
+        && at(i) == Some(':')
+        && at(i + 1) == Some(':')
+        && !matches!(tokens.last(), Some(Token::Dollar | Token::At))
+    {
+        tokens.push(Token::Desc);
+        return Ok(i);
     }
     tokens.push(Token::Name {
         text,
@@ -2119,10 +2224,11 @@ fn read_interpolated_until(
                 text.push(chars[i + 1]);
                 i += 2;
             }
-            // `(,expr)` — the rounded hole: the dollar's value-side
-            // digraph, closed by the balancing `)` (nested parens and
-            // single-quoted strings honored); `\(` escapes a literal.
-            '(' if chars.get(i + 1) == Some(&',') => {
+            // `(_expr)` — the rounded hole (draft 166: the cursor's
+            // underscore before the expression), closed by the
+            // balancing `)` (nested parens and single-quoted strings
+            // honored); `\(` escapes a literal.
+            '(' if chars.get(i + 1) == Some(&'_') => {
                 if !text.is_empty() {
                     parts.push(InterpPart::Text(std::mem::take(&mut text)));
                 }
@@ -2158,7 +2264,7 @@ fn read_interpolated_until(
                                     }
                                     None => {
                                         return Err(QuarbError::lex(
-                                            "unterminated interpolation '(,…' (missing ')')",
+                                            "unterminated interpolation '(_…' (missing ')')",
                                         ));
                                     }
                                 }
@@ -2170,7 +2276,7 @@ fn read_interpolated_until(
                         }
                         None => {
                             return Err(QuarbError::lex(
-                                "unterminated interpolation '(,…' (missing ')')",
+                                "unterminated interpolation '(_…' (missing ')')",
                             ));
                         }
                     }
@@ -2390,7 +2496,7 @@ mod glued_operator_tests {
             "got {toks:?}"
         );
         // A non-digit target still lexes as the crosslink.
-        assert!(lex("a<-b").unwrap().contains(&Token::ArrowIn));
+        assert!(lex("a<-b").unwrap().iter().any(|t| matches!(t, Token::ArrowIn { rounded: false })));
     }
 
     #[test]
@@ -2551,6 +2657,18 @@ mod glued_operator_tests {
     }
 
     #[test]
+    fn projection_operator_lexes() {
+        for q in ["$_:$.p", "$.t:$.p", "$_:#(:A)", "$_:@(:A; 1)", "t:%(:A)", "//x:$.cols", "$_[..2]:#(:A)"] {
+            let toks = lex(q).unwrap();
+            eprintln!("{q}: {toks:?}");
+            assert!(
+                toks.iter().any(|t| matches!(t, Token::ProjectColon)),
+                "{q} lexes no ProjectColon: {toks:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rounded_family_lexes() {
         let name = |t: &str| Token::Name {
             text: t.into(),
@@ -2558,7 +2676,7 @@ mod glued_operator_tests {
             glued: true,
         };
         // reverse arrows: `-:` / `--:` are `<-` / `<--`
-        assert!(lex("/a-:b").unwrap().contains(&Token::ArrowIn));
+        assert!(lex("/a-:b").unwrap().iter().any(|t| matches!(t, Token::ArrowIn { rounded: true })));
         assert!(lex("/a--:b").unwrap().contains(&Token::ReverseResolve));
         // the edge accessors keep their dash
         assert_eq!(
@@ -3098,24 +3216,25 @@ mod glued_operator_tests {
 
     #[test]
     fn rounded_hole_in_a_string() {
-        // `(,expr)` is `${expr}` inside a double-quoted string; nested
-        // parens and quotes ride along; `\(` escapes a literal.
+        // `(_expr)` is `${expr}` inside a double-quoted string (draft
+        // 166); nested parens and quotes ride along; `\(` escapes a
+        // literal.
         assert_eq!(
-            lex(r#""a (,::n) b""#).unwrap(),
+            lex(r#""a (_::n) b""#).unwrap(),
             lex(r#""a ${::n} b""#).unwrap()
         );
         assert_eq!(
-            lex(r#""(,(::n | upper)) x""#).unwrap(),
+            lex(r#""(_(::n | upper)) x""#).unwrap(),
             lex(r#""${(::n | upper)} x""#).unwrap()
         );
         // the hole's text is kept verbatim and re-lexed at parse time
         assert!(
-            matches!(lex(r#""(,(.n))""#).unwrap().as_slice(), [Token::Interp(parts)] if matches!(parts.as_slice(), [InterpPart::Hole(h)] if h == "(.n)"))
+            matches!(lex(r#""(_(.n))""#).unwrap().as_slice(), [Token::Interp(parts)] if matches!(parts.as_slice(), [InterpPart::Hole(h)] if h == "(.n)"))
         );
         // escaped, no hole opens: an ordinary (hole-less) literal
-        let t = lex(r#""\(,see""#).unwrap();
+        let t = lex(r#""\(_see""#).unwrap();
         assert!(t.len() == 1 && !matches!(t[0], Token::Interp(_)), "{t:?}");
-        assert!(lex(r#""(,::n""#).is_err());
+        assert!(lex(r#""(_::n""#).is_err());
     }
 
     #[test]
@@ -3154,7 +3273,8 @@ mod glued_operator_tests {
     #[test]
     fn fragment_and_parameter_units() {
         // `(=name)` is `&name`, `(=name!)` the macro marker, `(=3)` a
-        // history line, `(,col)` a definition's parameter.
+        // history line, `_col` a definition's parameter, `(,col)` the
+        // session read.
         assert!(
             matches!(lex("| (=load)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "load")
         );
@@ -3173,7 +3293,10 @@ mod glued_operator_tests {
             matches!(lex("| (=3)").unwrap().as_slice(), [Token::Pipe, Token::Amp, Token::Name { text, .. }] if text == "3")
         );
         assert!(
-            matches!(lex("| (,col)").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == "col")
+            matches!(lex("| _col").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == "col")
+        );
+        assert!(
+            matches!(lex("| (,col)").unwrap().as_slice(), [Token::Pipe, Token::Dollar, Token::Name { text, .. }] if text == ",col")
         );
         // the node anchors open with their own token; a single-paren
         // name is a plain group

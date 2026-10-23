@@ -395,7 +395,7 @@ pub fn xml_to_value(text: &str) -> Option<crate::value::Value> {
                 let v = if a.is_empty() {
                     crate::value::Value::Str(String::new())
                 } else {
-                    crate::value::Value::Record(a)
+                    crate::value::Value::Record(a.into())
                 };
                 push_field(&mut stack.last_mut()?.fields, tag, v);
             }
@@ -459,7 +459,7 @@ fn frame_to_value(fields: Vec<(String, crate::value::Value)>, text: String) -> c
     if !text.trim().is_empty() {
         fields.push(("#text".to_string(), crate::value::Value::Str(text)));
     }
-    crate::value::Value::Record(fields)
+    crate::value::Value::Record(fields.into())
 }
 
 /// Add `(key, value)` to a field list, collecting a repeated key

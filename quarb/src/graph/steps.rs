@@ -2061,9 +2061,49 @@ pub(crate) fn apply_predicates<T>(
     let mut i = 0;
     while i < step.predicates.len() {
         match &step.predicates[i] {
-            pred @ (Predicate::Index(_) | Predicate::Range(_, _)) => {
+            pred @ (Predicate::Index(_) | Predicate::Range(_, _) | Predicate::Positions(_)) => {
                 items = positional(items, pred);
                 i += 1;
+            }
+            // A computed bracket reads no node: its value, read once
+            // in the walk's scope, is the position or the position
+            // list; any other value is a condition on every item.
+            Predicate::Computed(op) => {
+                i += 1;
+                let Some(first) = items.first() else { continue };
+                let scope = Scope {
+                    prov: None,
+                    outer,
+                    register,
+                    crossing: None,
+                    witness: (!witness.is_empty()).then_some(witness),
+                    ..Scope::at(state)
+                };
+                let value = super::operand::operand_value_at(
+                    adapter,
+                    node_of(first),
+                    op,
+                    trace,
+                    witness,
+                    scope,
+                );
+                match crate::pipeline::positions_of(&value) {
+                    Some(pred) => items = positional(items, &pred),
+                    None => {
+                        let truthy = PredExpr::Truthy(op.clone());
+                        items.retain(|item| {
+                            let scope = Scope {
+                                prov: None,
+                                outer,
+                                register,
+                                crossing: None,
+                                witness: (!witness.is_empty()).then_some(witness),
+                                ..Scope::at(state)
+                            };
+                            eval_pred_expr_at(adapter, node_of(item), &truthy, trace, witness, scope)
+                        });
+                    }
+                }
             }
             Predicate::Expr(_) => {
                 let mut run: Vec<&PredExpr> = Vec::new();

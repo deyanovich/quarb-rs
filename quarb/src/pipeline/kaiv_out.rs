@@ -119,7 +119,8 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         | Value::Foreign(_)
         | Value::Table(_)
         | Value::Node(_) => ("str", v.to_string()),
-        Value::Projection { ladder, key } => ("str", Value::projection_spelling(*ladder, key)),
+        Value::Projection { ladder, key, typing } => ("str", Value::projector_spelling(*ladder, key, typing.as_ref())),
+        Value::Quarq(q) => ("str", q.source.clone()),
     }
 }
 
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn document_places_records_and_scalars() {
         let items = vec![
-            Value::Record(vec![
+            Value::record(vec![
                 ("name".into(), Value::Str("Ada".into())),
                 (
                     "tags".into(),

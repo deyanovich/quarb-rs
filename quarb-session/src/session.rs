@@ -150,6 +150,11 @@ impl Session {
         self.executor.refs()
     }
 
+    /// The session memory, when the executor keeps one.
+    pub fn session_memory(&self) -> Option<quarb::SessionMemory> {
+        self.executor.session_memory()
+    }
+
     /// Evaluate a line against a freshly re-materialized source — the
     /// `&N!` live reading, which sees current data.
     pub fn eval_fresh(&self, line: &str) -> Result<Vec<Cell>> {

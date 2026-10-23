@@ -17,8 +17,88 @@ pub(crate) use crate::value::ambient::take_refusal;
 /// (`qua`'s flags, a session's settings), read by the executor from
 /// the run in progress — never from an adapter method or a global.
 /// Public as `quarb::Run`.
+/// The session memory (spec: Capsa Operations, "Session memory",
+/// draft 166): a value store that outlives the query, per session —
+/// the quai kernel, the qua REPL, a `.quai` read cell by cell; for a
+/// one-shot run the run itself. `| ,name` files the topic under the
+/// name, `$,name` reads it wherever a register stands, `%,` is the
+/// whole memory as a record. The host owns it and hands it to each
+/// run.
+pub type SessionMemory = std::rc::Rc<std::cell::RefCell<SessionStore>>;
+
+/// How a session prints its results (spec: Session memory, "Session
+/// settings", draft 166): `off` as written, `structures` lists,
+/// records and tables through `pretty`, `always` every result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrettyMode {
+    #[default]
+    Off,
+    Structures,
+    Always,
+}
+
+impl PrettyMode {
+    pub fn word(self) -> &'static str {
+        match self {
+            PrettyMode::Off => "off",
+            PrettyMode::Structures => "structures",
+            PrettyMode::Always => "always",
+        }
+    }
+    pub fn parse(word: &str) -> Option<PrettyMode> {
+        match word {
+            "off" => Some(PrettyMode::Off),
+            "structures" => Some(PrettyMode::Structures),
+            "always" => Some(PrettyMode::Always),
+            _ => None,
+        }
+    }
+    /// Whether a result of this kind prints through `pretty`.
+    pub fn applies(self, v: &Value) -> bool {
+        match self {
+            PrettyMode::Off => false,
+            PrettyMode::Always => true,
+            PrettyMode::Structures => matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_)),
+        }
+    }
+}
+
+/// The session's store: the filed values and the settings the
+/// `session` command sets (draft 166).
+#[derive(Clone, Debug)]
+pub struct SessionStore {
+    pub memory: std::collections::BTreeMap<String, Value>,
+    pub pretty: PrettyMode,
+    /// `pretty`'s digits after the point for the session.
+    pub precision: usize,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        SessionStore { memory: Default::default(), pretty: PrettyMode::Off, precision: 6 }
+    }
+}
+
+impl SessionStore {
+    /// The settings as the record `session` alone answers.
+    pub fn settings(&self) -> Value {
+        Value::record(vec![
+            ("pretty".to_string(), Value::Str(self.pretty.word().to_string())),
+            ("precision".to_string(), Value::Int(self.precision as i64)),
+        ])
+    }
+}
+
+/// A fresh, empty session memory with the opening settings.
+pub fn session_memory() -> SessionMemory {
+    std::rc::Rc::new(std::cell::RefCell::new(SessionStore::default()))
+}
+
 #[derive(Clone, Default)]
 pub struct RunOptions {
+    /// The session memory the run reads and files into, if the host
+    /// keeps one; without it a session read refuses.
+    pub session: Option<SessionMemory>,
     /// The invocation instant `now()` denotes, bound by the runner
     /// before evaluation (never a clock read during it); `None` when
     /// the runner bound none, and `now()` is null.

@@ -107,11 +107,11 @@ fn the_table_constructor_takes_its_option_alone() {
     assert_eq!(one("= @(1..12) | #(-w=3) | dim"), "@(4; 3)");
     assert_eq!(
         one("= @(1..6) | #(--header=@(a; b; c)) | header"),
-        r#"%(a = "int"; b = "int"; c = "int")"#
+        "@(:a<*; int>; :b<*; int>; :c<*; int>)"
     );
     assert_eq!(one("= @(1..6) | #(-h=@(a; b; c)) | :b"), "@(2; 5)");
     assert_eq!(one("= 1..6 @| #(-w=2) | dim"), "@(3; 2)");
-    assert_eq!(one("= 1..6 @| #(--header=@(a; b)) | header"), r#"%(a = "int"; b = "int")"#);
+    assert_eq!(one("= 1..6 @| #(--header=@(a; b)) | header"), "@(:a<*; int>; :b<*; int>)");
     // inside an expression the option form reads the topic where it stands
     assert_eq!(one("= @(1; 2) | (#(-w=1) | dim)"), "@(2; 1)");
     // a width that does not divide the length names both numbers
@@ -144,11 +144,13 @@ fn the_count_and_the_header_alone_are_retired() {
     }
     let e = refuse("= @(1..6) | #(@(a; b; c))");
     assert!(
-        e.contains("'#(@(a; b; c))' alone is retired") && e.contains("#(--header=@(a; b; c))"),
+        e.contains("'#(@(a; b; c))' alone is retired") && e.contains("#(--header=@(:a; :b; :c))"),
         "{e}"
     );
-    // a header-only literal in an expression is still the empty frame
-    assert_eq!(one("= #(@(a; b)) | header"), r#"%(a = "text"; b = "text")"#);
+    // a lone list of names is a header of no rows (draft 166): refused
+    // with the pointer at the option
+    let e = refuse("= #(@(a; b)) | header");
+    assert!(e.contains("alone is retired") && e.contains("#(--header=@(:a; :b))"), "{e}");
 }
 
 #[test]

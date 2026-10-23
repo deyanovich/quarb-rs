@@ -83,9 +83,9 @@ fn a_text_takes_the_right_sides_text() {
 
 #[test]
 fn null_on_either_side_is_null_and_other_kinds_are_refused() {
-    assert_eq!(run("= null ++ 1").unwrap(), vec![""]);
-    assert_eq!(run("= @(1) ++ null").unwrap(), vec![""]);
-    assert_eq!(run("= null ++! %(a = 1)").unwrap(), vec![""]);
+    assert_eq!(run("= null ++ 1").unwrap(), vec!["null"]);
+    assert_eq!(run("= @(1) ++ null").unwrap(), vec!["null"]);
+    assert_eq!(run("= null ++! %(a = 1)").unwrap(), vec!["null"]);
     assert!(refuse("= 1 ++ 2").contains("takes no concatenation"));
     assert!(refuse("= true ++ @(1)").contains("takes no concatenation"));
 }

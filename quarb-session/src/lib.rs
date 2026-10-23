@@ -82,6 +82,22 @@ impl Cell {
             Cell::Value(v) => v.display_form(),
         }
     }
+
+    /// The line under a session's settings: a value the setting
+    /// covers prints through `pretty` (`session(--pretty=…)`, draft
+    /// 166), the rest as `display`.
+    pub fn display_in(&self, session: Option<&quarb::SessionMemory>) -> String {
+        if let (Cell::Value(v), Some(memory)) = (self, session) {
+            let (mode, precision) = {
+                let s = memory.borrow();
+                (s.pretty, s.precision)
+            };
+            if mode.applies(v) {
+                return quarb::pretty_value(v, precision);
+            }
+        }
+        self.display()
+    }
 }
 
 /// The materialization + query substrate. Implementations run a query
@@ -92,6 +108,12 @@ impl Cell {
 /// cross a process boundary (the daemon) as plain text.
 pub trait Executor {
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>>;
+
+    /// The session memory the executor runs with, when it keeps one
+    /// (the local executor does; a daemon's lives in the daemon).
+    fn session_memory(&self) -> Option<quarb::SessionMemory> {
+        None
+    }
 
     /// The unresolved external references the last `run` recorded:
     /// identifiers (URLs, for html) of documents queries referenced

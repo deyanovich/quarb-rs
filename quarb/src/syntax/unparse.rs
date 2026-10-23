@@ -37,6 +37,34 @@ pub fn unparse(query: &Query) -> String {
         }
         return out;
     }
+    // `session(--pretty=always) | …` — the session command heads the
+    // query on the root (draft 166), its words bare
+    if let [branch] = query.branches.as_slice()
+        && branch.steps.is_empty()
+        && branch.projection.is_none()
+        && matches!(branch.anchor, crate::syntax::ast::Anchor::Root)
+        && query.correlations.is_empty()
+        && let Some((Command::Func(call), rest)) = query.pipeline.split_first()
+        && call.name == "session"
+    {
+        let opts: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| match a {
+                Arg::Opt { name, value: Some(Operand::Lit(Value::Str(w))) } => format!("{name}={}", name_text(w)),
+                Arg::Opt { name, value: Some(Operand::Lit(v)) } => format!("{name}={}", v.to_quarb()),
+                Arg::Opt { name, value: None } => name.clone(),
+                Arg::Opt { name, value: Some(v) } => format!("{name}={}", operand(v)),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        let mut out = if opts.is_empty() { "session".to_string() } else { format!("session({})", opts.join("; ")) };
+        for command_ast in rest {
+            out.push(' ');
+            out.push_str(&command(command_ast));
+        }
+        return out;
+    }
     let n = query.correlations.len();
     // The join prints where it binds: the driver's commands before
     // `join_at` precede the `<=>` entries, the rest follow them.
@@ -514,6 +542,15 @@ pub(crate) fn predicate(p: &Predicate) -> String {
             format!("[{f}..{t}]")
         }
         Predicate::Expr(e) => format!("[{}]", pred_expr(e)),
+        Predicate::Positions(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|p| predicate(p).trim_matches(['[', ']']).to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Predicate::Computed(o) => format!("[{}]", operand(o)),
     }
 }
 
@@ -637,18 +674,36 @@ fn cmp(op: CmpOp) -> &'static str {
 /// `#(--width=3)` / `#(--header=@(a; b; c))` — the reshape's
 /// option, long, the header's names bare.
 fn reshape_text(call: &crate::syntax::ast::FnCall) -> String {
-    match &call.args[0] {
-        Arg::Lit(Value::List(names)) => format!(
-            "#(--header=@({}))",
+    let index = call.args.iter().find_map(|a| match a {
+        Arg::Opt { name, value: Some(v) } if name == "--index" => Some(format!("--index={}", operand(v))),
+        _ => None,
+    });
+    let main = call.args.iter().find(|a| !matches!(a, Arg::Opt { .. }));
+    let head = match main {
+        Some(Arg::Lit(Value::List(names))) => Some(format!(
+            "--header=@({})",
             names
                 .iter()
-                .map(|n| name_text(&n.to_string()))
+                .map(|n| match n {
+                    p @ Value::Projection { .. } => p.to_quarb(),
+                    n => name_text(&n.to_string()),
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
-        ),
-        Arg::Lit(v) => format!("#(--width={})", v.to_quarb()),
-        _ => fn_call(call),
-    }
+        )),
+        Some(Arg::Lit(v)) => Some(format!("--width={}", v.to_quarb())),
+        Some(_) => return fn_call(call),
+        None => None,
+    };
+    // `--name=word` — the header's name (draft 166), bare where a word
+    let name = call.args.iter().find_map(|a| match a {
+        Arg::Opt { name, value: Some(Operand::Lit(Value::Str(s))) } if name == "--name" => {
+            Some(format!("--name={}", name_text(s)))
+        }
+        _ => None,
+    });
+    let parts: Vec<String> = head.into_iter().chain(index).chain(name).collect();
+    format!("#({})", parts.join("; "))
 }
 
 pub(crate) fn operand_text(o: &Operand) -> String {
@@ -726,11 +781,45 @@ pub(crate) fn operand(o: &Operand) -> String {
             let inner: Vec<String> = items
                 .iter()
                 .map(|(n, e)| match n {
-                    Some(n) => format!("{n} = {}", body_text(e)),
+                    Some(n) => format!("{} = {}", row_key_text(n), body_text(e)),
                     None => body_text(e),
                 })
                 .collect();
             format!("%({})", inner.join("; "))
+        }
+        Operand::Desc(inner) => format!("-{}", operand(inner)),
+        Operand::Spread(inner) => format!("{}...", operand(inner)),
+        Operand::Projected { base, shape } => {
+            let b = match **base {
+                Operand::Arith { .. } | Operand::Concat { .. } | Operand::Coalesce { .. } => {
+                    parens(&operand(base))
+                }
+                _ => operand(base),
+            };
+            match shape {
+                crate::syntax::ast::ProjShape::Value(v) => match &**v {
+                    Operand::List(_) | Operand::Recall(_) => format!("{b}:{}", operand(v)),
+                    Operand::Piped { expr, commands }
+                        if matches!(**expr, Operand::Topic)
+                            && matches!(commands.as_slice(), [Command::Func(c)] if c.name == "rec") =>
+                    {
+                        format!("{b}:{}", operand(v))
+                    }
+                    other => format!("{b}:({})", operand(other)),
+                },
+                crate::syntax::ast::ProjShape::Columns { items, index } => format!(
+                    "{b}:#({})",
+                    items
+                        .iter()
+                        .map(|(k, o)| match k {
+                            Some(k) => format!("{k} = {}", operand(o)),
+                            None => operand(o),
+                        })
+                        .chain(index.iter().map(|i| format!("--index={}", operand(i))))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            }
         }
         Operand::Neg(inner) => format!(
             "- {}",
@@ -751,6 +840,16 @@ pub(crate) fn operand(o: &Operand) -> String {
             Operand::Topic => format!(":{name}"),
             _ => format!("{}:{name}", operand(base)),
         },
+        Operand::LabelIndex { base, labels } => format!(
+            "{}[[{}]]",
+            operand(base),
+            labels.iter().map(body_text).collect::<Vec<_>>().join("; ")
+        ),
+        // `:A<int>`; the bare trait body of `map` is the brackets alone
+        Operand::Typed { inner, typing } => match **inner {
+            Operand::Topic => typing.spelling(),
+            _ => format!("{}{}", operand(inner), typing.spelling()),
+        },
         Operand::ValueMeta { base, key } => format!("{}:{key}", operand(base)),
         Operand::PeerReg { at, reg: r } => {
             format!("{}:{}", operand(at), reg(r).trim_start_matches('$'))
@@ -764,15 +863,23 @@ pub(crate) fn operand(o: &Operand) -> String {
             format!("{} ?? {}", body_text(left), body_text(right))
         }
         Operand::Index { base, rows, cols } => {
-            let spec = |s: &crate::syntax::ast::IndexSpec| match s {
-                crate::syntax::ast::IndexSpec::At(n) => n.to_string(),
-                crate::syntax::ast::IndexSpec::Range(a, b) => format!(
-                    "{}..{}",
-                    a.map(|x| x.to_string()).unwrap_or_default(),
-                    b.map(|x| x.to_string()).unwrap_or_default()
-                ),
-                crate::syntax::ast::IndexSpec::Name(n) => literal(&Value::Str(n.clone())),
-            };
+            fn spec(s: &crate::syntax::ast::IndexSpec) -> String {
+                match s {
+                    crate::syntax::ast::IndexSpec::At(n) => n.to_string(),
+                    crate::syntax::ast::IndexSpec::Range(a, b) => format!(
+                        "{}..{}",
+                        a.map(|x| x.to_string()).unwrap_or_default(),
+                        b.map(|x| x.to_string()).unwrap_or_default()
+                    ),
+                    crate::syntax::ast::IndexSpec::Name(n) => literal(&Value::Str(n.clone())),
+                    crate::syntax::ast::IndexSpec::List(items)
+                    | crate::syntax::ast::IndexSpec::Coords(items) => {
+                        items.iter().map(spec).collect::<Vec<_>>().join("; ")
+                    }
+                    crate::syntax::ast::IndexSpec::Expr(o) => operand(o),
+                    crate::syntax::ast::IndexSpec::Cond(e) => pred_expr(e),
+                }
+            }
             match cols {
                 Some(c) => format!("{}[{}; {}]", body_text(base), spec(rows), spec(c)),
                 None => format!("{}[{}]", body_text(base), spec(rows)),
@@ -794,7 +901,7 @@ pub(crate) fn operand(o: &Operand) -> String {
                 let inner: Vec<String> = row
                     .iter()
                     .map(|(n, e)| match n {
-                        Some(n) => format!("{n} = {}", body_text(e)),
+                        Some(n) => format!("{} = {}", row_key_text(n), body_text(e)),
                         None => body_text(e),
                     })
                     .collect();
@@ -860,6 +967,18 @@ pub(crate) fn operand(o: &Operand) -> String {
         Operand::CtxTable => "#_".to_string(),
         Operand::Piped { expr, commands } if matches!(**expr, Operand::Seed) => {
             parens(&headless(commands))
+        }
+        // `value:::key` — the glued descriptor (draft 166)
+        Operand::Piped { expr, commands }
+            if let [Command::Expr(Operand::Rel {
+                steps,
+                projection: Some(Projection::AdapterMeta(key)),
+                anchor: crate::pipeline::Anchor::Current,
+            })] = commands.as_slice()
+                && steps.is_empty()
+                && !matches!(**expr, Operand::Seed) =>
+        {
+            format!("{}:::{key}", operand(expr))
         }
         Operand::Piped { expr, commands } => {
             let tail: Vec<String> = commands.iter().map(command).collect();
@@ -1097,6 +1216,25 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Func(call) if call.name == "#" && !call.args.is_empty() => {
             format!("| {}", reshape_text(call))
         }
+        // `| [2]`, `| [2..4]`, `| [2; 4]`, `| [$.pos]` — the bracket
+        // command prints as its brackets.
+        Command::Func(call) if call.name == "[]" => format!(
+            "| [{}]",
+            call.args
+                .iter()
+                .map(|a| match a {
+                    crate::syntax::ast::Arg::Lit(v) => literal(v),
+                    crate::syntax::ast::Arg::Range(f, t) => format!(
+                        "{}..{}",
+                        f.map(|x| x.to_string()).unwrap_or_default(),
+                        t.map(|x| x.to_string()).unwrap_or_default()
+                    ),
+                    crate::syntax::ast::Arg::Expr(e) => operand(e),
+                    other => arg_text(other),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
         Command::Func(call) => format!("| {}", fn_call(call)),
         // `%%(...)`: the record sigil's enriched register view.
         Command::RecordWith(call) => format!("| %%{}", record_args(call, "; ")),
@@ -1203,7 +1341,16 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Select(p) => format!("@| {}", predicate(p)),
         Command::Filter(e) => format!("| [{}]", pred_expr(e)),
         Command::Recall(r) => format!("| {}", reg(r)),
+        Command::Splice(r) => format!("| &{}", reg(r)),
+        Command::SessionPush(name) => format!("| ,{name}"),
     }
+}
+
+/// A row literal's key as written: quoted where the marker says it
+/// was (`'2013-01-01' = 5`), bare otherwise.
+fn row_key_text(name: &str) -> String {
+    let (text, quoted) = crate::syntax::ast::row_key(name);
+    if quoted { crate::value::quarb_string(text) } else { text.to_string() }
 }
 
 fn is_record_call(name: &str) -> bool {
@@ -1249,13 +1396,21 @@ fn record_args(call: &crate::syntax::ast::FnCall, sep: &str) -> String {
     let mut i = 0;
     while i < call.args.len() {
         match &call.args[i] {
-            Arg::Lit(Value::Str(k)) if i + 1 < call.args.len() => {
-                let key = if is_bare_key(k) {
-                    k.clone()
-                } else {
-                    literal(&Value::Str(k.clone()))
+            // a text key bare or quoted, a typed key as its literal;
+            // a declared field prints its trait on the key
+            Arg::Lit(Value::Str(_)) | Arg::Key(_) if i + 1 < call.args.len() => {
+                let key = match &call.args[i] {
+                    Arg::Lit(Value::Str(k)) if is_bare_key(k) => k.clone(),
+                    Arg::Lit(Value::Str(k)) => literal(&Value::Str(k.clone())),
+                    Arg::Key(k) => k.to_quarb(),
+                    _ => unreachable!(),
                 };
-                out.push(format!("{key} = {}", arg_text(&call.args[i + 1])));
+                match &call.args[i + 1] {
+                    Arg::Expr(Operand::Typed { inner, typing }) => {
+                        out.push(format!("{key}{} = {}", typing.spelling(), body_text(inner)));
+                    }
+                    value => out.push(format!("{key} = {}", arg_text(value))),
+                }
                 i += 2;
             }
             a => {
@@ -1282,6 +1437,11 @@ fn grouped(text: String) -> String {
 
 /// A headless body pipeline's text: the commands with the first
 /// one's pipe dropped (`cc`, `unique @| count`).
+/// A quarq's canonical spelling: its body headless in `q(…)`.
+pub(crate) fn quarq_source(commands: &[crate::syntax::ast::Command]) -> String {
+    format!("q({})", headless(commands))
+}
+
 fn headless(commands: &[crate::syntax::ast::Command]) -> String {
     let tail: Vec<String> = commands.iter().map(command).collect();
     let text = tail.join(" ");
@@ -1302,6 +1462,8 @@ pub(crate) fn body_text(op: &Operand) -> String {
 fn arg_text(a: &Arg) -> String {
     match a {
         Arg::Lit(v) => literal(v),
+        // a record's typed key prints as the literal it is
+        Arg::Key(v) => literal(v),
         Arg::Expr(e) => body_text(e),
         Arg::Range(a, b) => format!(
             "{}..{}",
@@ -1386,6 +1548,8 @@ pub(crate) fn reg(r: &RegRef) -> String {
         RegRef::Index(n) => format!("$.{n}"),
         RegRef::Back(n) => format!("$.-{n}"),
         RegRef::Named(n) => format!("$.{n}"),
+        RegRef::Session(n) => format!("$,{n}"),
+        RegRef::SessionRecord => "%,".to_string(),
         RegRef::Whole => "@.".to_string(),
         RegRef::Record => "%.".to_string(),
         RegRef::FullRecord => "%.*".to_string(),
