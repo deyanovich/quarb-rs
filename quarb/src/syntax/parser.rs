@@ -5117,13 +5117,12 @@ impl Parser<'_> {
         }
         let axis = self.axis()?;
         if matches!(self.peek(), Some(Token::LParen)) {
-            // `->(a && !b)`: the label algebra, when the parentheses
-            // hold an operator of it; a plain alternation `->(a|b)`
+            // `/(*.rs && !test_*)`, `->(a && !b)`: the name algebra
+            // on any axis (spec: Name algebra), when the parentheses
+            // hold a connective of it; a plain alternation `/(a|b)`
             // stays the path-pattern group it always was.
-            if matches!(axis, Axis::OutLink | Axis::InLink | Axis::BothLink)
-                && self.label_algebra_ahead()
-            {
-                let labels = self.label_selection()?;
+            if self.name_algebra_ahead() {
+                let labels = self.name_selection(&axis)?;
                 let mut step = self.finish_step(axis, Matcher::Any)?;
                 step.labels = labels;
                 if matches!(self.peek(), Some(Token::Quant { .. })) {
@@ -5443,15 +5442,25 @@ impl Parser<'_> {
         })
     }
 
-    /// Whether the `(` ahead opens a label algebra rather than a
-    /// path-pattern group: an `&&`, `||` or `!` (or their words)
-    /// somewhere before its closing `)`. A plain alternation has
+    /// Whether the `(` ahead opens a name algebra rather than a
+    /// path-pattern group: an `&&` or `||` (or their words), or a
+    /// `!` leading a designator, before its closing `)` — outside
+    /// the brackets of a predicate and the angles of a trait block,
+    /// whose own connectives are theirs. A plain alternation has
     /// none and stays a group.
-    fn label_algebra_ahead(&self) -> bool {
+    fn name_algebra_ahead(&self) -> bool {
         let mut depth = 0usize;
+        let mut bracket = 0usize;
+        let mut angle = 0usize;
         let mut i = self.pos;
         while let Some(t) = self.toks.get(i) {
             match t {
+                Token::LBracket => bracket += 1,
+                Token::RBracket => bracket = bracket.saturating_sub(1),
+                _ if bracket > 0 => {}
+                Token::Lt { .. } => angle += 1,
+                Token::Gt { .. } => angle = angle.saturating_sub(1),
+                _ if angle > 0 => {}
                 Token::LParen => depth += 1,
                 Token::RParen => {
                     depth -= 1;
@@ -5459,7 +5468,15 @@ impl Parser<'_> {
                         return false;
                     }
                 }
-                Token::AmpAmp | Token::PipePipe | Token::Bang => return true,
+                Token::AmpAmp | Token::PipePipe => return true,
+                Token::Bang
+                    if matches!(
+                        self.toks.get(i - 1),
+                        Some(Token::LParen | Token::AmpAmp | Token::PipePipe | Token::Pipe)
+                    ) =>
+                {
+                    return true;
+                }
                 Token::Name {
                     text,
                     quoted: false,
@@ -5481,21 +5498,30 @@ impl Parser<'_> {
         false
     }
 
-    /// Parse `(expr)` after a crosslink arrow: the label algebra —
-    /// `||` or `|` (OR), `&&` (AND), tight `!` (NOT), parentheses,
-    /// wildcards in the labels — normalized to CNF like a trait
-    /// filter, one [`LabelClause`] per conjunct.
-    fn label_selection(&mut self) -> Result<Vec<LabelClause>> {
+    /// Parse `(expr)` after a navigation operator: the name algebra
+    /// (spec: Name algebra) — `||` or `|` (OR), `&&` (AND), tight `!`
+    /// (NOT), parentheses, the designators names, globs and regex
+    /// literals — normalized to CNF like a trait filter, one
+    /// [`LabelClause`] per conjunct. After a crosslink arrow it is
+    /// the label selection, read over the labels.
+    fn name_selection(&mut self, axis: &Axis) -> Result<Vec<LabelClause>> {
         self.pos += 1; // consume '('
+        let what = if axis.is_link() {
+            "a label selection holds label names joined by '&&', '||' and '!': ->(a && !b)"
+        } else {
+            "a name algebra holds designators — names, globs and regex literals — \
+             joined by '&&', '||' and a leading '!': /(*.rs && !test_*)"
+        };
         let Some(expr) = self.label_or() else {
-            return Err(QuarbError::parse(
-                "a label selection holds label names joined by '&&', '||' and '!': ->(a && !b)",
-            ));
+            return Err(QuarbError::parse(what));
         };
         if !matches!(self.peek(), Some(Token::RParen)) {
-            return Err(QuarbError::parse(
-                "expected ')' closing the label selection",
-            ));
+            return Err(match self.peek() {
+                Some(Token::Name { .. } | Token::Regex(_)) => QuarbError::parse(format!(
+                    "two designators stand joined by '&&' or '||', spaced: {what}"
+                )),
+                _ => QuarbError::parse(format!("expected ')' closing the parenthesis: {what}")),
+            });
         }
         self.pos += 1;
         let clauses = trait_cnf(expr)?;
@@ -5510,10 +5536,16 @@ impl Parser<'_> {
                             Some(n) => (true, n),
                             None => (false, alt.as_str()),
                         };
-                        Ok(LabelAlt {
-                            neg,
-                            matcher: matcher_for(name, false)?,
-                        })
+                        let matcher = if let Some(pat) = name.strip_prefix(REGEX_MARK) {
+                            Regex::new(pat).map(Matcher::Regex).map_err(|e| {
+                                QuarbError::parse(format!("bad regex '/{pat}/': {e}"))
+                            })?
+                        } else if let Some(text) = name.strip_prefix(QUOTED_MARK) {
+                            Matcher::Name(text.to_string())
+                        } else {
+                            matcher_for(name, false)?
+                        };
+                        Ok(LabelAlt { neg, matcher })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(LabelClause { alts })
@@ -5556,10 +5588,19 @@ impl Parser<'_> {
             return Some(TExpr::Not(Box::new(self.label_not()?)));
         }
         match self.peek() {
-            Some(Token::Name { text, .. }) => {
-                let name = text.clone();
+            Some(Token::Name { text, quoted, .. }) => {
+                let name = if *quoted {
+                    format!("{QUOTED_MARK}{text}")
+                } else {
+                    text.clone()
+                };
                 self.pos += 1;
                 Some(TExpr::Has(name))
+            }
+            Some(Token::Regex(pat)) => {
+                let pat = format!("{REGEX_MARK}{pat}");
+                self.pos += 1;
+                Some(TExpr::Has(pat))
             }
             Some(Token::LParen) => {
                 self.pos += 1;
@@ -9119,6 +9160,13 @@ fn arith_word(text: &str) -> Option<ArithOp> {
         _ => return None,
     })
 }
+
+/// The marks a name algebra's designators carry through the CNF
+/// normalizer, whose literals are strings: a regex designator's
+/// body, and a quoted name (taken literally, never as a glob).
+/// Neither character occurs in a designator.
+const REGEX_MARK: char = '\u{1}';
+const QUOTED_MARK: char = '\u{2}';
 
 /// A trait boolean expression, as parsed; normalized to CNF
 /// before it leaves the parser.

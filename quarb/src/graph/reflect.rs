@@ -236,8 +236,10 @@ impl QueryArbor {
                 "matcher-kind".to_string(),
                 Value::Str(if s.labels.is_empty() {
                     matcher_kind(&s.matcher).to_string()
-                } else {
+                } else if s.axis.is_link() {
                     "labels".to_string()
+                } else {
+                    "algebra".to_string()
                 }),
             ),
             ("leaf".to_string(), Value::Bool(s.leaf)),

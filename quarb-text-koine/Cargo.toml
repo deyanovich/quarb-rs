@@ -7,14 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-quarb-text = { path = "../quarb-text", version = "0.43.0" }
+quarb-text = { path = "../quarb-text", version = "0.44.0" }
 atrep = { version = "0.3.10", default-features = false, features = ["docx"] }
 flate2.workspace = true
 thiserror = "2"
 quick-xml = "0.37"
 
 [dev-dependencies]
-quarb-text-docx = { path = "../quarb-text-docx", version = "0.43.0" }
+quarb-text-docx = { path = "../quarb-text-docx", version = "0.44.0" }
 flate2.workspace = true
 regex = "1"
-quarb = { path = "../quarb", version = "0.43.0" }
+quarb = { path = "../quarb", version = "0.44.0" }

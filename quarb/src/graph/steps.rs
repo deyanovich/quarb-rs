@@ -1931,7 +1931,24 @@ pub(crate) fn indexable_equality(e: &PredExpr) -> Option<(&str, &Value)> {
 }
 
 pub(crate) fn matches_step(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
-    matches_name(adapter, node, &step.matcher) && tests_ok(adapter, node, step)
+    matches_name(adapter, node, &step.matcher)
+        && algebra_ok(adapter, node, step)
+        && tests_ok(adapter, node, step)
+}
+
+/// Whether `node` passes the name algebra of a step on a node axis
+/// (`/(*.rs && !test_*)`, spec: Name algebra): every clause holds
+/// of the node's name, the complement read among the hop's own
+/// candidates, which is where the caller stands. A crosslink hop
+/// reads its labels instead (`select_links`), and a step without
+/// an algebra passes.
+pub(crate) fn algebra_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
+    step.axis.is_link()
+        || step.labels.iter().all(|c| {
+            c.alts
+                .iter()
+                .any(|a| matches_name(adapter, node, &a.matcher) != a.neg)
+        })
 }
 
 /// The nameless part of `matches_step` (trait filters and the leaf

@@ -298,6 +298,10 @@ enum Opener {
     RoundedTrait,
     /// `[`
     Bracket,
+    /// `(` directly after a navigation operator holding the name
+    /// algebra (`&&`, `||`, a leading `!`): a bare `/…/` inside is
+    /// a regex designator. A nested paren inherits it.
+    NameAlgebra,
 }
 
 /// Whether a dash at this point is the edge accessor's own name —
@@ -474,6 +478,104 @@ fn after_axis(tokens: &[Token]) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether the paren opening at `i`, directly after a navigation
+/// operator, holds the name algebra (spec: Name algebra): a `&&` or
+/// `||` connective, or a `!` leading a designator (first in the
+/// paren or right after a connective), before the balancing `)`,
+/// outside any `[…]` predicate or `<…>` trait block and outside
+/// quotes. A single `|` keeps the path alternation; the content of
+/// brackets is a predicate's own. The lookahead stays on the line.
+fn name_algebra_ahead(chars: &[char], i: usize) -> bool {
+    let mut depth = 0usize;
+    let mut bracket = 0usize;
+    let mut in_trait = false;
+    let mut prev = '(';
+    let mut j = i;
+    while let Some(&c) = chars.get(j) {
+        match c {
+            '\n' => return false,
+            '"' | '\'' => {
+                // skip the quoted name
+                let mut k = j + 1;
+                while let Some(&d) = chars.get(k) {
+                    if d == '\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if d == c {
+                        break;
+                    }
+                    k += 1;
+                }
+                j = k + 1;
+                prev = 'q';
+                continue;
+            }
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            '<' if bracket == 0 => in_trait = true,
+            '>' if bracket == 0 => in_trait = false,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return false;
+                }
+            }
+            '&' if bracket == 0 && !in_trait && chars.get(j + 1) == Some(&'&') => return true,
+            '|' if bracket == 0 && !in_trait && chars.get(j + 1) == Some(&'|') => return true,
+            '!' if bracket == 0
+                && !in_trait
+                && depth == 1
+                && matches!(prev, '(' | '&' | '|')
+                && !matches!(chars.get(j + 1), Some('=' | '~')) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        if !c.is_whitespace() {
+            prev = c;
+        }
+        j += 1;
+    }
+    false
+}
+
+/// Read a bare `/…/` regex designator of the name algebra opening
+/// at `i`: the body up to the next unescaped slash on the line;
+/// `\/` is a literal slash. Returns the body and the index past
+/// the closing slash.
+fn regex_designator(chars: &[char], i: usize) -> Result<(String, usize)> {
+    let mut body = String::new();
+    let mut j = i + 1;
+    while let Some(&c) = chars.get(j) {
+        match c {
+            '\n' => break,
+            '\\' if chars.get(j + 1) == Some(&'/') => {
+                body.push('/');
+                j += 2;
+            }
+            '\\' => {
+                body.push('\\');
+                if let Some(&n) = chars.get(j + 1) {
+                    body.push(n);
+                }
+                j += 2;
+            }
+            '/' => return Ok((body, j + 1)),
+            _ => {
+                body.push(c);
+                j += 1;
+            }
+        }
+    }
+    Err(QuarbError::lex(
+        "a regex designator in a name algebra closes with '/' on its line: \
+         '/(/^[a-z]/ && !/_test$/)'",
+    ))
 }
 
 /// Read a `(/…/)` regex literal opening at `i`: the body up to a
@@ -690,6 +792,19 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // substitution command. `\/` escapes a literal slash.
             's' if at(i + 1) == Some('/') && matches!(tokens.last(), Some(Token::Pipe)) => {
                 i = lex_subst(&chars, i, &mut tokens)?
+            }
+            // A regex designator of the name algebra: `/…/` bare in
+            // designator position, closing at the next unescaped
+            // slash on the line.
+            '/' if matches!(openers.last(), Some(Opener::NameAlgebra))
+                && matches!(
+                    tokens.last(),
+                    Some(Token::LParen | Token::Bang | Token::AmpAmp | Token::PipePipe)
+                ) =>
+            {
+                let (body, next) = regex_designator(&chars, i)?;
+                tokens.push(Token::Regex(body));
+                i = next;
             }
             '/' if at(i + 1) == Some('/') => {
                 tokens.push(Token::SlashSlash);
@@ -1445,6 +1560,25 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     "'((_N))' is retired: the joined node is '((N))', the driver '((0))'",
                 ));
             }
+            // `(a && !b)` directly after a navigation operator — the
+            // name algebra (spec: Name algebra): designators joined
+            // by `&&`, `||` and a leading `!`. Inside it a bare
+            // `/…/` is a regex designator, so
+            // `/(/^[a-z]/ && !/_test$/)` is two regexes and not one
+            // literal closing at its last `/)`. A nested paren stays
+            // in the algebra. A single `|` between subpaths is the
+            // path alternation and takes none of this. Before the
+            // id anchor: `/((!a || b) && c)` opens a nested clause,
+            // and an anchor never follows an operator.
+            '(' if matches!(openers.last(), Some(Opener::NameAlgebra))
+                || (after_axis(&tokens)
+                    && !after_call_head(&tokens, glued)
+                    && name_algebra_ahead(&chars, i)) =>
+            {
+                openers.push(Opener::NameAlgebra);
+                tokens.push(Token::LParen);
+                i += 1;
+            }
             // `((!expr))` — the node-id anchor: the
             // node whose id the expression yields (`((!7))`,
             // `((!$.v:%origin:id))`), stood on; a list forks.
@@ -1595,7 +1729,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                             before: false,
                         });
                     }
-                    Some(Opener::Paren) => {
+                    Some(Opener::Paren | Opener::NameAlgebra) => {
                         openers.pop();
                         tokens.push(Token::RParen);
                     }

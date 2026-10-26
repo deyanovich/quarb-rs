@@ -190,7 +190,14 @@ fn step_record(i: usize, p: &PStep, staged: bool) -> qt::Step {
                 r.matcherkind = Some(matcher_kind(&s.matcher).into());
             } else {
                 r.matcher = Some(unparse::labels(&s.labels));
-                r.matcherkind = Some("labels".into());
+                r.matcherkind = Some(
+                    if s.axis.is_link() {
+                        "labels"
+                    } else {
+                        "algebra"
+                    }
+                    .into(),
+                );
             }
             r.predicate = predicates_text(&s.predicates);
         }

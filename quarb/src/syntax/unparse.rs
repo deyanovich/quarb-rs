@@ -449,7 +449,14 @@ pub(crate) fn labels(clauses: &[crate::syntax::ast::LabelClause]) -> String {
     let clause = |c: &crate::syntax::ast::LabelClause| -> String {
         c.alts
             .iter()
-            .map(|a| format!("{}{}", if a.neg { "!" } else { "" }, matcher(&a.matcher)))
+            .map(|a| {
+                // a regex designator stands bare inside the algebra
+                let m = match &a.matcher {
+                    Matcher::Regex(r) => format!("/{}/", r.as_str().replace('/', "\\/")),
+                    m => matcher(m),
+                };
+                format!("{}{}", if a.neg { "!" } else { "" }, m)
+            })
             .collect::<Vec<_>>()
             .join(" || ")
     };

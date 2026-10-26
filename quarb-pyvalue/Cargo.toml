@@ -11,5 +11,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.43.0" }
+quarb = { path = "../quarb", version = "0.44.0" }
 pyo3 = { version = "0.28", features = ["abi3-py38"] }

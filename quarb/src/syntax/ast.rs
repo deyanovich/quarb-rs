@@ -572,8 +572,13 @@ pub struct Quant {
 pub struct Step {
     pub axis: Axis,
     pub matcher: Matcher,
-    /// The label selection of a crosslink hop, `->(a && !b)`;
-    /// empty when the matcher alone names the label.
+    /// The name algebra (spec: Name algebra): designators joined
+    /// by `&&`, `||` and a leading `!`, in CNF. On a crosslink hop
+    /// it is the label selection, `->(a && !b)`, read over the
+    /// labels; on every other axis it reads the node's name,
+    /// `/(*.rs && !test_*)`, the complement among the hop's own
+    /// candidates. Empty when the matcher alone names the hop; the
+    /// matcher is `Any` when it is set.
     pub labels: Vec<LabelClause>,
     /// `<...>` trait filters. Multiple clauses are ANDed together.
     pub traits: Vec<TraitClause>,
@@ -1174,12 +1179,13 @@ impl TraitClause {
     }
 }
 
-/// One conjunct of a crosslink label selection — `->(a && !b)`,
-/// spec: Label Selections — its alternatives OR'd, each a label
-/// pattern, negated or not. A step's clauses are ANDed, as a
-/// trait's are. The selection reads the labels a crosslink carries
-/// together: `(a && b)` is one crosslink labeled both ways. `*` is
-/// any label; every crosslink carries one, so `!*` selects nothing.
+/// One conjunct of a name algebra — `/(*.rs && !test_*)`,
+/// `->(a && !b)`, spec: Name algebra — its alternatives OR'd, each
+/// a designator (a name, a glob, a regex), negated or not. A step's
+/// clauses are ANDed, as a trait's are. On a crosslink hop the
+/// selection reads the labels a crosslink carries together:
+/// `(a && b)` is one crosslink labeled both ways. `*` is any
+/// label or name, so `!*` selects nothing.
 #[derive(Debug, Clone)]
 pub struct LabelClause {
     pub alts: Vec<LabelAlt>,
@@ -1199,6 +1205,14 @@ impl LabelClause {
             let hit = labels.iter().any(|l| a.matcher.matches(l));
             hit != a.neg
         })
+    }
+}
+
+impl Axis {
+    /// A crosslink axis: the step's matcher and name algebra read
+    /// the edge labels, not the node's name.
+    pub fn is_link(&self) -> bool {
+        matches!(self, Axis::OutLink | Axis::InLink | Axis::BothLink)
     }
 }
 
