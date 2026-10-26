@@ -161,8 +161,5 @@ fn an_aliased_node_forwards_base_provenance() {
     // An aliased node IS its base row under a role: it answers the
     // base's provenance (none here — sqlite records none), never a
     // model:/ derivation stamp.
-    assert_eq!(
-        values(&a, "/deploys/deploy[::rev = 'b2']:source"),
-        vec![""]
-    );
+    assert_eq!(values(&a, "/deploys/deploy[::rev = 'b2']:source"), vec![""]);
 }

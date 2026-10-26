@@ -916,7 +916,19 @@ impl AstAdapter for MetathecaAdapter {
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["short", "n-facts", "seq", "blob", "size", "n-paths", "first-at", "last-at", "hash", "state", "state-short"]
+        &[
+            "short",
+            "n-facts",
+            "seq",
+            "blob",
+            "size",
+            "n-paths",
+            "first-at",
+            "last-at",
+            "hash",
+            "state",
+            "state-short",
+        ]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

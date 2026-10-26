@@ -883,7 +883,14 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     && !after_push_dot(&chars, i)
                     && !matches!(
                         tokens.last(),
-                        Some(Token::LParen | Token::Semi | Token::Comma | Token::At | Token::OptEq | Token::ProjectColon)
+                        Some(
+                            Token::LParen
+                                | Token::Semi
+                                | Token::Comma
+                                | Token::At
+                                | Token::OptEq
+                                | Token::ProjectColon
+                        )
                     )
                 {
                     return Err(QuarbError::lex(
@@ -1148,7 +1155,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             '_' if at(i + 1).is_some_and(|c| c.is_alphabetic())
                 && (i == 0
                     || !(is_name_char(chars[i - 1])
-                        || matches!(chars[i - 1], '/' | ':' | '\\' | '>' | '-' | '\'' | '"' | '@' | '$'))) =>
+                        || matches!(
+                            chars[i - 1],
+                            '/' | ':' | '\\' | '>' | '-' | '\'' | '"' | '@' | '$'
+                        ))) =>
             {
                 let mut j = i + 1;
                 while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
@@ -1223,7 +1233,9 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     || matches!(chars[i - 1], ')' | ']' | '}' | '"' | '\''))
                 && ((matches!(at(i + 1), Some('@' | '%' | '#')) && at(i + 2) == Some('('))
                     || (at(i + 1) == Some('(')
-                        && !(at(i + 2) == Some('*') && at(i + 3) == Some('.') && at(i + 4) == Some(')')))
+                        && !(at(i + 2) == Some('*')
+                            && at(i + 3) == Some('.')
+                            && at(i + 4) == Some(')')))
                     || (at(i + 1) == Some('$') && at(i + 2) == Some('.'))) =>
             {
                 tokens.push(Token::ProjectColon);
@@ -1603,7 +1615,9 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     && at(i + 1).is_none_or(|c| !c.is_alphanumeric())) =>
             {
                 let mut j = i + 1;
-                while j < chars.len() && (chars[j].is_alphanumeric() || matches!(chars[j], '_' | '-')) {
+                while j < chars.len()
+                    && (chars[j].is_alphanumeric() || matches!(chars[j], '_' | '-'))
+                {
                     j += 1;
                 }
                 let text: String = chars[i..j].iter().collect();
@@ -1973,7 +1987,8 @@ fn lex_colons(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>
         // ':::' — adapter metadata. The shaped core reads moved
         // to the single colon (':%provenance', ':@origin').
         Some(':') => {
-            if matches!(at(i + 3), Some('%' | '@')) && at(i + 4).is_some_and(|c| c.is_alphabetic()) {
+            if matches!(at(i + 3), Some('%' | '@')) && at(i + 4).is_some_and(|c| c.is_alphabetic())
+            {
                 return Err(QuarbError::lex(
                     "':::%provenance' is retired: the shaped reads are ':%provenance', \
                      ':@provenance', ':%origin' and ':@origin'",
@@ -2496,7 +2511,12 @@ mod glued_operator_tests {
             "got {toks:?}"
         );
         // A non-digit target still lexes as the crosslink.
-        assert!(lex("a<-b").unwrap().iter().any(|t| matches!(t, Token::ArrowIn { rounded: false })));
+        assert!(
+            lex("a<-b")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::ArrowIn { rounded: false }))
+        );
     }
 
     #[test]
@@ -2658,7 +2678,15 @@ mod glued_operator_tests {
 
     #[test]
     fn projection_operator_lexes() {
-        for q in ["$_:$.p", "$.t:$.p", "$_:#(:A)", "$_:@(:A; 1)", "t:%(:A)", "//x:$.cols", "$_[..2]:#(:A)"] {
+        for q in [
+            "$_:$.p",
+            "$.t:$.p",
+            "$_:#(:A)",
+            "$_:@(:A; 1)",
+            "t:%(:A)",
+            "//x:$.cols",
+            "$_[..2]:#(:A)",
+        ] {
             let toks = lex(q).unwrap();
             eprintln!("{q}: {toks:?}");
             assert!(
@@ -2676,7 +2704,12 @@ mod glued_operator_tests {
             glued: true,
         };
         // reverse arrows: `-:` / `--:` are `<-` / `<--`
-        assert!(lex("/a-:b").unwrap().iter().any(|t| matches!(t, Token::ArrowIn { rounded: true })));
+        assert!(
+            lex("/a-:b")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::ArrowIn { rounded: true }))
+        );
         assert!(lex("/a--:b").unwrap().contains(&Token::ReverseResolve));
         // the edge accessors keep their dash
         assert_eq!(
@@ -2798,11 +2831,23 @@ mod glued_operator_tests {
         // glued to a hop, a dashed or worded body is the trait
         assert!(matches!(
             lex("//x(:stage-direction)").unwrap().as_slice(),
-            [_, Token::Name { .. }, Token::Lt { spaced: false, .. }, Token::Name { .. }, ..]
+            [
+                _,
+                Token::Name { .. },
+                Token::Lt { spaced: false, .. },
+                Token::Name { .. },
+                ..
+            ]
         ));
         assert!(matches!(
             lex("//x(:word and not punct)").unwrap().as_slice(),
-            [_, Token::Name { .. }, Token::Lt { spaced: false, .. }, Token::Name { .. }, ..]
+            [
+                _,
+                Token::Name { .. },
+                Token::Lt { spaced: false, .. },
+                Token::Name { .. },
+                ..
+            ]
         ));
         // root anchor: `(())` is `^`; a glued `()` stays a call's parens
         assert_eq!(
@@ -3410,9 +3455,15 @@ mod regex_and_search_tests {
         // `//user(:admin)` glued is the rounded trait; `= (:name)`
         // spaced is a value group on the core read.
         let toks = lex("//user(:admin)").unwrap();
-        assert!(toks.iter().any(|t| matches!(t, Token::Lt { .. })), "got {toks:?}");
+        assert!(
+            toks.iter().any(|t| matches!(t, Token::Lt { .. })),
+            "got {toks:?}"
+        );
         let toks = lex("/a | %(n = (:name); :::size)").unwrap();
-        assert!(!toks.iter().any(|t| matches!(t, Token::Lt { .. })), "got {toks:?}");
+        assert!(
+            !toks.iter().any(|t| matches!(t, Token::Lt { .. })),
+            "got {toks:?}"
+        );
         assert!(toks.contains(&Token::Field), "got {toks:?}");
     }
 
@@ -3424,7 +3475,11 @@ mod regex_and_search_tests {
         assert!(toks.contains(&Token::AtAt), "got {toks:?}");
         let toks = lex("/x | @ @| first(2)").unwrap();
         assert!(!toks.contains(&Token::AtAt), "got {toks:?}");
-        assert_eq!(toks.iter().filter(|t| **t == Token::At).count(), 2, "got {toks:?}");
+        assert_eq!(
+            toks.iter().filter(|t| **t == Token::At).count(),
+            2,
+            "got {toks:?}"
+        );
     }
 
     #[test]

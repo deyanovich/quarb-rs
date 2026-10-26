@@ -166,7 +166,13 @@ impl AstAdapter for XlsxAdapter {
         // the workbook's words replace the relational model's kind
         // (database/table/row/cell); its other traits follow
         let mut out = vec![kind.to_string()];
-        out.extend(self.model.traits(node).into_iter().skip(1).filter(|t| t != kind));
+        out.extend(
+            self.model
+                .traits(node)
+                .into_iter()
+                .skip(1)
+                .filter(|t| t != kind),
+        );
         out
     }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {

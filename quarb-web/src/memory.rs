@@ -114,7 +114,12 @@ pub(crate) fn redirect_target(doc: &scraper::Html) -> Option<String> {
     for s in doc.select(&script) {
         let text: String = s.text().collect();
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        let sends = ["location.replace(", "location.href", "location.assign(", "location="];
+        let sends = [
+            "location.replace(",
+            "location.href",
+            "location.assign(",
+            "location=",
+        ];
         if !sends.iter().any(|p| compact.contains(p)) {
             continue;
         }

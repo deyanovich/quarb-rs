@@ -8,10 +8,8 @@
 use quarb::{QueryResult, Value};
 
 fn doc() -> quarb_json::JsonAdapter {
-    quarb_json::JsonAdapter::parse(
-        r#"{"rows":[{"k":"a","x":1},{"k":"b","x":3},{"k":"a","x":5}]}"#,
-    )
-    .unwrap()
+    quarb_json::JsonAdapter::parse(r#"{"rows":[{"k":"a","x":1},{"k":"b","x":3},{"k":"a","x":5}]}"#)
+        .unwrap()
 }
 
 fn run(q: &str) -> quarb::Result<Vec<String>> {
@@ -41,7 +39,10 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
     assert_eq!(one("= 5 | + 1"), "6");
     // a surplus `$_` gets the pointer, as written
     let e = refuse("= 3.14159 | round($_; 2)");
-    assert!(e.contains("round reads its input from the pipe: write | round(2)"), "{e}");
+    assert!(
+        e.contains("round reads its input from the pipe: write | round(2)"),
+        "{e}"
+    );
     // a command that takes no operand, written with a parenthesis
     // after a pipe, is the call operand it is anywhere else (draft
     // 166): `upper($_)` is `($_ | upper)`, `upper("b")` is `("b" | upper)`
@@ -50,9 +51,15 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
     assert_eq!(one("= 1 | date(2013-01-01) + 1_d"), "2013-01-02");
     // a reducer keeps its refusal: the key goes through --of
     let e = refuse("= @(1; 2) | sum($_)");
-    assert!(e.contains("sum reads its input from the pipe: write | sum"), "{e}");
+    assert!(
+        e.contains("sum reads its input from the pipe: write | sum"),
+        "{e}"
+    );
     let e = refuse("/rows/* | ::x @| count($_)");
-    assert!(e.contains("count reads its input from the pipe: write @| count"), "{e}");
+    assert!(
+        e.contains("count reads its input from the pipe: write @| count"),
+        "{e}"
+    );
     // any other surplus is refused with the synopsis
     let e = refuse("= 3.14159 | round(2; 3)");
     assert!(
@@ -73,7 +80,10 @@ fn inside_an_expression_the_first_argument_is_the_input() {
         "{e}"
     );
     let e = refuse("= count(@(1); 2)");
-    assert!(e.contains("'count' inside an expression takes its input"), "{e}");
+    assert!(
+        e.contains("'count' inside an expression takes its input"),
+        "{e}"
+    );
 }
 
 #[test]

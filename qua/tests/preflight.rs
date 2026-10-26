@@ -243,7 +243,10 @@ fn a_listing_prices_a_size_filter_and_statistics_price_a_key() {
     let (out, err, ok) = qua(&dir, &["--plan", "//*<file>[::size > 40]", "corpus:shelf"]);
     assert!(ok, "{err}");
     assert!(out.contains("nodes-max=0\n"), "{out}");
-    let (out, err, ok) = qua(&dir, &["--plan", "//*<file>[::size > 40_B]", "corpus:shelf"]);
+    let (out, err, ok) = qua(
+        &dir,
+        &["--plan", "//*<file>[::size > 40_B]", "corpus:shelf"],
+    );
     assert!(ok, "{err}");
     assert!(out.contains("trait=file"), "{out}");
     // Priced by the listing, still the engine's to run.

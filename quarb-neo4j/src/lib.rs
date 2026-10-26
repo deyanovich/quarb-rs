@@ -625,11 +625,8 @@ impl AstAdapter for Neo4jAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["out-degree"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let nodes = self.nodes.borrow();

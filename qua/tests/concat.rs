@@ -192,7 +192,12 @@ fn after_a_pipe_the_topic_is_the_left_side() {
 
 #[test]
 fn the_append_pipe_is_retired_with_a_pointer() {
-    for q in ["= @(1) +| 2", "= %(a = 1) +|! %(a = 2)", "= @(1) +__ 2", "= @(1) +__! 2"] {
+    for q in [
+        "= @(1) +| 2",
+        "= %(a = 1) +|! %(a = 2)",
+        "= @(1) +__ 2",
+        "= @(1) +__! 2",
+    ] {
         let e = refuse(q);
         assert!(e.contains("'+|' is retired: write '| ++ x'"), "{q}: {e}");
     }

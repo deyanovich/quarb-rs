@@ -51,10 +51,7 @@ fn the_doors() {
     );
     // The plain mount keeps the XML: the Chinese names as written.
     assert_eq!(
-        ok(
-            &dir,
-            &["//*[:name = \"字:文本串\"]:: @| first", "emma.uot"]
-        ),
+        ok(&dir, &["//*[:name = \"字:文本串\"]:: @| first", "emma.uot"]),
         "Chapter I"
     );
 }

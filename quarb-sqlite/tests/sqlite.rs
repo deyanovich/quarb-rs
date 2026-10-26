@@ -61,8 +61,14 @@ fn cells_carry_their_columns_type_traits() {
     assert_eq!(values("/tracks/1:kind"), ["row"]);
     assert_eq!(values("/tracks:kind"), ["table"]);
     assert_eq!(values("/tracks/1/*<number> @| count"), ["4"]);
-    assert_eq!(values("/tracks/1/*<integer>:name @| join(\", \")"), ["id, album_id, secs"]);
-    assert_eq!(values("/tracks/*/*<string> @| count"), values("/tracks/* @| count"));
+    assert_eq!(
+        values("/tracks/1/*<integer>:name @| join(\", \")"),
+        ["id, album_id, secs"]
+    );
+    assert_eq!(
+        values("/tracks/*/*<string> @| count"),
+        values("/tracks/* @| count")
+    );
     assert_eq!(values("/tracks:traits"), ["table"]);
     assert_eq!(values("/tracks/1:traits"), ["row"]);
 }

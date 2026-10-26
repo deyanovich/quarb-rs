@@ -42,10 +42,7 @@ fn a_folder_of_documents_reads_at_the_text_level() {
     let text = format!("text:{}", dir.display());
 
     // the files and the subfolder, by name
-    assert_eq!(
-        qua(&["/* | :name", &text]),
-        "01-one.md\n02-two.md\npart2\n"
-    );
+    assert_eq!(qua(&["/* | :name", &text]), "01-one.md\n02-two.md\npart2\n");
     // sections across the whole folder, the subfolder included
     assert_eq!(
         qua(&["//section::lemma", &text]),

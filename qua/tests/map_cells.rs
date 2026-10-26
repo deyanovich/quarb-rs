@@ -115,7 +115,9 @@ fn to_restricts_the_mapping() {
         one("= %(a = null; b = 2; c = null) | map(?? 0; --to=[1])"),
         "%(a = 0; b = 2; c = null)"
     );
-    let e = run(&format!("{T} | map(?? 0; --to=:zz)")).unwrap_err().to_string();
+    let e = run(&format!("{T} | map(?? 0; --to=:zz)"))
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("no column 'zz'"), "{e}");
 }
 

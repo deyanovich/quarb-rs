@@ -52,12 +52,21 @@ fn the_head_sigil_is_optional_before_a_value_only_token() {
 fn scalar_commands_broadcast_one_level_deep() {
     assert_eq!(one(r#"@("A"; "b") | lower"#), r#"@("a"; "b")"#);
     assert_eq!(one("@(1.26; 2.5) | round(1)"), "@(1.3; 2.5)");
-    assert_eq!(one(r#"%(a = "X"; b = "y") | upper"#), r#"%(a = "X"; b = "Y")"#);
-    assert_eq!(one(r#"#(@(a; b); %("x"; 1)) | upper"#), "#(@(a; b);\n  %(\"X\"; 1))");
+    assert_eq!(
+        one(r#"%(a = "X"; b = "y") | upper"#),
+        r#"%(a = "X"; b = "Y")"#
+    );
+    assert_eq!(
+        one(r#"#(@(a; b); %("x"; 1)) | upper"#),
+        "#(@(a; b);\n  %(\"X\"; 1))"
+    );
     // one level: a nested list is handed to the command whole
     assert_eq!(one("@(@(1.26); 2.5) | round(1)"), "@(null; 2.5)");
     // an index column stands
-    assert_eq!(one(r#"#(@(d; a); %("k"; "x")) | #(-i=:d) | upper | :::index"#), r#"@("k")"#);
+    assert_eq!(
+        one(r#"#(@(d; a); %("k"; "x")) | #(-i=:d) | upper | :::index"#),
+        r#"@("k")"#
+    );
     // an expanding command's values gather per item
     assert_eq!(one(r#"@("a b"; "c") | words"#), r#"@(@("a"; "b"); "c")"#);
     // the null guard broadcasts as `??` does, the substitution as `lower`
@@ -70,8 +79,14 @@ fn scalar_commands_broadcast_one_level_deep() {
 
 #[test]
 fn a_reducer_over_records_of_one_shape_goes_column_by_column() {
-    assert_eq!(one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | mean"), "%(a = 2; b = 3)");
-    assert_eq!(one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | sum"), "%(a = 4; b = 6)");
+    assert_eq!(
+        one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | mean"),
+        "%(a = 2; b = 3)"
+    );
+    assert_eq!(
+        one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | sum"),
+        "%(a = 4; b = 6)"
+    );
     // a list it cannot read answers null, printed
     assert_eq!(one(r#"@("a"; %(x = 1)) | mean"#), "null");
     assert_eq!(one("null"), "null");
@@ -80,7 +95,10 @@ fn a_reducer_over_records_of_one_shape_goes_column_by_column() {
 
 #[test]
 fn pretty_prints_records_of_one_shape_as_the_grid() {
-    assert_eq!(one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | pretty"), "a  b\n-  -\n1  2\n3  4");
+    assert_eq!(
+        one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | pretty"),
+        "a  b\n-  -\n1  2\n3  4"
+    );
     assert_eq!(
         one("@(%(a = 1; b = 2); %(a = 3; c = 4)) | pretty"),
         "@(%(a = 1;\n    b = 2);\n  %(a = 3;\n    c = 4))"
@@ -94,7 +112,10 @@ fn nulls_counts_the_null_fields() {
     assert_eq!(one(&format!("{T} | nulls")), "@(1; 2; 0)");
     assert_eq!(one(&format!("{T} | [nulls = 0] | dim")), "@(1; 2)");
     assert_eq!(one(&format!("{T} | [nulls < 2] | dim")), "@(2; 2)");
-    assert_eq!(one("@(%(a = 1; b = null); %(a = 1; b = 2)) @| nulls"), "@(1; 0)");
+    assert_eq!(
+        one("@(%(a = 1; b = null); %(a = 1; b = 2)) @| nulls"),
+        "@(1; 0)"
+    );
 }
 
 #[test]
@@ -126,11 +147,17 @@ fn a_descriptor_glues_to_a_value() {
     assert_eq!(one(&format!("{T} | $_:::index")), "@(1; 4)");
     assert_eq!(one(&format!("{T} | $_:::dim")), "@(2; 3)");
     assert_eq!(one(&format!("{T} | .t | $.t:::nrows + 1")), "3");
-    assert_eq!(one(&format!("{T} | %(k = $_:::keys; n = $_:::ncols)")), r#"%(k = @("d"; "a"; "b"); n = 3)"#);
+    assert_eq!(
+        one(&format!("{T} | %(k = $_:::keys; n = $_:::ncols)")),
+        r#"%(k = @("d"; "a"; "b"); n = 3)"#
+    );
     assert_eq!(one("%(a = 1) | $_:::type"), "record");
     // (the session read `$,t:::header` rides the same arm; the test
     // runner has no session memory, so a register stands in)
-    assert_eq!(one(&format!("{T} | .t | $.t:::header")), "@(:d<*; int>; :a<*; int>; :b<*; int>)");
+    assert_eq!(
+        one(&format!("{T} | .t | $.t:::header")),
+        "@(:d<*; int>; :a<*; int>; :b<*; int>)"
+    );
     let e = refuse("%(a = 1) | $_:::zzz");
     assert!(e.contains("retired"), "{e}");
     // the canonical text keeps the glued spelling
@@ -144,14 +171,23 @@ fn the_matrix_form_of_the_table_literal() {
     // Construction, draft 166); a headerless table prints as its lists
     assert_eq!(one("#(@(1; 2); @(3; 4))"), "#(@(1; 2);\n  @(3; 4))");
     assert_eq!(one("#(@(1; 2); @(3; 4)) | :::dim"), "@(2; 2)");
-    assert_eq!(one("#(@(1; 2); @(3; 4)) | header"), "@(:1<*; int>; :2<*; int>)");
-    assert_eq!(one("#(@(1; 2); @(3; 4)) | transpose"), "#(@(1; 3);\n  @(2; 4))");
+    assert_eq!(
+        one("#(@(1; 2); @(3; 4)) | header"),
+        "@(:1<*; int>; :2<*; int>)"
+    );
+    assert_eq!(
+        one("#(@(1; 2); @(3; 4)) | transpose"),
+        "#(@(1; 3);\n  @(2; 4))"
+    );
     // a single list of numbers alone is a one-row matrix
     assert_eq!(one("#(@(1; 2)) | :::dim"), "@(1; 2)");
     // positional records stay rows, printing as the matrix they are
     assert_eq!(one("#(%(1; 2); %(3; 4))"), "#(@(1; 2);\n  @(3; 4))");
     // a list followed by records is the header, as before
-    assert_eq!(one(r#"#(@(name; age); %("Braund"; 22)) | header"#), "@(:name<*; text>; :age<*; int>)");
+    assert_eq!(
+        one(r#"#(@(name; age); %("Braund"; 22)) | header"#),
+        "@(:name<*; text>; :age<*; int>)"
+    );
     // the rows are of one sigil
     assert!(refuse("#(%(1; 2); @(3; 4))").contains("a list after a record row"));
     assert!(refuse("#(@(1; 2); @(3; 4); %(5; 6))").contains("a record after a matrix row"));
@@ -167,20 +203,42 @@ fn the_header_has_a_name_and_transpose_exchanges_it_with_the_index() {
     assert_eq!(one(&format!("{T} | :::name")), "letters");
     assert_eq!(one(&format!("{T} | $_:::name")), "letters");
     assert_eq!(one("@(1; 2) | #(--header=@(:a; :b)) | :::name"), "null");
-    assert_eq!(one("@(1; 2) | #(--header=@(:a; :b)) | #(--name=letters) | :::name"), "letters");
-    assert_eq!(one("@(1; 2) | #(--header=@(:a; :b); --name=column) | :::name"), "null");
+    assert_eq!(
+        one("@(1; 2) | #(--header=@(:a; :b)) | #(--name=letters) | :::name"),
+        "letters"
+    );
+    assert_eq!(
+        one("@(1; 2) | #(--header=@(:a; :b); --name=column) | :::name"),
+        "null"
+    );
     assert_eq!(one(&format!("{T} | [:a > 0] | :::name")), "letters");
     // transpose: the header's name becomes the new index column's,
     // `column` where it has none; the index column's name the header's
-    assert_eq!(one(&format!("{T} | transpose | header")), "@(:letters<*; text>; :1<*; int>)");
+    assert_eq!(
+        one(&format!("{T} | transpose | header")),
+        "@(:letters<*; text>; :1<*; int>)"
+    );
     const D: &str = "#(@(date; A; B); %(2013-01-01; 1; 10); %(2013-01-02; 2; 20)) | #(-i=:date)";
     assert_eq!(one(&format!("{D} | transpose | :::name")), "date");
-    assert_eq!(one(&format!("{D} | transpose | header")), "@(:column<*; text>; :'2013-01-01'<*; int>; :'2013-01-02'<*; int>)");
-    assert_eq!(one(&format!("{D} | transpose | transpose | header")), "@(:date<*; instant>; :A<*; int>; :B<*; int>)");
-    assert_eq!(one(&format!("{D} | transpose | transpose | :::name")), "null");
+    assert_eq!(
+        one(&format!("{D} | transpose | header")),
+        "@(:column<*; text>; :'2013-01-01'<*; int>; :'2013-01-02'<*; int>)"
+    );
+    assert_eq!(
+        one(&format!("{D} | transpose | transpose | header")),
+        "@(:date<*; instant>; :A<*; int>; :B<*; int>)"
+    );
+    assert_eq!(
+        one(&format!("{D} | transpose | transpose | :::name")),
+        "null"
+    );
     // the canonical text keeps the option
     let q = quarb::Query::parse(&format!("= {T}"), &doc()).unwrap();
-    assert!(q.canonical().contains("--name=letters"), "{}", q.canonical());
+    assert!(
+        q.canonical().contains("--name=letters"),
+        "{}",
+        q.canonical()
+    );
 }
 
 #[test]
@@ -190,8 +248,14 @@ fn brackets_glued_to_a_value_take_a_condition() {
     // judged as the topic; header and index kept
     const T: &str = "#(@(d; A; C); %(1; 1; \"x\"); %(2; 2; \"y\"); %(3; 3; \"x\")) | #(-i=:d)";
     assert_eq!(one(&format!("{T} | $_[:A > 1] | :::index")), "@(2; 3)");
-    assert_eq!(one(&format!("{T} | $_[:A > 1] | header")), "@(:d<*; int>; :A<*; int>; :C<*; text>)");
-    assert_eq!(one(&format!("{T} | .t | $.t[:C <<= @(\"x\")] | :::dim")), "@(2; 3)");
+    assert_eq!(
+        one(&format!("{T} | $_[:A > 1] | header")),
+        "@(:d<*; int>; :A<*; int>; :C<*; text>)"
+    );
+    assert_eq!(
+        one(&format!("{T} | .t | $.t[:C <<= @(\"x\")] | :::dim")),
+        "@(2; 3)"
+    );
     assert_eq!(one(&format!("{T} | $_[nulls = 0] | :::dim")), "@(3; 3)");
     assert_eq!(one("@(1; 5; 3) | $_[$_ > 2]"), "@(5; 3)");
     // the index forms stand: a position, a range, a list, a cell, a name
@@ -212,7 +276,10 @@ fn brackets_glued_to_a_value_take_a_condition() {
     let q = quarb::Query::parse("= @(1; 5; 3) | $_[$_ > 2]", &doc()).unwrap();
     assert!(q.canonical().contains("$_[$_ > 2]"), "{}", q.canonical());
     // two tables compare item by item: `t[cond]` and `t | [cond]` agree
-    assert_eq!(one(&format!("{T} | ($_[:A > 1]) = ($_ | [:A > 1])")), "true");
+    assert_eq!(
+        one(&format!("{T} | ($_[:A > 1]) = ($_ | [:A > 1])")),
+        "true"
+    );
 }
 
 #[test]
@@ -225,10 +292,22 @@ fn two_tables_compare_item_by_item() {
     assert_eq!(one("#(@(a); %(1)) = #(@(a); %(2))"), "false");
     assert_eq!(one("#(@(a); %(1)) = #(@(a); %(\"1\"))"), "true");
     assert_eq!(one("#(@(a); %(1); %(2)) = #(@(a); %(1))"), "false");
-    assert_eq!(one("= (#(@(d; a); %(1; 2)) | #(-i=:d)) = (#(@(d; a); %(1; 2)) | #(-i=:d))"), "true");
-    assert_eq!(one("= (#(@(d; a); %(1; 2)) | #(-i=:d)) = #(@(d; a); %(1; 2))"), "false");
-    assert_eq!(one("= (@(1) | #(--header=@(:a<int>))) = (@(1) | #(--header=@(:a)))"), "false");
-    assert_eq!(one("= (@(1) | #(--header=@(:a); --name=x)) = (@(1) | #(--header=@(:a)))"), "true");
+    assert_eq!(
+        one("= (#(@(d; a); %(1; 2)) | #(-i=:d)) = (#(@(d; a); %(1; 2)) | #(-i=:d))"),
+        "true"
+    );
+    assert_eq!(
+        one("= (#(@(d; a); %(1; 2)) | #(-i=:d)) = #(@(d; a); %(1; 2))"),
+        "false"
+    );
+    assert_eq!(
+        one("= (@(1) | #(--header=@(:a<int>))) = (@(1) | #(--header=@(:a)))"),
+        "false"
+    );
+    assert_eq!(
+        one("= (@(1) | #(--header=@(:a); --name=x)) = (@(1) | #(--header=@(:a)))"),
+        "true"
+    );
     assert_eq!(one("#(@(1; 2); @(3; 4)) = #(@(1; 2); @(3; 4))"), "true");
 }
 

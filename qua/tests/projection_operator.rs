@@ -46,19 +46,28 @@ fn the_shape_after_the_colon_reads_on_the_value() {
         "%(n = @(1; 3); k = @(null; 4); fixed = 1)"
     );
     // a bare projection keys its own field
-    assert_eq!(one(&format!("{T} | $_:%(:A; :B)")), "%(A = @(1; 3); B = @(null; 4))");
+    assert_eq!(
+        one(&format!("{T} | $_:%(:A; :B)")),
+        "%(A = @(1; 3); B = @(null; 4))"
+    );
     // the `#` shape: the table of the named columns, still a table
     assert_eq!(one(&format!("{T} | $_:#(:A)")), "#(@(A);\n  %(1);\n  %(3))");
     assert_eq!(
         one(&format!("{T} | $_[..1]:#(:A; s = :B)")),
         "#(@(A; s);\n  %(1; null))"
     );
-    assert_eq!(one(&format!("{T} | $_[2]:#(:A; :B)")), "#(@(A; B);\n  %(3; 4))");
+    assert_eq!(
+        one(&format!("{T} | $_[2]:#(:A; :B)")),
+        "#(@(A; B);\n  %(3; 4))"
+    );
     // on a record and on nodes: one row of the readings
     assert_eq!(one("= %(A = 1; B = 2) | $_:#(:A)"), "#(@(A);\n  %(1))");
     assert_eq!(
         run("/rows/*:#(:index; ::name)").unwrap(),
-        ["#(@(index; name);\n  %(1; \"Iliad\"))", "#(@(index; name);\n  %(2; \"Emma\"))"]
+        [
+            "#(@(index; name);\n  %(1; \"Iliad\"))",
+            "#(@(index; name);\n  %(2; \"Emma\"))"
+        ]
     );
     // (a JSON array names its items by position)
     assert_eq!(
@@ -120,12 +129,19 @@ fn the_spread_item_keys_by_the_bare_keys() {
         one("/rows/*[1]:%(:props...; n = 1)"),
         "%(name = \"Iliad\"; pages = 683; n = 1)"
     );
-    assert_eq!(one("= %(a = 1; b = 2) | $_:%((fields)...)"), "%(a = 1; b = 2)");
-    let e = run("/rows/*[1] | %(::name; :props...)").unwrap_err().to_string();
+    assert_eq!(
+        one("= %(a = 1; b = 2) | $_:%((fields)...)"),
+        "%(a = 1; b = 2)"
+    );
+    let e = run("/rows/*[1] | %(::name; :props...)")
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("share the bare key 'name'"), "{e}");
     // `project` still works through 0.41.x
     // `project` is retired at 0.42.0; `| %` is the node's record
-    let e = run("/rows/*[1] | project(:props; -r)").unwrap_err().to_string();
+    let e = run("/rows/*[1] | project(:props; -r)")
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("'project(…)' is retired"), "{e}");
 }
 
@@ -147,7 +163,10 @@ fn equality_inside_map_and_after_a_pipe() {
         one(&format!("{T} | map($_ = null)")),
         "#(@(A; B);\n  %(false; true);\n  %(false; false))"
     );
-    assert_eq!(one(&format!("{T} | map(= null)")), one(&format!("{T} | map($_ = null)")));
+    assert_eq!(
+        one(&format!("{T} | map(= null)")),
+        one(&format!("{T} | map($_ = null)"))
+    );
     // the comparison does not broadcast
     assert_eq!(one(&format!("{T} | $_ = null")), "false");
     assert_eq!(one("= 5 | $_ = 5 && $_ > 1"), "true");

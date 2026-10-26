@@ -1127,7 +1127,14 @@ impl AstAdapter for AtrepAdapter {
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["short-desc", "long-desc", "form", "keyword", "bracket-matching", "resolved"]
+        &[
+            "short-desc",
+            "long-desc",
+            "form",
+            "keyword",
+            "bracket-matching",
+            "resolved",
+        ]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

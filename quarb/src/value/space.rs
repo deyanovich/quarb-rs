@@ -205,7 +205,10 @@ fn nest_by_levels(fields: Vec<(String, Value)>) -> Value {
         }
     }
     for (o, g) in groups {
-        if let Some(slot) = out.iter_mut().find(|(k, v)| *k == o && matches!(v, Value::Null)) {
+        if let Some(slot) = out
+            .iter_mut()
+            .find(|(k, v)| *k == o && matches!(v, Value::Null))
+        {
             slot.1 = nest_by_levels(g);
         }
     }
@@ -307,7 +310,12 @@ impl Record {
     pub fn key(&self, i: usize) -> Value {
         match self.keys.as_ref().and_then(|k| k.get(i)) {
             Some(k) => k.clone(),
-            None => Value::Str(self.fields.get(i).map(|(k, _)| k.clone()).unwrap_or_default()),
+            None => Value::Str(
+                self.fields
+                    .get(i)
+                    .map(|(k, _)| k.clone())
+                    .unwrap_or_default(),
+            ),
         }
     }
 
@@ -334,17 +342,25 @@ impl Record {
 
     /// The declared type of field `i`, `Some` where it is declared.
     pub fn declaration(&self, i: usize) -> Option<ColumnType> {
-        self.declared.as_ref().and_then(|d| d.get(i)).cloned().flatten()
+        self.declared
+            .as_ref()
+            .and_then(|d| d.get(i))
+            .cloned()
+            .flatten()
     }
 
     /// Whether any field is declared.
     pub fn has_declarations(&self) -> bool {
-        self.declared.as_ref().is_some_and(|d| d.iter().any(Option::is_some))
+        self.declared
+            .as_ref()
+            .is_some_and(|d| d.iter().any(Option::is_some))
     }
 
     /// Field `i` declared `ty` (`None` undeclares it).
     pub fn declare(&mut self, i: usize, ty: Option<ColumnType>) {
-        let d = self.declared.get_or_insert_with(|| vec![None; self.fields.len()]);
+        let d = self
+            .declared
+            .get_or_insert_with(|| vec![None; self.fields.len()]);
         d.resize(self.fields.len(), None);
         d[i] = ty;
         if d.iter().all(Option::is_none) {
@@ -426,9 +442,18 @@ impl Record {
     /// The record with the fields `keep(i)` admits, the keys and
     /// declarations kept in step.
     pub fn filter_fields(self, mut keep: impl FnMut(usize, &(String, Value)) -> bool) -> Record {
-        let kept: Vec<bool> = self.fields.iter().enumerate().map(|(i, f)| keep(i, f)).collect();
+        let kept: Vec<bool> = self
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| keep(i, f))
+            .collect();
         let pick = |v: Vec<Value>| -> Vec<Value> {
-            v.into_iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| x).collect()
+            v.into_iter()
+                .zip(&kept)
+                .filter(|(_, k)| **k)
+                .map(|(x, _)| x)
+                .collect()
         };
         Record {
             fields: self
@@ -440,7 +465,11 @@ impl Record {
                 .collect(),
             keys: self.keys.map(pick),
             declared: self.declared.map(|d| {
-                d.into_iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| x).collect()
+                d.into_iter()
+                    .zip(&kept)
+                    .filter(|(_, k)| **k)
+                    .map(|(x, _)| x)
+                    .collect()
             }),
         }
     }
@@ -602,7 +631,14 @@ impl ColumnType {
             ColumnType::Quantity => "quantity".to_string(),
             ColumnType::Text => "text".to_string(),
             ColumnType::Tuple(items) => {
-                format!("({})", items.iter().map(ColumnType::word).collect::<Vec<_>>().join("; "))
+                format!(
+                    "({})",
+                    items
+                        .iter()
+                        .map(ColumnType::word)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
             }
         }
     }
@@ -616,7 +652,9 @@ impl ColumnType {
                 .split([';', ','])
                 .map(|w| ColumnType::from_word(w.trim()))
                 .collect();
-            return items.filter(|v| !v.is_empty()).map(|v| ColumnType::Tuple(std::sync::Arc::new(v)));
+            return items
+                .filter(|v| !v.is_empty())
+                .map(|v| ColumnType::Tuple(std::sync::Arc::new(v)));
         }
         ColumnType::ORDER.into_iter().find(|t| t.word() == word)
     }
@@ -703,7 +741,11 @@ pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
         if cells.len() != items.len() {
             return None;
         }
-        let cast: Option<Vec<Value>> = cells.iter().zip(items.iter()).map(|(c, ty)| cast_cell(c, ty)).collect();
+        let cast: Option<Vec<Value>> = cells
+            .iter()
+            .zip(items.iter())
+            .map(|(c, ty)| cast_cell(c, ty))
+            .collect();
         return cast.map(Value::list);
     }
     coerce_cell(v, t).or_else(|| match (v, t) {
@@ -846,7 +888,8 @@ impl Table {
     /// one width; the one routine every builder of a table calls.
     /// Every column is undeclared.
     pub fn new(header: Option<Vec<String>>, rows: Vec<Vec<Value>>) -> Table {
-        Table::typed(header, rows, Vec::new()).unwrap_or_else(|_| unreachable!("no column is declared"))
+        Table::typed(header, rows, Vec::new())
+            .unwrap_or_else(|_| unreachable!("no column is declared"))
     }
 
     /// A table built under a declared header (spec: The Table,
@@ -876,7 +919,13 @@ impl Table {
         rows: Vec<Vec<Value>>,
         mut declared: Vec<Option<ColumnType>>,
     ) -> Result<Table, String> {
-        let mut t = Table { header, rows, declared: Vec::new(), index: 0, name: None };
+        let mut t = Table {
+            header,
+            rows,
+            declared: Vec::new(),
+            index: 0,
+            name: None,
+        };
         let w = t.width();
         declared.resize(w, None);
         if declared.iter().all(Option::is_none) {
@@ -955,7 +1004,10 @@ impl Table {
     /// composite index outer first (spec: The Table, "The index"):
     /// the columns moved first in that order, each declared where its
     /// projector declares it, and marked the index.
-    pub fn indexed_by_levels(&self, levels: &[(String, Option<ColumnType>)]) -> Result<Table, String> {
+    pub fn indexed_by_levels(
+        &self,
+        levels: &[(String, Option<ColumnType>)],
+    ) -> Result<Table, String> {
         let w = self.width();
         let mut order: Vec<usize> = Vec::with_capacity(w);
         for (name, _) in levels {
@@ -982,7 +1034,8 @@ impl Table {
             .header
             .as_ref()
             .map(|h| order.iter().map(|k| h[*k].clone()).collect());
-        let mut declared: Vec<Option<ColumnType>> = order.iter().map(|k| self.declaration(*k)).collect();
+        let mut declared: Vec<Option<ColumnType>> =
+            order.iter().map(|k| self.declaration(*k)).collect();
         for (i, (_, ty)) in levels.iter().enumerate() {
             if ty.is_some() {
                 declared[i] = ty.clone();
@@ -991,7 +1044,12 @@ impl Table {
         let rows = self
             .rows
             .iter()
-            .map(|r| order.iter().map(|k| r.get(*k).cloned().unwrap_or(Value::Null)).collect())
+            .map(|r| {
+                order
+                    .iter()
+                    .map(|k| r.get(*k).cloned().unwrap_or(Value::Null))
+                    .collect()
+            })
             .collect();
         Ok(Table::typed(header, rows, declared)?.with_index(n))
     }
@@ -1004,7 +1062,12 @@ impl Table {
             return None;
         }
         if self.index == 1 {
-            return Some(self.rows.iter().map(|r| r.first().cloned().unwrap_or(Value::Null)).collect());
+            return Some(
+                self.rows
+                    .iter()
+                    .map(|r| r.first().cloned().unwrap_or(Value::Null))
+                    .collect(),
+            );
         }
         let names: Vec<String> = (0..self.index).map(|j| self.column_name(j)).collect();
         Some(
@@ -1026,7 +1089,11 @@ impl Table {
     /// A row's label as one name: the levels joined by `:` (a header
     /// path), one level its text.
     pub fn label_name(&self, row: &[Value]) -> String {
-        row[..self.index].iter().map(Record::key_text).collect::<Vec<_>>().join(":")
+        row[..self.index]
+            .iter()
+            .map(Record::key_text)
+            .collect::<Vec<_>>()
+            .join(":")
     }
 
     /// The level names of the index, outer first.
@@ -1061,20 +1128,34 @@ impl Table {
     pub fn sub_columns(&self, prefix: &str) -> Option<Table> {
         let h = self.header.as_ref()?;
         let lead = format!("{prefix}:");
-        let under: Vec<usize> = (self.index..self.width()).filter(|&j| h[j].starts_with(&lead)).collect();
+        let under: Vec<usize> = (self.index..self.width())
+            .filter(|&j| h[j].starts_with(&lead))
+            .collect();
         if under.is_empty() {
             return None;
         }
         let order: Vec<usize> = (0..self.index).chain(under.iter().copied()).collect();
         let header: Vec<String> = order
             .iter()
-            .map(|&j| if j < self.index { h[j].clone() } else { h[j][lead.len()..].to_string() })
+            .map(|&j| {
+                if j < self.index {
+                    h[j].clone()
+                } else {
+                    h[j][lead.len()..].to_string()
+                }
+            })
             .collect();
-        let declared: Vec<Option<ColumnType>> = order.iter().map(|&j| self.declaration(j)).collect();
+        let declared: Vec<Option<ColumnType>> =
+            order.iter().map(|&j| self.declaration(j)).collect();
         let rows: Vec<Vec<Value>> = self
             .rows
             .iter()
-            .map(|r| order.iter().map(|&j| r.get(j).cloned().unwrap_or(Value::Null)).collect())
+            .map(|r| {
+                order
+                    .iter()
+                    .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
+                    .collect()
+            })
             .collect();
         Some(
             Table::typed(Some(header), rows, declared)
@@ -1085,7 +1166,9 @@ impl Table {
 
     /// Whether the header has levels: a column name with a colon.
     pub fn header_has_levels(&self) -> bool {
-        self.header.as_ref().is_some_and(|h| h[self.index..].iter().any(|n| n.contains(':')))
+        self.header
+            .as_ref()
+            .is_some_and(|h| h[self.index..].iter().any(|n| n.contains(':')))
     }
 
     /// `stack` (spec: The Table, "Levels of the header"): the innermost
@@ -1097,7 +1180,10 @@ impl Table {
         if self.index == 0 {
             return Err("stack moves the header's innermost level into the index, and the table has no index: name one with #(-i=:col)".into());
         }
-        let h = self.header.clone().unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
+        let h = self
+            .header
+            .clone()
+            .unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
         let data: Vec<usize> = (self.index..self.width()).collect();
         // the innermost level of each data column's name, and what
         // stands before it
@@ -1121,7 +1207,11 @@ impl Table {
         let mut header: Vec<String> = h[..self.index].to_vec();
         header.push("variable".to_string());
         let new_cols: Vec<Option<String>> = outers.clone();
-        header.extend(new_cols.iter().map(|o| o.clone().unwrap_or_else(|| "value".to_string())));
+        header.extend(
+            new_cols
+                .iter()
+                .map(|o| o.clone().unwrap_or_else(|| "value".to_string())),
+        );
         let mut rows: Vec<Vec<Value>> = Vec::new();
         for r in &self.rows {
             for inner in &inner_values {
@@ -1132,7 +1222,11 @@ impl Table {
                         Some(o) => format!("{o}:{inner}"),
                         None => inner.clone(),
                     };
-                    let cell = h.iter().position(|n| *n == name).and_then(|j| r.get(j).cloned()).unwrap_or(Value::Null);
+                    let cell = h
+                        .iter()
+                        .position(|n| *n == name)
+                        .and_then(|j| r.get(j).cloned())
+                        .unwrap_or(Value::Null);
                     row.push(cell);
                 }
                 rows.push(row);
@@ -1149,7 +1243,10 @@ impl Table {
         if self.index == 0 {
             return Err("unstack moves the index's innermost level into the header, and the table has no index level to move".into());
         }
-        let h = self.header.clone().unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
+        let h = self
+            .header
+            .clone()
+            .unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
         let k = self.index - 1;
         let data: Vec<usize> = (self.index..self.width()).collect();
         let mut values: Vec<Value> = Vec::new();
@@ -1162,7 +1259,11 @@ impl Table {
         let mut header: Vec<String> = h[..k].to_vec();
         for &j in &data {
             for v in &values {
-                header.push(if data.len() == 1 { Record::key_text(v) } else { format!("{}:{}", h[j], Record::key_text(v)) });
+                header.push(if data.len() == 1 {
+                    Record::key_text(v)
+                } else {
+                    format!("{}:{}", h[j], Record::key_text(v))
+                });
             }
         }
         // one row per distinct outer label, in first-met order
@@ -1199,23 +1300,36 @@ impl Table {
     /// remains.
     pub fn sub_table(&self, rows: &[usize], k: usize) -> Table {
         let header = self.header.as_ref().map(|h| h[k..].to_vec());
-        let declared: Vec<Option<ColumnType>> = (k..self.width()).map(|j| self.declaration(j)).collect();
+        let declared: Vec<Option<ColumnType>> =
+            (k..self.width()).map(|j| self.declaration(j)).collect();
         let body: Vec<Vec<Value>> = rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect();
         Table::typed(header, body, declared)
-            .unwrap_or_else(|_| Table::new(self.header.as_ref().map(|h| h[k..].to_vec()), rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect()))
+            .unwrap_or_else(|_| {
+                Table::new(
+                    self.header.as_ref().map(|h| h[k..].to_vec()),
+                    rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect(),
+                )
+            })
             .with_index(self.index.saturating_sub(k))
     }
 
     /// The rows carrying `label`, compared as a value against the
     /// index's type (a text label cast to it where it reads).
     pub fn rows_labelled(&self, label: &Value) -> Vec<usize> {
-        let Some(labels) = self.labels() else { return Vec::new() };
+        let Some(labels) = self.labels() else {
+            return Vec::new();
+        };
         let ty = self.types().first().cloned();
         let wanted = match ty {
             Some(t) => cast_cell(label, &t).unwrap_or_else(|| label.clone()),
             None => label.clone(),
         };
-        labels.iter().enumerate().filter(|(_, l)| **l == wanted).map(|(i, _)| i).collect()
+        labels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| **l == wanted)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// A column by name as the table answers it: on an indexed table
@@ -1225,9 +1339,14 @@ impl Table {
     pub fn column_value(&self, name: &str) -> Result<Value, String> {
         let Some(list) = self.column(name) else {
             // `t:bar` on a header with levels: the columns under the name
-            return Ok(self.sub_columns(name).map(Value::table).unwrap_or(Value::Null));
+            return Ok(self
+                .sub_columns(name)
+                .map(Value::table)
+                .unwrap_or(Value::Null));
         };
-        let Some(labels) = self.labels() else { return Ok(list) };
+        let Some(labels) = self.labels() else {
+            return Ok(list);
+        };
         let mut seen: Vec<&Value> = Vec::with_capacity(labels.len());
         for l in &labels {
             if seen.contains(&l) {
@@ -1241,14 +1360,12 @@ impl Table {
         }
         let cells = list.into_items().unwrap_or_default();
         if self.index == 1 {
-            return Ok(Value::Record(Record::keyed(labels.into_iter().zip(cells).collect())));
+            return Ok(Value::Record(Record::keyed(
+                labels.into_iter().zip(cells).collect(),
+            )));
         }
         // a composite index nests the record level by level
-        let levels: Vec<Vec<Value>> = self
-            .rows
-            .iter()
-            .map(|r| r[..self.index].to_vec())
-            .collect();
+        let levels: Vec<Vec<Value>> = self.rows.iter().map(|r| r[..self.index].to_vec()).collect();
         Ok(nest_levels(&levels, &cells, 0))
     }
 
@@ -1258,11 +1375,15 @@ impl Table {
     /// ordering, a walk that cannot change a cell's type).
     pub fn with_rows(&self, rows: Vec<Vec<Value>>) -> Table {
         if self.declared.is_empty() {
-            return Table::new(self.header.clone(), rows).with_index(self.index).with_name(self.name.clone());
+            return Table::new(self.header.clone(), rows)
+                .with_index(self.index)
+                .with_name(self.name.clone());
         }
         match Table::typed(self.header.clone(), rows.clone(), self.declared.clone()) {
             Ok(t) => t.with_index(self.index).with_name(self.name.clone()),
-            Err(_) => Table::new(self.header.clone(), rows).with_index(self.index).with_name(self.name.clone()),
+            Err(_) => Table::new(self.header.clone(), rows)
+                .with_index(self.index)
+                .with_name(self.name.clone()),
         }
     }
 
@@ -1318,7 +1439,13 @@ impl Table {
         } else {
             coerced.chunks(w).map(|c| c.to_vec()).collect()
         };
-        Table { header: None, rows, declared: Vec::new(), index: 0, name: None }
+        Table {
+            header: None,
+            rows,
+            declared: Vec::new(),
+            index: 0,
+            name: None,
+        }
     }
 
     /// The column types, one per column: the type of the cells as
@@ -1445,7 +1572,9 @@ impl Table {
             let fields: Vec<(String, Value)> = (self.index..self.width())
                 .map(|j| {
                     let name = self.column_name(j);
-                    let v = self.column_value(&name).unwrap_or_else(|_| self.column_at(j));
+                    let v = self
+                        .column_value(&name)
+                        .unwrap_or_else(|_| self.column_at(j));
                     (name, v)
                 })
                 .collect();
@@ -1667,7 +1796,9 @@ impl Value {
     /// other value.
     pub fn declared_type(&self) -> Option<ColumnType> {
         match self {
-            Value::Projection { typing: Some(t), .. } => t.declared(),
+            Value::Projection {
+                typing: Some(t), ..
+            } => t.declared(),
             _ => None,
         }
     }
@@ -1958,7 +2089,11 @@ impl Value {
             Value::Table(t) => t.to_quarb(),
             // A library value has no Quarb form that reads back; its
             // text is the object's own display.
-            Value::Projection { ladder, key, typing } => Value::projector_spelling(*ladder, key, typing.as_ref()),
+            Value::Projection {
+                ladder,
+                key,
+                typing,
+            } => Value::projector_spelling(*ladder, key, typing.as_ref()),
             Value::Quarq(q) => q.source.clone(),
             other => other.to_string(),
         }
@@ -1987,7 +2122,11 @@ impl Value {
             // a query shows reads back as what it says
             Value::Null => "null".to_string(),
             Value::List(_) | Value::Record(_) => self.to_quarb(),
-            Value::Projection { ladder, key, typing } => Value::projector_spelling(*ladder, key, typing.as_ref()),
+            Value::Projection {
+                ladder,
+                key,
+                typing,
+            } => Value::projector_spelling(*ladder, key, typing.as_ref()),
             Value::Quarq(q) => q.source.clone(),
             Value::Table(t) => t.to_quarb_lines(),
             other => other.to_string(),
@@ -2031,9 +2170,11 @@ impl Value {
             },
             // The locator text: no JSON form keeps nodeness.
             Value::Node(n) => json_string(&n.locator),
-            Value::Projection { ladder, key, typing } => {
-                json_string(&Value::projector_spelling(*ladder, key, typing.as_ref()))
-            }
+            Value::Projection {
+                ladder,
+                key,
+                typing,
+            } => json_string(&Value::projector_spelling(*ladder, key, typing.as_ref())),
             // The source text: no JSON form keeps a quarq.
             Value::Quarq(q) => json_string(&q.source),
         }
@@ -2246,18 +2387,20 @@ impl SortKey {
             // put before -inf); two NaNs are equal.
             // The dimensionless line first, then the dimensions in
             // text order; magnitudes meet only within one line.
-            (Line(a, i, da), Line(b, j, db)) => da.cmp(db).then_with(|| match (a.is_nan(), b.is_nan()) {
-                (true, true) => i.cmp(j),
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                (false, false) => {
-                    if *a == 0.0 && *b == 0.0 {
-                        i.cmp(j)
-                    } else {
-                        a.total_cmp(b).then(i.cmp(j))
+            (Line(a, i, da), Line(b, j, db)) => {
+                da.cmp(db).then_with(|| match (a.is_nan(), b.is_nan()) {
+                    (true, true) => i.cmp(j),
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => {
+                        if *a == 0.0 && *b == 0.0 {
+                            i.cmp(j)
+                        } else {
+                            a.total_cmp(b).then(i.cmp(j))
+                        }
                     }
-                }
-            }),
+                })
+            }
             (Period(a, g), Period(b, h)) => a.cmp(b).then(g.cmp(h)),
             (Text(a), Text(b)) | (ListText(a), ListText(b)) | (RecordText(a), RecordText(b)) => {
                 a.cmp(b)
@@ -2509,8 +2652,16 @@ pub fn pretty_float(f: f64, precision: usize) -> String {
     match fixed.split_once('.') {
         Some((whole, frac)) => {
             let frac = frac.trim_end_matches('0');
-            let whole = if whole == "-0" && frac.is_empty() { "0" } else { whole };
-            if frac.is_empty() { whole.to_string() } else { format!("{whole}.{frac}") }
+            let whole = if whole == "-0" && frac.is_empty() {
+                "0"
+            } else {
+                whole
+            };
+            if frac.is_empty() {
+                whole.to_string()
+            } else {
+                format!("{whole}.{frac}")
+            }
         }
         None => fixed,
     }

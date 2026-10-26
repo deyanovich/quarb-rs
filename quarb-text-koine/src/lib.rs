@@ -202,7 +202,11 @@ pub fn detect_xml_kind(text: &str) -> Option<&'static str> {
                     .attributes()
                     .flatten()
                     .find(|a| a.key.as_ref() == b"xmlns")
-                    .and_then(|a| a.decode_and_unescape_value(decoder).ok().map(|v| v.to_string()));
+                    .and_then(|a| {
+                        a.decode_and_unescape_value(decoder)
+                            .ok()
+                            .map(|v| v.to_string())
+                    });
                 if let Some(ns) = xmlns.as_deref() {
                     match ns {
                         "http://www.tei-c.org/ns/1.0" => return Some("tei"),

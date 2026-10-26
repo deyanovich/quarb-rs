@@ -67,7 +67,9 @@ fn a_keyed_aggregate_ranks_the_rows_of_one_table() {
     // the chain of stable sorts, least significant first, is the
     // same ranking
     assert_eq!(
-        one(&format!("{TABLE} @| sort_by(:pages; --desc) @| sort_by(:name)")),
+        one(&format!(
+            "{TABLE} @| sort_by(:pages; --desc) @| sort_by(:name)"
+        )),
         table(&[EMMA, HAMLET, ILIAD])
     );
     assert_eq!(
@@ -120,7 +122,10 @@ fn the_ordering_reductions_read_the_rows() {
     // a keyless sort has no column: refused with the pointer
     for q in [format!("{TABLE} | sort"), format!("{TABLE} @| sort")] {
         let e = run(&q).unwrap_err().to_string();
-        assert!(e.contains("sorts by a column") && e.contains("sort_by(:col; --desc)"), "{q}: {e}");
+        assert!(
+            e.contains("sorts by a column") && e.contains("sort_by(:col; --desc)"),
+            "{q}: {e}"
+        );
     }
 }
 
@@ -148,7 +153,9 @@ fn desc_on_values_and_the_option_checks() {
     );
     let e = run("/rows/* @| sort_by(--desc)").unwrap_err().to_string();
     assert!(e.contains("needs value-expression keys"), "{e}");
-    let e = run("/rows/* @| sort_by(::pages; --nope)").unwrap_err().to_string();
+    let e = run("/rows/* @| sort_by(::pages; --nope)")
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("--desc"), "{e}");
 }
 
@@ -188,7 +195,10 @@ fn the_glued_minus_descends_on_one_key_of_any_type() {
         run("/rows/*[1..3] @| top(2; -::pages) | ::name").unwrap(),
         vec!["Hamlet", "Emma"]
     );
-    assert_eq!(run("/rows/*[1] | %(n = -::pages)").unwrap(), vec!["%(n = -683)"]);
+    assert_eq!(
+        run("/rows/*[1] | %(n = -::pages)").unwrap(),
+        vec!["%(n = -683)"]
+    );
     let e = run("/rows/*[1] | ::pages -::year").unwrap_err().to_string();
     assert!(e.contains("spaced on both sides"), "{e}");
 }

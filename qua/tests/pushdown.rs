@@ -120,7 +120,10 @@ fn a_json_path_pushes_only_as_declared() {
     let (out, err) = qua(&dir, q);
     assert_eq!(out, "");
     assert_eq!(scan(q), "");
-    assert!(!err.contains("json_extract") || err.contains("scann"), "{err}");
+    assert!(
+        !err.contains("json_extract") || err.contains("scann"),
+        "{err}"
+    );
     // Declared JSON: both roads graft and agree.
     let q = "/t/*[/doc/tag:: = \"gold\"]::id";
     let (out, err) = qua(&dir, q);

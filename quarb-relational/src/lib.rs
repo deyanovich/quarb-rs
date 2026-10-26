@@ -131,14 +131,12 @@ pub fn type_traits(declared: &str) -> Vec<String> {
             "int" | "integer" | "smallint" | "bigint" | "tinyint" | "mediumint" | "int2"
             | "int4" | "int8" | "serial" | "bigserial" | "smallserial" | "real" | "float"
             | "float4" | "float8" | "double" | "double precision" | "numeric" | "decimal"
-            | "number" | "dec" | "hugeint" | "ubigint" | "uinteger" | "usmallint"
-            | "utinyint" | "float64" | "int64" | "numeric64" | "bignumeric" | "binary_float"
+            | "number" | "dec" | "hugeint" | "ubigint" | "uinteger" | "usmallint" | "utinyint"
+            | "float64" | "int64" | "numeric64" | "bignumeric" | "binary_float"
             | "binary_double" => Some("number"),
             "char" | "character" | "varchar" | "character varying" | "nvarchar" | "nchar"
             | "varchar2" | "nvarchar2" | "text" | "ntext" | "clob" | "nclob" | "tinytext"
-            | "mediumtext" | "longtext" | "string" | "bpchar" | "citext" | "name" => {
-                Some("string")
-            }
+            | "mediumtext" | "longtext" | "string" | "bpchar" | "citext" | "name" => Some("string"),
             _ => None,
         }
         .or_else(|| {
@@ -1248,11 +1246,8 @@ impl AstAdapter for RelationalModel {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["n-rows", "columns", "loaded", "n-loaded", "table", "rowid"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match self.entry(node) {
@@ -1632,7 +1627,6 @@ mod tests {
             fks: vec![],
             json_columns: Vec::new(),
             column_types: Vec::new(),
-        
         };
         let rows = vec![
             RowSpec {

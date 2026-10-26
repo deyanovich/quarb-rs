@@ -15,15 +15,16 @@
 //! subcontext body `.(…)`.
 
 use crate::error::{QuarbError, Result};
-use crate::value::ColumnType;
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec, InterpSeg, ProjShape,
-    LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr, Predicate, Projection,
-    PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath, Step, TableRow, TraitClause,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec,
+    InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr, Predicate,
+    ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath, Step,
+    TableRow, TraitClause,
 };
 use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
 use crate::syntax::lexer::{self, Token};
+use crate::value::ColumnType;
 use crate::value::Value;
 use crate::value::{AND_WORDS, NOT_WORDS, OR_WORDS, is_bool_word};
 use globset::Glob;
@@ -223,7 +224,9 @@ fn reg_ref(rest: &str) -> Result<RegRef> {
         .chars()
         .next()
         .is_some_and(|c| c.is_alphabetic() || c == '_')
-        && rest.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        && rest
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
         return Ok(RegRef::Named(rest.to_string()));
     }
@@ -767,7 +770,10 @@ impl Parser<'_> {
         if branches.is_empty()
             && self.subquery_depth == 0
             && matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "session")
-            && matches!(self.toks.get(self.pos + 1), None | Some(Token::LParen | Token::Pipe))
+            && matches!(
+                self.toks.get(self.pos + 1),
+                None | Some(Token::LParen | Token::Pipe)
+            )
         {
             self.pos += 1;
             let mut args: Vec<Arg> = Vec::new();
@@ -784,7 +790,9 @@ impl Parser<'_> {
                         ));
                     };
                     match (self.peek(), self.toks.get(self.pos + 1)) {
-                        (Some(Token::DashDash), Some(Token::Name { glued: true, .. })) => self.pos += 2,
+                        (Some(Token::DashDash), Some(Token::Name { glued: true, .. })) => {
+                            self.pos += 2
+                        }
                         _ => self.pos += 1,
                     }
                     let value = if matches!(self.peek(), Some(Token::OptEq)) {
@@ -792,7 +800,9 @@ impl Parser<'_> {
                         match self.peek() {
                             Some(Token::Name { text, .. }) => {
                                 let text = text.clone();
-                                let v = match literal_value(&text, false, &|e| self.expander.unit_scale(e)) {
+                                let v = match literal_value(&text, false, &|e| {
+                                    self.expander.unit_scale(e)
+                                }) {
                                     v @ Value::Int(_) => v,
                                     _ => Value::Str(text),
                                 };
@@ -825,7 +835,10 @@ impl Parser<'_> {
                 projection: None,
                 anchor: Anchor::Root,
             });
-            pipeline.push(Command::Func(FnCall { name: "session".into(), args }));
+            pipeline.push(Command::Func(FnCall {
+                name: "session".into(),
+                args,
+            }));
             return Ok(());
         }
         if branches.is_empty()
@@ -836,6 +849,27 @@ impl Parser<'_> {
             // open a value (draft 166); the unparser prints it always
             if matches!(self.peek(), Some(Token::Eq)) {
                 self.pos += 1;
+                // the expression may be left out (draft 171): the
+                // command after `=` is the first of the pipeline, the
+                // root thread opened with no topic — `= .f(0) | …` is
+                // `^ | .f(0) | …`. A pipe in its place stays a fragment.
+                if matches!(self.peek(), Some(Token::Pipe)) {
+                    return Err(QuarbError::parse(
+                        "the head's expression may be left out, not replaced by a \
+                         pipe: write '= .f(0) | …' (a leading pipe is a fragment)",
+                    ));
+                }
+                if self.command_head_ahead() {
+                    let command = self.pipe_item(PipeMode::Nav)?;
+                    let command = self.quantified_push(command)?;
+                    branches.push(Branch {
+                        steps: Vec::new(),
+                        projection: None,
+                        anchor: Anchor::Root,
+                    });
+                    pipeline.push(command);
+                    return Ok(());
+                }
             }
             // the full expression: a comparison and a bare conditional
             // stand at the head (`= 1 = 1 ? "yes" : "no"`, draft 166);
@@ -1030,35 +1064,8 @@ impl Parser<'_> {
                         }
                         continue;
                     }
-                    let mut command = self.pipe_item(mode)?;
-                    // `.v(body){N}` — a quantifier on a push repeats
-                    // it.
-                    if let Some(&Token::Quant { min, max }) = self.peek() {
-                        if !matches!(
-                            command,
-                            Command::Push(_)
-                                | Command::ExprPush { .. }
-                                | Command::Subcontext { .. }
-                                | Command::RecordPush { .. }
-                                | Command::FieldsPush
-                        ) {
-                            return Err(QuarbError::parse(
-                                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')",
-                            ));
-                        }
-                        if max.is_some_and(|n| n < min) {
-                            return Err(QuarbError::parse(format!(
-                                "a quantifier's bounds are ordered: {{{min};{}}}",
-                                max.unwrap()
-                            )));
-                        }
-                        self.pos += 1;
-                        command = Command::Repeat {
-                            command: Box::new(command),
-                            min,
-                            max,
-                        };
-                    }
+                    let command = self.pipe_item(mode)?;
+                    let command = self.quantified_push(command)?;
                     mode = command_mode_out(&command, mode);
                     pipeline.push(command);
                 }
@@ -1315,7 +1322,8 @@ impl Parser<'_> {
                 self.pos += 1;
                 // `| @*` — retired (draft 157): the pointer, not
                 // the row reading followed by a stray star.
-                if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "*") {
+                if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == "*")
+                {
                     return Err(QuarbError::parse(
                         "'@*' is retired: the context is '@_' (the topics), '@@_' \
                          (the positions; '@@_::prop' maps over them), '#.' / '#.*' (the \
@@ -1420,7 +1428,8 @@ impl Parser<'_> {
                 // as its columns, a list of records as a record of
                 // lists.
                 // `%,` — the session memory as a record (draft 166)
-                if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",") {
+                if matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",")
+                {
                     self.pos += 1;
                     return Ok(Command::Recall(RegRef::SessionRecord));
                 }
@@ -1462,7 +1471,10 @@ impl Parser<'_> {
                 let name = text[1..].to_string();
                 self.pos += 1;
                 if name.is_empty()
-                    || !name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    || !name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
                 {
                     return Err(QuarbError::parse(
                         "the session push names its value: '| ,df' files the topic under 'df' for the session",
@@ -1626,7 +1638,9 @@ impl Parser<'_> {
             // run, by the topic's kind.
             // `| [[x]]`, `| [[a..b]]` — the lookup by label on the
             // topic (spec: Indexing a Value, draft 166), beside `| [n]`
-            Some(Token::LBracket) if matches!(self.toks.get(self.pos + 1), Some(Token::LBracket)) => {
+            Some(Token::LBracket)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::LBracket)) =>
+            {
                 let labels = self.label_brackets()?;
                 return Ok(Command::Expr(Operand::LabelIndex {
                     base: Box::new(Operand::Topic),
@@ -1698,12 +1712,9 @@ impl Parser<'_> {
             // above; parenthesized paths remain expressions.)
             // (the full expression: a comparison and a bare conditional
             // follow the head, `| (::a = ::b) ? 1 : 0`, draft 166)
-            Some(
-                Token::ColonColon
-                | Token::ColonColonColon
-                | Token::LParen
-                | Token::Interp(_),
-            ) => Ok(Command::Expr(self.expr_head()?)),
+            Some(Token::ColonColon | Token::ColonColonColon | Token::LParen | Token::Interp(_)) => {
+                Ok(Command::Expr(self.expr_head()?))
+            }
             // A literal where a command name would stand opens an
             // expression (spec: Literals and constructors): `| 0`
             // yields 0 per thread, `| 10 + $_` is `| + 10`, `| "x"`
@@ -3253,7 +3264,9 @@ impl Parser<'_> {
             for item in items {
                 match item {
                     Operand::Lit(Value::Str(s)) => names.push(s),
-                    Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => names.push(v.to_string()),
+                    Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
+                        names.push(v.to_string())
+                    }
                     _ => {
                         return Err(QuarbError::parse(
                             "a table's header is a list of names, bare or quoted (#(@(name; age); …)); a value computed there names nothing",
@@ -3338,7 +3351,11 @@ impl Parser<'_> {
                 return Err(QuarbError::parse(format!(
                     "'#(@({0}))' alone is retired: a header of no rows; write the rows after it, or build the table from data with '#(--header=@({1}))'",
                     names.join("; "),
-                    names.iter().map(|n| format!(":{n}")).collect::<Vec<_>>().join("; ")
+                    names
+                        .iter()
+                        .map(|n| format!(":{n}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 )));
             }
             rows.push(TableRow::List(h));
@@ -3562,8 +3579,12 @@ impl Parser<'_> {
                     };
                     head_projections(&mut op);
                     match &op {
-                        Operand::Lit(Value::Projection { .. }) | Operand::Lit(Value::List(_)) => index = Some(op),
-                        Operand::Lit(Value::Str(s)) => index = Some(Operand::Lit(Value::projection(1, s.clone()))),
+                        Operand::Lit(Value::Projection { .. }) | Operand::Lit(Value::List(_)) => {
+                            index = Some(op)
+                        }
+                        Operand::Lit(Value::Str(s)) => {
+                            index = Some(Operand::Lit(Value::projection(1, s.clone())))
+                        }
                         Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
                             index = Some(Operand::Lit(Value::projection(1, v.to_string())))
                         }
@@ -3608,9 +3629,17 @@ impl Parser<'_> {
                         }
                         // A header computed elsewhere (`(t | header)`,
                         // a capsa): read when the table is built.
-                        Some(op @ (Operand::Group(_) | Operand::Recall(_) | Operand::Field { .. }
-                            | Operand::Rel { .. } | Operand::Param(_) | Operand::Piped { .. }
-                            | Operand::Index { .. } | Operand::PeerReg { .. } | Operand::Topic)) => {
+                        Some(
+                            op @ (Operand::Group(_)
+                            | Operand::Recall(_)
+                            | Operand::Field { .. }
+                            | Operand::Rel { .. }
+                            | Operand::Param(_)
+                            | Operand::Piped { .. }
+                            | Operand::Index { .. }
+                            | Operand::PeerReg { .. }
+                            | Operand::Topic),
+                        ) => {
                             header = Some(Header::Computed(op));
                             continue;
                         }
@@ -3730,11 +3759,71 @@ impl Parser<'_> {
     /// nan/inf, true/false/null), a constructor `@(` `%(` `#(`, a
     /// quarq `q(`, a session read `$,`. A parenthesis, a minus, a
     /// name and a fragment call keep the sigil.
+    /// `.v(body){N}` — a quantifier after a push repeats it; after
+    /// any other command it is refused.
+    fn quantified_push(&mut self, command: Command) -> Result<Command> {
+        let Some(&Token::Quant { min, max }) = self.peek() else {
+            return Ok(command);
+        };
+        if !matches!(
+            command,
+            Command::Push(_)
+                | Command::ExprPush { .. }
+                | Command::Subcontext { .. }
+                | Command::RecordPush { .. }
+                | Command::FieldsPush
+        ) {
+            return Err(QuarbError::parse(
+                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')",
+            ));
+        }
+        if max.is_some_and(|n| n < min) {
+            return Err(QuarbError::parse(format!(
+                "a quantifier's bounds are ordered: {{{min};{}}}",
+                max.unwrap()
+            )));
+        }
+        self.pos += 1;
+        Ok(Command::Repeat {
+            command: Box::new(command),
+            min,
+            max,
+        })
+    }
+
+    /// After an explicit `=`: whether a command, not an expression,
+    /// follows — a register push (`.f(0)`, `.`, `.%`) or the bare name
+    /// of a library command (draft 171: the head's expression may be
+    /// left out; the command is then the pipeline's first, on the root
+    /// thread with no topic). A name followed by a parenthesis stays
+    /// the call form (`= upper("ab")`: the first argument the input).
+    fn command_head_ahead(&self) -> bool {
+        let next_paren = matches!(self.toks.get(self.pos + 1), Some(Token::LParen));
+        match self.peek() {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => {
+                !self.literal_word(text)
+                    && (text.starts_with('.')
+                        || (!next_paren
+                            && !text.starts_with('-')
+                            && crate::syntax::registry::spec(text).is_some()))
+            }
+            _ => false,
+        }
+    }
+
     fn value_only_head(&self) -> bool {
         let next_paren = matches!(self.toks.get(self.pos + 1), Some(Token::LParen));
         match self.peek() {
             Some(Token::Name { quoted: true, .. }) | Some(Token::Interp(_)) => true,
-            Some(Token::Name { text, quoted: false, .. }) => {
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => {
                 (text == "q" && next_paren)
                     || (!next_paren && !text.starts_with('-') && self.literal_word(text))
             }
@@ -3820,7 +3909,11 @@ impl Parser<'_> {
                 (Some(Token::Name { text, quoted, .. }), Some(Token::Eq)) => {
                     // a quoted key is marked, so it stays text where a
                     // bare one reads as the literal it spells
-                    let key = if *quoted { format!("\u{0}{text}") } else { text.clone() };
+                    let key = if *quoted {
+                        format!("\u{0}{text}")
+                    } else {
+                        text.clone()
+                    };
                     self.pos += 2;
                     Some(key)
                 }
@@ -3828,7 +3921,11 @@ impl Parser<'_> {
             };
             // `price<float> = 5` — the declared field: the value
             // typed by the key's trait
-            let typed = if name.is_none() { self.typed_key()? } else { None };
+            let typed = if name.is_none() {
+                self.typed_key()?
+            } else {
+                None
+            };
             let mut item = self.additive()?;
             if let (Some(key), Operand::Typed { inner, typing }) = (&name, &item) {
                 return Err(typed_value_refusal(key, inner, typing.clone()));
@@ -3846,7 +3943,11 @@ impl Parser<'_> {
             // `#($.h...)` — the spread: the projectors a held list
             // holds, each its own column (spec: Projectors, draft 166)
             if name.is_none()
-                && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                && let Some(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                }) = self.peek()
                 && text == "..."
             {
                 self.pos += 1;
@@ -3909,7 +4010,11 @@ impl Parser<'_> {
                 };
                 let mut item = self.additive()?;
                 if name.is_none()
-                    && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                    && let Some(Token::Name {
+                        text,
+                        quoted: false,
+                        glued: true,
+                    }) = self.peek()
                     && text == "..."
                 {
                     self.pos += 1;
@@ -3958,7 +4063,8 @@ impl Parser<'_> {
     /// on a path step read it: `t[:A > 0]`, `v[$_ > 2]`, `t[nulls = 0]`.
     fn index_spec(&mut self) -> Result<IndexSpec> {
         let start = self.pos;
-        let ends = |p: &Self| matches!(p.peek(), Some(Token::RBracket | Token::Semi | Token::Comma));
+        let ends =
+            |p: &Self| matches!(p.peek(), Some(Token::RBracket | Token::Semi | Token::Comma));
         // `[@(2; 4)]`, `[$.pos]` — an index read from an expression
         // of literals and registers, when it stands alone
         if matches!(self.peek(), Some(Token::At | Token::Dollar))
@@ -4013,7 +4119,10 @@ impl Parser<'_> {
                 "brackets on a value hold an index — a position ([2]), a range ([2..4], [..3]), a column name ([\"age\"]) — or a condition on its rows or items ([:A > 0], [$_ > 2]): {e}"
             ))
         })?;
-        if !matches!(self.peek(), Some(Token::RBracket | Token::Semi | Token::Comma)) {
+        if !matches!(
+            self.peek(),
+            Some(Token::RBracket | Token::Semi | Token::Comma)
+        ) {
             return Err(QuarbError::parse(
                 "brackets on a value close after one index or condition: ']'",
             ));
@@ -4251,7 +4360,10 @@ impl Parser<'_> {
                         return Err(QuarbError::parse(
                             "'%' is retired as tree's operand: write --record or -r for the properties record",
                         ));
-                    } else if name == "pivot" && args.is_empty() && matches!(self.peek(), Some(Token::LParen)) {
+                    } else if name == "pivot"
+                        && args.is_empty()
+                        && matches!(self.peek(), Some(Token::LParen))
+                    {
                         // `pivot((:A; :B); C; D)` — a projector list as
                         // the row key (spec: Tables and Reshapes, draft
                         // 166): the result indexed by it
@@ -4390,20 +4502,28 @@ impl Parser<'_> {
                         && letters.iter().all(|c| c.is_alphabetic())
                         && crate::syntax::registry::split_env(command).is_none()
                     {
-                        let declared: &[&str] = crate::syntax::registry::spec(command)
-                            .map_or(&[], |s| s.options);
+                        let declared: &[&str] =
+                            crate::syntax::registry::spec(command).map_or(&[], |s| s.options);
                         let takes_of = crate::syntax::registry::takes_of(command);
                         for c in &letters {
                             let short = format!("-{c}");
-                            if !(declared.contains(&short.as_str()) || (takes_of && short == "-o")) {
-                                let mut shorts: Vec<&str> =
-                                    declared.iter().copied().filter(|o| !o.starts_with("--")).collect();
+                            if !(declared.contains(&short.as_str()) || (takes_of && short == "-o"))
+                            {
+                                let mut shorts: Vec<&str> = declared
+                                    .iter()
+                                    .copied()
+                                    .filter(|o| !o.starts_with("--"))
+                                    .collect();
                                 if takes_of {
                                     shorts.push("-o");
                                 }
                                 return Err(QuarbError::parse(format!(
                                     "'{short}' in '{t}' is no switch of '{command}' (its short switches: {})",
-                                    if shorts.is_empty() { "none".to_string() } else { shorts.join(" ") }
+                                    if shorts.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        shorts.join(" ")
+                                    }
                                 )));
                             }
                         }
@@ -4619,7 +4739,11 @@ impl Parser<'_> {
                 }
                 self.pos += 1;
                 let word = match self.bump() {
-                    Some(Token::Name { text, quoted: false, .. }) => text.clone(),
+                    Some(Token::Name {
+                        text,
+                        quoted: false,
+                        ..
+                    }) => text.clone(),
                     _ => {
                         return Err(QuarbError::parse(format!(
                             "'{opt}' takes a type word: '%({opt}=int)'"
@@ -4742,7 +4866,11 @@ impl Parser<'_> {
         if record {
             let save = self.pos;
             if let Ok(Arg::Expr(op)) = self.func_arg()
-                && let Some(Token::Name { text, quoted: false, glued: true }) = self.peek()
+                && let Some(Token::Name {
+                    text,
+                    quoted: false,
+                    glued: true,
+                }) = self.peek()
                 && text == "..."
             {
                 self.pos += 1;
@@ -4856,7 +4984,9 @@ impl Parser<'_> {
             // from the core); `:%provenance` the shaped read.
             Some(Token::Field) => {
                 self.pos += 1;
-                Projection::CoreMeta(canonical_core_field(self.require_projection_name("the core field `:`")?))
+                Projection::CoreMeta(canonical_core_field(
+                    self.require_projection_name("the core field `:`")?,
+                ))
             }
             Some(Token::ColonColon) => {
                 self.pos += 1;
@@ -5750,8 +5880,10 @@ impl Parser<'_> {
         // Two positions joined by `||` / `&&` select nothing
         // sensible: the position list is the spelling.
         if let PredExpr::Or(a, b) | PredExpr::And(a, b) = &expr
-            && let (PredExpr::Truthy(Operand::Lit(Value::Int(x))), PredExpr::Truthy(Operand::Lit(Value::Int(y)))) =
-                (&**a, &**b)
+            && let (
+                PredExpr::Truthy(Operand::Lit(Value::Int(x))),
+                PredExpr::Truthy(Operand::Lit(Value::Int(y))),
+            ) = (&**a, &**b)
         {
             return Err(QuarbError::parse(format!(
                 "positions are listed with ';': write '[{x}; {y}]'"
@@ -5901,7 +6033,10 @@ impl Parser<'_> {
         // after a pipe or an opening parenthesis the operator opens
         // the command (`| > 3`, `map(> 0 ? …)`): no space before it
         let opens = self.pos > 0
-            && matches!(self.toks.get(self.pos - 1), Some(Token::Pipe | Token::LParen));
+            && matches!(
+                self.toks.get(self.pos - 1),
+                Some(Token::Pipe | Token::LParen)
+            );
         if let Some(t @ (Token::Gt { spaced: false, .. } | Token::Lt { spaced: false, .. })) =
             self.peek()
         {
@@ -6297,7 +6432,10 @@ impl Parser<'_> {
                 o,
                 Operand::Recall(_) | Operand::Field { .. } | Operand::Index { .. }
             )
-            && !matches!(self.toks.get(self.pos + 1), Some(Token::Name { glued: true, .. }))
+            && !matches!(
+                self.toks.get(self.pos + 1),
+                Some(Token::Name { glued: true, .. })
+            )
         {
             self.pos += 1;
             if let Operand::Rel {
@@ -6469,10 +6607,22 @@ impl Parser<'_> {
         // value's provenance reads through the shape sigils only. A
         // node path parsed its own `:::` as the adapter rung already.
         while matches!(self.peek(), Some(Token::ColonColonColon)) {
-            if let Some(Token::Name { text, quoted: false, .. }) = self.toks.get(self.pos + 1)
+            if let Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) = self.toks.get(self.pos + 1)
                 && matches!(
                     text.as_str(),
-                    "fields" | "keys" | "header" | "type" | "dim" | "nrows" | "ncols" | "index" | "name"
+                    "fields"
+                        | "keys"
+                        | "header"
+                        | "type"
+                        | "dim"
+                        | "nrows"
+                        | "ncols"
+                        | "index"
+                        | "name"
                 )
             {
                 let key = text.clone();
@@ -6564,7 +6714,11 @@ impl Parser<'_> {
             // the instant); a quoted label is text
             let bare = matches!(self.peek(), Some(Token::Name { quoted: false, .. }));
             let label = self.additive()?;
-            labels.push(if bare { label_range(label, &|e| self.expander.unit_scale(e)) } else { label });
+            labels.push(if bare {
+                label_range(label, &|e| self.expander.unit_scale(e))
+            } else {
+                label
+            });
             match self.peek() {
                 Some(Token::Semi | Token::Comma) => self.pos += 1,
                 Some(Token::RBracket) => {}
@@ -6600,7 +6754,11 @@ impl Parser<'_> {
         let start = self.pos;
         self.pos += 1;
         let word = |t: Option<&Token>| match t {
-            Some(Token::Name { text, quoted: false, .. }) => Some(text.clone()),
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) => Some(text.clone()),
             _ => None,
         };
         // `<(int; text)>` — the tuple type, its words in parentheses
@@ -6629,7 +6787,9 @@ impl Parser<'_> {
                 ))
             })?;
             if !matches!(self.peek(), Some(Token::Gt { .. })) {
-                return Err(QuarbError::parse("the trait brackets of a projector close with '>'"));
+                return Err(QuarbError::parse(
+                    "the trait brackets of a projector close with '>'",
+                ));
             }
             self.pos += 1;
             return Ok(Some(Typing::Declared(ty)));
@@ -6691,7 +6851,10 @@ impl Parser<'_> {
         let Some(Token::Name { text, .. }) = self.peek() else {
             return Ok(None);
         };
-        if !matches!(self.toks.get(self.pos + 1), Some(Token::Lt { spaced: false, .. })) {
+        if !matches!(
+            self.toks.get(self.pos + 1),
+            Some(Token::Lt { spaced: false, .. })
+        ) {
             return Ok(None);
         }
         let key = text.clone();
@@ -6740,11 +6903,7 @@ impl Parser<'_> {
             && self.toks.get(self.pos + 1).is_none_or(|t| {
                 !matches!(
                     t,
-                    Token::RParen
-                        | Token::Semi
-                        | Token::Comma
-                        | Token::RBracket
-                        | Token::Pipe
+                    Token::RParen | Token::Semi | Token::Comma | Token::RBracket | Token::Pipe
                 )
             })
         {
@@ -6768,7 +6927,10 @@ impl Parser<'_> {
         // arrow everywhere else).
         if self.keyed_args
             && self.pos > 0
-            && matches!(self.toks.get(self.pos - 1), Some(Token::LParen | Token::Semi | Token::Comma))
+            && matches!(
+                self.toks.get(self.pos - 1),
+                Some(Token::LParen | Token::Semi | Token::Comma)
+            )
             && let (
                 Some(Token::ArrowIn { rounded: true }),
                 Some(Token::Name {
@@ -7267,7 +7429,9 @@ impl Parser<'_> {
                     return Ok(Some(Command::AggRecord { call, enriched }));
                 }
                 // `@| %,` — the session memory as a record (draft 166)
-                if !enriched && matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",") {
+                if !enriched
+                    && matches!(self.peek(), Some(Token::Name { text, quoted: false, .. }) if text == ",")
+                {
                     self.pos += 1;
                     return Ok(Some(Command::AggRecall(RegRef::SessionRecord)));
                 }
@@ -7304,8 +7468,7 @@ impl Parser<'_> {
                 self.pos += 2;
                 Ok(Some(Command::AggRecall(RegRef::Whole)))
             }
-            Some(Token::AtAt)
-                if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text == ".") =>
+            Some(Token::AtAt) if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text == ".") =>
             {
                 self.pos += 2;
                 Ok(Some(Command::AggRecall(RegRef::NodeWhole)))
@@ -7896,8 +8059,7 @@ impl Parser<'_> {
             }
             // `%,` — the session memory as a record, a value wherever
             // a register stands (draft 166)
-            Some(Token::Percent)
-                if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == ",") =>
+            Some(Token::Percent) if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == ",") =>
             {
                 self.pos += 2;
                 Ok(Operand::Recall(RegRef::SessionRecord))
@@ -7962,8 +8124,7 @@ impl Parser<'_> {
             // `@-` — all arrived-by edges (bare: labels; projected:
             // each edge's property); `@.` — the value regulae; `@@.`
             // — the node references; `@(…)` — the list literal.
-            Some(Token::AtAt)
-                if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == ".") =>
+            Some(Token::AtAt) if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == ".") =>
             {
                 self.pos += 2;
                 Ok(Operand::Recall(RegRef::NodeWhole))
@@ -8508,7 +8669,16 @@ impl Parser<'_> {
         // conditional may follow (`| $_ = null`, `| $_ > 3 ? $_ :
         // null`, `| $_ ?? 0`): the full expression
         if self.cmp_ahead()
-            || matches!(self.peek(), Some(Token::Coalesce | Token::AmpAmp | Token::PipePipe | Token::Question { .. } | Token::QuestionEq))
+            || matches!(
+                self.peek(),
+                Some(
+                    Token::Coalesce
+                        | Token::AmpAmp
+                        | Token::PipePipe
+                        | Token::Question { .. }
+                        | Token::QuestionEq
+                )
+            )
         {
             let first = self.pred_primary_from(left)?;
             let first = self.pred_and_from(first)?;
@@ -8532,7 +8702,10 @@ impl Parser<'_> {
         // the command (`| > 3`, `map(> 0 ? …)`): nothing stands
         // before it to be spaced from
         let opens = self.pos > 0
-            && matches!(self.toks.get(self.pos - 1), Some(Token::Pipe | Token::LParen));
+            && matches!(
+                self.toks.get(self.pos - 1),
+                Some(Token::Pipe | Token::LParen)
+            );
         let op = match self.peek()? {
             Token::Eq => CmpOp::Eq,
             Token::Ne => CmpOp::Ne,
@@ -9088,11 +9261,7 @@ fn unit_operand_refusal(command: &str, operand: &str, names: &[String]) -> Optio
 /// `sh:`) keep the `$_` input-slot placement, and a library's own
 /// gate counts its operands.
 fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
-    if !call
-        .name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if !call.name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Ok(());
     }
     let Some(max) = crate::syntax::man::operand_bound(&call.name) else {
@@ -9506,7 +9675,9 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
     // the options (`--desc`) are not keys
     let mut keys = args.filter(|a| !matches!(a, Arg::Opt { .. })).peekable();
     // a quarq written as a key is applied on each capsa (spec: Quarqs)
-    if keys.peek().is_none() || keys.any(|a| matches!(a, Arg::Lit(v) if !matches!(v, Value::Quarq(_)))) {
+    if keys.peek().is_none()
+        || keys.any(|a| matches!(a, Arg::Lit(v) if !matches!(v, Value::Quarq(_))))
+    {
         return Err(QuarbError::parse(format!(
             "{} needs value-expression keys, e.g. {}(::age)",
             call.name, call.name
@@ -9752,7 +9923,10 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
             let rest = operands.as_slice();
             // The positional word is retired (draft 164): the n − 1
             // spread is the switch; the field to reduce is `--of`.
-            if rest.iter().any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample")) {
+            if rest
+                .iter()
+                .any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "sample"))
+            {
                 return Err(QuarbError::parse(format!(
                     "'sample' is an option: write {0}(--sample)",
                     call.name
@@ -9817,7 +9991,11 @@ fn is_word(text: &str) -> bool {
         && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-pub(crate) fn literal_value(text: &str, quoted: bool, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Value {
+pub(crate) fn literal_value(
+    text: &str,
+    quoted: bool,
+    scale: &dyn Fn(&str) -> Option<(f64, String)>,
+) -> Value {
     if quoted {
         return Value::Str(text.to_string());
     }
@@ -9951,10 +10129,7 @@ fn adapter_key(key: String, value_side: bool) -> Result<Projection> {
 }
 
 fn is_projection_start(tok: &Token) -> bool {
-    matches!(
-        tok,
-        Token::ColonColon | Token::ColonColonColon
-    )
+    matches!(tok, Token::ColonColon | Token::ColonColonColon)
 }
 
 /// Build a [`Matcher`] from a name token. A quoted name is always a
@@ -10147,9 +10322,10 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 subst_operand(i, map);
             }
         }
-        Operand::Neg(inner) | Operand::Desc(inner) | Operand::Gathered(inner) | Operand::Spread(inner) => {
-            subst_operand(inner, map)
-        }
+        Operand::Neg(inner)
+        | Operand::Desc(inner)
+        | Operand::Gathered(inner)
+        | Operand::Spread(inner) => subst_operand(inner, map),
         Operand::Projected { base, shape } => {
             subst_operand(base, map);
             match shape {
@@ -11222,7 +11398,9 @@ fn typed_value_refusal(key: &str, inner: &Operand, typing: crate::value::Typing)
 /// such literals (`2013-01-02..2013-01-04`) the range operand of its
 /// bounds; a quoted label and any other label stay as written.
 fn label_range(label: Operand, scale: &dyn Fn(&str) -> Option<(f64, String)>) -> Operand {
-    let Operand::Lit(Value::Str(text)) = &label else { return label };
+    let Operand::Lit(Value::Str(text)) = &label else {
+        return label;
+    };
     let instant = |t: &str| {
         crate::temporal::parse_iso(t).map(|(secs, nanos, offset_min)| Value::Instant {
             secs,

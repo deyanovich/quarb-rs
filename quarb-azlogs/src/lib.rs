@@ -647,11 +647,8 @@ impl AstAdapter for AzlAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["table", "workspace", "type"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let (t, i) = self.entry_at(node)?;

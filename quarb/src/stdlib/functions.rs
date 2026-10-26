@@ -67,16 +67,16 @@ pub fn pretty_precision(call: &FnCall) -> usize {
     call.args
         .iter()
         .find_map(|a| match a {
-            Arg::Opt { name, value: Some(crate::syntax::ast::Operand::Lit(Value::Int(n))) }
-                if name == "--precision" || name == "-p" =>
-            {
-                Some((*n).max(0) as usize)
-            }
+            Arg::Opt {
+                name,
+                value: Some(crate::syntax::ast::Operand::Lit(Value::Int(n))),
+            } if name == "--precision" || name == "-p" => Some((*n).max(0) as usize),
             _ => None,
         })
         .unwrap_or_else(|| {
             // the session's digits (`session(--precision=n)`, draft 166), else six
-            crate::pipeline::run_option(|o| o.session.as_ref().map(|s| s.borrow().precision)).unwrap_or(6)
+            crate::pipeline::run_option(|o| o.session.as_ref().map(|s| s.borrow().precision))
+                .unwrap_or(6)
         })
 }
 
@@ -208,8 +208,13 @@ fn grid(
                         return format!("{}{c}", " ".repeat(widths[i].saturating_sub(width(c))));
                     }
                     let (w, f) = parts(c);
-                    let lead = widths[i].saturating_sub(whole[i] + frac[i]) + whole[i].saturating_sub(w);
-                    return format!("{}{c}{}", " ".repeat(lead), " ".repeat(frac[i].saturating_sub(f)));
+                    let lead =
+                        widths[i].saturating_sub(whole[i] + frac[i]) + whole[i].saturating_sub(w);
+                    return format!(
+                        "{}{c}{}",
+                        " ".repeat(lead),
+                        " ".repeat(frac[i].saturating_sub(f))
+                    );
                 }
                 format!("{c}{}", " ".repeat(widths[i].saturating_sub(width(c))))
             })
@@ -615,7 +620,13 @@ pub fn apply_scalar(
                     .map(|row| {
                         row.iter()
                             .enumerate()
-                            .map(|(j, c)| if j < t.index { c.clone() } else { one(c.clone()) })
+                            .map(|(j, c)| {
+                                if j < t.index {
+                                    c.clone()
+                                } else {
+                                    one(c.clone())
+                                }
+                            })
                             .collect()
                     })
                     .collect();
@@ -649,7 +660,8 @@ fn apply_scalar_inner(
         "type" => return vec![type_of(&topic)],
         "types" => return vec![refusing(call, Err(TYPES_RETIRED.into()))],
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
-        | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack" | "unstack" => {
+        | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack"
+        | "unstack" => {
             return vec![refusing(
                 call,
                 match call.name.as_str() {
@@ -658,7 +670,11 @@ fn apply_scalar_inner(
                     "stack" | "unstack" => match topic {
                         Value::Table(t) if call.name == "stack" => t.stacked().map(Value::table),
                         Value::Table(t) => t.unstacked().map(Value::table),
-                        other => Err(format!("{} moves a level of a table, not {}", call.name, kind_of(&other))),
+                        other => Err(format!(
+                            "{} moves a level of a table, not {}",
+                            call.name,
+                            kind_of(&other)
+                        )),
                     },
                     "keys" => keys_reading(topic),
                     "values" => values_reading(topic),
@@ -678,17 +694,24 @@ fn apply_scalar_inner(
         // `| describe` on a table: one row per statistic over the
         // numeric columns, indexed by the statistic (draft 166)
         "describe" if matches!(topic, Value::Table(_)) => {
-            let Value::Table(t) = topic else { unreachable!() };
+            let Value::Table(t) = topic else {
+                unreachable!()
+            };
             return vec![refusing(call, describe_table(&t, scale))];
         }
         "describe" if matches!(topic, Value::Record(_)) => {
-            let Value::Record(r) = topic else { unreachable!() };
+            let Value::Record(r) = topic else {
+                unreachable!()
+            };
             let values: Vec<Value> = r.iter().map(|(_, v)| v.clone()).collect();
             return vec![describe_values(&values, scale)];
         }
         // `| melt` on a table value answers the long table itself
         "melt" if matches!(topic, Value::Table(_)) => {
-            return vec![refusing(call, melt(call, vec![topic]).map(|mut v| v.pop().unwrap_or(Value::Null)))];
+            return vec![refusing(
+                call,
+                melt(call, vec![topic]).map(|mut v| v.pop().unwrap_or(Value::Null)),
+            )];
         }
         "pivot" | "melt" => {
             let items = match topic {
@@ -1377,14 +1400,24 @@ fn apply_scalar_inner(
                 }
             };
             let unit = match &d {
-                Value::Quantity { written: Some((_, u)), .. } => u.as_str(),
+                Value::Quantity {
+                    written: Some((_, u)),
+                    ..
+                } => u.as_str(),
                 Value::Quantity { base, .. } => base.as_str(),
                 _ => "",
             };
-            if matches!(unit, "mo" | "month" | "months" | "y" | "yr" | "year" | "years") {
+            if matches!(
+                unit,
+                "mo" | "month" | "months" | "y" | "yr" | "year" | "years"
+            ) {
                 return refuse(format!(
                     "truncate: {d} is a calendar period, not a fixed-length duration; a calendar grain is period's: period(\"{}\")",
-                    if unit.starts_with('m') { "month" } else { "year" }
+                    if unit.starts_with('m') {
+                        "month"
+                    } else {
+                        "year"
+                    }
                 ));
             }
             let Some((ds, dn)) = d.span_parts() else {
@@ -2491,9 +2524,26 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// quantity words `unit` and `dimension`, one per column on a table
 /// (spec: Quantity Commands). `default(v)` broadcasts as `??` does,
 /// the substitution `s/…/…/` as `lower`.
-const BROADCAST_EXEMPT: [&str; 13] = [
-    "record", "rec", "xml", "html", "markdown", "atrep", "conllu", "link", "sh", "exchange",
-    "time_anchor", "unit", "dimension",
+/// The table reshapers `stack` and `unstack` and `map` itself take
+/// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
+/// read the structure whole.
+const BROADCAST_EXEMPT: [&str; 16] = [
+    "map",
+    "stack",
+    "unstack",
+    "record",
+    "rec",
+    "xml",
+    "html",
+    "markdown",
+    "atrep",
+    "conllu",
+    "link",
+    "sh",
+    "exchange",
+    "time_anchor",
+    "unit",
+    "dimension",
 ];
 
 /// The aggregate entry: a command over the items of a stream, or
@@ -2672,8 +2722,8 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // A numeric reducer over lists and no number: each list is
         // a value it cannot coerce, so the answer is null — said,
         // not silent, with the two spellings that reduce the lists.
-        name @ ("sum" | "product" | "mean" | "avg" | "median" | "percentile" | "std"
-        | "stddev" | "var" | "variance")
+        name @ ("sum" | "product" | "mean" | "avg" | "median" | "percentile" | "std" | "stddev"
+        | "var" | "variance")
             if !input.iter().any(|v| v.numeric().is_some())
                 && input.iter().any(|v| matches!(v, Value::List(_))) =>
         {
@@ -2704,18 +2754,41 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // (so `[nulls = 0]` over a table keeps the complete rows)
         "nulls" => {
             let of_fields = |fields: &[(String, Value)]| {
-                Value::Int(fields.iter().filter(|(_, v)| matches!(v, Value::Null)).count() as i64)
+                Value::Int(
+                    fields
+                        .iter()
+                        .filter(|(_, v)| matches!(v, Value::Null))
+                        .count() as i64,
+                )
             };
-            let of_row = |row: &[Value]| Value::Int(row.iter().filter(|v| matches!(v, Value::Null)).count() as i64);
+            let of_row = |row: &[Value]| {
+                Value::Int(row.iter().filter(|v| matches!(v, Value::Null)).count() as i64)
+            };
             match input.as_slice() {
                 [Value::Record(r)] => vec![of_fields(r)],
                 [Value::Table(t)] => vec![Value::list(t.rows.iter().map(|r| of_row(r)).collect())],
-                [Value::List(items)] if items.iter().all(|i| matches!(i, Value::Record(_))) => vec![Value::list(
-                    items.iter().map(|i| match i { Value::Record(r) => of_fields(r), _ => Value::Null }).collect(),
-                )],
-                _ if !input.is_empty() && input.iter().all(|i| matches!(i, Value::Record(_))) => vec![Value::list(
-                    input.iter().map(|i| match i { Value::Record(r) => of_fields(r), _ => Value::Null }).collect(),
-                )],
+                [Value::List(items)] if items.iter().all(|i| matches!(i, Value::Record(_))) => {
+                    vec![Value::list(
+                        items
+                            .iter()
+                            .map(|i| match i {
+                                Value::Record(r) => of_fields(r),
+                                _ => Value::Null,
+                            })
+                            .collect(),
+                    )]
+                }
+                _ if !input.is_empty() && input.iter().all(|i| matches!(i, Value::Record(_))) => {
+                    vec![Value::list(
+                        input
+                            .iter()
+                            .map(|i| match i {
+                                Value::Record(r) => of_fields(r),
+                                _ => Value::Null,
+                            })
+                            .collect(),
+                    )]
+                }
                 _ => vec![of_row(&input)],
             }
         }
@@ -3057,7 +3130,10 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // nulls counted in a last row. `@| histogram(n; --width=w)`:
         // the same bins drawn as bars, one text value; a stream of
         // other values draws one bar per distinct value.
-        "bins" => vec![refusing(call, binned(call, input, scale).map(|b| b.table()))],
+        "bins" => vec![refusing(
+            call,
+            binned(call, input, scale).map(|b| b.table()),
+        )],
         "histogram" => vec![refusing(call, histogram(call, input, scale))],
         "combinations" | "pairs" | "triples" => {
             let n = match call.name.as_str() {
@@ -3371,24 +3447,41 @@ const DESCRIBE_ROWS: [&str; 8] = ["count", "mean", "std", "min", "25%", "50%", "
 /// record of the eight statistics, null skipped as missing, `count`
 /// the non-null count, `std` the sample deviation.
 fn describe_values(input: &[Value], scale: Scale) -> Value {
-    let present: Vec<Value> = input.iter().filter(|v| !matches!(v, Value::Null)).cloned().collect();
+    let present: Vec<Value> = input
+        .iter()
+        .filter(|v| !matches!(v, Value::Null))
+        .cloned()
+        .collect();
     let stat = |name: &str| -> Value {
         if present.is_empty() {
-            return if name == "count" { Value::Int(0) } else { Value::Null };
+            return if name == "count" {
+                Value::Int(0)
+            } else {
+                Value::Null
+            };
         }
         match name {
             "count" => Value::Int(present.len() as i64),
             "mean" => mean(&present, scale),
             "std" => spread(&present, f64::sqrt, scale, 1),
-            "min" => extreme(present.clone(), std::cmp::Ordering::Less, scale).pop().unwrap_or(Value::Null),
-            "max" => extreme(present.clone(), std::cmp::Ordering::Greater, scale).pop().unwrap_or(Value::Null),
+            "min" => extreme(present.clone(), std::cmp::Ordering::Less, scale)
+                .pop()
+                .unwrap_or(Value::Null),
+            "max" => extreme(present.clone(), std::cmp::Ordering::Greater, scale)
+                .pop()
+                .unwrap_or(Value::Null),
             "25%" => quantile(&present, 0.25, scale),
             "50%" => quantile(&present, 0.5, scale),
             "75%" => quantile(&present, 0.75, scale),
             _ => Value::Null,
         }
     };
-    Value::record(DESCRIBE_ROWS.iter().map(|n| (n.to_string(), stat(n))).collect())
+    Value::record(
+        DESCRIBE_ROWS
+            .iter()
+            .map(|n| (n.to_string(), stat(n)))
+            .collect(),
+    )
 }
 
 /// `describe` on a table: a table with one row per statistic, indexed
@@ -3409,7 +3502,11 @@ fn describe_table(t: &crate::Table, scale: Scale) -> Result<Value, String> {
     let columns: Vec<Value> = numeric
         .iter()
         .map(|&j| {
-            let cells: Vec<Value> = t.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)).collect();
+            let cells: Vec<Value> = t
+                .rows
+                .iter()
+                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                .collect();
             describe_values(&cells, scale)
         })
         .collect();
@@ -3418,14 +3515,22 @@ fn describe_table(t: &crate::Table, scale: Scale) -> Result<Value, String> {
         .enumerate()
         .map(|(i, name)| {
             let mut row = vec![Value::Str(name.to_string())];
-            row.extend(columns.iter().map(|c| match c {
-                Value::Record(r) => r.deref().get(i).map(|(_, v)| v.clone()).unwrap_or(Value::Null),
-                _ => Value::Null,
+            row.extend(columns.iter().map(|c| {
+                match c {
+                    Value::Record(r) => r
+                        .deref()
+                        .get(i)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Null),
+                    _ => Value::Null,
+                }
             }));
             row
         })
         .collect();
-    Ok(Value::table(crate::Table::new(Some(header), rows).with_index(1)))
+    Ok(Value::table(
+        crate::Table::new(Some(header), rows).with_index(1),
+    ))
 }
 
 fn mean(input: &[Value], scale: Scale) -> Value {
@@ -4442,7 +4547,10 @@ fn pretty_at(v: &Value, col: usize, precision: usize) -> String {
             if !opens {
                 return line;
             }
-            let inner: Vec<String> = items.iter().map(|i| pretty_at(i, col + 2, precision)).collect();
+            let inner: Vec<String> = items
+                .iter()
+                .map(|i| pretty_at(i, col + 2, precision))
+                .collect();
             format!("@({})", inner.join(&format!(";\n{pad}")))
         }
         Value::Float(f) => crate::value::pretty_float(*f, precision),
@@ -4456,7 +4564,11 @@ fn pretty_line(v: &Value, precision: usize) -> String {
     match v {
         Value::List(items) => format!(
             "@({})",
-            items.iter().map(|i| pretty_line(i, precision)).collect::<Vec<_>>().join("; ")
+            items
+                .iter()
+                .map(|i| pretty_line(i, precision))
+                .collect::<Vec<_>>()
+                .join("; ")
         ),
         Value::Float(f) => crate::value::pretty_float(*f, precision),
         other => other.to_quarb(),
@@ -4521,7 +4633,11 @@ pub(crate) fn table_order_reading(
         "first" | "last" => {
             let from_end = call.name == "last";
             match call.args.first() {
-                None => match if from_end { t.rows.last() } else { t.rows.first() } {
+                None => match if from_end {
+                    t.rows.last()
+                } else {
+                    t.rows.first()
+                } {
                     Some(row) => row_record(row),
                     None => Value::Null,
                 },
@@ -4719,7 +4835,9 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
         }
         (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right),
         (ConcatMode::Merge, Value::Record(fields)) => record_concat(fields, right, false),
-        (ConcatMode::Merge, Value::Str(s)) => Ok(Value::Str(format!("{s}{}", right.display_form()))),
+        (ConcatMode::Merge, Value::Str(s)) => {
+            Ok(Value::Str(format!("{s}{}", right.display_form())))
+        }
         (ConcatMode::Merge, other) => Err(format!(
             "{} takes no concatenation: the left side of '++' is a list, a record, a table or a text, which gives the shape",
             kind_of(&other)
@@ -4825,7 +4943,11 @@ fn table_concat(t: &crate::Table, right: Value) -> Result<Value, String> {
     }
     // a declared column casts the appended cells or refuses naming
     // it; a column the header gained is undeclared
-    Ok(Value::table(crate::Table::typed(header, rows, t.declared.clone())?))
+    Ok(Value::table(crate::Table::typed(
+        header,
+        rows,
+        t.declared.clone(),
+    )?))
 }
 
 /// One row of named fields laid under a table's header by name, a
@@ -4937,7 +5059,11 @@ pub(crate) fn concat_row(
             rows.push(cells);
             // a declared column casts the appended cell or refuses
             // naming it; a column the header gained is undeclared
-            Ok(Value::table(crate::Table::typed(header, rows, t.declared.clone())?))
+            Ok(Value::table(crate::Table::typed(
+                header,
+                rows,
+                t.declared.clone(),
+            )?))
         }
         other => {
             // a row literal's bare key reads as the key it spells
@@ -4948,18 +5074,19 @@ pub(crate) fn concat_row(
                 match name {
                     Some(k) => {
                         let (text, quoted) = crate::syntax::ast::row_key(&k);
-                        let key = match crate::syntax::parser::literal_value(text, quoted, &|_| None) {
-                            Value::Str(s) if quoted => Value::Str(s),
-                            Value::Str(s) => crate::temporal::parse_iso(&s)
-                                .map(|(secs, nanos, offset_min)| Value::Instant {
-                                    secs,
-                                    nanos,
-                                    offset_min,
-                                    calendar: Default::default(),
-                                })
-                                .unwrap_or(Value::Str(s)),
-                            typed => typed,
-                        };
+                        let key =
+                            match crate::syntax::parser::literal_value(text, quoted, &|_| None) {
+                                Value::Str(s) if quoted => Value::Str(s),
+                                Value::Str(s) => crate::temporal::parse_iso(&s)
+                                    .map(|(secs, nanos, offset_min)| Value::Instant {
+                                        secs,
+                                        nanos,
+                                        offset_min,
+                                        calendar: Default::default(),
+                                    })
+                                    .unwrap_or(Value::Str(s)),
+                                typed => typed,
+                            };
                         pairs.push((key, v));
                     }
                     None => {
@@ -4970,7 +5097,11 @@ pub(crate) fn concat_row(
                     }
                 }
             }
-            concat(mode, other, Value::Record(crate::value::Record::keyed(pairs)))
+            concat(
+                mode,
+                other,
+                Value::Record(crate::value::Record::keyed(pairs)),
+            )
         }
     }
 }
@@ -4985,19 +5116,21 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
     // `--index=:col` (`-i`): the index named, a typed projector
     // declaring it; applied after the build. `| #` with no option
     // drops the role.
-    let index: Option<Vec<(String, Option<crate::value::ColumnType>)>> = call.args.iter().find_map(|a| match a {
-        Arg::Opt { name, value } if name == "--index" => Some(match value {
-            Some(crate::syntax::ast::Operand::Lit(v)) => index_levels(v),
-            Some(other) => vec![(crate::syntax::unparse::operand(other), None)],
-            None => Vec::new(),
-        }),
-        _ => None,
-    });
+    let index: Option<Vec<(String, Option<crate::value::ColumnType>)>> =
+        call.args.iter().find_map(|a| match a {
+            Arg::Opt { name, value } if name == "--index" => Some(match value {
+                Some(crate::syntax::ast::Operand::Lit(v)) => index_levels(v),
+                Some(other) => vec![(crate::syntax::unparse::operand(other), None)],
+                None => Vec::new(),
+            }),
+            _ => None,
+        });
     // `--name=word` names the header (draft 166), read back by `:::name`
     let header_name: Option<String> = call.args.iter().find_map(|a| match a {
-        Arg::Opt { name, value: Some(crate::syntax::ast::Operand::Lit(Value::Str(s))) } if name == "--name" => {
-            Some(s.clone())
-        }
+        Arg::Opt {
+            name,
+            value: Some(crate::syntax::ast::Operand::Lit(Value::Str(s))),
+        } if name == "--name" => Some(s.clone()),
         _ => None,
     });
     let finish = |v: Value| -> Result<Value, String> {
@@ -5075,7 +5208,10 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
 /// first, each declared where its brackets declare a type.
 pub(crate) fn index_levels(v: &Value) -> Vec<(String, Option<crate::value::ColumnType>)> {
     let one = |p: &Value| match p {
-        Value::Projection { key, typing, .. } => (key.clone(), typing.as_ref().and_then(crate::value::Typing::declared)),
+        Value::Projection { key, typing, .. } => (
+            key.clone(),
+            typing.as_ref().and_then(crate::value::Typing::declared),
+        ),
         other => (other.to_string(), None),
     };
     match v {
@@ -5130,9 +5266,10 @@ fn header_items(items: &[Value]) -> Vec<(String, Option<crate::value::ColumnType
     items
         .iter()
         .map(|i| match i {
-            Value::Projection { key, typing, .. } => {
-                (key.clone(), typing.as_ref().and_then(crate::value::Typing::declared))
-            }
+            Value::Projection { key, typing, .. } => (
+                key.clone(),
+                typing.as_ref().and_then(crate::value::Typing::declared),
+            ),
             other => (other.to_string(), None),
         })
         .collect()
@@ -5145,7 +5282,10 @@ fn header_items(items: &[Value]) -> Vec<(String, Option<crate::value::ColumnType
 /// columns the header names, in its order, cast as declared — the
 /// header applied as the structured projector it is, `t:#(h...)`;
 /// a named column the data lacks refuses.
-fn typed_table(declared: &[(String, Option<crate::value::ColumnType>)], v: Value) -> Result<Value, String> {
+fn typed_table(
+    declared: &[(String, Option<crate::value::ColumnType>)],
+    v: Value,
+) -> Result<Value, String> {
     use crate::value::ColumnType;
     let spelled = || {
         format!(
@@ -5166,7 +5306,11 @@ fn typed_table(declared: &[(String, Option<crate::value::ColumnType>)], v: Value
         // item a cell under a declared tuple)
         Value::List(items)
             if items.iter().all(|i| {
-                flat_cell(i) || (matches!(i, Value::List(_)) && declared.iter().any(|(_, t)| matches!(t, Some(crate::value::ColumnType::Tuple(_)))))
+                flat_cell(i)
+                    || (matches!(i, Value::List(_))
+                        && declared
+                            .iter()
+                            .any(|(_, t)| matches!(t, Some(crate::value::ColumnType::Tuple(_)))))
             }) =>
         {
             let width = declared.len();
@@ -5178,7 +5322,9 @@ fn typed_table(declared: &[(String, Option<crate::value::ColumnType>)], v: Value
                 ));
             }
             let rows: Vec<Vec<Value>> = items.chunks(width).map(|c| c.to_vec()).collect();
-            crate::Table::declared(declared.to_vec(), rows).map(Value::table).map_err(wrap)
+            crate::Table::declared(declared.to_vec(), rows)
+                .map(Value::table)
+                .map_err(wrap)
         }
         // a table, or what reads as one: the named columns, in the
         // header's order, cast as declared (`t:#(h...)`)
@@ -5204,13 +5350,23 @@ fn typed_table(declared: &[(String, Option<crate::value::ColumnType>)], v: Value
                     }
                 }
             }
-            let header = order.iter().map(|(j, ty)| (names[*j].clone(), ty.clone())).collect();
+            let header = order
+                .iter()
+                .map(|(j, ty)| (names[*j].clone(), ty.clone()))
+                .collect();
             let rows = t
                 .rows
                 .iter()
-                .map(|r| order.iter().map(|(j, _)| r.get(*j).cloned().unwrap_or(Value::Null)).collect())
+                .map(|r| {
+                    order
+                        .iter()
+                        .map(|(j, _)| r.get(*j).cloned().unwrap_or(Value::Null))
+                        .collect()
+                })
                 .collect();
-            crate::Table::declared(header, rows).map(Value::table).map_err(wrap)
+            crate::Table::declared(header, rows)
+                .map(Value::table)
+                .map_err(wrap)
         }
         other => Err(wrap(format!("{} lays out no table", kind_of(&other)))),
     }
@@ -5389,8 +5545,8 @@ fn bar(n: i64, max: i64, width: usize) -> String {
     if max <= 0 || n <= 0 {
         return String::new();
     }
-    let eighths = ((n as f64 / max as f64 * width as f64 * 8.0).round() as usize)
-        .clamp(1, width * 8);
+    let eighths =
+        ((n as f64 / max as f64 * width as f64 * 8.0).round() as usize).clamp(1, width * 8);
     let mut s = "█".repeat(eighths / 8);
     const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     s.push_str(PARTS[eighths % 8]);
@@ -5407,7 +5563,10 @@ fn histogram(call: &FnCall, input: Vec<Value>, scale: Scale) -> Result<Value, St
         })
         .map(|v| match v {
             Some(crate::syntax::ast::Operand::Lit(Value::Int(w))) if *w >= 1 => Ok(*w as usize),
-            _ => Err("histogram(--width=n): the longest bar in cells, a number of at least 1".to_string()),
+            _ => Err(
+                "histogram(--width=n): the longest bar in cells, a number of at least 1"
+                    .to_string(),
+            ),
         })
         .transpose()?
         .unwrap_or(40);
@@ -5455,8 +5614,10 @@ fn histogram(call: &FnCall, input: Vec<Value>, scale: Scale) -> Result<Value, St
             }
         }
         counts.sort_by_key(|(k, _)| *k);
-        let mut rows: Vec<(String, i64, bool)> =
-            counts.into_iter().map(|(k, c)| (k.to_string(), c, true)).collect();
+        let mut rows: Vec<(String, i64, bool)> = counts
+            .into_iter()
+            .map(|(k, c)| (k.to_string(), c, true))
+            .collect();
         if nulls > 0 {
             rows.push(("null".to_string(), nulls, false));
         }
@@ -5803,12 +5964,16 @@ fn table_rows(t: &crate::Table, rows: &IndexSpec) -> Result<Option<Vec<usize>>, 
             (a..b).collect()
         }
         IndexSpec::List(_) => listed_positions(rows, t.rows.len())?,
-        IndexSpec::Coords(parts) => listed_positions(&IndexSpec::List(parts.clone()), t.rows.len())?,
+        IndexSpec::Coords(parts) => {
+            listed_positions(&IndexSpec::List(parts.clone()), t.rows.len())?
+        }
         IndexSpec::Name(n) => {
             return Err(format!("rows are indexed by position, not by name ('{n}')"));
         }
         IndexSpec::Expr(_) | IndexSpec::Cond(_) => {
-            return Err("an index read from an expression is an integer or a list of integers".into());
+            return Err(
+                "an index read from an expression is an integer or a list of integers".into(),
+            );
         }
     }))
 }
@@ -5885,7 +6050,10 @@ pub(crate) fn index_mask(
                 (None, Some(name)) => table_columns(t, &IndexSpec::Name(name.to_string()))?,
                 (None, None) => (0..t.width()).collect(),
             };
-            Ok(IndexMask::Cells { rows: row_set, cols: col_set })
+            Ok(IndexMask::Cells {
+                rows: row_set,
+                cols: col_set,
+            })
         }
         Value::List(items) => {
             if cols.is_some() || column.is_some() {
@@ -5901,10 +6069,15 @@ pub(crate) fn index_mask(
                 IndexSpec::List(_) => listed_positions(rows, len)?,
                 IndexSpec::Coords(parts) => listed_positions(&IndexSpec::List(parts.clone()), len)?,
                 IndexSpec::Name(n) => {
-                    return Err(format!("a list is indexed by position, not by name ('{n}')"));
+                    return Err(format!(
+                        "a list is indexed by position, not by name ('{n}')"
+                    ));
                 }
                 IndexSpec::Expr(_) | IndexSpec::Cond(_) => {
-                    return Err("an index read from an expression is an integer or a list of integers".into());
+                    return Err(
+                        "an index read from an expression is an integer or a list of integers"
+                            .into(),
+                    );
                 }
             }))
         }
@@ -5927,7 +6100,10 @@ pub(crate) fn index_mask(
                     .map(|p| vec![p])
                     .ok_or_else(|| format!("no field '{n}'"))?,
                 IndexSpec::Expr(_) | IndexSpec::Cond(_) => {
-                    return Err("an index read from an expression is an integer or a list of integers".into());
+                    return Err(
+                        "an index read from an expression is an integer or a list of integers"
+                            .into(),
+                    );
                 }
             }))
         }
@@ -5954,7 +6130,9 @@ fn listed_positions(spec: &IndexSpec, len: usize) -> Result<Vec<usize>, String> 
                 keep[a..b].iter_mut().for_each(|k| *k = true);
             }
             IndexSpec::Name(n) => {
-                return Err(format!("positions are listed by number, not by name ('{n}')"));
+                return Err(format!(
+                    "positions are listed by number, not by name ('{n}')"
+                ));
             }
             IndexSpec::List(_) | IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => {
                 return Err("a position list holds positions and ranges".into());
@@ -6010,7 +6188,8 @@ pub(crate) fn index_value(
         IndexSpec::Coords(parts) => {
             if matches!(v, Value::Table(_)) {
                 return Err(
-                    "a table has two coordinates, t[i; j]: the listed rows are t[@(1; 2; 3)]".into(),
+                    "a table has two coordinates, t[i; j]: the listed rows are t[@(1; 2; 3)]"
+                        .into(),
                 );
             }
             coords_as_list = IndexSpec::List(parts.clone());
@@ -6040,12 +6219,16 @@ pub(crate) fn index_value(
                 }
                 IndexSpec::List(_) => {
                     let chosen = listed_positions(rows, items.len())?;
-                    Ok(Value::list(chosen.into_iter().map(|i| items[i].clone()).collect()))
+                    Ok(Value::list(
+                        chosen.into_iter().map(|i| items[i].clone()).collect(),
+                    ))
                 }
                 IndexSpec::Name(n) => Err(format!(
                     "a list is indexed by position, not by name ('{n}'); a record's field is ':{n}'"
                 )),
-                IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => unreachable!("resolved above"),
+                IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => {
+                    unreachable!("resolved above")
+                }
             }
         }
         Value::Table(t) => {
@@ -6116,9 +6299,13 @@ pub(crate) fn index_value(
             match rows {
                 IndexSpec::List(_) => {
                     let chosen = listed_positions(rows, fields.len())?;
-                    Ok(Value::Record(chosen.into_iter().map(|i| fields[i].clone()).collect()))
+                    Ok(Value::Record(
+                        chosen.into_iter().map(|i| fields[i].clone()).collect(),
+                    ))
                 }
-                IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => unreachable!("resolved above"),
+                IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => {
+                    unreachable!("resolved above")
+                }
                 IndexSpec::At(n) => Ok(position(*n, fields.len())
                     .map(|p| fields[p - 1].1.clone())
                     .unwrap_or(Value::Null)),
@@ -6161,11 +6348,16 @@ pub(crate) fn table_rows_at(call: &FnCall, v: Value) -> Result<Value, String> {
                 .iter()
                 .map(|v| match v {
                     Value::Int(n) => Ok(IndexSpec::At(*n)),
-                    _ => Err("an index read from an expression is an integer or a list of integers".to_string()),
+                    _ => Err(
+                        "an index read from an expression is an integer or a list of integers"
+                            .to_string(),
+                    ),
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(IndexSpec::List),
-            _ => Err("'[n]' takes a position, a range, or a list of them: [2], [2..4], [2; 4; 5]".into()),
+            _ => Err(
+                "'[n]' takes a position, a range, or a list of them: [2], [2..4], [2; 4; 5]".into(),
+            ),
         }
     };
     let spec = match call.args.as_slice() {
@@ -6341,9 +6533,19 @@ fn transposed_frame(t: &crate::Table) -> Value {
     // the index column's name the header's
     let first = t.name.clone().unwrap_or_else(|| "column".to_string());
     if t.index > 0 {
-        let depth = names[t.index..].iter().map(|n| n.split(':').count()).max().unwrap_or(1);
+        let depth = names[t.index..]
+            .iter()
+            .map(|n| n.split(':').count())
+            .max()
+            .unwrap_or(1);
         let mut header: Vec<String> = (0..depth)
-            .map(|i| if i == 0 { first.clone() } else { format!("{first}{}", i + 1) })
+            .map(|i| {
+                if i == 0 {
+                    first.clone()
+                } else {
+                    format!("{first}{}", i + 1)
+                }
+            })
             .collect();
         header.extend(t.rows.iter().map(|r| t.label_name(r)));
         let rows: Vec<Vec<Value>> = names
@@ -6351,14 +6553,23 @@ fn transposed_frame(t: &crate::Table) -> Value {
             .enumerate()
             .skip(t.index)
             .map(|(j, name)| {
-                let mut row: Vec<Value> = name.split(':').map(|s| Value::Str(s.to_string())).collect();
+                let mut row: Vec<Value> =
+                    name.split(':').map(|s| Value::Str(s.to_string())).collect();
                 row.resize(depth, Value::Null);
-                row.extend(t.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)));
+                row.extend(
+                    t.rows
+                        .iter()
+                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null)),
+                );
                 row
             })
             .collect();
         let new_name = (t.index == 1).then(|| names[0].clone());
-        return Value::table(crate::Table::new(Some(header), rows).with_index(depth).with_name(new_name));
+        return Value::table(
+            crate::Table::new(Some(header), rows)
+                .with_index(depth)
+                .with_name(new_name),
+        );
     }
     let mut header = vec![first];
     header.extend((1..=t.rows.len()).map(|i| i.to_string()));
@@ -6367,7 +6578,11 @@ fn transposed_frame(t: &crate::Table) -> Value {
         .enumerate()
         .map(|(j, name)| {
             let mut row = vec![Value::Str(name.clone())];
-            row.extend(t.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)));
+            row.extend(
+                t.rows
+                    .iter()
+                    .map(|r| r.get(j).cloned().unwrap_or(Value::Null)),
+            );
             row
         })
         .collect();
@@ -6503,11 +6718,26 @@ fn word_args(call: &FnCall) -> Vec<&str> {
 /// pairing, which reads the structure as one value.
 pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Option<Value> {
     const NUMERIC: [&str; 12] = [
-        "sum", "product", "min", "max", "mean", "avg", "median", "percentile", "std", "stddev",
-        "var", "variance",
+        "sum",
+        "product",
+        "min",
+        "max",
+        "mean",
+        "avg",
+        "median",
+        "percentile",
+        "std",
+        "stddev",
+        "var",
+        "variance",
     ];
     let name = call.name.as_str();
-    let one = |items: Vec<Value>| apply(call, items, scale).into_iter().next().unwrap_or(Value::Null);
+    let one = |items: Vec<Value>| {
+        apply(call, items, scale)
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null)
+    };
     match topic {
         Value::Record(fields) if name == "count" => Some(Value::Int(fields.len() as i64)),
         Value::Table(t) if name == "count" => Some(Value::Int(t.rows.len() as i64)),
@@ -6528,8 +6758,11 @@ pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Op
         Value::Table(t) if NUMERIC.contains(&name) => Some(Value::record(
             (t.index..t.width())
                 .map(|j| {
-                    let cells: Vec<Value> =
-                        t.rows.iter().map(|r| r.get(j).cloned().unwrap_or(Value::Null)).collect();
+                    let cells: Vec<Value> = t
+                        .rows
+                        .iter()
+                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
+                        .collect();
                     (t.column_name(j), one(cells))
                 })
                 .collect(),
@@ -6576,11 +6809,19 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
                     _ => None,
                 })
                 .collect(),
-            Arg::Expr(crate::syntax::ast::Operand::Field { base, name }) if matches!(**base, crate::syntax::ast::Operand::Topic) => Some(vec![name.clone()]),
+            Arg::Expr(crate::syntax::ast::Operand::Field { base, name })
+                if matches!(**base, crate::syntax::ast::Operand::Topic) =>
+            {
+                Some(vec![name.clone()])
+            }
             Arg::Expr(crate::syntax::ast::Operand::List(items)) => items
                 .iter()
                 .map(|i| match i {
-                    crate::syntax::ast::Operand::Field { base, name } if matches!(**base, crate::syntax::ast::Operand::Topic) => Some(name.clone()),
+                    crate::syntax::ast::Operand::Field { base, name }
+                        if matches!(**base, crate::syntax::ast::Operand::Topic) =>
+                    {
+                        Some(name.clone())
+                    }
                     crate::syntax::ast::Operand::Lit(Value::Str(s)) => Some(s.clone()),
                     _ => None,
                 })
@@ -6588,7 +6829,11 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
             _ => None,
         }
     };
-    let operands: Vec<&Arg> = call.args.iter().filter(|a| !matches!(a, Arg::Opt { .. })).collect();
+    let operands: Vec<&Arg> = call
+        .args
+        .iter()
+        .filter(|a| !matches!(a, Arg::Opt { .. }))
+        .collect();
     if !(operands.is_empty() || operands.len() == 3) {
         return Err(
             "pivot takes the row, column and value fields (pivot(row; column; value), the row a projector list for several), or no operand to read the first three fields by position"
@@ -6598,9 +6843,14 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
     let named: Option<(Vec<String>, String, String)> = if operands.is_empty() {
         None
     } else {
-        let row = name_of(operands[0]).ok_or("pivot: the row key is a field name or a list of projectors")?;
-        let col = name_of(operands[1]).and_then(|v| v.into_iter().next()).ok_or("pivot: the column key is a field name")?;
-        let val = name_of(operands[2]).and_then(|v| v.into_iter().next()).ok_or("pivot: the value is a field name")?;
+        let row = name_of(operands[0])
+            .ok_or("pivot: the row key is a field name or a list of projectors")?;
+        let col = name_of(operands[1])
+            .and_then(|v| v.into_iter().next())
+            .ok_or("pivot: the column key is a field name")?;
+        let val = name_of(operands[2])
+            .and_then(|v| v.into_iter().next())
+            .ok_or("pivot: the value is a field name")?;
         Some((row, col, val))
     };
     // a table pivots its rows; a stream of records the records: both
@@ -6616,7 +6866,9 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
     let wide = pivot_records(&named, input)?;
     let row_names: Vec<String> = match (&named, wide.first()) {
         (Some((row, _, _)), _) => row.clone(),
-        (None, Some(Value::Record(r))) => vec![r.first().map(|(k, _)| k.clone()).unwrap_or_default()],
+        (None, Some(Value::Record(r))) => {
+            vec![r.first().map(|(k, _)| k.clone()).unwrap_or_default()]
+        }
         _ => Vec::new(),
     };
     if wide.is_empty() {
@@ -6624,7 +6876,8 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
     }
     match table_reading(Value::list(wide))? {
         Value::Table(wt) if !row_names.is_empty() => {
-            let levels: Vec<(String, Option<crate::value::ColumnType>)> = row_names.into_iter().map(|n| (n, None)).collect();
+            let levels: Vec<(String, Option<crate::value::ColumnType>)> =
+                row_names.into_iter().map(|n| (n, None)).collect();
             Ok(vec![Value::table(wt.indexed_by_levels(&levels)?)])
         }
         other => Ok(vec![other]),
@@ -6633,7 +6886,10 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// The wide records of a pivot: one per row key, in first
 /// appearance, the row fields then one field per column key.
-fn pivot_records(named: &Option<(Vec<String>, String, String)>, input: Vec<Value>) -> Result<Vec<Value>, String> {
+fn pivot_records(
+    named: &Option<(Vec<String>, String, String)>,
+    input: Vec<Value>,
+) -> Result<Vec<Value>, String> {
     let mut row_names: Vec<String> = Vec::new();
     let mut row_keys: Vec<Vec<Value>> = Vec::new();
     let mut col_keys: Vec<String> = Vec::new();
@@ -6692,7 +6948,11 @@ fn pivot_records(named: &Option<(Vec<String>, String, String)>, input: Vec<Value
         if let Some(prev) = cells.get(&(r, c)) {
             return Err(format!(
                 "pivot: two values for row '{}', column '{}' ({} and {}); aggregate before the pivot",
-                row_keys[r].iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
+                row_keys[r]
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 col_keys[c],
                 prev,
                 val
@@ -6704,7 +6964,8 @@ fn pivot_records(named: &Option<(Vec<String>, String, String)>, input: Vec<Value
         .iter()
         .enumerate()
         .map(|(r, key)| {
-            let mut rec: Vec<(String, Value)> = row_names.iter().cloned().zip(key.iter().cloned()).collect();
+            let mut rec: Vec<(String, Value)> =
+                row_names.iter().cloned().zip(key.iter().cloned()).collect();
             for (c, ck) in col_keys.iter().enumerate() {
                 rec.push((
                     ck.clone(),
@@ -6727,15 +6988,26 @@ fn melt(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
     // A table value melts its rows and answers the long table (spec:
     // Tables and Reshapes).
     if let [Value::Table(_)] = input.as_slice() {
-        let Some(Value::Table(t)) = input.into_iter().next() else { unreachable!() };
+        let Some(Value::Table(t)) = input.into_iter().next() else {
+            unreachable!()
+        };
         // on an indexed table the index is the id, and the long table
         // is indexed by it with `variable` as the inner level (spec:
         // The Table, "Levels of the header")
         if t.index > 0 {
             let levels: Vec<String> = t.level_names();
             let mut keyed = call.clone();
-            let mut args: Vec<Arg> = levels.iter().map(|n| Arg::Lit(Value::Str(n.clone()))).collect();
-            args.extend(keyed.args.iter().filter(|a| matches!(a, Arg::Opt { .. })).cloned());
+            let mut args: Vec<Arg> = levels
+                .iter()
+                .map(|n| Arg::Lit(Value::Str(n.clone())))
+                .collect();
+            args.extend(
+                keyed
+                    .args
+                    .iter()
+                    .filter(|a| matches!(a, Arg::Opt { .. }))
+                    .cloned(),
+            );
             keyed.args = args;
             let plain = t.as_ref().clone().drop_index();
             let records = match rows_reading(Value::table(plain))? {

@@ -707,7 +707,9 @@ impl Host for Calc {
         Origins::at(Position::default(), command_now())
     }
     fn quantifier_bound(&self) -> usize {
-        AstAdapter::quantifier_bound(&crate::graph::adapter::Bare)
+        // the run's bound first (`--quantifier-bound`), as the graph
+        // host takes it; the bare adapter's only without one
+        quantifier_bound(&crate::graph::adapter::Bare)
     }
     fn node_ref(&self, _: &()) -> Option<Value> {
         record_refusal(no_arbor("a mark"));

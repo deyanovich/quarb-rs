@@ -630,11 +630,8 @@ impl AstAdapter for CwlAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["group", "stream", "received", "id"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let (g, i) = self.event_at(node)?;

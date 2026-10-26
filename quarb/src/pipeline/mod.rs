@@ -273,7 +273,8 @@ pub(crate) trait Host {
     fn capsae(&self, scope: Scope<'_, Self::Ext>, projection: Option<&Projection>) -> Vec<Value>;
     /// The context's positions (`@@_`): every peer's node as a
     /// reference, or projected over (`@@_::prop`).
-    fn positions(&self, scope: Scope<'_, Self::Ext>, projection: Option<&Projection>) -> Vec<Value>;
+    fn positions(&self, scope: Scope<'_, Self::Ext>, projection: Option<&Projection>)
+    -> Vec<Value>;
     /// The keys (positions) an operand names, for a peer read.
     fn operand_keys(
         &self,

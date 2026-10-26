@@ -340,7 +340,10 @@ fn a_redirect_stub_stands_for_its_target() {
         ["spec/quarb-v1.0-draft.164.html"]
     );
     assert_eq!(
-        strs(&a, "/sites/example.org/pages/spec/quarb-v1.0-draft.164.html<-redirect::path"),
+        strs(
+            &a,
+            "/sites/example.org/pages/spec/quarb-v1.0-draft.164.html<-redirect::path"
+        ),
         ["spec/latest"]
     );
     assert_eq!(
@@ -348,8 +351,17 @@ fn a_redirect_stub_stands_for_its_target() {
         ["guides/jq.html"]
     );
     // the stub's own text is no content: no links, no page in the graph
-    assert_eq!(strs(&a, "/sites/example.org/pages/spec/latest->link @| count"), ["0"]);
-    assert_eq!(strs(&a, "//page[:name = \"latest\"] | ->redirect:name"), ["jq.html", "quarb-v1.0-draft.164.html"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/spec/latest->link @| count"),
+        ["0"]
+    );
+    assert_eq!(
+        strs(&a, "//page[:name = \"latest\"] | ->redirect:name"),
+        ["jq.html", "quarb-v1.0-draft.164.html"]
+    );
     // an ordinary page is no redirect
-    assert_eq!(strs(&a, "/sites/example.org/pages/about.html->redirect @| count"), ["0"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/about.html->redirect @| count"),
+        ["0"]
+    );
 }

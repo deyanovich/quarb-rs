@@ -207,8 +207,7 @@ fn pandas_frames_chain_and_export() {
     let out =
         run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | [2] | :x"#).unwrap();
     assert_eq!(out, vec!["3.75"]);
-    let out =
-        run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | keys"#).unwrap();
+    let out = run(r#"/rows/* | %(::book; ::x; ::y) @| pd:describe | pd:round(2) | keys"#).unwrap();
     assert_eq!(out, vec![r#"@("index"; "x"; "y")"#]);
     // The row reading carries the index back as the first field.
     let out =
@@ -404,17 +403,35 @@ fn a_parameter_is_reachable_as_an_operand_and_by_name() {
     // `np.round(a, decimals=0)`: decimals as the operand after the
     // input's slot, or by name
     assert_eq!(run("= 3.14159 | np:round(2)").unwrap(), vec!["3.14"]);
-    assert_eq!(run("= 3.14159 | np:round(--decimals=2)").unwrap(), vec!["3.14"]);
+    assert_eq!(
+        run("= 3.14159 | np:round(--decimals=2)").unwrap(),
+        vec!["3.14"]
+    );
     let e = refuse("= 3.14159 | np:round(2; --decimals=3)");
-    assert!(e.contains("takes 'decimals' once") && e.contains("--decimals="), "{e}");
+    assert!(
+        e.contains("takes 'decimals' once") && e.contains("--decimals="),
+        "{e}"
+    );
     // `np.repeat(a, repeats, axis=None)`: the required `repeats` by
     // name, or missing
-    assert_eq!(run("= @(1; 2) | np:repeat(2) | dim").unwrap(), vec!["@(4; 1)"]);
-    assert_eq!(run("= @(1; 2) | np:repeat(--repeats=2) | dim").unwrap(), vec!["@(4; 1)"]);
+    assert_eq!(
+        run("= @(1; 2) | np:repeat(2) | dim").unwrap(),
+        vec!["@(4; 1)"]
+    );
+    assert_eq!(
+        run("= @(1; 2) | np:repeat(--repeats=2) | dim").unwrap(),
+        vec!["@(4; 1)"]
+    );
     let e = refuse("= @(1; 2) | np:repeat");
-    assert!(e.contains("needs 1 operand") && e.contains("repeats unfilled"), "{e}");
+    assert!(
+        e.contains("needs 1 operand") && e.contains("repeats unfilled"),
+        "{e}"
+    );
     // a surplus operand is still refused with the synopsis
     // (`np.round(a, decimals=0, out=None)`: two after the input)
     let e = refuse("= 3.14159 | np:round(2; 3; 4)");
-    assert!(e.contains("takes 2 operands") && e.contains("np:round("), "{e}");
+    assert!(
+        e.contains("takes 2 operands") && e.contains("np:round("),
+        "{e}"
+    );
 }

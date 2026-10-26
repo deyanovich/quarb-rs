@@ -119,7 +119,14 @@ fn kaiv_scalar(v: &Value) -> (&'static str, String) {
         | Value::Foreign(_)
         | Value::Table(_)
         | Value::Node(_) => ("str", v.to_string()),
-        Value::Projection { ladder, key, typing } => ("str", Value::projector_spelling(*ladder, key, typing.as_ref())),
+        Value::Projection {
+            ladder,
+            key,
+            typing,
+        } => (
+            "str",
+            Value::projector_spelling(*ladder, key, typing.as_ref()),
+        ),
         Value::Quarq(q) => ("str", q.source.clone()),
     }
 }

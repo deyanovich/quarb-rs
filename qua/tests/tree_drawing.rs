@@ -162,7 +162,10 @@ fn a_document_hangs_its_starting_points_by_their_path() {
     );
     // a parenthesised column is a body on each node, a bare word
     // in it a command
-    assert_eq!(text("/archives/gro/entries/0 @| tree(0; (count))", &d), "/  1\n└┄┄ archives/gro/entries\n    └── 0  1");
+    assert_eq!(
+        text("/archives/gro/entries/0 @| tree(0; (count))", &d),
+        "/  1\n└┄┄ archives/gro/entries\n    └── 0  1"
+    );
     // the root itself as a starting point draws the whole document
     assert_eq!(text("^ @| tree(2)", &d), "/\n└── archives\n    └── gro");
     // a value context is refused; so is the pipe form and a stray word
@@ -275,10 +278,22 @@ fn crosslinks_are_listed_one_hop_deep() {
 fn the_display_words_are_switches_and_the_old_spellings_point_at_them() {
     let d = quarb_json::JsonAdapter::parse(r#"{"a":{"x":1}}"#).unwrap();
     for (q, hint) in [
-        ("/a @| tree(traits)", "'traits' is a string here: write --traits or -t"),
-        ("/a @| tree(kind)", "'kind' is a string here: write --kind or -k"),
-        ("/a @| tree(0; props)", "'props' is a string here: write --props or -p"),
-        ("/a @| tree(%)", "'%' is retired as tree's operand: write --record or -r"),
+        (
+            "/a @| tree(traits)",
+            "'traits' is a string here: write --traits or -t",
+        ),
+        (
+            "/a @| tree(kind)",
+            "'kind' is a string here: write --kind or -k",
+        ),
+        (
+            "/a @| tree(0; props)",
+            "'props' is a string here: write --props or -p",
+        ),
+        (
+            "/a @| tree(%)",
+            "'%' is retired as tree's operand: write --record or -r",
+        ),
     ] {
         let e = quarb::run(q, &d).unwrap_err().to_string();
         assert!(e.contains(hint), "{q}: {e}");
@@ -286,7 +301,12 @@ fn the_display_words_are_switches_and_the_old_spellings_point_at_them() {
     // the switches mix with the positional depth and columns
     // (the switches stand last, after the depth and the columns, as
     // the one option rule has it)
-    for q in ["/a @| tree(1; -t)", "/a @| tree(0; ::x; -r)", "/a @| tree(0; --traits --props)", "/a @| tree(-p)"] {
+    for q in [
+        "/a @| tree(1; -t)",
+        "/a @| tree(0; ::x; -r)",
+        "/a @| tree(0; --traits --props)",
+        "/a @| tree(-p)",
+    ] {
         quarb::run(q, &d).unwrap_or_else(|e| panic!("{q}: {e}"));
     }
 }
@@ -294,30 +314,50 @@ fn the_display_words_are_switches_and_the_old_spellings_point_at_them() {
 #[test]
 fn short_switches_bundle_as_in_the_shell() {
     let d = quarb_json::JsonAdapter::parse(r#"{"a":{"x":1}}"#).unwrap();
-    let text = |q: &str| {
-        match quarb::run(q, &d).unwrap_or_else(|e| panic!("{q}: {e}")) {
-            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect::<Vec<_>>().join("\n"),
-            other => panic!("{q}: {other:?}"),
-        }
+    let text = |q: &str| match quarb::run(q, &d).unwrap_or_else(|e| panic!("{q}: {e}")) {
+        quarb::QueryResult::Values(vs) => vs
+            .iter()
+            .map(|v| v.display_form())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => panic!("{q}: {other:?}"),
     };
     assert_eq!(text("/a @| tree(1; -tp)"), text("/a @| tree(1; -t -p)"));
     // --kind prints the first trait alone, where -t prints them all
-    assert_eq!(text("/a @| tree(1; -k)"), "/ <object>\n└── a <object>\n    └── x <number>");
-    assert_eq!(text("/a @| tree(1; -kt)"), text("/a @| tree(1; --kind --traits)"));
+    assert_eq!(
+        text("/a @| tree(1; -k)"),
+        "/ <object>\n└── a <object>\n    └── x <number>"
+    );
+    assert_eq!(
+        text("/a @| tree(1; -kt)"),
+        text("/a @| tree(1; --kind --traits)")
+    );
     assert_eq!(text("/a @| tree(1; -pt)"), text("/a @| tree(1; -p -t)"));
-    assert_eq!(text("/a @| tree(0; ::x; -rt)"), text("/a @| tree(0; ::x; -r -t)"));
+    assert_eq!(
+        text("/a @| tree(0; ::x; -rt)"),
+        text("/a @| tree(0; ::x; -r -t)")
+    );
     // the unparse prints them singly
     assert_eq!(
-        quarb::Query::parse("/a @| tree(1; -tp)", &d).unwrap().canonical(),
+        quarb::Query::parse("/a @| tree(1; -tp)", &d)
+            .unwrap()
+            .canonical(),
         "/a @| tree(1; -t -p)"
     );
     // an unknown letter names itself and the command's short switches
-    let e = quarb::run("/a @| tree(1; -tx)", &d).unwrap_err().to_string();
-    assert!(e.contains("'-x' in '-tx' is no switch of 'tree' (its short switches: -k -t -p -r -s)"), "{e}");
+    let e = quarb::run("/a @| tree(1; -tx)", &d)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("'-x' in '-tx' is no switch of 'tree' (its short switches: -k -t -p -r -s)"),
+        "{e}"
+    );
     // the last letter keeps its value: `-to=…` on a reducer
     assert_eq!(text("/a | ::x @| sum(-o=$_ * 2)"), "2");
     // long options never bundle
-    let e = quarb::run("/a @| tree(1; --tp)", &d).unwrap_err().to_string();
+    let e = quarb::run("/a @| tree(1; --tp)", &d)
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("no option '--tp'"), "{e}");
 }
 
@@ -334,20 +374,42 @@ fn leaf_runs_collapse_sampling_and_the_record_part() {
     )
     .unwrap();
     let text = |q: &str| match quarb::run(q, &d).unwrap_or_else(|e| panic!("{q}: {e}")) {
-        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect::<Vec<_>>().join("\n"),
+        quarb::QueryResult::Values(vs) => vs
+            .iter()
+            .map(|v| v.display_form())
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => panic!("{q}: {other:?}"),
     };
     // leaves named by position differ, and do not collapse; rows
     // with children are not leaves
-    assert_eq!(text("/flat @| tree(1)"), "/\n└── flat\n    ├── 0\n    ├── 1\n    ├── 2\n    └── 3");
-    assert_eq!(text("/rows @| tree(1)"), "/\n└── rows\n    ├── 0\n    ├── 1\n    └── 2");
+    assert_eq!(
+        text("/flat @| tree(1)"),
+        "/\n└── flat\n    ├── 0\n    ├── 1\n    ├── 2\n    └── 3"
+    );
+    assert_eq!(
+        text("/rows @| tree(1)"),
+        "/\n└── rows\n    ├── 0\n    ├── 1\n    └── 2"
+    );
     // same-named leaves whose lines read alike collapse; a column
     // that differs keeps them apart
-    assert_eq!(text("/rows/*/k @| tree(0)"), "/\n└── rows\n    ├┄┄ 0\n    │   └── k\n    ├┄┄ 1\n    │   └── k\n    └┄┄ 2\n        └── k");
-    assert_eq!(text("/flat/* @| tree(0; -k)"), "/ <object>\n└┄┄ flat\n    ├── 0 <string>\n    ├── 1 <string>\n    ├── 2 <string>\n    └── 3 <string>");
+    assert_eq!(
+        text("/rows/*/k @| tree(0)"),
+        "/\n└── rows\n    ├┄┄ 0\n    │   └── k\n    ├┄┄ 1\n    │   └── k\n    └┄┄ 2\n        └── k"
+    );
+    assert_eq!(
+        text("/flat/* @| tree(0; -k)"),
+        "/ <object>\n└┄┄ flat\n    ├── 0 <string>\n    ├── 1 <string>\n    ├── 2 <string>\n    └── 3 <string>"
+    );
     // --sample=n: the first n, then the more line
-    assert_eq!(text("/flat @| tree(1; -s=2)"), "/\n└── flat\n    ├── 0\n    ├── 1\n    └── … and 2 more");
-    assert_eq!(text("/o @| tree(1; --sample=3)"), "/\n└── o\n    ├── x\n    ├── y\n    ├── z\n    └── … and 7 more");
+    assert_eq!(
+        text("/flat @| tree(1; -s=2)"),
+        "/\n└── flat\n    ├── 0\n    ├── 1\n    └── … and 2 more"
+    );
+    assert_eq!(
+        text("/o @| tree(1; --sample=3)"),
+        "/\n└── o\n    ├── x\n    ├── y\n    ├── z\n    └── … and 7 more"
+    );
     // -r: the scalar properties, six then an ellipsis; a child with
     // children (z, w) and a null member are no fields; none → nothing
     assert_eq!(
@@ -365,7 +427,11 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     )
     .unwrap();
     let text = |q: &str| match quarb::run(q, &d).unwrap() {
-        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect::<Vec<_>>().join("\n"),
+        quarb::QueryResult::Values(vs) => vs
+            .iter()
+            .map(|v| v.display_form())
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => panic!("{q}: {other:?}"),
     };
     // one skipped path: one stub, as before

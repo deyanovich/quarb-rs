@@ -174,8 +174,14 @@ fn value_expressions_over_string_attributes() {
     // computed pipeline topic; the non-numeric row is null (empty)
     assert_eq!(vals("//item | ::price * ::qty"), vec!["12", "20", ""]);
     // a computed column, pushed then aggregated
-    assert_eq!(vals("//item | .total(::price * ::qty) | $.total @| sum"), vec!["32"]);
-    assert_eq!(vals("//item | .total(::price * ::qty) | $.total @| max"), vec!["20"]);
+    assert_eq!(
+        vals("//item | .total(::price * ::qty) | $.total @| sum"),
+        vec!["32"]
+    );
+    assert_eq!(
+        vals("//item | .total(::price * ::qty) | $.total @| max"),
+        vec!["20"]
+    );
 }
 
 /// A correlated join whose two conditions must bind to the *same*

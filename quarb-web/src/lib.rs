@@ -835,11 +835,22 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
-        &["n-sites", "lowering", "n-pages", "n-links", "base", "hierarchy", "path", "depth", "rank", "kind", "key", "redirect", "category"]
-
+        &[
+            "n-sites",
+            "lowering",
+            "n-pages",
+            "n-links",
+            "base",
+            "hierarchy",
+            "path",
+            "depth",
+            "rank",
+            "kind",
+            "key",
+            "redirect",
+            "category",
+        ]
     }
-
 
     fn metadata(&self, id: NodeId, key: &str) -> Option<Value> {
         match self.decode(id) {

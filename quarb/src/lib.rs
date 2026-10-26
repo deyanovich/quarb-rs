@@ -53,18 +53,18 @@ pub use graph::tabula::{table_node_records, table_rows_of};
 pub use graph::{adapter, conformance, koine, names, plan, reflect, source, target, trace};
 #[cfg(feature = "kaiv")]
 pub use pipeline::kaiv_out;
+pub use pipeline::{PrettyMode, SessionMemory, SessionStore, session_memory};
 pub use pipeline::{env, library};
 pub use quarb_time::{calendar, calnames, datenames, durnames, regional};
 /// The temporal fragment (the `quarb-time` crate, at its old paths).
 pub use quarb_time::{period, temporal, timex};
-pub use stdlib::{pretty_precision, tabulate, tabulate_in, tabulate_pretty, tabulate_with};
-pub use pipeline::{PrettyMode, SessionMemory, SessionStore, session_memory};
 pub use stdlib::pretty_value;
-pub use value::pretty_float;
+pub use stdlib::{pretty_precision, tabulate, tabulate_in, tabulate_pretty, tabulate_with};
 use syntax::{ast, lexer, parser, unparse};
 pub use syntax::{highlight, man, registry};
 pub use thread::prov::{ORIGIN_CAP, Origin, Origins, Prov};
 pub use value::encoding::{base64, base64_decode, sha256, sha256_hex};
+pub use value::pretty_float;
 pub use value::split_seconds_pub;
 pub use value::table::{TABLE_CSS, table_cells, table_columns, table_html, table_html_plain};
 pub use value::{bibref, encoding, locale, number, quantity, table, translit};
@@ -146,10 +146,15 @@ pub fn parse_step_body(body: &str) -> Result<StepBody> {
         ast::PathElem::Group(g) => &g.predicates,
         _ => return refuse("that"),
     };
-    if preds
-        .iter()
-        .any(|p| matches!(p, ast::Predicate::Index(_) | ast::Predicate::Range(_, _) | ast::Predicate::Positions(_) | ast::Predicate::Computed(_)))
-    {
+    if preds.iter().any(|p| {
+        matches!(
+            p,
+            ast::Predicate::Index(_)
+                | ast::Predicate::Range(_, _)
+                | ast::Predicate::Positions(_)
+                | ast::Predicate::Computed(_)
+        )
+    }) {
         return refuse("a positional predicate");
     }
     Ok(StepBody(elem))
@@ -256,7 +261,9 @@ pub fn closes_with_drawing(text: &str) -> bool {
         .and_then(|tokens| parser::parse(&tokens))
         .ok()
         .and_then(|q| match q.pipeline.last() {
-            Some(ast::Command::Agg(call)) => Some(matches!(call.name.as_str(), "tree" | "histogram")),
+            Some(ast::Command::Agg(call)) => {
+                Some(matches!(call.name.as_str(), "tree" | "histogram"))
+            }
             _ => None,
         })
         .unwrap_or(false)

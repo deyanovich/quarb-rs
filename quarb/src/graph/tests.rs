@@ -465,10 +465,7 @@ fn correlation() {
     // Nodes at the same depth as `a` (depth 1): a and b.
     assert_eq!(run("//* <=> //a[:depth = $$0:depth]", &t), vec![1, 4]);
     // All .rs files except the one `x.rs` names (join by name).
-    assert_eq!(
-        run("//*.rs <=> //x.rs[:name != $$0:name]", &t),
-        vec![5, 7]
-    );
+    assert_eq!(run("//*.rs <=> //x.rs[:name != $$0:name]", &t), vec![5, 7]);
     // Chained: an unconstrained second entry binds its first
     // candidate; the depth condition still filters the driver.
     assert_eq!(
@@ -1159,10 +1156,7 @@ fn predicates() {
     // negation: non-leaf children of root -> a, b
     assert_eq!(run("/*[!:is-leaf]", &t), vec![1, 4]);
     // and + regex match on the name
-    assert_eq!(
-        run("//*[:is-leaf && :name == (/rs/)]", &t),
-        vec![2, 5, 7]
-    );
+    assert_eq!(run("//*[:is-leaf && :name == (/rs/)]", &t), vec![2, 5, 7]);
     // comparison against a literal, via core depth
     assert_eq!(run("//*[:depth > 2]", &t), vec![7]);
 }
@@ -1318,10 +1312,7 @@ fn value_expression_commands() {
         vec![Value::Int(6)]
     );
     // grouped expression command
-    assert_eq!(
-        vals("/a/x.rs | (:index + 1) * 3", &t),
-        vec![Value::Int(6)]
-    );
+    assert_eq!(vals("/a/x.rs | (:index + 1) * 3", &t), vec![Value::Int(6)]);
 }
 
 /// Keyed aggregates reorder or filter capsae by per-capsa keys,
@@ -1401,10 +1392,7 @@ fn keyed_aggregates() {
     assert_eq!(run("//* @| unique_by(:depth)", &t), vec![1, 2, 7]);
     // composite keys tie-break
     assert_eq!(
-        vals(
-            "//*[:is-leaf] @| sort_by(:depth, :name) | :name",
-            &t
-        )[0],
+        vals("//*[:is-leaf] @| sort_by(:depth, :name) | :name", &t)[0],
         Value::Str("x.rs".into())
     );
 }
@@ -1424,10 +1412,7 @@ fn positional_and_filter_commands() {
     );
     // per-capsa filter: each capsa tested against its node
     assert_eq!(run("//* | [:is-leaf]", &t), vec![2, 3, 5, 7]);
-    assert_eq!(
-        run("//*.rs @| sort_by(:name) | [:depth > 2]", &t),
-        vec![7]
-    );
+    assert_eq!(run("//*.rs @| sort_by(:name) | [:depth > 2]", &t), vec![7]);
     // `| [1]` parses (it is a row of a table, spec: The Table Kind)
     // and refuses at the run on anything else, pointing at `@| [n]`
     assert!(parse(&lex("//* | [1]").unwrap()).is_ok());
@@ -1596,10 +1581,7 @@ fn marks() {
     let t = MockTree::sample();
     // Mark mid-path; recall in a later step predicate — the
     // intra-path back-reference (Cypher's node variables).
-    assert_eq!(
-        run("/a .a /*[:name = $$.a:name]", &t),
-        Vec::<u64>::new()
-    );
+    assert_eq!(run("/a .a /*[:name = $$.a:name]", &t), Vec::<u64>::new());
     assert_eq!(run("//deep .d /w.rs[$$.d:name = \"deep\"]", &t), vec![7]);
     // Recall in a pipeline command operand.
     assert_eq!(
@@ -1608,10 +1590,7 @@ fn marks() {
     );
     // Marks inside patterns: recall in a group predicate sees
     // the walk's own marks.
-    assert_eq!(
-        run("/a/x.rs .x (->ref)[$$.x:name = \"x.rs\"]", &t),
-        vec![7]
-    );
+    assert_eq!(run("/a/x.rs .x (->ref)[$$.x:name = \"x.rs\"]", &t), vec![7]);
     // The context-typed push: bare .name in a SCALAR context
     // still feeds the register, not the marks.
     assert_eq!(vals("//*.rs @| count | .n | $.n", &t), vec![Value::Int(3)]);
@@ -2370,10 +2349,7 @@ fn fork_keeps_the_register_provenance() {
 #[test]
 fn record_keeps_a_part_per_field() {
     let t = MockTree::sample();
-    let rows = traced(
-        "/a/x.rs | .n(:index) | ->ref | %(a = $.n; b = :name)",
-        &t,
-    );
+    let rows = traced("/a/x.rs | .n(:index) | ->ref | %(a = $.n; b = :name)", &t);
     let p = &rows[0].prov;
     assert_eq!(p.origins, origins(&[(2, 1), (7, 3)]));
     assert_eq!(p.part("a").origins, origins(&[(2, 1)]));
@@ -2436,10 +2412,7 @@ fn group_and_ungroup_carry_origins() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].prov.origins, origins(&[(2, 2), (3, 2)]));
     assert_eq!(rows[1].prov.origins, origins(&[(5, 2), (6, 2)]));
-    let rows = traced(
-        "/*/* | .d(\\:name) | :index @| group(d = $.d) | $.d",
-        &t,
-    );
+    let rows = traced("/*/* | .d(\\:name) | :index @| group(d = $.d) | $.d", &t);
     assert_eq!(rows[0].prov.origins, origins(&[(1, 1)]));
     let rows = traced(
         "/*/* | .d(\\:name) | :index @| group(d = $.d) @| ungroup | $.d",
@@ -2456,10 +2429,7 @@ fn a_group_sums_a_record_field() {
     // field read on the group's list projects each member, so
     // `:n | sum` says the same. Both agree with grouping the values.
     let t = MockTree::sample();
-    let by_value = traced(
-        "/*/* | .d(\\:name) | :index @| group(d = $.d) | sum",
-        &t,
-    );
+    let by_value = traced("/*/* | .d(\\:name) | :index @| group(d = $.d) | sum", &t);
     let keyed = traced(
         "/*/* | .d(\\:name) | %(n = :index) @| group(d = $.d) | sum(--of=:n)",
         &t,
@@ -2572,7 +2542,9 @@ fn value_side_provenance_projection() {
     };
     assert_eq!(&whole[..5], &core[..]);
     assert_eq!(whole[5], ("elided".to_string(), Value::Int(0)));
-    assert!(matches!(&whole[6], (k, Value::Str(t)) if k == "text" && t.starts_with("?api-gateway@")));
+    assert!(
+        matches!(&whole[6], (k, Value::Str(t)) if k == "text" && t.starts_with("?api-gateway@"))
+    );
     assert_eq!(
         vals(&format!("{q} | $_:%provenance:path"), &t),
         vec![Value::Str("/a/x.rs".into())]
@@ -2591,7 +2563,10 @@ fn value_side_provenance_projection() {
             ("command".into(), Value::Int(command)),
         ])
     };
-    assert_eq!(vals(&format!("{q} | $_:%origin:id"), &t), vec![Value::Int(2)]);
+    assert_eq!(
+        vals(&format!("{q} | $_:%origin:id"), &t),
+        vec![Value::Int(2)]
+    );
     assert_eq!(vals(&format!("{q} | $_:%origin"), &t), vec![coord(2, 1)]);
     assert_eq!(
         vals(&format!("{q} | $_:@origin"), &t),
@@ -2602,7 +2577,10 @@ fn value_side_provenance_projection() {
         vals(&format!("{q} | $_:%origin:id | . | ((!7)):name"), &t),
         vec![Value::Str("w.rs".into())]
     );
-    assert_eq!(vals(&format!("{q} | $_:%provenance:elided"), &t), vec![Value::Int(0)]);
+    assert_eq!(
+        vals(&format!("{q} | $_:%provenance:elided"), &t),
+        vec![Value::Int(0)]
+    );
     // A record field's own part, through the field colon.
     assert_eq!(
         vals(
@@ -2628,10 +2606,7 @@ fn value_side_provenance_projection() {
     );
     // A node answers the shaped keys too: one entry, its own
     // coordinate, none elided.
-    assert_eq!(
-        vals("/a/x.rs:@provenance | count", &t),
-        vec![Value::Int(1)]
-    );
+    assert_eq!(vals("/a/x.rs:@provenance | count", &t), vec![Value::Int(1)]);
     assert_eq!(vals("/a/x.rs:origin", &t), vec![Value::Int(2)]);
     assert_eq!(vals("/a/x.rs:%origin", &t), vec![coord(2, 0)]);
     assert_eq!(vals("/a/x.rs:elided", &t), vec![Value::Int(0)]);
@@ -2711,9 +2686,7 @@ fn peer_read_sees_the_input_snapshot() {
     // x.rs's a as b.
     assert_eq!(
         vals(
-            &format!(
-                "{pair} | .v((:name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"
-            ),
+            &format!("{pair} | .v((:name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"),
             &t
         ),
         vec![Value::Null, Value::Int(9)]
@@ -2774,7 +2747,10 @@ fn peer_read_carries_the_regula_provenance() {
     assert_eq!(rows[0].prov.origins, origins(&[(7, 1)]));
     let t2 = provenanced();
     assert_eq!(
-        vals(&format!("{pair} | .v(:index) | ->ref:.v:%provenance:source"), &t2)[0],
+        vals(
+            &format!("{pair} | .v(:index) | ->ref:.v:%provenance:source"),
+            &t2
+        )[0],
         Value::Str("crm".into())
     );
 }
@@ -2830,10 +2806,7 @@ fn node_id_anchor() {
         vec![Value::Str("x.rs".into())]
     );
     assert_eq!(
-        vals(
-            "/a/x.rs | .v(:index) | ->ref | ((!$.v:%origin)):name",
-            &t
-        ),
+        vals("/a/x.rs | .v(:index) | ->ref | ((!$.v:%origin)):name", &t),
         vec![Value::Str("x.rs".into())]
     );
     assert_eq!(

@@ -45,17 +45,17 @@ fn a_literal_after_a_pipe_opens_an_expression() {
     assert_eq!(one("= 3 | 2_km | type"), "quantity");
     assert_eq!(one("= 3 | 1.5 * 2"), "3");
     // per thread, the thread's own topic in reach
-    assert_eq!(
-        run("/rows/* | ::x | 10 + $_").unwrap(),
-        vec!["11", "13"]
-    );
+    assert_eq!(run("/rows/* | ::x | 10 + $_").unwrap(), vec!["11", "13"]);
     // a bare word is still a command
     let e = refuse("= 3 | nosuchcommand");
     assert!(e.contains("nosuchcommand"), "{e}");
     // a literal head continues only with an operator: the pointers
     for q in ["= 12 h", "= 3 | 12 km | type", "= 3 | 12 h"] {
         let e = refuse(q);
-        assert!(e.contains("continues only with an operator") && e.contains("_"), "{q}: {e}");
+        assert!(
+            e.contains("continues only with an operator") && e.contains("_"),
+            "{q}: {e}"
+        );
     }
     assert!(refuse("= 12 h").contains("12_h"));
     let e = refuse("= 3 | 12h");
@@ -90,7 +90,10 @@ fn after_the_aggregation_pipe_the_expression_runs_once_over_the_context() {
     );
     assert_eq!(one("/rows/* | ::x @| #(%(1; 2)) | dim"), "@(1; 2)");
     // the plain aggregate record keeps its bodies over the context
-    assert_eq!(one("/rows/* | ::x @| %(xs = $_; n = count)"), "%(xs = @(1; 3); n = 2)");
+    assert_eq!(
+        one("/rows/* | ::x @| %(xs = $_; n = count)"),
+        "%(xs = @(1; 3); n = 2)"
+    );
     // the stream read as rows is one list: a stream of records the
     // record array, as `@| # | @` gives
     assert_eq!(
@@ -111,7 +114,10 @@ fn the_table_constructor_takes_its_option_alone() {
     );
     assert_eq!(one("= @(1..6) | #(-h=@(a; b; c)) | :b"), "@(2; 5)");
     assert_eq!(one("= 1..6 @| #(-w=2) | dim"), "@(3; 2)");
-    assert_eq!(one("= 1..6 @| #(--header=@(a; b)) | header"), "@(:a<*; int>; :b<*; int>)");
+    assert_eq!(
+        one("= 1..6 @| #(--header=@(a; b)) | header"),
+        "@(:a<*; int>; :b<*; int>)"
+    );
     // inside an expression the option form reads the topic where it stands
     assert_eq!(one("= @(1; 2) | (#(-w=1) | dim)"), "@(2; 1)");
     // a width that does not divide the length names both numbers
@@ -121,9 +127,15 @@ fn the_table_constructor_takes_its_option_alone() {
     assert!(e.contains("5 items do not divide into rows of 2"), "{e}");
     // an item beside an option refuses, naming both
     let e = refuse("= @(1..6) | #(-w=2; %(1; 2))");
-    assert!(e.contains("takes its option alone") && e.contains("'-w'"), "{e}");
+    assert!(
+        e.contains("takes its option alone") && e.contains("'-w'"),
+        "{e}"
+    );
     let e = refuse("= @(1..6) | #(%(1; 2); --width=2)");
-    assert!(e.contains("takes its option alone") && e.contains("'--width'"), "{e}");
+    assert!(
+        e.contains("takes its option alone") && e.contains("'--width'"),
+        "{e}"
+    );
     // one option at a time; an unknown one refuses
     let e = refuse("= @(1..6) | #(-w=2 -h=@(a; b))");
     assert!(e.contains("both given"), "{e}");
@@ -140,7 +152,10 @@ fn the_table_constructor_takes_its_option_alone() {
 fn the_count_and_the_header_alone_are_retired() {
     for q in ["= @(1..6) | #(3)", "= 1..6 @| #(3)", "= #(3)"] {
         let e = refuse(q);
-        assert!(e.contains("'#(3)' is retired") && e.contains("#(--width=3)"), "{q}: {e}");
+        assert!(
+            e.contains("'#(3)' is retired") && e.contains("#(--width=3)"),
+            "{q}: {e}"
+        );
     }
     let e = refuse("= @(1..6) | #(@(a; b; c))");
     assert!(
@@ -150,7 +165,10 @@ fn the_count_and_the_header_alone_are_retired() {
     // a lone list of names is a header of no rows (draft 166): refused
     // with the pointer at the option
     let e = refuse("= #(@(a; b)) | header");
-    assert!(e.contains("alone is retired") && e.contains("#(--header=@(:a; :b))"), "{e}");
+    assert!(
+        e.contains("alone is retired") && e.contains("#(--header=@(:a; :b))"),
+        "{e}"
+    );
 }
 
 #[test]

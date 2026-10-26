@@ -13,8 +13,15 @@ fn refuse(q: &str) -> String {
 
 #[test]
 fn project_is_retired_with_the_pointer_at_the_projection_operator() {
-    for q in ["/a | project(::x)", "/a | project(%(n = ::x); -r)", "= %(a = 1) | project(:a)"] {
+    for q in [
+        "/a | project(::x)",
+        "/a | project(%(n = ::x); -r)",
+        "= %(a = 1) | project(:a)",
+    ] {
         let e = refuse(q);
-        assert!(e.contains("'project(…)' is retired") && e.contains("v:%(…)") && e.contains("| %"), "{q}: {e}");
+        assert!(
+            e.contains("'project(…)' is retired") && e.contains("v:%(…)") && e.contains("| %"),
+            "{q}: {e}"
+        );
     }
 }

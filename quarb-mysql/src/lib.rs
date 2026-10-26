@@ -342,7 +342,10 @@ async fn fetch_rows(
 /// a mixed comparison by rules of its own (`n = 'abc'` is `n = 0`),
 /// so a plan is Quarb's scan only where a column compared with a
 /// number is numeric and one compared with text is not.
-pub fn column_catalog(config: &str, tables: &[&str]) -> Result<Vec<(String, bool, bool)>, MysqlError> {
+pub fn column_catalog(
+    config: &str,
+    tables: &[&str],
+) -> Result<Vec<(String, bool, bool)>, MysqlError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

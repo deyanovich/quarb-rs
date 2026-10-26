@@ -1124,11 +1124,8 @@ impl AstAdapter for GitlabAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["path", "url", "member", "access"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {

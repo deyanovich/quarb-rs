@@ -29,8 +29,12 @@ of its single thread, and never parses it (`cat notes.md | qc '$_
 | wc'`; a document on a pipe is `qua`'s). `-l` makes one thread
 per line, the line as its topic (`seq 5 | qc -l '$_ * 2'`, `ls |
 qc -l '@| count'`): sugar for `$_ | lines |` at the head. A query
-that opens with a pipe pipes from the topic (`echo a b c | qc '|
-words @| count'`). At a terminal the topic is null.
+that opens with a pipe continues the piped text (`echo a b c | qc
+'| words @| count'`); with nothing piped it is refused, as `qua`
+refuses a leading pipe. At a terminal the topic is null, and a
+query opens the root thread with no topic as in `qua`: `qc '=
+.f(0) | .f(1) | .f($. + $..){10} | @.'` seeds the capsa and runs
+the push ten times (`^ | .f(0) | …` is the same query).
 
 The output forms are `qua`'s: the Quarb form by default, `--json`,
 `--jsonl`, `--csv`, `--pretty`, `--save FILE` into SQLite, `--kaiv`.

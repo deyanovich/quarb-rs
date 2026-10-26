@@ -573,7 +573,10 @@ pub fn column_catalog(
             // numeric affinity, and whether the column is declared
             // json (the graft's declaration, kept by SQLite as the
             // type name)
-            let json = matches!(declared.trim().to_ascii_lowercase().as_str(), "json" | "jsonb");
+            let json = matches!(
+                declared.trim().to_ascii_lowercase().as_str(),
+                "json" | "jsonb"
+            );
             catalog.push((name, numeric_affinity(&declared), json));
         }
     }

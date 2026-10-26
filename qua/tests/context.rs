@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn fixture() -> PathBuf {
-    let test = std::thread::current().name().unwrap_or("t").replace(':', "-");
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("t")
+        .replace(':', "-");
     let dir = std::env::temp_dir().join(format!("quarb-context-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -60,10 +63,7 @@ fn the_topics_and_the_positions() {
     assert_eq!(ok(&d, "/a/* | @@_::k @| first"), "@(1; 2; 3)");
     assert_eq!(ok(&d, "/a/* | ((*_))::x @| first"), "@(10; 20; 30)");
     // Inside a map, the element context.
-    assert_eq!(
-        ok(&d, "= @(1; 3) $| ($_ * 100 div sum(@_))"),
-        "@(25; 75)"
-    );
+    assert_eq!(ok(&d, "= @(1; 3) $| ($_ * 100 div sum(@_))"), "@(25; 75)");
 }
 
 /// `#.*` is the context as a table of the value regulae, one row
@@ -88,9 +88,7 @@ fn the_context_as_a_table() {
         "#(@(A);\n  %(\"/a/0\");\n  %(\"/a/1\");\n  %(\"/a/2\"))"
     );
     // A regula that is no cell refuses by name.
-    assert!(
-        err(&d, "/a/* | .l(@(1; 2)) | #.*").contains("'#.*' holds a list under 'l'")
-    );
+    assert!(err(&d, "/a/* | .l(@(1; 2)) | #.*").contains("'#.*' holds a list under 'l'"));
 }
 
 /// `@*` and `(*)` are retired, with the pointer at the three.

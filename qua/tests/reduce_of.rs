@@ -49,7 +49,10 @@ fn the_option_reads_an_expression_on_each_item_over_the_context() {
     );
     // with the listed operands, the options last
     assert_eq!(one("/rows/* @| percentile(50; --of=::x)"), "3");
-    assert_eq!(run("/rows/* @| first(2; --of=::x)").unwrap(), vec!["1", "3"]);
+    assert_eq!(
+        run("/rows/* @| first(2; --of=::x)").unwrap(),
+        vec!["1", "3"]
+    );
     assert_eq!(one("/rows/* @| variance(--sample --of=::x)"), "4");
     // the position stays in reach: a node's own property
     assert_eq!(one("/rows/* | ::k @| join(\", \"; --of=$$_::x)"), "1, 3, 5");
@@ -69,15 +72,11 @@ fn after_group_the_option_reads_each_member() {
     );
     // the spec's own example
     assert_eq!(
-        run("/rows/* | %(::k; n = ::x) @| group(::k) | sum(--of=:n) | %($.k; total = $_)")
-            .unwrap(),
+        run("/rows/* | %(::k; n = ::x) @| group(::k) | sum(--of=:n) | %($.k; total = $_)").unwrap(),
         vec!["%(k = \"a\"; total = 6)", "%(k = \"b\"; total = 3)"]
     );
     // a list topic without members: each item as the topic
-    assert_eq!(
-        one("= @(%(x = 1); %(x = 2)) | sum(--of=:x * 10)"),
-        "30"
-    );
+    assert_eq!(one("= @(%(x = 1); %(x = 2)) | sum(--of=:x * 10)"), "30");
 }
 
 #[test]
@@ -102,7 +101,8 @@ fn a_numeric_reducer_over_lists_says_so() {
 #[test]
 fn a_reducer_in_a_body_over_a_group_takes_the_members_together() {
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | %(k = $.k; n = count; s = ($_ | sum(--of=:x)))").unwrap(),
+        run("/rows/* | %(::k; ::x) @| group(::k) | %(k = $.k; n = count; s = ($_ | sum(--of=:x)))")
+            .unwrap(),
         [r#"%(k = "a"; n = 2; s = 6)"#, r#"%(k = "b"; n = 1; s = 3)"#]
     );
     assert_eq!(
@@ -119,16 +119,25 @@ fn a_reducer_in_a_body_over_a_group_takes_the_members_together() {
 #[test]
 fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
     let e = refuse("/rows/* @| sum(::x)");
-    assert!(e.contains("'sum' takes no operand, 1 given") && e.contains("synopsis"), "{e}");
+    assert!(
+        e.contains("'sum' takes no operand, 1 given") && e.contains("synopsis"),
+        "{e}"
+    );
     let e = refuse("/rows/* | %(::k; ::x) @| group(::k) | sum(:x)");
     assert!(e.contains("'sum' takes no operand, 1 given"), "{e}");
     let e = refuse("/rows/* @| variance(::x; --sample)");
     assert!(e.contains("variance takes no operand"), "{e}");
     // the positional word is retired with the pointer to the switch
     let e = refuse("/rows/* @| variance(sample)");
-    assert!(e.contains("'sample' is an option: write variance(--sample)"), "{e}");
+    assert!(
+        e.contains("'sample' is an option: write variance(--sample)"),
+        "{e}"
+    );
     let e = refuse("/rows/* | ::x @| zscore(sample; ::k)");
-    assert!(e.contains("'sample' is an option: write zscore(--sample)"), "{e}");
+    assert!(
+        e.contains("'sample' is an option: write zscore(--sample)"),
+        "{e}"
+    );
     // nested, the first argument is the input: `(:x | sum)`
     assert_eq!(
         run("/rows/* | %(::k; ::x) @| group(::k) | %($.k; total = sum(:x))").unwrap(),
@@ -138,10 +147,15 @@ fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
     let e = refuse("/rows/* @| sum(--of)");
     assert!(e.contains("takes the expression to reduce"), "{e}");
     let e = refuse("/rows/* @| sum(--foo=1)");
-    assert!(e.contains("'sum' takes '--of=expr' ('-o=expr')") && e.contains("'--foo' given"), "{e}");
+    assert!(
+        e.contains("'sum' takes '--of=expr' ('-o=expr')") && e.contains("'--foo' given"),
+        "{e}"
+    );
     // a keyed aggregate keeps its key operand
     assert_eq!(
-        run("/rows/* | ::x @| sort_by($_) | ::x").unwrap_or_default().len(),
+        run("/rows/* | ::x @| sort_by($_) | ::x")
+            .unwrap_or_default()
+            .len(),
         3
     );
 }

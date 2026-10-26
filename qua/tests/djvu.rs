@@ -59,10 +59,7 @@ fn the_text_layer_under_the_outline() {
     );
     assert_eq!(ok(&dir, &["//page @| count", "text:onegin.djvu"]), "3");
     assert_eq!(
-        ok(
-            &dir,
-            &["//page[!:::text-layer]:::page", "text:onegin.djvu"]
-        ),
+        ok(&dir, &["//page[!:::text-layer]:::page", "text:onegin.djvu"]),
         "3"
     );
     assert_eq!(

@@ -432,7 +432,17 @@ fn spellings_are_locked() {
     // the header option's list of names or projectors is one literal
     assert_eq!(
         collect("literal", "type"),
-        set(&["bool", "float", "instant", "int", "list", "null", "projector", "quantity", "text"])
+        set(&[
+            "bool",
+            "float",
+            "instant",
+            "int",
+            "list",
+            "null",
+            "projector",
+            "quantity",
+            "text"
+        ])
     );
     // a typed projector's declared type word, `*` under the star
     assert_eq!(collect("projection", "type"), set(&["float", "int"]));

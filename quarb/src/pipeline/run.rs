@@ -58,7 +58,9 @@ impl PrettyMode {
         match self {
             PrettyMode::Off => false,
             PrettyMode::Always => true,
-            PrettyMode::Structures => matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_)),
+            PrettyMode::Structures => {
+                matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_))
+            }
         }
     }
 }
@@ -75,7 +77,11 @@ pub struct SessionStore {
 
 impl Default for SessionStore {
     fn default() -> Self {
-        SessionStore { memory: Default::default(), pretty: PrettyMode::Off, precision: 6 }
+        SessionStore {
+            memory: Default::default(),
+            pretty: PrettyMode::Off,
+            precision: 6,
+        }
     }
 }
 
@@ -83,7 +89,10 @@ impl SessionStore {
     /// The settings as the record `session` alone answers.
     pub fn settings(&self) -> Value {
         Value::record(vec![
-            ("pretty".to_string(), Value::Str(self.pretty.word().to_string())),
+            (
+                "pretty".to_string(),
+                Value::Str(self.pretty.word().to_string()),
+            ),
             ("precision".to_string(), Value::Int(self.precision as i64)),
         ])
     }

@@ -45,7 +45,9 @@ fn the_inspection_fields_list_the_three_ladders_as_projections() {
     assert_eq!(rows("/a:metadata"), meta);
     // the core fields themselves, the same list on every node
     let fields = rows("/a:fields");
-    for k in [":name;", ":id;", ":index;", ":traits;", ":kind;", ":props;", ":meta;", ":fields;"] {
+    for k in [
+        ":name;", ":id;", ":index;", ":traits;", ":kind;", ":props;", ":meta;", ":fields;",
+    ] {
         assert!(fields[0].contains(k), "{k} in {fields:?}");
     }
     assert_eq!(rows("/b:fields"), fields);
@@ -54,7 +56,10 @@ fn the_inspection_fields_list_the_three_ladders_as_projections() {
     assert_eq!(rows("/a:kind"), ["object"]);
     assert_eq!(rows("/b:kind"), ["array"]);
     assert_eq!(rows("/a/*:kind"), rows("/a/* | :traits | first"));
-    assert_eq!(rows("/a/*[:kind = \"number\"] | :name"), rows("/a/*<number> | :name"));
+    assert_eq!(
+        rows("/a/*[:kind = \"number\"] | :name"),
+        rows("/a/*<number> | :name")
+    );
     // the canonical spellings print short
     for (q, canon) in [("/a:properties", "/a:props"), ("/a:metadata", "/a:meta")] {
         assert_eq!(quarb::Query::parse(q, &doc()).unwrap().canonical(), canon);
@@ -74,8 +79,14 @@ fn a_projector_prints_as_written_and_coerces_to_its_key() {
 #[test]
 fn the_fields_command_reads_any_topic() {
     assert_eq!(rows("= %(a = 1; b = 2) | fields"), ["@(:a; :b)"]);
-    assert_eq!(rows("= %('my key' = 1; b = 2) | fields"), ["@(:'my key'; :b)"]);
-    assert_eq!(rows("= #(%(a = 1; b = 2); %(a = 3; b = 4)) | fields"), ["@(:a; :b)"]);
+    assert_eq!(
+        rows("= %('my key' = 1; b = 2) | fields"),
+        ["@(:'my key'; :b)"]
+    );
+    assert_eq!(
+        rows("= #(%(a = 1; b = 2); %(a = 3; b = 4)) | fields"),
+        ["@(:a; :b)"]
+    );
     assert_eq!(rows("= #(%(1; 2)) | fields"), ["@(:1; :2)"]);
     assert_eq!(rows("/a | fields"), rows("/a:fields"));
     // over a stream of records, the union in first-seen order
@@ -131,7 +142,10 @@ fn the_record_reading_of_a_node_and_no_row_reading() {
     assert_eq!(rows("/a | %"), [r#"%(title = "Iliad"; year = -750)"#]);
     assert_eq!(rows("/a | % | :title"), ["Iliad"]);
     let e = refuse("/a | @");
-    assert!(e.contains("a node has no row reading") && e.contains("'| %'"), "{e}");
+    assert!(
+        e.contains("a node has no row reading") && e.contains("'| %'"),
+        "{e}"
+    );
     // the record then reads as a record: its fields counted
     assert_eq!(rows("/a | % | count"), ["2"]);
 }

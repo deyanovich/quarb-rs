@@ -1192,13 +1192,24 @@ pub(crate) fn default_command<H: Host>(
                     if !holes {
                         return fallback;
                     }
-                    let fill = |v: Value| if matches!(v, Value::Null) { fallback.clone() } else { v };
+                    let fill = |v: Value| {
+                        if matches!(v, Value::Null) {
+                            fallback.clone()
+                        } else {
+                            v
+                        }
+                    };
                     match topic {
-                        Value::List(items) => Value::list(items.iter().cloned().map(fill).collect()),
+                        Value::List(items) => {
+                            Value::list(items.iter().cloned().map(fill).collect())
+                        }
                         Value::Record(r) => Value::Record(r.map_values(fill)),
                         Value::Table(t) => {
-                            let rows: Vec<Vec<Value>> =
-                                t.rows.iter().map(|row| row.iter().cloned().map(fill).collect()).collect();
+                            let rows: Vec<Vec<Value>> = t
+                                .rows
+                                .iter()
+                                .map(|row| row.iter().cloned().map(fill).collect())
+                                .collect();
                             match t.rebuild(rows) {
                                 Ok(nt) => Value::table(nt),
                                 Err(e) => {
@@ -1278,7 +1289,8 @@ pub(crate) fn agg_as_func_command<H: Host>(
             // values, a table's columns into a record; `count` of
             // a record's fields and a table's rows.
             if of.is_none()
-                && let Some(topic @ (Value::Record(_) | Value::Table(_) | Value::List(_))) = &c.topic
+                && let Some(topic @ (Value::Record(_) | Value::Table(_) | Value::List(_))) =
+                    &c.topic
                 && let Some(v) = stdlib::reduce_structure(call, topic, &|e| host.scale_of(e))
             {
                 c.topic = Some(v);
@@ -1415,6 +1427,11 @@ pub(crate) fn repeat_command<H: Host>(
     }
     let limit = max.unwrap_or(n_max);
     let exact = *max == Some(*min);
+    // An open loop (`{m;}`) runs to the bound; reaching it with the
+    // capsae still changing is the quantifier's refusal (spec:
+    // Quantifier bound), never a silent trail. An explicit ceiling
+    // inside the bound is the user's ask: complete at n, silent.
+    let open = max.is_none();
     let signature = |caps: &[Thread<H::Ext>]| -> Vec<RoundState<<H::Ext as Attachment>::Key>> {
         caps.iter()
             .map(|c| {
@@ -1427,19 +1444,31 @@ pub(crate) fn repeat_command<H: Host>(
             .collect()
     };
     let mut round = 0;
+    let mut moving = false;
     while round < limit {
-        let before = if exact || round < *min {
-            None
-        } else {
+        let forced = exact || round < *min;
+        let before = if !forced || (open && round + 1 == limit) {
             Some(signature(&caps))
+        } else {
+            None
         };
         caps = apply_command(inner, caps, host, trace, outer);
         round += 1;
-        if let Some(b) = before
-            && b == signature(&caps)
-        {
-            break;
+        if let Some(b) = before {
+            let same = b == signature(&caps);
+            moving = !same;
+            if same && !forced {
+                break;
+            }
         }
+    }
+    if open && round == limit && moving {
+        record_refusal(format!(
+            "the push is still moving at the quantifier bound ({n_max}): {limit} rounds ran \
+             and the last still changed the capsae; raise --quantifier-bound, or give the \
+             loop a ceiling '{{{min};n}}' to stop there"
+        ));
+        return Vec::new();
     }
     caps
 }
@@ -1543,13 +1572,18 @@ pub(crate) fn map_cells_command<H: Host>(
         Arg::Expr(e) => Some(e),
         _ => None,
     }) else {
-        return refuse_all::<H>(caps, "map takes a command: map(round(3)), map(?? 0), map(+ 3)");
+        return refuse_all::<H>(
+            caps,
+            "map takes a command: map(round(3)), map(?? 0), map(+ 3)",
+        );
     };
     // `map(<int>; --to=:D)` — a trait as the body redeclares the
     // columns or fields (spec: The Table, "Mapping over the cells",
     // draft 166): `<int>` declares and casts, `<*>` undeclares
     let redeclare: Option<crate::Typing> = match body {
-        Operand::Typed { inner, typing } if matches!(**inner, Operand::Topic) => Some(typing.clone()),
+        Operand::Typed { inner, typing } if matches!(**inner, Operand::Topic) => {
+            Some(typing.clone())
+        }
         _ => None,
     };
     let commands: Vec<Command> = match body {
@@ -1569,11 +1603,16 @@ pub(crate) fn map_cells_command<H: Host>(
     // names (spec: Indexing a Value)
     enum To<'a> {
         Columns(Vec<String>),
-        Index { rows: &'a IndexSpec, cols: Option<&'a IndexSpec>, column: Option<&'a str> },
+        Index {
+            rows: &'a IndexSpec,
+            cols: Option<&'a IndexSpec>,
+            column: Option<&'a str>,
+        },
         /// `--to=:::index`: the labels are the mapped part (draft 166)
         Labels,
     }
-    const TO_FORMS: &str = "--to takes the cells to map: --to=:col, --to=(:a; :b), --to=[rows], --to=[rows]:col";
+    const TO_FORMS: &str =
+        "--to takes the cells to map: --to=:col, --to=(:a; :b), --to=[rows], --to=[rows]:col";
     let to: Option<To<'_>> = match call.args.iter().find_map(|a| match a {
         Arg::Opt { name, value } if name == "--to" => Some(value.as_ref()),
         _ => None,
@@ -1593,16 +1632,25 @@ pub(crate) fn map_cells_command<H: Host>(
                     anchor: Anchor::Current,
                 } if steps.is_empty() && k == "index" => Some(To::Labels),
                 Operand::Index { base, rows, cols } if matches!(**base, Operand::Topic) => {
-                    Some(To::Index { rows, cols: cols.as_ref(), column: None })
+                    Some(To::Index {
+                        rows,
+                        cols: cols.as_ref(),
+                        column: None,
+                    })
                 }
                 Operand::Field { base, name } => match &**base {
                     Operand::Index { base, rows, cols } if matches!(**base, Operand::Topic) => {
-                        Some(To::Index { rows, cols: cols.as_ref(), column: Some(name.as_str()) })
+                        Some(To::Index {
+                            rows,
+                            cols: cols.as_ref(),
+                            column: Some(name.as_str()),
+                        })
                     }
                     Operand::Topic => Some(To::Columns(vec![name.clone()])),
                     _ => return refuse_all::<H>(caps, TO_FORMS),
                 },
-                Operand::List(items) => match items.iter().map(name_of).collect::<Option<Vec<_>>>() {
+                Operand::List(items) => match items.iter().map(name_of).collect::<Option<Vec<_>>>()
+                {
                     Some(names) => Some(To::Columns(names)),
                     None => return refuse_all::<H>(caps, TO_FORMS),
                 },
@@ -1612,7 +1660,10 @@ pub(crate) fn map_cells_command<H: Host>(
         Some(None) => return refuse_all::<H>(caps, TO_FORMS),
     };
     if redeclare.is_some() && matches!(to, Some(To::Index { .. })) {
-        return refuse_all::<H>(caps, "map: --to under a trait names columns or fields, not rows: rows have no type");
+        return refuse_all::<H>(
+            caps,
+            "map: --to under a trait names columns or fields, not rows: rows have no type",
+        );
     }
     caps.into_iter()
         .enumerate()
@@ -2013,9 +2064,10 @@ pub(crate) fn project_command<H: Host>(
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
     use crate::syntax::ast::{Anchor, Operand, Projection};
-    let as_record = call.args.iter().any(
-        |a| matches!(a, Arg::Opt { name, .. } if name == "--record" || name == "-r"),
-    );
+    let as_record = call
+        .args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--record" || name == "-r"));
     let Some(expr) = call.args.iter().find_map(|a| match a {
         Arg::Expr(e) => Some(e.clone()),
         Arg::Lit(v) => Some(Operand::Lit(v.clone())),
@@ -2072,10 +2124,15 @@ pub(crate) fn project_command<H: Host>(
     fn walk(v: Value, read: &dyn Fn(u8, &str) -> Value) -> Value {
         match v {
             Value::Projection { ladder, key, .. } => read(ladder, &key),
-            Value::List(items) => Value::list(items.iter().cloned().map(|x| walk(x, read)).collect()),
-            Value::Record(fields) => {
-                Value::Record(fields.into_iter().map(|(k, x)| (k, walk(x, read))).collect())
+            Value::List(items) => {
+                Value::list(items.iter().cloned().map(|x| walk(x, read)).collect())
             }
+            Value::Record(fields) => Value::Record(
+                fields
+                    .into_iter()
+                    .map(|(k, x)| (k, walk(x, read)))
+                    .collect(),
+            ),
             Value::Table(t) => {
                 let rows = t
                     .rows
@@ -2091,13 +2148,28 @@ pub(crate) fn project_command<H: Host>(
     for (i, c) in caps.into_iter().enumerate() {
         // the operand on the cursor; several values fork under the
         // standing rule, each its own capsa
-        let (values, o) = capture(|| eval_operand(host, &c.ext, &expr, trace, c.scope(Some(i + 1), peers, outer)));
-        let values = if values.is_empty() { vec![Value::Null] } else { values };
+        let (values, o) = capture(|| {
+            eval_operand(
+                host,
+                &c.ext,
+                &expr,
+                trace,
+                c.scope(Some(i + 1), peers, outer),
+            )
+        });
+        let values = if values.is_empty() {
+            vec![Value::Null]
+        } else {
+            values
+        };
         for v in values {
             let mut k = c.clone();
             let read = |ladder: u8, key: &str| -> Value {
                 let op = as_operand(ladder, key);
-                capture(|| group_value(host, &k.ext, &op, trace, k.scope(Some(i + 1), peers, outer))).0
+                capture(|| {
+                    group_value(host, &k.ext, &op, trace, k.scope(Some(i + 1), peers, outer))
+                })
+                .0
             };
             let answer: Result<Value, String> = if !as_record {
                 Ok(walk(v, &read))
@@ -2311,11 +2383,7 @@ pub(crate) fn order_command<H: Host>(
             c
         })
         .collect();
-    let topic_of = |c: &Thread<H::Ext>| {
-        c.topic
-            .clone()
-            .unwrap_or_else(|| host.node_scalar(&c.ext))
-    };
+    let topic_of = |c: &Thread<H::Ext>| c.topic.clone().unwrap_or_else(|| host.node_scalar(&c.ext));
     match call.name.as_str() {
         // With a locale argument, topics sort by their text
         // under that locale's collation (colligo; codepoint
@@ -2896,8 +2964,14 @@ pub(crate) fn keyed_agg<H: Host>(
                     })
                 }
                 Arg::Lit(Value::Quarq(q)) => {
-                    let held = q.projector.as_deref().cloned().unwrap_or_else(|| Value::Quarq(q.clone()));
-                    Some(crate::pipeline::operand::apply_held(host, &c.ext, held, trace, scope))
+                    let held = q
+                        .projector
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(|| Value::Quarq(q.clone()));
+                    Some(crate::pipeline::operand::apply_held(
+                        host, &c.ext, held, trace, scope,
+                    ))
                 }
                 Arg::Lit(_)
                 | Arg::Key(_)
@@ -3248,7 +3322,10 @@ pub(crate) fn session_settings(call: &FnCall) -> Vec<(String, Value)> {
     call.args
         .iter()
         .filter_map(|a| match a {
-            Arg::Opt { name, value: Some(Operand::Lit(v)) } => Some((name.clone(), v.clone())),
+            Arg::Opt {
+                name,
+                value: Some(Operand::Lit(v)),
+            } => Some((name.clone(), v.clone())),
             Arg::Opt { name, value: None } => Some((name.clone(), Value::Null)),
             _ => None,
         })

@@ -329,7 +329,15 @@ impl AstAdapter for FsAdapter {
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["size", "is-dir", "is-file", "modified", "extension", "mode", "permissions"]
+        &[
+            "size",
+            "is-dir",
+            "is-file",
+            "modified",
+            "extension",
+            "mode",
+            "permissions",
+        ]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

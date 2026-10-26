@@ -646,9 +646,11 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     // run code outside the query.
     let environments = take_environments(&mut cli)?;
     let locale = set_output_locale(&cli)?;
-    if profile == Profile::Calc {
-        calc_check_options(&mut cli)?;
-    }
+    let mut piped = if profile == Profile::Calc {
+        calc_check_options(&mut cli)?
+    } else {
+        None
+    };
     let output = if cli.json {
         Output::Json
     } else if cli.jsonl {
@@ -907,10 +909,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     // parsed (a document on a pipe is qua's). At a terminal the
     // topic stays null.
     if profile == Profile::Calc {
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text)
-                .context("reading standard input")?;
+        if let Some(text) = piped.take() {
             oc.topic = Some(Value::Str(text));
         }
     } else if cli.lines {
@@ -938,7 +937,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
 /// The calculator's checks on the command line: no input, no mount,
 /// none of the options that open or translate one; the expression
 /// head supplied where the query lacks it.
-fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
+fn calc_check_options(cli: &mut Cli) -> anyhow::Result<Option<String>> {
     // Every positional argument is expression text: `qc 3 + 5` is
     // the expression `3 + 5`. The arguments stay in `paths` so that
     // a query which fails to parse can name an existing file among
@@ -971,16 +970,42 @@ fn calc_check_options(cli: &mut Cli) -> anyhow::Result<()> {
     // stands; any other body is a command of its own.
     // A body that opens with a pipe stands for `$_ | …`: the topic
     // (the input) is what it pipes from.
-    let opens_with_pipe = ["|", "@|", "__", "@__"]
-        .iter()
-        .any(|p| body.starts_with(p));
+    let opens_with_pipe = ["|", "@|", "__", "@__"].iter().any(|p| body.starts_with(p));
+    // The piped text, read here so the query's shape is judged
+    // against it: a query that opens with a pipe continues the piped
+    // text (`echo a b c | qc '| words @| count'`); with nothing piped
+    // there is nothing to continue, and the leading pipe is the
+    // fragment qua refuses (draft 171). At a terminal the text is
+    // none and the topic stays null. (`--expand` runs nothing: the
+    // lens shows the sugar as it stands.)
+    let piped = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        None
+    } else {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text)
+            .context("reading standard input")?;
+        Some(text)
+    };
+    if opens_with_pipe
+        && !cli.lines
+        && !cli.expand
+        && piped.as_deref().is_none_or(|t| t.trim().is_empty())
+    {
+        anyhow::bail!(
+            "a leading pipe continues the piped text, and nothing is piped: a query without \
+             input opens the root thread with '= .f(0) | …' or '^ | .f(0) | …' (a leading \
+             pipe is a fragment)"
+        );
+    }
     cli.query = match (cli.lines, opens_with_pipe) {
         (true, true) => format!("= $_ | lines {body}"),
         (true, false) => format!("= $_ | lines | {body}"),
         (false, true) => format!("= $_ {body}"),
+        // `^ | cmd` opens the root thread as in qua: no head before it
+        (false, false) if body.starts_with('^') => body.to_string(),
         (false, false) => format!("= {body}"),
     };
-    Ok(())
+    Ok(piped)
 }
 
 /// The calculator's check on the query, its definitions in front:

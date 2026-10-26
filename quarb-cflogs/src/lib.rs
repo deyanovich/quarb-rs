@@ -397,11 +397,8 @@ impl AstAdapter for CflAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["zone", "cache"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let i = self.entry_of(node)?;

@@ -40,7 +40,13 @@ fn one(q: &str) -> String {
 
 #[test]
 fn a_dash_led_last_field_is_the_option_segment_in_every_parenthesis() {
-    for q in ["= @(--author)", "= @(1; --author)", "= @(-x)", "= @(1; -x)", "= @(--x=1)"] {
+    for q in [
+        "= @(--author)",
+        "= @(1; --author)",
+        "= @(-x)",
+        "= @(1; -x)",
+        "= @(--x=1)",
+    ] {
         let e = refuse(q);
         assert!(e.contains("'@(…)' takes no option ('-"), "{q}: {e}");
     }

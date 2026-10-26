@@ -411,10 +411,7 @@ fn mentions_from_ner_tags() {
 fn mentions_from_corefud_brackets() {
     let m = quarb_text::TextModel::parse_conllu_corpus(COREF).unwrap();
     // A chain is the tokens sharing a cluster.
-    assert_eq!(
-        values(&m, "//token[\"e1\" <<= :::entity]::"),
-        ["Tom", "he"]
-    );
+    assert_eq!(values(&m, "//token[\"e1\" <<= :::entity]::"), ["Tom", "he"]);
     assert_eq!(
         values(&m, "//token[\"e1\" <<= :::entity]:::mention"),
         ["1", "3"]
@@ -616,10 +613,7 @@ fn stored_sentences_and_treebank_tokens_have_coordinates() {
         "Chapter One\nTom ran.\nHuck sat down."
     );
     assert_eq!(run("//sentence | :::n", headed), "1\n2\n3");
-    assert_eq!(
-        run("//section[1]/sentence[1]/token | :::n", headed),
-        "1\n2"
-    );
+    assert_eq!(run("//section[1]/sentence[1]/token | :::n", headed), "1\n2");
     assert_eq!(run("//sentence[2]/token[1]:::n", headed), "3");
     assert_eq!(run("//sentence[1]:::end", headed), "11");
     // The treebank as a document: tokens along the surface, the

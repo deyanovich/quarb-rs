@@ -755,7 +755,10 @@ fn decimal_comma_and_group_underscores_canonicalize() {
         canon("/a <=> /b[::y = $$0::t] | .t(::x)"),
         "/a <=> /b[::y = $$0::t] | .t(::x)"
     );
-    assert_eq!(canon("/a | $$__::x | $$__/kid::y"), "/a | $$__::x | $$__/kid::y");
+    assert_eq!(
+        canon("/a | $$__::x | $$__/kid::y"),
+        "/a | $$__::x | $$__/kid::y"
+    );
     // the parent and the ancestors take no name: bare is canonical,
     // the star accepted; the rounded ascent is a hop in name position
     assert_eq!(canon("/a/b\\*/d::"), "/a/b\\/d::");

@@ -583,11 +583,15 @@ impl AstAdapter for KaivAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
-        &["type", "unit", "source-id", "source-uri", "sources", "timestamp"]
-
+        &[
+            "type",
+            "unit",
+            "source-id",
+            "source-uri",
+            "sources",
+            "timestamp",
+        ]
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = self.node(node)?;
@@ -802,10 +806,7 @@ mod tests {
         );
         // A typed temporal criterion over the bridged instant (the
         // list-carrying leaf's newest entry qualifies it too).
-        assert_eq!(
-            values(&a, "//*[:instant > 2025-01-01]::"),
-            ["100", "21.7"]
-        );
+        assert_eq!(values(&a, "//*[:instant > 2025-01-01]::"), ["100", "21.7"]);
         // A leaf listing several sources: the raw tier reads the
         // first entry and names every id; the core tier answers the
         // whole list, the newest instant, and the elision count.

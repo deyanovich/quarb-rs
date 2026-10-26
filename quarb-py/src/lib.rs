@@ -440,9 +440,15 @@ impl Document {
                 ));
             }
         }
-        let (result, html) = self.doc.execute_html(query).map_err(PyValueError::new_err)?;
+        let (result, html) = self
+            .doc
+            .execute_html(query)
+            .map_err(PyValueError::new_err)?;
         let values = match result {
-            QueryResult::Values(vs) => vs.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?,
+            QueryResult::Values(vs) => vs
+                .iter()
+                .map(|v| value_to_py(py, v))
+                .collect::<PyResult<Vec<_>>>()?,
             QueryResult::Nodes(ns) => ns
                 .into_iter()
                 .map(|n| self.doc.render(n).into_py_any(py))

@@ -150,7 +150,11 @@ impl ColumnTypes {
         let json = |e: &(String, bool, bool)| e.2;
         let mut out: Vec<String> = Vec::new();
         for (columns, pick, want) in [
-            (&self.numeric, numeric as fn(&(String, bool, bool)) -> bool, true),
+            (
+                &self.numeric,
+                numeric as fn(&(String, bool, bool)) -> bool,
+                true,
+            ),
             (&self.text, numeric, false),
             (&self.json, json, true),
         ] {

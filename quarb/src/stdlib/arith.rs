@@ -590,7 +590,9 @@ pub(crate) fn broadcast(
             };
             let pairs = keys
                 .iter()
-                .map(|k| Ok::<_, String>((k.clone(), broadcast(op, &cell(a, k), &cell(b, k), scale)?)))
+                .map(|k| {
+                    Ok::<_, String>((k.clone(), broadcast(op, &cell(a, k), &cell(b, k), scale)?))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Record(crate::value::Record::keyed(pairs)))
         }
@@ -638,7 +640,8 @@ pub(crate) fn broadcast(
                         };
                         Ok::<_, String>((k.clone(), v))
                     })
-                    .collect::<Result<Vec<_>, _>>()?.into(),
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
             ))
         }
         (l, r) => Ok(arith(op, l, r, scale)),

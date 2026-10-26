@@ -415,7 +415,9 @@ fn json_kind(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Object(_) => "map",
         serde_json::Value::Array(_) => "array",
-        v => scalar(v).map(|s| quarb::adapter::value_kind(&s)).unwrap_or("null"),
+        v => scalar(v)
+            .map(|s| quarb::adapter::value_kind(&s))
+            .unwrap_or("null"),
     }
 }
 
@@ -484,11 +486,8 @@ impl AstAdapter for CosmosAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["ts", "rid", "etag"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match &self.nodes.borrow()[node.0 as usize].kind {

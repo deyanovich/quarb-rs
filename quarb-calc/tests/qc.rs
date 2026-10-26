@@ -196,3 +196,58 @@ fn a_command_of_the_graphs_layer_is_refused_by_name() {
     // A value command with a node fallback stays the calculator's.
     assert_eq!(qc(&["%(a = 1) | json"]).1, "{\"a\": 1}\n");
 }
+
+#[test]
+fn the_head_may_open_the_root_thread_as_in_qua() {
+    // draft 171: `= cmd` and `^ | cmd` open the root thread with no
+    // topic; a leading pipe with nothing piped is the fragment qua
+    // refuses (the harness pipes an empty stdin)
+    let fib = "@(0; 1; 1; 2; 3; 5; 8; 13; 21; 34; 55; 89)\n".to_string();
+    assert_eq!(
+        qc(&["= .f(0) | .f(1) | .f($. + $..){10} | @."]),
+        (true, fib.clone())
+    );
+    assert_eq!(
+        qc(&["^ | .f(0) | .f(1) | .f($. + $..){10} | @."]),
+        (true, fib)
+    );
+    let (ok, e) = qc(&["| .f(0) | .f(1) | @."]);
+    assert!(!ok && e.contains("nothing is piped"), "{e}");
+    let (ok, e) = qc(&["= | .f(0) | @."]);
+    assert!(!ok && e.contains("nothing is piped"), "{e}");
+    // with text piped, a leading pipe continues it as before
+    assert_eq!(
+        qc_in(&["| words @| count"], Some("a b c\n")),
+        (true, "3\n".to_string())
+    );
+}
+
+#[test]
+fn the_quantifier_bound_option_reaches_the_calculator() {
+    let logistic = "= 0.5 | .x | .x(3.7 * $.x * (1 - $.x))";
+    let (ok, e) = qc(&[&format!("{logistic}{{1;}} | @. | count")]);
+    assert!(
+        !ok && e.contains("still moving at the quantifier bound (32)"),
+        "{e}"
+    );
+    let (ok, e) = qc(&[
+        "--quantifier-bound",
+        "40",
+        &format!("{logistic}{{1;}} | @. | count"),
+    ]);
+    assert!(!ok && e.contains("quantifier bound (40)"), "{e}");
+    assert_eq!(
+        qc(&[
+            "--quantifier-bound",
+            "40",
+            &format!("{logistic}{{1;40}} | @. | count")
+        ]),
+        (true, "41\n".to_string())
+    );
+    let (ok, e) = qc(&[
+        "--quantifier-bound",
+        "2",
+        &format!("{logistic}{{1;3}} | @. | count"),
+    ]);
+    assert!(!ok && e.contains("exceeds the quantifier bound (2)"), "{e}");
+}

@@ -89,10 +89,7 @@ pub(crate) fn navigate_paths(
             }
         }
         let mut merged: Vec<(GraphExt, Vec<Reg>)> = Vec::new();
-        let mut index: HashMap<
-            (NodeId, Vec<(Option<String>, String)>),
-            usize,
-        > = HashMap::new();
+        let mut index: HashMap<(NodeId, Vec<(Option<String>, String)>), usize> = HashMap::new();
         for (ext, r) in next {
             match index.entry((ext.node, reg_key(&r))) {
                 std::collections::hash_map::Entry::Occupied(e) => {
@@ -156,18 +153,10 @@ pub(crate) fn navigate_from(
     seed_register: &[Reg],
 ) -> Vec<NodeId> {
     dedup(
-        navigate_paths(
-            elems,
-            adapter,
-            start,
-            trace,
-            outer,
-            witness,
-            seed_register,
-        )
-        .into_iter()
-        .map(|(e, _)| e.node)
-        .collect(),
+        navigate_paths(elems, adapter, start, trace, outer, witness, seed_register)
+            .into_iter()
+            .map(|(e, _)| e.node)
+            .collect(),
     )
 }
 
@@ -571,7 +560,8 @@ pub(crate) fn expand_elems(
         // A mark files a reference to each in-flight path's node.
         if let PathElem::Mark(name) = elem {
             for path in &mut paths {
-                path.register.push(mark_reg(adapter, path.ext.node, name.clone()));
+                path.register
+                    .push(mark_reg(adapter, path.ext.node, name.clone()));
             }
             continue;
         }
@@ -2100,7 +2090,14 @@ pub(crate) fn apply_predicates<T>(
                                 witness: (!witness.is_empty()).then_some(witness),
                                 ..Scope::at(state)
                             };
-                            eval_pred_expr_at(adapter, node_of(item), &truthy, trace, witness, scope)
+                            eval_pred_expr_at(
+                                adapter,
+                                node_of(item),
+                                &truthy,
+                                trace,
+                                witness,
+                                scope,
+                            )
                         });
                     }
                 }

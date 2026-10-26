@@ -64,11 +64,10 @@ impl TreeSpec {
                 Arg::Opt { name, .. } if name == "--record" || name == "-r" => {
                     spec.parts.push(Part::Record)
                 }
-                Arg::Opt { name, value: Some(Operand::Lit(Value::Int(n))) }
-                    if name == "--sample" || name == "-s" =>
-                {
-                    spec.sample = Some((*n).max(0) as usize)
-                }
+                Arg::Opt {
+                    name,
+                    value: Some(Operand::Lit(Value::Int(n))),
+                } if name == "--sample" || name == "-s" => spec.sample = Some((*n).max(0) as usize),
                 Arg::Expr(e) => spec.parts.push(Part::Column(e.clone())),
                 _ => {}
             }
@@ -136,9 +135,7 @@ fn html_of(events: &[(usize, Line, String)]) -> String {
             open.pop();
             out.push_str("</details>");
         }
-        let has_children = events
-            .get(i + 1)
-            .is_some_and(|(d, _, _)| *d > *depth);
+        let has_children = events.get(i + 1).is_some_and(|(d, _, _)| *d > *depth);
         let class = match line {
             Line::Node => "node",
             Line::Stub => "stub",
@@ -403,7 +400,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
                         // every item a starting point: one stub
                         let path: Vec<String> = run.iter().map(|n| self.label(*n)).collect();
                         let tee = if last { "└┄┄ " } else { "├┄┄ " };
-                        self.events.push((depth_of(prefix), Line::Stub, path.join("/")));
+                        self.events
+                            .push((depth_of(prefix), Line::Stub, path.join("/")));
                         self.out.push(format!("{prefix}{tee}{}", path.join("/")));
                         let under = format!("{prefix}{below}");
                         self.draw_items(at.items, &under);
@@ -417,7 +415,11 @@ impl<A: AstAdapter> Drawer<'_, A> {
                     for (j, node) in run.iter().enumerate() {
                         let text = format!("{}{}", self.label(*node), self.suffix(*node));
                         self.events.push((depth_of(&p), Line::Node, text));
-                        self.out.push(format!("{p}{tee}{}{}", self.label(*node), self.suffix(*node)));
+                        self.out.push(format!(
+                            "{p}{tee}{}{}",
+                            self.label(*node),
+                            self.suffix(*node)
+                        ));
                         self.drawn.insert(*node);
                         p.push_str(below);
                         if j == 0 {
@@ -463,7 +465,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
     fn links_and_children(&mut self, node: NodeId, prefix: &str, remaining: Option<usize>) {
         for (label, target) in self.listed_links(node) {
             let text = format!("->{label} {}", name_path(self.adapter, target));
-            self.events.push((depth_of(prefix) , Line::Link, text.clone()));
+            self.events
+                .push((depth_of(prefix), Line::Link, text.clone()));
             if self.drawn.contains(&target) {
                 self.out.push(format!("{prefix}{text}"));
                 continue;
@@ -483,7 +486,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
                     ""
                 };
                 let text = format!("->{l2} {}{onward}", name_path(self.adapter, t2));
-                self.events.push((depth_of(&deeper), Line::Link, text.clone()));
+                self.events
+                    .push((depth_of(&deeper), Line::Link, text.clone()));
                 self.out.push(format!("{deeper}{text}"));
             }
             self.children(target, &deeper, self.spec.depth);
@@ -565,7 +569,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
     /// A line that is no node: a collapsed run or the more line.
     fn push_line(&mut self, prefix: &str, last: bool, text: String) {
         let tee = if last { "└── " } else { "├── " };
-        self.events.push((depth_of(prefix), Line::Node, text.clone()));
+        self.events
+            .push((depth_of(prefix), Line::Node, text.clone()));
         self.out.push(format!("{prefix}{tee}{text}"));
     }
 
@@ -636,7 +641,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
                         .filter(|c| !self.adapter.children(**c).is_empty())
                         .filter_map(|c| self.adapter.name(*c))
                         .collect();
-                    let leaves: Vec<String> = kids.iter().filter_map(|c| self.adapter.name(*c)).collect();
+                    let leaves: Vec<String> =
+                        kids.iter().filter_map(|c| self.adapter.name(*c)).collect();
                     let fields: Vec<(String, Value)> = self
                         .adapter
                         .property_names(node)
@@ -646,8 +652,13 @@ impl<A: AstAdapter> Drawer<'_, A> {
                             let v = self.adapter.property(node, &name).unwrap_or(Value::Null);
                             // a child whose value is null is a member,
                             // not a datum
-                            let datum = !matches!(v, Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Node(_))
-                                && !(matches!(v, Value::Null) && leaves.contains(&name));
+                            let datum = !matches!(
+                                v,
+                                Value::List(_)
+                                    | Value::Record(_)
+                                    | Value::Table(_)
+                                    | Value::Node(_)
+                            ) && !(matches!(v, Value::Null) && leaves.contains(&name));
                             datum.then_some((name, v))
                         })
                         .collect();

@@ -391,11 +391,8 @@ impl AstAdapter for LdapAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["dn", "n-attrs"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {

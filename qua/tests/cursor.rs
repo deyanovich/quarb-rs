@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn fixture() -> PathBuf {
-    let test = std::thread::current().name().unwrap_or("t").replace(':', "-");
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("t")
+        .replace(':', "-");
     let dir = std::env::temp_dir().join(format!("quarb-cursor-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -77,8 +80,14 @@ fn the_invoking_position() {
         "@%(@(v; up); %(10; 1); %(20; 1))\n%(v = 30; up = 2)"
     );
     // the thread whose scoped match is empty answers null, printed
-    assert_eq!(ok(&d, "/a/* | .s(/b/*[$$__::k = 1]::v) | $.s"), "@(10; 20)\nnull");
-    assert_eq!(ok(&d, "/a/* | .s(/b/* | .t(((__))::k) | $.t) | $.s"), "@(1; 1)\n2");
+    assert_eq!(
+        ok(&d, "/a/* | .s(/b/*[$$__::k = 1]::v) | $.s"),
+        "@(10; 20)\nnull"
+    );
+    assert_eq!(
+        ok(&d, "/a/* | .s(/b/* | .t(((__))::k) | $.t) | $.s"),
+        "@(1; 1)\n2"
+    );
     // Top level: null.
     assert_eq!(ok(&d, "/a/* | ($$__::k ?? \"none\")"), "none\nnone");
     // `_` is the cursor record now: a node projection written on it
@@ -140,7 +149,10 @@ fn the_driver_in_a_fragment_body() {
     // naming the fragment.
     let (out, err, good) = run("&under::v");
     assert!(!good, "{out}");
-    assert!(err.contains("in expansion of '&under'") && err.contains("names the driver"), "{err}");
+    assert!(
+        err.contains("in expansion of '&under'") && err.contains("names the driver"),
+        "{err}"
+    );
     let (_, err, good) = run("/a/* | %(n = (&twice::v))");
     assert!(!good);
     assert!(err.contains("in expansion of '&twice'"), "{err}");
@@ -153,7 +165,10 @@ fn the_driver_in_a_fragment_body() {
     assert_eq!(out, "30");
     let (_, err, good) = run("&gen::v");
     assert!(!good);
-    assert!(err.contains("in expansion of '&gen'") && err.contains("names the driver"), "{err}");
+    assert!(
+        err.contains("in expansion of '&gen'") && err.contains("names the driver"),
+        "{err}"
+    );
 }
 
 /// The capsa is one memory: marks are regulae holding references,
@@ -186,7 +201,10 @@ fn marks_are_regulae() {
     // A name reads whatever was filed under it last: a reference
     // prints as its locator, is of type node, and `-->` resolves it.
     assert_eq!(ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A"), "/a/0\n/a/0");
-    assert_eq!(ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A | type"), "node\nnode");
+    assert_eq!(
+        ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A | type"),
+        "node\nnode"
+    );
     assert_eq!(ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A-->::k"), "1\n1");
     assert_eq!(
         ok(&d, "/a/*[::k = 1] | .A | /b/* | ((A))/b/*::v @| count"),

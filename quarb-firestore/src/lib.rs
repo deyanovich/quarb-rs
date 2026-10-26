@@ -522,11 +522,8 @@ impl AstAdapter for FirestoreAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["path", "n-fields"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match key {

@@ -683,11 +683,8 @@ impl AstAdapter for GclAdapter {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
         &["severity", "received", "log", "project"]
-
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let i = self.entry_of(node)?;

@@ -311,7 +311,8 @@ fn identifiers_are_gated() {
     assert!(pushdown("/t/*[::\"a OR b\" = 5] | ::x").is_none());
     assert!(pushdown("/\"t; DROP TABLE u\"/*[::a = 5] | ::x").is_none());
     assert!(
-        pushdown("/albums/* <=> /tracks/*[::aid = $$0::\"album-id\"] | %(t = $$1::title)").is_none()
+        pushdown("/albums/* <=> /tracks/*[::aid = $$0::\"album-id\"] | %(t = $$1::title)")
+            .is_none()
     );
     // The display translation double-quotes (ANSI) with a note.
     let t = export("/t/*[::\"a OR b\" = 5] | ::x").unwrap();
@@ -509,7 +510,8 @@ fn refuses_the_internal_left_marker() {
     // join's left table: query text containing it would be
     // rewritten inside its own literals and could spoof the join
     // obligation, so it stays on the scan path.
-    let q = "/albums/* <=> /tracks/*[::note = '__LEFT__.id' && ::album_id = $$0::id] | %($$1::title)";
+    let q =
+        "/albums/* <=> /tracks/*[::note = '__LEFT__.id' && ::album_id = $$0::id] | %($$1::title)";
     assert!(pushdown(q).is_none());
     let Err(err) = pushdown_explained(q) else {
         panic!("marker in a literal must refuse")

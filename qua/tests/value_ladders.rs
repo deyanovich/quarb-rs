@@ -21,9 +21,15 @@ fn the_rungs_on_a_record_a_list_and_a_table() {
     // property (the reach-back idiom), the field the single colon's
     assert_eq!(rows("/a | % | ::x"), ["1"]);
     assert_eq!(rows("/a | % | :x"), ["1"]);
-    assert_eq!(rows("/a | %(::y) | ++ %(x = ::x)"), [r#"%(y = "two"; x = 1)"#]);
+    assert_eq!(
+        rows("/a | %(::y) | ++ %(x = ::x)"),
+        [r#"%(y = "two"; x = 1)"#]
+    );
     assert_eq!(rows(r#"/a | %(::y) | [::x = 1] | :y"#), ["two"]);
-    assert_eq!(rows("/a | % | $_:%(n = ::x; t = :::type)"), [r#"%(n = 1; t = "record")"#]);
+    assert_eq!(
+        rows("/a | % | $_:%(n = ::x; t = :::type)"),
+        [r#"%(n = 1; t = "record")"#]
+    );
     // the descriptors
     assert_eq!(rows("/a | % | :::fields"), ["@(:x; :y)"]);
     assert_eq!(rows("/a | % | :::keys"), [r#"@("x"; "y")"#]);
@@ -40,7 +46,10 @@ fn the_rungs_on_a_record_a_list_and_a_table() {
     // a table: the column as a list, the descriptors
     let t = r#"= #(@(name; age); %("Braund"; 22); %("Allen"; 35))"#;
     assert_eq!(rows(&format!("{t} | :age")), ["@(22; 35)"]);
-    assert_eq!(rows(&format!("{t} | :::header")), ["@(:name<*; text>; :age<*; int>)"]);
+    assert_eq!(
+        rows(&format!("{t} | :::header")),
+        ["@(:name<*; text>; :age<*; int>)"]
+    );
     assert_eq!(rows(&format!("{t} | :::type")), [r#"@("text"; "int")"#]);
     assert_eq!(rows(&format!("{t} | :::dim")), ["@(2; 2)"]);
     assert_eq!(rows(&format!("{t} | :::nrows")), ["2"]);

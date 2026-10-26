@@ -73,7 +73,11 @@ pub(crate) fn recall_part<T: Clone>(
 
 /// The named view of one side of the register: the latest regula
 /// per name, in first-push order.
-fn named_side<T: Clone>(register: &[Reg], refs: bool, part: impl Fn(&Reg) -> &T) -> Vec<(String, T)> {
+fn named_side<T: Clone>(
+    register: &[Reg],
+    refs: bool,
+    part: impl Fn(&Reg) -> &T,
+) -> Vec<(String, T)> {
     let mut fields: Vec<(String, T)> = Vec::new();
     for reg in register.iter().filter(|r| is_reference(r) == refs) {
         if let Some(name) = &reg.name {
@@ -107,7 +111,11 @@ pub(crate) fn session_recall(r: &RegRef) -> Value {
                 let held: Vec<&str> = memory.keys().map(String::as_str).collect();
                 crate::value::ambient::record_refusal(format!(
                     "no value ',{name}' in the session memory (it holds: {}); the capsa's register is '$.{name}'",
-                    if held.is_empty() { "nothing".to_string() } else { held.join(", ") }
+                    if held.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        held.join(", ")
+                    }
                 ));
                 Value::Null
             }

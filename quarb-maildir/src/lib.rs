@@ -451,7 +451,15 @@ impl AstAdapter for MaildirAdapter {
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["n-messages", "encoding", "replaced", "new", "epoch", "date", "n-headers"]
+        &[
+            "n-messages",
+            "encoding",
+            "replaced",
+            "new",
+            "epoch",
+            "date",
+            "n-headers",
+        ]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {

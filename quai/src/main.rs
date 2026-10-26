@@ -441,7 +441,8 @@ fn main() -> Result<()> {
 /// line after each cell; a cell whose last command is a session push
 /// prints nothing after its lines; a refusal prints as `error: …`.
 fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let mut cells: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
     for line in text.lines() {

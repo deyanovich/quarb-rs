@@ -356,7 +356,11 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
         // cells); the header's name does not enter
         (Value::Table(x), Value::Table(y)) => {
             let declared = |t: &crate::Table| -> Vec<Option<crate::value::ColumnType>> {
-                if t.declared.is_empty() { vec![None; t.width()] } else { t.declared.clone() }
+                if t.declared.is_empty() {
+                    vec![None; t.width()]
+                } else {
+                    t.declared.clone()
+                }
             };
             x.header == y.header
                 && x.index == y.index

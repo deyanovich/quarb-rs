@@ -205,7 +205,10 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '¥ 500' | quantity"), "500_JPY");
     assert_eq!(one("= '12 EUR/kg' | quantity"), "12_EUR/kg");
     assert_eq!(one("= '12 EUR' | quantity | dimension"), "EUR");
-    assert_eq!(one("= ('12 EUR' | quantity) + ('3 USD' | quantity)"), "null");
+    assert_eq!(
+        one("= ('12 EUR' | quantity) + ('3 USD' | quantity)"),
+        "null"
+    );
     assert_eq!(one("= ('12 EUR' | quantity) | convert(USD)"), "null");
     assert_eq!(one("= '12 UAH' | quantity"), "12_UAH");
     assert_eq!(one("= '₦500' | quantity"), "500_NGN");
@@ -306,7 +309,10 @@ fn the_exchange_follows_the_rates_record() {
     assert_eq!(one("= 12_USD | exchange(%(EUR = 1.25_USD); USD)"), "12_USD");
     // no opaque factor, two of them, or a rate the record does not reach: null
     assert_eq!(one("= 12_kg | exchange(%(EUR = 1.25_USD); USD)"), "null");
-    assert_eq!(one("= 12_EUR/GBP | exchange(%(EUR = 1.25_USD); USD)"), "null");
+    assert_eq!(
+        one("= 12_EUR/GBP | exchange(%(EUR = 1.25_USD); USD)"),
+        "null"
+    );
     assert_eq!(one("= 12_CHF | exchange(%(EUR = 1.25_USD); USD)"), "null");
     assert_eq!(one("= 'soon' | exchange(%(EUR = 1.25_USD); USD)"), "null");
     // several entries and no target: refused by name
@@ -576,8 +582,14 @@ fn dfmt_writes_a_locales_designations() {
     assert_eq!(one("= 443100_s | duration | dfmt"), "5d 3h 5min");
     assert_eq!(one("= 443100_s | duration | dfmt(en)"), "5d 3h 5min");
     assert_eq!(one("= 443100_s | duration | dfmt(fr)"), "5 j 3 h 5 min");
-    assert_eq!(one("= 443100_s | duration | dfmt('fr-CA')"), "5 j 3 h 5 min");
-    assert_eq!(one("= 443100_s | duration | dfmt(de)"), "5 Tg. 3 Std. 5 Min.");
+    assert_eq!(
+        one("= 443100_s | duration | dfmt('fr-CA')"),
+        "5 j 3 h 5 min"
+    );
+    assert_eq!(
+        one("= 443100_s | duration | dfmt(de)"),
+        "5 Tg. 3 Std. 5 Min."
+    );
     assert_eq!(one("= 443100_s | duration | dfmt(es)"), "5 d 3 h 5 min");
     assert_eq!(one("= 443100_s | duration | dfmt(ru)"), "5 сут 3 ч 5 мин");
     assert_eq!(one("= 443100_s | duration | dfmt(zh)"), "5天 3小时 5分钟");

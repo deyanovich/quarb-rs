@@ -19,10 +19,7 @@ fn scan_filter_resolve() {
     let target = std::env::var("QUARB_DYNAMODB_TEST").expect("QUARB_DYNAMODB_TEST");
     let a = DynamodbAdapter::connect(&target).unwrap();
     // deterministic key-sorted listing, hash-named items repeating
-    assert_eq!(
-        values(&a, "/tracks/*:name"),
-        ["Bartok", "Bartok", "Holst"]
-    );
+    assert_eq!(values(&a, "/tracks/*:name"), ["Bartok", "Bartok", "Holst"]);
     // the sort key stays a property to filter on
     assert_eq!(
         values(&a, "/tracks/Bartok[::song = 'Ostinato']::secs"),

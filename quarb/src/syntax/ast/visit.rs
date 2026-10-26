@@ -79,7 +79,11 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
                 v.operand(keys);
                 v.operand(values);
             }
-            Arg::Lit(_) | Arg::Key(_) | Arg::Range(_, _) | Arg::Named { .. } | Arg::Opt { value: None, .. } => {}
+            Arg::Lit(_)
+            | Arg::Key(_)
+            | Arg::Range(_, _)
+            | Arg::Named { .. }
+            | Arg::Opt { value: None, .. } => {}
         }
     }
 }

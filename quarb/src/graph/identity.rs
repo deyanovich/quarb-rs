@@ -234,10 +234,8 @@ pub(crate) fn find_tree(
     };
     let elems = crate::syntax::parser::parse_scope_path(path)
         .map_err(|_| Some(format!("{identity}!{path}")))?;
-    navigate_from(
-        &elems.0, adapter, node, trace, outer, witness, register,
-    )
-    .into_iter()
-    .next()
-    .ok_or_else(|| Some(format!("{identity}!{path}")))
+    navigate_from(&elems.0, adapter, node, trace, outer, witness, register)
+        .into_iter()
+        .next()
+        .ok_or_else(|| Some(format!("{identity}!{path}")))
 }

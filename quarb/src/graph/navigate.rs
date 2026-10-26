@@ -340,7 +340,10 @@ pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> O
                 .collect(),
         )),
         "fields" => Some(Value::list(
-            CORE_FIELDS.iter().map(|k| Value::projection(1, *k)).collect(),
+            CORE_FIELDS
+                .iter()
+                .map(|k| Value::projection(1, *k))
+                .collect(),
         )),
         "traits" => Some(Value::list(
             adapter.traits(node).into_iter().map(Value::Str).collect(),

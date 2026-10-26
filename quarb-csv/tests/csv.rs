@@ -428,7 +428,10 @@ fn window_shapes() {
     assert!(err("/row | ::age | window(-1..0)").contains("'window' uses '@|'"));
     // `| shift(n)` stands on a value (a list, a record, an indexed
     // table move their values, draft 166); a number has none to move
-    assert!(err("/row | ::age | shift(1)").contains("shift moves the values of a list, a record or a table"));
+    assert!(
+        err("/row | ::age | shift(1)")
+            .contains("shift moves the values of a list, a record or a table")
+    );
     // an empty span, a zero count, a missing distance
     assert!(err("/row @| window(2..1)").contains("start <= end"));
     assert!(err("/row @| window(0)").contains("offset range or a count"));

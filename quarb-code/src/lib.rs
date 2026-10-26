@@ -428,7 +428,11 @@ impl AstAdapter for CodeModel {
     /// (`loop`, `conditional`).
     fn traits(&self, node: NodeId) -> Vec<String> {
         let n = &self.nodes[node.0 as usize];
-        let kind = if n.construct.is_empty() { "file" } else { n.construct };
+        let kind = if n.construct.is_empty() {
+            "file"
+        } else {
+            n.construct
+        };
         let mut out = vec![kind.to_string()];
         for t in n.traits {
             if *t != kind {
@@ -464,11 +468,16 @@ impl AstAdapter for CodeModel {
     /// a node answers).
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-
-        &["kind", "construct", "start-line", "end-line", "lang", "n-params", "function"]
-
+        &[
+            "kind",
+            "construct",
+            "start-line",
+            "end-line",
+            "lang",
+            "n-params",
+            "function",
+        ]
     }
-
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];

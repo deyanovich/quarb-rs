@@ -528,7 +528,10 @@ pub const SPECS: &[FnSpec] = &[
     // The temporal fragment.
     scalar("datetime", "the instant read from text"),
     scalar("epoch", "the instant as seconds since the epoch"),
-    scalar("truncate", "the instant floored to a multiple of a fixed-length duration from the epoch"),
+    scalar(
+        "truncate",
+        "the instant floored to a multiple of a fixed-length duration from the epoch",
+    ),
     scalar("isoformat", "the instant in ISO 8601"),
     scalar("year", "the instant's year"),
     scalar("month", "the instant's month"),
@@ -608,30 +611,54 @@ pub const SPECS: &[FnSpec] = &[
     reducing("min", "the least"),
     reducing("max", "the greatest"),
     reducing("mean", "the arithmetic mean"),
-    reducing("describe", "the summary statistics: count, mean, std, min, the quartiles, max"),
-    reducing("nulls", "the count of null fields; on a table one count per row"),
+    reducing(
+        "describe",
+        "the summary statistics: count, mean, std, min, the quartiles, max",
+    ),
+    reducing(
+        "nulls",
+        "the count of null fields; on a table one count per row",
+    ),
     FnSpec {
         options: &["--pretty", "--precision", "-p"],
-        ..scalar("session", "the session's settings: --pretty=always|structures|off prints the results through pretty, --precision=n sets its digits; alone, the settings as a record")
+        ..scalar(
+            "session",
+            "the session's settings: --pretty=always|structures|off prints the results through pretty, --precision=n sets its digits; alone, the settings as a record",
+        )
     },
     scalar("stack", "the header's innermost level moved into the index"),
-    scalar("unstack", "the index's innermost level moved into the header"),
+    scalar(
+        "unstack",
+        "the index's innermost level moved into the header",
+    ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),
     with_check(
-        with_options(reducing(
-            "std",
-            "the standard deviation (sample with the word sample)",
-        ), &["--sample"]),
+        with_options(
+            reducing(
+                "std",
+                "the standard deviation (sample with the word sample)",
+            ),
+            &["--sample"],
+        ),
         Check::Stat,
     ),
     with_check(
-        with_options(reducing("var", "the variance (n − 1 with --sample)"), &["--sample"]),
+        with_options(
+            reducing("var", "the variance (n − 1 with --sample)"),
+            &["--sample"],
+        ),
         Check::Stat,
     ),
-    with_check(with_options(reducing("stddev", "std, alias"), &["--sample"]), Check::Stat),
-    with_check(with_options(reducing("variance", "var, alias"), &["--sample"]), Check::Stat),
+    with_check(
+        with_options(reducing("stddev", "std, alias"), &["--sample"]),
+        Check::Stat,
+    ),
+    with_check(
+        with_options(reducing("variance", "var, alias"), &["--sample"]),
+        Check::Stat,
+    ),
     reducing(
         "entropy",
         "the Shannon entropy, bits: of a stream of counts, or of the \
@@ -764,7 +791,10 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(context("zscore", "each value standardized over the context"), &["--sample"]),
+        with_options(
+            context("zscore", "each value standardized over the context"),
+            &["--sample"],
+        ),
         Check::Command,
     ),
     with_check(
@@ -781,7 +811,10 @@ pub const SPECS: &[FnSpec] = &[
                 "tree",
                 "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth and column expressions; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
             )),
-            &["--kind", "-k", "--traits", "-t", "--props", "-p", "--record", "-r", "--sample", "-s"],
+            &[
+                "--kind", "-k", "--traits", "-t", "--props", "-p", "--record", "-r", "--sample",
+                "-s",
+            ],
         ),
         Check::Command,
     ),
@@ -808,7 +841,10 @@ pub const SPECS: &[FnSpec] = &[
     ),
     // Keyed aggregates.
     with_options(
-        keyed("sort_by", "the capsae sorted by keys; --desc (-d) descending"),
+        keyed(
+            "sort_by",
+            "the capsae sorted by keys; --desc (-d) descending",
+        ),
         &["--desc", "-d"],
     ),
     keyed("unique_by", "the first capsa per distinct key"),

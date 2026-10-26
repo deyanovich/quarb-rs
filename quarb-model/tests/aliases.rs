@@ -83,13 +83,21 @@ fn alias_statements_are_checked_at_parse_time() {
 /// model's declared ones in declaration order.
 #[test]
 fn the_kind_leads_and_declared_traits_follow() {
-    let a = over("node /lib/para: //paragraph;\ntrait <first>: [:: = \"one\"];\ntrait <short>: [:: = \"one\" || :: = \"two\"];");
+    let a = over(
+        "node /lib/para: //paragraph;\ntrait <first>: [:: = \"one\"];\ntrait <short>: [:: = \"one\" || :: = \"two\"];",
+    );
     assert_eq!(
         values(&a, "/lib/para[1] | :traits"),
         vec!["paragraph, block, para, first, short"]
     );
     assert_eq!(values(&a, "/lib/para[1] | :kind"), vec!["paragraph"]);
-    assert_eq!(values(&a, "/lib/para[2] | :traits"), vec!["paragraph, block, para, short"]);
+    assert_eq!(
+        values(&a, "/lib/para[2] | :traits"),
+        vec!["paragraph, block, para, short"]
+    );
     // the source itself: its traits, then the declared
-    assert_eq!(values(&a, "//paragraph[1] | :traits"), vec!["paragraph, block, first, short"]);
+    assert_eq!(
+        values(&a, "//paragraph[1] | :traits"),
+        vec!["paragraph, block, first, short"]
+    );
 }

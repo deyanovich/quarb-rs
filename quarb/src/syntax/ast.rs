@@ -753,7 +753,10 @@ pub enum Operand {
     /// it, at any depth, replaced by its reading on that value (on
     /// each node, for a path), every other value kept. The `#`
     /// shape is the table of the named columns.
-    Projected { base: Box<Operand>, shape: ProjShape },
+    Projected {
+        base: Box<Operand>,
+        shape: ProjShape,
+    },
     /// `:props...` — the spread suffix on a record item: a list of
     /// projectors spread into the record's fields, each keyed
     /// by its bare key and read on the cursor (`%(:props...)` is what
@@ -786,7 +789,10 @@ pub enum Operand {
     /// table the rows carrying the label, on a record the field
     /// under the key, compared as values; a range takes both ends
     /// in. Where the single bracket counts positions.
-    LabelIndex { base: Box<Operand>, labels: Vec<Operand> },
+    LabelIndex {
+        base: Box<Operand>,
+        labels: Vec<Operand>,
+    },
     /// `:A<int>`, `::price<float>`, `<int>` — a typed projector
     /// (spec: Projectors, draft 166): a projection with its trait
     /// brackets, declaring the type of the field it names; `inner`
@@ -795,7 +801,10 @@ pub enum Operand {
     /// a field is declared — a header item, a record key, a
     /// structured projector's item, `map`'s body — and is refused as
     /// a value.
-    Typed { inner: Box<Operand>, typing: crate::value::Typing },
+    Typed {
+        inner: Box<Operand>,
+        typing: crate::value::Typing,
+    },
     /// `base:key` — a value's provenance: the core-metadata rung
     /// after a register value or the topic, defined over the
     /// origins the value was read from (`source`, `instant`,

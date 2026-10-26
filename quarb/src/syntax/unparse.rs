@@ -51,14 +51,27 @@ pub fn unparse(query: &Query) -> String {
             .args
             .iter()
             .map(|a| match a {
-                Arg::Opt { name, value: Some(Operand::Lit(Value::Str(w))) } => format!("{name}={}", name_text(w)),
-                Arg::Opt { name, value: Some(Operand::Lit(v)) } => format!("{name}={}", v.to_quarb()),
+                Arg::Opt {
+                    name,
+                    value: Some(Operand::Lit(Value::Str(w))),
+                } => format!("{name}={}", name_text(w)),
+                Arg::Opt {
+                    name,
+                    value: Some(Operand::Lit(v)),
+                } => format!("{name}={}", v.to_quarb()),
                 Arg::Opt { name, value: None } => name.clone(),
-                Arg::Opt { name, value: Some(v) } => format!("{name}={}", operand(v)),
+                Arg::Opt {
+                    name,
+                    value: Some(v),
+                } => format!("{name}={}", operand(v)),
                 other => format!("{other:?}"),
             })
             .collect();
-        let mut out = if opts.is_empty() { "session".to_string() } else { format!("session({})", opts.join("; ")) };
+        let mut out = if opts.is_empty() {
+            "session".to_string()
+        } else {
+            format!("session({})", opts.join("; "))
+        };
         for command_ast in rest {
             out.push(' ');
             out.push_str(&command(command_ast));
@@ -675,7 +688,10 @@ fn cmp(op: CmpOp) -> &'static str {
 /// option, long, the header's names bare.
 fn reshape_text(call: &crate::syntax::ast::FnCall) -> String {
     let index = call.args.iter().find_map(|a| match a {
-        Arg::Opt { name, value: Some(v) } if name == "--index" => Some(format!("--index={}", operand(v))),
+        Arg::Opt {
+            name,
+            value: Some(v),
+        } if name == "--index" => Some(format!("--index={}", operand(v))),
         _ => None,
     });
     let main = call.args.iter().find(|a| !matches!(a, Arg::Opt { .. }));
@@ -697,9 +713,10 @@ fn reshape_text(call: &crate::syntax::ast::FnCall) -> String {
     };
     // `--name=word` — the header's name (draft 166), bare where a word
     let name = call.args.iter().find_map(|a| match a {
-        Arg::Opt { name, value: Some(Operand::Lit(Value::Str(s))) } if name == "--name" => {
-            Some(format!("--name={}", name_text(s)))
-        }
+        Arg::Opt {
+            name,
+            value: Some(Operand::Lit(Value::Str(s))),
+        } if name == "--name" => Some(format!("--name={}", name_text(s))),
         _ => None,
     });
     let parts: Vec<String> = head.into_iter().chain(index).chain(name).collect();
@@ -970,11 +987,13 @@ pub(crate) fn operand(o: &Operand) -> String {
         }
         // `value:::key` — the glued descriptor (draft 166)
         Operand::Piped { expr, commands }
-            if let [Command::Expr(Operand::Rel {
-                steps,
-                projection: Some(Projection::AdapterMeta(key)),
-                anchor: crate::pipeline::Anchor::Current,
-            })] = commands.as_slice()
+            if let [
+                Command::Expr(Operand::Rel {
+                    steps,
+                    projection: Some(Projection::AdapterMeta(key)),
+                    anchor: crate::pipeline::Anchor::Current,
+                }),
+            ] = commands.as_slice()
                 && steps.is_empty()
                 && !matches!(**expr, Operand::Seed) =>
         {
@@ -1350,7 +1369,11 @@ pub(crate) fn command(st: &Command) -> String {
 /// was (`'2013-01-01' = 5`), bare otherwise.
 fn row_key_text(name: &str) -> String {
     let (text, quoted) = crate::syntax::ast::row_key(name);
-    if quoted { crate::value::quarb_string(text) } else { text.to_string() }
+    if quoted {
+        crate::value::quarb_string(text)
+    } else {
+        text.to_string()
+    }
 }
 
 fn is_record_call(name: &str) -> bool {

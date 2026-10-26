@@ -241,6 +241,9 @@ pub fn registry_tsv() -> String {
             // `number` is both: the numeric cast under a locale on
             // `|`, the outline command on `@|` (the inventory's word).
             (true, Some(Agg::Context)) if spec.name == "number" => "both",
+            // `shift` is a context command with a value form (`| shift(1)`
+            // on a list), not a renderer like csv or pretty
+            (true, Some(Agg::Context)) if spec.name == "shift" => "context",
             (true, Some(Agg::Context)) => "rendering",
             (false, Some(Agg::Reducing)) => "reducing",
             (false, Some(Agg::Context)) => "context",
@@ -255,6 +258,12 @@ pub fn registry_tsv() -> String {
         if spec.agg.is_some() {
             pipes.push("@|");
         }
+        // `session` heads a query and rides no pipe, as `now()` does
+        // (the inventory's `expr` rows are no pipeline command); it is
+        // registered for its options' sake and, like `now`, not listed.
+        if spec.name == "session" {
+            continue;
+        }
         let layer = match spec.layer {
             Layer::Value => "value",
             Layer::Node => "node",
@@ -263,16 +272,14 @@ pub fn registry_tsv() -> String {
         // thread`, `"null"`, `v`, `0`, `1`, `""`, `unchanged`), from
         // the vendored row; the registry's word where a command has
         // no row.
-        let onnull = entry(spec.name)
-            .map(|e| e.onnull)
-            .unwrap_or_else(|| {
-                match spec.null {
-                    OnNull::Null => "null",
-                    OnNull::Nothing => "no thread",
-                    OnNull::Keep => "",
-                }
-                .to_string()
-            });
+        let onnull = entry(spec.name).map(|e| e.onnull).unwrap_or_else(|| {
+            match spec.null {
+                OnNull::Null => "null",
+                OnNull::Nothing => "no thread",
+                OnNull::Keep => "",
+            }
+            .to_string()
+        });
         s.push_str(&format!(
             "{}\t{kind}\t{}\t{layer}\t{onnull}\t{}\n",
             spec.name,
@@ -316,8 +323,14 @@ mod tests {
         assert_eq!(synopsis_bound("round / round(d)"), Some(1));
         assert_eq!(synopsis_bound("log / log(b) / log(x; b)"), Some(2));
         assert_eq!(synopsis_bound("group(key) / group(key; key…)"), None);
-        assert_eq!(synopsis_bound("melt(id; id…) / melt(id; --name=; --value=)"), None);
-        assert_eq!(synopsis_bound("| number(LOCALE) / @| number / @| number(level)"), Some(1));
+        assert_eq!(
+            synopsis_bound("melt(id; id…) / melt(id; --name=; --value=)"),
+            None
+        );
+        assert_eq!(
+            synopsis_bound("| number(LOCALE) / @| number / @| number(level)"),
+            Some(1)
+        );
         assert_eq!(synopsis_bound("sh(cmd) / `cmd` / (;cmd)"), Some(1));
         assert_eq!(synopsis_bound("s/pattern/replacement/mods"), Some(0));
         assert_eq!(operand_bound("round"), Some(1));

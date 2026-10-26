@@ -42,8 +42,8 @@ use crate::graph::adapter::{AstAdapter, NodeId};
 use crate::graph::host::{QueryResult, eval};
 use crate::pipeline::gate;
 use crate::syntax::ast::{
-    Anchor, Arg, Axis, Branch, Command, ConcatMode, Group, Matcher, Operand, PathElem, PredExpr, Predicate,
-    Projection, PushBody, Query, Reach, RefProp, RegRef, Step, TraitClause,
+    Anchor, Arg, Axis, Branch, Command, ConcatMode, Group, Matcher, Operand, PathElem, PredExpr,
+    Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Step, TraitClause,
 };
 pub(crate) use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
 use crate::value::Value;
@@ -543,7 +543,11 @@ impl QueryArbor {
                 let (kind, items): (&str, Vec<&Operand>) = match shape {
                     crate::syntax::ast::ProjShape::Columns { items, index } => (
                         "table",
-                        items.iter().map(|(_, o)| o).chain(index.iter().map(|b| &**b)).collect(),
+                        items
+                            .iter()
+                            .map(|(_, o)| o)
+                            .chain(index.iter().map(|b| &**b))
+                            .collect(),
                     ),
                     crate::syntax::ast::ProjShape::Value(v) => (
                         match &**v {
@@ -644,7 +648,8 @@ impl QueryArbor {
                         ("core", Some(name.clone()))
                     }
                     Operand::Rel {
-                        projection: Some(p), ..
+                        projection: Some(p),
+                        ..
                     } => match p {
                         Projection::Property(k) => ("property", k.clone()),
                         Projection::CoreMeta(k) => ("core", Some(k.clone())),

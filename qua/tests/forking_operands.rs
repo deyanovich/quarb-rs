@@ -83,7 +83,11 @@ fn a_nested_call_reads_its_argument_by_input_type() {
     // on a node thread the root is `^/`: a bare `/*` is the node's children
     assert_eq!(
         rows("/* | %(::k; total = sum(^/*::n))"),
-        [r#"%(k = "a"; total = 6)"#, r#"%(k = "b"; total = 6)"#, r#"%(k = "a"; total = 6)"#]
+        [
+            r#"%(k = "a"; total = 6)"#,
+            r#"%(k = "b"; total = 6)"#,
+            r#"%(k = "a"; total = 6)"#
+        ]
     );
     // a scalar command takes them one at a time and forks
     assert_eq!(rows("= 3 | (upper(/*::k))"), ["A", "B", "A"]);
@@ -92,7 +96,9 @@ fn a_nested_call_reads_its_argument_by_input_type() {
     assert_eq!(rows("= 3 | (/*::n | sum)"), ["1", "2", "3"]);
     assert_eq!(one("= 3 | (/*::n @| sum)"), "6");
     // round trip
-    let printed = quarb::Query::parse("= 3 | (10 + sum(/*::n))", &doc()).unwrap().canonical();
+    let printed = quarb::Query::parse("= 3 | (10 + sum(/*::n))", &doc())
+        .unwrap()
+        .canonical();
     let again = quarb::Query::parse(&printed, &doc()).unwrap().canonical();
     assert_eq!(printed, again);
 }
@@ -118,7 +124,10 @@ fn reducers_over_a_record_and_a_table() {
     assert_eq!(one("= 7 | count"), "1");
     assert_eq!(one("= @(1; 2) | count"), "2");
     // with --of the reducers reduce per row, per value
-    assert_eq!(one("= #(%(a = 1; b = 2); %(a = 3; b = 4)) | sum(--of=:a * :b)"), "14");
+    assert_eq!(
+        one("= #(%(a = 1; b = 2); %(a = 3; b = 4)) | sum(--of=:a * :b)"),
+        "14"
+    );
     assert_eq!(one("= %(a = 1; b = 2) | sum(--of=$_ * 2)"), "6");
     // the other readings of a table under a reducer stay
     let e = refuse("= #(%(a = 1; b = 2)) | join");

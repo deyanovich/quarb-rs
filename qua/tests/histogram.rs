@@ -15,7 +15,11 @@ fn doc() -> quarb_json::JsonAdapter {
 
 fn one(q: &str) -> String {
     match quarb::run(q, &doc()).unwrap_or_else(|e| panic!("{q}: {e}")) {
-        QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect::<Vec<_>>().join("\n"),
+        QueryResult::Values(vs) => vs
+            .iter()
+            .map(|v| v.display_form())
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => panic!("{q}: {other:?}"),
     }
 }
@@ -32,9 +36,15 @@ fn bins_is_the_table_of_equal_width_bins() {
     );
     // ten bins unless given; the last bin closed
     assert_eq!(one("/n/*:: @| bins | dim"), "@(11; 3)");
-    assert_eq!(one("/n/*:: @| bins(1)"), "#(@(from; to; count);\n  %(1; 10; 5);\n  %(null; null; 1))");
+    assert_eq!(
+        one("/n/*:: @| bins(1)"),
+        "#(@(from; to; count);\n  %(1; 10; 5);\n  %(null; null; 1))"
+    );
     // text that reads as a number is one (a CSV column)
-    assert_eq!(one("/t/*:: @| bins(2)"), "#(@(from; to; count);\n  %(22; 30; 2);\n  %(30; 38; 1))");
+    assert_eq!(
+        one("/t/*:: @| bins(2)"),
+        "#(@(from; to; count);\n  %(22; 30; 2);\n  %(30; 38; 1))"
+    );
     // other values refuse, pointing at histogram
     let e = refuse("/s/*:: @| bins");
     assert!(e.contains("bins numbers, and the stream holds text"), "{e}");
@@ -50,7 +60,10 @@ fn histogram_draws_the_bars() {
     );
     // whole numbers taking no more distinct values than bins: one
     // bar per value, in numeric order
-    assert_eq!(one("/c/*:: @| histogram(-w=6)"), "1  ██      1\n2  ██      1\n3  ██████  3");
+    assert_eq!(
+        one("/c/*:: @| histogram(-w=6)"),
+        "1  ██      1\n2  ██      1\n3  ██████  3"
+    );
     // other values: one bar per distinct value, most frequent first,
     // n the most shown, the rest one bar, the nulls last
     assert_eq!(
@@ -93,8 +106,14 @@ fn count_and_frequencies_take_the_values_and_nulls_switches() {
         one("/s/*:: @| frequencies(-n)"),
         "%(value = \"a\"; n = 3)\n%(value = \"b\"; n = 2)\n%(value = \"c\"; n = 1)\n%(value = null; n = 1)"
     );
-    assert_eq!(one("/s/*:: @| frequencies(2; -n)"), "%(value = \"a\"; n = 3)\n%(value = \"b\"; n = 2)\n%(value = null; n = 1)");
-    assert_eq!(one("/s/*:: @| frequencies(--values)"), one("/s/*:: @| frequencies"));
+    assert_eq!(
+        one("/s/*:: @| frequencies(2; -n)"),
+        "%(value = \"a\"; n = 3)\n%(value = \"b\"; n = 2)\n%(value = null; n = 1)"
+    );
+    assert_eq!(
+        one("/s/*:: @| frequencies(--values)"),
+        one("/s/*:: @| frequencies")
+    );
     let e = refuse("/n/*:: @| sum(-n)");
     assert!(e.contains("'-n' given"), "{e}");
 }

@@ -125,10 +125,7 @@ fn elevated_nodes_answer_derivation_provenance_only() {
         values(&a, "/cookies/cookie[:: = 'ck-1']:provenance"),
         vec!["?model:/cookies"]
     );
-    assert_eq!(
-        values(&a, "/cookies/cookie[:: = 'ck-1']:instant"),
-        vec![""]
-    );
+    assert_eq!(values(&a, "/cookies/cookie[:: = 'ck-1']:instant"), vec![""]);
     assert_eq!(values(&a, "/cookies:source"), vec!["model:/cookies"]);
     // Base rows forward to the base adapter (which records none).
     assert_eq!(values(&a, "/posts/1:source"), vec![""]);
