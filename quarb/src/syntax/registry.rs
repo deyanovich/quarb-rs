@@ -808,6 +808,33 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         with_options(
             on_node(context(
+                "edges",
+                "the edges among the context's nodes as a table, the induced subgraph: from, to, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
+            )),
+            &["--weight", "-w"],
+        ),
+        Check::Command,
+    ),
+    with_check(
+        on_node(context(
+            "nodes",
+            "the context's nodes as a table: node, name, kind",
+        )),
+        Check::Command,
+    ),
+    with_check(
+        with_options(
+            on_node(context(
+                "collapse",
+                "one thread per distinct node among the context's threads, in order of first arrival: @- the union of their arriving edges, the capsa gathered (equal regulae once, differing ones as lists); collapse(-e) one thread per node and arriving edge",
+            )),
+            &["-e", "--edge"],
+        ),
+        Check::Command,
+    ),
+    with_check(
+        with_options(
+            on_node(context(
                 "tree",
                 "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth and column expressions; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
             )),
@@ -838,6 +865,10 @@ pub const SPECS: &[FnSpec] = &[
     context(
         "encoding",
         "the output encoding (closing: the tool applies it)",
+    ),
+    both(
+        "copy",
+        "the output to the clipboard instead of the screen, exactly as it would have printed, on either pipe (closing: the tool applies it and says what it copied)",
     ),
     // Keyed aggregates.
     with_options(

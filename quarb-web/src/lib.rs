@@ -292,6 +292,48 @@ impl<S: WebStore> WebAdapter<S> {
         self.encode(Node::Row(key, 0))
     }
 
+    /// Where an edge to page `t` lands: the node bearing `fragment`
+    /// in the page's text tree when the page is mounted and the
+    /// name is borne, else the page.
+    fn landing(&self, t: PageKey, fragment: Option<&str>) -> NodeId {
+        if let Some(f) = fragment
+            && let Some(g) = self.graft(t)
+            && let Some(n) = g.resolve_fragment(g.root(), f)
+        {
+            return self.map_back(t, &g, n);
+        }
+        self.page_node(t)
+    }
+
+    /// The properties of the edge `label` from `source` to `target`
+    /// (a row, or a node inside one), as the source's link row
+    /// carries them: the anchor text as `text`, then the rest.
+    fn edge_props(&self, source: NodeId, label: &str, target: NodeId) -> Vec<(String, Value)> {
+        let Node::Row(s, 0) = self.decode(source) else {
+            return Vec::new();
+        };
+        let Some((t, _)) = self.split(target) else {
+            return Vec::new();
+        };
+        self.store
+            .link_rows(s)
+            .into_iter()
+            .find(|l| {
+                l.role == label
+                    && l.to == Some(t)
+                    && self.landing(t, l.fragment.as_deref()) == target
+            })
+            .map(|l| {
+                let mut props = Vec::new();
+                if let Some(a) = &l.anchor {
+                    props.push(("text".to_string(), Value::Str(a.clone())));
+                }
+                props.extend(l.props);
+                props
+            })
+            .unwrap_or_default()
+    }
+
     /// The row a level node belongs to, with the graft node when
     /// inside a page: the page node maps to the graft's root.
     fn split(&self, id: NodeId) -> Option<(PageKey, Option<NodeId>)> {
@@ -442,6 +484,7 @@ fn kind_named(name: &str) -> Option<PageKind> {
         "category" => PageKind::Category,
         "tag" => PageKind::Tag,
         "redirect" => PageKind::Redirect,
+        "resource" => PageKind::Resource,
         _ => return None,
     })
 }
@@ -639,6 +682,30 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         }
     }
 
+    /// An edge's own properties (spec: Text Readings, the web
+    /// reading): `hreflang` on an altlang, `position` on a
+    /// breadcrumb — the first edge of the label between the two
+    /// pages.
+    fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
+        self.edge_props(source, label, target)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    fn link_property(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        name: &str,
+    ) -> Option<Value> {
+        self.edge_props(source, label, target)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v)
+    }
+
     fn traits(&self, id: NodeId) -> Vec<String> {
         match self.decode(id) {
             Node::Site(_) => vec!["site".to_string()],
@@ -652,6 +719,14 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 if r.kind == PageKind::Redirect {
                     // a page wearing the trait (draft 164)
                     out.insert(0, "page".to_string());
+                }
+                if r.kind == PageKind::Resource {
+                    // the target's extension, and `external` for
+                    // another host's resource
+                    out.extend(resource_traits(
+                        r.url.as_deref().unwrap_or(""),
+                        self.site_row(r.site).map(|s| s.base_url.clone()),
+                    ));
                 }
                 if r.kind == PageKind::Category {
                     for t in &r.tags {
@@ -708,6 +783,14 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 }
                 if r.kind == PageKind::Category && PAGE_PROPS.contains(&name) {
                     return r.tags.iter().any(|t| t == name);
+                }
+                if r.kind == PageKind::Resource {
+                    return resource_traits(
+                        r.url.as_deref().unwrap_or(""),
+                        self.site_row(r.site).map(|s| s.base_url.clone()),
+                    )
+                    .iter()
+                    .any(|t| t == name);
                 }
                 if r.kind != PageKind::Page {
                     return false;
@@ -917,10 +1000,17 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 let mut out = Vec::new();
                 match r.kind {
                     PageKind::Page | PageKind::Redirect => {
-                        let ts = self.store.related(k, LinkKind::Link, LinkDir::Out);
+                        // every edge under its role (spec: Text
+                        // Readings, the web reading): `link` the
+                        // content, `navbar`, `breadcrumb`, `footer`,
+                        // `altlang`, `pdf`, `canonical`
+                        let lrs = self.store.link_rows(k);
+                        let ts: Vec<PageKey> = lrs.iter().filter_map(|l| l.to).collect();
                         self.hydrate(&ts);
-                        for t in ts {
-                            out.push(("link".to_string(), self.page_node(t)));
+                        for l in &lrs {
+                            if let Some(t) = l.to {
+                                out.push((l.role.clone(), self.landing(t, l.fragment.as_deref())));
+                            }
                         }
                         for t in self.store.related(k, LinkKind::Category, LinkDir::Out) {
                             out.push(("category".to_string(), self.page_node(t)));
@@ -935,10 +1025,13 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     // A category page links like any page, and its
                     // declared parents are the DAG above it.
                     PageKind::Category => {
-                        let ts = self.store.related(k, LinkKind::Link, LinkDir::Out);
+                        let lrs = self.store.link_rows(k);
+                        let ts: Vec<PageKey> = lrs.iter().filter_map(|l| l.to).collect();
                         self.hydrate(&ts);
-                        for t in ts {
-                            out.push(("link".to_string(), self.page_node(t)));
+                        for l in &lrs {
+                            if let Some(t) = l.to {
+                                out.push((l.role.clone(), self.landing(t, l.fragment.as_deref())));
+                            }
                         }
                         for t in self.store.related(k, LinkKind::Category, LinkDir::Out) {
                             out.push(("category".to_string(), self.page_node(t)));
@@ -966,6 +1059,52 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         }
     }
 
+    /// The edges of the page graph (spec: The graph as a table, The
+    /// graph library): every link of a page under its role, to the
+    /// PAGE it resolved to — a fragment link lands navigation on the
+    /// section (`links`), but the edge is page to page, as
+    /// `backlinks` already reads it and as the stored rank counts
+    /// it, so `//page @| graph:pagerank(->link)` equals `::pagerank`.
+    fn edge_rows(&self, id: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        let Node::Row(k, 0) = self.decode(id) else {
+            return self
+                .links(id)
+                .into_iter()
+                .map(|(l, t)| (l, t, None))
+                .collect();
+        };
+        let Some(r) = self.row(k) else {
+            return Vec::new();
+        };
+        if !matches!(
+            r.kind,
+            PageKind::Page | PageKind::Redirect | PageKind::Category
+        ) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let lrs = self.store.link_rows(k);
+        let ts: Vec<PageKey> = lrs.iter().filter_map(|l| l.to).collect();
+        self.hydrate(&ts);
+        for l in &lrs {
+            if let Some(t) = l.to {
+                out.push((l.role.clone(), self.page_node(t), None));
+            }
+        }
+        for t in self.store.related(k, LinkKind::Category, LinkDir::Out) {
+            out.push(("category".to_string(), self.page_node(t), None));
+        }
+        if r.kind != PageKind::Category {
+            for t in self.store.related(k, LinkKind::Tag, LinkDir::Out) {
+                out.push(("tag".to_string(), self.page_node(t), None));
+            }
+            if let Some(t) = r.redirect_to {
+                out.push(("redirect".to_string(), self.page_node(t), None));
+            }
+        }
+        out
+    }
+
     fn backlinks(&self, id: NodeId) -> Vec<(String, NodeId)> {
         match self.decode(id) {
             Node::Row(k, 0) => {
@@ -978,13 +1117,26 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 let mut out = Vec::new();
                 match r.kind {
                     PageKind::Page | PageKind::Redirect => {
-                        let ss = self.store.related(k, LinkKind::Link, LinkDir::In);
+                        // the pages pointing here, each under the
+                        // role its edge carries
+                        let rs = self.store.in_roles(k);
+                        let ss: Vec<PageKey> = rs.iter().map(|(_, s)| *s).collect();
                         self.hydrate(&ss);
-                        for s in ss {
-                            out.push(("link".to_string(), self.page_node(s)));
+                        for (role, s) in rs {
+                            out.push((role, self.page_node(s)));
                         }
                         for s in self.store.related(k, LinkKind::Redirect, LinkDir::In) {
                             out.push(("redirect".to_string(), self.page_node(s)));
+                        }
+                    }
+                    // `<-link`, `<-pdf` from a resource: the pages
+                    // pointing at it
+                    PageKind::Resource => {
+                        let rs = self.store.in_roles(k);
+                        let ss: Vec<PageKey> = rs.iter().map(|(_, s)| *s).collect();
+                        self.hydrate(&ss);
+                        for (role, s) in rs {
+                            out.push((role, self.page_node(s)));
                         }
                     }
                     // Members arrive under their own kind: `<-page`
@@ -1021,10 +1173,19 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 let Some((_, g, n)) = self.graft_node(id) else {
                     return Vec::new();
                 };
-                g.backlinks(n)
+                let mut out: Vec<(String, NodeId)> = g
+                    .backlinks(n)
                     .into_iter()
                     .map(|(l, t)| (l, self.map_back(k, &g, t)))
-                    .collect()
+                    .collect();
+                // the edges landing on this node by its fragment name
+                // (`<-link` on a section)
+                for (fragment, role, src) in self.store.in_fragments(k) {
+                    if g.resolve_fragment(g.root(), &fragment) == Some(n) {
+                        out.push((role, self.page_node(src)));
+                    }
+                }
+                out
             }
             _ => Vec::new(),
         }
@@ -1228,4 +1389,33 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
             _ => Provenance::default(),
         }
     }
+}
+
+/// A resource's traits beside `resource` (spec: Text Readings, the
+/// web reading): the extension of the URL's last path segment,
+/// lowercased (`pdf`, `png`, `zip`), and `external` where the host
+/// is not the site's.
+pub(crate) fn resource_traits(url: &str, base_url: Option<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(u) = url::Url::parse(url) {
+        if let Some(ext) = u
+            .path_segments()
+            .and_then(|mut s| s.next_back())
+            .and_then(|last| last.rsplit_once('.'))
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .filter(|e| {
+                !e.is_empty() && e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+        {
+            out.push(ext);
+        }
+        let external = match base_url.and_then(|b| url::Url::parse(&b).ok()) {
+            Some(b) => b.host_str() != u.host_str(),
+            None => true,
+        };
+        if external {
+            out.push("external".to_string());
+        }
+    }
+    out
 }

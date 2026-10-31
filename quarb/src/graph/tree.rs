@@ -479,7 +479,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
             for (l2, t2) in self.listed_links(target) {
                 let onward = if links_of(self.adapter, t2)
                     .iter()
-                    .any(|(_, t)| self.context.contains(t))
+                    .any(|(_, t, _)| self.context.contains(t))
                 {
                     " -> ..."
                 } else {
@@ -582,8 +582,8 @@ impl<A: AstAdapter> Drawer<'_, A> {
         }
         links_of(self.adapter, node)
             .iter()
-            .filter(|(_, t)| self.context.contains(t))
-            .cloned()
+            .filter(|(_, t, _)| self.context.contains(t))
+            .map(|(l, t, _)| (l.clone(), *t))
             .collect()
     }
 
@@ -591,7 +591,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
     /// outgoing link is its symlink target.
     fn inline_link(&self, node: NodeId) -> Option<NodeId> {
         match links_of(self.adapter, node).as_slice() {
-            [(label, target)] if label == INLINE_LINK => Some(*target),
+            [(label, target, _)] if label == INLINE_LINK => Some(*target),
             _ => None,
         }
     }

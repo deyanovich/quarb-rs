@@ -39,12 +39,13 @@ fn a_ref_may_name_its_source_by_role() {
     let by_path = library("ref /books/*::author --> /writers/author[::id = $];");
     let by_role = library("ref /library/book::author --> /writers/author[::id = $];");
     for a in [&by_path, &by_role] {
-        // the arrow is a hop: one capsa per author reached, as the
-        // glued path and `| ->x::name` read; the per-book value is
-        // the parenthesized expression
+        // the arrow is a hop: one thread per book's arrival at its
+        // author (spec: Expansion paths), as the glued path and
+        // `| ->x::name` read; the per-book value is the
+        // parenthesized expression
         assert_eq!(
             values(a, "//book | ::author-->::name"),
-            ["Mark Twain", "Jane Austen"]
+            ["Mark Twain", "Mark Twain", "Jane Austen"]
         );
         assert_eq!(
             values(a, "//book | (::author-->::name)"),

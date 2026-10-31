@@ -105,7 +105,7 @@ fn hops_read_by_key() {
         [r#"%(name = "Bartok"; t = false; a = false; n = 1)"#]
     );
     assert_eq!(
-        v("/artists/1<-artist_id | %(::title; t = (^/tracks:::loaded))"),
+        v("/artists/1<-artist | %(::title; t = (^/tracks:::loaded))"),
         [
             r#"%(title = "Mars"; t = false)"#,
             r#"%(title = "Venus"; t = false)"#

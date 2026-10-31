@@ -179,3 +179,42 @@ fn a_listing_applies_size_and_kind_filters() {
     assert_eq!(c.entries, (1, 1));
     assert_eq!(c.bytes, Some((42, 42)));
 }
+
+#[test]
+fn a_listing_counts_what_the_mount_exposes() {
+    let dir = scratch();
+    let shelf = dir.join("shelf");
+    // An ignore file covers a subtree and a file; a hidden note
+    // and the ignore file itself are hidden entries.
+    std::fs::write(shelf.join(".gitignore"), "verse/\npersuasion.txt\n").unwrap();
+    std::fs::write(shelf.join(".notes"), "not a book").unwrap();
+    let size = |n: &str| std::fs::metadata(shelf.join(n)).unwrap().len();
+    // Listed as the mount walks it: emma.txt alone.
+    let c = quarb_open::catalog(shelf.to_str().unwrap(), Cap::NONE).unwrap();
+    assert_eq!(c.entries, (1, 1));
+    assert_eq!(c.bytes, Some((size("emma.txt"), size("emma.txt"))));
+    assert_eq!(c.confidence, Confidence::Exact);
+    // The reading prefix changes nothing: the folder is the same.
+    let c = quarb_open::catalog(&format!("text:{}", shelf.display()), Cap::NONE).unwrap();
+    assert_eq!(c.entries, (1, 1));
+    // Listed as `--hidden --no-ignore` mounts it: every entry.
+    let all = quarb_fs::FsOptions {
+        hidden: true,
+        respect_ignore: false,
+    };
+    let c = quarb_open::catalog_seen(shelf.to_str().unwrap(), Cap::NONE, all).unwrap();
+    assert_eq!(c.entries, (6, 6));
+    let total = size("emma.txt")
+        + size("persuasion.txt")
+        + size("verse/iliad.txt")
+        + size(".gitignore")
+        + size(".notes");
+    assert_eq!(c.bytes, Some((total, total)));
+    // Hidden entries shown, the ignore file still honoured.
+    let shown = quarb_fs::FsOptions {
+        hidden: true,
+        respect_ignore: true,
+    };
+    let c = quarb_open::catalog_seen(shelf.to_str().unwrap(), Cap::NONE, shown).unwrap();
+    assert_eq!(c.entries, (3, 3));
+}

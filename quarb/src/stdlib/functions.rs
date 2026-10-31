@@ -3242,7 +3242,17 @@ enum QuantFold {
 }
 
 fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
-    if !input.iter().any(|v| matches!(v, Value::Quantity { .. })) {
+    // A fold of quantities: a typed quantity among the values, or
+    // unit text the quantity coercion reads (`'18 parasang'` under
+    // a declared unit, `'12 km'` under the table) — a stream of
+    // cells is text until a reducer lifts it, as `convert` lifts
+    // one value. Plain text and bare numbers stay absent.
+    let unital = |v: &Value| match v {
+        Value::Quantity { .. } => true,
+        Value::Str(s) => crate::value::quantity::parse_unit_text_with(s, scale).is_some(),
+        _ => false,
+    };
+    if !input.iter().any(unital) {
         return QuantFold::Absent;
     }
     let mut base: Option<String> = None;
@@ -4198,7 +4208,11 @@ fn extreme(input: Vec<Value>, want: std::cmp::Ordering, scale: Scale) -> Vec<Val
     // Ordering across dimensions is meaningless: a min over watts
     // and meters would pick by raw magnitude. Refuse, like the
     // numeric folds.
-    if matches!(quantital_fold(&input, scale), QuantFold::Unsound) {
+    // (unit text beside a bare number orders by the unital
+    // comparison below; the fold's refusal is for typed quantities)
+    if input.iter().any(|v| matches!(v, Value::Quantity { .. }))
+        && matches!(quantital_fold(&input, scale), QuantFold::Unsound)
+    {
         return vec![Value::Null];
     }
     // NaN is never an extreme: it orders after every other number

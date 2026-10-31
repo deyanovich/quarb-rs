@@ -42,8 +42,9 @@ fn projected_properties(command: &Command) -> Vec<String> {
 }
 
 /// Whether a command's expressions read the context (`@_`, `@@_`,
-/// `#*`, `##*`, a peer read; directly or through a
-/// pipe tail) — the trigger for materializing the input snapshot.
+/// `#*`, `##*`; directly or through a pipe tail) — the trigger
+/// for materializing the input snapshot. The node read (`X:.name`)
+/// is not one: it reads the run's attachments, not the context.
 /// Subcontext and push bodies are excluded: their commands get
 /// contexts of their own.
 pub(crate) fn command_reads_context(command: &Command) -> bool {
@@ -56,7 +57,6 @@ pub(crate) fn command_reads_context(command: &Command) -> bool {
                     | Operand::Positions { .. }
                     | Operand::Matrix { .. }
                     | Operand::CtxTable
-                    | Operand::PeerReg { .. }
             ) {
                 self.0 = true;
             } else {
@@ -162,6 +162,10 @@ pub(crate) fn apply_commands<H: Host>(
             }
         }
         caps = apply_command(&commands[i], caps, host, trace, outer);
+        // A walk's facts are in scope for the one command after it.
+        for c in &mut caps {
+            c.ext.end_walk();
+        }
         // a trailing `session(…)` that sets answers nothing, as a push
         // does (draft 166): no thread, so no line
         if i + 1 == commands.len()
@@ -219,6 +223,18 @@ pub(crate) fn apply_command<H: Host>(
         // indexed table's cells moved n places down (null where
         // nothing stands), the keys and the labels kept; a plain
         // table moves its rows.
+        // `| copy` — the output boundary is the tool's (spec: The
+        // clipboard): `qua`, the notebook and the browser hosts take
+        // it off the end and copy what they would have printed.
+        // Reaching the executor means the host does not copy, or
+        // the command stood inside a body.
+        Command::Func(call) if call.name == "copy" => {
+            record_refusal(
+                "copy stands last and is the tool's: the host that prints the output applies it; this host does not copy, or the command stood inside a body"
+                    .into(),
+            );
+            Vec::new()
+        }
         Command::Func(call) if call.name == "shift" => {
             let n: i64 = match call.args.first() {
                 Some(Arg::Lit(Value::Int(n))) => *n,
@@ -487,11 +503,20 @@ pub(crate) fn apply_command<H: Host>(
                         }
                     },
                     ("--precision" | "-p", Value::Int(n)) if n >= 0 => memory.borrow_mut().precision = n as usize,
+                    ("--diagnostics" | "-d", Value::Str(w)) => match w.parse::<crate::diagnostic::Severity>() {
+                        Ok(level) => memory.borrow_mut().diagnostics = level,
+                        Err(_) => {
+                            return refuse_all::<H>(
+                                caps,
+                                &format!("session: --diagnostics takes 'error', 'warning', 'info' or 'debug', not '{w}'"),
+                            );
+                        }
+                    },
                     (n, v) => {
                         return refuse_all::<H>(
                             caps,
                             &format!(
-                                "session: '{n}' is no setting{}; the settings are '--pretty=always|structures|off' and '--precision=n'",
+                                "session: '{n}' is no setting{}; the settings are '--pretty=always|structures|off', '--precision=n' and '--diagnostics=error|warning|info|debug'",
                                 if matches!(v, Value::Null) { String::new() } else { format!(" (given {})", crate::stdlib::kind_of(&v)) }
                             ),
                         );
@@ -720,6 +745,15 @@ pub(crate) fn apply_command<H: Host>(
             min,
             max,
         } => repeat_command(inner, min, max, caps, host, trace, outer),
+        // `.:name(body)` — the attaching push (spec: Attached
+        // Regulae): the push it wraps runs as itself, then the
+        // regula it filed is attached to each thread's node; the
+        // attachments commit when the command ends, so the body's
+        // reads saw the previous command's.
+        Command::Attach {
+            name,
+            command: inner,
+        } => attach_command(name.as_deref(), inner, caps, host, trace, outer),
         Command::Map(inner) => map_command(inner, caps, host, trace, outer),
         // The spread: fork a list topic into one thread per
         // element; null forks to nothing, a non-list scalar passes
@@ -975,6 +1009,17 @@ pub(crate) fn apply_command<H: Host>(
         Command::Agg(call) if call.name == "tree" => {
             tree_command(call, caps, host, trace, outer, peers)
         }
+        // `@| collapse` — one thread per distinct node among the
+        // context's threads (spec: Expansion paths), the merge the
+        // navigation no longer makes.
+        Command::Agg(call) if call.name == "collapse" => collapse_command(call, caps, host),
+        // `@| edges(->road)` / `@| nodes` — the context's graph as a
+        // table (spec: The graph as a table).
+        Command::Agg(call)
+            if call.name == "edges" || call.name == "nodes" =>
+        {
+            graph_table_command(call, caps, host)
+        }
         // `@| timeline(EXPR[; ANCHOR][; forward])` — the narrative
         // point carried from capsa to capsa. Row-aligned like
         // `shift`.
@@ -1184,6 +1229,7 @@ pub(crate) fn default_command<H: Host>(
                                 ext: &c.ext,
                                 view: c.ext.view(),
                                 crossing: None,
+                                walk: None,
                                 witness: None,
                             },
                         ),
@@ -1395,6 +1441,68 @@ pub(crate) fn agg_as_func_command<H: Host>(
 }
 
 /// `| repeat(...)` — the iteration command. `apply_command`'s arm.
+/// `.:name(body)` / `.:%` — `apply_command`'s arm: the wrapped push,
+/// then the attachment of what it filed to the node each thread
+/// stands at — the regula under the name, or every regula the
+/// fields push filed — committed as the command's (spec: Attached
+/// Regulae). A thread standing nowhere (after an aggregate) has no
+/// node to attach to and refuses; threads standing at one node must
+/// agree (`commit`).
+pub(crate) fn attach_command<H: Host>(
+    name: Option<&str>,
+    inner: &Command,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    let before: Vec<usize> = caps.iter().map(|c| c.register.len()).collect();
+    let out = apply_command(inner, caps, host, trace, outer);
+    let shown = name.map_or(".:%".to_string(), |n| format!(".:{n}"));
+    for (i, c) in out.iter().enumerate() {
+        if host.node_ref(&c.ext).is_none() {
+            record_refusal(format!(
+                "'{shown}' attaches to the node the thread stands at, and this thread stands nowhere \
+                 (after an aggregate): navigate to a node before attaching"
+            ));
+            return Vec::new();
+        }
+        let filed: Vec<&Reg> = match name {
+            Some(n) => c
+                .register
+                .iter()
+                .rev()
+                .find(|r| r.name.as_deref() == Some(n))
+                .into_iter()
+                .collect(),
+            // every regula this command filed: the fields push
+            // neither forks nor drops a thread, so the registers
+            // line up with the input's
+            None => c.register[before.get(i).copied().unwrap_or(0).min(c.register.len())..]
+                .iter()
+                .filter(|r| r.name.is_some())
+                .collect(),
+        };
+        for r in filed {
+            attach(
+                c.ext.key(),
+                Attached {
+                    name: r.name.clone().expect("named"),
+                    value: r.value.clone(),
+                    prov: r.prov.clone(),
+                },
+            );
+        }
+    }
+    match commit::<<H::Ext as Attachment>::Key>() {
+        Ok(_) => out,
+        Err(why) => {
+            record_refusal(why);
+            Vec::new()
+        }
+    }
+}
+
 pub(crate) fn repeat_command<H: Host>(
     inner: &Command,
     min: &usize,
@@ -1412,17 +1520,25 @@ pub(crate) fn repeat_command<H: Host>(
     if let Some(n) = max
         && *n > n_max
     {
-        record_refusal(format!(
-            "the loop's explicit ceiling ({n}) exceeds the quantifier \
+        crate::value::ambient::record_refusal_coded(
+            crate::diagnostic::QUANTIFIER_BOUND,
+            "the loop",
+            format!(
+                "the loop's explicit ceiling ({n}) exceeds the quantifier \
                  bound ({n_max}); raise --quantifier-bound"
-        ));
+            ),
+        );
         return Vec::new();
     }
     if *min > n_max {
-        record_refusal(format!(
-            "the loop's minimum ({min}) exceeds the quantifier bound \
+        crate::value::ambient::record_refusal_coded(
+            crate::diagnostic::QUANTIFIER_BOUND,
+            "the loop",
+            format!(
+                "the loop's minimum ({min}) exceeds the quantifier bound \
                  ({n_max}); raise --quantifier-bound"
-        ));
+            ),
+        );
         return Vec::new();
     }
     let limit = max.unwrap_or(n_max);
@@ -1435,10 +1551,13 @@ pub(crate) fn repeat_command<H: Host>(
     let signature = |caps: &[Thread<H::Ext>]| -> Vec<RoundState<<H::Ext as Attachment>::Key>> {
         caps.iter()
             .map(|c| {
+                let key = c.ext.key();
+                let attached = attached_fields(&key);
                 (
-                    c.ext.key(),
+                    key,
                     c.topic.clone(),
                     named_register_fields(&c.register),
+                    attached,
                 )
             })
             .collect()
@@ -2337,6 +2456,69 @@ pub(crate) fn record_push_command<H: Host>(
 }
 
 /// The order and selection family (`sort_by`, `reverse`, `first`, …): capsa-preserving, the effective topic baked in. `apply_command`'s arm.
+/// `@| collapse`: one thread per distinct node among the context's
+/// threads, in order of first arrival; its `@-` the union of their
+/// arriving edges, its capsa the gathering the merge used to make
+/// (equal regulae kept once, differing ones gathered as lists);
+/// `collapse(-e)` keeps threads apart by arriving edge, so it
+/// collapses only what differs by route alone (spec: Expansion
+/// paths).
+pub(crate) fn collapse_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+) -> Vec<Thread<H::Ext>> {
+    if let Some(c) = caps.iter().find(|c| c.topic.is_some()) {
+        record_refusal(format!(
+            "collapse gathers the threads standing on nodes, and the context holds values ({}): \
+             collapse before projecting",
+            c.topic.as_ref().map_or(Value::Null, stdlib::type_of)
+        ));
+        return Vec::new();
+    }
+    let by_edge = call
+        .args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "-e" || name == "--edge"));
+    let mut out: Vec<Thread<H::Ext>> = Vec::new();
+    let mut index: HashMap<(<H::Ext as Attachment>::Key, Option<String>), usize> = HashMap::new();
+    for c in caps {
+        let key = (
+            c.ext.key(),
+            if by_edge { c.ext.crossing_key() } else { None },
+        );
+        match index.get(&key) {
+            Some(&i) => {
+                let kept = &mut out[i];
+                kept.prov.origins.union(&c.prov.origins);
+                kept.ext.gather(c.ext);
+                // the capsa: equal regulae once, differing ones
+                // gathered as a list of the distinct values
+                for (a, b) in kept.register.iter_mut().zip(c.register) {
+                    a.prov.origins.union(&b.prov.origins);
+                    if a.value == b.value {
+                        continue;
+                    }
+                    let mut items = match a.value.clone().into_items() {
+                        Some(items) => items,
+                        None => vec![a.value.clone()],
+                    };
+                    if !items.contains(&b.value) {
+                        items.push(b.value);
+                    }
+                    a.value = Value::list(items);
+                }
+            }
+            None => {
+                index.insert(key, out.len());
+                out.push(c);
+            }
+        }
+    }
+    let _ = host;
+    out
+}
+
 pub(crate) fn order_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,
@@ -2726,6 +2908,13 @@ pub(crate) fn agg_command<H: Host>(
         record_refusal(
             "the encoding command stands last: '… @| csv @| encoding(windows-1251)'; \
                  the tool that prints the output applies it"
+                .into(),
+        );
+        return Vec::new();
+    }
+    if call.name == "copy" {
+        record_refusal(
+            "copy stands last and is the tool's: the host that prints the output applies it; this host does not copy, or the command stood inside a body"
                 .into(),
         );
         return Vec::new();

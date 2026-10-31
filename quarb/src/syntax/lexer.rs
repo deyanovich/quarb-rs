@@ -147,6 +147,13 @@ pub enum Token {
     ArrowIn { rounded: bool },
     /// `--` — either-direction crosslink (the headless arrow).
     DashDash,
+    /// `~` — the navop star: every edge touching the position, a
+    /// tree edge or a crosslink, either direction (spec: The Navop
+    /// Star).
+    Tilde,
+    /// `~~` — the deep navop star: the walk over every edge ending
+    /// at a matching one; the reach marks follow as after `//`.
+    TildeTilde,
     /// A lone `-` glued to a `::` / `:::` projection (`-::fare`):
     /// the descending marker on a sort key.
     Desc,
@@ -186,10 +193,12 @@ pub enum Token {
     /// `:name` — a record's field: the single colon
     /// glued to the field name, the bottom rung of the colon ladder.
     Field,
-    /// `:.name` / `:.` / `:.N` / `:@.` / `:%.` / `:%%.` glued after
-    /// a node path — the cross-capsa read: the register
-    /// of the capsa standing at the node. The body is the register
-    /// accessor as written (`.name`, `@.`, …).
+    /// `:.name` / `:%.` glued after a node path, or standing alone
+    /// — the node read (spec: Attached Regulae): the regula
+    /// attached to the node, or the record of them. The body is the
+    /// accessor as written (`.name`, `%.`); the retired
+    /// location-read accessors (`.`, `.N`, `@.`, `%%.`) lex too and
+    /// the parser refuses them by name.
     Capsa(String),
     /// `%+` — the named-captures record.
     PercentPlus,
@@ -210,6 +219,13 @@ pub enum Token {
     /// `(m, None)` (open-ended, clamped to the adapter's quantifier
     /// bound at execution).
     Quant { min: usize, max: Option<usize> },
+    /// `{;100_km}` / `{10_km;100_km}` / `{2_h;}` — a budget
+    /// quantifier: the floor and the ceiling as written (spec: The
+    /// budget quantifier). A brace pair alone, never after `+`/`*`.
+    Budget {
+        floor: Option<String>,
+        ceiling: Option<String>,
+    },
     /// `~(...)` — the inner regex pattern.
     Regex(String),
     /// `s/pat/repl/mods` — a substitution, lexed only in pipeline
@@ -466,6 +482,8 @@ fn after_axis(tokens: &[Token]) -> bool {
                 | Token::ArrowOut
                 | Token::ArrowIn { .. }
                 | Token::DashDash
+                | Token::Tilde
+                | Token::TildeTilde
                 | Token::Resolve
                 | Token::ReverseResolve
                 | Token::ValueMatch
@@ -1405,10 +1423,12 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Capsa("@.".to_string()));
                 i += 5;
             }
-            // `X:.r` — the cross-capsa read: a colon
-            // glued on the left to a node path and on the right to
-            // a register accessor (`.name`, `.`, `.N`, `@.`, `%.`,
-            // `%%.`). Spaced on the left it stays the conditional's
+            // `X:.r` — the node read (spec: Attached Regulae): a
+            // colon glued on the left to a node path and on the
+            // right to a register accessor (`.name`, `%.`; the
+            // retired location-read accessors `.`, `.N`, `@.`,
+            // `%%.` still lex, so the parser can refuse them by
+            // name). Spaced on the left it stays the conditional's
             // else (`? 1 : .5`).
             ':' if i > 0
                 && (is_name_char(chars[i - 1])
@@ -1435,6 +1455,22 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 } else if at(j) == Some('-') && at(j + 1).is_some_and(|c| c.is_ascii_digit()) {
                     j += 1;
                 }
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                tokens.push(Token::Capsa(chars[start..j].iter().collect()));
+                i = j;
+            }
+            // `:.name`, `:%.` with nothing glued on the left — the
+            // node read of the current node (`[:.l = $$.V:.l]`,
+            // `%(l = :.l)`). The dot must open a name: `:.5` after
+            // a conditional's `?` is still the else of `.5`.
+            ':' if (at(i + 1) == Some('.')
+                && at(i + 2).is_some_and(|c| c.is_alphabetic() || c == '_'))
+                || (at(i + 1) == Some('%') && at(i + 2) == Some('.')) =>
+            {
+                let start = i + 1;
+                let mut j = if at(i + 1) == Some('%') { i + 3 } else { i + 2 };
                 while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
                     j += 1;
                 }
@@ -1587,6 +1623,19 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 && at(i + 2) == Some('!') =>
             {
                 tokens.push(Token::IdAnchorOpen);
+                i += 3;
+            }
+            // `/(*)` — the degenerate name list after a navigation
+            // operator is the wildcard, `*` (spec: Name algebra),
+            // never the rounded register: ordinary parentheses.
+            '(' if after_axis(&tokens) && at(i + 1) == Some('*') && at(i + 2) == Some(')') => {
+                tokens.push(Token::LParen);
+                tokens.push(Token::Name {
+                    text: "*".to_string(),
+                    quoted: false,
+                    glued: true,
+                });
+                tokens.push(Token::RParen);
                 i += 3;
             }
             '(' if !after_call_head(&tokens, glued)
@@ -1875,15 +1924,16 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             '~' if at(i + 1) == Some('>') => {
                 return Err(QuarbError::lex("'~>' is retired: write '-->'"));
             }
-            '~' if at(i + 1) == Some('(') => {
-                return Err(QuarbError::lex(
-                    "'~(…)' is retired: the regex literal is '(/…/)'",
-                ));
+            // The navop star: the wildcard of the operator slot, as
+            // the glob star is of the name slot. `~~` is its deep
+            // form; the reach marks lex on their own, as after `//`.
+            '~' if at(i + 1) == Some('~') => {
+                tokens.push(Token::TildeTilde);
+                i += 2;
             }
             '~' => {
-                return Err(QuarbError::lex(
-                    "'~' is not an operator: the regex literal is '(/…/)', the resolution '-->'",
-                ));
+                tokens.push(Token::Tilde);
+                i += 1;
             }
             '\'' => {
                 let (text, next) = read_quoted(&chars, i + 1, c)?;
@@ -1926,6 +1976,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // spread), so only `..` directly before `/` is the hop;
             // the name lexer breaks on the same shape.
             c if is_name_char(c) => i = lex_name(&chars, i, glued, &mut tokens)?,
+            '{' if budget_body(&chars, i + 1, '}') => {
+                let (floor, ceiling, next) = read_budget(&chars, i + 1, '}')?;
+                tokens.push(Token::Budget { floor, ceiling });
+                i = next;
+            }
             '{' => {
                 let (min, max, next) = read_quantifier(&chars, i + 1, '}')?;
                 tokens.push(Token::Quant { min, max });
@@ -2219,11 +2274,13 @@ pub(crate) fn subst_flags(mods: &str) -> String {
     }
 }
 
-/// Read a `{n}` / `{m,n}` / `{m,}` repetition quantifier after the
-/// opening brace at `start`, up to `close` (`}` — or `)` for the
-/// rounded `(;m,n)`). Returns `(min, max, index past the closer)`;
-/// `max` is `None` for the open-ended `{m,}` form. Interior spaces
-/// are tolerated (`{ 1 , 3 }`).
+/// Read a `{n}` / `{m;n}` / `{m;}` / `{;n}` repetition quantifier
+/// after the opening brace at `start`, up to `close` (`}` — or `)`
+/// for the rounded `(+m;n)`). Returns `(min, max, index past the
+/// closer)`; `max` is `None` for the open-ended `{m;}` form, and an
+/// absent floor is zero — `{;n}` is `{0;n}`, the start included, as
+/// regex's `{,n}` (spec draft.178). Interior spaces are tolerated
+/// (`{ 1 ; 3 }`).
 fn read_quantifier(
     chars: &[char],
     start: usize,
@@ -2231,9 +2288,9 @@ fn read_quantifier(
 ) -> Result<(usize, Option<usize>, usize)> {
     let malformed = || {
         QuarbError::lex(if close == ')' {
-            "malformed quantifier '(;…)': write (;n), (;m;n), or (;m;)"
+            "malformed quantifier '(+…)': write (+n), (+m;n), (+m;), or (+;n)"
         } else {
-            "malformed quantifier '{…}': write {n}, {m;n}, or {m;}"
+            "malformed quantifier '{…}': write {n}, {m;n}, {m;}, or {;n}"
         })
     };
     let mut i = start;
@@ -2253,7 +2310,12 @@ fn read_quantifier(
         }
         digits.parse().ok()
     };
-    let min = number(&mut i).ok_or_else(malformed)?;
+    // An absent floor before `;` is zero: the ceiling-only form.
+    let min = match number(&mut i) {
+        Some(m) => m,
+        None if chars.get(i) == Some(&';') => 0,
+        None => return Err(malformed()),
+    };
     match chars.get(i) {
         Some(&c) if c == close => Ok((min, Some(min), i + 1)),
         Some(',') => Err(QuarbError::lex(
@@ -2280,6 +2342,77 @@ fn read_quantifier(
 /// quote.
 fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, usize)> {
     read_interpolated_until(chars, start, '"')
+}
+
+/// Whether a brace body up to `close` is a budget: one `;` at most,
+/// and a quantity literal — digits, then `_` or a space and a unit's
+/// letters — on at least one side, nothing else (`;100_km`,
+/// `10_km;100_km`, `2_h;`). A bare count body is not.
+fn budget_body(chars: &[char], start: usize, close: char) -> bool {
+    let mut k = start;
+    let mut unit_letter = false;
+    let mut semis = 0;
+    // each side opens with a digit (a quantity's magnitude), or is
+    // empty
+    let mut side_open = true;
+    while let Some(&c) = chars.get(k) {
+        if c == close {
+            return unit_letter && semis <= 1;
+        }
+        match c {
+            ';' => {
+                semis += 1;
+                side_open = true;
+            }
+            ' ' if side_open => {}
+            c if c.is_ascii_digit() => side_open = false,
+            _ if side_open => return false,
+            '.' | '_' | ' ' => {}
+            c if c.is_alphabetic()
+                || matches!(c, '/' | '^' | '*' | '%' | '$' | '€' | '£' | '¥') =>
+            {
+                unit_letter = true
+            }
+            _ => return false,
+        }
+        k += 1;
+    }
+    false
+}
+
+/// Read a budget quantifier's body after the opener at `start`, up
+/// to `close`: `floor;ceiling`, either side absent, each the
+/// quantity text as written (spaces trimmed, `_` kept). An exact
+/// form `{Q}` — no `;` — is refused with a pointer at the ceiling.
+fn read_budget(
+    chars: &[char],
+    start: usize,
+    close: char,
+) -> Result<(Option<String>, Option<String>, usize)> {
+    let mut k = start;
+    let mut body = String::new();
+    while let Some(&c) = chars.get(k) {
+        if c == close {
+            break;
+        }
+        body.push(c);
+        k += 1;
+    }
+    if chars.get(k) != Some(&close) {
+        return Err(QuarbError::lex("a budget quantifier closes with '}'"));
+    }
+    let Some((floor, ceiling)) = body.split_once(';') else {
+        return Err(QuarbError::lex(format!(
+            "a budget quantifier bounds a sum, so it has no exact form: write a ceiling \
+             '{{;{t}}}', a floor '{{{t};}}', or both",
+            t = body.trim()
+        )));
+    };
+    let side = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    Ok((side(floor), side(ceiling), k + 1))
 }
 
 /// Digits around one `;` up to `close`, with at least one digit —
@@ -2535,6 +2668,23 @@ mod quant_tests {
         };
         assert_eq!(quant("{2}"), (2, Some(2)));
         assert_eq!(quant("{1;3}"), (1, Some(3)));
+        // the ceiling-only form: an absent floor is zero
+        assert_eq!(quant("{;3}"), (0, Some(3)));
+        // a budget: the bounds as written (spec: The budget quantifier)
+        assert!(matches!(
+            lex("{;100_km}").unwrap().as_slice(),
+            [Token::Budget { floor: None, ceiling: Some(c) }] if c == "100_km"
+        ));
+        assert!(matches!(
+            lex("{2_h;}").unwrap().as_slice(),
+            [Token::Budget { floor: Some(f), ceiling: None }] if f == "2_h"
+        ));
+        assert!(
+            lex("{5_km}")
+                .unwrap_err()
+                .to_string()
+                .contains("no exact form")
+        );
         assert!(lex("{1,3}").unwrap_err().to_string().contains("retired"));
         assert_eq!(quant("{2;}"), (2, None));
         assert_eq!(quant("{ 1 ; 3 }"), (1, Some(3)));
@@ -2573,7 +2723,7 @@ mod quant_tests {
 
     #[test]
     fn malformed_quantifiers() {
-        for src in ["{}", "{;3}", "{a}", "{1,2", "{1;2", "{1:2}"] {
+        for src in ["{}", "{a}", "{1,2", "{1;2", "{1:2}", "{;a}"] {
             assert!(lex(src).is_err(), "{src} should !lex");
         }
         // A stray closing brace stays unsupported.
@@ -3049,9 +3199,11 @@ mod glued_operator_tests {
     }
 
     #[test]
-    fn cross_capsa_reads_lex() {
-        // The accessor glued to a path: every register reading, and
-        // the rounded twin of `@.`; spaced, the colon is the else.
+    fn node_reads_lex() {
+        // The accessor glued to a path, the bare form for the
+        // current node, and the retired location-read accessors
+        // (lexed, refused by the parser); spaced, the colon is the
+        // else.
         for (q, body) in [
             ("<-link:.v", ".v"),
             ("/*:.", "."),
@@ -3062,6 +3214,10 @@ mod glued_operator_tests {
             ("->ref:%%.", "%%."),
             ("(->ref):.v", ".v"),
             ("/a[1]:.v", ".v"),
+            ("[:.l = 1]", ".l"),
+            ("%(l = :.l)", ".l"),
+            ("| :%.", "%."),
+            ("$$.V:.l", ".l"),
         ] {
             let toks = lex(q).unwrap();
             assert!(
@@ -3220,12 +3376,10 @@ mod glued_operator_tests {
     fn regex_literal_in_parens_lexes() {
         // name position: strict `/)` closer, flags inline
         assert_eq!(lex("//(/^foo/)").unwrap(), lex("//(/^foo/)").unwrap());
-        assert!(
-            lex("//~((?i)^foo)")
-                .unwrap_err()
-                .to_string()
-                .contains("retired")
-        );
+        // `~` is the navop star now (spec: The Navop Star): the old
+        // `~(…)` regex spelling reads as the star and a group
+        assert!(lex("/a~x").unwrap().contains(&Token::Tilde));
+        assert!(lex("/a~~?x").unwrap().contains(&Token::TildeTilde));
         // a group ending in a hop named x stays a group
         assert!(matches!(
             lex("/a(/src/x)+").unwrap().as_slice(),

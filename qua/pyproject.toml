@@ -42,7 +42,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://quarb.org/"
-Adapters = "https://quarb.org/adapters/"
+Adapters = "https://quarb.org/adapters.html"
 Repository = "https://gitlab.com/quarb/engine"
 
 [tool.maturin]

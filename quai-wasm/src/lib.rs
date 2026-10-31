@@ -83,9 +83,11 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Build a mounted [`Doc`] from a `sources_json` array of
 /// `{"name", "format", "text"}` (or `"bytes_b64"` for sqlite). A
-/// single source mounts path-bare at the root; several mount as
-/// named children. Shared by [`QuaiSession::mount`] and
-/// [`QuaiSession::mount_with_model`].
+/// single source mounts path-bare at the root, as one source on the
+/// command line does; several mount as named children — and so does
+/// a single source carrying `"named": true`, the way a model cell's
+/// `mount NAME: TARGET;` always names its root (spec: .quai). Shared
+/// by [`QuaiSession::mount`] and [`QuaiSession::mount_with_model`].
 fn build_doc(
     sources_json: &str,
 ) -> Result<(Doc, std::collections::HashMap<String, quarb::NodeId>), JsError> {
@@ -93,6 +95,11 @@ fn build_doc(
         .map_err(|e| JsError::new(&format!("bad sources array: {e}")))?;
     let mut parts: Vec<(String, Doc)> = Vec::new();
     let mut urls: Vec<(String, String)> = Vec::new();
+    let named = sources
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|s| s.get("named").and_then(|v| v.as_bool()).unwrap_or(false));
     for s in sources.as_array().into_iter().flatten() {
         let field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_owned);
         let (Some(name), Some(format)) = (field("name"), field("format")) else {
@@ -142,8 +149,9 @@ fn build_doc(
     }
     let doc = match parts.len() {
         0 => return Err(JsError::new("no sources to mount")),
-        // A single source stays path-bare at the root.
-        1 => parts.remove(0).1,
+        // A single source stays path-bare at the root — unless it
+        // asked for its name.
+        1 if !named => parts.remove(0).1,
         _ => Doc::mount_docs(parts).map_err(|e| JsError::new(&format!("{e:#}")))?,
     };
     let roots = doc.url_roots(&urls);
@@ -198,6 +206,38 @@ fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
         .ok()
 }
 
+/// One diagnostic as the page reads it: `{severity, code, site,
+/// message}`, the severity word in lower case.
+fn diag_json(d: &quarb::Diagnostic) -> serde_json::Value {
+    json!({
+        "severity": d.severity.word(),
+        "code": d.code,
+        "site": d.site,
+        "message": d.message,
+    })
+}
+
+/// The envelope of a withheld answer: `error` the displayed message
+/// (as before), and the same error as the diagnostics array's one
+/// item with its code and site (a Quarb error's own; `ERROR` at
+/// `query` for a host failure).
+fn error_envelope(label: &str, e: &anyhow::Error) -> String {
+    let message = format!("{e:#}");
+    let d = match e.downcast_ref::<quarb::QuarbError>() {
+        Some(q) => q.diagnostic(),
+        None => quarb::Diagnostic::error("ERROR", "query", message.clone()),
+    };
+    envelope_full(
+        label,
+        vec![],
+        None,
+        Some(message),
+        Vec::new(),
+        None,
+        vec![d],
+    )
+}
+
 /// A result envelope for JS: the `&N` label, the output lines, and an
 /// optional note or error (exactly one of note/error, or neither).
 fn envelope(
@@ -235,11 +275,28 @@ fn envelope_html(
     refs: Vec<String>,
     html: Option<String>,
 ) -> String {
+    envelope_full(label, lines, note, error, refs, html, Vec::new())
+}
+
+/// [`envelope_html`] with the run's diagnostics (spec: Diagnostics):
+/// the warnings and infos beside an answer, in raising order; for a
+/// withheld answer the error itself as the first and only item, so
+/// a host reads one array whatever the outcome.
+fn envelope_full(
+    label: &str,
+    lines: Vec<String>,
+    note: Option<String>,
+    error: Option<String>,
+    refs: Vec<String>,
+    html: Option<String>,
+    diagnostics: Vec<quarb::Diagnostic>,
+) -> String {
     json!({
         "label": label,
         "lines": lines,
         "html": html,
         "note": note,
+        "diagnostics": diagnostics.iter().map(diag_json).collect::<Vec<_>>(),
         "error": error,
         "refs": refs,
     })
@@ -368,13 +425,41 @@ impl QuaiSession {
         if t.is_empty() {
             return envelope("", vec![], None, None);
         }
+        let label = format!("&{}", self.session.line_no());
+        // A definition cell takes its ordinal and answers nothing.
         if (t.starts_with("def ") || t.starts_with("macro ")) && quarb::parse_defs(t).is_ok() {
             return match self.session.add_def(t) {
-                Ok(()) => envelope("", vec![], Some("definitions added".into()), None),
+                Ok(()) => envelope(&label, vec![], Some("definitions added".into()), None),
                 Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
             };
         }
-        let label = format!("&{}", self.session.line_no());
+        // A model cell (spec: .quai, Kinds): the page applied its
+        // mounts and declarations when it opened the session
+        // (`mountWithModel`); here it takes its ordinal, so the
+        // labels match the file's, and answers nothing.
+        let first = t.split_whitespace().next().unwrap_or_default();
+        if matches!(
+            first,
+            "node"
+                | "ref"
+                | "rel"
+                | "edge"
+                | "alias"
+                | "trait"
+                | "index"
+                | "units"
+                | "tree"
+                | "mount"
+                | "use"
+        ) {
+            self.session.commit(t, Vec::new());
+            return envelope(
+                &label,
+                vec![],
+                Some("model cell — applied when the session opened".into()),
+                None,
+            );
+        }
         match self.session.eval_table(t) {
             Ok((cells, html)) => {
                 let refs = self.session.refs();
@@ -384,9 +469,10 @@ impl QuaiSession {
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope_html(&label, lines, note, None, refs, html)
+                let diagnostics = self.session.diagnostics();
+                envelope_full(&label, lines, note, None, refs, html, diagnostics)
             }
-            Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
+            Err(e) => error_envelope("", &e),
         }
     }
 
@@ -400,19 +486,20 @@ impl QuaiSession {
             return envelope("", vec![], None, None);
         }
 
-        // A definition extends the table but is not run.
+        let label = format!("&{}", self.session.line_no());
+
+        // A definition extends the table but is not run; it takes
+        // its ordinal all the same.
         if line.starts_with("def ")
             || line == "def"
             || line.starts_with("macro ")
             || line == "macro"
         {
             return match self.session.add_def(line) {
-                Ok(()) => envelope("", vec![], Some("definition added".into()), None),
+                Ok(()) => envelope(&label, vec![], Some("definition added".into()), None),
                 Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
             };
         }
-
-        let label = format!("&{}", self.session.line_no());
 
         // A standalone `&N#` — replay the frozen footprint.
         if let Some(n) = numeric_ref_with(line, '#') {
@@ -461,9 +548,10 @@ impl QuaiSession {
                 } else {
                     Some(format!("{label} is not referenceable"))
                 };
-                envelope_html(&label, lines, note, None, refs, html)
+                let diagnostics = self.session.diagnostics();
+                envelope_full(&label, lines, note, None, refs, html, diagnostics)
             }
-            Err(e) => envelope("", vec![], None, Some(format!("{e:#}"))),
+            Err(e) => error_envelope("", &e),
         }
     }
 }

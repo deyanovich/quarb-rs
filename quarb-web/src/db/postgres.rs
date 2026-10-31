@@ -68,6 +68,12 @@ impl PostgresStore {
     /// the catalog.
     pub fn open(config: &str) -> Result<PostgresStore, String> {
         let (rt, client) = Self::connect(config)?;
+        // a store made before the roles: the columns added
+        for stmt in super::LINK_COLUMNS_ADDED {
+            let _ = rt.block_on(
+                client.batch_execute(&stmt.replace("ADD COLUMN", "ADD COLUMN IF NOT EXISTS")),
+            );
+        }
         let catalog = Self::read_catalog(&rt, &client)?;
         Ok(PostgresStore {
             rt,
@@ -234,9 +240,9 @@ impl WebStore for PostgresStore {
     fn related(&self, key: PageKey, kind: LinkKind, dir: LinkDir) -> Vec<PageKey> {
         let k = Param::Int(key.0 as i64);
         match (kind, dir) {
-            (LinkKind::Link, LinkDir::Out) => self.keys("SELECT to_id FROM links WHERE from_id = $1 AND to_id IS NOT NULL ORDER BY pos", &[k]),
+            (LinkKind::Link, LinkDir::Out) => self.keys("SELECT l.to_id FROM links l JOIN pages t ON t.id = l.to_id WHERE l.from_id = $1 AND l.role = 'link' AND t.kind <> 'resource' ORDER BY l.pos", &[k]),
             (LinkKind::Link, LinkDir::In) => self.keys(
-                "SELECT l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = $1 ORDER BY p.tree_rank",
+                "SELECT l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = $1 AND l.role = 'link' ORDER BY p.tree_rank",
                 &[k],
             ),
             (LinkKind::Category, LinkDir::Out) => self.keys(
@@ -256,10 +262,34 @@ impl WebStore for PostgresStore {
         }
     }
 
+    fn in_roles(&self, key: PageKey) -> Vec<(String, PageKey)> {
+        let client = self.client.borrow();
+        self.rt
+            .block_on(client.query("SELECT l.role, l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = $1 ORDER BY p.tree_rank, l.pos", &[&(key.0 as i64)]))
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| (r.get::<_, String>(0), PageKey(r.get::<_, i64>(1) as u64)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn in_fragments(&self, key: PageKey) -> Vec<(String, String, PageKey)> {
+        let client = self.client.borrow();
+        self.rt
+            .block_on(client.query("SELECT l.fragment, l.role, l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = $1 AND l.fragment IS NOT NULL ORDER BY p.tree_rank, l.pos", &[&(key.0 as i64)]))
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1), PageKey(r.get::<_, i64>(2) as u64)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn link_rows(&self, key: PageKey) -> Vec<LinkRow> {
         let client = self.client.borrow();
         self.rt
-            .block_on(client.query("SELECT to_id, to_url, anchor, section, kind, via_template FROM links WHERE from_id = $1 ORDER BY pos", &[&(key.0 as i64)]))
+            .block_on(client.query("SELECT to_id, to_url, anchor, section, kind, via_template, role, props, fragment FROM links WHERE from_id = $1 ORDER BY pos", &[&(key.0 as i64)]))
             .map(|rows| {
                 rows.iter()
                     .map(|r| LinkRow {
@@ -269,6 +299,9 @@ impl WebStore for PostgresStore {
                         section: r.get(3),
                         red: r.get::<_, String>(4) == "red",
                         via_template: r.get::<_, i64>(5) != 0,
+                        role: r.get(6),
+                        props: super::props_of_json(&r.get::<_, String>(7)),
+                        fragment: r.get(8),
                     })
                     .collect()
             })
@@ -438,13 +471,37 @@ impl SqlStore for PostgresStore {
             .block_on(client.execute(sql, &[]))
             .map_err(|e| format!("{e}: {sql}"))
     }
+    fn site_base_url(&self, site: SiteId) -> Option<String> {
+        let client = self.client.borrow();
+        self.rt
+            .block_on(client.query_one(
+                "SELECT base_url FROM sites WHERE id = $1",
+                &[&(site.0 as i64)],
+            ))
+            .ok()
+            .map(|r| r.get(0))
+    }
+    fn unresolved_targets(&self, site: SiteId) -> Vec<String> {
+        let client = self.client.borrow();
+        self.rt
+            .block_on(client.query("SELECT DISTINCT l.to_url FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = $1 AND l.to_id IS NULL AND l.kind <> 'red' ORDER BY l.to_url", &[&(site.0 as i64)]))
+            .map(|rows| rows.iter().map(|r| r.get::<_, String>(0)).collect())
+            .unwrap_or_default()
+    }
+    fn max_page_id(&self) -> i64 {
+        let client = self.client.borrow();
+        self.rt
+            .block_on(client.query_one("SELECT coalesce(max(id), 0) FROM pages", &[]))
+            .map(|r| r.get(0))
+            .unwrap_or(0)
+    }
     fn tree_nodes(&self, site: SiteId, container: Container) -> Vec<TreeNode> {
         let client = self.client.borrow();
         self.rt
-            .block_on(client.query("SELECT id, parent_id, name, kind, redirect_to FROM pages WHERE site_id = $1 AND container = $2", &[&(site.0 as i64), &container.name()]))
+            .block_on(client.query("SELECT id, parent_id, name, kind, redirect_to, pagerank FROM pages WHERE site_id = $1 AND container = $2", &[&(site.0 as i64), &container.name()]))
             .map(|rows| {
                 rows.iter()
-                    .map(|r| TreeNode { id: r.get(0), parent: r.get(1), name: r.get(2), kind: r.get(3), redirect_to: r.get(4) })
+                    .map(|r| TreeNode { id: r.get(0), parent: r.get(1), name: r.get(2), kind: r.get(3), redirect_to: r.get(4), pagerank: r.get(5) })
                     .collect()
             })
             .unwrap_or_default()
@@ -481,7 +538,7 @@ impl SqlStore for PostgresStore {
     fn link_edges(&self, site: SiteId, exclude_templates: bool) -> Vec<(PageKey, PageKey)> {
         let client = self.client.borrow();
         let sql = format!(
-            "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = $1 AND l.to_id IS NOT NULL{}",
+            "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id JOIN pages t ON t.id = l.to_id WHERE p.site_id = $1 AND l.role = 'link' AND t.kind <> 'resource'{}",
             if exclude_templates {
                 " AND l.via_template = 0"
             } else {
@@ -583,7 +640,7 @@ const TABLES: [(&str, &str); 5] = [
     ("page_text", "page_id, plain"),
     (
         "links",
-        "from_id, pos, to_id, to_url, anchor, section, kind, via_template",
+        "from_id, pos, to_id, to_url, anchor, section, kind, via_template, role, props, fragment",
     ),
     ("page_terms", "page_id, term_id, pos"),
 ];
@@ -678,14 +735,17 @@ impl Sink for CopyWriter<'_> {
     }
     fn link(&mut self, from: PageKey, pos: u32, l: &LinkRow) -> Result<(), String> {
         self.bufs[3].push_str(&format!(
-            "{}\t{pos}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{pos}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             from.0,
             copy_num(l.to.map(|p| p.0)),
             copy_field(&l.to_url),
             copy_opt(l.anchor.as_deref()),
             copy_opt(l.section.as_deref()),
             if l.red { "red" } else { "link" },
-            l.via_template as i64
+            l.via_template as i64,
+            copy_field(&l.role),
+            copy_field(&super::props_json(&l.props)),
+            copy_opt(l.fragment.as_deref())
         ));
         self.maybe_flush()
     }

@@ -85,7 +85,7 @@ fn the_context_as_a_table() {
     );
     assert_eq!(
         ok(&d, "/a/* | .A | .k(::k) | ##.* @| first"),
-        "#(@(A);\n  %(\"/a/0\");\n  %(\"/a/1\");\n  %(\"/a/2\"))"
+        "#(@(A);\n  %(/a/0);\n  %(/a/1);\n  %(/a/2))"
     );
     // A regula that is no cell refuses by name.
     assert!(err(&d, "/a/* | .l(@(1; 2)) | #.*").contains("'#.*' holds a list under 'l'"));

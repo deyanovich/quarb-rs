@@ -21,6 +21,8 @@ pub struct LocalExecutor {
     /// documents queried but not mounted. The host may acquire
     /// them, remount, and re-run; the executor only reports.
     refs: std::cell::RefCell<Vec<String>>,
+    /// The diagnostics the last run raised (spec: Diagnostics).
+    diagnostics: std::cell::RefCell<Vec<quarb::Diagnostic>>,
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
@@ -59,6 +61,7 @@ impl LocalExecutor {
             doc,
             url_roots: Default::default(),
             refs: Default::default(),
+            diagnostics: Default::default(),
             now,
             allow_shell,
             environments: Vec::new(),
@@ -107,6 +110,7 @@ impl LocalExecutor {
             doc,
             url_roots: Default::default(),
             refs: Default::default(),
+            diagnostics: Default::default(),
             now,
             allow_shell,
             environments: Vec::new(),
@@ -119,8 +123,10 @@ impl LocalExecutor {
 
 /// Run one query against a `Doc`, rendering its result to [`Cell`]s
 /// and reporting the unresolved references.
-fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<(Vec<Cell>, Vec<String>)> {
-    let out = doc.run(query, run).map_err(|e| anyhow::anyhow!("{e}"))?;
+type Ran = (Vec<Cell>, Vec<String>, Vec<quarb::Diagnostic>);
+
+fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<Ran> {
+    let out = doc.run(query, run).map_err(anyhow::Error::new)?;
     let cells = match out.result {
         QueryResult::Nodes(nodes) => nodes
             .into_iter()
@@ -128,7 +134,7 @@ fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<(Vec<Cell
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
     };
-    Ok((cells, out.refs))
+    Ok((cells, out.refs, out.diagnostics))
 }
 
 /// [`run_doc`], against a model-enriched view.
@@ -137,10 +143,10 @@ fn run_doc_modeled(
     query: &str,
     run: &quarb::Run,
     model: &quarb_model::Model,
-) -> anyhow::Result<(Vec<Cell>, Vec<String>)> {
+) -> anyhow::Result<Ran> {
     let out = doc
         .run_modeled(query, run, model)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     let cells = match out.result {
         QueryResult::Nodes(nodes) => nodes
             .into_iter()
@@ -148,7 +154,7 @@ fn run_doc_modeled(
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
     };
-    Ok((cells, out.refs))
+    Ok((cells, out.refs, out.diagnostics))
 }
 
 impl LocalExecutor {
@@ -162,6 +168,7 @@ impl LocalExecutor {
             environments: self.environments.clone(),
             ref_targets: self.url_roots.clone(),
             session: Some(self.session.clone()),
+            debug: self.session.borrow().diagnostics == quarb::Severity::Debug,
             ..quarb::Run::ambient()
         }
     }
@@ -173,17 +180,22 @@ impl Executor for LocalExecutor {
     }
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
         let run = self.run_opts();
-        let (cells, refs) = if let Some(model) = &self.model {
+        let (cells, refs, diagnostics) = if let Some(model) = &self.model {
             run_doc_modeled(&self.doc, query, &run, model)?
         } else {
             run_doc(&self.doc, query, &run)?
         };
         *self.refs.borrow_mut() = refs;
+        *self.diagnostics.borrow_mut() = diagnostics;
         Ok(cells)
     }
 
     fn refs(&self) -> Vec<String> {
         self.refs.borrow().clone()
+    }
+
+    fn diagnostics(&self) -> Vec<quarb::Diagnostic> {
+        self.diagnostics.borrow().clone()
     }
 
     fn run_fresh(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
@@ -193,7 +205,7 @@ impl Executor for LocalExecutor {
                 [one] if one.name.is_none() => Doc::open(&one.path, opts)?,
                 many => Doc::mount_specs(many, opts)?,
             };
-            return run_doc(&fresh, query, &self.run_opts()).map(|(cells, _)| cells);
+            return run_doc(&fresh, query, &self.run_opts()).map(|(cells, _, _)| cells);
         }
         self.run(query)
     }
@@ -210,8 +222,9 @@ impl Executor for LocalExecutor {
         let out = self
             .doc
             .run_rendering(query, &run)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(anyhow::Error::new)?;
         *self.refs.borrow_mut() = out.refs;
+        *self.diagnostics.borrow_mut() = out.diagnostics;
         let Some(closing) = out.closing.filter(|c| !c.csv) else {
             // Not a table after all (a csv, or no closing command):
             // the rows as the run would have printed them.

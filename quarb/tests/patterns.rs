@@ -302,7 +302,8 @@ fn rounded_predicate_alias_canonicalizes() {
     );
     // the two spellings nest freely, and a regex body stays raw
     assert_eq!(canon("/a[::x = 1](?::y = 2)"), "/a[::x = 1][::y = 2]");
-    assert!(refuse("/~((?i)bob)(?::x = 1)").contains("retired"));
+    // (`~` is the navop star now: the rounded predicate rides it)
+    assert_eq!(canon("/a~bob(?::x = 1)"), "/a~bob[::x = 1]");
     // the pair does not mix spellings
     assert!(refuse("/a(?::x = 1]").contains("closes with ')'"));
     // and the pointy family is untouched: a group stays a group

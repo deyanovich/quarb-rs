@@ -1,0 +1,13 @@
+[package]
+name = "quarb-lib-graph"
+description = "The graph algorithms behind Quarb's graph: command library and the web level's stored rank: PageRank over an edge list, weighted or not, with the dangling mass spread; pure functions, no engine dependency"
+keywords = ["quarb", "graph", "pagerank", "command-library"]
+categories = ["algorithms"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

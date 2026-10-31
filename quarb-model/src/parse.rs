@@ -301,6 +301,9 @@ pub struct NodeDecl {
 pub struct RefDecl {
     /// The node-selecting path (the `::field` suffix stripped).
     pub scope: String,
+    /// `acyclic`: the promise that no walk over the link returns to
+    /// a node (spec: Model Files, Acyclic links).
+    pub acyclic: bool,
     /// The property resolved into the container.
     pub field: String,
     pub container: String,
@@ -317,6 +320,12 @@ pub struct RefDecl {
     /// explicit form `--> /cookies/cookie[::id = $]`. `None` is the
     /// short form, matching the target's default projection.
     pub key_field: Option<String>,
+    /// `as NAME`: the edge's own label, both ways (`->NAME`,
+    /// `<-NAME`); `as ::prop` each row's edge labelled by that
+    /// property's value; without either the role the hop arrives at.
+    /// On a property the source already declares (a catalog's foreign
+    /// key) it renames that one edge.
+    pub label: Option<Label>,
 }
 
 /// `rel SOURCE -> TARGET[cond];` — a relation between two node sets
@@ -331,11 +340,92 @@ pub struct RelDecl {
     pub cond: String,
 }
 
+/// The label a ref or edge statement gives the edges it declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Label {
+    /// `as NAME`: one label for every edge of the statement.
+    Name(String),
+    /// `as ::prop`: each edge labelled by its row's value of the
+    /// property, a text (spec: Model Files, labels by property). A
+    /// row whose value is null or missing declares no edge under the
+    /// statement; a value that is no text refuses at load.
+    Property(String),
+}
+
+impl Label {
+    fn parse(text: &str) -> Label {
+        match text.strip_prefix("::") {
+            Some(p) => Label::Property(p.trim().to_string()),
+            None => Label::Name(text.to_string()),
+        }
+    }
+
+    /// The label as the statement wrote it.
+    pub fn written(&self) -> String {
+        match self {
+            Label::Name(n) => n.clone(),
+            Label::Property(p) => format!("::{p}"),
+        }
+    }
+}
+
+/// Split an edge statement's rest at the colon that ends its scope:
+/// the first single colon at bracket depth zero outside quotes, so a
+/// predicate's `::prop` and its string literals pass over.
+fn split_scope_colon(rest: &str) -> Option<(&str, &str)> {
+    let b = rest.as_bytes();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'"' | b'\'' => quote = Some(c),
+                b'[' | b'(' => depth += 1,
+                b']' | b')' => depth = depth.saturating_sub(1),
+                b':' if depth == 0 => {
+                    if b.get(i + 1) == Some(&b':') {
+                        i += 2;
+                        continue;
+                    }
+                    return Some((&rest[..i], &rest[i + 1..]));
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct EdgeDecl {
     pub scope: String,
     pub field_a: String,
     pub field_b: String,
+    /// `as NAME`: the edge's own label on both ends; without it the
+    /// role each end lands in (spec: Model Files, edges).
+    pub label: Option<Label>,
+    /// `acyclic`: the promise that no walk over the edge returns to
+    /// a node (spec: Model Files, Acyclic links).
+    pub acyclic: bool,
+}
+
+/// The trailing `acyclic` of a ref or edge declaration, split off.
+fn split_acyclic(rest: &str) -> (&str, bool) {
+    let t = rest.trim_end();
+    match t.strip_suffix("acyclic") {
+        Some(head) if head.ends_with(char::is_whitespace) => (head.trim_end(), true),
+        _ => (rest, false),
+    }
 }
 
 /// Split model-file text into statements at a lone `;` outside any
@@ -555,6 +645,16 @@ fn parse_ref_target(s: &str) -> Result<(String, String, Option<String>, Option<S
         }
         None => (s.trim().to_string(), None),
     };
+    // The target is one path (a bare container, `/container/role`,
+    // a mount's path) with its condition, then `as NAME` and
+    // `acyclic`, both optional and in that order: any other
+    // trailing words are a refusal, as a misspelt keyword is.
+    if path.contains(char::is_whitespace) {
+        return Err(format!(
+            "ref target carries trailing text: '{s}' (a ref is 'PATH::field --> \
+             container[::PROP = $]', then an optional 'as NAME' and 'acyclic')"
+        ));
+    }
     // The container is the first segment of a path form, or the whole
     // word of the bare form; the path form's second segment is the role.
     let mut segs = path.trim_start_matches('/').split('/').map(str::trim);
@@ -748,18 +848,32 @@ fn parse_model_in(
                 }
             }
             "ref" => {
+                let (rest, acyclic) = split_acyclic(rest);
                 let (left, container) = rest
                     .split_once("-->")
                     .ok_or_else(|| format!("ref needs 'PATH::field --> container': '{stmt}'"))?;
                 let (scope, field) = split_field(left)?;
+                // `--> container as NAME` names the edge's label, as
+                // on an edge statement; `acyclic` follows it
+                let (container, label) = match container.trim_end().rsplit_once(" as ") {
+                    Some((c, name))
+                        if !name.trim().is_empty()
+                            && !name.trim().contains(char::is_whitespace) =>
+                    {
+                        (c, Some(Label::parse(name.trim())))
+                    }
+                    _ => (container, None),
+                };
                 let (container, path, role, key_field) = parse_ref_target(container)?;
                 model.refs.push(RefDecl {
                     scope,
+                    acyclic,
                     field,
                     container,
                     path,
                     role,
                     key_field,
+                    label,
                 });
             }
             "rel" => {
@@ -781,18 +895,29 @@ fn parse_model_in(
                 });
             }
             "edge" => {
-                let (scope_head, pair) = rest
-                    .split_once(':')
+                let (rest, acyclic) = split_acyclic(rest);
+                // the colon after the scope, outside any predicate
+                // the scope carries (`/flights/*[::carrier = "x"]:`)
+                let (scope_head, pair) = split_scope_colon(rest)
                     .ok_or_else(|| format!("edge needs 'PATH: ::a -- ::b': '{stmt}'"))?;
                 let (a, b) = pair
                     .split_once("--")
                     .ok_or_else(|| format!("edge needs two fields 'a -- b': '{stmt}'"))?;
                 let field_a = a.trim().trim_start_matches("::").trim().to_string();
+                // `::b as NAME` names the edge's label
+                let (b, label) = match b.rsplit_once(" as ") {
+                    Some((b, name)) if !name.trim().is_empty() => {
+                        (b.to_string(), Some(Label::parse(name.trim())))
+                    }
+                    _ => (b.to_string(), None),
+                };
                 let field_b = b.trim().trim_start_matches("::").trim().to_string();
                 model.edges.push(EdgeDecl {
                     scope: scope_head.trim().to_string(),
                     field_a,
                     field_b,
+                    label,
+                    acyclic,
                 });
             }
             "def" | "macro" => {
@@ -970,6 +1095,49 @@ fn parse_model_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ref_takes_as_name_then_acyclic_and_nothing_else() {
+        let m = parse_model(
+            "ref /figures/*::mother_id --> /figures/*[::id = $] as mother acyclic;\n\
+             ref /figures/*::father_id --> /figures/*[::id = $] as father;\n\
+             ref /figures/*::spouse_id --> /figures/*[::id = $];",
+        )
+        .unwrap();
+        assert_eq!(m.refs[0].label, Some(Label::Name("mother".into())));
+        assert!(m.refs[0].acyclic);
+        assert_eq!(m.refs[0].key_field.as_deref(), Some("id"));
+        assert_eq!(m.refs[1].label, Some(Label::Name("father".into())));
+        assert!(!m.refs[1].acyclic);
+        assert_eq!(m.refs[2].label, None);
+        // a ref's target is one path and its condition, then `as
+        // NAME` and `acyclic`: other trailing words refuse by the line
+        let err = parse_model("ref /figures/*::mother_id --> /figures/*[::id = $] mother;")
+            .err()
+            .expect("refuses");
+        assert!(err.contains("trailing text"), "{err}");
+        assert!(err.contains("$] mother"), "{err}");
+        let err = parse_model("ref /figures/*::mother_id --> /figures/*[::id = $] as the mother;")
+            .err()
+            .expect("refuses");
+        assert!(err.contains("trailing text"), "{err}");
+    }
+
+    #[test]
+    fn a_label_by_property_parses_on_a_ref_and_on_an_edge() {
+        let m = parse_model(
+            "ref /flights/*::origin --> /airports/*[::code = $] as ::carrier;\n\
+             ref /flights/*::dest --> /airports/*[::code = $];\n\
+             edge /flights/*: ::origin -- ::dest as ::carrier;\n\
+             edge /flights/*[::carrier = \"panam\"]: ::origin -- ::dest as panam;",
+        )
+        .unwrap();
+        assert_eq!(m.refs[0].label, Some(Label::Property("carrier".into())));
+        assert_eq!(m.edges[0].label, Some(Label::Property("carrier".into())));
+        assert_eq!(m.edges[0].label.as_ref().unwrap().written(), "::carrier");
+        assert_eq!(m.edges[1].scope, "/flights/*[::carrier = \"panam\"]");
+        assert_eq!(m.edges[1].label, Some(Label::Name("panam".into())));
+    }
 
     #[test]
     fn parses_the_forum_model() {

@@ -89,6 +89,10 @@ pub enum InputSlot {
     /// path names (a fitted estimator before `.predict(X)`).
     OperandOrSelf(usize),
     Option(&'static str),
+    /// The context itself, read by the engine (the graph library's
+    /// row-aligned aggregates): no operand's place is taken, and
+    /// `$_` places nothing.
+    Context,
 }
 
 impl InputSlot {
@@ -96,7 +100,7 @@ impl InputSlot {
     pub fn operand_index(&self) -> Option<usize> {
         match self {
             InputSlot::Operand(i) | InputSlot::OperandOrSelf(i) => Some(*i),
-            InputSlot::Option(_) => None,
+            InputSlot::Option(_) | InputSlot::Context => None,
         }
     }
 }
@@ -305,7 +309,7 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
     let slot_takes = match syn.input {
         InputSlot::Operand(_) => !places_input(call),
         InputSlot::OperandOrSelf(_) => !places_input(call) && written_operands < fixed,
-        InputSlot::Option(_) => false,
+        InputSlot::Option(_) | InputSlot::Context => false,
     };
     let room = fixed.saturating_sub(usize::from(slot_takes));
     if written_operands > room && !syn.variadic() {

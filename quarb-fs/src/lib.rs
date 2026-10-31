@@ -58,6 +58,29 @@ pub struct FsAdapter {
     root: NodeId,
 }
 
+/// The entries a mount over `root` exposes, in the order the
+/// adapter interns them: the root first, then each directory
+/// before its contents, siblings by name. Hidden entries and the
+/// ones `.gitignore` / `.ignore` files cover are left out unless
+/// `opts` says otherwise, whether or not the tree is a git
+/// repository; symlinks are not followed. An estimator that prices
+/// a folder before it opens walks this, so it counts the files the
+/// mount will expose and no others.
+pub fn walk(root: &Path, opts: FsOptions) -> ignore::Walk {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(!opts.hidden)
+        .git_ignore(opts.respect_ignore)
+        .git_global(opts.respect_ignore)
+        .git_exclude(opts.respect_ignore)
+        .ignore(opts.respect_ignore)
+        .parents(opts.respect_ignore)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_name(|a, b| a.cmp(b));
+    builder.build()
+}
+
 impl FsAdapter {
     /// Build an adapter rooted at `root` with default options
     /// (ignore-aware, hidden entries skipped).
@@ -77,19 +100,7 @@ impl FsAdapter {
         let mut parents: Vec<Option<NodeId>> = Vec::new();
         let mut index: HashMap<PathBuf, usize> = HashMap::new();
 
-        let mut builder = WalkBuilder::new(&root_path);
-        builder
-            .hidden(!opts.hidden)
-            .git_ignore(opts.respect_ignore)
-            .git_global(opts.respect_ignore)
-            .git_exclude(opts.respect_ignore)
-            .ignore(opts.respect_ignore)
-            .parents(opts.respect_ignore)
-            .require_git(false)
-            .follow_links(false)
-            .sort_by_file_name(|a, b| a.cmp(b));
-
-        for entry in builder.build() {
+        for entry in walk(&root_path, opts) {
             let Ok(entry) = entry else { continue };
             let path = entry.path().to_path_buf();
 

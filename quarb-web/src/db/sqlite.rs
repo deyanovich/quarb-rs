@@ -58,6 +58,11 @@ impl SqliteStore {
     /// Open an existing store.
     pub fn open(path: &Path) -> Result<SqliteStore, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        // a store made before the roles: the columns added, the
+        // content links it holds keeping their default role
+        for stmt in super::LINK_COLUMNS_ADDED {
+            let _ = conn.execute(stmt, []);
+        }
         let catalog = Self::read_catalog(&conn)?;
         Ok(SqliteStore {
             conn: RefCell::new(conn),
@@ -216,12 +221,13 @@ impl WebStore for SqliteStore {
     fn related(&self, key: PageKey, kind: LinkKind, dir: LinkDir) -> Vec<PageKey> {
         let k = Param::Int(key.0 as i64);
         match (kind, dir) {
+            // the content links to pages: the page graph
             (LinkKind::Link, LinkDir::Out) => self.keys(
-                "SELECT to_id FROM links WHERE from_id = ?1 AND to_id IS NOT NULL ORDER BY pos",
+                "SELECT l.to_id FROM links l JOIN pages t ON t.id = l.to_id WHERE l.from_id = ?1 AND l.role = 'link' AND t.kind <> 'resource' ORDER BY l.pos",
                 &[k],
             ),
             (LinkKind::Link, LinkDir::In) => self.keys(
-                "SELECT l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = ?1 ORDER BY p.tree_rank",
+                "SELECT l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = ?1 AND l.role = 'link' ORDER BY p.tree_rank",
                 &[k],
             ),
             (LinkKind::Category, LinkDir::Out) => self.keys(
@@ -241,9 +247,37 @@ impl WebStore for SqliteStore {
         }
     }
 
+    fn in_roles(&self, key: PageKey) -> Vec<(String, PageKey)> {
+        let conn = self.conn.borrow();
+        let Ok(mut st) = conn.prepare_cached("SELECT l.role, l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = ?1 ORDER BY p.tree_rank, l.pos") else {
+            return Vec::new();
+        };
+        st.query_map([key.0 as i64], |r| {
+            Ok((r.get::<_, String>(0)?, PageKey(r.get::<_, i64>(1)? as u64)))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    fn in_fragments(&self, key: PageKey) -> Vec<(String, String, PageKey)> {
+        let conn = self.conn.borrow();
+        let Ok(mut st) = conn.prepare_cached("SELECT l.fragment, l.role, l.from_id FROM links l JOIN pages p ON p.id = l.from_id WHERE l.to_id = ?1 AND l.fragment IS NOT NULL ORDER BY p.tree_rank, l.pos") else {
+            return Vec::new();
+        };
+        st.query_map([key.0 as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                PageKey(r.get::<_, i64>(2)? as u64),
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
     fn link_rows(&self, key: PageKey) -> Vec<LinkRow> {
         let conn = self.conn.borrow();
-        let Ok(mut st) = conn.prepare_cached("SELECT to_id, to_url, anchor, section, kind, via_template FROM links WHERE from_id = ?1 ORDER BY pos") else {
+        let Ok(mut st) = conn.prepare_cached("SELECT to_id, to_url, anchor, section, kind, via_template, role, props, fragment FROM links WHERE from_id = ?1 ORDER BY pos") else {
             return Vec::new();
         };
         st.query_map([key.0 as i64], |r| {
@@ -254,6 +288,9 @@ impl WebStore for SqliteStore {
                 section: r.get(3)?,
                 red: r.get::<_, String>(4)? == "red",
                 via_template: r.get::<_, i64>(5)? != 0,
+                role: r.get(6)?,
+                props: super::props_of_json(&r.get::<_, String>(7)?),
+                fragment: r.get(8)?,
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -420,9 +457,34 @@ impl SqlStore for SqliteStore {
             .map(|n| n as u64)
             .map_err(|e| format!("{e}: {sql}"))
     }
+    fn site_base_url(&self, site: SiteId) -> Option<String> {
+        self.conn
+            .borrow()
+            .query_row(
+                "SELECT base_url FROM sites WHERE id = ?1",
+                [site.0 as i64],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+    fn unresolved_targets(&self, site: SiteId) -> Vec<String> {
+        let conn = self.conn.borrow();
+        let Ok(mut st) = conn.prepare("SELECT DISTINCT l.to_url FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = ?1 AND l.to_id IS NULL AND l.kind <> 'red' ORDER BY l.to_url") else {
+            return Vec::new();
+        };
+        st.query_map([site.0 as i64], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+    fn max_page_id(&self) -> i64 {
+        self.conn
+            .borrow()
+            .query_row("SELECT coalesce(max(id), 0) FROM pages", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
     fn tree_nodes(&self, site: SiteId, container: Container) -> Vec<TreeNode> {
         let conn = self.conn.borrow();
-        let Ok(mut st) = conn.prepare("SELECT id, parent_id, name, kind, redirect_to FROM pages WHERE site_id = ?1 AND container = ?2") else {
+        let Ok(mut st) = conn.prepare("SELECT id, parent_id, name, kind, redirect_to, pagerank FROM pages WHERE site_id = ?1 AND container = ?2") else {
             return Vec::new();
         };
         st.query_map(rusqlite::params![site.0 as i64, container.name()], |r| {
@@ -432,6 +494,7 @@ impl SqlStore for SqliteStore {
                 name: r.get(2)?,
                 kind: r.get(3)?,
                 redirect_to: r.get(4)?,
+                pagerank: r.get(5)?,
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -460,7 +523,7 @@ impl SqlStore for SqliteStore {
     fn link_edges(&self, site: SiteId, exclude_templates: bool) -> Vec<(PageKey, PageKey)> {
         let conn = self.conn.borrow();
         let sql = format!(
-            "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = ?1 AND l.to_id IS NOT NULL{}",
+            "SELECT l.from_id, l.to_id FROM links l JOIN pages p ON p.id = l.from_id JOIN pages t ON t.id = l.to_id WHERE p.site_id = ?1 AND l.role = 'link' AND t.kind <> 'resource'{}",
             if exclude_templates {
                 " AND l.via_template = 0"
             } else {
@@ -616,8 +679,8 @@ impl Sink for Writer<'_> {
     fn link(&mut self, from: PageKey, pos: u32, l: &LinkRow) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT INTO links (from_id, pos, to_id, to_url, anchor, section, kind, via_template) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![from.0 as i64, pos as i64, l.to.map(|p| p.0 as i64), l.to_url, l.anchor, l.section, if l.red { "red" } else { "link" }, l.via_template as i64],
+                "INSERT INTO links (from_id, pos, to_id, to_url, anchor, section, kind, via_template, role, props, fragment) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![from.0 as i64, pos as i64, l.to.map(|p| p.0 as i64), l.to_url, l.anchor, l.section, if l.red { "red" } else { "link" }, l.via_template as i64, l.role, super::props_json(&l.props), l.fragment],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())

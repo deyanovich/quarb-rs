@@ -1590,6 +1590,24 @@ impl Exporter {
     /// The column a plain column operand names (`::col`, `$*1::col`):
     /// a path without a step, or a context reference, projecting a
     /// named property.
+    /// A numeric reducer (`sum`, `mean`, `min`, `max`) pushed over a
+    /// column is the scan's only on a numeric-typed column: the
+    /// scan lifts unit text (`'18 parasang'` under a declared unit)
+    /// to quantities and orders texts as texts, where SQL sums a
+    /// text column by its leading digits and orders it by
+    /// collation. Recorded for the caller's catalog as a
+    /// comparison's assumption is.
+    fn assume_numeric(&mut self, column: Option<String>) {
+        if !self.strict {
+            return;
+        }
+        if let Some(c) = column
+            && !self.column_types.numeric.contains(&c)
+        {
+            self.column_types.numeric.push(c);
+        }
+    }
+
     fn column_operand(&self, o: NodeId) -> Option<String> {
         match self.kind(o).as_str() {
             "path" if self.kid(o, "step").is_none() => {}
@@ -1792,8 +1810,10 @@ impl Exporter {
         };
         let commands: Vec<NodeId> = self.arbor.children(pipe);
         let mut i = 0;
-        // A pending per-row value (`| ::col`) feeding an aggregate.
+        // A pending per-row value (`| ::col`) feeding an aggregate,
+        // and the column it names where it is one.
         let mut pending_col: Option<String> = None;
+        let mut pending_name: Option<String> = None;
         // After a grouped reduction: (key, agg_sql, alias).
         let mut grouped: Option<(String, String, String)> = None;
 
@@ -1803,6 +1823,7 @@ impl Exporter {
                 "expr" => {
                     let kids = self.arbor.children(s);
                     pending_col = Some(self.operand(kids[0], join.map(|(l, _)| l))?);
+                    pending_name = self.column_operand(kids[0]);
                 }
                 "cmd" => {
                     let name = self.prop_s(s, "name");
@@ -1825,6 +1846,7 @@ impl Exporter {
                                 pending_col = None;
                                 None
                             } else {
+                                self.assume_numeric(pending_name.take());
                                 pending_col.take()
                             };
                             let agg = sql_agg(&name, col)?;
@@ -1901,6 +1923,7 @@ impl Exporter {
                                 pending_col = None;
                                 None
                             } else {
+                                self.assume_numeric(pending_name.take());
                                 pending_col.take()
                             };
                             sel.select = vec![sql_agg(&name, col)?];

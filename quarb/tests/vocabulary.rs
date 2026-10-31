@@ -123,9 +123,13 @@ const CORPUS: &[&str] = &[
     // the value-side provenance projection (2026-09-06): `:key`
     // after a recall
     "/x | .v(::a) | $.v:%provenance:text",
-    // the cross-capsa read (2026-09-07): a register accessor glued
-    // to a node path reads the peer standing there
-    "//x | .v(::a) | <-link:.v",
+    // the node read (2026-09-07; attached regulae 2026-10-31): the
+    // attaching push, the read after a node path and alone, the
+    // record of a node's attachments
+    "//x | .:v(::a) | <-link:.v | :.v | (<-link:%.)",
+    // the edge's ends as node operands (2026-10-31): a projection,
+    // a node read, a field holding a reference as the node side
+    "//x | ->link | %(t = $-:target::code; s = $-:source:.v) | :t:.v",
     // the quantified push (2026-09-07): the iteration loop
     "/a | .v(1) | .v($.v * 2){3} | .w($.v + 1){1;5}",
     // the node-id anchor and the shaped core keys (2026-09-07):
@@ -184,6 +188,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("alt", &[]),
     ("and", &[]),
     ("arith", &["op"]),
+    // v3 additive growth: attach (2026-10-31, the attaching push
+    // `.:name(body)`, spec: Attached Regulae).
+    ("attach", &["name"]),
     // v1 additive growth: mark key (2026-07-11, the (name)
     // anchor); the mark-array anchor keys (2026-07-24, marks
     // symmetry: (N), (.), (@), (@name)).
@@ -268,6 +275,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
         "path",
         &[
             "anchored",
+            // v3 additive growth: edge-end (2026-10-31, the edge's end
+            // `$-:source` / `$-:target` as a node operand).
+            "edge-end",
             "mark",
             "mark-back",
             "mark-index",
@@ -277,8 +287,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             "node-id",
         ],
     ),
-    // v1 additive growth: peer-reg (2026-09-07, the cross-capsa read
-    // `X:.r`).
+    // v1 additive growth: peer-reg (2026-09-07, the node read
+    // `X:.r`; since 2026-10-31 the attached regula, the node operand
+    // its child or absent for the current node).
     ("peer-reg", &["ref"]),
     ("piped", &[]),
     ("pipeline", &[]),

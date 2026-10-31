@@ -291,9 +291,10 @@ fn marginalia_is_the_aside_family() {
            <aside epub:type="marginalia" id="mg"><p>Contested figure.</p></aside>
            <div class="sidenote">A Tufte class, left unread as apparatus.</div>"##,
     );
+    // (the second aside pointed at twice: one thread per arrival)
     assert_eq!(
         vals(&m, "//*<deixis>->aside::"),
-        ["See the map.", "Contested figure."]
+        ["See the map.", "Contested figure.", "Contested figure."]
     );
     // the id-less aside anchors where it stood
     assert_eq!(

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What a run is given: the pinned instant, the shell gate, the
-/// quantifier bound, reproducibility, the declared references'
+/// quantifier and frontier bounds, reproducibility, the declared references'
 /// targets, the collation, the sentence bonds, the budget, the plan
 /// switch, the head's topic, the environments and the libraries.
 #[derive(Clone, Default)]
@@ -20,6 +20,9 @@ pub struct Run {
     pub now: Option<(i64, u32)>,
     pub allow_shell: bool,
     pub quantifier_bound: Option<usize>,
+    pub frontier_bound: Option<usize>,
+    /// Raise the debug diagnostics (`--diagnostics=debug`).
+    pub debug: bool,
     pub reproducible: bool,
     pub ref_targets: HashMap<String, NodeId>,
     pub collation: Option<String>,
@@ -48,6 +51,8 @@ impl Run {
             now: self.now,
             allow_shell: self.allow_shell,
             quantifier_bound: self.quantifier_bound,
+            frontier_bound: self.frontier_bound,
+            debug: self.debug,
             reproducible: self.reproducible,
             collation: self.collation.clone(),
             bonds: self.bonds.clone(),

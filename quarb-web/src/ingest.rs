@@ -249,6 +249,9 @@ fn process(
                 section: f.section,
                 red: f.red,
                 via_template: f.transcluded,
+                role: f.role.clone(),
+                props: f.props.clone(),
+                fragment: None,
             });
         }
     }
@@ -702,17 +705,17 @@ pub fn finish(
     eprintln!("{}", log.last().unwrap());
     match opts.tree {
         Tree::Path => {
-            let nodes: Vec<(i64, Option<i64>, String)> = store
+            let nodes: Vec<(i64, Option<i64>, String, f64)> = store
                 .tree_nodes(site, Container::Pages)
                 .into_iter()
-                .map(|n| (n.id, n.parent, n.name))
+                .map(|n| (n.id, n.parent, n.name, n.pagerank))
                 .collect();
             let ranked = analyze::rank_tree(&nodes);
             store.set_tree(&ranked)?;
-            let cats: Vec<(i64, Option<i64>, String)> = store
+            let cats: Vec<(i64, Option<i64>, String, f64)> = store
                 .tree_nodes(site, Container::Categories)
                 .into_iter()
-                .map(|n| (n.id, n.parent, n.name))
+                .map(|n| (n.id, n.parent, n.name, n.pagerank))
                 .collect();
             let ranked = analyze::rank_tree(&cats);
             store.set_tree(&ranked)?;
@@ -740,6 +743,30 @@ pub fn finish(
             ""
         }
     ));
+    // The document order (spec: Text Readings, the web reading): the
+    // tree's pre-order with siblings by pagerank descending, ties by
+    // name — ranked again now that the pageranks are known, in every
+    // container the tree spans.
+    let t = std::time::Instant::now();
+    let mut ranked = 0usize;
+    for container in [Container::Pages, Container::Categories] {
+        let nodes: Vec<(i64, Option<i64>, String, f64)> = store
+            .tree_nodes(site, container)
+            .into_iter()
+            .map(|n| (n.id, n.parent, n.name, n.pagerank))
+            .collect();
+        if nodes.is_empty() {
+            continue;
+        }
+        let rows = analyze::rank_tree(&nodes);
+        ranked += rows.len();
+        store.set_tree(&rows)?;
+    }
+    store.reload()?;
+    log.push(format!(
+        "document order: {ranked} row(s) ranked by pagerank ({:.1?})",
+        t.elapsed()
+    ));
     Ok(log)
 }
 
@@ -763,21 +790,21 @@ fn category_tree(
         .filter(|r| r.kind == "category")
         .map(|r| r.id)
         .collect();
-    let cats: Vec<(i64, Option<i64>, String)> = rows
+    let cats: Vec<(i64, Option<i64>, String, f64)> = rows
         .iter()
         .filter(|r| r.kind == "category")
-        .map(|r| (r.id, r.parent, r.name.clone()))
+        .map(|r| (r.id, r.parent, r.name.clone(), r.pagerank))
         .collect();
-    let nodes: Vec<(i64, Option<i64>, String)> = rows
+    let nodes: Vec<(i64, Option<i64>, String, f64)> = rows
         .iter()
         .filter(|r| r.kind != "category" && r.kind != "dir")
-        .map(|r| (r.id, r.parent, r.name.clone()))
+        .map(|r| (r.id, r.parent, r.name.clone(), r.pagerank))
         .collect();
     let redirect_of: HashMap<i64, i64> = rows
         .iter()
         .filter_map(|r| r.redirect_to.map(|t| (r.id, t)))
         .collect();
-    let mut all: Vec<(i64, Option<i64>, String)> =
+    let mut all: Vec<(i64, Option<i64>, String, f64)> =
         nodes.iter().chain(cats.iter()).cloned().collect();
     let edges = store.term_edges(site);
     eprintln!(

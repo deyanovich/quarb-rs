@@ -135,14 +135,22 @@ fn added_and_changed() {
         values(&a, "/states/'~2'->added | ::kind"),
         ["core/path", "core/path"]
     );
-    // ...both about the same entry (node results dedupe, so the
-    // converging edges land once), and the fact events link back
-    // to their introducing state.
+    // ...both about the same entry — one thread per converging
+    // edge (spec: Expansion paths), `@| collapse` the entry once —
+    // and the fact events link back to their introducing state.
     assert_eq!(
         values(&a, "/states/'~2'->added->entry | ::path"),
+        ["docs/a.md", "docs/a.md"]
+    );
+    assert_eq!(
+        values(&a, "/states/'~2'->added->entry @| collapse | ::path"),
         ["docs/a.md"]
     );
-    assert_eq!(values(&a, "/states/'~2'->added->state | :::seq"), ["4"]);
+    // (one thread per fact's arrival at the state)
+    assert_eq!(
+        values(&a, "/states/'~2'->added->state | :::seq"),
+        ["4", "4"]
+    );
     // The diff surface: the one entry that changed in that state.
     assert_eq!(
         values(&a, "/states/'~2'/entries/*<changed> @| count"),

@@ -77,6 +77,8 @@ pub(crate) fn pipeline_projected(query: &Query) -> bool {
             Command::Agg(call) if call.name == "ungroup" => {
                 projected = before_group.pop().unwrap_or(false);
             }
+            // `@| collapse` gathers node threads into node threads
+            Command::Agg(call) if call.name == "collapse" => {}
             // A navigation command rebuilds the capsae: without a
             // projection the context is node-typed again no matter
             // what came before; with one it is value-typed.
@@ -105,8 +107,11 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         | Command::RecordPush { .. }
         | Command::FieldsPush
         | Command::AggPush { .. } => false,
-        // A quantified push is its push, round after round.
-        Command::Repeat { command, .. } => command_projects(command),
+        // A quantified push is its push, round after round; an
+        // attaching push is the push it wraps.
+        Command::Repeat { command, .. } | Command::Attach { command, .. } => {
+            command_projects(command)
+        }
         // A spliced quarq is whatever it holds: the runtime
         // any-topic check types the result.
         Command::Splice(_) => false,

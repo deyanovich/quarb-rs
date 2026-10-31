@@ -11,6 +11,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.44.0" }
-quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.44.0" }
+quarb = { path = "../quarb", version = "0.45.0" }
+quarb-pyvalue = { path = "../quarb-pyvalue", version = "0.45.0" }
 pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"] }

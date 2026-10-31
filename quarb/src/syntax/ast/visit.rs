@@ -104,7 +104,9 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Select(p) => v.predicate(p),
         Command::Filter(e) => v.pred(e),
         Command::Nav(b) => v.branch(b),
-        Command::Map(inner) | Command::Repeat { command: inner, .. } => v.command(inner),
+        Command::Map(inner)
+        | Command::Repeat { command: inner, .. }
+        | Command::Attach { command: inner, .. } => v.command(inner),
         Command::Push(_)
         | Command::Recall(_)
         | Command::Splice(_)
@@ -221,7 +223,11 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
             v.operand(left);
             v.operand(right);
         }
-        Operand::PeerReg { at, .. } => v.operand(at),
+        Operand::PeerReg { at, .. } => {
+            if let Some(at) = at {
+                v.operand(at)
+            }
+        }
         Operand::List(items) => {
             for i in items {
                 v.operand(i);

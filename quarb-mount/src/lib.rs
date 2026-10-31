@@ -153,6 +153,9 @@ const ROOT_ALIAS: u64 = INNER_MASK;
 /// A Quarb adapter over a set of named mounts.
 pub struct MountAdapter {
     mounts: Vec<Entry>,
+    /// Whether the engine asked for whole listings
+    /// (`AstAdapter::whole_listings`), to tell a mount opened later.
+    whole_listings: std::cell::Cell<bool>,
 }
 
 // The mount index rides the high byte (bits 56–63); an inner adapter
@@ -185,6 +188,7 @@ impl MountAdapter {
         }
         Ok(MountAdapter {
             mounts: mounts.into_iter().map(Entry::active).collect(),
+            whole_listings: std::cell::Cell::new(false),
         })
     }
 
@@ -278,6 +282,9 @@ impl MountAdapter {
         };
         match opened {
             Ok(a) => {
+                if self.whole_listings.get() {
+                    a.whole_listings();
+                }
                 let _ = e.cell.set(a);
                 Ok(e.cell.get().expect("just set").as_ref())
             }
@@ -615,6 +622,54 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    // The row-bearing forms and the edges `edges` collects answer
+    // from the mounted adapter too, each node and each row's identity
+    // translated: the trait defaults would read `links` and lose the
+    // row (spec: Edge rows) and the mounted level's own edge rule
+    // (the web level's page-to-page edges).
+    fn link_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self
+                .adapter(m)
+                .link_rows(inner)
+                .into_iter()
+                .map(|(l, t, row)| (l, self.encode(m, t), row.map(|r| self.encode(m, r))))
+                .collect(),
+        }
+    }
+
+    fn edge_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self
+                .adapter(m)
+                .edge_rows(inner)
+                .into_iter()
+                .map(|(l, t, row)| (l, self.encode(m, t), row.map(|r| self.encode(m, r))))
+                .collect(),
+        }
+    }
+
+    fn backlink_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self
+                .adapter(m)
+                .backlink_rows(inner)
+                .into_iter()
+                .map(|(l, s, row)| (l, self.encode(m, s), row.map(|r| self.encode(m, r))))
+                .collect(),
+        }
+    }
+
+    fn link_consumed(&self, source: NodeId, label: &str) -> bool {
+        match self.decode(source) {
+            None => false,
+            Some((m, inner)) => self.adapter(m).link_consumed(inner, label),
+        }
+    }
+
     fn link_property(
         &self,
         source: NodeId,
@@ -793,6 +848,17 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    /// Every mount open so far hears it; one opened later hears it
+    /// as it opens (`open`).
+    fn whole_listings(&self) {
+        self.whole_listings.set(true);
+        for e in &self.mounts {
+            if let Some(a) = e.cell.get() {
+                a.whole_listings();
+            }
+        }
+    }
+
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let mut by_mount: Vec<Vec<NodeId>> = vec![Vec::new(); self.mounts.len()];
         for &n in nodes {
@@ -815,6 +881,14 @@ impl AstAdapter for MountAdapter {
             .map(|a| a.quantifier_bound())
             .max()
             .unwrap_or(32)
+    }
+
+    fn frontier_bound(&self) -> usize {
+        (0..self.mounts.len())
+            .filter_map(|m| self.active(m))
+            .map(|a| a.frontier_bound())
+            .max()
+            .unwrap_or(100_000)
     }
 
     /// The mount is a provenance layer: the inner adapter answers

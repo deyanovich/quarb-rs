@@ -82,6 +82,29 @@ pub enum Anchor {
     /// run or the next, since adapters mint ids deterministically.
     /// An id the adapter never minted yields no node.
     Id(Box<Operand>),
+    /// `$-:source` / `$-:target` — an end of the arrived-by edge, in
+    /// the declaration's orientation (spec: Edge facts): a node
+    /// operand in its own right, so a path, a projection or a node
+    /// read may follow it (`$-:target::code`, `$-:source:.d`).
+    /// Nothing where no edge has been walked.
+    EdgeEnd(End),
+}
+
+/// Which end of an edge: the node the declaration points from, or
+/// the one it points to — whichever way the hop walked it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    Source,
+    Target,
+}
+
+impl End {
+    pub fn name(self) -> &'static str {
+        match self {
+            End::Source => "source",
+            End::Target => "target",
+        }
+    }
 }
 
 impl PartialEq for Anchor {
@@ -95,6 +118,7 @@ impl PartialEq for Anchor {
                 a == b
             }
             (Anchor::MarkIndex(a), Anchor::MarkIndex(b)) => a == b,
+            (Anchor::EdgeEnd(a), Anchor::EdgeEnd(b)) => a == b,
             // Two id anchors are equal when they are spelled alike.
             (Anchor::Id(a), Anchor::Id(b)) => {
                 crate::syntax::unparse::operand_text(a) == crate::syntax::unparse::operand_text(b)
@@ -139,6 +163,17 @@ pub enum Command {
     /// evaluated against the capsa's node, set as the topic and
     /// pushed (a computed column).
     ExprPush { name: Option<String>, expr: Operand },
+    /// `| .:name(body)` / `| .:name` / `| .:%` — the attaching push
+    /// (spec: Attached Regulae): the push it wraps files in the
+    /// capsa exactly as `.name(body)` or `.%` does, and the same
+    /// regulae are attached to the node the thread stands at, where
+    /// `X:.name` reads them by the node's identity — the one named,
+    /// or every field the fields push filed (`name` is then `None`).
+    /// Takes the quantifier like any push.
+    Attach {
+        name: Option<String>,
+        command: Box<Command>,
+    },
     /// `@| f` — reduce the whole context's topics to a new context.
     /// Keyed aggregates (`sort_by`, `unique_by`, `min_by`, `max_by`,
     /// `top`, `bottom`) instead reorder or filter the capsae
@@ -452,7 +487,7 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     if let Operand::ValueMeta { key, .. } = op {
         return Some(key);
     }
-    // `<-link:.v` — a peer's named regula derives its name as a
+    // `<-link:.v` — an attached regula derives its name as a
     // recall does.
     if let Operand::PeerReg {
         reg: RegRef::Named(n),
@@ -531,10 +566,14 @@ pub enum PushBody {
     Expr(Operand),
 }
 
-/// `( alt | alt | … ) quant reach` — a path-pattern group. Expansion
-/// follows simple-path semantics: within one expansion path no node
-/// is visited twice (the start node included), and open-ended
-/// quantifiers stop at the adapter's quantifier bound.
+/// `( alt | alt | … ) quant reach` — a path-pattern group. A set
+/// walk (an open quantifier with a floor of at most one, under all
+/// matches or the proximal reach, no push or mark inside) reaches
+/// each node once, at the fewest rounds, and runs to its fixpoint;
+/// every other group is an exact walk over acyclic walks: within one
+/// expansion path no node is visited twice (the start node
+/// included), the rounds capped by the adapter's quantifier bound
+/// and the paths in flight by the frontier bound.
 #[derive(Debug, Clone)]
 pub struct Group {
     /// Alternative subpaths (at least one, each non-empty). Each
@@ -561,10 +600,24 @@ pub struct Group {
 /// `{m,n}`-style repetition. `max` is `None` for the open-ended
 /// forms, clamped to the adapter's quantifier bound at execution.
 /// A plain group is `{1,1}`; `+` is `{1,}`; `*` is `{0,}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quant {
     pub min: usize,
     pub max: Option<usize>,
+    /// A budget instead of a count (spec: The budget quantifier):
+    /// `{;100_km}`, `{10_km;100_km}`, `{2_h;}` — the floor and the
+    /// ceiling as written, quantities the walk sums an edge weight
+    /// against. With a budget `min` is 0 and `max` is `None`.
+    pub budget: Option<Budget>,
+}
+
+/// A budget quantifier's bounds, as written: each a quantity
+/// literal (`100_km`, `2_h`), resolved at the walk under the run's
+/// declared units; an absent floor includes the start at zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Budget {
+    pub floor: Option<String>,
+    pub ceiling: Option<String>,
 }
 
 /// One navigation step.
@@ -815,13 +868,20 @@ pub enum Operand {
     /// origins the value was read from (`source`, `instant`,
     /// `dpid`, `provenance`, `origins`, `elided`).
     ValueMeta { base: Box<Operand>, key: String },
-    /// `X:.r` — the cross-capsa read: `at` is a node
-    /// path (a `Rel`, a `Ctx`, or the invoking position); at each node it
-    /// reaches, the regula `reg` of every capsa of the command's
-    /// *input* context standing there (the `@*` snapshot rule), one
-    /// value per (node, capsa), in context order. No values where
-    /// nobody stands; null outside a pipeline context.
-    PeerReg { at: Box<Operand>, reg: RegRef },
+    /// `X:.name`, `:.name`, `X:%.` — the node read (spec: Attached
+    /// Regulae): the regula attached to the node `at` reaches under
+    /// the name (`RegRef::Named`), or the record of everything
+    /// attached there (`RegRef::Record`); `at` is a bare node
+    /// operand (a path, a mark, the invoking position, a bound
+    /// node), or `None` for the current node (`:.name` alone, also
+    /// inside a predicate). One value per node reached, in context
+    /// order, as the previous command left the attachments; a node
+    /// with nothing attached under the name yields no value (null
+    /// as a scalar, nothing to an aggregate).
+    PeerReg {
+        at: Option<Box<Operand>>,
+        reg: RegRef,
+    },
     /// `%+` — the record of the last match's named groups (Perl's
     /// `%+`); the empty record outside any match.
     NamedCaptures,
@@ -1256,6 +1316,16 @@ pub enum Axis {
     /// only one direction usually exists, so the spelling drops
     /// the direction claim the data never needed.
     BothLink,
+    /// `~` — the navop star, the wildcard of the operator slot: every
+    /// edge touching the position, a tree edge or a crosslink, either
+    /// direction, keeping the far ends whose edge matches the name —
+    /// a child's or the parent's name, a crosslink's label: `~x` ≡
+    /// `(/x|\x|->x|<-x)`, `~*` every edge. Siblings are an order, not
+    /// edges, so it never walks `>` or `<`.
+    Any,
+    /// `~~`, `~~?`, `~~!` — the deep navop star: the walk over every
+    /// edge ending at a matching one, as `//name` is to `/name`.
+    AnyDeep(Reach),
     /// `::prop-->label` — resolve a cross-reference (the glued name
     /// is the reference label): the adapter maps
     /// `(node, property, label)` to a target node. With no property

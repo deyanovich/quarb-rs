@@ -948,6 +948,15 @@ impl AstAdapter for GitAdapter {
         Some(self.commit_node(&first))
     }
 
+    /// A history is acyclic by its nature: a commit's parents
+    /// precede it, so a walk over `parent` never returns (spec:
+    /// Model Files, Acyclic links — a source that knows this of its
+    /// own links carries the promise without a declaration).
+    fn acyclic_link(&self, label: &str) -> Option<String> {
+        (label == "parent")
+            .then(|| "the commit history (a commit's parents precede it)".to_string())
+    }
+
     /// Every parent is an outgoing `parent` edge (merges fan out).
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let Some(hash) = self.commit_of(node) else {

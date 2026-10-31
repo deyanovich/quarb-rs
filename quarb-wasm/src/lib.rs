@@ -44,18 +44,18 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
     let nanos = ((now_millis / 1000.0).fract() * 1e9) as u32;
     let outcome = match format {
         "json" => quarb_json::JsonAdapter::parse(input)
-            .map_err(|e| format!("parsing JSON: {e}"))
+            .map_err(|e| mount_error(format!("parsing JSON: {e}")))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         // The property reading: containers are nodes, scalars are
         // properties.
         "json2" => quarb_json::JsonAdapter::parse_as(input, quarb_json::Reading::Property)
-            .map_err(|e| format!("parsing JSON: {e}"))
+            .map_err(|e| mount_error(format!("parsing JSON: {e}")))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         "yaml" => quarb_yaml::parse(input)
-            .map_err(|e| format!("parsing YAML: {e}"))
+            .map_err(|e| mount_error(format!("parsing YAML: {e}")))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         "toml" => quarb_toml::parse(input)
-            .map_err(|e| format!("parsing TOML: {e}"))
+            .map_err(|e| mount_error(format!("parsing TOML: {e}")))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         // `csv` / `tsv`, or `csv;` / `csv;comma` — the delimiter and
         // the decimal convention after the format's name, as the
@@ -76,11 +76,11 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             })();
             options
                 .and_then(|o| quarb_csv::CsvAdapter::parse_declared(input, delim, o))
-                .map_err(|e| format!("parsing CSV: {e}"))
+                .map_err(|e| mount_error(format!("parsing CSV: {e}")))
                 .and_then(|a| go(query, &a, |n| a.locator(n), secs, nanos))
         }
         "xml" => quarb_xml::XmlAdapter::parse(input)
-            .map_err(|e| format!("parsing XML: {e}"))
+            .map_err(|e| mount_error(format!("parsing XML: {e}")))
             .and_then(|a| go(query, &a, |n| a.locator(n), secs, nanos)),
         "html" => {
             let a = quarb_html::HtmlAdapter::parse(input);
@@ -115,7 +115,11 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             };
             match parsed {
                 Ok(a) => go(query, &a, |n| a.locator(n), secs, nanos),
-                Err(e) => Err(format!("reading CoNLL-U: {e}")),
+                Err(e) => Err(quarb::Diagnostic::error(
+                    "ERROR",
+                    "mount",
+                    format!("reading CoNLL-U: {e}"),
+                )),
             }
         }
         // The corpus reading: the same three, tokenized.
@@ -128,14 +132,13 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             a.tokenize();
             go(query, &a, |n| a.locator(n), secs, nanos)
         }
-        other => Err(format!("unknown format: {other}")),
+        other => Err(quarb::Diagnostic::error(
+            "ERROR",
+            "mount",
+            format!("unknown format: {other}"),
+        )),
     };
-    match outcome {
-        Ok((lines, html)) => {
-            serde_json::json!({ "ok": true, "lines": lines, "html": html }).to_string()
-        }
-        Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
-    }
+    outcome_json(outcome)
 }
 
 /// The engine's table stylesheet, scoped under `.quarb-table`: a
@@ -154,33 +157,87 @@ fn go<A: AstAdapter>(
     render: impl Fn(NodeId) -> String,
     secs: i64,
     nanos: u32,
-) -> Result<(Vec<String>, Option<String>), String> {
+) -> Result<Ran, quarb::Diagnostic> {
     let run = quarb::Run {
         now: Some((secs, nanos)),
         ..Default::default()
     };
+    // `| copy` comes off the end: the host copies the lines it
+    // would have shown, and says so (spec: The clipboard)
+    let (owned, copy) = match quarb::take_copy(query) {
+        Some((rest, rendering)) => (rest, Some(rendering)),
+        None => (query.to_string(), None),
+    };
+    let query = owned.as_str();
     if quarb::closes_with_table(query) {
         let out = quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
             .and_then(|q| q.without_closing().run(adapter, &run))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.diagnostic())?;
         if let Some(closing) = out.closing.filter(|c| !c.csv) {
             let rows: Vec<Value> =
                 quarb::table_rows_of(adapter, out.result, &closing.columns, &render);
             let columns = (!closing.columns.is_empty()).then_some(closing.columns.as_slice());
             let text = quarb::tabulate_with(&rows, columns, false, b',');
             let html = quarb::table_html_plain(&rows, columns);
-            return Ok((vec![text], Some(html)));
+            return Ok((vec![text], Some(html), out.diagnostics, copy));
         }
     }
-    match quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
+    let out = quarb::Query::parse_with(query, &quarb::Defs::default(), adapter, &run)
         .and_then(|q| q.run(adapter, &run))
-        .map(|o| o.result)
-    {
-        Ok(QueryResult::Nodes(nodes)) => Ok((nodes.into_iter().map(render).collect(), None)),
-        Ok(QueryResult::Values(values)) => {
-            Ok((values.into_iter().map(|v| v.display_form()).collect(), None))
-        }
-        Err(e) => Err(e.to_string()),
+        .map_err(|e| e.diagnostic())?;
+    let lines = match out.result {
+        QueryResult::Nodes(nodes) => nodes.into_iter().map(render).collect(),
+        QueryResult::Values(values) => values.into_iter().map(|v| v.display_form()).collect(),
+    };
+    Ok((lines, None, out.diagnostics, copy))
+}
+
+/// A source that would not open: an error at the mount, with no
+/// rule's code.
+fn mount_error(message: String) -> quarb::Diagnostic {
+    quarb::Diagnostic::error("ERROR", "mount", message)
+}
+
+/// A run's answer for JS: the lines, the HTML grid of a closing
+/// `@| pretty`, and the diagnostics beside the answer (spec:
+/// Diagnostics).
+/// The lines, the HTML grid when there is one, the diagnostics, and
+/// — under `| copy` — the rendering's name: the host puts the lines
+/// on the clipboard instead of showing them (spec: The clipboard).
+type Ran = (
+    Vec<String>,
+    Option<String>,
+    Vec<quarb::Diagnostic>,
+    Option<&'static str>,
+);
+
+/// The JSON of a run: `{"ok": true, "lines", "html", "diagnostics"}`,
+/// or `{"ok": false, "error", "diagnostics"}` with the error as the
+/// array's one item, code and site beside the message.
+fn outcome_json(outcome: Result<Ran, quarb::Diagnostic>) -> String {
+    let diag = |d: &quarb::Diagnostic| {
+        serde_json::json!({
+            "severity": d.severity.word(),
+            "code": d.code,
+            "site": d.site,
+            "message": d.message,
+        })
+    };
+    match outcome {
+        Ok((lines, html, diagnostics, copy)) => serde_json::json!({
+            "ok": true,
+            "lines": lines,
+            "html": html,
+            "copy": copy,
+            "diagnostics": diagnostics.iter().map(diag).collect::<Vec<_>>(),
+        })
+        .to_string(),
+        Err(d) => serde_json::json!({
+            "ok": false,
+            "error": d.message,
+            "diagnostics": [diag(&d)],
+        })
+        .to_string(),
     }
 }
 
@@ -286,12 +343,7 @@ impl Site {
             format!("{}\n{}", self.defs, query)
         };
         let outcome = go(&query, a, render, secs, nanos);
-        match outcome {
-            Ok((lines, html)) => {
-                serde_json::json!({ "ok": true, "lines": lines, "html": html }).to_string()
-            }
-            Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
-        }
+        outcome_json(outcome)
     }
 
     /// The pages as locators, for a quick listing without a query.

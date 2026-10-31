@@ -30,6 +30,11 @@ pub enum PageKind {
     /// A page that stands for another (`->redirect` reaches it); a
     /// page under `//page` too, wearing the trait `<redirect>`.
     Redirect,
+    /// A link target that is no page of the site — a file (a PDF,
+    /// an image, an archive) or another host's page — kept as a node
+    /// so `//page[->link<pdf>]` and `<-link` from it answer (spec:
+    /// Text Readings, the web reading). Not a `//page`.
+    Resource,
 }
 
 impl PageKind {
@@ -40,6 +45,7 @@ impl PageKind {
             PageKind::Category => "category",
             PageKind::Tag => "tag",
             PageKind::Redirect => "redirect",
+            PageKind::Resource => "resource",
         }
     }
 
@@ -158,6 +164,22 @@ pub struct LinkRow {
     /// A link the site itself marks as leading nowhere (a wiki's
     /// redlink), or a same-site path no page answers to.
     pub red: bool,
+    /// The edge's label, read off the page's standard markers (spec:
+    /// Text Readings, the web reading): `link` for an anchor in the
+    /// content, `navbar` (the header, a nav that is no breadcrumb),
+    /// `breadcrumb`, `footer`, `altlang` (`<link rel="alternate"
+    /// hreflang>`), `pdf` / `feed` (an alternate by its type),
+    /// `canonical`.
+    pub role: String,
+    /// The edge's own properties: `title`, `rel` (as written),
+    /// `hreflang`, `type`, `position`, the hint booleans
+    /// (`nofollow`, `ugc`, `sponsored`, `external`, `noopener`,
+    /// `noreferrer`); the anchor text answers as `text`.
+    pub props: Vec<(String, Value)>,
+    /// A same-page or sibling-page fragment (`#filters`): the edge
+    /// lands on the node bearing that name in the target's text
+    /// tree, when mounted, else on the page.
+    pub fragment: Option<String>,
     /// A link written by a template (a navbox), not by the page's
     /// own text.
     pub via_template: bool,
@@ -207,6 +229,20 @@ pub trait WebStore {
     fn related(&self, key: PageKey, kind: LinkKind, dir: LinkDir) -> Vec<PageKey>;
     /// A page's outgoing links as written, in document order.
     fn link_rows(&self, key: PageKey) -> Vec<LinkRow>;
+    /// The pages pointing at `key`, each with the role its edge
+    /// carries (`link`, `navbar`, `footer`, …), in document order. A
+    /// store that keeps the content links alone answers those.
+    fn in_roles(&self, key: PageKey) -> Vec<(String, PageKey)> {
+        self.related(key, LinkKind::Link, LinkDir::In)
+            .into_iter()
+            .map(|k| ("link".to_string(), k))
+            .collect()
+    }
+    /// The edges landing on a fragment of `key`: (fragment, role,
+    /// source), for `<-link` on the node bearing the name.
+    fn in_fragments(&self, _key: PageKey) -> Vec<(String, String, PageKey)> {
+        Vec::new()
+    }
     /// The page's document.
     fn html(&self, key: PageKey) -> Option<String>;
     /// The page a URL names, if the store holds it — the landing

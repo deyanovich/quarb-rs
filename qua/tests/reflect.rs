@@ -134,11 +134,12 @@ fn numpy_functions_over_the_stream() {
         vec!["@(1; 3; 5; 6)", "@(2; 1; 0; 0.5)"]
     );
     // A one-dimensional array comes back as a sample (a one-column
-    // table without a header), which reads back to its values; a
-    // two-dimensional one as an array table.
+    // table without a header, the matrix whose rows print as lists),
+    // which reads back to its values; a two-dimensional one as an
+    // array table.
     assert_eq!(
         run("/v/* | :: @| np:cumsum").unwrap(),
-        vec!["#(%(1);\n  %(3);\n  %(6);\n  %(10);\n  %(20))"]
+        vec!["#(@(1);\n  @(3);\n  @(6);\n  @(10);\n  @(20))"]
     );
     assert_eq!(
         run("/v/* | :: @| np:cumsum @| @").unwrap(),
@@ -149,7 +150,7 @@ fn numpy_functions_over_the_stream() {
     assert_eq!(run("= @(-1; 1) @| np:log @| @").unwrap(), vec!["nan", "0"]);
     assert_eq!(
         run("/rows/* | %(::book; ::x; ::y) @| np:transpose").unwrap(),
-        vec!["#(%(1; 3; 5; 6);\n  %(2; 1; 0; 0.5))"]
+        vec!["#(@(1; 3; 5; 6);\n  @(2; 1; 0; 0.5))"]
     );
     // Chaining: the sample is the input of the next function, on
     // either pipe.

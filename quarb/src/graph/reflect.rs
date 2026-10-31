@@ -69,6 +69,7 @@ fn anchor_props(anchor: &Anchor) -> Vec<(String, Value)> {
         Anchor::MarksNamed(m) => {
             vec![("marks-name".to_string(), Value::Str(m.clone()))]
         }
+        Anchor::EdgeEnd(end) => vec![("edge-end".to_string(), Value::Str(end.name().to_string()))],
         // The id as a value where it is a literal, its spelling
         // otherwise.
         Anchor::Id(op) => vec![(
@@ -693,7 +694,9 @@ impl QueryArbor {
                     vec![("ref".to_string(), Value::Str(reg_spelling(reg)))],
                     Some(parent),
                 );
-                self.walk_operand(at, id);
+                if let Some(at) = at {
+                    self.walk_operand(at, id);
+                }
             }
             Operand::NamedCaptures => {
                 self.intern(Some("captures"), Vec::new(), Some(parent));
@@ -1085,6 +1088,14 @@ impl QueryArbor {
             Command::Map(inner) => {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
                 self.walk_command(inner, id);
+            }
+            Command::Attach { name, command } => {
+                let mut props = Vec::new();
+                if let Some(n) = name {
+                    props.push(("name".to_string(), Value::Str(n.clone())));
+                }
+                let id = self.intern(Some("attach"), props, Some(parent));
+                self.walk_command(command, id);
             }
             Command::Repeat { command, min, max } => {
                 let mut props = vec![("min".to_string(), Value::Int(*min as i64))];
@@ -1629,6 +1640,10 @@ impl AstAdapter for ExpansionAdapter<'_> {
         self.data.quantifier_bound()
     }
 
+    fn frontier_bound(&self) -> usize {
+        self.data.frontier_bound()
+    }
+
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.data.unit_scale(expr)
     }
@@ -1643,7 +1658,7 @@ impl AstAdapter for ExpansionAdapter<'_> {
 /// name, `//literal::` the value).
 fn default_key(kind: &str) -> Option<&'static str> {
     match kind {
-        "cmd" | "agg" | "push" | "expr-push" | "subcontext" | "agg-push" => Some("name"),
+        "cmd" | "agg" | "push" | "expr-push" | "subcontext" | "agg-push" | "attach" => Some("name"),
         "agg-recall" => Some("ref"),
         "literal" | "predicate" => Some("value"),
         "step" => Some("matcher"),
@@ -1719,6 +1734,10 @@ fn axis_spelling(a: &Axis) -> String {
         Axis::OutLink => "->".to_string(),
         Axis::InLink => "<-".to_string(),
         Axis::BothLink => "--".to_string(),
+        Axis::Any => "~".to_string(),
+        Axis::AnyDeep(Reach::All) => "~~".to_string(),
+        Axis::AnyDeep(Reach::Proximal) => "~~?".to_string(),
+        Axis::AnyDeep(Reach::Distal) => "~~!".to_string(),
         Axis::Resolve { .. } => "-->".to_string(),
         Axis::ReverseResolve { .. } => "<--".to_string(),
         Axis::ValueMatch { .. } => "=>".to_string(),

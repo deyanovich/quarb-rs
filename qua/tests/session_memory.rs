@@ -111,7 +111,7 @@ fn the_session_settings_are_set_by_the_session_command() {
     let s = Session::new();
     assert_eq!(
         s.run("session").unwrap(),
-        vec![r#"%(pretty = "off"; precision = 6)"#]
+        vec![r#"%(pretty = "off"; precision = 6; diagnostics = "warning")"#]
     );
     // a trailing set yields no thread, so no line
     assert_eq!(
@@ -120,12 +120,44 @@ fn the_session_settings_are_set_by_the_session_command() {
     );
     assert_eq!(
         s.run("session").unwrap(),
-        vec![r#"%(pretty = "always"; precision = 6)"#]
+        vec![r#"%(pretty = "always"; precision = 6; diagnostics = "warning")"#]
     );
     // the command heads a query, the thread on the root as after `=`
     assert_eq!(
         s.run("session(--precision=2) | session").unwrap(),
-        vec![r#"%(pretty = "always"; precision = 2)"#]
+        vec![r#"%(pretty = "always"; precision = 2; diagnostics = "warning")"#]
+    );
+    // the query it heads continues as after `=`: navigation from the
+    // root, a record on each node, an expression; a setting passes
+    // the threads on without turning them scalar
+    assert_eq!(
+        s.run("session(--precision=3) | /rows/*[..2] | %(::n)")
+            .unwrap(),
+        vec!["%(n = 1)", "%(n = 2)"]
+    );
+    assert_eq!(
+        s.run("session(--precision=2) | /rows/*::n @| sum").unwrap(),
+        vec!["6"]
+    );
+    assert_eq!(
+        s.run("session(--precision=2) | 2 div 4").unwrap(),
+        vec!["0.5"]
+    );
+    // `session` alone answers a record: a hop after it refuses as
+    // after any value
+    let e = s.run("session | /rows/*").unwrap_err().to_string();
+    assert!(e.contains("cannot navigate in scalar mode"), "{e}");
+    // the diagnostics level is a setting like the others (spec:
+    // Diagnostics): set, it rides the record; a bad word refuses
+    assert_eq!(
+        s.run("session(--diagnostics=info) | session").unwrap(),
+        vec![r#"%(pretty = "always"; precision = 2; diagnostics = "info")"#]
+    );
+    assert!(
+        s.run("session(--diagnostics=loud)")
+            .unwrap_err()
+            .to_string()
+            .contains("--diagnostics takes")
     );
     // the session's digits are pretty's default; `-p` on the call wins
     assert_eq!(
@@ -138,7 +170,7 @@ fn the_session_settings_are_set_by_the_session_command() {
     );
     assert_eq!(
         s.run("session(--pretty=off) | session").unwrap(),
-        vec![r#"%(pretty = "off"; precision = 2)"#]
+        vec![r#"%(pretty = "off"; precision = 2; diagnostics = "info")"#]
     );
     // a wrong word and an unknown setting refuse naming the two
     let e = s

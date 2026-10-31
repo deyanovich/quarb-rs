@@ -100,6 +100,27 @@ pub struct TableSpec {
     pub column_types: Vec<String>,
 }
 
+impl TableSpec {
+    /// The label of each declared key's crosslink, aligned with
+    /// `fks`: the column without its `_id` suffix, the later of two
+    /// that would share a name keeping its full column name
+    /// ([`quarb::adapter::reference_labels`]).
+    pub fn fk_labels(&self) -> Vec<String> {
+        // declaration order is the columns' order, whatever order
+        // the catalog lists the keys in
+        let mut order: Vec<usize> = (0..self.fks.len()).collect();
+        order.sort_by_key(|&i| self.fks[i].0);
+        let labels = quarb::adapter::reference_labels(
+            order.iter().map(|&i| self.columns[self.fks[i].0].as_str()),
+        );
+        let mut out = vec![String::new(); self.fks.len()];
+        for (label, i) in labels.into_iter().zip(order) {
+            out[i] = label;
+        }
+        out
+    }
+}
+
 /// The traits a declared SQL type gives a cell (spec: adapter
 /// traits): the type name lowercased and stripped of its parameters
 /// (`VARCHAR(20)` → `varchar`, `DECIMAL(18,3)` → `decimal`,
@@ -352,6 +373,10 @@ pub struct RelationalModel {
     /// One table's listing under a pushed-down WHERE: (table index,
     /// reader).
     listing: Option<(usize, Fetcher)>,
+    /// Set once the engine asked for whole listings
+    /// (`AstAdapter::whole_listings`): the filtered listing is then
+    /// bypassed and the table read whole on its next listing.
+    listing_off: std::cell::Cell<bool>,
     estimator: Option<Estimator>,
     /// Estimates already asked of the driver, by table and the
     /// equalities' text: a plan is read many times per run.
@@ -414,6 +439,7 @@ impl RelationalModel {
             }),
             key_fetcher: None,
             listing: None,
+            listing_off: std::cell::Cell::new(false),
             estimator: None,
             estimates: Default::default(),
         };
@@ -437,6 +463,7 @@ impl RelationalModel {
             fetcher,
             key_fetcher: None,
             listing: None,
+            listing_off: std::cell::Cell::new(false),
             estimator: None,
             estimates: Default::default(),
         }
@@ -527,6 +554,11 @@ impl RelationalModel {
     /// The table's rows as its children: under the pushed-down
     /// filter where one is set for it, else the whole table.
     fn listed(&self, t: usize) -> std::rc::Rc<Vec<usize>> {
+        // The engine asked for whole listings: a filtered read, made
+        // or pending, gives way to the whole table.
+        if self.listing_off.get() {
+            return self.whole(t);
+        }
         if let Some(order) = self.tables[t].data.borrow().order.clone() {
             return order;
         }
@@ -915,6 +947,9 @@ impl RelationalModel {
 }
 
 impl AstAdapter for RelationalModel {
+    fn whole_listings(&self) {
+        self.listing_off.set(true);
+    }
     /// The kind first (spec: Traits): `database`, `table`, `row`,
     /// `cell`; a cell then carries its column's declared type and
     /// the derived kind (spec: adapter traits).
@@ -1314,7 +1349,8 @@ impl AstAdapter for RelationalModel {
     }
 
     /// Each declared FK column with a non-null value is an outgoing
-    /// crosslink, labeled by the column name.
+    /// crosslink, labeled by the column name without its `_id`
+    /// suffix ([`TableSpec::fk_labels`]).
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let Some((t, Some(r))) = self.entry(node) else {
             return Vec::new();
@@ -1323,14 +1359,15 @@ impl AstAdapter for RelationalModel {
             return Vec::new();
         };
         let spec = &self.tables[t].spec;
+        let labels = spec.fk_labels();
         let mut out = Vec::new();
-        for (col, target, to) in &spec.fks {
+        for (i, (col, target, to)) in spec.fks.iter().enumerate() {
             let value = &row.values[*col];
             if matches!(value, Value::Null) {
                 continue;
             }
             if let Some(n) = self.find_target(target, to, value) {
-                out.push((spec.columns[*col].clone(), n));
+                out.push((labels[i].clone(), n));
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1424,10 +1461,11 @@ impl AstAdapter for RelationalModel {
             return None;
         }
         // Per referring table, in its own order; a row reached
-        // through two of its columns counts once.
+        // through two of its columns counts once. The property
+        // names the column, not the edge's label.
         let mut out: Vec<NodeId> = Vec::new();
-        for (label, n) in self.backlinks(node) {
-            if property.is_none_or(|p| label == p) && !out.contains(&n) {
+        for (t, col, n) in self.referrers(node) {
+            if property.is_none_or(|p| self.tables[t].spec.columns[col] == p) && !out.contains(&n) {
                 out.push(n);
             }
         }
@@ -1576,7 +1614,38 @@ impl AstAdapter for RelationalModel {
     /// table contributes the rows whose FK value matches, in the
     /// referring table's order — read by key where the driver can
     /// (`WHERE fk = …`), else from the table's value index.
+    /// The backlinks, labeled as the forward crosslinks are
+    /// ([`TableSpec::fk_labels`]).
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        let mut labels: HashMap<usize, Vec<String>> = HashMap::new();
+        self.referrers(node)
+            .into_iter()
+            .map(|(t, col, n)| {
+                let labels = labels
+                    .entry(t)
+                    .or_insert_with(|| self.tables[t].spec.fk_labels());
+                let i = self.tables[t]
+                    .spec
+                    .fks
+                    .iter()
+                    .position(|(c, _, _)| *c == col);
+                (
+                    i.map_or_else(
+                        || self.tables[t].spec.columns[col].clone(),
+                        |i| labels[i].clone(),
+                    ),
+                    n,
+                )
+            })
+            .collect()
+    }
+}
+
+impl RelationalModel {
+    /// Every row with a declared key into this row: its table, the
+    /// key column's index, and the row — the backlinks before
+    /// their labeling.
+    fn referrers(&self, node: NodeId) -> Vec<(usize, usize, NodeId)> {
         let Some((tt, Some(tr))) = self.entry(node) else {
             return Vec::new();
         };
@@ -1594,10 +1663,7 @@ impl AstAdapter for RelationalModel {
                     continue;
                 };
                 for r in self.col_lookup(t, *col, &value) {
-                    out.push((
-                        self.tables[t].spec.columns[*col].clone(),
-                        Self::row_node(t, r),
-                    ));
+                    out.push((t, *col, Self::row_node(t, r)));
                 }
             }
         }

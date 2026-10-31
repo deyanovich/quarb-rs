@@ -42,9 +42,34 @@ pub(crate) trait Attachment: Clone {
     /// What a correlation binds and tries: the witness under trial,
     /// read in place of the thread's own while a search evaluates.
     type Witness: ?Sized;
-    type Key: std::hash::Hash + Eq + Clone;
+    type Key: std::hash::Hash + Eq + Clone + 'static;
+    /// What a walk knows of the edge it crossed (the graph: the
+    /// round, the hops, the budget's total — spec: Edge facts).
+    type Walk;
     fn view(&self) -> Self::View;
     fn key(&self) -> Self::Key;
+    /// The walk that ended at this attachment, if one did and no
+    /// command has read it yet: the last edge crossed and its facts,
+    /// in scope for the one command after the walk.
+    fn walk_exit(&self) -> Option<(&Self::Crossing, &Self::Walk)> {
+        None
+    }
+    /// A command has run: the walk's facts leave the scope.
+    fn end_walk(&mut self) {}
+    /// The edge the thread most recently walked, where no walk's
+    /// exit stands in scope (the graph: a plain hop's arrived-by
+    /// edge, read by `$-` in the command after the hop).
+    fn crossing(&self) -> Option<&Self::Crossing> {
+        None
+    }
+    /// `@| collapse`: fold another thread's attachment into this one
+    /// (the graph: the arriving edges united).
+    fn gather(&mut self, _other: Self) {}
+    /// The identity of the edge this thread arrived by, for
+    /// `collapse(-e)`; `None` where none.
+    fn crossing_key(&self) -> Option<String> {
+        None
+    }
     /// A thread standing where this one stands, carrying nothing.
     fn bare(&self) -> Self;
     /// Whether a scope with this view belongs to a thread standing
@@ -59,6 +84,7 @@ impl Attachment for () {
     type Crossing = ();
     type Witness = ();
     type Key = ();
+    type Walk = ();
     fn view(&self) -> Self::View {}
     fn key(&self) -> Self::Key {}
     fn bare(&self) -> Self {}
@@ -74,8 +100,9 @@ pub(crate) struct Reg {
     pub(crate) name: Option<String>,
     pub(crate) value: Value,
     pub(crate) prov: Prov,
-    /// Where the push happened — the coordinate a cross-capsa read
-    /// will address; unread until that lands.
+    /// Where the push happened. Unread: the node read goes by the
+    /// node a regula is attached to (spec: Attached Regulae), not
+    /// by where its push stood.
     #[allow(dead_code)]
     pub(crate) site: Origin,
 }

@@ -199,3 +199,43 @@ fn an_unreadable_leaf_answers_null_with_the_reason_in_explain() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_plan_prices_the_files_the_folder_exposes() {
+    // The reader honours an ignore file and skips hidden entries;
+    // the plan and the budget count the same files, so a folder's
+    // bound does not depend on what its ignored caches hold.
+    let dir = std::env::temp_dir().join(format!("quarb-planned-shelf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("raw")).unwrap();
+    std::fs::write(dir.join("a.txt"), "one paragraph\n").unwrap();
+    std::fs::write(dir.join("raw/b.txt"), "sub paragraph, longer\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), "raw/\n").unwrap();
+    let mount = format!("text:{}", dir.display());
+    assert_eq!(qua(&["//paragraph @| count", &mount]), "1\n");
+    let plan = qua(&["--plan", "//paragraph @| count", &mount]);
+    assert!(plan.contains("bytes-min=14\n"), "{plan}");
+    assert!(plan.contains("bytes-max=14\n"), "{plan}");
+    // A budget the exposed file fits runs; the ignored one is not
+    // priced against it.
+    assert_eq!(
+        qua(&["--budget", "bytes=20", "//paragraph @| count", &mount]),
+        "1\n"
+    );
+    let (ok, _, err) = qua_full(&["--budget", "bytes=10", "//paragraph @| count", &mount]);
+    assert!(!ok && err.contains("14 bytes"), "{err}");
+    // Mounted with the ignore file set aside, both read and plan
+    // take the subtree; shown hidden, the ignore file itself.
+    assert_eq!(qua(&["--no-ignore", "//paragraph @| count", &mount]), "2\n");
+    let plan = qua(&["--no-ignore", "--plan", "//paragraph @| count", &mount]);
+    assert!(plan.contains("bytes-min=36\n"), "{plan}");
+    let plan = qua(&[
+        "--no-ignore",
+        "--hidden",
+        "--plan",
+        "//paragraph @| count",
+        &mount,
+    ]);
+    assert!(plan.contains("bytes-min=41\n"), "{plan}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

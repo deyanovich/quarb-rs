@@ -17,10 +17,10 @@
 use crate::error::{QuarbError, Result};
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, FnCall, Group, IndexSpec,
-    InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr, Predicate,
-    ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath, Step,
-    TableRow, TraitClause,
+    Anchor, Arg, ArithOp, Axis, Branch, Budget, CmpOp, Command, ConcatMode, End, FnCall, Group,
+    IndexSpec, InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr,
+    Predicate, ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath,
+    Step, TableRow, TraitClause,
 };
 use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
 use crate::syntax::lexer::{self, Token};
@@ -409,6 +409,7 @@ fn group_wrap(
             == (Quant {
                 min: 1,
                 max: Some(1),
+                budget: None,
             })
         && g.predicates.is_empty()
         && g.reach == Reach::All
@@ -468,6 +469,14 @@ fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
     match command {
         // the session push leaves the cursor untouched, as a push does
         Command::SessionPush(_) => cur,
+        // `session(…)` sets and passes the threads on: the query it
+        // heads continues as after `=`, navigation included
+        // (spec: Session settings)
+        Command::Func(call) if call.name == "session" && !call.args.is_empty() => cur,
+        // `@| collapse` gathers node threads into node threads: the
+        // context stays node-typed, and a hop may follow (spec:
+        // Attached Regulae, "a hop after collapse reads it")
+        Command::Agg(call) if call.name == "collapse" => cur,
         Command::Nav(b) => {
             if b.projection.is_some() {
                 PipeMode::Scalar
@@ -493,7 +502,29 @@ fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::RecordWith(_)
         | Command::Spread { .. }
         | Command::Map(_) => PipeMode::Scalar,
-        Command::Repeat { command, .. } => command_mode_out(command, cur),
+        Command::Repeat { command, .. } | Command::Attach { command, .. } => {
+            command_mode_out(command, cur)
+        }
+    }
+}
+
+/// The accessor of a node read (spec: Attached Regulae): `.name`
+/// the regula attached under the name, `%.` the record of them.
+/// The location read's accessors (`.`, `.N`, `@.`, `%%.`, the
+/// full views) are retired and refuse by name.
+fn attached_ref(body: &str) -> Result<RegRef> {
+    match body {
+        "%." => Ok(RegRef::Record),
+        "." | ".." => Err(QuarbError::parse(format!(
+            "':{body}' is retired: a node carries attached regulae, read by name (X:.name) or all at once (X:%.)"
+        ))),
+        b if b.starts_with(['@', '%']) || b.starts_with(".-") => Err(QuarbError::parse(format!(
+            "':{b}' is retired: a node carries attached regulae, read by name (X:.name) or all at once (X:%.)"
+        ))),
+        b if b[1..].chars().all(|c| c.is_ascii_digit()) => Err(QuarbError::parse(format!(
+            "':{b}' is retired: attached regulae are named, read as X:.name (or all at once, X:%.)"
+        ))),
+        b => Ok(RegRef::Named(b[1..].to_string())),
     }
 }
 
@@ -593,6 +624,18 @@ impl Parser<'_> {
             }
         }
         let query = self.parse_chain()?;
+        // `| copy` / `@| copy` stands last (spec: The clipboard): it
+        // takes the output exactly as it would have printed, one
+        // thing whatever the pipe, so nothing may follow it; a part
+        // is copied by pushing and recalling it.
+        if let Some(i) = query.pipeline.iter().position(
+            |c| matches!(c, Command::Func(call) | Command::Agg(call) if call.name == "copy"),
+        ) && i + 1 < query.pipeline.len()
+        {
+            return Err(QuarbError::parse(
+                "copy stands last: it copies the output exactly as it would have printed; to copy a part, push it and recall it ('| .r(…) | … | $.r | copy')",
+            ));
+        }
         if let Some(tok) = self.peek() {
             // `:name` spaced after a path: a core field glues to
             // its step.
@@ -1028,6 +1071,8 @@ impl Parser<'_> {
                 | Token::ArrowOut
                 | Token::ArrowIn { .. }
                 | Token::DashDash
+                | Token::Tilde
+                | Token::TildeTilde
                 | Token::LParen
                 | Token::ColonColon
                 | Token::ColonColonColon
@@ -1147,6 +1192,95 @@ impl Parser<'_> {
     /// static execution mode entering this command: path-shaped
     /// commands are navigation in navigation mode and an error in
     /// scalar mode (a live topic would be dropped — file it first).
+    /// The rest of a push after its name: the record push
+    /// (`.name%(…)`), the subcontext or computed body
+    /// (`.name(body)`), else the bare push (a mark in navigation
+    /// mode). Shared by the plain and the attaching spelling.
+    fn push_rest(&mut self, name: Option<String>) -> Result<Command> {
+        // `.%(...)` / `.name%(...)` — the record push
+        //: the constructor's fields, built and
+        // filed in one step; `.%%(...)` the enriched view.
+        if matches!(self.peek(), Some(Token::Percent)) {
+            self.pos += 1;
+            let enriched = if matches!(self.peek(), Some(Token::Percent)) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            };
+            if !matches!(self.peek(), Some(Token::LParen)) {
+                // The bare `.%` is the fields push: the topic
+                // record's fields, each filed under its name.
+                if !enriched && name.is_none() {
+                    return Ok(Command::FieldsPush);
+                }
+                return Err(QuarbError::parse(
+                    "a record push takes its fields: `.%(…)` or `.name%(…)`; \
+                     the bare `.%` (no name, no parens) spreads the topic record",
+                ));
+            }
+            let call = self.record_args()?;
+            validate_record(&call)?;
+            return Ok(Command::RecordPush {
+                name,
+                call,
+                enriched,
+            });
+        }
+        if matches!(self.peek(), Some(Token::LParen)) {
+            self.pos += 1;
+            // A subcontext body is a navigating sub-query; a
+            // value expression (`.total(::price * ::qty)`) is
+            // the fallback when the query reading does not
+            // reach the closing parenthesis.
+            let save = self.pos;
+            self.subquery_depth += 1;
+            let tried = self.parse_query();
+            self.subquery_depth -= 1;
+            if let Ok(body) = tried
+                && matches!(self.peek(), Some(Token::RParen))
+            {
+                self.pos += 1;
+                return Ok(Command::Subcontext {
+                    name,
+                    body: Box::new(body),
+                });
+            }
+            self.pos = save;
+            // The push's own parentheses delimit the body, so
+            // a conditional needs no second pair:
+            // `.born(::quarter ? … : …)`.
+            let expr = self.cond_expr()?;
+            // …and neither does a pipe: `.a($_ | first)` is
+            // `.a(($_ | first))`.
+            let commands = self.inline_pipe_tail()?;
+            let expr = if commands.is_empty() {
+                expr
+            } else {
+                Operand::Piped {
+                    expr: Box::new(expr),
+                    commands,
+                }
+            };
+            self.expect(Token::RParen, "')' to close a subcontext")?;
+            Ok(Command::ExprPush { name, expr })
+        } else {
+            // In navigation mode a bare push marks; marks
+            // may not take numeric names (positions number
+            // themselves).
+            // A mark named `_N` is reserved: `((_N))` is the
+            // join's N-th node in the rounded spelling.
+            if name.as_deref().is_some_and(|n| {
+                n.len() > 1 && n.starts_with('_') && n[1..].chars().all(|c| c.is_ascii_digit())
+            }) {
+                return Err(QuarbError::parse(
+                    "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)",
+                ));
+            }
+            Ok(Command::Push(name))
+        }
+    }
+
     fn pipe_item(&mut self, mode: PipeMode) -> Result<Command> {
         // A command that opens with a reference arrow — `::p-->`,
         // `::p=>(…)`, the bare `-->`, `<--(…)` — is a hop like
@@ -1282,8 +1416,11 @@ impl Parser<'_> {
                 Ok(Command::Expr(self.expr_head()?))
             }
             // `| :name` — the topic record's field; `| %+` — the
-            // named-captures record.
-            Some(Token::Field | Token::PercentPlus) => Ok(Command::Expr(self.expr_head()?)),
+            // named-captures record; `| :.name` / `| :%.` — the
+            // current node's attached regulae.
+            Some(Token::Field | Token::PercentPlus | Token::Capsa(_)) => {
+                Ok(Command::Expr(self.expr_head()?))
+            }
             // `| @_`, `| @@_::prop`, `| #*`, `| ##*`, `| #_` — the
             // context family as the command's expression; `| _` the
             // cursor record.
@@ -1502,6 +1639,58 @@ impl Parser<'_> {
                 } else {
                     Some(text[1..].to_string())
                 };
+                // `.:%` — the attaching fields push (spec: Attached
+                // Regulae): each field of the topic record filed
+                // under its name and attached to the node.
+                if name.is_none()
+                    && matches!(self.peek(), Some(Token::Colon { spaced: false }))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                {
+                    self.pos += 2;
+                    if matches!(self.peek(), Some(Token::LParen | Token::Percent)) {
+                        return Err(QuarbError::parse(
+                            "the attaching fields push is bare: '.:%' attaches every field of the topic record; a record is attached as '.:name(%(…))'",
+                        ));
+                    }
+                    return Ok(Command::Attach {
+                        name: None,
+                        command: Box::new(Command::FieldsPush),
+                    });
+                }
+                // `.:name(body)` / `.:name` — the attaching push
+                // (spec: Attached Regulae): the dot, a glued colon,
+                // the name. Parsed as the push it wraps, then
+                // wrapped.
+                if name.is_none() && matches!(self.peek(), Some(Token::Field)) {
+                    self.pos += 1;
+                    let Some(Token::Name {
+                        text: n,
+                        quoted: false,
+                        ..
+                    }) = self.peek()
+                    else {
+                        return Err(QuarbError::parse(
+                            "an attaching push takes a name: '.:name(body)' attaches the body's value to the node, '.:name' the topic",
+                        ));
+                    };
+                    let n = n.clone();
+                    self.pos += 1;
+                    if !n.chars().next().is_some_and(|c| c.is_alphabetic()) {
+                        return Err(QuarbError::parse(format!(
+                            "an attaching push's name starts with a letter ('.:name'), not '{n}'"
+                        )));
+                    }
+                    if matches!(self.peek(), Some(Token::Percent)) {
+                        return Err(QuarbError::parse(
+                            "an attaching push takes a body or the topic: '.:name(body)', '.:name'; a record is attached as '.:name(%(…))'",
+                        ));
+                    }
+                    let inner = self.push_rest(Some(n.clone()))?;
+                    return Ok(Command::Attach {
+                        name: Some(n),
+                        command: Box::new(inner),
+                    });
+                }
                 // A push name is an identifier — it starts with a
                 // letter — or a quoted string glued to the dot
                 // (`."3"(…)`, the data-driven names a pivot writes).
@@ -1524,90 +1713,7 @@ impl Parser<'_> {
                          ('| .\"{n}\"'), and recall a position with $.N or ((.N))"
                     )));
                 }
-                // `.%(...)` / `.name%(...)` — the record push
-                //: the constructor's fields, built and
-                // filed in one step; `.%%(...)` the enriched view.
-                if matches!(self.peek(), Some(Token::Percent)) {
-                    self.pos += 1;
-                    let enriched = if matches!(self.peek(), Some(Token::Percent)) {
-                        self.pos += 1;
-                        true
-                    } else {
-                        false
-                    };
-                    if !matches!(self.peek(), Some(Token::LParen)) {
-                        // The bare `.%` is the fields push: the topic
-                        // record's fields, each filed under its name.
-                        if !enriched && name.is_none() {
-                            return Ok(Command::FieldsPush);
-                        }
-                        return Err(QuarbError::parse(
-                            "a record push takes its fields: `.%(…)` or `.name%(…)`; \
-                             the bare `.%` (no name, no parens) spreads the topic record",
-                        ));
-                    }
-                    let call = self.record_args()?;
-                    validate_record(&call)?;
-                    return Ok(Command::RecordPush {
-                        name,
-                        call,
-                        enriched,
-                    });
-                }
-                if matches!(self.peek(), Some(Token::LParen)) {
-                    self.pos += 1;
-                    // A subcontext body is a navigating sub-query; a
-                    // value expression (`.total(::price * ::qty)`) is
-                    // the fallback when the query reading does not
-                    // reach the closing parenthesis.
-                    let save = self.pos;
-                    self.subquery_depth += 1;
-                    let tried = self.parse_query();
-                    self.subquery_depth -= 1;
-                    if let Ok(body) = tried
-                        && matches!(self.peek(), Some(Token::RParen))
-                    {
-                        self.pos += 1;
-                        return Ok(Command::Subcontext {
-                            name,
-                            body: Box::new(body),
-                        });
-                    }
-                    self.pos = save;
-                    // The push's own parentheses delimit the body, so
-                    // a conditional needs no second pair:
-                    // `.born(::quarter ? … : …)`.
-                    let expr = self.cond_expr()?;
-                    // …and neither does a pipe: `.a($_ | first)` is
-                    // `.a(($_ | first))`.
-                    let commands = self.inline_pipe_tail()?;
-                    let expr = if commands.is_empty() {
-                        expr
-                    } else {
-                        Operand::Piped {
-                            expr: Box::new(expr),
-                            commands,
-                        }
-                    };
-                    self.expect(Token::RParen, "')' to close a subcontext")?;
-                    Ok(Command::ExprPush { name, expr })
-                } else {
-                    // In navigation mode a bare push marks; marks
-                    // may not take numeric names (positions number
-                    // themselves).
-                    // A mark named `_N` is reserved: `((_N))` is the
-                    // join's N-th node in the rounded spelling.
-                    if name.as_deref().is_some_and(|n| {
-                        n.len() > 1
-                            && n.starts_with('_')
-                            && n[1..].chars().all(|c| c.is_ascii_digit())
-                    }) {
-                        return Err(QuarbError::parse(
-                            "a mark named '_N' is reserved — ((_N)) is the join's N-th node ($$N)",
-                        ));
-                    }
-                    Ok(Command::Push(name))
-                }
+                self.push_rest(name)
             }
             // `| s/pat/repl/mods` — regex substitution on the topic.
             Some(Token::Subst {
@@ -1794,6 +1900,8 @@ impl Parser<'_> {
                     | Token::ArrowOut
                     | Token::ArrowIn { .. }
                     | Token::DashDash
+                    | Token::Tilde
+                    | Token::TildeTilde
             )
         };
         match self.peek() {
@@ -1825,7 +1933,7 @@ impl Parser<'_> {
             }
             Some(Token::Question { .. }) => true,
             // `| <-link:.v` — a path with a register accessor glued
-            // to it is the cross-capsa read, an expression.
+            // to it is the node read, an expression.
             Some(Token::Capsa(_)) => true,
             _ => false,
         }
@@ -2332,9 +2440,17 @@ impl Parser<'_> {
             && self.defs.get(stripped).is_some()
         {
             quant = Some(if name.ends_with('+') {
-                Quant { min: 1, max: None }
+                Quant {
+                    min: 1,
+                    max: None,
+                    budget: None,
+                }
             } else {
-                Quant { min: 0, max: None }
+                Quant {
+                    min: 0,
+                    max: None,
+                    budget: None,
+                }
             });
             name = stripped.to_string();
         }
@@ -2684,7 +2800,7 @@ impl Parser<'_> {
                     | Token::Correlate
                     | Token::Semi
                     // `X:.r` — a register accessor glued to the
-                    // path closes the walk: the cross-capsa read.
+                    // path closes the walk: the node read.
                     | Token::Capsa(_)
                     // `/x:%(…)` — the projection operator closes it
                     | Token::ProjectColon
@@ -2861,6 +2977,7 @@ impl Parser<'_> {
                     quant: Quant {
                         min: 1,
                         max: Some(1),
+                        budget: None,
                     },
                     predicates: Vec::new(),
                     traits: Vec::new(),
@@ -2892,6 +3009,7 @@ impl Parser<'_> {
                 quant.unwrap_or(Quant {
                     min: 1,
                     max: Some(1),
+                    budget: None,
                 }),
                 predicates,
                 reach,
@@ -2909,6 +3027,8 @@ impl Parser<'_> {
                         | Token::ArrowOut
                         | Token::ArrowIn { .. }
                         | Token::DashDash
+                        | Token::Tilde
+                        | Token::TildeTilde
                         | Token::LParen
                         | Token::Amp
                         | Token::ColonColon
@@ -3076,6 +3196,8 @@ impl Parser<'_> {
                         | Token::ArrowOut
                         | Token::ArrowIn { .. }
                         | Token::DashDash
+                        | Token::Tilde
+                        | Token::TildeTilde
                         | Token::ColonColon
                         | Token::ColonColonColon
                 )
@@ -3772,9 +3894,10 @@ impl Parser<'_> {
                 | Command::Subcontext { .. }
                 | Command::RecordPush { .. }
                 | Command::FieldsPush
+                | Command::Attach { .. }
         ) {
             return Err(QuarbError::parse(
-                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)')",
+                "a quantifier repeats a push: write it after '.name(body)' (or '.', '.%', '.name%(…)', '.:name(body)')",
             ));
         }
         if max.is_some_and(|n| n < min) {
@@ -4314,6 +4437,61 @@ impl Parser<'_> {
                     // separator closes the operands with an empty
                     // field instead, and a dash-led operand keeps its
                     // reading: `f(--author;)` (draft 164).
+                    // `edges(--road; --weight=km)`: the undirected hop
+                    // is the collecting operand (spec: The graph as a
+                    // table), read before the option segment; `--weight`
+                    // alone is an option of `edges`.
+                    if (name == "edges" || name.starts_with("graph:"))
+                        && args.is_empty()
+                        && let Some(Token::DashDash) = self.peek()
+                        && let Some(matcher) = match self.toks.get(self.pos + 1) {
+                            Some(Token::Name {
+                                text,
+                                quoted: false,
+                                glued: true,
+                            }) if text == "*" => Some(Matcher::Any),
+                            Some(Token::Name {
+                                text,
+                                quoted: false,
+                                glued: true,
+                            }) if !matches!(
+                                text.as_str(),
+                                "weight"
+                                    | "damping"
+                                    | "iterations"
+                                    | "rounds"
+                                    | "from"
+                                    | "teleport"
+                                    | "normalized"
+                            ) =>
+                            {
+                                Some(Matcher::Name(text.clone()))
+                            }
+                            _ => None,
+                        }
+                    {
+                        self.pos += 2;
+                        args.push(Arg::Expr(Operand::Rel {
+                            steps: vec![PathElem::Step(Step {
+                                axis: Axis::BothLink,
+                                matcher,
+                                labels: Vec::new(),
+                                traits: Vec::new(),
+                                predicates: Vec::new(),
+                                leaf: false,
+                            })],
+                            projection: None,
+                            anchor: Anchor::Current,
+                        }));
+                        if matches!(self.peek(), Some(Token::Comma | Token::Semi)) {
+                            self.pos += 1;
+                            if matches!(self.peek(), Some(Token::RParen)) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
                     if self.option_ahead() && !self.trailing_separator_ahead() {
                         self.option_segment(name, args)?;
                         break;
@@ -5138,6 +5316,18 @@ impl Parser<'_> {
                 }
                 return Ok(PathElem::Step(step));
             }
+            // `/(*)` — the degenerate list is the wildcard itself
+            // (spec: Name algebra): the plain step, so a positional
+            // predicate and a trailing projection read as on `/*`;
+            // quantified, `(*){2}`, it stays a group of one.
+            if matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, quoted: false, .. }) if text == "*")
+                && matches!(self.toks.get(self.pos + 2), Some(Token::RParen))
+                && !matches!(self.toks.get(self.pos + 3), Some(Token::Quant { .. }))
+            {
+                self.pos += 3;
+                let step = self.finish_step(axis, Matcher::Any)?;
+                return Ok(PathElem::Step(step));
+            }
             return Ok(PathElem::Group(self.group(Some(axis))?));
         }
         if matches!(self.peek(), Some(Token::Quant { .. })) {
@@ -5152,6 +5342,7 @@ impl Parser<'_> {
                     | Axis::PrevSibling
                     | Axis::OutLink
                     | Axis::InLink
+                    | Axis::Any
             ) {
                 return Err(QuarbError::parse(
                     "a quantifier attaches to a single-hop operator or a \
@@ -5227,6 +5418,7 @@ impl Parser<'_> {
         let quant = self.group_quant()?.unwrap_or(Quant {
             min: 1,
             max: Some(1),
+            budget: None,
         });
         // `<trait>` after a quantified group filters its matches
         // like a step's trait does, in the step's order (traits,
@@ -5374,6 +5566,20 @@ impl Parser<'_> {
     /// quantifier). Returns `None` when no quantifier is present.
     fn group_quant(&mut self) -> Result<Option<Quant>> {
         match self.peek() {
+            // A budget (spec: The budget quantifier): the bounds as
+            // written, resolved at the walk under the run's units.
+            Some(Token::Budget { floor, ceiling }) => {
+                let budget = Budget {
+                    floor: floor.clone(),
+                    ceiling: ceiling.clone(),
+                };
+                self.pos += 1;
+                Ok(Some(Quant {
+                    min: 0,
+                    max: None,
+                    budget: Some(budget),
+                }))
+            }
             Some(Token::Quant { min, max }) => {
                 let (min, max) = (*min, *max);
                 if max.is_some_and(|n| n < min) {
@@ -5383,7 +5589,11 @@ impl Parser<'_> {
                     )));
                 }
                 self.pos += 1;
-                Ok(Some(Quant { min, max }))
+                Ok(Some(Quant {
+                    min,
+                    max,
+                    budget: None,
+                }))
             }
             Some(Token::Name {
                 text,
@@ -5391,7 +5601,11 @@ impl Parser<'_> {
                 glued: true,
             }) if text == "+" => {
                 self.pos += 1;
-                Ok(Some(Quant { min: 1, max: None }))
+                Ok(Some(Quant {
+                    min: 1,
+                    max: None,
+                    budget: None,
+                }))
             }
             Some(Token::Name {
                 text,
@@ -5399,7 +5613,11 @@ impl Parser<'_> {
                 glued: true,
             }) if text == "*" => {
                 self.pos += 1;
-                Ok(Some(Quant { min: 0, max: None }))
+                Ok(Some(Quant {
+                    min: 0,
+                    max: None,
+                    budget: None,
+                }))
             }
             _ => Ok(None),
         }
@@ -5841,6 +6059,8 @@ impl Parser<'_> {
                     | Token::ArrowOut
                     | Token::ArrowIn { .. }
                     | Token::DashDash
+                    | Token::Tilde
+                    | Token::TildeTilde
                     | Token::LParen
             )
         ) {
@@ -6455,11 +6675,63 @@ impl Parser<'_> {
         r
     }
 
+    /// The node read glued to an operand (spec: Attached Regulae).
+    fn node_read(&mut self, o: Operand) -> Result<Operand> {
+        // `X:.name` / `X:%.` — the node read (spec: Attached
+        // Regulae): an accessor glued to a node operand reads the
+        // regula attached to the node it reaches, or the record of
+        // them. The node side is a bare node operand — a path, a
+        // mark, `$$_`, `$$N`, an edge's end `$-:source` — without
+        // a projection (a projected path is a value, and a value
+        // carries no attachments), or a record's field holding a
+        // node reference (`:source` on an edges row).
+        let Some(Token::Capsa(body)) = self.peek() else {
+            return Ok(o);
+        };
+        let body = body.clone();
+        let reg = attached_ref(&body)?;
+        let bare = |o: &Operand| {
+            matches!(
+                o,
+                Operand::Rel {
+                    projection: None,
+                    ..
+                } | Operand::Ctx {
+                    projection: None,
+                    ..
+                } | Operand::Field { .. }
+            )
+        };
+        let ok = match &o {
+            Operand::Invoking(inner) | Operand::Position(inner) | Operand::Driver(inner) => {
+                bare(inner)
+            }
+            other => bare(other),
+        };
+        if !ok {
+            return Err(QuarbError::parse(format!(
+                "':{body}' reads what is attached to a node: write it after a node path (<-link:{body}, \\/*:{body}), an edge's end ($-:target:{body}), a node-valued field (:source:{body}), or alone for the current node (:{body})"
+            )));
+        }
+        self.pos += 1;
+        Ok(Operand::PeerReg {
+            at: Some(Box::new(o)),
+            reg,
+        })
+    }
+
     fn unary_inner(&mut self) -> Result<Operand> {
         // `base:name` — a record's field, chained for
         // nested records; a leading `:name` reads the topic's field.
         let mut o = if matches!(self.peek(), Some(Token::Field)) {
             Operand::Topic
+        } else if let Some(Token::Capsa(body)) = self.peek() {
+            // `:.name` / `:%.` alone — the node read of the current
+            // node (spec: Attached Regulae), inside a predicate as
+            // in a command.
+            let reg = attached_ref(&body.clone())?;
+            self.pos += 1;
+            Operand::PeerReg { at: None, reg }
         } else {
             self.unary_primary()?
         };
@@ -6490,65 +6762,14 @@ impl Parser<'_> {
                 };
             }
         }
-        // `X:.r` — the cross-capsa read: a register
-        // accessor glued to a node path reads the register of the
-        // capsa standing at the node. The node side must be a bare
-        // node operand — a path, `$$_`, `$$N` — without a projection
-        // (a projected path is a value, and a value has no capsa).
-        if let Some(Token::Capsa(body)) = self.peek() {
-            let body = body.clone();
-            let reg = match body.as_str() {
-                "." => RegRef::Top,
-                "@." => RegRef::Whole,
-                "@@." => RegRef::NodeWhole,
-                "%." => RegRef::Record,
-                "%.*" => RegRef::FullRecord,
-                "%%." => RegRef::NodeRecord,
-                "%%.*" => RegRef::NodeFullRecord,
-                "%.." | "%%.." => {
-                    return Err(QuarbError::parse(format!(
-                        "':{body}' is retired: the full view is ':{}.*'",
-                        body.trim_end_matches('.')
-                    )));
-                }
-                b if b.starts_with(['@', '%']) => {
-                    return Err(QuarbError::parse(format!(
-                        "':{b}' is not a register view: the views are :@. :@@. :%. :%.* :%%. :%%.*"
-                    )));
-                }
-                b => reg_ref(&b[1..])?,
-            };
-            let bare = |o: &Operand| {
-                matches!(
-                    o,
-                    Operand::Rel {
-                        projection: None,
-                        ..
-                    } | Operand::Ctx {
-                        projection: None,
-                        ..
-                    }
-                )
-            };
-            let ok = match &o {
-                Operand::Invoking(inner) | Operand::Position(inner) | Operand::Driver(inner) => {
-                    bare(inner)
-                }
-                other => bare(other),
-            };
-            if !ok {
-                return Err(QuarbError::parse(format!(
-                    "':{body}' reads the register of the capsa standing at a node: write it after a node path (<-link:{body}, \\/*:{body})"
-                )));
-            }
-            self.pos += 1;
-            o = Operand::PeerReg {
-                at: Box::new(o),
-                reg,
-            };
-        }
+        let mut o = self.node_read(o)?;
         loop {
             match self.peek() {
+                // `:source:.l` — a node read after a field chain
+                // (the field holds a node reference).
+                Some(Token::Capsa(_)) => {
+                    o = self.node_read(o)?;
+                }
                 // `v:@(…)`, `v:%(…)`, `t:#(…)`, `v:(…)`, `t:$.proj` —
                 // the projection operator (spec: The Projection
                 // Operator): the shape applied to the value.
@@ -7300,6 +7521,7 @@ impl Parser<'_> {
                     | Command::RecordPush { .. }
                     | Command::FieldsPush
                     | Command::Subcontext { .. }
+                    | Command::Attach { .. }
                     | Command::AggPush { .. }
                     | Command::Nav(_)
             ) {
@@ -7326,7 +7548,8 @@ impl Parser<'_> {
             | Command::ExprPush { .. }
             | Command::RecordPush { .. }
             | Command::FieldsPush
-            | Command::Subcontext { .. } => Err(QuarbError::parse(
+            | Command::Subcontext { .. }
+            | Command::Attach { .. } => Err(QuarbError::parse(
                 "a pipe inside an expression transforms a value; \
                      pushes belong to real capsae (use a command)",
             )),
@@ -7541,6 +7764,8 @@ impl Parser<'_> {
                         | Token::ArrowOut
                         | Token::ArrowIn { .. }
                         | Token::DashDash
+                        | Token::Tilde
+                        | Token::TildeTilde
                         | Token::LParen
                 )
             ) {
@@ -7684,6 +7909,22 @@ impl Parser<'_> {
                 steps.push(self.path_elem()?);
                 continue;
             }
+            // `--from=/a --weight=km`: a dash pair followed by a
+            // glued word and `=` is the next option of the segment,
+            // never an undirected hop (`--weight=` is no step)
+            if matches!(self.peek(), Some(Token::DashDash))
+                && matches!(
+                    self.toks.get(self.pos + 1),
+                    Some(Token::Name {
+                        quoted: false,
+                        glued: true,
+                        ..
+                    })
+                )
+                && matches!(self.toks.get(self.pos + 2), Some(Token::OptEq))
+            {
+                break;
+            }
             if matches!(
                 self.peek(),
                 Some(
@@ -7698,6 +7939,8 @@ impl Parser<'_> {
                         | Token::ArrowOut
                         | Token::ArrowIn { .. }
                         | Token::DashDash
+                        | Token::Tilde
+                        | Token::TildeTilde
                         | Token::ReverseResolve
                         | Token::LParen
                 )
@@ -7745,6 +7988,8 @@ impl Parser<'_> {
                                 | Token::ArrowOut
                                 | Token::ArrowIn { .. }
                                 | Token::DashDash
+                                | Token::Tilde
+                                | Token::TildeTilde
                                 | Token::LParen
                         )
                     ) {
@@ -7801,6 +8046,8 @@ impl Parser<'_> {
                                 | Token::ArrowOut
                                 | Token::ArrowIn { .. }
                                 | Token::DashDash
+                                | Token::Tilde
+                                | Token::TildeTilde
                                 | Token::LParen
                         )
                     ) {
@@ -7855,7 +8102,9 @@ impl Parser<'_> {
                 | Token::PrevSibling
                 | Token::ArrowOut
                 | Token::ArrowIn { .. }
-                | Token::DashDash,
+                | Token::DashDash
+                | Token::Tilde
+                | Token::TildeTilde,
             ) => self.rel_operand_from_step(),
             // A resolution chain in operand position: follow the
             // reference(s), then project (`::album_id-->::title`).
@@ -7880,6 +8129,8 @@ impl Parser<'_> {
                                 | Token::ArrowOut
                                 | Token::ArrowIn { .. }
                                 | Token::DashDash
+                                | Token::Tilde
+                                | Token::TildeTilde
                                 | Token::LParen
                         )
                     ) {
@@ -8416,13 +8667,49 @@ impl Parser<'_> {
                         }) if text == "-" => {
                             self.pos += 1;
                             let projection = self.projection()?;
-                            if matches!(
-                                projection,
-                                Some(Projection::CoreMeta(_) | Projection::AdapterMeta(_))
-                            ) {
-                                return Err(QuarbError::parse(
-                                    "an edge carries plain properties only ($-::prop)",
-                                ));
+                            // The edge's core fields ride the glued colon
+                            // (spec: Edge facts): its ends `$-:source`,
+                            // `$-:target` (node references), the walk's
+                            // `$-:round`, `$-:hops`, `$-:total`.
+                            // The ends are node operands (`Anchor::EdgeEnd`):
+                            // a path, a projection or a node read may follow.
+                            if let Some(Projection::CoreMeta(k)) = &projection
+                                && let Some(end) = match k.as_str() {
+                                    "source" => Some(End::Source),
+                                    "target" => Some(End::Target),
+                                    _ => None,
+                                }
+                            {
+                                let anchor = Anchor::EdgeEnd(end);
+                                return Ok(match self.rel_operand_continue(Vec::new())? {
+                                    Operand::Rel {
+                                        steps, projection, ..
+                                    } => Operand::Rel {
+                                        steps,
+                                        projection,
+                                        anchor,
+                                    },
+                                    _ => Operand::Rel {
+                                        steps: Vec::new(),
+                                        projection: None,
+                                        anchor,
+                                    },
+                                });
+                            }
+                            match &projection {
+                                Some(Projection::CoreMeta(k))
+                                    if matches!(k.as_str(), "round" | "hops" | "total") => {}
+                                Some(Projection::CoreMeta(k)) => {
+                                    return Err(QuarbError::parse(format!(
+                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops' and ':total'; ':{k}' is none of them"
+                                    )));
+                                }
+                                Some(Projection::AdapterMeta(_)) => {
+                                    return Err(QuarbError::parse(
+                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total'",
+                                    ));
+                                }
+                                _ => {}
                             }
                             return Ok(Operand::Edge { projection });
                         }
@@ -8622,6 +8909,7 @@ impl Parser<'_> {
                     quant: Quant {
                         min: 1,
                         max: Some(1),
+                        budget: None,
                     },
                     predicates: Vec::new(),
                     traits: Vec::new(),
@@ -8657,6 +8945,7 @@ impl Parser<'_> {
                     | Command::RecordPush { .. }
                     | Command::FieldsPush
                     | Command::Subcontext { .. }
+                    | Command::Attach { .. }
                     | Command::AggPush { .. }
                     | Command::Nav(_)
             ) {
@@ -8978,7 +9267,7 @@ impl Parser<'_> {
                 // name rather than reading a field. The segment
                 // wildcards ride the same glue: `:*` lexes as a
                 // glued colon and the name `*`, `:.` as the
-                // cross-capsa read `.` — here both are one more
+                // node read `.` — here both are one more
                 // segment (`<tag:*>`, `<tag:.>`, `<a:.:b>`).
                 loop {
                     match (self.peek(), self.toks.get(self.pos + 1)) {
@@ -9037,6 +9326,8 @@ impl Parser<'_> {
             Some(Token::ArrowOut) => Axis::OutLink,
             Some(Token::ArrowIn { .. }) => Axis::InLink,
             Some(Token::DashDash) => Axis::BothLink,
+            Some(Token::Tilde) => Axis::Any,
+            Some(Token::TildeTilde) => Axis::AnyDeep(self.reach()),
             Some(Token::Name { text, .. }) => {
                 return Err(QuarbError::parse(format!(
                     "expected a navigation operator before '{text}' \
@@ -9529,6 +9820,12 @@ pub(crate) fn retired_command(name: &str) -> Option<String> {
         "chars" => Some("'chars' is retired: write 'cc'".into()),
         "types" => Some("'types' is retired: the type of a table's columns is 'type'".into()),
         "table" => Some("'table' is retired: the table is '@| pretty'".into()),
+        // retired 2026-10-31 (spec: The graph library): the rank is
+        // the library's, a float per node, the table `@| nodes`
+        "pagerank" => Some(
+            "'@| pagerank' is retired: the graph library ranks the context, '@| graph:pagerank(->link)' (a float per node; '@| nodes' for the table)"
+                .into(),
+        ),
         // retired at 0.42.0 (spec: Projectors, the projection operator)
         "project" => Some(
             "'project(…)' is retired: the projection operator — 'v:%(…)', 't:#(:A; :B)', 'v:$.p' — and '| %' for a node's record"
@@ -9989,6 +10286,18 @@ fn validate_stat_args(call: &FnCall) -> Result<()> {
                 )))
             }
         }
+        // `copy` — the output to the clipboard (spec: Output
+        // Commands, The clipboard): no operand, no option; the tool
+        // that prints applies it, so it stands last.
+        "copy" => {
+            if call.args.is_empty() {
+                Ok(())
+            } else {
+                Err(QuarbError::parse(
+                    "copy takes no operand and no option: it copies the output exactly as it would have printed ('… @| json | copy')",
+                ))
+            }
+        }
         // `encoding(LABEL)` — the output boundary: one label the
         // Encoding Standard knows. The command stands last; the tool
         // that prints applies it (the engine has no byte value).
@@ -10293,7 +10602,9 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         Command::Subcontext { body, .. } => subst_query(body, map),
         Command::Filter(e) => subst_pred_expr(e, map),
         Command::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
-        Command::Map(inner) | Command::Repeat { command: inner, .. } => subst_command(inner, map),
+        Command::Map(inner)
+        | Command::Repeat { command: inner, .. }
+        | Command::Attach { command: inner, .. } => subst_command(inner, map),
         Command::Select(_)
         | Command::Push(_)
         | Command::FieldsPush
@@ -10402,7 +10713,11 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
             subst_operand(left, map);
             subst_operand(right, map);
         }
-        Operand::PeerReg { at, .. } => subst_operand(at, map),
+        Operand::PeerReg { at, .. } => {
+            if let Some(at) = at {
+                subst_operand(at, map)
+            }
+        }
         Operand::List(items) => {
             for item in items {
                 subst_operand(item, map);
@@ -10860,7 +11175,8 @@ impl visit::Visitor for Outer {
                     | Anchor::MarkTop
                     | Anchor::MarkBack(_)
                     | Anchor::MarksAll
-                    | Anchor::MarksNamed(_),
+                    | Anchor::MarksNamed(_)
+                    | Anchor::EdgeEnd(_),
                 ..
             } => self.0 = true,
             _ => visit::walk_operand(self, o),

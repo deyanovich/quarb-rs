@@ -322,3 +322,59 @@ fn the_scope_leaves_crosslinks_and_grafts_alone() {
     );
     let _ = Value::Null;
 }
+
+#[test]
+fn the_index_backed_store_carries_roles_and_resources() {
+    // the memory store's edges by role, its resources and its
+    // fragment landings cross into the SQLite store and answer the
+    // same (spec: Text Readings, the web reading)
+    let mut fs = files();
+    fs.push(PageFile {
+        path: "spec.html".into(),
+        html: page(
+            "The spec",
+            "<link rel=\"alternate\" type=\"application/pdf\" href=\"spec/quarb.pdf\"><link rel=\"alternate\" hreflang=\"ru\" href=\"https://example.ru/spec.html\"><link rel=\"stylesheet\" href=\"style.css\">",
+            "<header><nav><a href=\"index.html\">Home</a></nav></header><main><p>See the <a href=\"guides/sql.html#joins\">joins</a> and a <a href=\"https://spam.example/\" rel=\"nofollow\">user link</a>.</p></main><footer><a href=\"about.html\">About</a></footer>",
+        ),
+    });
+    let mem = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
+        fs,
+    ));
+    let path = tmp("roles.db");
+    let db = WebAdapter::new(SqliteStore::create(&path, mem.store()).unwrap());
+    let spec = "/sites/example.org/pages/spec.html";
+    for q in [
+        "//page @| count",
+        "//resource::url",
+        "//resource<pdf> @| count",
+        "//resource<external>::url",
+        &format!("{spec}->pdf::path"),
+        &format!("{spec}->altlang[$-::hreflang = \"ru\"]::url"),
+        &format!("{spec}->asset[$-::rel = \"stylesheet\"]::path"),
+        &format!("{spec}->navbar::path"),
+        &format!("{spec}->footer::path"),
+        &format!("{spec}->link[$-::nofollow]::url"),
+        &format!("{spec}->link"),
+        "/sites/example.org/pages/about.html<-navbar::path",
+        "/sites/example.org/pages/about.html<-footer::path",
+        "/sites/example.org/pages/index.html<-navbar::path",
+        "//page[->pdf]::title",
+        "/sites/example.org/pages/spec.html::out_degree",
+        "/sites/example.org/pages/guides/sql.html::in_degree",
+    ] {
+        assert_eq!(lines(&db, q), lines(&mem, q), "{q}");
+    }
+    // the fragment lands on the Joins section in both
+    let land = lines(&db, &format!("{spec}->link"));
+    assert!(
+        land.iter()
+            .any(|l| l.starts_with("/sites/example.org/pages/guides/sql.html!")),
+        "{land:?}"
+    );
+    assert_eq!(lines(&db, "//resource<pdf> @| count"), ["1"]);
+    assert_eq!(lines(&db, "//page[->pdf]::title"), ["The spec"]);
+}

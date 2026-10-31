@@ -191,13 +191,13 @@ impl Doc {
             #[cfg(feature = "native")]
             "text-bibtex" | "bibtex" => quarb_text_koine::parse_bibtex(input)
                 .map(Doc::Text)
-                .map_err(|e| anyhow::anyhow!("{e}")),
+                .map_err(anyhow::Error::new),
             // FictionBook 2 at the text level, through the koine
             // route (atrep's importer).
             #[cfg(feature = "native")]
             "text-fb2" | "fb2" => quarb_text_koine::parse_xml_as(input, "fb2")
                 .map(Doc::Text)
-                .map_err(|e| anyhow::anyhow!("{e}")),
+                .map_err(anyhow::Error::new),
             // The code level: identifiers as names; the format
             // name carries the language.
             #[cfg(feature = "native")]
@@ -255,11 +255,7 @@ impl Doc {
             let base = self.base_dyn();
             return Ok(quarb_text::render_nodes(base, &[base.root()], render));
         }
-        match self
-            .run(query, run)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .result
-        {
+        match self.run(query, run).map_err(anyhow::Error::new)?.result {
             QueryResult::Nodes(nodes) => {
                 Ok(quarb_text::render_nodes(self.base_dyn(), &nodes, render))
             }
@@ -428,7 +424,7 @@ impl Doc {
     pub fn sqlite_bytes(bytes: &[u8]) -> Result<Doc> {
         Ok(Doc::Sqlite(
             quarb_sqlite::SqliteAdapter::from_bytes(bytes)
-                .map_err(|e| anyhow::anyhow!("{e}"))
+                .map_err(anyhow::Error::new)
                 .context("opening SQLite bytes")?,
         ))
     }

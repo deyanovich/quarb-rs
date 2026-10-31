@@ -411,7 +411,7 @@ fn main() -> Result<()> {
         session.borrow_mut().set_budget(Some(b));
     }
     if let Some(file) = &cli.run {
-        return run_file(&session, file);
+        return run_file(&session, &mut remount, file);
     }
     let sources = if cli.paths.is_empty() {
         "a bare root — calculator session; lines open with '= expr', :mount adds sources"
@@ -440,23 +440,50 @@ fn main() -> Result<()> {
 /// continuation lines and the output indented four spaces, a blank
 /// line after each cell; a cell whose last command is a session push
 /// prints nothing after its lines; a refusal prints as `error: …`.
-fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> Result<()> {
+/// The notebook shape (spec: .quai; the playground's `?src=` door
+/// reads the same file): a block whose lines are not indented is
+/// Markdown prose, skipped in silence; a cell whose first token is a
+/// model-file keyword is a MODEL CELL, applied to the session — its
+/// `mount NAME: TARGET;` statements mount sources (a relative target
+/// against the file's directory; a URL stays as it is), its other
+/// statements join the session's model — and takes its ordinal with
+/// no output; a `def`/`macro` cell extends the fragment table and
+/// takes its ordinal the same way (spec: .quai, Numbering).
+fn run_file(
+    session: &std::rc::Rc<std::cell::RefCell<Session>>,
+    remount: &mut Option<Remount>,
+    file: &Path,
+) -> Result<()> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let mut cells: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
+    let mut indented = true;
+    let mut close = |current: &mut Vec<String>, indented: &mut bool| {
+        if !current.is_empty() && *indented {
+            cells.push(std::mem::take(current));
+        }
+        current.clear();
+        *indented = true;
+    };
     for line in text.lines() {
         if line.trim().is_empty() {
-            if !current.is_empty() {
-                cells.push(std::mem::take(&mut current));
-            }
+            close(&mut current, &mut indented);
             continue;
         }
-        current.push(line.strip_prefix("    ").unwrap_or(line).to_string());
+        match line
+            .strip_prefix("    ")
+            .or_else(|| line.strip_prefix('\t'))
+        {
+            Some(rest) => current.push(rest.to_string()),
+            None => {
+                indented = false;
+                current.push(line.to_string());
+            }
+        }
     }
-    if !current.is_empty() {
-        cells.push(current);
-    }
+    close(&mut current, &mut indented);
+    let base_dir = file.parent();
     let mut failed = false;
     for cell in cells {
         let q = cell.join("\n");
@@ -464,6 +491,25 @@ fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> 
         println!("&{n}  {}", cell[0]);
         for l in &cell[1..] {
             println!("    {l}");
+        }
+        // A model cell: mounts and declarations, no output.
+        let first = q.split_whitespace().next().unwrap_or_default();
+        if first == "def" || first == "macro" {
+            if let Err(e) = session.borrow_mut().add_def(&q) {
+                failed = true;
+                println!("    error: {e:#}");
+            }
+            println!();
+            continue;
+        }
+        if MODEL_KEYWORDS.contains(&first) {
+            if let Err(e) = apply_model_cell(session, remount, &q, base_dir) {
+                failed = true;
+                println!("    error: {e:#}");
+            }
+            session.borrow_mut().commit(&q, Vec::new());
+            println!();
+            continue;
         }
         // a session push and a `session(…)` that sets answer nothing:
         // no line after them (the engine yields no thread; the guard
@@ -493,6 +539,7 @@ fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> 
                         }
                     }
                 }
+                print_diagnostics(&session.borrow(), "    ");
                 session.borrow_mut().commit(&q, cells);
             }
             Err(e) => {
@@ -505,6 +552,95 @@ fn run_file(session: &std::rc::Rc<std::cell::RefCell<Session>>, file: &Path) -> 
     }
     if failed {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// The reading schemes a mount target may open with, as on the
+/// command line (`text:FILE`, `corpus:DIR`, `lit:FILE`, `koine:FILE`):
+/// a relative path behind one resolves against the file's directory.
+const READING_SCHEMES: [&str; 5] = ["text", "corpus", "lit", "koine", "json2"];
+
+/// The model-file keywords that open a model cell (spec: .quai,
+/// Kinds), `def` and `macro` among them.
+const MODEL_KEYWORDS: [&str; 13] = [
+    "def", "macro", "node", "ref", "rel", "edge", "alias", "trait", "index", "units", "tree",
+    "mount", "use",
+];
+
+/// Apply a model cell to the session: parse it as a model file, mount
+/// what it mounts (named, relative targets against `base_dir`), join
+/// its declarations to the session's model, seed its defs, and
+/// rebuild the executor.
+fn apply_model_cell(
+    session: &std::rc::Rc<std::cell::RefCell<Session>>,
+    remount: &mut Option<Remount>,
+    text: &str,
+    base_dir: Option<&Path>,
+) -> Result<()> {
+    let m = quarb_model::parse_model(text).map_err(|e| anyhow::anyhow!("model cell: {e}"))?;
+    let Some(ctx) = remount else {
+        anyhow::bail!("a model cell needs an in-process session (not --daemon)");
+    };
+    let added = ctx.specs.len();
+    for mt in &m.mounts {
+        // A reading scheme ahead of a relative path (`text:tom.txt`,
+        // `corpus:dir/`) resolves the path against the file's
+        // directory too, scheme kept; a URL or an absolute path stays.
+        let target = match mt.target.split_once(':') {
+            Some((scheme, rest))
+                if READING_SCHEMES.contains(&scheme)
+                    && !rest.starts_with("//")
+                    && !std::path::Path::new(rest).is_absolute() =>
+            {
+                format!(
+                    "{scheme}:{}",
+                    quarb_model::resolve_mount_target(rest, base_dir)
+                )
+            }
+            _ => quarb_model::resolve_mount_target(&mt.target, base_dir),
+        };
+        if quarb::Environment::is_environment_target(&target) {
+            anyhow::bail!(
+                "mount '{}' names an environment ({target}); environments are mounted \
+                 from the command line only",
+                mt.name
+            );
+        }
+        ctx.specs
+            .push(MountSpec::parse(&format!("{}={}", mt.name, target)));
+    }
+    let merged = match ctx.model.take() {
+        None => m.clone(),
+        Some(mut base) => {
+            base.mounts.extend(m.mounts.iter().cloned());
+            base.nodes.extend(m.nodes.iter().cloned());
+            base.refs.extend(m.refs.iter().cloned());
+            base.rels.extend(m.rels.iter().cloned());
+            base.edges.extend(m.edges.iter().cloned());
+            base.aliases.extend(m.aliases.iter().cloned());
+            base.traits.extend(m.traits.iter().cloned());
+            base.indexes.extend(m.indexes.iter().cloned());
+            base.trees.extend(m.trees.iter().cloned());
+            base.units.extend(m.units.iter().cloned());
+            base.unit_files.extend(m.unit_files.iter().cloned());
+            if !m.defs_text.trim().is_empty() {
+                base.defs_text.push('\n');
+                base.defs_text.push_str(&m.defs_text);
+            }
+            base
+        }
+    };
+    ctx.model = Some(merged);
+    match local_executor(ctx) {
+        Ok(executor) => session.borrow_mut().set_executor(executor),
+        Err(e) => {
+            ctx.specs.truncate(added);
+            return Err(e);
+        }
+    }
+    if !m.defs_text.trim().is_empty() {
+        session.borrow_mut().seed_defs(&m.defs_text)?;
     }
     Ok(())
 }
@@ -838,12 +974,26 @@ fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str,
             for c in &cells {
                 println!("{}", c.display());
             }
+            print_diagnostics(session, "");
             let n = session.line_no();
             if !session.commit(&q, cells) {
                 eprintln!("note: &{n} is not referenceable (its shape can't be a macro body)");
             }
         }
         Err(e) => eprintln!("error: {e:#}"),
+    }
+}
+
+/// The diagnostics the last evaluation raised beside its answer,
+/// down to the session's level (`session(--diagnostics=…)`), each on
+/// its own line after the cell's lines (spec: Diagnostics — a
+/// diagnostic belongs to the cell that raised it).
+fn print_diagnostics(session: &Session, indent: &str) {
+    let level = session.diagnostics_level();
+    for d in session.diagnostics() {
+        if d.severity.shown_at(level) {
+            println!("{indent}{d}");
+        }
     }
 }
 

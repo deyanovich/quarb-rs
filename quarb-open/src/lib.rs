@@ -1698,8 +1698,21 @@ pub const LISTING_BUDGET: u64 = 200_000;
 /// `cap` (or past [`LISTING_BUDGET`]) and reports a lower bound:
 /// under a budget, a directory of a hundred thousand files costs
 /// as many reads as the budget allows, plus one.
+///
+/// A directory is listed the way its mount walks it
+/// ([`quarb_fs::walk`] with the default [`FsOptions`]): hidden
+/// entries and the ones an ignore file covers are not counted, so
+/// the plan prices the files the reader will open and no others.
+/// [`catalog_seen`] takes the options a run was given (`--hidden`,
+/// `--no-ignore`).
 pub fn catalog(target: &str, cap: quarb::Cap) -> Option<quarb::Catalog> {
     catalog_at(target, &[], cap)
+}
+
+/// [`catalog`] with the listing options of the run that will open
+/// the target: what the mount exposes is what the plan counts.
+pub fn catalog_seen(target: &str, cap: quarb::Cap, seen: FsOptions) -> Option<quarb::Catalog> {
+    catalog_with(target, &[], cap, &quarb_archive::Sieve::none(), seen)
 }
 
 /// [`catalog_at`] for a plan's ask: the path, the cap, and the
@@ -1707,8 +1720,17 @@ pub fn catalog(target: &str, cap: quarb::Cap) -> Option<quarb::Catalog> {
 /// `<dir>`) — the ready-made [`quarb::CatalogLookup`] for a path
 /// target.
 pub fn catalog_for(target: &str, ask: &quarb::Ask<'_>) -> Option<quarb::Catalog> {
+    catalog_for_seen(target, ask, FsOptions::default())
+}
+
+/// [`catalog_for`] with the listing options of the run.
+pub fn catalog_for_seen(
+    target: &str,
+    ask: &quarb::Ask<'_>,
+    seen: FsOptions,
+) -> Option<quarb::Catalog> {
     let sieve = quarb_archive::Sieve::of(ask);
-    let mut c = catalog_with(target, ask.scope, ask.cap, &sieve)?;
+    let mut c = catalog_with(target, ask.scope, ask.cap, &sieve, seen)?;
     c.applied = sieve.applied.clone();
     c.traits_applied = sieve.traits_applied;
     Some(c)
@@ -1719,7 +1741,13 @@ pub fn catalog_for(target: &str, ask: &quarb::Ask<'_>) -> Option<quarb::Catalog>
 /// archive member's header. `None` where the path names nothing
 /// the catalog can see (a node inside a document, a database).
 pub fn catalog_at(target: &str, scope: &[&str], cap: quarb::Cap) -> Option<quarb::Catalog> {
-    catalog_with(target, scope, cap, &quarb_archive::Sieve::none())
+    catalog_with(
+        target,
+        scope,
+        cap,
+        &quarb_archive::Sieve::none(),
+        FsOptions::default(),
+    )
 }
 
 fn catalog_with(
@@ -1727,6 +1755,7 @@ fn catalog_with(
     scope: &[&str],
     cap: quarb::Cap,
     sieve: &quarb_archive::Sieve<'_>,
+    seen: FsOptions,
 ) -> Option<quarb::Catalog> {
     use quarb::{Catalog, Confidence, Latency};
     let t = target.trim();
@@ -1805,36 +1834,34 @@ fn catalog_with(
     if !md.is_dir() {
         return None;
     }
+    // The mount's own walk: what it will expose is what is counted
+    // (an ignored subtree, a hidden file, are never read).
     let (mut count, mut bytes, mut cut) = (0u64, 0u64, false);
-    let mut stack = vec![at];
-    'walk: while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for e in quarb_fs::walk(&at, seen).flatten() {
+        if e.depth() == 0 {
+            continue;
+        }
+        let Some(ft) = e.file_type() else {
             continue;
         };
-        for e in entries.flatten() {
-            let Ok(ft) = e.file_type() else {
-                continue;
-            };
-            if ft.is_dir() {
-                stack.push(e.path());
-                if !sieve.keeps(false, e.metadata().map(|m| m.len()).unwrap_or(0)) {
-                    continue;
-                }
-                count += 1;
-            } else if ft.is_file() {
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                if !sieve.keeps(true, size) {
-                    continue;
-                }
-                count += 1;
-                bytes += size;
-            } else {
+        if ft.is_dir() {
+            if !sieve.keeps(false, e.metadata().map(|m| m.len()).unwrap_or(0)) {
                 continue;
             }
-            if count >= LISTING_BUDGET || cap.past(count, bytes) {
-                cut = true;
-                break 'walk;
+            count += 1;
+        } else if ft.is_file() {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if !sieve.keeps(true, size) {
+                continue;
             }
+            count += 1;
+            bytes += size;
+        } else {
+            continue;
+        }
+        if count >= LISTING_BUDGET || cap.past(count, bytes) {
+            cut = true;
+            break;
         }
     }
     Some(Catalog::plain(

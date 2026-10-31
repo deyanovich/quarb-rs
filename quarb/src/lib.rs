@@ -11,10 +11,12 @@
 //! `<trait>` filters), scalar projection (`::` properties, `:` core
 //! metadata, `:::` adapter metadata), `[...]` predicates (comparisons,
 //! `and`/`or`/`not`/`!`, structural conditions, index selection),
-//! `||` union, `->` / `<-` crosslink navigation, path patterns
+//! `||` union, `->` / `<-` crosslink navigation, `~` / `~~` the navop
+//! star over every edge touching a node, path patterns
 //! (`(...)` groups with subpath alternation and `+`/`*`/`{m,n}`
-//! quantifiers — simple-path expansion under the adapter's
-//! [quantifier bound](AstAdapter::quantifier_bound)), and the register
+//! quantifiers — expansion under the adapter's
+//! [quantifier bound](AstAdapter::quantifier_bound) and
+//! [frontier bound](AstAdapter::frontier_bound)), and the register
 //! system: per-capsa `| f` transforms, `@| f` whole-context
 //! aggregation, `| .` push and `| $.` recall of breadcrumbs, and
 //! `| .(expr)` subcontexts for grouped aggregation. It also does
@@ -37,6 +39,7 @@
 //! assert!(matches!(hits, QueryResult::Nodes(ns) if ns.is_empty()));
 //! ```
 
+pub mod diagnostic;
 pub mod error;
 mod graph;
 mod pipeline;
@@ -69,6 +72,7 @@ pub use value::split_seconds_pub;
 pub use value::table::{TABLE_CSS, table_cells, table_columns, table_html, table_html_plain};
 pub use value::{bibref, encoding, locale, number, quantity, table, translit};
 
+pub use diagnostic::{Diagnostic, Severity};
 pub use error::{Kind as ErrorKind, QuarbError, Result};
 pub use graph::adapter::{
     Ask, AstAdapter, Cap, Catalog, CatalogLookup, Cmp, Confidence, Conjunct, Estimate, ExternalRef,
@@ -178,8 +182,10 @@ pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &St
 /// quantifier cut off at the bound) records a refusal instead, and
 /// the entry points surface it here.
 fn checked<T>(result: T) -> Result<T> {
-    match value::ambient::take_refusal() {
-        Some(msg) => Err(QuarbError::refused(msg)),
+    match value::ambient::take_refusal_diagnostic() {
+        Some(d) => Err(QuarbError::refused(d.message)
+            .with_code(d.code)
+            .with_site(d.site)),
         None => Ok(result),
     }
 }
@@ -226,6 +232,12 @@ pub struct Outcome {
     /// renders it where the terminal prints the text
     /// ([`closes_with_drawing`]); dressed with [`TABLE_CSS`].
     pub html: Option<String>,
+    /// The warnings and infos the run raised, in raising order
+    /// (spec: Diagnostics): they accompany the answer, where an
+    /// error withholds it ([`QuarbError::diagnostic`]). A host shows
+    /// them down to its level and never merges them with another
+    /// query's.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// A parsed query, ready to run against an adapter under a
@@ -382,6 +394,7 @@ impl Query {
             refs: pipeline::take_refs(),
             plan,
             html: pipeline::take_drawing_html(),
+            diagnostics: value::ambient::take_diagnostics(),
         })
     }
 
@@ -399,6 +412,7 @@ impl Query {
             refs: pipeline::take_refs(),
             plan: None,
             html: pipeline::take_drawing_html(),
+            diagnostics: value::ambient::take_diagnostics(),
         })
     }
 
@@ -671,4 +685,48 @@ pub fn expand_with(
     run: &Run,
 ) -> Result<String> {
     Ok(Query::parse_with(query, defs, adapter, run)?.canonical())
+}
+
+/// Take `| copy` or `@| copy` off the end of a query text (spec:
+/// Output Commands, "The clipboard"): the output boundary is the
+/// tool's, so the host that prints applies it; the pipe carries no
+/// information for it, the output being one thing however many
+/// threads stand before it. Answers the query without it and the
+/// name of the rendering the copied text is in — the closing
+/// renderer's (`JSON`, `CSV`, `kaiv`, …) or `text` for the default
+/// rendering — or `None` when the query does not end in `copy`
+/// (a `copy` anywhere else reaches the executor and refuses).
+pub fn take_copy(query: &str) -> Option<(String, &'static str)> {
+    let trimmed = query.trim_end();
+    let head = trimmed.strip_suffix("copy")?;
+    let head = head.trim_end();
+    let rest = head.strip_suffix('|')?;
+    if rest.ends_with('$') {
+        return None;
+    }
+    let rest = rest.strip_suffix('@').unwrap_or(rest);
+    let rest = rest.trim_end();
+    if rest.is_empty() {
+        return None;
+    }
+    let last = rest.rsplit(['|']).next().unwrap_or("").trim();
+    let name: String = last
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let rendering = match name.as_str() {
+        "json" => "JSON",
+        "jsonl" => "JSON Lines",
+        "yaml" => "YAML",
+        "toml" => "TOML",
+        "xml" => "XML",
+        "csv" => "CSV",
+        "table" | "pretty" => "a table",
+        "kaiv" => "kaiv",
+        "markdown" => "Markdown",
+        "html" => "HTML",
+        "atrep" => "atrep",
+        _ => "text",
+    };
+    Some((rest.to_string(), rendering))
 }

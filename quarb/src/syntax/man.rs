@@ -302,10 +302,32 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             entries().iter().map(Entry::written).collect();
         for e in entries() {
+            // a library's row names the library's command (the
+            // engine's own `graph:`; a linked library's rows are
+            // the host's to check)
+            if !e.library.is_empty() {
+                if e.library == "graph" {
+                    use crate::pipeline::library::CommandLibrary as _;
+                    assert!(
+                        crate::graph::library::GRAPH.synopsis(&e.name).is_some(),
+                        "inventory row without a library command: {}",
+                        e.written()
+                    );
+                }
+                continue;
+            }
             assert!(
                 e.written() == "now" || crate::syntax::registry::spec(&e.written()).is_some(),
                 "inventory row without a command: {}",
                 e.written()
+            );
+        }
+        use crate::pipeline::library::CommandLibrary as _;
+        for syn in crate::graph::library::GRAPH.commands() {
+            assert!(
+                names.contains(&format!("graph:{}", syn.name)),
+                "library command without an inventory row: graph:{}",
+                syn.name
             );
         }
         for spec in crate::syntax::registry::SPECS {

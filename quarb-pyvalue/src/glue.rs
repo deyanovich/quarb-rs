@@ -111,6 +111,9 @@ pub(crate) fn placed(
                 at = Some(i);
             }
             InputSlot::Option(long) => keyword.push((long.to_string(), input)),
+            // the context itself (the graph library): the engine
+            // reads it, nothing crosses to the callee
+            InputSlot::Context => {}
         }
     }
     for (long, value) in call.options {

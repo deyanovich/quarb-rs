@@ -25,7 +25,7 @@ reference CLI as a prebuilt binary: PostgreSQL, MySQL, DuckDB,
 BigQuery, MongoDB, Neo4j, Firebase/Firestore/Datastore,
 Kubernetes, GitHub, GitLab, IMAP/Maildir, object stores, git,
 the filesystem, composition and mounts — the [full adapter
-list](https://quarb.org/adapters/).
+list](https://quarb.org/adapters.html).
 
 The base [`quarb`](https://pypi.org/project/quarb/) package is
 the other half: Python bindings (`import quarb`, the Jupyter

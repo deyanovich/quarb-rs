@@ -191,14 +191,17 @@ fn the_path_tree() {
     let store = build(Tree::Path, "path");
     let a = WebAdapter::new(store);
     assert_eq!(lines(&a, "/sites/*::host"), ["it.example.org"]);
-    assert_eq!(lines(&a, "//page @| count"), ["4"]);
+    // the four articles and the redirect stub, which answers
+    // `//page` too (draft 164)
+    assert_eq!(lines(&a, "//page @| count"), ["5"]);
     assert_eq!(
         lines(&a, "//page::path"),
         [
+            "wiki/Roma",
             "wiki/Guerra_degli_emù",
-            "wiki/Italia",
             "wiki/Lazio",
-            "wiki/Roma"
+            "wiki/Italia",
+            "wiki/Rome"
         ]
     );
     assert_eq!(lines(&a, "//dir::path"), ["wiki"]);
@@ -215,7 +218,7 @@ fn the_path_tree() {
     );
     assert_eq!(
         lines(&a, "/sites/it.example.org/pages/wiki/Roma<-link::title"),
-        ["Guerra degli emù", "Italia", "Lazio"]
+        ["Guerra degli emù", "Lazio", "Italia"]
     );
     // A template-written link counts as a link and is flagged;
     // the analytics can leave it out.
@@ -329,7 +332,9 @@ fn the_path_tree() {
 fn the_category_tree() {
     let store = build(Tree::Category, "cat");
     let a = WebAdapter::new(store);
-    assert_eq!(lines(&a, "//page @| count"), ["4"]);
+    // the four articles and the redirect stub, which answers
+    // `//page` too (draft 164)
+    assert_eq!(lines(&a, "//page @| count"), ["5"]);
     assert_eq!(lines(&a, "//dir @| count"), ["0"]);
     // Roma's shallowest declared category is Città (depth 3), so it
     // hangs there, not under Capitali (depth 4).
@@ -345,7 +350,7 @@ fn the_category_tree() {
             &a,
             "/sites/it.example.org/pages/\"Categoria:Enciclopedia\"/\"Categoria:Geografia\"/*::title"
         ),
-        ["Categoria:Città", "Categoria:Regioni", "Italia", "Storia"]
+        ["Italia", "Categoria:Città", "Categoria:Regioni", "Storia"]
     );
     // An unreached category (Guerre) is a root beside the tree,
     // with its page beneath.

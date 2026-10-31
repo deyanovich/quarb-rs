@@ -60,13 +60,14 @@ fn the_cursor_is_a_record_of_the_topic_and_the_position() {
 fn the_context_table_is_the_cursors_plural() {
     assert_eq!(
         all("/a/*::k | #_ @| first"),
-        // (a table column holds a reference as its locator text,
-        // the table rule, as `##*` does)
-        "#(@(topic; position);\n  %(1; \"/a/0\");\n  %(2; \"/a/1\"))"
+        // (a table column of references is a `node` column: the
+        // cells stay references and print as the path, as the
+        // `node` column of `@| nodes` does)
+        "#(@(topic; position);\n  %(1; /a/0);\n  %(2; /a/1))"
     );
     assert_eq!(all("/a/*::k | #_:topic @| first"), "@(1; 2)");
     assert_eq!(all("/a/*::k | @_ @| first"), "@(1; 2)");
-    assert_eq!(all("/a/* | #_:position @| first"), "@(\"/a/0\"; \"/a/1\")");
+    assert_eq!(all("/a/* | #_:position @| first"), "@(/a/0; /a/1)");
     assert_eq!(all("/a/* | @@_ @| first"), "@(/a/0; /a/1)");
 }
 
@@ -162,7 +163,7 @@ fn the_full_views_and_the_matrices_take_the_star_and_the_dot() {
     assert_eq!(all(&format!("{q}#.*:2 @| first")), "@(\"x\"; \"y\")");
     assert_eq!(
         all("/a/* | .A | .k(::k) | ##. @| first"),
-        "#(@(A);\n  %(\"/a/0\");\n  %(\"/a/1\"))"
+        "#(@(A);\n  %(/a/0);\n  %(/a/1))"
     );
     for bad in ["#*", "##*"] {
         let e = refused(&format!("{q}{bad} @| first"));

@@ -677,25 +677,41 @@ pub(crate) fn eval_operand<H: Host>(
             };
             eval_operand(host, ext, taken, trace, scope)
         }
-        // `X:.r` — the cross-capsa read: at each node
-        // `at` reaches, the regula of every capsa of the command's
-        // input context standing there — the snapshot, so the read
-        // is synchronous within the command. One value per (node,
-        // capsa), in context order; none where nobody stands; null
-        // where no context exists. The value's origins are the
-        // regula's own (where it was read), not the node it is
-        // read at: the navigation to `at` is not a read.
+        // `X:.name` / `:.name` / `X:%.` — the node read (spec:
+        // Attached Regulae): at each node `at` reaches (the current
+        // node when there is no node side), what the previous
+        // command left attached there — by the node's identity,
+        // whoever attached it and whether anyone stands there now.
+        // One value per node, in context order; a node with nothing
+        // attached under the name yields none (null as a scalar,
+        // nothing to an aggregate); `%.` yields the record, empty
+        // where nothing is attached. The value's origins are the
+        // attached regula's own (where it was read), not the node
+        // it is read at: the navigation to `at` is not a read.
         Operand::PeerReg { at, reg } => {
-            let Some(peers) = scope.peers else {
-                return vec![Value::Null];
+            let keys = match at {
+                Some(at) => discard(|| host.operand_keys(ext, at, trace, scope)),
+                None => vec![ext.key()],
             };
-            let keys = discard(|| host.operand_keys(ext, at, trace, scope));
             let mut out = Vec::new();
             for k in keys {
-                for &i in peers.at(&k) {
-                    let p = &peers.caps[i];
-                    note_all(&recall_prov(&p.register, reg).origins);
-                    out.push(recall(&p.register, reg));
+                match reg {
+                    RegRef::Record => {
+                        let all = attached_all(&k);
+                        for r in &all {
+                            note_all(&r.prov.origins);
+                        }
+                        out.push(Value::record(
+                            all.into_iter().map(|r| (r.name, r.value)).collect(),
+                        ));
+                    }
+                    RegRef::Named(name) => {
+                        if let Some((v, prov)) = attached(&k, name) {
+                            note_all(&prov.origins);
+                            out.push(v);
+                        }
+                    }
+                    _ => {}
                 }
             }
             out
@@ -1944,6 +1960,14 @@ pub(crate) fn eval_pred_expr<H: Host>(
                     &|e| host.scale_of(e),
                 )
             })
+        }
+        // A bare path is an existence test: nodes alone are read
+        PredExpr::Truthy(Operand::Rel {
+            steps,
+            projection,
+            anchor,
+        }) if !steps.is_empty() => {
+            host.rel_exists(ext, steps, anchor, projection.as_ref(), trace, scope)
         }
         PredExpr::Truthy(o) => eval_operand(host, ext, o, trace, scope)
             .iter()

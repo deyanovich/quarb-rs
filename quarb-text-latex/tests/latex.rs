@@ -346,9 +346,13 @@ optionals \citet[see][p.~7]{lamport94}.
     assert_eq!(values(&m, "//cit[!::locator] @| count"), ["3"]);
     // The arrow lands on the entry; its projection is the full
     // reference text, plain.
+    // (cited twice: one thread per citing arrival)
     assert_eq!(
         values(&m, r#"//cit[::target = "lamport94"]--> ::"#),
-        ["Leslie Lamport. LaTeX. 1994."]
+        [
+            "Leslie Lamport. LaTeX. 1994.",
+            "Leslie Lamport. LaTeX. 1994."
+        ]
     );
     // The two linters: uncited entries, dangling citations.
     assert_eq!(values(&m, "//bib[!<-cit]::onym"), ["unused00"]);

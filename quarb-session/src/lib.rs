@@ -124,6 +124,13 @@ pub trait Executor {
         Vec::new()
     }
 
+    /// The warnings and infos the last `run` raised beside its
+    /// answer (spec: Diagnostics), in raising order; empty by
+    /// default. An error is the `Err` itself.
+    fn diagnostics(&self) -> Vec<quarb::Diagnostic> {
+        Vec::new()
+    }
+
     /// Run against a *freshly re-materialized* source — the `&N!`
     /// live reading. The default re-runs against the standing arbor
     /// (an immutable source never drifts); executors that can re-open

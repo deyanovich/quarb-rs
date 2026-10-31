@@ -1,7 +1,9 @@
 //! Part of the executor: see `exec/mod.rs`.
 
 use super::*;
-use crate::graph::adapter::{Conjunct, PlanAxis, StepPlan};
+use crate::diagnostic::{FRONTIER_BOUND, QUANTIFIER_BOUND, WALK};
+use crate::graph::adapter::{Conjunct, PlanAxis, StepPlan, reference_label};
+use crate::value::ambient::{record_debug, record_refusal_coded};
 
 /// Run the navigation path starting from `start`, per-path: each
 /// result carries the register its expansion path's pushes built.
@@ -17,6 +19,7 @@ pub(crate) fn navigate_paths(
     outer: Option<&Scope<'_, GraphExt>>,
     witness: &[Option<NodeId>],
     seed_register: &[Reg],
+    node_level: bool,
 ) -> Vec<(GraphExt, Vec<Reg>)> {
     // The frontier: one attachment per path (its node, its marks, the
     // edges it arrived by) with the path's register beside it. The
@@ -27,6 +30,7 @@ pub(crate) fn navigate_paths(
             bindings: Vec::new(),
             arrived: Vec::new(),
             unplaced: false,
+            walk: None,
         },
         seed_register.to_vec(),
     )];
@@ -38,26 +42,48 @@ pub(crate) fn navigate_paths(
             }
             continue;
         }
-        let mut next: Vec<(GraphExt, Vec<Reg>)> = Vec::new();
+        // Every thread forks on its own (spec: Expansion paths): two
+        // threads merge only when no later read could tell them
+        // apart — the same node, the same arriving edge (its
+        // identity: parallel edges and different labels stay apart),
+        // the same capsa and marks. A hop from two threads to one
+        // node is two threads, as a join's rows are; a walk's exit
+        // is one thread per acyclic walk.
+        let mut next: Vec<(Option<usize>, GraphExt, Vec<Reg>)> = Vec::new();
         if let PathElem::Step(step) = elem {
             prefetch_hint(adapter, step, ctx.iter().map(|c| c.0.node));
         }
-        for (ext, register) in &ctx {
+        for (i, (ext, register)) in ctx.iter().enumerate() {
             let node = ext.node;
             match elem {
                 PathElem::Step(step) => {
-                    let mut succs = Vec::new();
-                    apply_step(
-                        adapter, node, step, trace, outer, witness, ext, register, &mut succs,
-                    );
-                    next.extend(succs.into_iter().map(|s| {
-                        let arrived = arrived_edge(adapter, node, step, s).into_iter().collect();
+                    // a link hop hands its edges over: one thread
+                    // per edge (two rows on one leg, a node linked
+                    // both ways)
+                    let succs: Vec<(NodeId, Option<EdgeCtx>)> = if let Some(edges) =
+                        link_edges(adapter, node, step, trace, outer, witness, ext, register)
+                    {
+                        edges.into_iter().map(|(s, e)| (s, Some(e))).collect()
+                    } else {
+                        let mut succs = Vec::new();
+                        apply_step(
+                            adapter, node, step, trace, outer, witness, ext, register, &mut succs,
+                        );
+                        succs
+                            .into_iter()
+                            .map(|s| (s, arrived_edge(adapter, node, step, s)))
+                            .collect()
+                    };
+                    next.extend(succs.into_iter().map(|(s, edge)| {
+                        let arrived = edge.into_iter().collect();
                         (
+                            Some(i),
                             GraphExt {
                                 node: s,
                                 bindings: Vec::new(),
                                 arrived,
                                 unplaced: false,
+                                walk: None,
                             },
                             register.clone(),
                         )
@@ -70,17 +96,24 @@ pub(crate) fn navigate_paths(
                             bindings: Vec::new(),
                             arrived: Vec::new(),
                             unplaced: false,
+                            walk: None,
                         },
                         visited: vec![node],
                         register: register.clone(),
                         last_edge: None,
+                        set_walk: true,
+                        node_level,
+                        hops: 0,
+                        total: 0.0,
                     };
                     next.extend(
                         expand_group(adapter, group, anchor, trace, outer, witness)
                             .into_iter()
                             .map(|p| {
                                 let arrived = p.last_edge.clone().into_iter().collect();
-                                (GraphExt { arrived, ..p.ext }, p.register)
+                                // the walk's facts ride the exit; one
+                                // thread per walk, none merged
+                                (None, GraphExt { arrived, ..p.ext }, p.register)
                             }),
                     );
                 }
@@ -89,9 +122,23 @@ pub(crate) fn navigate_paths(
             }
         }
         let mut merged: Vec<(GraphExt, Vec<Reg>)> = Vec::new();
-        let mut index: HashMap<(NodeId, Vec<(Option<String>, String)>), usize> = HashMap::new();
-        for (ext, r) in next {
-            match index.entry((ext.node, reg_key(&r))) {
+        type Key = (
+            usize,
+            NodeId,
+            Option<(NodeId, String, NodeId, Option<NodeId>)>,
+            Vec<(Option<String>, String)>,
+        );
+        let mut index: HashMap<Key, usize> = HashMap::new();
+        for (from, ext, r) in next {
+            let Some(from) = from else {
+                merged.push((ext, r));
+                continue;
+            };
+            let edge = ext
+                .arrived
+                .first()
+                .map(|e| (e.source, e.label.clone(), e.target, e.row));
+            match index.entry((from, ext.node, edge, reg_key(&r))) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let kept = &mut merged[*e.get()];
                     for (a, b) in kept.1.iter_mut().zip(&r) {
@@ -152,12 +199,52 @@ pub(crate) fn navigate_from(
     witness: &[Option<NodeId>],
     seed_register: &[Reg],
 ) -> Vec<NodeId> {
-    dedup(
-        navigate_paths(elems, adapter, start, trace, outer, witness, seed_register)
-            .into_iter()
-            .map(|(e, _)| e.node)
-            .collect(),
+    navigate_from_level(
+        elems,
+        adapter,
+        start,
+        trace,
+        outer,
+        witness,
+        seed_register,
+        false,
     )
+}
+
+/// `navigate_from` with the consumer's word on what it reads:
+/// `node_level` when nodes alone (an existence test), so a walk may
+/// expand by node where that is exact (spec: Expansion paths).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn navigate_from_level(
+    elems: &[PathElem],
+    adapter: &impl AstAdapter,
+    start: NodeId,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+    witness: &[Option<NodeId>],
+    seed_register: &[Reg],
+    node_level: bool,
+) -> Vec<NodeId> {
+    // the top-level fold (correlate::dedup_merge): one thread per
+    // (node, arrival, capsa) — a tree axis reaching one node from
+    // several contexts is that node once, as the top-level path
+    // answers; a walk's facts keep every walk apart, so a walk inside
+    // an operand answers one value per walk (spec: Expansion paths)
+    let mut seen = HashSet::new();
+    navigate_paths(
+        elems,
+        adapter,
+        start,
+        trace,
+        outer,
+        witness,
+        seed_register,
+        node_level,
+    )
+    .into_iter()
+    .filter(|(e, r)| seen.insert((e.node, arrival_key(e), reg_key(r))))
+    .map(|(e, _)| e.node)
+    .collect()
 }
 
 /// One in-flight expansion path through a path-pattern group: the
@@ -177,6 +264,145 @@ pub(crate) struct GPath {
     pub(crate) visited: Vec<NodeId>,
     pub(crate) register: Vec<Reg>,
     pub(crate) last_edge: Option<EdgeCtx>,
+    /// Whether the path belongs to a set walk (spec: Expansion
+    /// paths): one that reaches each node once, at the fewest
+    /// rounds, and so keeps no history (`expand_group`) — where an
+    /// exact walk's path is one acyclic walk per history.
+    pub(crate) set_walk: bool,
+    /// Whether what consumes the walk reads nodes alone (`@|
+    /// collapse`, `nodes`, `edges`, `pagerank`, a marker): the
+    /// expansion may then go by node and round where that is exact
+    /// — under the acyclic promise, or for a plain open walk (spec:
+    /// Expansion paths, Acyclic links).
+    pub(crate) node_level: bool,
+    /// The hops the walk has taken to reach this path's node.
+    pub(crate) hops: usize,
+    /// Under a budget, the weight summed so far, in the budget's base
+    /// unit (spec: The budget quantifier).
+    pub(crate) total: f64,
+}
+
+/// A budget quantifier resolved under the run's units: the floor
+/// and the ceiling in the base unit, the base unit's name, and the
+/// bound's written unit with its scale (base per written), for the
+/// total a reader sees.
+#[derive(Clone, Debug)]
+pub(crate) struct BudgetBounds {
+    pub(crate) floor: f64,
+    pub(crate) ceiling: Option<f64>,
+    pub(crate) base: String,
+    pub(crate) unit: String,
+    pub(crate) scale: f64,
+    pub(crate) written: String,
+}
+
+impl BudgetBounds {
+    /// Resolve a budget's bounds (the floor, the ceiling, as
+    /// written) under the run's units; a bound that is no quantity,
+    /// or two bounds of two dimensions, refuse by name.
+    pub(crate) fn resolve(b: &crate::syntax::ast::Budget) -> Result<BudgetBounds, String> {
+        let read = |text: &str| -> Result<(f64, String, f64, String), String> {
+            crate::value::quantity::parse_unit_text(&text.replace('_', " ")).ok_or_else(|| {
+                if text.trim().parse::<f64>().is_ok() {
+                    format!(
+                        "one dimension per quantifier: '{text}' counts hops where the other \
+                         bound measures a quantity; a budget's bounds are quantities of one \
+                         dimension ('{{;100_km}}'), a count of hops is '{{1;5}}'"
+                    )
+                } else {
+                    format!(
+                        "the budget's bound '{text}' is no quantity: a budget bounds a sum of an \
+                         edge weight, '{{;100_km}}', '{{2_h;}}' — a count of hops is '{{;5}}'"
+                    )
+                }
+            })
+        };
+        let floor = b.floor.as_deref().map(read).transpose()?;
+        let ceiling = b.ceiling.as_deref().map(read).transpose()?;
+        let (anchor, written) = match (&ceiling, &floor) {
+            (Some(c), _) => (c.clone(), b.ceiling.clone().unwrap_or_default()),
+            (None, Some(f)) => (f.clone(), b.floor.clone().unwrap_or_default()),
+            (None, None) => return Err("a budget needs a floor or a ceiling".into()),
+        };
+        if let (Some(c), Some(f)) = (&ceiling, &floor)
+            && c.1 != f.1
+        {
+            return Err(format!(
+                "one dimension per quantifier: the floor '{}' measures {} and the ceiling '{}' {}",
+                b.floor.as_deref().unwrap_or(""),
+                f.1,
+                b.ceiling.as_deref().unwrap_or(""),
+                c.1
+            ));
+        }
+        let (bv, base, wmag, wunit) = anchor;
+        Ok(BudgetBounds {
+            floor: floor.map(|f| f.0).unwrap_or(0.0),
+            ceiling: ceiling.map(|c| c.0),
+            base,
+            unit: wunit,
+            scale: if wmag != 0.0 { bv / wmag } else { 1.0 },
+            written,
+        })
+    }
+
+    /// The facts of a path under this budget: its total in the base
+    /// unit and as the budget wrote its unit.
+    pub(crate) fn facts(&self, path: &GPath) -> WalkFacts {
+        WalkFacts {
+            round: path.hops,
+            hops: path.hops,
+            total: Some((
+                path.total,
+                self.base.clone(),
+                path.total / self.scale,
+                self.unit.clone(),
+            )),
+            trail: path.trail(),
+        }
+    }
+
+    /// The weight an edge carries for this budget: the one property
+    /// of the budget's dimension, read as a quantity under the run's
+    /// units. `Ok(None)` is an edge without the property — not
+    /// crossed; two properties of the dimension refuse naming both.
+    pub(crate) fn weight(
+        &self,
+        adapter: &impl AstAdapter,
+        edge: &EdgeCtx,
+    ) -> Result<Option<f64>, String> {
+        let mut found: Vec<(String, f64)> = Vec::new();
+        for name in edge.property_names(adapter) {
+            let Some(v) = edge.property(adapter, &name) else {
+                continue;
+            };
+            let q = match &v {
+                Value::Quantity { value, base, .. } => Some((*value, base.clone())),
+                Value::Str(s) => {
+                    crate::value::quantity::parse_unit_text(s).map(|(bv, b, _, _)| (bv, b))
+                }
+                _ => None,
+            };
+            if let Some((bv, b)) = q
+                && b == self.base
+            {
+                found.push((name, bv));
+            }
+        }
+        match found.as_slice() {
+            [] => Ok(None),
+            [(_, w)] => Ok(Some(*w)),
+            many => Err(format!(
+                "two properties of one dimension on the edge '{}': {} — a budget sums one; name \
+                 the weight in the model or the query",
+                edge.label,
+                many.iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+        }
+    }
 }
 
 impl GPath {
@@ -187,7 +413,9 @@ impl GPath {
     /// The path extended by one hop to `node`, along `edge`.
     fn with(&self, node: NodeId, edge: Option<EdgeCtx>) -> GPath {
         let mut visited = self.visited.clone();
-        if let Err(i) = visited.binary_search(&node) {
+        if !self.set_walk
+            && let Err(i) = visited.binary_search(&node)
+        {
             visited.insert(i, node);
         }
         GPath {
@@ -196,11 +424,35 @@ impl GPath {
                 bindings: Vec::new(),
                 arrived: Vec::new(),
                 unplaced: false,
+                walk: None,
             },
             visited,
             register: self.register.clone(),
             last_edge: edge,
+            set_walk: self.set_walk,
+            node_level: self.node_level,
+            hops: self.hops + 1,
+            total: self.total,
         }
+    }
+
+    /// The walk's facts at this path for a reader without a budget
+    /// (`$-:round`, `$-:hops`; `$-:total` null).
+    fn facts(&self) -> WalkFacts {
+        WalkFacts {
+            round: self.hops,
+            hops: self.hops,
+            total: None,
+            trail: self.trail(),
+        }
+    }
+
+    /// A digest of the path's history: the nodes it crossed.
+    fn trail(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.visited.hash(&mut h);
+        h.finish()
     }
 
     /// The dedup key: node, ground covered, breadcrumbs made, and
@@ -211,7 +463,7 @@ impl GPath {
         NodeId,
         Vec<NodeId>,
         Vec<(Option<String>, String)>,
-        Option<(NodeId, String, NodeId)>,
+        Option<(NodeId, String, NodeId, Option<NodeId>)>,
     ) {
         (
             self.ext.node,
@@ -219,7 +471,7 @@ impl GPath {
             reg_key(&self.register),
             self.last_edge
                 .as_ref()
-                .map(|e| (e.source, e.label.clone(), e.target)),
+                .map(|e| (e.source, e.label.clone(), e.target, e.row)),
         )
     }
 }
@@ -239,11 +491,13 @@ pub(crate) fn arrived_edge(
             source: adapter.parent(succ).unwrap_or(from),
             label: CHILD.into(),
             target: succ,
+            row: None,
         },
         Axis::Parent => EdgeCtx {
             source: from,
             label: PARENT.into(),
             target: succ,
+            row: None,
         },
         Axis::Ancestor(_) => {
             // The chain's last hop: the child of `succ` on the walk.
@@ -258,70 +512,113 @@ pub(crate) fn arrived_edge(
                 source: child,
                 label: PARENT.into(),
                 target: succ,
+                row: None,
             }
         }
         Axis::NextSibling | Axis::FollowingSiblings(_) => EdgeCtx {
             source: from,
             label: NEXT.into(),
             target: succ,
+            row: None,
         },
         Axis::PrevSibling | Axis::PrecedingSiblings(_) => EdgeCtx {
             source: from,
             label: PREV.into(),
             target: succ,
+            row: None,
         },
         Axis::OutLink => {
-            let label = select_links(step, &links_of(adapter, from))
-                .into_iter()
-                .find(|(_, t)| *t == succ)
-                .map(|(l, _)| l)?;
+            let (label, row) = select_links(step, &links_of(adapter, from), |l, _| {
+                adapter.link_consumed(from, l)
+            })
+            .into_iter()
+            .find(|(_, t, _)| *t == succ)
+            .map(|(l, _, r)| (l, r))?;
             EdgeCtx {
                 source: from,
                 label,
                 target: succ,
+                row,
             }
         }
         Axis::InLink => {
-            let label = select_links(step, &backlinks_of(adapter, from))
-                .into_iter()
-                .find(|(_, s)| *s == succ)
-                .map(|(l, _)| l)?;
+            let (label, row) = select_links(step, &backlinks_of(adapter, from), |l, s| {
+                adapter.link_consumed(s, l)
+            })
+            .into_iter()
+            .find(|(_, s, _)| *s == succ)
+            .map(|(l, _, r)| (l, r))?;
             EdgeCtx {
                 source: succ,
                 label,
                 target: from,
+                row,
             }
         }
         // The headless arrow: the edge context still records the
         // edge's true direction — the walk just declined to assert
         // it. Outgoing is tried first.
         Axis::BothLink => {
-            if let Some(label) = select_links(step, &links_of(adapter, from))
-                .into_iter()
-                .find(|(_, t)| *t == succ)
-                .map(|(l, _)| l)
+            if let Some((label, row)) = select_links(step, &links_of(adapter, from), |l, _| {
+                adapter.link_consumed(from, l)
+            })
+            .into_iter()
+            .find(|(_, t, _)| *t == succ)
+            .map(|(l, _, r)| (l, r))
             {
                 EdgeCtx {
                     source: from,
                     label,
                     target: succ,
+                    row,
                 }
             } else {
-                let label = select_links(step, &backlinks_of(adapter, from))
-                    .into_iter()
-                    .find(|(_, s)| *s == succ)
-                    .map(|(l, _)| l)?;
+                let (label, row) = select_links(step, &backlinks_of(adapter, from), |l, s| {
+                    adapter.link_consumed(s, l)
+                })
+                .into_iter()
+                .find(|(_, s, _)| *s == succ)
+                .map(|(l, _, r)| (l, r))?;
                 EdgeCtx {
                     source: succ,
                     label,
                     target: from,
+                    row,
                 }
+            }
+        }
+        // The navop star: the edge of `from` that reaches `succ`
+        // (the matching label first, as `link_property` reads it).
+        // A deep walk's last hop is not recorded: the edge into
+        // `succ` from its parent, else its first backlink.
+        Axis::Any | Axis::AnyDeep(_) => {
+            if let Some((_, e)) = incident_edges(adapter, from, step)
+                .into_iter()
+                .find(|(n, _)| *n == succ)
+            {
+                return Some(e);
+            }
+            if let Some(p) = adapter.parent(succ) {
+                return Some(EdgeCtx {
+                    source: p,
+                    label: CHILD.into(),
+                    target: succ,
+                    row: None,
+                });
+            }
+            let (label, s, row) = backlinks_of(adapter, succ).first().cloned()?;
+            EdgeCtx {
+                source: s,
+                label,
+                target: succ,
+                row,
             }
         }
         Axis::Resolve { property, .. } => EdgeCtx {
             source: from,
             label: property.clone().unwrap_or_else(|| "ref".to_string()),
             target: succ,
+            row: None,
         },
         Axis::ReverseResolve { property, .. } => EdgeCtx {
             source: succ,
@@ -332,6 +629,7 @@ pub(crate) fn arrived_edge(
                     .unwrap_or_else(|| "ref".to_string()),
             },
             target: from,
+            row: None,
         },
         Axis::ValueMatch {
             property, target, ..
@@ -339,6 +637,7 @@ pub(crate) fn arrived_edge(
             source: from,
             label: format!("{property}={target}"),
             target: succ,
+            row: None,
         },
     };
     Some(edge)
@@ -371,35 +670,116 @@ pub(crate) fn expand_group(
     let n_max = quantifier_bound(adapter);
     if let Some(n) = group.quant.max {
         if n > n_max {
-            record_refusal(format!(
-                "the pattern's explicit ceiling ({n}) exceeds the \
-                 quantifier bound ({n_max}); raise --quantifier-bound"
-            ));
+            record_refusal_coded(
+                QUANTIFIER_BOUND,
+                "the quantifier",
+                format!(
+                    "the pattern's explicit ceiling ({n}) exceeds the \
+                     quantifier bound ({n_max}); raise --quantifier-bound"
+                ),
+            );
             return Vec::new();
         }
     } else if group.quant.min > n_max {
-        record_refusal(format!(
-            "the pattern's minimum ({}) exceeds the quantifier bound \
-             ({n_max}); raise --quantifier-bound",
-            group.quant.min
-        ));
+        record_refusal_coded(
+            QUANTIFIER_BOUND,
+            "the quantifier",
+            format!(
+                "the pattern's minimum ({}) exceeds the quantifier bound \
+                 ({n_max}); raise --quantifier-bound",
+                group.quant.min
+            ),
+        );
         return Vec::new();
     }
-    let hi = group.quant.max.unwrap_or(n_max);
+    let f_max = frontier_bound(adapter);
+    // A budget (spec: The budget quantifier): the bounds resolved
+    // under the run's units; a budgeted walk is exact.
+    let budget = match &group.quant.budget {
+        Some(b) => match BudgetBounds::resolve(b) {
+            Ok(bounds) => Some(bounds),
+            Err(e) => {
+                record_refusal_coded(crate::diagnostic::REFUSED, "the quantifier", e);
+                return Vec::new();
+            }
+        },
+        None => None,
+    };
+    // The SET WALK (spec: Expansion paths): a group with no push and
+    // no mark, under an open quantifier whose floor is at most one,
+    // for all matches or the proximal reach — the forms whose answer
+    // is a node set the distance expansion gives exactly. It reaches
+    // each node once, at the fewest rounds, and runs to its fixpoint:
+    // the graph bounds its rounds, not the quantifier bound. Every
+    // other form — a ceiling, a floor above one, the distal reach —
+    // and every recording walk is an EXACT WALK: one acyclic walk
+    // per history, under the quantifier bound. An exact group inside
+    // a set walk records its own ground and hands set paths back; a
+    // group inside an exact walk is exact, however deep.
+    // Every walk is answered (spec: Expansion paths): the set walk
+    // stays an internal expansion where the answer cannot tell, the
+    // proximal reach alone — one thread per node at its first round.
+    // What consumes the walk reads nodes alone — a marker selects
+    // per node, a collapsing reducer or a graph table follows the
+    // branch — so a node-level expansion is exact: the plain open
+    // walk by node (every node reachable at all is reachable by an
+    // acyclic walk), the exact forms under the acyclic promise.
+    let node_level = anchor.node_level || group.reach != Reach::All;
+    let set_walk = anchor.set_walk
+        && group_is_plain(group)
+        && set_form(group)
+        && (group.reach == Reach::Proximal || (group.reach == Reach::All && node_level))
+        && budget.is_none();
+    let anchor_was_set = anchor.set_walk;
+    let anchor_ground = anchor.visited.clone();
+    // The acyclic promise (spec: Model Files, Acyclic links): every
+    // hop of the group over a link promised acyclic. A set walk
+    // keeps no history, so the promise has nothing to spare it.
+    // Over link hops alone the promise is read from the edges the
+    // walk crosses, round by round: it holds while every crossed
+    // label is promised (an exact label resolves it before the
+    // first round, a wildcard after it) and lapses at the first
+    // unpromised edge, the histories kept apart from there on.
+    let links_only = !set_walk && group_walks_links(group);
+    let promise: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(if links_only {
+        group_promise(adapter, group)
+    } else {
+        None
+    });
+    let alive = std::cell::Cell::new(links_only);
+    // The promise changes no answer (spec: Acyclic links): it merges
+    // the histories only where nothing read could tell them apart —
+    // a node-level reading, and no budget (the totals would tell);
+    // its cycle refusal fires on every form, the budgeted too.
+    let merge_ok = node_level && budget.is_none();
+    let mut anchor = anchor;
+    anchor.set_walk = set_walk;
+    let hi = if set_walk {
+        usize::MAX
+    } else {
+        group.quant.max.unwrap_or(n_max)
+    };
     // The group's predicates filter matches BEFORE reach — the
     // walk continues from the full frontier, but only survivors
     // are candidates. `(...)+[P]?` is therefore "the proximal
     // satisfying P": a shortest-path search.
-    let admits = |p: &GPath| group_admits(adapter, group, p, trace, outer, witness);
-    let mut matches: Vec<(GPath, usize)> = Vec::new();
-    if group.quant.min == 0 && admits(&anchor) {
-        matches.push((anchor.clone(), 0));
+    let admits = |p: &GPath| {
+        group_admits(adapter, group, p, trace, outer, witness, budget.as_ref())
+            && budget.as_ref().is_none_or(|b| p.total >= b.floor)
+    };
+    // The set walk's frontier: a position already reached — the
+    // anchor at round 0 — is not expanded again, so the frontier is
+    // a set of positions (times capsae), never of histories, and the
+    // walk ends on its own when a round reaches nothing new. The
+    // exact walk keeps one path per history (`GPath::blocks`).
+    let mut seen: HashSet<(NodeId, Vec<(Option<String>, String)>)> = HashSet::new();
+    if set_walk {
+        seen.insert((anchor.ext.node, reg_key(&anchor.register)));
     }
-    let mut frontier = vec![anchor];
-    let mut answered = false;
-    for count in 1..=hi {
+    let mut advance = |frontier: &[GPath], round: usize| -> Vec<GPath> {
         let mut next = Vec::new();
-        for path in &frontier {
+        let current = promise.borrow().clone();
+        for path in frontier {
             for alt in &group.alts {
                 next.extend(expand_elems(
                     adapter,
@@ -408,12 +788,192 @@ pub(crate) fn expand_group(
                     trace,
                     outer,
                     witness,
+                    budget.as_ref(),
+                    current.as_deref(),
                 ));
             }
         }
-        frontier = dedup_paths(next);
+        let next = dedup_paths(next);
+        // Under the acyclic promise no history can meet itself, so
+        // the exact walk expands by node and round: the paths at one
+        // position, one capsa and one arriving edge merge, their
+        // grounds united (a return to any of them is a cycle).
+        if alive.get() {
+            let mut decl: Option<String> = None;
+            let held = next.iter().all(|p| match &p.last_edge {
+                Some(e) => match adapter.acyclic_link(&e.label) {
+                    Some(d) => {
+                        decl.get_or_insert(d);
+                        true
+                    }
+                    None => false,
+                },
+                None => true,
+            });
+            if held {
+                if decl.is_some() {
+                    *promise.borrow_mut() = decl;
+                }
+            } else {
+                alive.set(false);
+                *promise.borrow_mut() = None;
+            }
+        }
+        let next = if merge_ok && alive.get() && promise.borrow().is_some() {
+            merge_by_position(next)
+        } else {
+            next
+        };
+        if !set_walk {
+            record_debug(WALK, format!("round {round}"), || {
+                format!(
+                    "exact walk: {} expansion path{} in flight after the merge \
+                     (frontier bound {f_max}, quantifier bound {n_max})",
+                    next.len(),
+                    if next.len() == 1 { "" } else { "s" }
+                )
+            });
+            return next;
+        }
+        // The proximal reach selects one thread per node (spec:
+        // Expansion paths): the first arrival of the round at a new
+        // position stays, and the position is spent from then on.
+        let mut fresh: Vec<GPath> = Vec::new();
+        for p in next {
+            let key = (p.ext.node, reg_key(&p.register));
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key);
+            fresh.push(p);
+        }
+        record_debug(WALK, format!("round {round}"), || {
+            format!(
+                "set walk: {} arrival{} this round, {} position{} spent",
+                fresh.len(),
+                if fresh.len() == 1 { "" } else { "s" },
+                seen.len(),
+                if seen.len() == 1 { "" } else { "s" }
+            )
+        });
+        fresh
+    };
+    let mut matches: Vec<(GPath, usize)> = Vec::new();
+    if group.quant.min == 0 && admits(&anchor) {
+        matches.push((anchor.clone(), 0));
+    }
+    // The lightest walks under a budget (spec: The budget
+    // quantifier, the proximal reach): breadth first by total —
+    // each node settled once, at its least total, the first
+    // satisfying settlement the answer for that node. Weights are
+    // non-negative (a negative one refuses on the hop).
+    if let (Some(b), Reach::Proximal) = (&budget, group.reach) {
+        let mut settled: HashSet<NodeId> = HashSet::from([anchor.ext.node]);
+        let mut pending: Vec<GPath> = Vec::new();
+        for alt in &group.alts {
+            pending.extend(expand_elems(
+                adapter,
+                alt,
+                vec![anchor.clone()],
+                trace,
+                outer,
+                witness,
+                Some(b),
+                promise.borrow().as_deref(),
+            ));
+        }
+        let mut rounds = 0usize;
+        while !pending.is_empty() {
+            rounds += 1;
+            if rounds > n_max * f_max {
+                break;
+            }
+            // the least total first
+            let (i, _) = pending
+                .iter()
+                .enumerate()
+                .min_by(|(_, p), (_, q)| {
+                    p.total
+                        .partial_cmp(&q.total)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("non-empty");
+            let path = pending.swap_remove(i);
+            if !settled.insert(path.ext.node) {
+                continue;
+            }
+            if admits(&path) {
+                matches.push((path.clone(), 0));
+            }
+            if path.hops >= n_max {
+                continue;
+            }
+            for alt in &group.alts {
+                for p in expand_elems(
+                    adapter,
+                    alt,
+                    vec![path.clone()],
+                    trace,
+                    outer,
+                    witness,
+                    Some(b),
+                    promise.borrow().as_deref(),
+                ) {
+                    if !settled.contains(&p.ext.node) {
+                        pending.push(p);
+                    }
+                }
+            }
+            if crate::value::ambient::refusal_pending() {
+                return Vec::new();
+            }
+            if pending.len() > f_max {
+                record_refusal_coded(
+                    FRONTIER_BOUND,
+                    format!("round {rounds}"),
+                    format!(
+                        "the frontier bound ({f_max}) is exceeded at round {rounds}: {} \
+                         expansion paths in flight; give the quantifier a ceiling, \
+                         {{;M}}, or raise --frontier-bound",
+                        pending.len()
+                    ),
+                );
+                return Vec::new();
+            }
+        }
+        return exit_walk(
+            matches.into_iter().map(|(p, _)| p).collect(),
+            budget.as_ref(),
+        );
+    }
+    let mut frontier = vec![anchor];
+    let mut answered = false;
+    for count in 1..=hi {
+        frontier = advance(&frontier, count);
+        // a refusal met on a hop (a cycle under the promise, a
+        // negative weight) voids the walk, whatever it matched
+        if crate::value::ambient::refusal_pending() {
+            return Vec::new();
+        }
         if frontier.is_empty() {
             break;
+        }
+        // The frontier bound: paths in flight after the round's
+        // merge. A set walk never nears it (at most one arrival per
+        // edge); an exact walk over data with many routes to a node
+        // does, and refuses by name.
+        if frontier.len() > f_max {
+            record_refusal_coded(
+                FRONTIER_BOUND,
+                format!("round {count}"),
+                format!(
+                    "the frontier bound ({f_max}) is exceeded at round {count}: {} \
+                     expansion paths in flight; give the quantifier a ceiling, \
+                     {{;M}}, or raise --frontier-bound",
+                    frontier.len()
+                ),
+            );
+            return Vec::new();
         }
         if count >= group.quant.min {
             let before = matches.len();
@@ -436,32 +996,17 @@ pub(crate) fn expand_group(
     // still in flight: probe one more round. If anything is still
     // walkable the closure is truncated — refuse out loud instead
     // of returning it as if complete.
-    if group.quant.max.is_none() && !answered && !frontier.is_empty() {
-        let mut probe = Vec::new();
-        for path in &frontier {
-            for alt in &group.alts {
-                probe.extend(expand_elems(
-                    adapter,
-                    alt,
-                    vec![path.clone()],
-                    trace,
-                    outer,
-                    witness,
-                ));
-                if !probe.is_empty() {
-                    break;
-                }
-            }
-            if !probe.is_empty() {
-                break;
-            }
-        }
-        if !probe.is_empty() {
-            record_refusal(format!(
-                "quantifier bound reached at round {n_max} with edges \
-                 still to take — the closure would be silently \
-                 incomplete; raise --quantifier-bound"
-            ));
+    if !set_walk && group.quant.max.is_none() && !answered && !frontier.is_empty() {
+        if !advance(&frontier, n_max + 1).is_empty() {
+            record_refusal_coded(
+                QUANTIFIER_BOUND,
+                format!("round {n_max}"),
+                format!(
+                    "quantifier bound reached at round {n_max} with edges \
+                     still to take — the closure would be silently \
+                     incomplete; raise --quantifier-bound"
+                ),
+            );
             return Vec::new();
         }
     }
@@ -470,11 +1015,82 @@ pub(crate) fn expand_group(
         Reach::Proximal => matches.iter().map(|&(_, c)| c).min(),
         Reach::Distal => matches.iter().map(|&(_, c)| c).max(),
     };
-    matches
-        .into_iter()
-        .filter(|&(_, c)| extreme.is_none_or(|e| c == e))
-        .map(|(p, _)| p)
-        .collect()
+    // Under a budget the distal reach is the heaviest walk within it,
+    // the count of hops aside.
+    let out: Vec<GPath> = if budget.is_some() && group.reach == Reach::Distal {
+        let heaviest = matches
+            .iter()
+            .map(|(p, _)| p.total)
+            .fold(f64::NEG_INFINITY, f64::max);
+        matches
+            .into_iter()
+            .filter(|(p, _)| p.total == heaviest)
+            .map(|(p, _)| p)
+            .collect()
+    } else {
+        matches
+            .into_iter()
+            .filter(|&(_, c)| extreme.is_none_or(|e| c == e))
+            .map(|(p, _)| p)
+            .collect()
+    };
+    // The markers are the one per-node selection (spec: Expansion
+    // paths): the proximal and the distal reach answer each node
+    // once, its first walk at the tier; every other form every walk.
+    let out: Vec<GPath> = if group.reach == Reach::All {
+        out
+    } else {
+        let mut once: HashSet<(NodeId, Vec<(Option<String>, String)>)> = HashSet::new();
+        out.into_iter()
+            .filter(|p| once.insert((p.ext.node, reg_key(&p.register))))
+            .collect()
+    };
+    let mut out = exit_walk(out, budget.as_ref());
+    // An exact group inside a set walk: its results rejoin the set
+    // walk with the anchor's ground, as set paths.
+    if anchor_was_set && !set_walk {
+        for p in &mut out {
+            p.set_walk = true;
+            p.visited = anchor_ground.clone();
+        }
+    }
+    out
+}
+
+/// The walk's results leave the group with the walk's facts on them
+/// (spec: Edge facts): the one command after the group reads `$-`
+/// and `$-:round`, `$-:hops`, `$-:total` for the walk that ended
+/// there.
+fn exit_walk(mut out: Vec<GPath>, budget: Option<&BudgetBounds>) -> Vec<GPath> {
+    for p in &mut out {
+        p.ext.walk = Some(match budget {
+            Some(b) => b.facts(p),
+            None => p.facts(),
+        });
+    }
+    out
+}
+
+/// Whether a quantifier's form asks for a node set alone: an open
+/// quantifier with a floor of at most one, under all matches or the
+/// proximal reach — the forms whose answer the distance expansion
+/// gives exactly, since the nodes some acyclic walk reaches are the
+/// nodes a shortest walk reaches (spec: Expansion paths). An exact
+/// count, a ceiling, a floor above one or the distal reach ask about
+/// acyclic walks of a given length and expand exactly.
+pub(crate) fn set_form(group: &Group) -> bool {
+    group.quant.min <= 1 && group.quant.max.is_none() && group.reach != Reach::Distal
+}
+
+/// Whether a pattern records nothing along the walk: no push and no
+/// mark in any alternative, nested groups included. A recording walk
+/// yields one result per walk, so it is exact whatever its form.
+pub(crate) fn group_is_plain(group: &Group) -> bool {
+    group.alts.iter().flatten().all(|e| match e {
+        PathElem::Step(_) => true,
+        PathElem::Group(g) => group_is_plain(g),
+        PathElem::Mark(_) | PathElem::Push { .. } => false,
+    })
 }
 
 /// `::name` on a node: the document's property, or — when the
@@ -494,6 +1110,7 @@ pub(crate) fn property_or_alias(adapter: &impl AstAdapter, node: NodeId, name: &
 
 /// Whether a path's endpoint passes the group's predicates, with
 /// the path's arrived-by edge in scope as `$-`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn group_admits(
     adapter: &impl AstAdapter,
     group: &Group,
@@ -501,6 +1118,7 @@ pub(crate) fn group_admits(
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
     witness: &[Option<NodeId>],
+    budget: Option<&BudgetBounds>,
 ) -> bool {
     if !group.traits.is_empty() && !trait_clauses_ok(adapter, path.ext.node, &group.traits) {
         return false;
@@ -517,12 +1135,18 @@ pub(crate) fn group_admits(
         })
         .collect();
     // The path's own register: the marks the walk filed are read
-    // from it (`$$.x` inside the group's guard).
+    // from it (`$$.x` inside the group's guard); the walk's facts
+    // beside the edge.
+    let facts = match budget {
+        Some(b) => b.facts(path),
+        None => path.facts(),
+    };
     let scope = Scope {
         prov: None,
         outer,
         register: &path.register,
         crossing: path.last_edge.as_ref(),
+        walk: Some(&facts),
         witness: (!witness.is_empty()).then_some(witness),
         ..Scope::at(&path.ext)
     };
@@ -543,11 +1167,119 @@ pub(crate) fn group_admits(
     )
 }
 
+/// Whether the group walks crosslinks alone: every hop of every
+/// alternative, nested groups included, is a link hop by a label or
+/// a wildcard — the walks the acyclic promise can spare their
+/// histories. A child step or a navop star leaves a walk its
+/// histories.
+fn group_walks_links(group: &Group) -> bool {
+    group.alts.iter().flatten().all(|elem| match elem {
+        PathElem::Mark(_) | PathElem::Push { .. } => true,
+        PathElem::Group(g) => group_walks_links(g),
+        PathElem::Step(step) => {
+            matches!(step.axis, Axis::OutLink | Axis::InLink | Axis::BothLink)
+                && matches!(step.matcher, Matcher::Name(_) | Matcher::Any)
+                && step.labels.is_empty()
+        }
+    })
+}
+
+/// The declaration promising every link the group walks acyclic
+/// (spec: Model Files, Acyclic links) before the first round: each
+/// hop a crosslink hop by an exact label the adapter promises. A
+/// wildcard hop resolves it from the edges crossed instead.
+fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
+    let mut decl: Option<String> = None;
+    for alt in &group.alts {
+        for elem in alt {
+            match elem {
+                PathElem::Mark(_) | PathElem::Push { .. } => {}
+                PathElem::Group(g) => {
+                    let d = group_promise(adapter, g)?;
+                    decl.get_or_insert(d);
+                }
+                PathElem::Step(step) => {
+                    if !matches!(step.axis, Axis::OutLink | Axis::InLink | Axis::BothLink) {
+                        return None;
+                    }
+                    let Matcher::Name(label) = &step.matcher else {
+                        return None;
+                    };
+                    let d = adapter.acyclic_link(label)?;
+                    decl.get_or_insert(d);
+                }
+            }
+        }
+    }
+    decl
+}
+
+/// A node named for a message by its path from the root
+/// (`/stations/1`), the names the adapter gives its ancestors.
+pub(crate) fn node_path(adapter: &impl AstAdapter, node: NodeId) -> String {
+    let mut segments = Vec::new();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n == adapter.root() {
+            break;
+        }
+        segments.push(adapter.name(n).unwrap_or_else(|| "*".to_string()));
+        cur = adapter.parent(n);
+    }
+    segments.reverse();
+    format!("/{}", segments.join("/"))
+}
+
+/// The exact walk under the acyclic promise: the paths of one round
+/// standing at one node with one capsa and one arriving edge are one
+/// expansion path, its ground the union of theirs — the nodes from
+/// which this one was reached, any of which reached again is a
+/// cycle. The breadcrumbs' provenance unites as in [`dedup_paths`].
+fn merge_by_position(paths: Vec<GPath>) -> Vec<GPath> {
+    let mut kept: Vec<GPath> = Vec::new();
+    let mut index: HashMap<
+        (
+            NodeId,
+            Vec<(Option<String>, String)>,
+            Option<(NodeId, String, NodeId)>,
+        ),
+        usize,
+    > = HashMap::new();
+    for p in paths {
+        let key = (
+            p.ext.node,
+            reg_key(&p.register),
+            p.last_edge
+                .as_ref()
+                .map(|e| (e.source, e.label.clone(), e.target)),
+        );
+        match index.get(&key) {
+            Some(&i) => {
+                let k = &mut kept[i];
+                for (a, b) in k.register.iter_mut().zip(&p.register) {
+                    a.prov.origins.union(&b.prov.origins);
+                }
+                for n in p.visited {
+                    if let Err(j) = k.visited.binary_search(&n) {
+                        k.visited.insert(j, n);
+                    }
+                }
+            }
+            None => {
+                index.insert(key, kept.len());
+                kept.push(p);
+            }
+        }
+    }
+    kept
+}
+
 /// Fold one alternative's elements over a set of in-flight paths.
-/// Steps apply from each path's node and drop successors the path has
-/// already visited; nested groups recurse with the outer path's
-/// visited set threaded through (a simple path never revisits a node,
-/// however deeply the pattern nests).
+/// Steps apply from each path's node and, on an exact walk's path, drop
+/// successors the path has already visited; nested groups recurse
+/// with the outer path's visited set threaded through (a simple path
+/// never revisits a node, however deeply the pattern nests). A set
+/// walk's path keeps no history: `expand_group` spends positions.
 pub(crate) fn expand_elems(
     adapter: &impl AstAdapter,
     elems: &[PathElem],
@@ -555,6 +1287,8 @@ pub(crate) fn expand_elems(
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
     witness: &[Option<NodeId>],
+    budget: Option<&BudgetBounds>,
+    promise: Option<&str>,
 ) -> Vec<GPath> {
     for elem in elems {
         // A mark files a reference to each in-flight path's node.
@@ -572,8 +1306,10 @@ pub(crate) fn expand_elems(
         for path in &paths {
             match elem {
                 PathElem::Step(step) => {
-                    let mut succs = Vec::new();
-                    apply_step(
+                    // a link hop hands its edges over: one walk per
+                    // edge (two rows on one leg, a node linked both
+                    // ways)
+                    let succs: Vec<(NodeId, Option<EdgeCtx>)> = if let Some(edges) = link_edges(
                         adapter,
                         path.ext.node,
                         step,
@@ -582,12 +1318,88 @@ pub(crate) fn expand_elems(
                         witness,
                         &path.ext,
                         &path.register,
-                        &mut succs,
-                    );
-                    next.extend(succs.into_iter().filter(|&s| !path.blocks(s)).map(|s| {
-                        let edge = arrived_edge(adapter, path.ext.node, step, s);
-                        path.with(s, edge)
-                    }));
+                    ) {
+                        edges.into_iter().map(|(s, e)| (s, Some(e))).collect()
+                    } else {
+                        let mut succs = Vec::new();
+                        apply_step(
+                            adapter,
+                            path.ext.node,
+                            step,
+                            trace,
+                            outer,
+                            witness,
+                            &path.ext,
+                            &path.register,
+                            &mut succs,
+                        );
+                        succs
+                            .into_iter()
+                            .map(|s| (s, arrived_edge(adapter, path.ext.node, step, s)))
+                            .collect()
+                    };
+                    for (s, edge) in succs {
+                        // A simple path never revisits a node; under
+                        // the acyclic promise a revisit is the data
+                        // breaking it, refused naming the declaration
+                        // (spec: Model Files, Acyclic links).
+                        if path.blocks(s) {
+                            if let Some(decl) = promise {
+                                record_refusal_coded(
+                                    crate::diagnostic::REFUSED,
+                                    "the walk",
+                                    format!(
+                                        "a cycle under the promise '{decl}': the walk from \
+                                         {} returns to {} after {} hop{}",
+                                        node_path(adapter, path.visited[0]),
+                                        node_path(adapter, s),
+                                        path.hops + 1,
+                                        if path.hops == 0 { "" } else { "s" }
+                                    ),
+                                );
+                                return Vec::new();
+                            }
+                            continue;
+                        }
+                        let mut p = path.with(s, edge);
+                        // Under a budget an edge is crossed with its
+                        // weight, or not at all: a missing weight is no
+                        // weight, never a free hop; past the ceiling the
+                        // path ends here.
+                        if let Some(b) = budget {
+                            let Some(edge) = &p.last_edge else { continue };
+                            match b.weight(adapter, edge) {
+                                Ok(Some(w)) => {
+                                    if w < 0.0 {
+                                        record_refusal_coded(
+                                            crate::diagnostic::REFUSED,
+                                            "the quantifier",
+                                            format!(
+                                                "a negative weight ({w} on '{}') under a budget: the \
+                                                 lightest walk needs weights of zero or more",
+                                                edge.label
+                                            ),
+                                        );
+                                        return Vec::new();
+                                    }
+                                    p.total += w;
+                                    if b.ceiling.is_some_and(|c| p.total > c) {
+                                        continue;
+                                    }
+                                }
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    record_refusal_coded(
+                                        crate::diagnostic::REFUSED,
+                                        "the quantifier",
+                                        e,
+                                    );
+                                    return Vec::new();
+                                }
+                            }
+                        }
+                        next.push(p);
+                    }
                 }
                 PathElem::Group(inner) => {
                     next.extend(expand_group(
@@ -607,10 +1419,15 @@ pub(crate) fn expand_elems(
                     // The body sees no marks (as before the frontier
                     // carried them): a bare attachment at the node.
                     let state = GraphExt::at(path.ext.node);
+                    let facts = match budget {
+                        Some(b) => b.facts(path),
+                        None => path.facts(),
+                    };
                     let scope = Scope {
                         prov: None,
                         outer,
                         crossing: path.last_edge.as_ref(),
+                        walk: Some(&facts),
                         witness: (!witness.is_empty()).then_some(witness),
                         ..Scope::at(&state)
                     };
@@ -640,9 +1457,10 @@ pub(crate) fn expand_elems(
             }
         }
         // Dedup by the full path key — never by node alone: two
-        // paths at the same node with different histories (ground
-        // covered, breadcrumbs, arrived-by edge) have different
-        // futures.
+        // exact-walk paths at the same node with different histories
+        // (ground covered, breadcrumbs, arrived-by edge) have
+        // different futures. A set walk's path carries the anchor's
+        // ground alone, so its key is position, capsa and edge.
         paths = dedup_paths(next);
         if paths.is_empty() {
             break;
@@ -788,6 +1606,7 @@ pub(crate) fn apply_step(
                         source: node,
                         label: CHILD.into(),
                         target: n,
+                        row: None,
                     })
                 },
             ));
@@ -825,6 +1644,7 @@ pub(crate) fn apply_step(
                         source: adapter.parent(n).unwrap_or(node),
                         label: CHILD.into(),
                         target: n,
+                        row: None,
                     })
                 },
             );
@@ -852,6 +1672,7 @@ pub(crate) fn apply_step(
                         source: node,
                         label: PARENT.into(),
                         target: p,
+                        row: None,
                     })
                 },
             ));
@@ -889,6 +1710,7 @@ pub(crate) fn apply_step(
                         source: preds.get(&n).copied().unwrap_or(node),
                         label: PARENT.into(),
                         target: n,
+                        row: None,
                     })
                 },
             );
@@ -914,6 +1736,7 @@ pub(crate) fn apply_step(
                         source: node,
                         label: NEXT.into(),
                         target: sib,
+                        row: None,
                     })
                 },
             ));
@@ -938,6 +1761,7 @@ pub(crate) fn apply_step(
                         source: node,
                         label: PREV.into(),
                         target: sib,
+                        row: None,
                     })
                 },
             ));
@@ -982,61 +1806,22 @@ pub(crate) fn apply_step(
                         source: node,
                         label: if following { NEXT.into() } else { PREV.into() },
                         target: sib,
+                        row: None,
                     })
                 },
             );
             out.extend(by_reach(found, *reach));
         }
-        Axis::OutLink => {
-            let matched: Vec<(String, NodeId)> = select_links(step, &links_of(adapter, node))
-                .into_iter()
-                .filter(|(_, target)| tests_ok(adapter, *target, step))
-                .collect();
-            let kept = apply_predicates(
-                adapter,
-                matched,
-                step,
-                trace,
-                outer,
-                witness,
-                state,
-                register,
-                |(_, n)| *n,
-                |(label, target)| {
-                    Some(EdgeCtx {
-                        source: node,
-                        label: label.clone(),
-                        target: *target,
-                    })
-                },
+        // the link axes: one successor per edge, the headless hop
+        // both ways — `link_edges` is the arm, the edges it hands
+        // over read by the walks that keep them
+        Axis::OutLink | Axis::InLink => {
+            out.extend(
+                link_edges(adapter, node, step, trace, outer, witness, state, register)
+                    .expect("a link axis")
+                    .into_iter()
+                    .map(|(n, _)| n),
             );
-            out.extend(kept.into_iter().map(|(_, target)| target));
-        }
-        Axis::InLink => {
-            let matched: Vec<(String, NodeId)> = select_links(step, &backlinks_of(adapter, node))
-                .into_iter()
-                .filter(|(_, source)| tests_ok(adapter, *source, step))
-                .collect();
-            let kept = apply_predicates(
-                adapter,
-                matched,
-                step,
-                trace,
-                outer,
-                witness,
-                state,
-                register,
-                |(_, n)| *n,
-                // The walked edge points INTO the current node.
-                |(label, source)| {
-                    Some(EdgeCtx {
-                        source: *source,
-                        label: label.clone(),
-                        target: node,
-                    })
-                },
-            );
-            out.extend(kept.into_iter().map(|(_, source)| source));
         }
         // `--` — both directions under one matcher: the node's
         // outgoing crosslinks and its backlinks, each edge kept
@@ -1044,6 +1829,14 @@ pub(crate) fn apply_step(
         // reports source and target faithfully.
         Axis::BothLink => both_link_step(
             adapter, node, step, trace, outer, witness, state, register, out,
+        ),
+        // `~` — every edge touching the node, the far ends the step
+        // keeps; `~~` the walk over every edge ending at such a hop.
+        Axis::Any => any_edge_step(
+            adapter, node, step, trace, outer, witness, state, register, out,
+        ),
+        Axis::AnyDeep(reach) => any_deep_step(
+            reach, adapter, node, step, trace, outer, witness, state, register, out,
         ),
         Axis::Resolve {
             property,
@@ -1148,13 +1941,188 @@ pub(crate) fn descendant_step(
                 source: adapter.parent(n).unwrap_or(node),
                 label: CHILD.into(),
                 target: n,
+                row: None,
             })
         },
     );
     out.extend(by_reach(found, *reach));
 }
 
+/// The edges touching `node` whose far end `step` keeps: the tree
+/// edges by the far end's name (a child's, the parent's — the name
+/// algebra and the nameless tests as on `/` and `\`), the crosslinks
+/// by their label (as on `->` and `<-`, the nameless tests on the far
+/// end). Each with its edge context, in the order children, parent,
+/// outgoing, incoming. Siblings are an order, not edges.
+pub(crate) fn incident_edges(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    step: &Step,
+) -> Vec<(NodeId, EdgeCtx)> {
+    let mut out = Vec::new();
+    for c in adapter.children(node) {
+        if matches_step(adapter, c, step) {
+            out.push((
+                c,
+                EdgeCtx {
+                    source: node,
+                    label: CHILD.into(),
+                    target: c,
+                    row: None,
+                },
+            ));
+        }
+    }
+    if let Some(p) = adapter.parent(node)
+        && matches_step(adapter, p, step)
+    {
+        out.push((
+            p,
+            EdgeCtx {
+                source: node,
+                label: PARENT.into(),
+                target: p,
+                row: None,
+            },
+        ));
+    }
+    for (label, t, row) in select_links(step, &links_of(adapter, node), |l, _| {
+        adapter.link_consumed(node, l)
+    }) {
+        if tests_ok(adapter, t, step) {
+            out.push((
+                t,
+                EdgeCtx {
+                    source: node,
+                    label,
+                    target: t,
+                    row,
+                },
+            ));
+        }
+    }
+    for (label, s, row) in select_links(step, &backlinks_of(adapter, node), |l, s| {
+        adapter.link_consumed(s, l)
+    }) {
+        if tests_ok(adapter, s, step) {
+            out.push((
+                s,
+                EdgeCtx {
+                    source: s,
+                    label,
+                    target: node,
+                    row,
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// The step `~*`: every edge, any far end.
+fn wild_edge_step() -> Step {
+    Step {
+        axis: Axis::Any,
+        matcher: Matcher::Any,
+        labels: Vec::new(),
+        traits: Vec::new(),
+        predicates: Vec::new(),
+        leaf: false,
+    }
+}
+
+/// `~` — the navop star: every edge touching the node, either
+/// direction, the far ends the step keeps. `apply_step`'s arm.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn any_edge_step(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    step: &Step,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+    witness: &[Option<NodeId>],
+    state: &GraphExt,
+    register: &[Reg],
+    out: &mut Vec<NodeId>,
+) {
+    let matched = incident_edges(adapter, node, step);
+    let kept = apply_predicates(
+        adapter,
+        matched,
+        step,
+        trace,
+        outer,
+        witness,
+        state,
+        register,
+        |(n, _)| *n,
+        |(_, e)| Some(e.clone()),
+    );
+    out.extend(kept.into_iter().map(|(n, _)| n));
+}
+
+/// `~~` — the deep navop star, `(~*)*~name`: the plain walk over
+/// every edge from the node (each node reached once, at the fewest
+/// rounds, the node itself at depth 0), then the matching hop from
+/// every node reached, at the tier after its depth; the reach picks
+/// the nearest or the farthest tier. `apply_step`'s arm.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn any_deep_step(
+    reach: &Reach,
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    step: &Step,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+    witness: &[Option<NodeId>],
+    state: &GraphExt,
+    register: &[Reg],
+    out: &mut Vec<NodeId>,
+) {
+    let wild = wild_edge_step();
+    let mut seen: HashSet<NodeId> = HashSet::from([node]);
+    let mut reached: Vec<(NodeId, usize)> = vec![(node, 0)];
+    let mut frontier = vec![node];
+    let mut depth = 0;
+    while !frontier.is_empty() {
+        depth += 1;
+        let mut next = Vec::new();
+        for n in &frontier {
+            for (far, _) in incident_edges(adapter, *n, &wild) {
+                if seen.insert(far) {
+                    next.push(far);
+                }
+            }
+        }
+        reached.extend(next.iter().map(|n| (*n, depth)));
+        frontier = next;
+    }
+    let mut found: Vec<((NodeId, EdgeCtx), usize)> = Vec::new();
+    for (n, d) in &reached {
+        for hit in incident_edges(adapter, *n, step) {
+            found.push((hit, d + 1));
+        }
+    }
+    let kept = apply_predicates(
+        adapter,
+        found,
+        step,
+        trace,
+        outer,
+        witness,
+        state,
+        register,
+        |((n, _), _)| *n,
+        |((_, e), _)| Some(e.clone()),
+    );
+    out.extend(crate::graph::navigate::dedup(by_reach(
+        kept.into_iter().map(|((n, _), d)| (n, d)).collect(),
+        *reach,
+    )));
+}
+
 /// `<->` — the links in both directions. `apply_step`'s arm.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn both_link_step(
     adapter: &impl AstAdapter,
     node: NodeId,
@@ -1166,16 +2134,77 @@ pub(crate) fn both_link_step(
     register: &[Reg],
     out: &mut Vec<NodeId>,
 ) {
-    let matched: Vec<(String, NodeId, bool)> = select_links(step, &links_of(adapter, node))
-        .into_iter()
-        .map(|(label, target)| (label, target, true))
-        .chain(
-            select_links(step, &backlinks_of(adapter, node))
-                .into_iter()
-                .map(|(label, source)| (label, source, false)),
-        )
-        .filter(|(_, other, _)| tests_ok(adapter, *other, step))
-        .collect();
+    out.extend(
+        link_edges(adapter, node, step, trace, outer, witness, state, register)
+            .expect("the headless axis")
+            .into_iter()
+            .map(|(n, _)| n),
+    );
+}
+
+/// A link hop's successors, each with the edge it crosses: `->` the
+/// outgoing links, `<-` the incoming, `--` both (the edge context
+/// recording the edge's true direction — the walk just declined to
+/// assert it). `None` for any other axis. One successor per EDGE:
+/// a node reached by two rows of an edge-declared table, or linked
+/// both ways, is reached twice, one thread per edge (spec: Expansion
+/// paths, Edge rows), which is why the hop hands its edges over
+/// rather than leaving them to be re-derived from the node
+/// (`arrived_edge` finds the first).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn link_edges(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    step: &Step,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+    witness: &[Option<NodeId>],
+    state: &GraphExt,
+    register: &[Reg],
+) -> Option<Vec<(NodeId, EdgeCtx)>> {
+    let (outgoing, incoming) = match step.axis {
+        Axis::OutLink => (true, false),
+        Axis::InLink => (false, true),
+        Axis::BothLink => (true, true),
+        _ => return None,
+    };
+    let mut matched: Vec<(String, NodeId, bool, Option<NodeId>)> = Vec::new();
+    if outgoing {
+        matched.extend(
+            select_links(step, &links_of(adapter, node), |l, _| {
+                adapter.link_consumed(node, l)
+            })
+            .into_iter()
+            .map(|(label, target, row)| (label, target, true, row)),
+        );
+    }
+    if incoming {
+        matched.extend(
+            select_links(step, &backlinks_of(adapter, node), |l, s| {
+                adapter.link_consumed(s, l)
+            })
+            .into_iter()
+            .map(|(label, source, row)| (label, source, false, row)),
+        );
+    }
+    matched.retain(|(_, other, _, _)| tests_ok(adapter, *other, step));
+    let edge_of = |label: &String, other: NodeId, out: bool, row: Option<NodeId>| {
+        if out {
+            EdgeCtx {
+                source: node,
+                label: label.clone(),
+                target: other,
+                row,
+            }
+        } else {
+            EdgeCtx {
+                source: other,
+                label: label.clone(),
+                target: node,
+                row,
+            }
+        }
+    };
     let kept = apply_predicates(
         adapter,
         matched,
@@ -1185,24 +2214,14 @@ pub(crate) fn both_link_step(
         witness,
         state,
         register,
-        |(_, n, _)| *n,
-        |(label, other, outgoing)| {
-            Some(if *outgoing {
-                EdgeCtx {
-                    source: node,
-                    label: label.clone(),
-                    target: *other,
-                }
-            } else {
-                EdgeCtx {
-                    source: *other,
-                    label: label.clone(),
-                    target: node,
-                }
-            })
-        },
+        |(_, n, _, _)| *n,
+        |(label, other, out, row)| Some(edge_of(label, *other, *out, *row)),
     );
-    out.extend(kept.into_iter().map(|(_, other, _)| other));
+    Some(
+        kept.into_iter()
+            .map(|(label, other, out, row)| (other, edge_of(&label, other, out, row)))
+            .collect(),
+    )
 }
 
 /// `-->` — follow a reference property to its target. `apply_step`'s arm.
@@ -1243,6 +2262,7 @@ pub(crate) fn resolve_step(
                         source: node,
                         label: p.clone(),
                         target: t,
+                        row: None,
                     })
                 },
             ));
@@ -1330,15 +2350,17 @@ pub(crate) fn resolve_step(
         state,
         register,
         |&n| n,
-        // A resolution edge is labeled by its relation —
-        // html's rel — falling back to the property name.
+        // A resolution edge is labeled by its relation — html's
+        // rel — falling back to the property's reference label
+        // (the name without its `_id` suffix).
         |&t| {
             Some(EdgeCtx {
                 source: node,
                 label: adapter
                     .ref_label(node, property)
-                    .unwrap_or_else(|| property.clone()),
+                    .unwrap_or_else(|| reference_label(property).to_string()),
                 target: t,
+                row: None,
             })
         },
     ));
@@ -1726,6 +2748,7 @@ pub(crate) fn value_match_step(
                 source: node,
                 label: format!("{property}={target}"),
                 target: u,
+                row: None,
             })
         },
     ));
@@ -1759,8 +2782,11 @@ pub(crate) fn reverse_found(
         |&(source, ref p)| {
             Some(EdgeCtx {
                 source,
-                label: adapter.ref_label(source, p).unwrap_or_else(|| p.clone()),
+                label: adapter
+                    .ref_label(source, p)
+                    .unwrap_or_else(|| reference_label(p).to_string()),
                 target: node,
+                row: None,
             })
         },
     )
@@ -1779,7 +2805,7 @@ pub(crate) fn prefetch_hint(
     let dirs: &[crate::graph::adapter::LinkDir] = match step.axis {
         Axis::OutLink => &[crate::graph::adapter::LinkDir::Out],
         Axis::InLink => &[crate::graph::adapter::LinkDir::In],
-        Axis::BothLink => &[
+        Axis::BothLink | Axis::Any | Axis::AnyDeep(_) => &[
             crate::graph::adapter::LinkDir::Out,
             crate::graph::adapter::LinkDir::In,
         ],
@@ -1976,6 +3002,7 @@ pub fn node_matches_elem(adapter: &impl AstAdapter, node: NodeId, elem: &PathEle
             source: adapter.parent(*n).unwrap_or(*n),
             label: CHILD.into(),
             target: *n,
+            row: None,
         })
     };
     match elem {
@@ -2083,6 +3110,7 @@ pub(crate) fn apply_predicates<T>(
                     outer,
                     register,
                     crossing: None,
+                    walk: None,
                     witness: (!witness.is_empty()).then_some(witness),
                     ..Scope::at(state)
                 };
@@ -2104,6 +3132,7 @@ pub(crate) fn apply_predicates<T>(
                                 outer,
                                 register,
                                 crossing: None,
+                                walk: None,
                                 witness: (!witness.is_empty()).then_some(witness),
                                 ..Scope::at(state)
                             };
@@ -2140,6 +3169,7 @@ pub(crate) fn apply_predicates<T>(
                         outer,
                         register,
                         crossing: edge.as_ref(),
+                        walk: None,
                         witness: (!witness.is_empty()).then_some(witness),
                         ..Scope::at(&state)
                     };
@@ -2270,30 +3300,41 @@ pub(crate) fn matches_label(matcher: &Matcher, label: &str) -> bool {
     matches!(matcher, Matcher::Any) || matcher.matches(label)
 }
 
-/// The crosslinks among `pairs` (label, other node) a step keeps.
-/// By its matcher, one per edge; by its label selection
+/// The crosslinks among `links` (label, other node, row) a step
+/// keeps. By its matcher, one per edge; by its label selection
 /// (`->(a && !b)`), one per other node, the selection reading the
 /// labels the crosslinks to that node carry together (spec: Label
 /// Selections) — the edge kept carries the first of them.
-pub(crate) fn select_links(step: &Step, pairs: &[(String, NodeId)]) -> Vec<(String, NodeId)> {
+pub(crate) fn select_links(
+    step: &Step,
+    links: &[(String, NodeId, Option<NodeId>)],
+    consumed: impl Fn(&str, NodeId) -> bool,
+) -> Vec<(String, NodeId, Option<NodeId>)> {
     if step.labels.is_empty() {
-        return pairs
+        // A bare wildcard skips the references an edge declaration
+        // consumed; a label named, a pattern or a selection reaches
+        // them (spec: Edge rows). `consumed` is asked with the far
+        // end, so a backward site can name the link's source.
+        let wild = matches!(step.matcher, Matcher::Any);
+        return links
             .iter()
-            .filter(|(l, _)| matches_label(&step.matcher, l))
+            .filter(|(l, n, _)| matches_label(&step.matcher, l) && !(wild && consumed(l, *n)))
             .cloned()
             .collect();
     }
-    let mut grouped: Vec<(NodeId, Vec<String>)> = Vec::new();
-    for (l, n) in pairs {
-        match grouped.iter_mut().find(|(m, _)| m == n) {
+    // the name algebra reads the labels one edge carries: a row is
+    // one edge of its own, a plain link's labels those to its far end
+    let mut grouped: Vec<((NodeId, Option<NodeId>), Vec<String>)> = Vec::new();
+    for (l, n, r) in links {
+        match grouped.iter_mut().find(|(k, _)| *k == (*n, *r)) {
             Some((_, ls)) => ls.push(l.clone()),
-            None => grouped.push((*n, vec![l.clone()])),
+            None => grouped.push(((*n, *r), vec![l.clone()])),
         }
     }
     grouped
         .into_iter()
         .filter(|(_, ls)| step.labels.iter().all(|c| c.matches(ls)))
-        .map(|(n, mut ls)| (ls.swap_remove(0), n))
+        .map(|((n, r), mut ls)| (ls.swap_remove(0), n, r))
         .collect()
 }
 

@@ -204,6 +204,35 @@ impl MockTree {
         }
     }
 
+    /// An n×n grid of cells `c1`…`cN` under the root, each linked
+    /// `r` to its right neighbour and `d` to the one below.
+    fn lattice(n: u64) -> Self {
+        let mut names = vec![None];
+        names.extend((1..=n * n).map(|i| Some(format!("c{i}"))));
+        let mut kids = HashMap::new();
+        kids.insert(0, (1..=n * n).collect());
+        let mut links = HashMap::new();
+        for i in 1..=n * n {
+            let (x, y) = ((i - 1) % n, (i - 1) / n);
+            let mut out = Vec::new();
+            if x < n - 1 {
+                out.push(("r".to_string(), i + 1));
+            }
+            if y < n - 1 {
+                out.push(("d".to_string(), i + n));
+            }
+            links.insert(i, out);
+        }
+        MockTree {
+            names,
+            kids,
+            loose: Vec::new(),
+            links,
+            edge_props: HashMap::new(),
+            prov: HashMap::new(),
+        }
+    }
+
     /// The sample tree with a `mgr` crosslink cycle laid over it:
     /// x.rs → z.rs → w.rs → x.rs.
     fn cyclic() -> Self {
@@ -273,6 +302,34 @@ impl MockTree {
 }
 
 impl MockTree {
+    /// The diamond with lengths on its `e` edges, as unit text:
+    /// a -4km-> x.rs, a -1km-> y.txt, x.rs -12km-> deep,
+    /// y.txt -2km-> deep; deep -3km-> x.rs closes the cycle. The
+    /// a→y.txt edge also carries a duration, the y.txt→deep edge a
+    /// second length (`detour`), for the dimension rules.
+    fn roads() -> Self {
+        let mut t = MockTree::diamond();
+        let mut w = |s: u64, t_: u64, props: Vec<(&str, Value)>| {
+            t.edge_props.insert(
+                (s, "e".to_string(), t_),
+                props.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
+            );
+        };
+        w(1, 2, vec![("len", Value::Str("4 km".into()))]);
+        w(
+            1,
+            3,
+            vec![
+                ("len", Value::Str("1 km".into())),
+                ("time", Value::Str("2 h".into())),
+            ],
+        );
+        w(2, 6, vec![("len", Value::Str("12 km".into()))]);
+        w(3, 6, vec![("len", Value::Str("2 km".into()))]);
+        w(6, 2, vec![("len", Value::Str("3 km".into()))]);
+        t
+    }
+
     /// The sample tree with weighted `e` edges laid over it:
     /// a -4-> x.rs, a -1-> y.txt; x.rs -12-> deep.
     fn weighted() -> Self {
@@ -341,6 +398,13 @@ impl AstAdapter for MockTree {
             })
             .collect()
     }
+    fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
+        self.edge_props
+            .get(&(source.0, label.to_string(), target.0))
+            .map(|ps| ps.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default()
+    }
+
     fn link_property(
         &self,
         source: NodeId,
@@ -605,6 +669,8 @@ fn label_algebra() {
         ],
     );
     assert_eq!(run("/a/x.rs->(ref && doc)", &t), vec![7]);
+    // (a label selection reads the labels to one node together,
+    // one thread per node — spec: Label Selections)
     assert_eq!(run("/a/x.rs->(ref || doc)", &t), vec![7, 5]);
     assert_eq!(run("/a/x.rs->(doc || ref)", &t), vec![7, 5]);
     assert_eq!(run("/a/x.rs->(!doc)", &t), vec![5]);
@@ -621,9 +687,12 @@ fn label_algebra() {
     let c = MockTree::cyclic();
     assert_eq!(run("/a/x.rs->(mgr && !x){2}", &c), vec![7]);
     assert_eq!(run("/a/x.rs(->(mgr || x)){2}", &c), vec![7]);
-    // the plain alternation is the union under its older spelling
+    // the plain alternation is the union of two hops under its
+    // older spelling: one thread per edge, so 7 twice; collapsed,
+    // the selection's node set
+    assert_eq!(run("/a/x.rs->(ref|doc)", &t), vec![7, 5, 7]);
     assert_eq!(
-        run("/a/x.rs->(ref|doc)", &t),
+        run("/a/x.rs->(ref|doc) @| collapse", &t),
         run("/a/x.rs->(ref || doc)", &t)
     );
     // the words of the family spell the operators too
@@ -652,6 +721,8 @@ fn zero_repetitions_keep_the_anchor() {
     assert_eq!(run("/b(/deep)*", &t), vec![4, 6]);
     // {0,1} spells the same reach explicitly.
     assert_eq!(run("/b(/deep){0;1}", &t), vec![4, 6]);
+    // {;1} is {0;1}: the ceiling alone, the start included.
+    assert_eq!(run("/b(/deep){;1}", &t), vec![4, 6]);
 }
 
 #[test]
@@ -679,15 +750,24 @@ fn quantifier_bound_refuses_out_loud() {
         }
     }
     let t = Bounded(MockTree::lists());
-    // The third li sits beyond the bound: the walk still has
-    // edges to take when the rounds run out, so the closure
-    // would be silently incomplete — refused, out loud.
     let refusal = |q: &str| {
         let out = run(q, &t);
         let msg = take_refusal();
         (out, msg)
     };
+    // The proximal reach is a set expansion to its first tier with
+    // a match: the quantifier bound does not count its rounds.
+    let (out, msg) = refusal("/div(/ul/li)+?");
+    assert_eq!(out, vec![3]);
+    assert!(msg.is_none());
+    // Every walk is answered (spec: Expansion paths): `+` is an
+    // exact walk under the bound, and the third li sits beyond it —
+    // edges still to take when the rounds run out, so the closure
+    // would be silently incomplete: refused, out loud.
     let (out, msg) = refusal("/div(/ul/li)+");
+    assert!(out.is_empty());
+    assert!(msg.unwrap().contains("quantifier bound reached"));
+    let (out, msg) = refusal("/div(/ul/li)+!");
     assert!(out.is_empty());
     assert!(msg.unwrap().contains("quantifier bound reached"));
     // An explicit ceiling beyond the bound refuses up front —
@@ -833,14 +913,23 @@ fn group_predicates_filter_before_reach() {
 #[test]
 fn arrived_edges_aggregate() {
     let t = MockTree::converging();
-    // deep is reached by two crossings; one capsa, both edges.
+    // deep is reached by two crossings: two threads, each with its
+    // own arriving edge (spec: Expansion paths); `@| collapse`
+    // gathers them into one with both edges
     assert_eq!(
         vals("//a->e->e | .(@-::qty) | $.", &t),
+        vec![
+            Value::list(vec![Value::Int(12)]),
+            Value::list(vec![Value::Int(5)])
+        ]
+    );
+    assert_eq!(
+        vals("//a->e->e @| collapse | .(@-::qty) | $.", &t),
         vec![Value::list(vec![Value::Int(12), Value::Int(5)])]
     );
     // bare @- reads the labels
     assert_eq!(
-        vals("//a->e->e | .(@-) | $.", &t),
+        vals("//a->e->e @| collapse | .(@-) | $.", &t),
         vec![Value::list(vec![
             Value::Str("e".into()),
             Value::Str("e".into())
@@ -851,15 +940,15 @@ fn arrived_edges_aggregate() {
         vals("/a | .(@-) | $.", &t),
         vec![Value::list(vec![Value::Str("[child]".into())])]
     );
-    // per-path capsae stay distinct when their breadcrumbs
-    // differ — one final crossing each; identical breadcrumbs
-    // merge, and their crossings aggregate
+    // per-path capsae stay distinct — one final crossing each;
+    // collapsed, identical breadcrumbs are kept once and the
+    // crossings aggregate
     assert_eq!(
         vals("//a(->e .($-::qty))->e | .(@-) @| count", &t),
         vec![Value::Int(2)]
     );
     assert_eq!(
-        vals("//a(->e .(1))->e | .(@-::qty) | $.", &t),
+        vals("//a(->e .(1))->e @| collapse | .(@-::qty) | $.", &t),
         vec![Value::list(vec![Value::Int(12), Value::Int(5)])]
     );
     // command form: `| @-::prop` sets the topic directly, and
@@ -974,25 +1063,35 @@ fn trait_negation() {
 fn map_pipe() {
     // deep is reached by two weighted crossings: qty [12, 5].
     let t = MockTree::converging();
-    // map: transform each element, capsae unchanged
+    // map: transform each element, capsae unchanged (the two
+    // routes to deep collapsed into one thread first)
     assert_eq!(
-        vals("//a->e->e | .(@-::qty) | $. $| ($_ * 10) | json", &t),
+        vals(
+            "//a->e->e @| collapse | .(@-::qty) | $. $| ($_ * 10) | json",
+            &t
+        ),
         vec![Value::Str("[120, 50]".into())]
     );
     // filter elements ($_ = the element): the comprehension WHERE
     assert_eq!(
-        vals("//a->e->e | .(@-::qty) | $. $| [$_ > 6] | json", &t),
+        vals(
+            "//a->e->e @| collapse | .(@-::qty) | $. $| [$_ > 6] | json",
+            &t
+        ),
         vec![Value::Str("[12]".into())]
     );
     // positional slice
     assert_eq!(
-        vals("//a->e->e | .(@-::qty) | $. $| [1..1] | json", &t),
+        vals(
+            "//a->e->e @| collapse | .(@-::qty) | $. $| [1..1] | json",
+            &t
+        ),
         vec![Value::Str("[12]".into())]
     );
     // @_ inside a map reads the ELEMENT context: self-normalize
     assert_eq!(
         vals(
-            "//a->e->e | .(@-::qty) | $. $| (($_ * 100 div (@_ @| sum) | round)) | json",
+            "//a->e->e @| collapse | .(@-::qty) | $. $| (($_ * 100 div (@_ @| sum) | round)) | json",
             &t
         ),
         vec![Value::Str("[71, 29]".into())]
@@ -1009,16 +1108,582 @@ fn map_pipe() {
 }
 
 #[test]
-fn simple_path_dedup_is_by_visited_set() {
-    // a → {x.rs, y.txt} → deep → x.rs (all labeled `e`): two
-    // routes meet at deep with different histories; only the
-    // y.txt route may continue back to x.rs. Deduping in-flight
-    // paths by node alone would drop one history at deep and
-    // could lose the count-3 match.
+fn set_walk_and_exact_walk_on_a_diamond() {
+    // a → {x.rs, y.txt} → deep → x.rs (all labeled `e`). Every
+    // walk is a thread (spec: Expansion paths): x, y, deep by x,
+    // deep by y, x by y and deep; the proximal reach is the first
+    // tier alone; `@| collapse` the node set.
     let t = MockTree::diamond();
-    assert_eq!(run("//a(->e)+", &t), vec![2, 3, 6]);
-    // the longest simple path: a → y.txt → deep → x.rs
+    assert_eq!(run("//a(->e)+", &t), vec![2, 3, 6, 6, 2]);
+    assert_eq!(run("//a(->e)+ @| collapse", &t), vec![2, 3, 6]);
+    assert_eq!(run("//a(->e)+?", &t), vec![2, 3]);
+    assert_eq!(run("//a(->e)*", &t).len(), 6);
+    assert_eq!(run("//a(->e)* @| collapse", &t).len(), 4);
+    // The exact walk (a count, a range, a floor above one, the
+    // distal reach) asks about acyclic walks of a given length:
+    // x.rs stands three hops out along a, y.txt, deep, and is the
+    // farthest end.
     assert_eq!(run("//a(->e)+!", &t), vec![2]);
+    assert_eq!(run("//a(->e){3}", &t), vec![2]);
+    assert_eq!(run("//a(->e){2;3}", &t), vec![6, 6, 2]);
+    assert_eq!(run("//a(->e){2;}", &t), vec![6, 6, 2]);
+    // A recording walk is exact whatever its form: one result per
+    // walk, the route through y.txt three breadcrumbs long.
+    assert_eq!(
+        vals("//a(->e .(1))+! | @. | count", &t),
+        vec![Value::Int(3)]
+    );
+    assert_eq!(
+        vals("//a(->e .(1)){3}:name", &t),
+        vec![Value::Str("x.rs".into())]
+    );
+}
+
+#[test]
+fn set_walk_over_a_lattice_is_polynomial() {
+    // A 12×12 grid, each cell linked right and down: the routes to
+    // the far corner number in the hundreds of thousands, the
+    // cells in the dozens. A set walk's frontier is one diagonal,
+    // and it runs past the quantifier bound of 32 to its fixpoint
+    // (the far corner is 22 rounds out; a 20×20 grid's would be 38).
+    // (`?` is the nearest tier: the two neighbours of c1, and c1
+    // itself under `*`)
+    let t = MockTree::lattice(12);
+    assert_eq!(run("/c1(->r|->d)+?", &t).len(), 2);
+    assert_eq!(run("/c1(->r|->d)*?", &t).len(), 1);
+    // (the far corner once: the markers answer each node once)
+    assert_eq!(run("/c1(->r|->d)+[:name = \"c144\"]?", &t), vec![144]);
+    assert!(take_refusal().is_none());
+    // every walk is answered otherwise (spec: Expansion paths): the
+    // routes through the grid are the frontier bound's to refuse
+    assert!(run("/c1(->r|->d)+", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("frontier bound"));
+    // The exact forms walk every route: a 6×6 grid has 252 at most.
+    let s = MockTree::lattice(6);
+    // (every walk to the far corner, 252 of them, one thread each)
+    let far = run("/c1(->r|->d){10}", &s);
+    assert_eq!(far.len(), 252);
+    assert!(far.iter().all(|&n| n == 36));
+    assert_eq!(run("/c1(->r|->d)+!", &s), vec![36]);
+    assert_eq!(run("/c1(->r|->d){10} @| collapse", &s), vec![36]);
+    // (every walk: 2^5 of five steps, 252 + 252 of nine and ten)
+    assert_eq!(run("/c1(->r|->d){5}", &s).len(), 32);
+    assert_eq!(run("/c1(->r|->d){9;}", &s).len(), 504);
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn the_degenerate_name_list_is_the_wildcard() {
+    // `/(*)` ≡ `/*` (spec: Name algebra): the plain step, with its
+    // positional predicates and projection; quantified it is the
+    // group of one it always was; `(!*)` selects nothing
+    let t = MockTree::sample();
+    assert_eq!(run("//a/(*)", &t), run("//a/*", &t));
+    assert_eq!(run("//a/(*)[..1]", &t), run("//a/*[..1]", &t));
+    assert_eq!(vals("//a/(*)[..1]:name", &t), vals("//a/*[..1]:name", &t));
+    assert_eq!(run("/a/(*){1}", &t), run("/a/*", &t));
+    assert_eq!(run("//(*)", &t), run("//*", &t));
+    assert_eq!(run("//a->(*)", &t), run("//a->*", &t));
+    assert!(run("//a/(!*)", &t).is_empty());
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn the_graph_as_a_table() {
+    let t = MockTree::roads();
+    let table = |q: &str| -> (Vec<String>, Vec<Vec<String>>) {
+        let vs = vals(q, &t);
+        assert_eq!(vs.len(), 1, "{q}");
+        let Value::Table(tb) = &vs[0] else {
+            panic!("{q}: not a table: {}", vs[0].display_form())
+        };
+        (
+            tb.header.clone().unwrap(),
+            tb.rows
+                .iter()
+                .map(|r| r.iter().map(Value::display_form).collect())
+                .collect(),
+        )
+    };
+    // the induced subgraph of a, x.rs, y.txt and deep: five stored
+    // `e` edges, their `len` and `time` properties as columns
+    let (h, rows) = table("//a(->e)* @| edges(->e)");
+    assert_eq!(h, ["source", "target", "label", "directed", "len", "time"]);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0], ["/a", "/a/x.rs", "e", "true", "4_km", "null"]);
+    assert_eq!(rows[1], ["/a", "/a/y.txt", "e", "true", "1_km", "2h"]);
+    // bare edges is edges(->*); `--e` the same edges with directed
+    // false; `<-e` the same five from the far ends
+    assert_eq!(table("//a(->e)* @| edges").1.len(), 5);
+    let (_, rows) = table("//a(->e)* @| edges(--e)");
+    assert_eq!(rows.len(), 5);
+    assert!(rows.iter().all(|r| r[3] == "false"));
+    assert_eq!(table("//a(->e)* @| edges(<-e)").1.len(), 5);
+    // narrowing the context narrows the graph: without deep, two edges
+    assert_eq!(table("//a(->e)*[:name != \"deep\"] @| edges").1.len(), 2);
+    // `~*` takes the tree edges too, labelled as the navop star does
+    let (_, rows) = table("//a(->e)* @| edges(~*)");
+    assert!(rows.iter().any(|r| r[2] == "[child]"), "{rows:?}");
+    assert_eq!(rows.iter().filter(|r| r[2] == "e").count(), 5);
+    // --weight=UNIT: the property of the unit's dimension, converted
+    let (h, rows) = table("//a(->e)* @| edges(->e; --weight=km)");
+    assert_eq!(h.last().unwrap(), "weight");
+    assert_eq!(
+        rows.iter().map(|r| r[6].as_str()).collect::<Vec<_>>(),
+        ["4_km", "1_km", "12_km", "2_km", "3_km"]
+    );
+    let (_, rows) = table("//a(->e)* @| edges(->e; --weight=h)");
+    assert_eq!(rows[1][6], "2_h");
+    assert_eq!(rows[0][6], "null");
+    // nodes: the context as node, name, kind
+    let (h, rows) = table("//a(->e)* @| nodes");
+    assert_eq!(h, ["node", "name", "kind"]);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[1][0], "/a/x.rs");
+    assert_eq!(rows[1][1], "x.rs");
+    assert!(take_refusal().is_none());
+    // a wrong operand refuses naming the forms
+    assert!(vals("//a(->e)* @| edges(:name)", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("the collecting hop"));
+    assert!(vals("//a(->e)* @| edges(->e; --weight=furlong)", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("no unit"));
+}
+
+#[test]
+fn pagerank_over_the_induced_subgraph() {
+    let t = MockTree::diamond();
+    let table = |q: &str| -> (Vec<String>, Vec<Vec<Value>>) {
+        let vs = vals(q, &t);
+        let Value::Table(tb) = &vs[0] else {
+            panic!("{q}: not a table")
+        };
+        (tb.header.clone().unwrap(), tb.rows.clone())
+    };
+    // a → {x.rs, y.txt} → deep → x.rs: the rank over the `e` edges
+    // sums to one; a, linked by nothing, holds the floor (1 - d) / n
+    let ranks = |q: &str| -> Vec<f64> {
+        vals(q, &t)
+            .iter()
+            .map(|v| match v {
+                Value::Float(f) => *f,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    let pr = ranks("//a(->e)* @| collapse @| graph:pagerank(->e)");
+    assert_eq!(pr.len(), 4);
+    assert!((pr.iter().sum::<f64>() - 1.0).abs() < 1e-9, "{pr:?}");
+    assert!((pr[0] - 0.15 / 4.0).abs() < 1e-9, "{pr:?}");
+    assert!(pr[1] > pr[2] && pr[3] > pr[2], "{pr:?}");
+    // the damping and the rounds are the knobs; the label algebra
+    // picks the labels; `--e` ranks both ways
+    let a = ranks("//a(->e)* @| collapse @| graph:pagerank(->e; --damping=0.5 --rounds=5)")[0];
+    assert!((a - 0.5 / 4.0).abs() < 1e-9, "{a}");
+    assert_eq!(
+        ranks("//a(->e)* @| collapse @| graph:pagerank(->(e || f))").len(),
+        4
+    );
+    let a = ranks("//a(->e)* @| collapse @| graph:pagerank(--e)")[0];
+    assert!(a > 0.15 / 4.0, "{a}");
+    // the label algebra and the group serve `edges`
+    assert_eq!(table("//a(->e)* @| edges(->(e || f))").1.len(), 5);
+    assert_eq!(table("//a(->e)* @| edges((->e|->f))").1.len(), 5);
+    assert!(take_refusal().is_none());
+    assert!(vals("//a(->e)* @| graph:pagerank(->e; --damping=2)", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("outside 0..1"));
+    // the bare table form is retired, with its pointer
+    let err = parse(&lex("//a(->e)* @| pagerank(->e)").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("graph:pagerank"), "{err}");
+}
+
+#[test]
+fn every_walk_is_its_own_thread() {
+    // deep is reached at round 2 by x (4 + 12 km) and by y (1 + 2
+    // km): two threads at the exit, each with its own facts and
+    // arriving edge (spec: Expansion paths); `@| collapse` makes
+    // the one thread the navigation used to, both edges in `@-`
+    let t = MockTree::roads();
+    let show = |q: &str| {
+        vals(q, &t)
+            .iter()
+            .map(Value::display_form)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"] | $-:total"),
+        vec!["16_km", "3_km"]
+    );
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"] | $-::len"),
+        vec!["12 km", "2 km"]
+    );
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"] @| collapse | @-::len"),
+        vec!["@(\"12 km\"; \"2 km\")"]
+    );
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"] @| collapse @| count"),
+        vec!["1"]
+    );
+    // the proximal reach is the one per-node selection: the least
+    // total under a budget
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"]? | $-:total"),
+        vec!["3_km"]
+    );
+    // x.rs at round 1 (4 km) and again at round 3 by y, deep (6 km)
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"x.rs\"] | $-:total"),
+        vec!["4_km", "6_km"]
+    );
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"x.rs\"] | $-:hops"),
+        vec!["1", "3"]
+    );
+    assert_eq!(
+        show("//a(->e){1;3}[:name = \"x.rs\"] | $-:hops"),
+        vec!["1", "3"]
+    );
+    // a hop from two threads to one node is two threads, as a join's
+    // rows are; collapse(-e) keeps them apart by arriving edge
+    assert_eq!(show("//a->e->e | :name"), vec!["deep", "deep"]);
+    assert_eq!(show("//a->e->e @| collapse | :name"), vec!["deep"]);
+    assert_eq!(
+        show("//a->e->e @| collapse(-e) | :name"),
+        vec!["deep", "deep"]
+    );
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn a_nested_tree_path_answers_the_node_set() {
+    // w.rs lies under b and under deep, so `//*//w.rs` from the root
+    // reaches it twice; the tree axes answer a node set, one w.rs at
+    // the top level and one inside an operand alike (the same fold:
+    // node, arriving edge, capsa) — where a walk answers one value
+    // per walk in both places too
+    let t = MockTree::roads();
+    let show = |q: &str| {
+        vals(q, &t)
+            .iter()
+            .map(Value::display_form)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(show("//*//w.rs | :name"), vec!["w.rs"]);
+    assert_eq!(show("//b | (\\//*//w.rs @| count)"), vec!["1"]);
+    assert_eq!(
+        show("//b | %(n = (\\//*//w.rs @| count))"),
+        vec!["%(n = 1)"]
+    );
+    // climbing too: z.rs, deep and w.rs all have b above them, and
+    // the ancestor axis answers b once, whichever child it was
+    // reached through
+    assert_eq!(show("//*\\\\b | :name"), vec!["b"]);
+    assert_eq!(show("//*\\\\b @| count"), vec!["1"]);
+    assert_eq!(show("//a | (\\//*\\\\b @| count)"), vec!["1"]);
+    assert_eq!(
+        show("//a(->e){;100_km}[:name = \"deep\"] @| count"),
+        vec!["2"]
+    );
+    assert_eq!(
+        show("//a | ((->e){;100_km}[:name = \"deep\"] @| count)"),
+        vec!["2"]
+    );
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn a_gathered_mark_reads_back_every_node() {
+    // x.rs and y.txt each mark themselves W and climb to a; collapse
+    // folds the two threads, the mark gathered as a list of both
+    // references, which `$$.W` reads back as both nodes
+    let t = MockTree::sample();
+    let show = |q: &str| {
+        vals(q, &t)
+            .iter()
+            .map(Value::display_form)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(show("/a/* .W | \\ | ($$.W @| count)"), vec!["1", "1"]);
+    assert_eq!(
+        show("/a/* .W | \\ @| collapse | ($$.W @| count)"),
+        vec!["2"]
+    );
+    assert_eq!(
+        show("/a/* .W | \\ @| collapse | ($$.W:name @| join(\", \"))"),
+        vec!["x.rs, y.txt"]
+    );
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn the_acyclic_promise_expands_by_node_and_round() {
+    /// A tree whose listed labels are promised acyclic.
+    struct Promised(MockTree, &'static [&'static str]);
+    impl AstAdapter for Promised {
+        fn root(&self) -> NodeId {
+            self.0.root()
+        }
+        fn children(&self, node: NodeId) -> Vec<NodeId> {
+            self.0.children(node)
+        }
+        fn name(&self, node: NodeId) -> Option<String> {
+            self.0.name(node)
+        }
+        fn parent(&self, node: NodeId) -> Option<NodeId> {
+            self.0.parent(node)
+        }
+        fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+            self.0.links(node)
+        }
+        fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+            self.0.backlinks(node)
+        }
+        fn acyclic_link(&self, label: &str) -> Option<String> {
+            self.1
+                .contains(&label)
+                .then(|| format!("ref /c/*::{label} --> /c acyclic"))
+        }
+        fn frontier_bound(&self) -> usize {
+            30
+        }
+    }
+    // The promise changes no answer (spec: Acyclic links): a count
+    // of walks across the 12×12 lattice still meets the frontier
+    // bound, promise or no promise. It changes the cost of every
+    // node-level reading — a collapsing reducer or a graph table
+    // after the walk, a marker — where the expansion goes by node,
+    // round and arriving edge (one diagonal in flight, 23 at most)
+    // instead of by history.
+    let t = Promised(MockTree::lattice(12), &["r", "d", "e"]);
+    assert!(run("/c1(->r|->d){22}", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("frontier bound (30)"));
+    assert_eq!(run("/c1(->r|->d){22} @| collapse", &t), vec![144]);
+    assert_eq!(run("/c1(->r|->d)+!", &t), vec![144]);
+    assert_eq!(run("/c1(->r|->d){5} @| collapse", &t).len(), 6);
+    assert_eq!(run("/c1(->r|->d){20;} @| collapse", &t).len(), 6);
+    assert_eq!(run("/c1(->r|->d)+ @| collapse", &t).len(), 143);
+    assert!(take_refusal().is_none());
+    // a recording walk reads its capsae, so it keeps every history
+    // and meets the bound as any count does
+    match eval(
+        &parse(&lex("/c1(->r .(1)|->d .(1)){22} | @. | count").unwrap()).unwrap(),
+        &t,
+    ) {
+        QueryResult::Values(vs) => assert!(vs.is_empty(), "{vs:?}"),
+        QueryResult::Nodes(ns) => assert!(ns.is_empty()),
+    }
+    assert!(take_refusal().unwrap().contains("frontier bound (30)"));
+    // a wildcard hop reads the promise off the edges it crosses
+    assert_eq!(run("/c1(->*){22} @| collapse", &t), vec![144]);
+    assert_eq!(run("/c1(->*)+!", &t), vec![144]);
+    assert!(take_refusal().is_none());
+    // an unpromised label among them keeps the histories, and the
+    // bound refuses even the node-level reading — the wildcard too,
+    // from the first unpromised edge
+    let half = Promised(MockTree::lattice(12), &["r"]);
+    assert!(run("/c1(->r|->d){5} @| collapse", &half).is_empty());
+    assert!(take_refusal().unwrap().contains("frontier bound (30)"));
+    assert!(run("/c1(->*){5} @| collapse", &half).is_empty());
+    assert!(take_refusal().unwrap().contains("frontier bound (30)"));
+    assert_eq!(run("/c1(->r){11}", &half), vec![12]);
+    assert!(take_refusal().is_none());
+    // without a promise a plain open walk read at the node level
+    // expands by node as well: the set of reachable cells
+    let plain = MockTree::lattice(12);
+    assert_eq!(run("/c1(->r|->d)+ @| collapse", &plain).len(), 143);
+    assert!(take_refusal().is_none());
+    // The diamond closes a cycle (deep → x.rs): an exact walk under
+    // the promise refuses naming the declaration; without the
+    // promise it drops the revisit and answers.
+    let d = Promised(MockTree::diamond(), &["e"]);
+    assert!(run("//a(->e){3}", &d).is_empty());
+    let msg = take_refusal().unwrap();
+    assert!(
+        msg.contains("a cycle under the promise 'ref /c/*::e --> /c acyclic'"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("the walk from /a returns to /a/x.rs after 3 hops"),
+        "{msg}"
+    );
+    assert_eq!(run("//a(->e){3}", &MockTree::diamond()), vec![2]);
+    assert!(take_refusal().is_none());
+}
+
+#[test]
+fn frontier_bound_refuses_out_loud() {
+    /// The lattice with a frontier bound of 12.
+    struct Narrow(MockTree);
+    impl AstAdapter for Narrow {
+        fn root(&self) -> NodeId {
+            self.0.root()
+        }
+        fn children(&self, node: NodeId) -> Vec<NodeId> {
+            self.0.children(node)
+        }
+        fn name(&self, node: NodeId) -> Option<String> {
+            self.0.name(node)
+        }
+        fn parent(&self, node: NodeId) -> Option<NodeId> {
+            self.0.parent(node)
+        }
+        fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
+            self.0.links(node)
+        }
+        fn frontier_bound(&self) -> usize {
+            12
+        }
+    }
+    let t = Narrow(MockTree::lattice(6));
+    // An exact walk holds 2^4 = 16 paths at round 4: refused,
+    // naming the bound and the round — recording or not.
+    for q in ["/c1(->r .(1)|->d .(1)){4}", "/c1(->r|->d){4}"] {
+        let out = run(q, &t);
+        let msg = take_refusal().unwrap();
+        assert!(out.is_empty());
+        assert!(
+            msg.contains("frontier bound (12) is exceeded at round 4"),
+            "{msg}"
+        );
+        assert!(msg.contains("--frontier-bound"));
+    }
+    // The proximal reach holds one path per arrival and stops at
+    // its first tier; every walk otherwise, which the bound refuses.
+    assert_eq!(run("/c1(->r|->d)+?", &t).len(), 2);
+    assert!(take_refusal().is_none());
+    assert!(run("/c1(->r|->d)+", &t).is_empty());
+    assert!(take_refusal().unwrap().contains("frontier bound (12)"));
+}
+
+#[test]
+fn navop_star_walks_every_edge() {
+    // The sample tree with x.rs --ref--> w.rs: `~` walks the tree
+    // edges and the crosslinks alike, either direction, and keeps
+    // the far ends whose edge matches — a child's or the parent's
+    // name, a crosslink's label. Siblings are no edges.
+    let t = MockTree::sample();
+    assert_eq!(run("/a/x.rs~*", &t), vec![1, 7]);
+    assert_eq!(run("/b/deep/w.rs~*", &t), vec![6, 2]);
+    assert_eq!(run("/a/x.rs~ref", &t), vec![7]);
+    assert_eq!(run("/a/x.rs~a", &t), vec![1]);
+    assert_eq!(run("/a~*", &t), vec![2, 3, 0]);
+    assert!(run("/a/x.rs~y.txt", &t).is_empty());
+    // The edge walked is in scope: a tree edge reports its
+    // structural label.
+    assert_eq!(run("/a/x.rs~*[$- = \"ref\"]", &t), vec![7]);
+    assert_eq!(run("/a/x.rs~*[$- = \"[parent]\"]", &t), vec![1]);
+    // Quantified, the walk is plain: each node once, at the fewest
+    // rounds. From x.rs: {a, w.rs}, then {root, y.txt, deep}.
+    assert_eq!(run("/a/x.rs(~*){2}", &t), vec![3, 0, 6]);
+    assert_eq!(run("/a/x.rs(~*)+[:name = \"deep\"]?", &t), vec![6]);
+    // The deep form: the walk over every edge, then the matching
+    // hop — w.rs by name is the child of deep, five hops out; the
+    // nearest edges are a's and ref's; the farthest hop is the one
+    // from z.rs back to b.
+    assert_eq!(run("/a/x.rs~~w.rs", &t), vec![7]);
+    assert_eq!(run("/a/x.rs~~?*", &t), vec![1, 7]);
+    assert_eq!(run("/a/x.rs~~!*", &t), vec![4]);
+    assert_eq!(
+        crate::syntax::unparse::unparse(&parse(&lex("/a~~?x(~.)*").unwrap()).unwrap()),
+        "/a~~?x(~.)*"
+    );
+}
+
+#[test]
+fn a_budget_sums_an_edge_weight_along_the_walk() {
+    // Spec: The budget quantifier. The roads diamond: a→x 4 km,
+    // a→y 1 km, x→deep 12 km, y→deep 2 km, deep→x 3 km.
+    let t = MockTree::roads();
+    // At most 5 km: the start at zero (an absent floor includes
+    // it), x (4), y (1), deep by y (3); deep by x is 16.
+    assert_eq!(run("//a(->e){;5_km}", &t), vec![1, 2, 3, 6]);
+    // At most 3 km: the start, y, deep; x by y, deep is 6 — no.
+    assert_eq!(run("//a(->e){;3_km}", &t), vec![1, 3, 6]);
+    // A floor: walks of 3 km or more within 7 km — x alone (4),
+    // deep by y (3), x by y, deep (6): one thread per walk
+    assert_eq!(run("//a(->e){3_km;7_km}", &t), vec![2, 6, 2]);
+    // The unit converts: 5000 m is 5 km.
+    assert_eq!(run("//a(->e){;5000_m}", &t), vec![1, 2, 3, 6]);
+    // The lightest walks: the start, then y at 1 km, deep at 3 km
+    // (by y), x at 4 km — each node once at its least total, the
+    // proximal reach.
+    assert_eq!(run("//a(->e){;100_km}?", &t), vec![1, 3, 6, 2]);
+    assert_eq!(run("//a(->e){;100_km}[:name = \"deep\"]?", &t), vec![6]);
+    // The heaviest within the budget: x by y, deep at 6 km.
+    assert_eq!(run("//a(->e){;7_km}!", &t), vec![2]);
+    // The total, read by the one command after the group, in the
+    // budget's unit; the hops and the round beside it.
+    assert_eq!(
+        vals("//a(->e){;100_km}[:name = \"deep\"]? | $-:total", &t),
+        vec![Value::Quantity {
+            value: 3000.0,
+            base: "m".into(),
+            written: Some((3.0, "km".into()))
+        }]
+    );
+    assert_eq!(
+        vals("//a(->e){;100_km}[:name = \"deep\"]? | $-:hops", &t),
+        vec![Value::Int(2)]
+    );
+    // One command only: the next one sees no edge.
+    assert_eq!(
+        vals(
+            "//a(->e){;100_km}[:name = \"deep\"]? | $-:hops | $-:hops",
+            &t
+        ),
+        vec![Value::Null]
+    );
+    // An edge without the weight is not crossed: a time budget sees
+    // only a→y (2 h); y→deep carries no time.
+    assert_eq!(run("//a(->e){;3_h}", &t), vec![1, 3]);
+    // Two lengths on one edge refuse naming both.
+    let mut two = MockTree::roads();
+    two.edge_props
+        .get_mut(&(3, "e".to_string(), 6))
+        .unwrap()
+        .push(("detour".into(), Value::Str("5 km".into())));
+    // (the refusal is recorded; the library voids the answer)
+    let _ = run("//a(->e){;5_km}", &two);
+    assert!(take_refusal().unwrap().contains("len and detour"));
+    // One dimension per quantifier.
+    assert!(run("//a(->e){1;5_km}", &t).is_empty());
+    assert!(
+        take_refusal()
+            .unwrap()
+            .contains("one dimension per quantifier")
+    );
+    // A negative weight refuses the lightest walk by name.
+    let mut neg = MockTree::roads();
+    neg.edge_props.insert(
+        (6, "e".to_string(), 2),
+        vec![("len".into(), Value::Str("-3 km".into()))],
+    );
+    let _ = run("//a(->e){;100_km}?", &neg);
+    assert!(take_refusal().unwrap().contains("negative weight"));
+    // The exact form has no meaning for a sum.
+    assert!(lex("//a(->e){5_km}").is_err());
+    // The facts on a counted walk: hops and the round, no total —
+    // one thread per walk, deep by x and by y.
+    assert_eq!(
+        vals("//a(->e){2}[:name = \"deep\"] | $-:round", &t),
+        vec![Value::Int(2), Value::Int(2)]
+    );
+    assert_eq!(
+        vals("//a(->e){2} | $-:total", &t),
+        vec![Value::Null, Value::Null]
+    );
+    // Inside the group's predicate the facts read too.
+    assert_eq!(run("//a(->e)+[$-:hops = 2]", &t), vec![6, 6]);
+    // Outside any group the facts are null.
+    assert_eq!(vals("//a->e | $-:hops", &t), vec![Value::Null, Value::Null]);
+    // The canonical text keeps the budget as written.
+    assert_eq!(
+        crate::syntax::unparse::unparse(&parse(&lex("//a(->e){;100_km}?").unwrap()).unwrap()),
+        "//a(->e){;100_km}?"
+    );
 }
 
 #[test]
@@ -1038,6 +1703,47 @@ fn edge_accessor() {
     assert_eq!(
         vals("//a->e[$-::qty > 1]:name", &t),
         vec![Value::Str("x.rs".into())]
+    );
+    // The command after a plain hop reads the edge the thread most
+    // recently walked (spec: Arrived-by Edge), as it does after a
+    // quantified group's exit: the label bare, the property
+    // projected.
+    assert_eq!(
+        vals("//a->e | $-", &t),
+        vec![Value::Str("e".into()), Value::Str("e".into())]
+    );
+    assert_eq!(
+        vals("//a->e | $-::qty", &t),
+        vec![Value::Int(4), Value::Int(1)]
+    );
+    // A tree hop walks the child edge: `//a` arrives by `[child]`.
+    assert_eq!(vals("//a | $-", &t), vec![Value::Str("[child]".into())]);
+}
+
+#[test]
+fn headless_hop_is_one_thread_per_edge() {
+    // x.rs (2) has e→deep (6), and e←a (1), e←deep (6): deep is
+    // linked both ways, so the headless hop reaches it twice — one
+    // thread per edge (spec: Expansion paths), the edge context
+    // keeping each edge's true direction.
+    let t = MockTree::diamond();
+    let mut reached = run("//x.rs--e", &t);
+    reached.sort();
+    assert_eq!(reached, vec![1, 6, 6]);
+    assert_eq!(
+        vals("//x.rs--e | $-", &t),
+        vec![
+            Value::Str("e".into()),
+            Value::Str("e".into()),
+            Value::Str("e".into())
+        ]
+    );
+    // Inside a group the same: two walks stand at deep after one
+    // round, each by its own edge.
+    assert_eq!(run("//x.rs(--e){1} | [:name = \"deep\"]", &t), vec![6, 6]);
+    assert_eq!(
+        run("//x.rs(--e){1} | [:name = \"deep\"] @| collapse", &t),
+        vec![6]
     );
 }
 
@@ -1087,8 +1793,13 @@ fn per_path_results() {
             Value::Str("y.txt-deep".into()),
         ]
     );
-    // Without pushes the same walk dedups by node, as before.
-    assert_eq!(run("//a(->e)+ | [:name = \"deep\"]", &t), vec![6]);
+    // Without pushes the two walks to deep are two threads too
+    // (spec: Expansion paths); `@| collapse` makes them one.
+    assert_eq!(run("//a(->e)+ | [:name = \"deep\"]", &t), vec![6, 6]);
+    assert_eq!(
+        run("//a(->e)+ | [:name = \"deep\"] @| collapse", &t),
+        vec![6]
+    );
 }
 
 #[test]
@@ -2623,132 +3334,215 @@ fn value_meta_needs_a_value_base() {
     assert!(parse(&lex("/a | $.n:%provenance:text").unwrap()).is_ok());
 }
 
-// ---- cross-capsa reads: X:.r ------------------------------------
+// ---- attached regulae: .:name, X:.name ----------------------------
+
+/// What a query refuses, as the error or the recorded refusal.
+fn refused(q: &str, t: &MockTree) -> Option<String> {
+    match crate::run(q, t) {
+        Ok(_) => take_refusal(),
+        Err(e) => Some(e.to_string()),
+    }
+}
 
 #[test]
-fn peer_read_is_by_location() {
+fn attached_read_is_by_node() {
     let t = MockTree::sample();
-    // x.rs --ref--> w.rs. Every file's capsa files its index;
-    // x.rs reads the regula of the capsa standing at w.rs, w.rs
-    // reads x.rs's through the reverse link; nobody stands at
-    // the other end for y.txt and z.rs: no value, null as a
-    // scalar.
+    // x.rs --ref--> w.rs. Every file attaches its index to its
+    // node; x.rs reads what w.rs carries, w.rs reads x.rs's
+    // through the reverse link; y.txt and z.rs reach no node: no
+    // value, null as a scalar.
     assert_eq!(
-        vals("//*<file> | .v(:index) | ->ref:.v", &t),
+        vals("//*<file> | .:v(:index) | ->ref:.v", &t),
         vec![Value::Int(1), Value::Null, Value::Null, Value::Null]
     );
     assert_eq!(
-        vals("//*<file> | .v(:index) | <-ref:.v", &t),
+        vals("//*<file> | .:v(:index) | <-ref:.v", &t),
         vec![Value::Null, Value::Null, Value::Null, Value::Int(1)]
     );
-    // The other accessors: the top regula, positional, the
-    // whole register, the record views.
-    assert_eq!(vals("/a/x.rs | .v(7) | ->ref:.v", &t), vec![Value::Null]);
-    let t2 = MockTree::sample();
+    // A plain push files in the capsa only: nothing is attached,
+    // the node read finds nothing.
     assert_eq!(
-        vals(
-            "//*<file> | .v(:index) | .w(:name) | ->ref:. | ($$_:name = \"x.rs\" ? $_ : \"-\")",
-            &t2
-        ),
-        vec![
-            Value::Str("w.rs".into()),
-            Value::Str("-".into()),
-            Value::Str("-".into()),
-            Value::Str("-".into())
-        ]
+        vals("//*<file> | .v(:index) | ->ref:.v", &t),
+        vec![Value::Null, Value::Null, Value::Null, Value::Null]
     );
-    // Positional: the first regula of the peer at w.rs.
+    // The attaching push files in the capsa too, exactly as the
+    // plain one does.
     assert_eq!(
-        vals("//*<file> | .v(:index * 10) | .w(:name) | ->ref:.1", &t),
-        vec![Value::Int(10), Value::Null, Value::Null, Value::Null]
+        vals("//*<file> | .:v(:index) | $.v", &t),
+        vec![Value::Int(1), Value::Int(2), Value::Int(1), Value::Int(1)]
+    );
+    // Bare, it attaches the topic.
+    assert_eq!(
+        vals("/a/x.rs | :index | .:v | :.v", &t),
+        vec![Value::Int(1)]
+    );
+    // The record of everything attached, in first-attach order;
+    // empty where nothing is.
+    assert_eq!(
+        vals("/a/x.rs | .:v(1) | .:w(\"k\") | :%.", &t),
+        vec![Value::record(vec![
+            ("v".to_string(), Value::Int(1)),
+            ("w".to_string(), Value::Str("k".into())),
+        ])]
+    );
+    assert_eq!(
+        vals("/a/x.rs | .:v(1) | ->ref:%.", &t),
+        vec![Value::record(Vec::new())]
     );
 }
 
 #[test]
-fn peer_read_sees_the_input_snapshot() {
+fn attached_read_survives_filters_and_walks() {
     let t = MockTree::sample();
-    // A round that both reads a peer's value and repoints the
-    // same name: every capsa reads the value the command
-    // received, whatever the evaluation order — x.rs and w.rs
-    // swap through the link in one command.
+    // Identity, not location: w.rs's thread is filtered away, its
+    // attachment stays readable — through the link, and standing
+    // on the node after a hop.
+    assert_eq!(
+        vals(
+            "//*<file> | .:v(:index * 10) | [:name = \"x.rs\"] | ->ref:.v",
+            &t
+        ),
+        vec![Value::Int(10)]
+    );
+    assert_eq!(
+        vals(
+            "//*<file> | .:v(:index * 10) | [:name = \"x.rs\"] | ->ref | :.v",
+            &t
+        ),
+        vec![Value::Int(10)]
+    );
+    assert_eq!(
+        vals(
+            "//*<file> | .:v(:index * 10) | [:name = \"x.rs\"] | ->ref | %(n = :name; v = :.v)",
+            &t
+        ),
+        vec![Value::record(vec![
+            ("n".to_string(), Value::Str("w.rs".into())),
+            ("v".to_string(), Value::Int(10)),
+        ])]
+    );
+    // In a predicate: the current node's, and a marked node's.
+    assert_eq!(run("//*<file> | .:v(:index) | ->ref[:.v = 1]", &t), vec![7]);
+    assert_eq!(
+        run(
+            "//*<file> | .:v(:index) | [:name = \"x.rs\"] | .M | ->ref[:.v = $$.M:.v]",
+            &t
+        ),
+        vec![7]
+    );
+    assert_eq!(
+        run(
+            "//*<file> | .:v(:index * :index) | [:name = \"x.rs\"] | .M | ->ref[:.v > $$.M:.v]",
+            &t
+        ),
+        Vec::<u64>::new()
+    );
+    // After `@| collapse` the one thread at the node reads it.
+    assert_eq!(
+        vals("/a/* | .:v(:index) | \\ @| collapse | /x.rs | :.v", &t),
+        vec![Value::Int(1)]
+    );
+    // `@| nodes` carries the attachments as columns.
+    let table = vals("/a/* | .:v(:index) | .:w(\"k\") @| nodes", &t);
+    let Value::Table(table) = &table[0] else {
+        panic!("expected a table, got {table:?}");
+    };
+    assert_eq!(
+        table.header.as_ref().unwrap(),
+        &["node", "name", "kind", "v", "w"]
+    );
+    assert_eq!(table.rows[0][3], Value::Int(1));
+    assert_eq!(table.rows[1][3], Value::Int(2));
+    assert_eq!(table.rows[1][4], Value::Str("k".into()));
+}
+
+#[test]
+fn attached_read_sees_the_input_snapshot() {
+    let t = MockTree::sample();
+    // A round that both reads a neighbour's value and attaches the
+    // same name: every thread reads what the command received,
+    // whatever the evaluation order — x.rs and w.rs swap through
+    // the link in one command.
     let pair = "//*<file>[:name = \"x.rs\" || :name = \"w.rs\"]";
     let vs = vals(
         &format!(
-            "{pair} | .v((:name = \"x.rs\" ? 5 : 9)) | .v((:name = \"x.rs\" ? ->ref:.v : <-ref:.v)) | $.v"
+            "{pair} | .:v((:name = \"x.rs\" ? 5 : 9)) | .:v((:name = \"x.rs\" ? ->ref:.v : <-ref:.v)) | $.v"
         ),
         &t,
     );
-    // x.rs (evaluated first) takes w.rs's 9; w.rs takes x.rs's 5
-    // — the value the command received, not the 9 x.rs just
-    // filed.
     assert_eq!(vs, vec![Value::Int(9), Value::Int(5)]);
-    // Two rounds: x.rs files a from w.rs's v, w.rs then reads
-    // x.rs's a as b.
+    // Two commands: x.rs attaches a from w.rs's v, w.rs then reads
+    // x.rs's a as b. Without the colon, a is filed but not
+    // attached, and the read finds nothing.
     assert_eq!(
         vals(
-            &format!("{pair} | .v((:name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"),
+            &format!(
+                "{pair} | .:v((:name = \"x.rs\" ? 5 : 9)) | .:a(->ref:.v) | .b(<-ref:.a) | $.b"
+            ),
             &t
         ),
         vec![Value::Null, Value::Int(9)]
     );
-}
-
-#[test]
-fn peer_read_after_a_fork_reads_the_children() {
-    let t = MockTree::sample();
-    // The thread at `a` files p, forks into its children, each
-    // files its index. Nobody stands at `a` any more, so a read
-    // at `a` finds nothing; the family is its children, read
-    // by navigating to them: every member answers, the shared
-    // prefix in copies.
     assert_eq!(
-        vals("/a | .p(1) | /* | .r(:index) | \\:.p", &t),
+        vals(
+            &format!(
+                "{pair} | .:v((:name = \"x.rs\" ? 5 : 9)) | .a(->ref:.v) | .b(<-ref:.a) | $.b"
+            ),
+            &t
+        ),
         vec![Value::Null, Value::Null]
     );
+    // Across commands the push replaces: the node carries the
+    // latest value under the name, the capsa every regula.
     assert_eq!(
-        vals("/a | .p(1) | /* | .r(:index) | (\\/*:.r @| sum)", &t),
-        vec![Value::Int(3), Value::Int(3)]
+        vals("/a/x.rs | .:v(1) | .:v(2) | :.v", &t),
+        vec![Value::Int(2)]
     );
     assert_eq!(
-        vals("/a | .p(1) | /* | .r(:index) | (\\/*:.p @| count)", &t),
-        vec![Value::Int(2), Value::Int(2)]
-    );
-    // A record per peer: `%.` at each sibling.
-    assert_eq!(
-        vals("/a | .p(1) | /* | .r(:index) | (\\/*:%. | :r @| sum)", &t),
-        vec![Value::Int(3), Value::Int(3)]
+        vals("/a/x.rs | .:v(1) | .:v(2) | @. | count", &t),
+        vec![Value::Int(2)]
     );
 }
 
 #[test]
-fn peer_read_answers_every_capsa_standing_there() {
+fn attaching_threads_at_one_node_must_agree() {
     let t = MockTree::sample();
-    // Two capsae converge on `a` with different registers: both
-    // are read. With equal registers they deduplicate into one.
+    // Two threads converge on `a` by the parent axis. Equal values
+    // pass; differing ones refuse, naming collapse; collapsed, the
+    // one thread attaches.
     assert_eq!(
-        vals("/a/* | .v(:index) | \\ | (\\/a:.v @| count)", &t),
+        vals("/a/* | .v(:index) | \\ | .:w(2) | :.w", &t),
         vec![Value::Int(2), Value::Int(2)]
     );
+    let why = refused("/a/* | .v(:index) | \\ | .:w($.v) | :.w", &t).unwrap();
+    assert!(why.contains("differing values under 'w'"), "{why}");
+    assert!(why.contains("@| collapse"), "{why}");
     assert_eq!(
-        vals("/a/* | .v(1) | \\ | (\\/a:.v @| count)", &t),
-        vec![Value::Int(1)]
+        vals(
+            "/a/* | .v(:index) | \\ @| collapse | .:w(($.v | count)) | :.w",
+            &t
+        ),
+        vec![Value::Int(2)]
     );
+    // A thread standing nowhere has no node to attach to.
+    let why = refused("/a/* | :index @| sum | .:w(1)", &t).unwrap();
+    assert!(why.contains("stands nowhere"), "{why}");
 }
 
 #[test]
-fn peer_read_carries_the_regula_provenance() {
+fn attached_regula_carries_its_provenance() {
     let t = MockTree::sample();
-    // The value read from w.rs's capsa keeps where w.rs read it
+    // The value read from w.rs's node keeps where w.rs read it
     // (node 7, command 1); the node it is read at is not an
     // origin, nor is the navigation.
     let pair = "//*<file>[:name = \"x.rs\" || :name = \"w.rs\"]";
-    let rows = traced(&format!("{pair} | .v(:index) | ->ref:.v"), &t);
+    let rows = traced(&format!("{pair} | .:v(:index) | ->ref:.v"), &t);
     assert_eq!(rows[0].node, NodeId(2));
     assert_eq!(rows[0].prov.origins, origins(&[(7, 1)]));
     let t2 = provenanced();
     assert_eq!(
         vals(
-            &format!("{pair} | .v(:index) | ->ref:.v:%provenance:source"),
+            &format!("{pair} | .:v(:index) | ->ref:.v:%provenance:source"),
             &t2
         )[0],
         Value::Str("crm".into())
@@ -2756,21 +3550,483 @@ fn peer_read_carries_the_regula_provenance() {
 }
 
 #[test]
-fn peer_read_is_null_without_a_context() {
+fn attached_read_is_null_without_attachments() {
     let t = MockTree::sample();
-    // In a navigation predicate no context exists: null, so the
-    // comparison fails.
+    // Nothing attached: null, so the comparison fails.
     assert_eq!(run("/a/x.rs[->ref:.v = 1]", &t), Vec::<u64>::new());
     assert_eq!(run("/a/x.rs[!->ref:.v]", &t), vec![2]);
+    assert_eq!(run("/a/x.rs[!:.v]", &t), vec![2]);
 }
 
 #[test]
-fn peer_read_needs_a_node_side() {
+fn attached_read_needs_a_node_side_or_none() {
     // A projected path is a value, not a node; so is a recall.
     assert!(parse(&lex("/a | $.v:.r").unwrap()).is_err());
     assert!(parse(&lex("/a | ->ref::x:.r").unwrap()).is_err());
+    // Alone, the current node.
+    assert!(parse(&lex("/a | :.r").unwrap()).is_ok());
+    assert!(parse(&lex("/a | :%.").unwrap()).is_ok());
+    assert!(parse(&lex("/a[:.r = 1]").unwrap()).is_ok());
     // A spaced colon is still the conditional's else.
     assert!(parse(&lex("/a | (::x ? 1 : .5)").unwrap()).is_ok());
+    // The location read's accessors are retired.
+    for q in [
+        "/a | ->ref:.",
+        "/a | ->ref:.1",
+        "/a | ->ref:..",
+        "/a | ->ref:@.",
+        "/a | ->ref:@@.",
+        "/a | ->ref:%%.",
+        "/a | ->ref:%.*",
+        "/a | ->ref:(*.)",
+    ] {
+        let err = parse(&lex(q).unwrap()).unwrap_err().to_string();
+        assert!(err.contains("retired"), "{q}: {err}");
+    }
+    // The attaching push takes a name, and a body or the topic.
+    assert!(parse(&lex("/a | .:(1)").unwrap()).is_err());
+    assert!(lex("/a | .:v%(a = 1)").and_then(|t| parse(&t)).is_err());
+    assert!(parse(&lex("/a | .:v(1){3}").unwrap()).is_ok());
+    assert!(parse(&lex("/a | .:v").unwrap()).is_ok());
+}
+
+#[test]
+fn edge_ends_are_node_operands() {
+    let t = MockTree::sample();
+    // `$-:source` / `$-:target` — the arrived-by edge's ends as node
+    // references in the declaration's orientation, node operands
+    // in their own right: a core field, a property, an attached
+    // regula.
+    assert_eq!(
+        vals(
+            "/a/x.rs | ->ref | %(s = $-:source:name; t = $-:target:name)",
+            &t
+        ),
+        vec![Value::record(vec![
+            ("s".to_string(), Value::Str("x.rs".into())),
+            ("t".to_string(), Value::Str("w.rs".into())),
+        ])]
+    );
+    assert_eq!(
+        vals(
+            "//*<file> | .:l(:name) | [:name = \"x.rs\"] | ->ref | %(s = $-:source:.l; t = $-:target:.l)",
+            &t
+        ),
+        vec![Value::record(vec![
+            ("s".to_string(), Value::Str("x.rs".into())),
+            ("t".to_string(), Value::Str("w.rs".into())),
+        ])]
+    );
+    // The undirected hop reads the ends as stored: from w.rs the
+    // edge's source is still x.rs.
+    assert_eq!(
+        vals("//*<file>[:name = \"w.rs\"] | --ref | $-:source:name", &t),
+        vec![Value::Str("x.rs".into())]
+    );
+    // The edges table's `source` and `target` cells are the same
+    // references: a row filter reads both ends' attachments through
+    // the columns.
+    let pair = "//*<file>[:name = \"x.rs\" || :name = \"w.rs\"]";
+    assert_eq!(
+        vals(
+            &format!("{pair} | .:l(:name) @| edges(->ref) | :target:.l"),
+            &t
+        ),
+        vec![Value::Str("w.rs".into())]
+    );
+    assert_eq!(
+        vals(
+            &format!("{pair} | .:l(:name) @| edges(->ref) | [:source:.l = :target:.l] | dim"),
+            &t
+        ),
+        vec![Value::list(vec![Value::Int(0), Value::Int(4)])]
+    );
+    assert_eq!(
+        vals(
+            &format!("{pair} | .:l(\"same\") @| edges(->ref) | [:source:.l = :target:.l] | dim"),
+            &t
+        ),
+        vec![Value::list(vec![Value::Int(1), Value::Int(4)])]
+    );
+    // A node operand of any other kind than a reference names no
+    // node; a plain value cannot carry a read.
+    assert!(parse(&lex("/a | $-::x:.r").unwrap()).is_err());
+    assert!(parse(&lex("/a | $-:round:.r").unwrap()).is_err());
+    assert_eq!(
+        vals("/a/x.rs | ->ref | %(n = :name) | :n:.l", &t),
+        vec![Value::Null]
+    );
+}
+
+// ---- the graph library: graph:pagerank, graph:distance, graph:kcore ----
+
+#[test]
+fn graph_pagerank_is_row_aligned_over_the_induced_subgraph() {
+    let t = MockTree::roads();
+    // one float per thread, the threads kept in place on their
+    // nodes; the walk reaches x.rs and deep twice, and a thread
+    // that reached a node twice reads the same number twice
+    let six = vals("//a(->e)* @| graph:pagerank(->e)", &t);
+    assert_eq!(six.len(), 6);
+    assert_eq!(six[1], six[5]);
+    assert_eq!(six[3], six[4]);
+    // collapsed to the four nodes: one value each
+    let ranks = vals("//a(->e)* @| collapse @| graph:pagerank(->e)", &t);
+    assert_eq!(
+        ranks,
+        vec![
+            six[0].clone(),
+            six[1].clone(),
+            six[2].clone(),
+            six[3].clone()
+        ]
+    );
+    let sum: f64 = ranks
+        .iter()
+        .map(|v| match v {
+            Value::Float(f) => *f,
+            other => panic!("{other:?}"),
+        })
+        .sum();
+    assert!((sum - 1.0).abs() < 1e-12, "{sum}");
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:pagerank(->e) | %(n = :name; r = $_) | :n",
+            &t
+        ),
+        vec![
+            Value::Str("a".into()),
+            Value::Str("x.rs".into()),
+            Value::Str("y.txt".into()),
+            Value::Str("deep".into())
+        ]
+    );
+    // `->*` when the hop is left out: the same here
+    assert_eq!(vals("//a(->e)* @| collapse @| graph:pagerank", &t), ranks);
+    // the induced rule: deep alone is a graph of one, rank one
+    assert_eq!(
+        vals("/b/deep @| graph:pagerank(->e)", &t),
+        vec![Value::Float(1.0)]
+    );
+    // threads are folded to their positions: two threads at `a`
+    // make a graph of one node, each reading its value
+    assert_eq!(
+        vals("/a/* | .v(:index) | \\ @| graph:pagerank(->e)", &t),
+        vec![Value::Float(1.0), Value::Float(1.0)]
+    );
+    // weights: by unit or by property, the same shares; weighted
+    // differs from unweighted
+    let by_unit = vals(
+        "//a(->e)* @| collapse @| graph:pagerank(->e; --weight=km)",
+        &t,
+    );
+    let by_prop = vals(
+        "//a(->e)* @| collapse @| graph:pagerank(->e; --weight=::len)",
+        &t,
+    );
+    for (a, b) in by_unit.iter().zip(&by_prop) {
+        let (Value::Float(a), Value::Float(b)) = (a, b) else {
+            panic!("{a:?} {b:?}");
+        };
+        assert!((a - b).abs() < 1e-12);
+    }
+    assert_ne!(by_unit, ranks);
+    // the rank reaches the node by the push after it
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:pagerank(->e) | .:pr | [:name = \"deep\"] | :.pr",
+            &t
+        ),
+        vec![ranks[3].clone()]
+    );
+    // what refuses: a value context, the plain pipe, an alternation
+    // of hops, the reserved option, a value context
+    // a value-mode thread still stands on its node: the positions
+    // are ranked whatever the topic; only a thread standing nowhere
+    // refuses
+    assert_eq!(
+        vals("//a(->e)* @| collapse | :index @| graph:pagerank(->e)", &t),
+        ranks
+    );
+    let why = refused("//a(->e)* | :index @| sum @| graph:pagerank(->e)", &t).unwrap();
+    assert!(why.contains("stands nowhere"), "{why}");
+    let table = vals("/a/* | %(n = :name) | .:% @| nodes", &t);
+    let Value::Table(table) = &table[0] else {
+        panic!("{table:?}");
+    };
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(table.header.as_ref().unwrap().last().unwrap(), "n");
+    let why = refused("//a(->e)* | graph:pagerank(->e)", &t).unwrap();
+    assert!(why.contains("aggregation pipe"), "{why}");
+    let why = refused("//a(->e)* @| graph:pagerank((->e|->f))", &t).unwrap();
+    assert!(why.contains("one hop"), "{why}");
+    let why = refused("//a(->e)* @| graph:pagerank(->e; --teleport=/a)", &t).unwrap();
+    assert!(why.contains("reserved"), "{why}");
+}
+
+#[test]
+fn graph_distance_counts_hops_or_sums_weights_from_the_seeds() {
+    let t = MockTree::roads();
+    // a -> x.rs, a -> y.txt, x.rs -> deep, y.txt -> deep, deep -> x.rs
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:distance(->e; --from=/a)",
+            &t
+        ),
+        vec![Value::Int(0), Value::Int(1), Value::Int(1), Value::Int(2)]
+    );
+    // a seed by mark; a seed outside the context counts for nothing
+    assert_eq!(
+        vals(
+            "/a .S (->e)* @| collapse @| graph:distance(->e; --from=$$.S)",
+            &t
+        ),
+        vec![Value::Int(0), Value::Int(1), Value::Int(1), Value::Int(2)]
+    );
+    assert_eq!(
+        vals("/a/* @| graph:distance(->e; --from=/a)", &t),
+        vec![Value::Null, Value::Null]
+    );
+    // unreached nodes are null; the nearest of several seeds
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:distance(->e; --from=/a/x.rs)",
+            &t
+        ),
+        vec![Value::Null, Value::Int(0), Value::Null, Value::Int(1)]
+    );
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:distance(->e; --from=/a/*)",
+            &t
+        ),
+        vec![Value::Null, Value::Int(0), Value::Int(0), Value::Int(1)]
+    );
+    // weights by unit: quantities in that unit, the shortest way
+    // (a -1km-> y.txt -2km-> deep beats a -4km-> x.rs -12km-> deep)
+    let km = vals(
+        "//a(->e)* @| graph:distance(->e; --from=/a --weight=km)",
+        &t,
+    );
+    assert_eq!(
+        km[0],
+        Value::Quantity {
+            value: 0.0,
+            base: "m".into(),
+            written: Some((0.0, "km".into()))
+        }
+    );
+    assert!(
+        matches!(&km[3], Value::Quantity { value, .. } if (*value - 3000.0).abs() < 1e-9),
+        "{km:?}"
+    );
+    // weights by property: integers stay integers
+    let w = MockTree::weighted();
+    assert_eq!(
+        vals(
+            "//a(->e)* @| graph:distance(->e; --from=/a --weight=::qty)",
+            &w
+        ),
+        vec![Value::Int(0), Value::Int(4), Value::Int(1), Value::Int(16)]
+    );
+    // the seeds are required
+    let why = refused("//a(->e)* @| graph:distance(->e)", &t).unwrap();
+    assert!(why.contains("--from"), "{why}");
+}
+
+#[test]
+fn graph_kcore_peels_undirected_distinct_neighbours() {
+    let t = MockTree::roads();
+    // the 4-cycle a - x.rs - deep - y.txt - a: every node in core 2,
+    // whichever way the hop reads the edges
+    assert_eq!(
+        vals("//a(->e)* @| collapse @| graph:kcore(->e)", &t),
+        vec![Value::Int(2); 4]
+    );
+    assert_eq!(
+        vals("//a(->e)* @| graph:kcore(--e)", &t),
+        vals("//a(->e)* @| graph:kcore(->e)", &t)
+    );
+    // one edge: its ends in core 1, the rest in core 0
+    let s = MockTree::sample();
+    assert_eq!(
+        vals("//*<file> @| graph:kcore(->ref)", &s),
+        vec![Value::Int(1), Value::Int(0), Value::Int(0), Value::Int(1)]
+    );
+    let why = refused("//a(->e)* @| graph:kcore(->e; --weight=km)", &t).unwrap();
+    assert!(why.contains("weight"), "{why}");
+}
+
+#[test]
+fn graph_betweenness_and_conncomp() {
+    let t = MockTree::roads();
+    let floats = |q: &str| -> Vec<f64> {
+        vals(q, &t)
+            .iter()
+            .map(|v| match v {
+                Value::Float(f) => *f,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    // a -> x.rs, a -> y.txt, x.rs -> deep, y.txt -> deep, deep -> x.rs:
+    // a is on no path between others; the pair (a, deep) splits its
+    // unit between x.rs and y.txt; deep carries y.txt's way to x.rs
+    let cb = floats("//a(->e)* @| collapse @| graph:betweenness(->e)");
+    assert_eq!(cb, [0.0, 0.5, 0.5, 1.0]);
+    // undirected: the 4-cycle a - x.rs - deep - y.txt - a, every node
+    // carrying half of the one pair across from it (that pair has
+    // two shortest ways round), 1/6 of the 3 pairs when normalized
+    let und = floats("//a(->e)* @| collapse @| graph:betweenness(--e; --normalized)");
+    assert!(und.iter().all(|&c| (c - 1.0 / 6.0).abs() < 1e-9), "{und:?}");
+    // weighted: a -1km-> y.txt -2km-> deep beats a -4km-> x.rs -12km->
+    // deep, so y.txt carries (a, deep) alone
+    let w = floats("//a(->e)* @| collapse @| graph:betweenness(->e; --weight=km)");
+    assert!(w[2] > w[1], "{w:?}");
+    // components: directed, x.rs <-> deep are strongly connected, a
+    // and y.txt alone; undirected, one component
+    assert_eq!(
+        vals("//a(->e)* @| collapse @| graph:conncomp(->e)", &t),
+        vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(2)]
+    );
+    assert_eq!(
+        vals("//a(->e)* @| collapse @| graph:conncomp(--e)", &t),
+        vec![Value::Int(1); 4]
+    );
+    // the sample tree: one ref edge, two islands
+    let s = MockTree::sample();
+    assert_eq!(
+        vals("//*<file> @| graph:conncomp(--ref)", &s),
+        vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(1)]
+    );
+    let why = refused("//a(->e)* @| graph:conncomp(->e; --weight=km)", &t).unwrap();
+    assert!(why.contains("weight"), "{why}");
+}
+
+#[test]
+fn a_mark_re_seat_keeps_every_thread() {
+    let t = MockTree::roads();
+    // a .A --e .H --e: five walks (x.rs has two edges to deep),
+    // three through x.rs and two through y.txt, their registers
+    // alike within a group; re-seating on H keeps the five (a hop
+    // would fold the alike), collapse folds them to the two H
+    assert_eq!(
+        vals("/a .A --e .H --e | $$.H @| count", &t),
+        vec![Value::Int(5)]
+    );
+    assert_eq!(
+        vals("/a .A --e .H --e | $$.H:name @| frequencies | :n", &t),
+        vec![Value::Int(3), Value::Int(2)]
+    );
+    assert_eq!(
+        vals("/a .A --e .H --e | $$.H @| collapse @| count", &t),
+        vec![Value::Int(2)]
+    );
+    // a hop still folds the alike: x.rs and y.txt both to `a`
+    assert_eq!(vals("/a/* | \\ @| count", &t), vec![Value::Int(1)]);
+}
+
+#[test]
+fn copy_stands_last_and_is_the_tools() {
+    let t = MockTree::sample();
+    // the spelling: last, bare, on the plain pipe
+    assert!(parse(&lex("/a/* | json | copy").unwrap()).is_ok());
+    assert!(parse(&lex("/a/* @| json | copy").unwrap()).is_ok());
+    let err = parse(&lex("/a/* | copy | first").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("stands last"), "{err}");
+    let err = parse(&lex("/a/* | copy(json)").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no operand"), "{err}");
+    // the engine itself does not copy: reaching the executor refuses
+    let why = refused("/a/* | copy", &t).unwrap();
+    assert!(why.contains("the tool's"), "{why}");
+    // the host takes it off the end, with the rendering's name
+    assert_eq!(
+        crate::take_copy("//page @| json | copy"),
+        Some(("//page @| json".to_string(), "JSON"))
+    );
+    assert_eq!(
+        crate::take_copy("/a/* | %(n = :name) | copy  "),
+        Some(("/a/* | %(n = :name)".to_string(), "text"))
+    );
+    assert_eq!(
+        crate::take_copy("/a/* @| csv(a; b) | copy"),
+        Some(("/a/* @| csv(a; b)".to_string(), "CSV"))
+    );
+    assert_eq!(crate::take_copy("/a/* | copy | first"), None);
+    // either pipe, one meaning
+    assert_eq!(
+        crate::take_copy("/a/* @| json @| copy"),
+        Some(("/a/* @| json".to_string(), "JSON"))
+    );
+    assert!(parse(&lex("/a/* @| copy").unwrap()).is_ok());
+    let err = parse(&lex("/a/* @| copy | first").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("stands last"), "{err}");
+    let why = refused("/a/* @| copy", &t).unwrap();
+    assert!(why.contains("the tool's"), "{why}");
+}
+
+#[test]
+fn the_attaching_fields_push_attaches_every_field() {
+    let t = MockTree::sample();
+    assert_eq!(
+        vals("/a/x.rs | %(k = 1; v = \"a\") | .:% | :%.", &t),
+        vec![Value::record(vec![
+            ("k".to_string(), Value::Int(1)),
+            ("v".to_string(), Value::Str("a".into())),
+        ])]
+    );
+    assert_eq!(
+        vals("/a/x.rs | %(k = 1; v = \"a\") | .:% | $.k", &t),
+        vec![Value::Int(1)]
+    );
+    // read from elsewhere, by the node
+    assert_eq!(
+        vals(
+            "//*<file> | %(n = :name) | .:% | [:n = \"x.rs\"] | ->ref:.n",
+            &t
+        ),
+        vec![Value::Str("w.rs".into())]
+    );
+    assert!(parse(&lex("/a | .:%{2}").unwrap()).is_ok());
+    assert!(parse(&lex("/a | .:%(a = 1)").unwrap()).is_err());
+}
+
+#[test]
+fn quantified_attaching_push_floods_to_a_fixpoint() {
+    // The 2×2 lattice: c1 -r-> c2, c1 -d-> c3, c2 -d-> c4, c3 -r->
+    // c4. Every cell takes the least label among its own and its
+    // neighbours', round after round, until nothing moves: c4
+    // reaches 1 in the second round, the third changes nothing.
+    let t = MockTree::lattice(2);
+    assert_eq!(
+        vals(
+            "/* | .:l(:index) | .:l((@(:.l; (--*:.l)) | min)){1;} | $.l",
+            &t
+        ),
+        vec![Value::Int(1); 4]
+    );
+    assert_eq!(
+        vals(
+            "/* | .:l(:index) | .:l((@(:.l; (--*:.l)) | min)){1;} | @. | count",
+            &t
+        ),
+        vec![Value::Int(4); 4]
+    );
+    // Seeded: the labelled cells keep theirs, the rest take the
+    // least neighbouring label.
+    assert_eq!(
+        vals(
+            "/* | .:l((:index = 1 ? 1 : (:index = 4 ? 4 : null))) | .:l($.l ?? (--*:.l @| min)){1;} | $.l",
+            &t
+        ),
+        vec![Value::Int(1), Value::Int(1), Value::Int(1), Value::Int(4)]
+    );
 }
 
 #[test]
@@ -2844,7 +4100,7 @@ fn quantified_push_iterates() {
     assert_eq!(
         vals(
             &format!(
-                "{pair} | .v(:index * 10) | .v(($.v + (->ref:.v | default(0)) + (<-ref:.v | default(0)))){{2}} | $.v"
+                "{pair} | .:v(:index * 10) | .:v(($.v + (->ref:.v | default(0)) + (<-ref:.v | default(0)))){{2}} | $.v"
             ),
             &t
         ),

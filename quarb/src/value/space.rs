@@ -609,6 +609,11 @@ pub enum ColumnType {
     Duration,
     Period,
     Quantity,
+    /// A column of node references (spec: The graph as a table):
+    /// the `node` column of `@| nodes`, `source` and `target` of
+    /// `@| edges`. The cells stay references — node operands inside
+    /// the query (`:source:.l`) — and print as the node's path.
+    Node,
     Text,
     /// A TUPLE column (spec: The Table, draft 166), declared only:
     /// `key<(int; text)>` holds lists of that arity and those types,
@@ -629,6 +634,7 @@ impl ColumnType {
             ColumnType::Duration => "duration".to_string(),
             ColumnType::Period => "period".to_string(),
             ColumnType::Quantity => "quantity".to_string(),
+            ColumnType::Node => "node".to_string(),
             ColumnType::Text => "text".to_string(),
             ColumnType::Tuple(items) => {
                 format!(
@@ -664,7 +670,7 @@ impl ColumnType {
         ColumnType::ORDER.iter().map(ColumnType::word).collect()
     }
 
-    const ORDER: [ColumnType; 8] = [
+    const ORDER: [ColumnType; 9] = [
         ColumnType::Boolean,
         ColumnType::Integer,
         ColumnType::Float,
@@ -672,6 +678,7 @@ impl ColumnType {
         ColumnType::Duration,
         ColumnType::Period,
         ColumnType::Quantity,
+        ColumnType::Node,
         ColumnType::Text,
     ];
 
@@ -692,6 +699,7 @@ impl ColumnType {
             Value::Quantity { base, .. } if base == "s" => ColumnType::Duration,
             Value::Period { .. } => ColumnType::Period,
             Value::Quantity { .. } => ColumnType::Quantity,
+            Value::Node(_) => ColumnType::Node,
             _ => ColumnType::Text,
         })
     }
@@ -846,6 +854,11 @@ fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
                     }
                 })
             }
+            _ => None,
+        },
+        // a reference stays one; nothing else is a node
+        T::Node => match v {
+            Value::Node(_) => Some(v.clone()),
             _ => None,
         },
         T::Text => Some(match v {
@@ -2107,11 +2120,23 @@ impl Value {
     /// records that keeps its shape (spec: The Table). One rule for
     /// every boundary; the explicit constructors (`#(…)`, `| #`)
     /// refuse instead, since the query asked for a table.
-    pub fn table_or_records(t: Table) -> Value {
-        if t.is_flat() {
-            Value::table(Table::new(t.header, t.rows))
+    /// The one rule for an implicit table (spec: The Table, the flat
+    /// table): flat rows are the table, typed by `Table::new`; rows
+    /// with a structured cell (a frame's object column of lists)
+    /// keep their shape as a list of records. The flatness is read
+    /// off the raw rows: `Table::new` would coerce the lists to text.
+    pub fn table_or_records(header: Option<Vec<String>>, rows: Vec<Vec<Value>>) -> Value {
+        let raw = Table {
+            header,
+            rows,
+            declared: Vec::new(),
+            index: 0,
+            name: None,
+        };
+        if raw.is_flat() {
+            Value::table(Table::new(raw.header, raw.rows))
         } else {
-            t.into_records()
+            raw.into_records()
         }
     }
 

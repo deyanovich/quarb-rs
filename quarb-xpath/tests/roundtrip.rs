@@ -24,8 +24,15 @@ const DOC: &str = r#"<?xml version="1.0"?>
   </chapter>
 </EXAMPLE>"#;
 
+/// An XPath answers a node set; a Quarb navigation one thread per
+/// arrival (spec: Expansion paths), so the round trip collapses
+/// them where the query ends on nodes.
 fn via_xpath(xpath: &str) -> Vec<String> {
-    let query = quarb_xpath::translate(xpath).unwrap().query;
+    let mut query = quarb_xpath::translate(xpath).unwrap().query;
+    let value_form = query.contains('|') || query.contains("::") || query.ends_with(')');
+    if !value_form {
+        query.push_str(" @| collapse");
+    }
     let adapter = XmlAdapter::parse(DOC).unwrap();
     match quarb::run(&query, &adapter).unwrap() {
         quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| adapter.locator(n)).collect(),

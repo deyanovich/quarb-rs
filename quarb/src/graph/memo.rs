@@ -46,12 +46,15 @@ thread_local! {
 /// once more per successor to recover the label of the edge it
 /// arrived by; on a store adapter each ask is a remote query, so
 /// the second and later asks answer from here.
-pub(crate) type LastLinks = Option<((usize, NodeId), std::rc::Rc<Vec<(String, NodeId)>>)>;
+pub(crate) type LastLinks = Option<(
+    (usize, NodeId),
+    std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>>,
+)>;
 
 pub(crate) fn links_of(
     adapter: &impl AstAdapter,
     node: NodeId,
-) -> std::rc::Rc<Vec<(String, NodeId)>> {
+) -> std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>> {
     let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
     if let Some(hit) = with_graph_run(|s| match &s.last_out {
         Some((k, v)) if *k == key => Some(v.clone()),
@@ -59,7 +62,7 @@ pub(crate) fn links_of(
     }) {
         return hit;
     }
-    let v = std::rc::Rc::new(adapter.links(node));
+    let v = std::rc::Rc::new(adapter.link_rows(node));
     with_graph_run(|s| s.last_out = Some((key, v.clone())));
     v
 }
@@ -67,7 +70,7 @@ pub(crate) fn links_of(
 pub(crate) fn backlinks_of(
     adapter: &impl AstAdapter,
     node: NodeId,
-) -> std::rc::Rc<Vec<(String, NodeId)>> {
+) -> std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>> {
     let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
     if let Some(hit) = with_graph_run(|s| match &s.last_in {
         Some((k, v)) if *k == key => Some(v.clone()),
@@ -75,7 +78,7 @@ pub(crate) fn backlinks_of(
     }) {
         return hit;
     }
-    let v = std::rc::Rc::new(adapter.backlinks(node));
+    let v = std::rc::Rc::new(adapter.backlink_rows(node));
     with_graph_run(|s| s.last_in = Some((key, v.clone())));
     v
 }

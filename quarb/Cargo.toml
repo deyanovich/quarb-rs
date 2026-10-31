@@ -11,6 +11,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
+# The debug diagnostics (spec: Diagnostics, the debug severity): the
+# evaluation's own notes, round by round or mount by mount, for whoever
+# works on the implementation. Off by default, so a release carries
+# none and `--diagnostics=debug` shows nothing there; every note sits
+# behind this feature, so the work is one grep to find and to delete.
+debug-diagnostics = []
 default = ["colligo", "decode-formats", "kaiv", "desm"]
 # `decode(yaml|toml|xml|json)`: the structured readings of a text,
 # each a parser dependency of its own. Off, `decode` keeps the
@@ -45,8 +51,9 @@ cjk = []
 libc = "0.2"
 
 [dependencies]
-quarb-trace = { path = "../quarb-trace", version = "0.44.0" }
-quarb-time = { path = "../quarb-time", version = "0.44.0" }
+quarb-trace = { path = "../quarb-trace", version = "0.45.0" }
+quarb-time = { path = "../quarb-time", version = "0.45.0" }
+quarb-lib-graph = { path = "../quarb-lib-graph", version = "0.45.0" }
 kaiv = { version = "0.15.0", default-features = false, optional = true }
 thiserror.workspace = true
 globset.workspace = true

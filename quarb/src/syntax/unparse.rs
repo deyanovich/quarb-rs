@@ -190,6 +190,7 @@ fn anchor(a: &crate::syntax::ast::Anchor) -> String {
         Anchor::MarkBack(n) => format!("$$.-{n}"),
         Anchor::MarksAll => "((@))".to_string(),
         Anchor::MarksNamed(m) => format!("((@{m}))"),
+        Anchor::EdgeEnd(end) => format!("$-:{}", end.name()),
         Anchor::Id(op) => format!("((!{}))", operand(op)),
     }
 }
@@ -226,6 +227,15 @@ pub(crate) fn group(g: &Group) -> String {
         .map(|alt| alt.iter().map(elem).collect())
         .collect();
     let quant = match (g.quant.min, g.quant.max) {
+        // a budget prints as written: the bounds are quantities
+        _ if g.quant.budget.is_some() => {
+            let b = g.quant.budget.as_ref().expect("checked");
+            format!(
+                "{{{};{}}}",
+                b.floor.as_deref().unwrap_or(""),
+                b.ceiling.as_deref().unwrap_or("")
+            )
+        }
         (1, Some(1)) => String::new(),
         (1, None) => "+".to_string(),
         (0, None) => "*".to_string(),
@@ -264,6 +274,8 @@ pub(crate) fn step(s: &Step) -> String {
         Axis::OutLink => out.push_str("->"),
         Axis::InLink => out.push_str("<-"),
         Axis::BothLink => out.push_str("--"),
+        Axis::Any => out.push('~'),
+        Axis::AnyDeep(r) => out.push_str(&format!("~~{}", reach_mark(r))),
         Axis::Resolve {
             property,
             label: hint,
@@ -875,9 +887,10 @@ pub(crate) fn operand(o: &Operand) -> String {
             _ => format!("{}{}", operand(inner), typing.spelling()),
         },
         Operand::ValueMeta { base, key } => format!("{}:{key}", operand(base)),
-        Operand::PeerReg { at, reg: r } => {
-            format!("{}:{}", operand(at), reg(r).trim_start_matches('$'))
-        }
+        Operand::PeerReg { at, reg: r } => match at {
+            Some(at) => format!("{}:{}", operand(at), reg(r).trim_start_matches('$')),
+            None => format!(":{}", reg(r).trim_start_matches('$')),
+        },
         Operand::NamedCaptures => "%+".to_string(),
         Operand::List(items) => {
             let inner: Vec<String> = items.iter().map(|i| grouped(body_text(i))).collect();
@@ -1310,6 +1323,9 @@ pub(crate) fn command(st: &Command) -> String {
             format!("$| {body}")
         }
         Command::Nav(b) => format!("| {}", branch(b)),
+        // `.:name…` — the attaching push: the push it wraps, the
+        // colon after the dot.
+        Command::Attach { command: inner, .. } => command(inner).replacen("| .", "| .:", 1),
         Command::Push(None) => "| .".to_string(),
         Command::Push(Some(n)) => format!("| .{}", push_name(n)),
         Command::FieldsPush => "| .%".to_string(),
@@ -1716,15 +1732,14 @@ mod tests {
     }
 
     #[test]
-    fn peer_reads_round_trip() {
+    fn node_reads_round_trip() {
         for q in [
-            "//x | .v(::a) | <-link:.v",
-            "//x | .v(::a) | (<-link:.v @| sum)",
-            "/a | /*:.",
-            "/a | /*:.2",
-            "/a | \\/*:@.",
+            "//x | .:v(::a) | <-link:.v",
+            "//x | .:v(::a) | (<-link:.v @| sum)",
+            "//x | .:v(::a){3} | :.v",
+            "//x | .:v | :%.",
+            "//x | .:v(/y @| count) | $$.M:.v",
             "/a | \\/*:%.",
-            "/a | \\/*:%%.",
             "/a | \\/*:%.:v",
             "/a | <-link:.v:%provenance:text",
             "/a | ((!3))::name",
@@ -1742,8 +1757,10 @@ mod tests {
                 "{q:?} -> {canon:?}"
             );
         }
-        // The rounded twin prints pointy.
-        assert_eq!(rt("/a | \\/*:(*.)"), rt("/a | \\/*:@."));
+        // The bare read prints bare; the attaching push keeps its
+        // colon through the quantifier.
+        assert_eq!(rt("/a | :.v"), "/a | :.v");
+        assert_eq!(rt("/a | .:v(1){2;}"), "/a | .:v(1){2;}");
     }
 
     #[test]

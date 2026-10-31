@@ -294,6 +294,12 @@ pub(crate) fn env_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
+    if let Some(("graph", name)) = crate::pipeline::env::split_env(&call.name) {
+        record_refusal(format!(
+            "graph:{name} reads the context's nodes and the edges among them: write it after '@|' on a node context"
+        ));
+        return Vec::new();
+    }
     // A linked library's prefix wins over a mount of the same name
     // (the host refuses such a mount).
     if let Some((prefix, name)) = crate::pipeline::env::split_env(&call.name)
@@ -339,11 +345,17 @@ pub(crate) fn env_agg_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
-    if let Some((prefix, name)) = crate::pipeline::env::split_env(&call.name)
-        && let Some(lib) =
+    if let Some((prefix, name)) = crate::pipeline::env::split_env(&call.name) {
+        // the engine's own library: row-aligned over the context,
+        // never a call over values (spec: The graph library)
+        if prefix == "graph" {
+            return graph_library_command(name, call, caps, host, trace, outer, peers);
+        }
+        if let Some(lib) =
             run_option(|o| o.libraries.iter().find(|l| l.prefix() == prefix).cloned())
-    {
-        return lib_agg_command(lib.as_ref(), name, call, caps, host, trace, outer, peers);
+        {
+            return lib_agg_command(lib.as_ref(), name, call, caps, host, trace, outer, peers);
+        }
     }
     let Some((env, name)) = environment_of(call) else {
         return Vec::new();

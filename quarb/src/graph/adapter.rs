@@ -1247,6 +1247,53 @@ pub trait AstAdapter {
         Vec::new()
     }
 
+    /// `links` with each edge's identity: the node that IS the edge,
+    /// for an adapter whose edges are rows (a model's `edge … as
+    /// flight` over a flights table: the row is the edge, its cells
+    /// the edge's properties), `None` for an edge that is nothing but
+    /// a link. Two rows on one leg are two edges — each its own
+    /// thread, each its own `$-` (spec: Edge rows). The default reads
+    /// `links` with no identity.
+    fn link_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.links(node)
+            .into_iter()
+            .map(|(l, t)| (l, t, None))
+            .collect()
+    }
+
+    /// The edges of the graph as a table (spec: The graph as a
+    /// table, The graph library): what `edges` collects and the
+    /// graph library reads, from `node` outward. By default the link
+    /// rows; a level whose hop lands inside the target — the web's
+    /// fragment link, which `links` lands on the section — reports
+    /// the edge to the target node itself, so that the induced
+    /// subgraph of the pages carries it and the stored rank's graph
+    /// is the one the library ranks.
+    fn edge_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.link_rows(node)
+    }
+
+    /// `backlinks` with each edge's identity, as `link_rows`.
+    fn backlink_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.backlinks(node)
+            .into_iter()
+            .map(|(l, s)| (l, s, None))
+            .collect()
+    }
+
+    /// Whether the link from `source` under `label` is a reference
+    /// an edge declaration consumed: a bare wildcard hop (`->*`,
+    /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
+    /// named (`<-origin`) still walks it (spec: Model Files, Edge
+    /// rows). A model's `edge /flights/*: ::origin -- ::dest`
+    /// consumes the two references its fields resolve through, so a
+    /// wildcard from an airport reaches the carrier edges and not the
+    /// flight rows; a reference no edge consumed stays visible to
+    /// wildcards. The default consumes nothing.
+    fn link_consumed(&self, _source: NodeId, _label: &str) -> bool {
+        false
+    }
+
     /// Resolve a cross-reference: `::property-->hint` maps `node`'s
     /// `property` (a value that references another node) to its target,
     /// with an optional adapter-specific `hint` (a relation type such as
@@ -1421,6 +1468,35 @@ pub trait AstAdapter {
     /// a store may fetch them in one statement; semantics are
     /// unchanged either way.
     fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+    /// Drop any pushed-down listing filter: from here on every
+    /// table's listing is the whole table. A model's fabric indexes
+    /// a ref's target container by listing it, and a listing the
+    /// planner narrowed to the query's rows would drop every edge
+    /// whose far end the predicate excluded; the engine re-applies
+    /// the pushed predicates, so a whole listing changes no answer.
+    /// A no-op for an adapter that never filters a listing.
+    fn whole_listings(&self) {}
+
+    /// The names of the properties an edge carries — the weights a
+    /// budget quantifier may sum (spec: The budget quantifier) and
+    /// the columns `@| edges` lists. Empty by default: an adapter
+    /// whose edges carry properties ([`AstAdapter::link_property`])
+    /// names them here, so the engine can pick the one of the
+    /// budget's dimension.
+    fn link_property_names(&self, _source: NodeId, _label: &str, _target: NodeId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The promise that no walk over the link `label` returns to a
+    /// node (spec: Model Files, Acyclic links): the declaration, or
+    /// the source's own word, that makes it — for the refusal that
+    /// names it when the data breaks it. `None` for a link that
+    /// makes no promise, every link by default. Under the promise the
+    /// exact forms of a quantified walk expand by node and round
+    /// instead of by history.
+    fn acyclic_link(&self, _label: &str) -> Option<String> {
+        None
+    }
 
     /// The quantifier bound N_max: the depth to which open-ended path
     /// quantifiers (`+`, `*`, `{m,}`) expand, and the ceiling of any
@@ -1431,6 +1507,20 @@ pub trait AstAdapter {
     /// instant are the run's alone (`Run::allow_shell`, `Run::now`).
     fn quantifier_bound(&self) -> usize {
         32
+    }
+
+    /// The frontier bound: the most expansion paths one round of a
+    /// quantified walk may hold in flight. A set walk (an open
+    /// quantifier with a floor of at most one, under all matches or
+    /// the proximal reach, no push or mark) reaches each node once
+    /// and never nears it; an exact walk keeps one acyclic walk per
+    /// history, and over data with many routes to a node that count
+    /// explodes — the bound refuses the walk by name instead of
+    /// running for hours. A run
+    /// may override it (`Run::frontier_bound`, the CLI's
+    /// `--frontier-bound`).
+    fn frontier_bound(&self) -> usize {
+        100_000
     }
 
     /// The data provenance of `node` — the `:source` /
@@ -1542,12 +1632,12 @@ macro_rules! forward_ast_adapter {
             index_referrers non_tree_nodes child_host children_named
             answers_to has_trait default_value metadata
             metadata_keys metadata_catalogue
-            aliased_metadata links backlinks resolve external_ref
+            aliased_metadata links backlinks link_rows edge_rows backlink_rows link_consumed resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
             descendants_where select select_plan estimate count
             prefetch_properties
-            prefetch_links quantifier_bound
+            prefetch_links whole_listings link_property_names acyclic_link quantifier_bound frontier_bound
             provenance has_node
             provenance_list unit_scale unit_names declared_notation
         );
@@ -1587,6 +1677,10 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [aliased_metadata $($r:ident)*] aliased_metadata) => {};
     (@unless [$i:tt] [links $($r:ident)*] links) => {};
     (@unless [$i:tt] [backlinks $($r:ident)*] backlinks) => {};
+    (@unless [$i:tt] [link_rows $($r:ident)*] link_rows) => {};
+    (@unless [$i:tt] [edge_rows $($r:ident)*] edge_rows) => {};
+    (@unless [$i:tt] [backlink_rows $($r:ident)*] backlink_rows) => {};
+    (@unless [$i:tt] [link_consumed $($r:ident)*] link_consumed) => {};
     (@unless [$i:tt] [resolve $($r:ident)*] resolve) => {};
     (@unless [$i:tt] [external_ref $($r:ident)*] external_ref) => {};
     (@unless [$i:tt] [resolve_fragment $($r:ident)*] resolve_fragment) => {};
@@ -1603,7 +1697,11 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [count $($r:ident)*] count) => {};
     (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
     (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links) => {};
+    (@unless [$i:tt] [whole_listings $($r:ident)*] whole_listings) => {};
     (@unless [$i:tt] [quantifier_bound $($r:ident)*] quantifier_bound) => {};
+    (@unless [$i:tt] [frontier_bound $($r:ident)*] frontier_bound) => {};
+    (@unless [$i:tt] [link_property_names $($r:ident)*] link_property_names) => {};
+    (@unless [$i:tt] [acyclic_link $($r:ident)*] acyclic_link) => {};
     (@unless [$i:tt] [provenance $($r:ident)*] provenance) => {};
     (@unless [$i:tt] [has_node $($r:ident)*] has_node) => {};
     (@unless [$i:tt] [provenance_list $($r:ident)*] provenance_list) => {};
@@ -1784,6 +1882,26 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).backlinks(node)
         }
     };
+    (@fwd [$i:tt] link_rows) => {
+        fn link_rows(&self, node: $crate::NodeId) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
+            $crate::forward_ast_adapter!(@target self $i).link_rows(node)
+        }
+    };
+    (@fwd [$i:tt] edge_rows) => {
+        fn edge_rows(&self, node: $crate::NodeId) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
+            $crate::forward_ast_adapter!(@target self $i).edge_rows(node)
+        }
+    };
+    (@fwd [$i:tt] backlink_rows) => {
+        fn backlink_rows(&self, node: $crate::NodeId) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
+            $crate::forward_ast_adapter!(@target self $i).backlink_rows(node)
+        }
+    };
+    (@fwd [$i:tt] link_consumed) => {
+        fn link_consumed(&self, source: $crate::NodeId, label: &str) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).link_consumed(source, label)
+        }
+    };
     (@fwd [$i:tt] resolve) => {
         fn resolve(
             &self,
@@ -1908,9 +2026,34 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).prefetch_links(nodes, dir)
         }
     };
+    (@fwd [$i:tt] whole_listings) => {
+        fn whole_listings(&self) {
+            $crate::forward_ast_adapter!(@target self $i).whole_listings()
+        }
+    };
     (@fwd [$i:tt] quantifier_bound) => {
         fn quantifier_bound(&self) -> usize {
             $crate::forward_ast_adapter!(@target self $i).quantifier_bound()
+        }
+    };
+    (@fwd [$i:tt] frontier_bound) => {
+        fn frontier_bound(&self) -> usize {
+            $crate::forward_ast_adapter!(@target self $i).frontier_bound()
+        }
+    };
+    (@fwd [$i:tt] link_property_names) => {
+        fn link_property_names(
+            &self,
+            source: $crate::NodeId,
+            label: &str,
+            target: $crate::NodeId,
+        ) -> Vec<String> {
+            $crate::forward_ast_adapter!(@target self $i).link_property_names(source, label, target)
+        }
+    };
+    (@fwd [$i:tt] acyclic_link) => {
+        fn acyclic_link(&self, label: &str) -> Option<String> {
+            $crate::forward_ast_adapter!(@target self $i).acyclic_link(label)
         }
     };
     (@fwd [$i:tt] provenance) => {
@@ -1947,6 +2090,38 @@ macro_rules! forward_ast_adapter {
 
 impl AstAdapter for Box<dyn AstAdapter> {
     crate::forward_ast_adapter!(*);
+}
+
+/// The label a reference declared by `property` gives its edge:
+/// the property's name without a trailing `_id` or camel-case `Id`
+/// (`manager_id` → `manager`, `authorId` → `author`; spec: A table
+/// with foreign keys). A name that is only the suffix (`id`, `_id`)
+/// or ends otherwise labels the edge as written.
+pub fn reference_label(property: &str) -> &str {
+    for suffix in ["_id", "Id"] {
+        if let Some(stem) = property.strip_suffix(suffix)
+            && !stem.is_empty()
+        {
+            return stem;
+        }
+    }
+    property
+}
+
+/// The labels of one scope's declared references, in declaration
+/// order: where two would share a name, the later keeps its full
+/// property name.
+pub fn reference_labels<'a>(properties: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in properties {
+        let label = reference_label(p);
+        if out.iter().any(|o| o == label) {
+            out.push(p.to_string());
+        } else {
+            out.push(label.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2210,6 +2385,12 @@ mod forwarding {
         fn quantifier_bound(&self) -> usize {
             77
         }
+        fn frontier_bound(&self) -> usize {
+            777
+        }
+        fn link_property_names(&self, source: NodeId, _label: &str, target: NodeId) -> Vec<String> {
+            vec![format!("w{}_{}", source.0, target.0)]
+        }
         fn provenance(&self, node: NodeId) -> Provenance {
             Provenance {
                 source: Some(format!("src{}", node.0)),
@@ -2318,6 +2499,8 @@ mod forwarding {
             assert_eq!(PREFETCHED.with(|c| c.get()), 21, "prefetch_links");
         }
         same!(quantifier_bound);
+        same!(frontier_bound);
+        same!(link_property_names, n(1), "e", n(2));
         same!(provenance, n(2));
         same!(has_node, n(8));
         same!(has_node, n(9));

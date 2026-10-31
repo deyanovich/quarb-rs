@@ -140,6 +140,8 @@ fn axis_text(a: &Axis) -> &'static str {
         Axis::OutLink => "->",
         Axis::InLink => "<-",
         Axis::BothLink => "--",
+        Axis::Any => "~",
+        Axis::AnyDeep(_) => "~~",
         Axis::Resolve { .. } => "-->",
         Axis::ReverseResolve { .. } => "<--",
         Axis::ValueMatch { .. } => "=>",
@@ -331,6 +333,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
             None,
             &[],
             &[],
+            false,
         )
         .into_iter()
         .map(|(e, _reg)| (e.node, e.arrived))
@@ -385,6 +388,26 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                     )
                 })
                 .collect(),
+            // The navop star: a tree edge by the pair's parenthood,
+            // a crosslink in its stored direction, against when
+            // walked from its target.
+            Axis::Any | Axis::AnyDeep(_) => {
+                if self.adapter.parent(to) == Some(from) {
+                    vec![(EdgeKey::Tree(from, to), false)]
+                } else if self.adapter.parent(from) == Some(to) {
+                    vec![(EdgeKey::Tree(to, from), true)]
+                } else {
+                    arrived
+                        .iter()
+                        .map(|e| {
+                            (
+                                EdgeKey::Link(e.source, e.label.clone(), e.target),
+                                e.target == from,
+                            )
+                        })
+                        .collect()
+                }
+            }
         }
     }
 
@@ -493,7 +516,14 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
 
     /// A quantified walk: the film inside one step — one frame per
     /// iteration, each iteration emitting a thread per node reached
-    /// at that depth (NOTES 004).
+    /// at that depth (NOTES 004). The film is the distance picture:
+    /// the walker keeps a visited set, so a node appears at the
+    /// first iteration that reaches it and never again — which nodes
+    /// the walk reached by a round, not which walks reached them.
+    /// The engine's exact walks (a count, a range, a floor above
+    /// one, the distal reach, a recording walk) keep one acyclic
+    /// walk per history and may answer a node at a later count; the
+    /// trace draws no second walk model (ruled 2026-10-26).
     fn group(&mut self, at: i64, prev: &[Th], g: &Group) -> Result<Vec<Th>> {
         let [body] = g.alts.as_slice() else {
             return Err(unsupported("group alternatives"));

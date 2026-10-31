@@ -218,9 +218,14 @@ fn the_layers_nearest_wins() {
         &["--explain", q, "sales.json"],
     );
     assert!(err.contains("locale: ru-RU (from QUARB_LOCALE)"), "{err}");
-    // an uncovered tag: refused on the flag, reported and canonical elsewhere
-    let (_, err, ok_) = qua(&dir, &[], &["--locale", "xx", q, "sales.json"]);
-    assert!(!ok_ && err.contains("no rendering rules"), "{err}");
+    // an uncovered tag: a LOCALE_UNKNOWN warning on any layer, the
+    // canonical form kept (spec: Diagnostics)
+    let (out, err, ok_) = qua(&dir, &[], &["--locale", "xx", q, "sales.json"]);
+    assert!(ok_ && out.trim() == "1234567.5", "{out} {err}");
+    assert!(
+        err.contains("warning LOCALE_UNKNOWN (--locale): locale: xx (from --locale) has no rendering rules; canonical"),
+        "{err}"
+    );
     assert_eq!(
         ok(&dir, &[("LANG", "xx_XX.UTF-8")], &[q, "sales.json"]),
         "1234567.5"

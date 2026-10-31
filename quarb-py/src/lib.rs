@@ -160,7 +160,10 @@ impl Doc {
             ($a:expr) => {{
                 quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
                     .and_then(|q| q.run($a, &run))
-                    .map(|o| (o.result, o.html))
+                    .map(|o| {
+                        set_last_diagnostics(&o.diagnostics);
+                        (o.result, o.html)
+                    })
                     .map_err(|e| e.to_string())
             }};
         }
@@ -189,6 +192,7 @@ impl Doc {
                 let out = quarb::Query::parse_with(query, &quarb::Defs::default(), $a, &run)
                     .and_then(|q| q.without_closing().run($a, &run))
                     .map_err(|e| e.to_string())?;
+                set_last_diagnostics(&out.diagnostics);
                 let closing = out
                     .closing
                     .filter(|c| !c.csv)
@@ -362,6 +366,31 @@ fn format_of(path: &Path) -> Option<&'static str> {
 ///
 /// `unsendable`: the HTML adapter's DOM is not thread-safe, so a
 /// Document is bound to the thread that created it.
+thread_local! {
+    /// The diagnostics of the last run on this thread (spec:
+    /// Diagnostics), as (severity, code, site, message) — read by
+    /// `Document.diagnostics()` right after a run; the kernel is
+    /// single-threaded.
+    static LAST_DIAGNOSTICS: std::cell::RefCell<Vec<(String, String, String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn set_last_diagnostics(ds: &[quarb::Diagnostic]) {
+    LAST_DIAGNOSTICS.with(|l| {
+        *l.borrow_mut() = ds
+            .iter()
+            .map(|d| {
+                (
+                    d.severity.word().to_string(),
+                    d.code.clone(),
+                    d.site.clone(),
+                    d.message.clone(),
+                )
+            })
+            .collect();
+    });
+}
+
 #[pyclass(frozen, unsendable, module = "quarb")]
 struct Document {
     doc: Doc,
@@ -392,6 +421,12 @@ impl Document {
     #[getter]
     fn format(&self) -> &str {
         &self.fmt
+    }
+
+    /// The diagnostics the last run raised beside its answer, as
+    /// `(severity, code, site, message)` tuples in raising order.
+    fn diagnostics(&self) -> Vec<(String, String, String, String)> {
+        LAST_DIAGNOSTICS.with(|l| l.borrow().clone())
     }
 
     /// Execute `query` and return its values, typed: ints, floats,
@@ -746,11 +781,19 @@ fn closes_with_drawing(query: &str) -> bool {
     quarb::closes_with_drawing(query)
 }
 
+/// Take `| copy` off the end of a query (spec: The clipboard): the
+/// query without it and the rendering's name, or None.
+#[pyfunction]
+fn take_copy(query: &str) -> Option<(String, String)> {
+    quarb::take_copy(query).map(|(rest, rendering)| (rest, rendering.to_string()))
+}
+
 #[pymodule]
 fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TABLE_CSS", quarb::TABLE_CSS)?;
     m.add_function(wrap_pyfunction!(closes_with_table, m)?)?;
+    m.add_function(wrap_pyfunction!(take_copy, m)?)?;
     m.add_function(wrap_pyfunction!(closes_with_drawing, m)?)?;
     m.add_class::<Document>()?;
     m.add_class::<Quantity>()?;

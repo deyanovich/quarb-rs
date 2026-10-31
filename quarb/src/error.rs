@@ -51,6 +51,17 @@ pub struct QuarbError {
     hint: Option<String>,
     at: Option<usize>,
     source: Option<Box<QuarbError>>,
+    /// The diagnostic code and site, when a rule named them —
+    /// boxed, so the error stays small on the parser's deep stacks
+    /// ([`QuarbError::code`], [`QuarbError::site`]).
+    diag: Option<Box<DiagInfo>>,
+}
+
+/// The code a rule named and the site that raised it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct DiagInfo {
+    code: Option<String>,
+    site: Option<String>,
 }
 
 impl QuarbError {
@@ -61,7 +72,52 @@ impl QuarbError {
             hint: None,
             at: None,
             source: None,
+            diag: None,
         }
+    }
+
+    /// With the diagnostic code a rule names (`QUANTIFIER_BOUND`).
+    pub fn with_code(mut self, code: impl Into<String>) -> QuarbError {
+        self.diag.get_or_insert_with(Default::default).code = Some(code.into());
+        self
+    }
+
+    /// With the site that raised it (a command, a hop, a round, a
+    /// mount, the query).
+    pub fn with_site(mut self, site: impl Into<String>) -> QuarbError {
+        self.diag.get_or_insert_with(Default::default).site = Some(site.into());
+        self
+    }
+
+    /// The diagnostic code (spec: Diagnostics): the one the rule
+    /// named, else the kind's — `SYNTAX` for a lex or parse error,
+    /// `UNSUPPORTED`, `EXPANSION`, `REFUSED` for a refusal no rule
+    /// has named yet.
+    pub fn code(&self) -> &str {
+        match self.diag.as_ref().and_then(|d| d.code.as_deref()) {
+            Some(c) => c,
+            None => match self.kind {
+                Kind::Lex | Kind::Parse => crate::diagnostic::SYNTAX,
+                Kind::Unsupported => "UNSUPPORTED",
+                Kind::Expansion => "EXPANSION",
+                Kind::Refused => crate::diagnostic::REFUSED,
+            },
+        }
+    }
+
+    /// The site that raised it: the one recorded, else `query`.
+    pub fn site(&self) -> &str {
+        self.diag
+            .as_ref()
+            .and_then(|d| d.site.as_deref())
+            .unwrap_or("query")
+    }
+
+    /// The error as a diagnostic of severity `error`: its code, its
+    /// site and the displayed message (banner, hint and position
+    /// included, as a host prints it).
+    pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        crate::diagnostic::Diagnostic::error(self.code(), self.site(), self.to_string())
     }
 
     /// A lexer error.
@@ -153,8 +209,12 @@ impl fmt::Display for QuarbError {
 }
 
 impl std::error::Error for QuarbError {
+    /// No chain: the display already carries the error inside (an
+    /// expansion's), so a host printing the chain (`{:#}` on an
+    /// `anyhow::Error` holding this one) does not say it twice;
+    /// [`QuarbError::inner`] reaches it.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_deref().map(|e| e as _)
+        None
     }
 }
 

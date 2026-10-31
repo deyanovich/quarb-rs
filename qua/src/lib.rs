@@ -191,6 +191,18 @@ struct Cli {
     #[arg(long)]
     explain: bool,
 
+    /// The diagnostics shown on stderr beside a query's answer:
+    /// error (the refusals and syntax errors alone), warning (the
+    /// default), info (every note the run raised: what was pushed
+    /// to a source, what was delegated, the locale in force), or
+    /// debug (what the evaluation did on the way, round by round).
+    /// The level changes what is shown, never what is raised. Beside
+    /// the specification's codes the tool raises two of its own:
+    /// UNRESOLVED (an external reference the run left unresolved)
+    /// and READING (a reading a mount declined), both infos.
+    #[arg(long, value_name = "LEVEL", default_value = "warning")]
+    diagnostics: String,
+
     /// Print the static plan (what the query will touch, step by
     /// step, with each adapter's estimate) as a kaiv document and
     /// stop, running nothing.
@@ -291,6 +303,12 @@ struct Cli {
     #[arg(long, value_name = "N")]
     quantifier_bound: Option<usize>,
 
+    /// Override the frontier bound: the most expansion paths one
+    /// round of a quantified walk may hold in flight (a walk that
+    /// pushes or marks keeps one path per route). Default: 100000.
+    #[arg(long, value_name = "N")]
+    frontier_bound: Option<usize>,
+
     /// Allow the sh(...) pipeline command to run external commands.
     /// Off by default: query text stays inert data — a .quarb
     /// file, a defs file, or a macro can never run a command
@@ -381,6 +399,8 @@ struct OutputCtx {
     save: Option<(PathBuf, String)>,
     /// --quantifier-bound.
     quant_bound: Option<usize>,
+    /// --frontier-bound.
+    front_bound: Option<usize>,
     allow_shell: bool,
     /// The session memory (`| ,name`, `$,name`, `%,`): for a one-shot
     /// run the run itself, for the REPL the whole session.
@@ -423,6 +443,10 @@ struct OutputCtx {
     resident: Option<(PathBuf, u64, bool)>,
     /// `@| encoding(LABEL)` taken off the end of the query.
     encoding: Option<(String, quarb::source::Escape)>,
+    /// `| copy` taken off the end of the query (spec: The
+    /// clipboard): the output goes to the clipboard instead of the
+    /// screen, this its rendering's name for the diagnostic.
+    copy: Option<&'static str>,
 }
 
 /// Split a scheme-prefixed query (`github:/torvalds/…`) into
@@ -773,6 +797,9 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     if let Some(n) = cli.quantifier_bound {
         anyhow::ensure!(n >= 1, "--quantifier-bound must be at least 1");
     }
+    if let Some(n) = cli.frontier_bound {
+        anyhow::ensure!(n >= 1, "--frontier-bound must be at least 1");
+    }
     // Bind the invocation instant: --now pins it; otherwise the
     // clock, read exactly once, here — never during evaluation.
     let now = match &cli.now {
@@ -886,8 +913,22 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         kaiv_origins: cli.kaiv_origins,
         save: cli.save.as_ref().map(|p| (p.clone(), cli.save_as.clone())),
         quant_bound: cli.quantifier_bound,
+        front_bound: cli.frontier_bound,
         allow_shell: cli.allow_shell,
-        session: quarb::session_memory(),
+        session: {
+            // The switch seeds the session's level; `session(…)` in a
+            // query may move it.
+            let memory = quarb::session_memory();
+            let level = cli
+                .diagnostics
+                .parse::<quarb::Severity>()
+                .map_err(|e| anyhow::anyhow!("--diagnostics: {e}"))?;
+            memory.borrow_mut().diagnostics = level;
+            // the debug licence: debug notes are raised only when
+            // the level asks for them
+            DEBUG_NOTES.with(|d| d.set(level == quarb::Severity::Debug));
+            memory
+        },
         environments: environments.clone(),
         libraries: linked_libraries(),
         reproducible: cli.reproducible,
@@ -903,6 +944,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         #[cfg(feature = "adapters")]
         resident: None,
         encoding: None,
+        copy: None,
     };
     // The calculator's input: a pipe is read whole, as one text, the
     // topic the expression head's thread opens with; nothing is
@@ -926,10 +968,18 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
     }
     if profile == Profile::Calc {
-        return calc_execute(&cli.query, cli.kaiv, &oc);
+        let r = calc_execute(&cli.query, cli.kaiv, &oc);
+        oc.flush_notes();
+        return r;
     }
     #[cfg(feature = "adapters")]
-    return execute(&cli, &cli.query, &oc);
+    {
+        // a run the engine never saw (a plan answered by the source)
+        // reports the notes the tool raised around it
+        let r = execute(&cli, &cli.query, &oc);
+        oc.flush_notes();
+        return r;
+    }
     #[cfg(not(feature = "adapters"))]
     unreachable!("the adapters are compiled out: this build is the calculator")
 }
@@ -1089,6 +1139,8 @@ fn resident_socket(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<PathBuf> {
         oc.locale.map(|(l, _)| l).map(|l| l.tag),
     )
         .hash(&mut h);
+    // (a thirteenth element: tuples hash up to twelve)
+    cli.frontier_bound.hash(&mut h);
     // A session renders as it was started: its output form and its
     // grouping are part of its identity, so a --json session never
     // answers a plain client. A relative source (`t.txt`,
@@ -1174,10 +1226,19 @@ fn resident_client(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<()> {
         .next()
         .and_then(|s| s.parse().ok())
         .context("bad session response status")?;
+    // The diagnostics, when the server sent any (a fourth field).
+    let dlen: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut body = vec![0u8; len];
     std::io::Read::read_exact(&mut reader, &mut body)?;
+    let mut diag = vec![0u8; dlen];
+    if dlen > 0 {
+        std::io::Read::read_exact(&mut reader, &mut diag)?;
+    }
     if status == 0 {
         std::io::stdout().write_all(&body)?;
+        if dlen > 0 {
+            std::io::stderr().write_all(&diag)?;
+        }
         Ok(())
     } else {
         anyhow::bail!("{}", String::from_utf8_lossy(&body));
@@ -1341,6 +1402,7 @@ fn resident_serve_loop<A: AstAdapter>(
                 let query = String::from_utf8_lossy(&qbytes).into_owned();
                 // The output command is each query's own: taken off
                 // and reset here, never inherited from the last.
+                let (query, copy) = take_copy(&query);
                 let (query, encoding) = match take_output_encoding(&query) {
                     Ok(q) => q,
                     Err(e) => {
@@ -1362,17 +1424,33 @@ fn resident_serve_loop<A: AstAdapter>(
                 }
                 let per_query = OutputCtx {
                     encoding,
+                    copy,
                     now,
                     ..oc.clone()
                 };
-                let (result, output) =
-                    with_stdout_capture(|| run_wrapped(&query, adapter, &render, None, &per_query));
+                DIAG_SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
+                let (result, output) = with_stdout_capture(|| {
+                    let r = run_wrapped(&query, adapter, &render, None, &per_query);
+                    per_query.flush_notes();
+                    r
+                });
+                let diag_lines = DIAG_SINK
+                    .with(|s| s.borrow_mut().take())
+                    .unwrap_or_default();
                 let (status, body) = match result {
                     Ok(()) => (0u8, output),
                     Err(e) => (1u8, format!("{e:#}").into_bytes()),
                 };
-                let _ = conn.write_all(format!("R {} {}\n", body.len(), status).as_bytes());
+                // The diagnostics follow the body, their length a
+                // fourth field of the header (absent = none).
+                let diag: Vec<u8> = diag_lines
+                    .iter()
+                    .flat_map(|l| format!("{l}\n").into_bytes())
+                    .collect();
+                let _ = conn
+                    .write_all(format!("R {} {} {}\n", body.len(), status, diag.len()).as_bytes());
                 let _ = conn.write_all(&body);
+                let _ = conn.write_all(&diag);
                 let _ = conn.flush();
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1389,6 +1467,72 @@ fn resident_serve_loop<A: AstAdapter>(
     }
     let _ = std::fs::remove_file(sock);
     Ok(())
+}
+
+/// The planner's and the locale layer's codes (spec: Diagnostics):
+/// infos of what was pushed to a source, what stayed with the
+/// engine and why, what a source answered natively, and the locale
+/// in force; a warning for a locale tag without rules.
+const PUSHED: &str = "PUSHED";
+const NOT_PUSHED: &str = "NOT_PUSHED";
+const DELEGATED: &str = "DELEGATED";
+const LOCALE: &str = "LOCALE";
+const LOCALE_UNKNOWN: &str = "LOCALE_UNKNOWN";
+/// The tool's own codes beside the specification's: an external
+/// reference the run left unresolved, a reading a mount declined.
+const UNRESOLVED: &str = "UNRESOLVED";
+const READING: &str = "READING";
+/// Debug codes: the plan a source was handed, the mount a query ran
+/// over (content the implementation's own).
+const PLAN: &str = "PLAN";
+const MOUNT: &str = "MOUNT";
+
+thread_local! {
+    /// The diagnostics the tool itself raises around a run — the
+    /// planner's infos, the locale layer's — kept until the run's
+    /// report drains them in front of the engine's own, or the
+    /// flush after a run the engine never saw (a plan answered by
+    /// the source).
+    static NOTES: std::cell::RefCell<Vec<quarb::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Whether debug notes are raised at all: the level asked for
+    /// them (spec: Diagnostics, the debug licence).
+    static DEBUG_NOTES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn note(d: quarb::Diagnostic) {
+    NOTES.with(|n| n.borrow_mut().push(d));
+}
+
+fn note_info(code: &str, site: impl Into<String>, message: impl Into<String>) {
+    note(quarb::Diagnostic::info(code, site, message));
+}
+
+fn note_warning(code: &str, site: impl Into<String>, message: impl Into<String>) {
+    note(quarb::Diagnostic::warning(code, site, message));
+}
+
+/// A debug note, its message built only when the level asks.
+fn note_debug(code: &str, site: impl Into<String>, message: impl FnOnce() -> String) {
+    if DEBUG_NOTES.with(|d| d.get()) {
+        note(quarb::Diagnostic::new(
+            quarb::Severity::Debug,
+            code,
+            site,
+            message(),
+        ));
+    }
+}
+
+fn take_notes() -> Vec<quarb::Diagnostic> {
+    NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
+thread_local! {
+    /// The resident server's diagnostics sink: while set, a run's
+    /// diagnostics collect here (as the lines a terminal would
+    /// print) instead of going to the server's stderr, and ride the
+    /// reply to the client, which prints them on its own stderr.
+    static DIAG_SINK: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` with stdout captured to a byte buffer (fd-level, so the
@@ -1454,6 +1598,13 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
 #[cfg(feature = "adapters")]
 fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
     let cap = oc.budget.as_ref().map_or(quarb::Cap::NONE, |b| b.cap());
+    // A folder is priced as the run will walk it: the same hidden
+    // and ignore rules, so the plan counts the files the mount
+    // exposes and no others.
+    let seen = quarb_fs::FsOptions {
+        hidden: cli.hidden,
+        respect_ignore: !cli.no_ignore,
+    };
     let mut catalogs = Vec::new();
     for (i, p) in cli.paths.iter().enumerate() {
         let (name, target) = match split_alias(p) {
@@ -1466,10 +1617,11 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
             ),
         };
         let t = target.to_string_lossy().into_owned();
-        if quarb_open::catalog(&t, cap).is_none() {
+        if quarb_open::catalog_seen(&t, cap, seen).is_none() {
             return Ok(false);
         }
-        let lookup: quarb::CatalogLookup = Box::new(move |ask| quarb_open::catalog_for(&t, ask));
+        let lookup: quarb::CatalogLookup =
+            Box::new(move |ask| quarb_open::catalog_for_seen(&t, ask, seen));
         catalogs.push((name, target.display().to_string(), lookup));
     }
     if catalogs.is_empty() {
@@ -1580,14 +1732,17 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     let ctx = &SourceCtx::default();
     // `--expand` shows the query whole; otherwise the output command
     // comes off the end here, for the sink to apply.
-    let (query, encoding) = if cli.expand || cli.expand_1 {
-        (query.to_string(), None)
+    let (query, copy, encoding) = if cli.expand || cli.expand_1 {
+        (query.to_string(), None, None)
     } else {
-        take_output_encoding(query)?
+        let (query, copy) = take_copy(query);
+        let (query, encoding) = take_output_encoding(&query)?;
+        (query, copy, encoding)
     };
     let query = &query;
     let oc = &OutputCtx {
         encoding,
+        copy,
         ..oc.clone()
     };
     // A refs document only means something to an adapter that
@@ -1737,10 +1892,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     return Ok(());
                 }
                 Err(e) => {
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -1751,9 +1910,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         MssqlAdapter::connect(s).context("connecting to SQL Server")?
                     }
                 }
@@ -1789,10 +1950,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     return Ok(());
                 }
                 Err(e) => {
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -1803,9 +1968,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         OracleAdapter::connect(s).context("connecting to Oracle")?
                     }
                 }
@@ -1844,10 +2011,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -1858,9 +2029,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         BigqueryAdapter::connect(s).context("connecting to BigQuery")?
                     }
                 }
@@ -1898,10 +2071,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     return Ok(());
                 }
                 Err(e) => {
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -1912,9 +2089,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         AthenaAdapter::connect(s).context("connecting to Athena")?
                     }
                 }
@@ -1960,10 +2139,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -1979,9 +2162,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         MysqlAdapter::connect(s).context("connecting to MySQL")?
                     }
                 }
@@ -2022,10 +2207,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -2037,9 +2226,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         PostgresAdapter::connect(s).context("connecting to PostgreSQL")?
                     }
                 }
@@ -2080,10 +2271,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -2129,10 +2324,14 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --explain.
-                    if cli.explain {
-                        eprintln!("pushdown: {}", plan.sql);
-                        eprintln!("pushdown: plan not executed ({e}); scanning");
-                    }
+                    note_info(
+                        NOT_PUSHED,
+                        "query",
+                        format!(
+                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
                 }
             }
         }
@@ -2149,9 +2348,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 match a.prefetch(&pl.table) {
                     Ok(()) => a,
                     Err(e) => {
-                        if cli.explain {
-                            eprintln!("partial pushdown: prefilter rejected ({e}); scanning");
-                        }
+                        note_info(
+                            NOT_PUSHED,
+                            "prefilter",
+                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                        );
                         SqliteAdapter::open_with_refs(p, &refs)
                             .context("opening SQLite database")?
                     }
@@ -2409,7 +2610,7 @@ fn partial_plan(
 /// scans.
 #[cfg(feature = "adapters")]
 fn column_types_hold(
-    cli: &Cli,
+    _cli: &Cli,
     what: &str,
     types: &quarb_sql::ColumnTypes,
     catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
@@ -2427,10 +2628,14 @@ fn column_types_hold(
             .cloned()
             .collect(),
     };
-    if !unmet.is_empty() && cli.explain {
-        eprintln!(
-            "{what}: not used (the comparison on {} would follow the column's type where the scan follows the value); scanning",
-            unmet.join(", ")
+    if !unmet.is_empty() {
+        note_info(
+            NOT_PUSHED,
+            what,
+            format!(
+                "{what}: not used (the comparison or reducer on {} would follow the column's type where the scan follows the value); scanning",
+                unmet.join(", ")
+            ),
         );
     }
     unmet.is_empty()
@@ -2455,18 +2660,22 @@ fn partial_plan_with(
     };
     match plan {
         Ok(p) => {
-            if cli.explain {
-                eprintln!(
+            note_info(
+                PUSHED,
+                "prefilter",
+                format!(
                     "partial pushdown: WHERE {} on {}; the rest scans the filtered set",
                     p.where_sql, p.table
-                );
-            }
+                ),
+            );
             Some(p)
         }
         Err(e) => {
-            if cli.explain {
-                eprintln!("partial pushdown refused: {e}; scanning");
-            }
+            note_info(
+                NOT_PUSHED,
+                "prefilter",
+                format!("partial pushdown refused: {e}; scanning"),
+            );
             None
         }
     }
@@ -2481,27 +2690,24 @@ fn pushdown_plan(
     dialect: Option<quarb_sql::Dialect>,
 ) -> Option<quarb_sql::Pushdown> {
     if !pushdown_applies(cli) {
-        if cli.explain {
-            eprintln!("pushdown: disabled; scanning");
-        }
+        note_info(NOT_PUSHED, "query", "pushdown: disabled; scanning");
         return None;
     }
     match quarb_sql::pushdown_explained(query, dialect) {
         Ok(plan) => {
-            if cli.explain {
-                // The plan as exported. What actually ran prints
-                // after execution (the driver resolves the ORDER
-                // BY key from the catalog), verbatim.
-                // What ran prints after execution (print_raw), so
-                // the plan itself is only announced when it does
-                // not run — the refusal branches below.
-            }
+            // The plan as exported; what actually ran is reported
+            // after execution (print_raw: the driver resolves the
+            // ORDER BY key from the catalog), and the plan itself
+            // is named where it does not run — the refusal branches.
+            note_debug(PLAN, "query", || format!("pushdown plan: {}", plan.sql));
             Some(plan)
         }
         Err(e) => {
-            if cli.explain {
-                eprintln!("pushdown refused: {e}; scanning");
-            }
+            note_info(
+                NOT_PUSHED,
+                "query",
+                format!("pushdown refused: {e}; scanning"),
+            );
             None
         }
     }
@@ -2515,10 +2721,8 @@ fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::
     // --explain: the statement the driver executed, verbatim,
     // ORDER BY and all. Recorded at execution because the key is
     // a per-adapter catalog lookup.
-    if oc.explain
-        && let Some(sql) = quarb_relational::take_executed()
-    {
-        eprintln!("pushdown: {sql}");
+    if let Some(sql) = quarb_relational::take_executed() {
+        note_info(PUSHED, "query", format!("pushdown: {sql}"));
     }
     // The same printer as the scan path, so --json / --jsonl /
     // --table / --csv hold whether or not the plan was pushed down.
@@ -2532,7 +2736,7 @@ fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::
             }
         })
         .collect();
-    let mut out = OutSink::new(oc.encoding.clone());
+    let mut out = OutSink::new(oc.encoding.clone(), oc.copy);
     emit_values(&mut out, values, oc.output, oc)?;
     out.finish()
 }
@@ -2545,18 +2749,28 @@ fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::
 struct OutSink {
     buf: Vec<u8>,
     encoding: Option<(String, quarb::source::Escape)>,
+    /// `| copy`: the buffer goes to the clipboard, not the screen,
+    /// and one diagnostic line says so (spec: The clipboard).
+    copy: Option<&'static str>,
 }
 
 impl OutSink {
-    fn new(encoding: OutputEncoding) -> Self {
+    fn new(encoding: OutputEncoding, copy: Option<&'static str>) -> Self {
         OutSink {
             buf: Vec::new(),
             encoding,
+            copy,
         }
     }
 
     fn finish(self) -> anyhow::Result<()> {
         use std::io::Write as _;
+        if let Some(rendering) = self.copy {
+            // the encoding is the screen's boundary; the clipboard
+            // takes text
+            let text = String::from_utf8(self.buf).context("the output is not UTF-8")?;
+            return copy_to_clipboard(&text, rendering);
+        }
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         match self.encoding {
@@ -2570,6 +2784,153 @@ impl OutSink {
         }
         out.flush()?;
         Ok(())
+    }
+}
+
+/// Past this many bytes the terminal's clipboard (OSC 52) is no
+/// longer the way: emulators and tmux cap the sequence, so a local
+/// tool is preferred and the diagnostic becomes a warning pointing
+/// at the redirection, the terminal user's tool.
+const COPY_THRESHOLD: usize = 100_000;
+
+/// `| copy` (spec: Output Commands, "The clipboard"): the rendered
+/// output to the clipboard instead of the screen. The terminal's
+/// own clipboard through OSC 52 (right through SSH and tmux) up to
+/// the threshold, a local tool past it or where there is no
+/// terminal (`wl-copy`, `xclip`, `xsel`, `pbcopy`, `clip.exe`), the
+/// terminal's again when no tool exists; and always one diagnostic
+/// in the output's place, shown at every level since it stands for
+/// the output: an info `copied 1.2 MB as JSON`, a warning past the
+/// threshold naming the redirection.
+fn copy_to_clipboard(text: &str, rendering: &str) -> anyhow::Result<()> {
+    let size = text.len();
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let small = size <= COPY_THRESHOLD;
+    let route = if small && tty {
+        osc52(text).map(|_| "the terminal's clipboard")
+    } else {
+        match clipboard_tool(text) {
+            Ok(tool) => Ok(tool),
+            Err(tool_error) if tty => osc52(text)
+                .map(|_| "the terminal's clipboard (no clipboard tool; the terminal may cap a text this large)")
+                .map_err(|e| anyhow::anyhow!("{tool_error}; {e}")),
+            Err(e) => Err(e),
+        }
+    };
+    let route = route.with_context(|| {
+        format!(
+            "copy: the output ({}) reached no clipboard; redirect it instead: qua … > file",
+            human_size(size)
+        )
+    })?;
+    let (severity, hint) = if small {
+        (quarb::Severity::Info, String::new())
+    } else {
+        (
+            quarb::Severity::Warning,
+            "; in a terminal prefer the redirection, qua … > file".to_string(),
+        )
+    };
+    let d = quarb::Diagnostic::new(
+        severity,
+        "COPIED",
+        "copy",
+        format!(
+            "copied {} as {rendering} to {route}{hint}",
+            human_size(size)
+        ),
+    );
+    // the output's stand-in: shown whatever the diagnostics level,
+    // through the resident server's sink when one is set
+    let line = d.to_string();
+    let sunk = DIAG_SINK.with(|s| {
+        if let Some(v) = s.borrow_mut().as_mut() {
+            v.push(line.clone());
+            true
+        } else {
+            false
+        }
+    });
+    if !sunk {
+        eprintln!("{line}");
+    }
+    Ok(())
+}
+
+/// A byte count as people read it.
+fn human_size(n: usize) -> String {
+    if n < 1000 {
+        format!("{n} B")
+    } else if n < 1_000_000 {
+        format!("{:.1} KB", n as f64 / 1000.0)
+    } else {
+        format!("{:.1} MB", n as f64 / 1_000_000.0)
+    }
+}
+
+/// OSC 52: the text, base64, to the terminal's clipboard selection
+/// (`c`), written to the controlling terminal so a redirected stdout
+/// never carries it.
+fn osc52(text: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let payload = quarb::base64(text.as_bytes());
+    let seq = format!("\x1b]52;c;{payload}\x07");
+    let mut tty = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .context("no controlling terminal for OSC 52")?;
+    tty.write_all(seq.as_bytes())?;
+    tty.flush()?;
+    Ok(())
+}
+
+/// The first clipboard tool that takes the text on its stdin:
+/// `wl-copy` under Wayland, `xclip -selection clipboard` or `xsel
+/// --clipboard --input` under X11, `pbcopy` on macOS, `clip.exe`
+/// under WSL. The system clipboard every application pastes from,
+/// never the X11 primary selection.
+fn clipboard_tool(text: &str) -> anyhow::Result<&'static str> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut candidates: Vec<(&'static str, &'static [&'static str])> = Vec::new();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        candidates.push(("wl-copy", &[]));
+    }
+    candidates.push(("xclip", &["-selection", "clipboard"]));
+    candidates.push(("xsel", &["--clipboard", "--input"]));
+    candidates.push(("pbcopy", &[]));
+    candidates.push(("clip.exe", &[]));
+    candidates.push(("wl-copy", &[]));
+    for (tool, args) in candidates {
+        let Ok(mut child) = Command::new(tool)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        if child.wait().map(|st| st.success()).unwrap_or(false) {
+            return Ok(tool);
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no clipboard tool found (wl-copy, xclip, xsel, pbcopy, clip.exe)"
+    ))
+}
+
+/// Take `| copy` off the end of a query (spec: The clipboard): the
+/// output boundary is the tool's, so the host that prints applies
+/// it; the engine's [`quarb::take_copy`] knows the spelling and the
+/// rendering's name.
+fn take_copy(query: &str) -> (String, Option<&'static str>) {
+    match quarb::take_copy(query) {
+        Some((rest, rendering)) => (rest, Some(rendering)),
+        None => (query.to_string(), None),
     }
 }
 
@@ -2659,18 +3020,30 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
             limit: None,
         }
     };
-    if cli.explain {
-        eprintln!("web: {} — {}", web_rung_name(&plan.rung), plan.reason);
-        if plan.rung != Rung::Scan {
-            eprintln!("web: WHERE {}", plan.where_sql);
-            if let Some(e) = store.estimate_where(&plan.where_sql, &plan.params) {
-                eprintln!("web: plan {e}");
-            }
-        }
+    note_info(
+        if plan.rung == Rung::Scan {
+            NOT_PUSHED
+        } else {
+            PUSHED
+        },
+        "web",
+        format!("web: {} — {}", web_rung_name(&plan.rung), plan.reason),
+    );
+    if plan.rung != Rung::Scan {
+        note_info(PUSHED, "web", format!("web: WHERE {}", plan.where_sql));
+        note_debug(PLAN, "web", || {
+            format!(
+                "web: plan {}",
+                store
+                    .estimate_where(&plan.where_sql, &plan.params)
+                    .map_or_else(|| "unknown".to_string(), |e| e.to_string())
+            )
+        });
     }
     match plan.rung {
         Rung::Full => {
             let n = store.count_where(&plan.where_sql, &plan.params);
+            note_info(DELEGATED, "web", "web: the count answered by the store");
             println!("{n}");
             Ok(())
         }
@@ -2685,9 +3058,11 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
                 ),
                 None => store.keys_where(&plan.where_sql, &plan.params),
             };
-            if cli.explain {
-                eprintln!("web: {} candidate(s)", keys.len());
-            }
+            note_info(
+                DELEGATED,
+                "web",
+                format!("web: {} candidate(s)", keys.len()),
+            );
             let adapter = quarb_web::WebAdapter::new(store).with_scope(keys);
             run(
                 query,
@@ -2869,7 +3244,7 @@ fn run_dispatch<A: AstAdapter>(
 
 impl OutputCtx {
     /// The options one query runs under: the flags (--allow-shell,
-    /// --quantifier-bound, --reproducible), the invocation instant
+    /// --quantifier-bound, --frontier-bound, --reproducible), the invocation instant
     /// (always bound in the CLI: --now, or one startup clock read),
     /// the output locale's collation, the session's sentence bonds.
     fn run_opts(&self) -> quarb::Run {
@@ -2880,6 +3255,8 @@ impl OutputCtx {
             environments: self.environments.clone(),
             libraries: self.libraries.clone(),
             quantifier_bound: self.quant_bound,
+            frontier_bound: self.front_bound,
+            debug: self.session.borrow().diagnostics == quarb::Severity::Debug,
             reproducible: self.reproducible,
             collation: self.locale.map(|(l, _)| l.tag.to_string()),
             budget: self.budget.clone(),
@@ -2889,22 +3266,71 @@ impl OutputCtx {
         }
     }
 
-    /// --explain: the unresolved references a run left, and the
-    /// folder leaves a reading refused (they answer null).
+    /// The diagnostics a run raised beside its answer, on stderr,
+    /// down to the level in force (`--diagnostics`; `--explain`
+    /// shows the infos as well), in raising order, each on its own
+    /// line as `SEVERITY CODE (site): message`.
+    fn report_diagnostics(&self, diagnostics: &[quarb::Diagnostic]) {
+        // The level: the session's setting (`session(--diagnostics=…)`
+        // in the query sets it; the switch seeded it), raised to info
+        // under --explain.
+        let mut level = self.session.borrow().diagnostics;
+        if self.explain && level < quarb::Severity::Info {
+            level = quarb::Severity::Info;
+        }
+        // the tool's own notes around the run come first: the
+        // planner's account, the locale in force
+        let shown: Vec<String> = take_notes()
+            .iter()
+            .chain(diagnostics)
+            .filter(|d| d.severity.shown_at(level))
+            .map(|d| d.to_string())
+            .collect();
+        if shown.is_empty() {
+            return;
+        }
+        // Under the resident server the lines travel to the client
+        // with the answer; otherwise they go to stderr here.
+        let sunk = DIAG_SINK.with(|s| {
+            if let Some(v) = s.borrow_mut().as_mut() {
+                v.extend(shown.iter().cloned());
+                true
+            } else {
+                false
+            }
+        });
+        if !sunk {
+            for line in shown {
+                eprintln!("{line}");
+            }
+        }
+    }
+
+    /// The notes the tool raised with no run to report them under.
+    fn flush_notes(&self) {
+        if NOTES.with(|n| n.borrow().is_empty()) {
+            return;
+        }
+        self.report_diagnostics(&[]);
+    }
+
+    /// The unresolved references a run left, and the folder leaves
+    /// a reading refused (they answer null): infos, reported with
+    /// the run's diagnostics.
     fn explain_refs(&self, refs: &[String]) {
         #[cfg(feature = "adapters")]
         let notes = quarb_open::take_notes();
         #[cfg(not(feature = "adapters"))]
         let notes: Vec<String> = Vec::new();
-        if self.explain {
-            for r in refs {
-                eprintln!(
-                    "unresolved external reference: {r} (mount it, or declare a tree for it)"
-                );
-            }
-            for n in notes {
-                eprintln!("{n}");
-            }
+        for r in refs {
+            note_info(
+                UNRESOLVED,
+                "query",
+                format!("unresolved external reference: {r} (mount it, or declare a tree for it)"),
+            );
+        }
+        for n in notes {
+            note_info(READING, "mount", n);
         }
     }
 }
@@ -2923,6 +3349,9 @@ fn run_wrapped<A: AstAdapter>(
     kaiv_source: Option<&str>,
     oc: &OutputCtx,
 ) -> anyhow::Result<()> {
+    note_debug(MOUNT, kaiv_source.unwrap_or("input"), || {
+        format!("mounted through {}", std::any::type_name::<A>())
+    });
     let run = oc.run_opts();
     // --expand with an input: expansion with the dataset at hand,
     // so data-aware macros (&name!) can read it.
@@ -2976,6 +3405,7 @@ fn run_wrapped<A: AstAdapter>(
     if let Some((path, table)) = save {
         let out = run_query(&parsed)?;
         oc.explain_refs(&out.refs);
+        oc.report_diagnostics(&out.diagnostics);
         let values = match out.result {
             QueryResult::Values(vs) => vs,
             QueryResult::Nodes(ns) => ns.into_iter().map(|n| Value::Str(render(n))).collect(),
@@ -2986,7 +3416,7 @@ fn run_wrapped<A: AstAdapter>(
         return Ok(());
     }
     // Buffered: one flush at the end, not a syscall per line.
-    let out = OutSink::new(oc.encoding.clone());
+    let out = OutSink::new(oc.encoding.clone(), oc.copy);
     let mode = oc.output;
     // Under an output locale a closing `@| csv` / `@| pretty` is the
     // tool's to render: the rows come back as they stand before it.
@@ -2998,13 +3428,14 @@ fn run_wrapped<A: AstAdapter>(
         result,
         closing,
         refs,
-        plan: _,
-        html: _,
+        diagnostics,
+        ..
     } = outcome;
-    // The unresolved references follow the result (the sink flushes
-    // first), as the transcripts read them.
+    // The unresolved references and the diagnostics follow the
+    // result (the sink flushes first), as the transcripts read them.
     let printed = print_result(out, result, closing, render, oc);
     oc.explain_refs(&refs);
+    oc.report_diagnostics(&diagnostics);
     printed
 }
 
@@ -3184,21 +3615,20 @@ fn set_output_locale(
             l.grouping = cli.grouping
                 || std::env::var("QUARB_GROUPING").is_ok_and(|v| v == "1" || v == "true")
                 || config_output("grouping").is_some_and(|v| v.as_bool() == Some(true));
-            if cli.explain {
-                eprintln!("locale: {tag} (from {layer})");
-            }
+            note_info(LOCALE, layer, format!("locale: {tag} (from {layer})"));
             return Ok(Some((l, layer)));
         }
+        // a tag without rules is replaced by the canonical form,
+        // warned about whatever layer named it (spec: Diagnostics)
         None => {
-            if layer == "--locale" {
-                anyhow::bail!(
-                    "--locale {tag}: no rendering rules for this locale (shipped: {}; C is the canonical form)",
+            note_warning(
+                LOCALE_UNKNOWN,
+                layer,
+                format!(
+                    "locale: {tag} (from {layer}) has no rendering rules; canonical (shipped: {}; C is the canonical form)",
                     quarb::locale::SHIPPED.join(", ")
-                );
-            }
-            if cli.explain {
-                eprintln!("locale: {tag} (from {layer}) has no rendering rules; canonical");
-            }
+                ),
+            );
         }
     }
     Ok(None)

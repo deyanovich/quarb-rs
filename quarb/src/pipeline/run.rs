@@ -73,6 +73,10 @@ pub struct SessionStore {
     pub pretty: PrettyMode,
     /// `pretty`'s digits after the point for the session.
     pub precision: usize,
+    /// The diagnostics level shown (spec: Diagnostics): error,
+    /// warning (the opening state) or info — what a host shows,
+    /// never what the engine raises.
+    pub diagnostics: crate::diagnostic::Severity,
 }
 
 impl Default for SessionStore {
@@ -81,6 +85,7 @@ impl Default for SessionStore {
             memory: Default::default(),
             pretty: PrettyMode::Off,
             precision: 6,
+            diagnostics: crate::diagnostic::Severity::Warning,
         }
     }
 }
@@ -94,6 +99,10 @@ impl SessionStore {
                 Value::Str(self.pretty.word().to_string()),
             ),
             ("precision".to_string(), Value::Int(self.precision as i64)),
+            (
+                "diagnostics".to_string(),
+                Value::Str(self.diagnostics.word().to_string()),
+            ),
         ])
     }
 }
@@ -120,6 +129,15 @@ pub struct RunOptions {
     /// ([`AstAdapter::quantifier_bound`], 32 unless its structures
     /// run deeper).
     pub quantifier_bound: Option<usize>,
+    /// The bound on the expansion paths one round of a quantified
+    /// walk holds in flight (`qua --frontier-bound`); `None` leaves
+    /// the adapter's own ([`AstAdapter::frontier_bound`], 100,000).
+    pub frontier_bound: Option<usize>,
+    /// Whether the run raises its debug diagnostics (the level asks
+    /// for `debug`): what the evaluation did on the way, round by
+    /// round — raised only on request, since a walk inside a
+    /// predicate would otherwise file a note per node per round.
+    pub debug: bool,
     /// `--reproducible`: hold back the machine-dependent instant
     /// rungs of provenance (a source's mtime, the moment of
     /// reading) so the same source answers the same provenance run
@@ -169,12 +187,15 @@ impl RunOptions {
         self.environments.iter().find(|e| e.alias == alias)
     }
 
-    /// The linked command library declared under `prefix`.
+    /// The command library declared under `prefix`: one the host
+    /// linked, or the engine's own (`graph:`, spec: The graph
+    /// library), which every build carries.
     pub fn library(&self, prefix: &str) -> Option<&dyn crate::pipeline::library::CommandLibrary> {
         self.libraries
             .iter()
             .find(|l| l.prefix() == prefix)
             .map(|l| l.as_ref())
+            .or_else(|| (prefix == "graph").then_some(&crate::graph::library::GRAPH as _))
     }
 }
 
@@ -212,6 +233,10 @@ pub(crate) struct RunState {
     /// renders it where the terminal prints the text. The last
     /// drawing wins.
     pub(crate) drawing_html: Option<String>,
+    /// The attached regulae (spec: Attached Regulae): the store
+    /// keyed by the layer's node identity, type-erased because the
+    /// run knows no attachment type; see `pipeline/attached.rs`.
+    pub(crate) attached: Option<Box<dyn std::any::Any>>,
 }
 
 thread_local! {
@@ -257,6 +282,7 @@ pub(crate) fn begin_run(options: Option<RunOptions>) -> RunGuard {
             collation: options.collation.clone(),
             bonds: options.bonds.clone(),
             refusal: None,
+            diagnostics: Vec::new(),
         };
         runs.push(RunState {
             options,

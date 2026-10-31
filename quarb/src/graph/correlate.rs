@@ -191,6 +191,7 @@ fn streamed_count(
             source: adapter.parent(n).unwrap_or(n),
             label: CHILD.into(),
             target: n,
+            row: None,
         })
     };
     // The lead steps: a frontier of ids, each step's matches
@@ -433,7 +434,14 @@ pub(crate) fn eval_query_caps_outer(
         witnesses: Default::default(),
         join_keys: Default::default(),
     };
-    let mut caps = union_branches(&query.branches, adapter, start, &trace, outer);
+    // A collapsing reducer or a graph table right after the branches
+    // reads nodes alone: the walk may expand by node where that is
+    // exact (spec: Expansion paths, Acyclic links).
+    let node_level = matches!(
+        query.pipeline.first(),
+        Some(Command::Agg(call)) if matches!(call.name.as_str(), "collapse" | "nodes" | "edges")
+    );
+    let mut caps = union_branches(&query.branches, adapter, start, &trace, outer, node_level);
     // The expression head's thread opens with the topic the run was
     // given (`qc` reading its pipe): the top-level query only, and
     // only the head's shape — one row from the root anchor with no
@@ -528,6 +536,7 @@ pub(crate) fn correlate_gate(
                     ext: &c.ext,
                     view: c.ext.view(),
                     crossing: None,
+                    walk: None,
                     witness: Some(&[]),
                 };
                 // Base contexts (an enclosing trace) stay unbound —
@@ -718,6 +727,7 @@ pub(crate) fn union_branches(
     start: NodeId,
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
+    node_level: bool,
 ) -> Vec<Capsa> {
     let mut caps = Vec::new();
     for branch in branches {
@@ -747,6 +757,7 @@ pub(crate) fn union_branches(
                 outer,
                 &[],
                 seed_register,
+                node_level && branch.projection.is_none(),
             ) {
                 caps.push(Capsa {
                     prov: if branch.projection.is_some() {
@@ -775,21 +786,50 @@ pub(crate) fn union_branches(
             }
         }
     }
-    // Dedup by (node, register): per-path results — the same node
-    // reached along walks with different breadcrumbs — stay
-    // distinct; without pushes every key is (node, empty) and the
-    // old node dedup is preserved.
+    // Dedup the indistinguishable alone (spec: Expansion paths):
+    // the same node reached by the same edge with the same facts
+    // and the same register is one thread; another route, another
+    // edge or another capsa is another thread.
     dedup_merge(caps)
 }
 
-/// Dedup capsae by (node, register), first-seen order, merging a
-/// dropped duplicate's origins into the survivor: the same value
-/// reached along another walk was read there too.
+/// The identity a thread's arrival has for the dedup: its arriving
+/// link edges and the walk's facts, where a walk ended here. A tree
+/// edge (child, parent, sibling) is no part of it: the tree axes
+/// answer a node set, one thread per node however many contexts
+/// climbed, descended or stepped sideways to it.
+pub(crate) type ArrivalKey = (
+    Vec<(NodeId, String, NodeId, Option<NodeId>)>,
+    Option<(usize, usize, Option<u64>, u64)>,
+);
+
+pub(crate) fn arrival_key(ext: &GraphExt) -> ArrivalKey {
+    (
+        ext.arrived
+            .iter()
+            .filter(|e| !matches!(e.label.as_str(), CHILD | PARENT | NEXT | PREV))
+            // the edge's row keeps two rows on one leg two threads
+            .map(|e| (e.source, e.label.clone(), e.target, e.row))
+            .collect(),
+        ext.walk.as_ref().map(|w| {
+            (
+                w.round,
+                w.hops,
+                w.total.as_ref().map(|(v, ..)| v.to_bits()),
+                w.trail,
+            )
+        }),
+    )
+}
+
+/// Dedup capsae by (node, arrival, register), first-seen order,
+/// merging a dropped duplicate's origins into the survivor: the
+/// same value reached the same way was read there too.
 pub(crate) fn dedup_merge(caps: Vec<Capsa>) -> Vec<Capsa> {
     let mut kept: Vec<Capsa> = Vec::new();
-    let mut index: HashMap<(NodeId, RegKey), usize> = HashMap::new();
+    let mut index: HashMap<(NodeId, ArrivalKey, RegKey), usize> = HashMap::new();
     for c in caps {
-        let key = (c.ext.node, reg_key(&c.register));
+        let key = (c.ext.node, arrival_key(&c.ext), reg_key(&c.register));
         match index.get(&key) {
             Some(&i) => merge_prov(&mut kept[i], &c),
             None => {

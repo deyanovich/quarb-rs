@@ -122,6 +122,10 @@ pub struct Group {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub at: i64,
+    /// The walk iteration inside a quantified step. The film is the
+    /// distance picture: a node appears at the first iteration that
+    /// reaches it — which nodes the walk reached by that round, not
+    /// which walks reached them (corpus NOTES 004).
     pub iter: Option<i64>,
     /// navigation | scalar
     pub mode: String,

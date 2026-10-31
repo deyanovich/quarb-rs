@@ -539,9 +539,12 @@ impl AstAdapter for MongodbAdapter {
                 })
                 .collect()
         };
+        // labeled by the field without its `_id` suffix
+        let labels = quarb::adapter::reference_labels(refs.iter().map(|(k, ..)| k.as_str()));
         refs.into_iter()
-            .filter_map(|(k, coll, id, db)| {
-                self.doc_node(&coll, &id, db.as_deref()).map(|n| (k, n))
+            .zip(labels)
+            .filter_map(|((_, coll, id, db), label)| {
+                self.doc_node(&coll, &id, db.as_deref()).map(|n| (label, n))
             })
             .collect()
     }

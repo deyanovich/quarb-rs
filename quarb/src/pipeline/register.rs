@@ -229,8 +229,9 @@ pub(crate) fn named_register_fields(register: &[Reg]) -> Vec<(String, Value)> {
 pub(crate) type RegKey = Vec<(Option<String>, String)>;
 
 /// What a round of a quantified push may change on a capsa: its
-/// node, its topic, and the named view of its register.
-pub(crate) type RoundState<K> = (K, Option<Value>, Vec<(String, Value)>);
+/// node, its topic, the named view of its register, and the regulae
+/// attached to its node.
+pub(crate) type RoundState<K> = (K, Option<Value>, Vec<(String, Value)>, Vec<(String, Value)>);
 
 pub(crate) fn reg_key(register: &[Reg]) -> RegKey {
     register

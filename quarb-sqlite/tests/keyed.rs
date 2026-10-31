@@ -53,14 +53,14 @@ fn show(a: &SqliteAdapter, q: &str) -> Vec<String> {
 
 const QUERIES: &[&str] = &[
     "/books/3::author_id-->::name",
-    "/books/3->author_id",
+    "/books/3->author",
     "/books/3->*",
     "/books/5::code-->::name",
     "/books/5::code-->authors",
     "/books/7::author_id-->",
     "/books/6::author_id-->",
     "/books/99::title",
-    "/authors/1<-author_id",
+    "/authors/1<-author",
     "/authors/1<-*",
     "/authors/1<--(::author_id)::title",
     "/authors/1<--(::editor_id)::title",
@@ -68,9 +68,9 @@ const QUERIES: &[&str] = &[
     "/authors/1<--(/books/*::author_id)::title",
     "/authors/2<--(/books/*)::title",
     "/authors/*<--(::author_id) @| count",
-    "/authors/* | %(::name; n = (<-author_id @| count))",
+    "/authors/* | %(::name; n = (<-author @| count))",
     "/books/* | %(::title; a = ::author_id-->::name)",
-    "/books/*[::id < 4]->author_id",
+    "/books/*[::id < 4]->author",
     "/staff/1(<-boss){1;3}",
     "/staff/6(->boss)+",
     "/staff/*[<-boss]::name",
@@ -119,7 +119,7 @@ fn a_hop_reads_the_rows_it_lands_on() {
     // are read too — but rows, never the table)
     assert_eq!(
         loaded(
-            "/authors/1<-author_id @| count | %(n = $_; b = (^/books:::loaded); \
+            "/authors/1<-author @| count | %(n = $_; b = (^/books:::loaded); \
              few = (^/books:::\"n-loaded\") < 7)"
         ),
         [r#"%(n = 2; b = false; few = true)"#]
@@ -149,7 +149,7 @@ fn a_pushed_down_filter_lists_only_and_hops_stay_exact() {
         ("/staff/*[::id > 3]->boss", "staff", "id > 3"),
         ("/staff/*[::id > 3]::boss-->::name", "staff", "id > 3"),
         ("/staff/*[::id < 3]<-boss<-boss", "staff", "id < 3"),
-        ("/books/*[::id < 4]->author_id", "books", "id < 4"),
+        ("/books/*[::id < 4]->author", "books", "id < 4"),
         (
             "/staff/*[::id = 2] | %(::name; all = (:::table))",
             "staff",

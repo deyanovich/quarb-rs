@@ -123,11 +123,11 @@ fn fk_resolution() {
 #[test]
 fn fk_links() {
     // each FK column is an outgoing crosslink labeled by column name
-    assert_eq!(nodes("/tracks/4->album_id"), vec!["/albums/2"]);
-    assert_eq!(nodes("/tracks/4->album_id->artist_id"), vec!["/artists/2"]);
+    assert_eq!(nodes("/tracks/4->album"), vec!["/albums/2"]);
+    assert_eq!(nodes("/tracks/4->album->artist"), vec!["/artists/2"]);
     // backlinks: which rows point here?
     assert_eq!(
-        nodes("/albums/1<-album_id"),
+        nodes("/albums/1<-album"),
         vec!["/tracks/1", "/tracks/2", "/tracks/3"]
     );
     // reverse resolution: rows whose artist_id points here
@@ -576,12 +576,9 @@ fn headless_arrow_union_on_self_reference() {
         _ => panic!("expected values"),
     };
     // Bo's neighbors under manager_id: his manager and his report.
-    assert_eq!(vals("/employees/2--manager_id::name"), vec!["Ada", "Dee"]);
+    assert_eq!(vals("/employees/2--manager::name"), vec!["Ada", "Dee"]);
     // The whole org is one undirected component from any seat.
-    assert_eq!(
-        vals("/employees/4(--manager_id)+::name @| count"),
-        vec!["3"]
-    );
+    assert_eq!(vals("/employees/4(--manager)+::name @| count"), vec!["3"]);
 }
 
 /// JSON-column prefilter identity on an adversarial table: mixed

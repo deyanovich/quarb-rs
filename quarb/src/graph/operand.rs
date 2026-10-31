@@ -1,5 +1,6 @@
 //! Part of the executor: see `exec/mod.rs`.
 
+use super::navigate::ref_nodes;
 use super::*;
 
 /// [`subcontext_scalar`] with the reduced value's provenance: one
@@ -52,6 +53,7 @@ pub(crate) fn node_scalar(adapter: &impl AstAdapter, node: NodeId) -> Value {
 /// (the tuple under test in a predicate, else the capsa's), the
 /// capsa's topic reachable as `$_` in the path's predicates, the
 /// members cleared (a path reads the node, not the group), deduped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rel_nodes(
     adapter: &impl AstAdapter,
     node: NodeId,
@@ -60,6 +62,7 @@ pub(crate) fn rel_nodes(
     trace: &Trace,
     bound: &[Option<NodeId>],
     scope: Scope<'_, GraphExt>,
+    node_level: bool,
 ) -> Vec<NodeId> {
     let witness = if bound.is_empty() {
         witness_of(&scope)
@@ -73,7 +76,7 @@ pub(crate) fn rel_nodes(
     };
     with_enclosing_topic(&scope, || {
         for from in operand_from(adapter, anchor, node, trace, bound, scope) {
-            nodes.extend(navigate_from(
+            nodes.extend(navigate_from_level(
                 steps,
                 adapter,
                 from,
@@ -81,10 +84,13 @@ pub(crate) fn rel_nodes(
                 nested_outer(&inner),
                 witness,
                 inner.register,
+                node_level,
             ));
         }
     });
-    dedup(nodes)
+    // one node per walk, as the top-level walk answers (spec:
+    // Expansion paths); the anchors' own duplicates folded
+    nodes
 }
 
 pub(crate) fn operand_nodes(
@@ -97,7 +103,7 @@ pub(crate) fn operand_nodes(
 ) -> Vec<NodeId> {
     match at {
         Operand::Rel { steps, anchor, .. } => {
-            rel_nodes(adapter, node, steps, anchor, trace, bound, scope)
+            rel_nodes(adapter, node, steps, anchor, trace, bound, scope, false)
         }
         Operand::Ctx { index, steps, .. } => {
             let bound = if bound.is_empty() {
@@ -115,7 +121,7 @@ pub(crate) fn operand_nodes(
             if steps.is_empty() {
                 vec![base]
             } else {
-                dedup(navigate_from(
+                navigate_from(
                     steps,
                     adapter,
                     base,
@@ -123,7 +129,7 @@ pub(crate) fn operand_nodes(
                     nested_outer(&scope),
                     bound,
                     scope.register,
-                ))
+                )
             }
         }
         Operand::Invoking(inner) => match scope.outer {
@@ -149,6 +155,13 @@ pub(crate) fn operand_nodes(
             ),
             None => Vec::new(),
         },
+        // A record's field holding node references (`:source` on an
+        // edges row): the nodes it refers to, in order; a value that
+        // is no reference names no node.
+        Operand::Field { .. } => eval_operand_at(adapter, node, at, trace, bound, scope)
+            .iter()
+            .flat_map(ref_nodes)
+            .collect(),
         _ => Vec::new(),
     }
 }

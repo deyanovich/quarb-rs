@@ -3,6 +3,7 @@
 //! arrived edges), the anchors, and the navigation helpers over an
 //! adapter.
 use super::*;
+use crate::syntax::ast::End;
 
 /// The graph layer's per-thread state: the position, the marks
 /// pocketed on the walk, the correlation witness and the edges the
@@ -24,6 +25,47 @@ pub(crate) struct GraphExt {
     /// where (`$$__/…`, a mark). `node` then holds the root as a
     /// placeholder the host never answers for.
     pub(crate) unplaced: bool,
+    /// The walk that ended here (spec: Edge facts): set at a
+    /// quantified group's exit, read by the one command after it
+    /// (`$-:round`, `$-:hops`, `$-:total`), cleared when that
+    /// command has run.
+    pub(crate) walk: Option<WalkFacts>,
+}
+
+/// What a walk knows of the edge it crossed (spec: Edge facts): the
+/// round in which it was crossed, the hops the walk had taken
+/// through it, and under a budget the weight summed so far — the
+/// base value, and the magnitude and unit as the budget wrote them.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WalkFacts {
+    pub(crate) round: usize,
+    pub(crate) hops: usize,
+    /// (base value, base unit, written magnitude, written unit)
+    pub(crate) total: Option<(f64, String, f64, String)>,
+    /// A digest of the walk's history (the nodes it crossed), so
+    /// two walks ending alike stay two threads (spec: Expansion
+    /// paths).
+    pub(crate) trail: u64,
+}
+
+impl WalkFacts {
+    /// The fact a glued core key names on the edge accessor:
+    /// `$-:round`, `$-:hops`, `$-:total` (null outside a budget).
+    pub(crate) fn fact(&self, key: &str) -> Option<Value> {
+        match key {
+            "round" => Some(Value::Int(self.round as i64)),
+            "hops" => Some(Value::Int(self.hops as i64)),
+            "total" => Some(match &self.total {
+                Some((value, base, mag, unit)) => Value::Quantity {
+                    value: *value,
+                    base: base.clone(),
+                    written: Some((*mag, unit.clone())),
+                },
+                None => Value::Null,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// What a scope says of the graph's state beyond the attachment it
@@ -38,6 +80,35 @@ pub(crate) struct GraphView {
 impl crate::thread::Attachment for GraphExt {
     type View = GraphView;
     type Crossing = EdgeCtx;
+    type Walk = WalkFacts;
+    fn walk_exit(&self) -> Option<(&EdgeCtx, &WalkFacts)> {
+        let facts = self.walk.as_ref()?;
+        self.arrived.first().map(|e| (e, facts))
+    }
+    fn end_walk(&mut self) {
+        self.walk = None;
+    }
+    fn crossing(&self) -> Option<&EdgeCtx> {
+        self.arrived.first()
+    }
+    fn gather(&mut self, other: GraphExt) {
+        for e in other.arrived {
+            if !self.arrived.contains(&e) {
+                self.arrived.push(e);
+            }
+        }
+    }
+    fn crossing_key(&self) -> Option<String> {
+        self.arrived.first().map(|e| {
+            format!(
+                "{}:{}:{}:{}",
+                e.source.0,
+                e.label,
+                e.target.0,
+                e.row.map_or(0, |r| r.0)
+            )
+        })
+    }
     type Witness = [Option<NodeId>];
     type Key = NodeId;
     fn view(&self) -> GraphView {
@@ -68,6 +139,7 @@ impl GraphExt {
             bindings: Vec::new(),
             arrived: Vec::new(),
             unplaced: false,
+            walk: None,
         }
     }
 
@@ -75,6 +147,7 @@ impl GraphExt {
     pub(crate) fn unplaced(root: NodeId) -> GraphExt {
         GraphExt {
             unplaced: true,
+            walk: None,
             ..GraphExt::at(root)
         }
     }
@@ -88,10 +161,21 @@ pub(crate) fn ref_node(v: &Value) -> Option<NodeId> {
     }
 }
 
+/// Every node a regula's value refers to: the one of a reference,
+/// each of a list of references (the marks `@| collapse` gathered
+/// from the threads it folded), none of any other value.
+pub(crate) fn ref_nodes(v: &Value) -> Vec<NodeId> {
+    match v {
+        Value::Node(n) => vec![NodeId(n.id)],
+        Value::List(items) => items.iter().filter_map(ref_node).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The references a register holds, in filing order: the node side
 /// of the capsa (`$$.N`, `((.N))`, `(@)`).
 pub(crate) fn references(register: &[Reg]) -> impl Iterator<Item = NodeId> + '_ {
-    register.iter().filter_map(|r| ref_node(&r.value))
+    register.iter().flat_map(|r| ref_nodes(&r.value))
 }
 
 /// A reference to `node` (spec: The Capsa, "Node references"): its
@@ -202,9 +286,8 @@ pub(crate) fn anchor_nodes(
             .iter()
             .rev()
             .find(|r| r.name.as_deref() == Some(m))
-            .and_then(|r| ref_node(&r.value))
-            .into_iter()
-            .collect(),
+            .map(|r| ref_nodes(&r.value))
+            .unwrap_or_default(),
         Anchor::MarkIndex(n) => references(register).nth(n - 1).into_iter().collect(),
         Anchor::MarkTop => references(register).last().into_iter().collect(),
         Anchor::MarkBack(n) => references(register)
@@ -218,7 +301,18 @@ pub(crate) fn anchor_nodes(
         Anchor::MarksNamed(m) => register
             .iter()
             .filter(|r| r.name.as_deref() == Some(m))
-            .filter_map(|r| ref_node(&r.value))
+            .flat_map(|r| ref_nodes(&r.value))
+            .collect(),
+        // `$-:source` / `$-:target` — an end of the arrived-by edge
+        // (spec: Edge facts), in the declaration's orientation;
+        // nothing where no edge has been walked.
+        Anchor::EdgeEnd(end) => scope
+            .crossing
+            .map(|e| match end {
+                End::Source => e.source,
+                End::Target => e.target,
+            })
+            .into_iter()
             .collect(),
     }
 }
@@ -236,6 +330,31 @@ pub(crate) struct EdgeCtx {
     pub(crate) source: NodeId,
     pub(crate) label: String,
     pub(crate) target: NodeId,
+    /// The edge's identity where the edge is a node of its own: the
+    /// row of an edge-declared table (spec: Edge rows). Two rows on
+    /// one leg are two edges, told apart here; its cells are the
+    /// edge's properties. `None` for an edge that is nothing but a
+    /// link, whose properties the adapter answers by the triple.
+    pub(crate) row: Option<NodeId>,
+}
+
+impl EdgeCtx {
+    /// The edge's property `name`: the row's cell where the edge is
+    /// a row, else what the adapter keeps on the link.
+    pub(crate) fn property(&self, adapter: &impl AstAdapter, name: &str) -> Option<Value> {
+        match self.row {
+            Some(row) => adapter.property(row, name),
+            None => adapter.link_property(self.source, &self.label, self.target, name),
+        }
+    }
+
+    /// The names of the edge's properties, as `property`.
+    pub(crate) fn property_names(&self, adapter: &impl AstAdapter) -> Vec<String> {
+        match self.row {
+            Some(row) => adapter.property_names(row),
+            None => adapter.link_property_names(self.source, &self.label, self.target),
+        }
+    }
 }
 
 /// The engine-reserved structural edge labels.

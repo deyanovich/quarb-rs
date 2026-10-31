@@ -341,6 +341,133 @@ pub(crate) fn tree_command<H: Host>(
     }
 }
 
+/// `@| edges(->road; --weight=km)` / `@| nodes`: the context's graph
+/// as one table value (spec: The graph as a table).
+pub(crate) fn graph_table_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+) -> Vec<Thread<H::Ext>> {
+    // The positions are tabled whatever the topic: a thread in
+    // value mode still stands on its node (spec: The graph as a
+    // table); only a thread standing nowhere (after an aggregate)
+    // has nothing to table.
+    if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
+        record_refusal(format!(
+            "{} draws the context's nodes, and a thread of the context stands nowhere \
+             (after an aggregate): navigate to the nodes before tabling them",
+            call.name
+        ));
+        return Vec::new();
+    }
+    let what = match crate::graph::edges::GraphTable::from_call(call) {
+        Ok(w) => w,
+        Err(why) => {
+            record_refusal(why);
+            return Vec::new();
+        }
+    };
+    let starts: Vec<H::Ext> = caps.iter().map(|c| c.ext.bare()).collect();
+    let mut origins = Origins::default();
+    for c in &caps {
+        origins.insert(host.origin_at(&c.ext));
+    }
+    match host.graph_table(&starts, &what) {
+        Ok(table) => vec![Thread::<H::Ext> {
+            prov: Prov::leaf(origins),
+            register: shared_register(&caps),
+            topic: Some(Value::Table(std::sync::Arc::new(table))),
+            members: Vec::new(),
+            captures: Vec::new(),
+            named: Vec::new(),
+            ext: host.unplaced_ext(),
+        }],
+        Err(why) => {
+            record_refusal(why);
+            Vec::new()
+        }
+    }
+}
+
+/// `@| graph:pagerank(->link; …)` — the graph library (spec: The
+/// graph library): a row-aligned aggregate over the context's nodes
+/// and the edges among them. The threads are folded to their
+/// distinct positions in order of first arrival, the host answers
+/// one value per position over that induced subgraph, and every
+/// thread keeps its place with its position's value as the topic.
+pub(crate) fn graph_library_command<H: Host>(
+    name: &str,
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    // the positions are read whatever the topic (spec: The graph
+    // library); a thread standing nowhere has none
+    if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
+        record_refusal(format!(
+            "graph:{name} reads the context's nodes, and a thread of the context stands nowhere \
+             (after an aggregate): navigate to the nodes before ranking them"
+        ));
+        return Vec::new();
+    }
+    let what = match crate::graph::edges::GraphTable::from_call(call) {
+        Ok(w) => w,
+        Err(why) => {
+            record_refusal(why);
+            return Vec::new();
+        }
+    };
+    let mut keys: Vec<<H::Ext as Attachment>::Key> = Vec::new();
+    let mut starts: Vec<H::Ext> = Vec::new();
+    let mut at: Vec<usize> = Vec::with_capacity(caps.len());
+    for c in &caps {
+        let k = c.ext.key();
+        match keys.iter().position(|x| *x == k) {
+            Some(i) => at.push(i),
+            None => {
+                at.push(keys.len());
+                keys.push(k);
+                starts.push(c.ext.bare());
+            }
+        }
+    }
+    // `--from=NODES`: the seeds, an anchored node operand resolved
+    // from the arbor's root (a path from the root), the shared
+    // register (a mark) or an id anchor — never from one thread's
+    // position, the context being many
+    let seeds: Vec<<H::Ext as Attachment>::Key> = match &what {
+        crate::graph::edges::GraphTable::Distance { from, .. } => {
+            let seed = seed_capsa(&caps, host);
+            let scope = seed.scope(None, peers, outer);
+            let root = host.unplaced_ext();
+            discard(|| host.operand_keys(&root, from, trace, scope))
+        }
+        _ => Vec::new(),
+    };
+    let values = match host.graph_values(&starts, &what, &seeds) {
+        Ok(v) => v,
+        Err(why) => {
+            record_refusal(why);
+            return Vec::new();
+        }
+    };
+    let mut origins = Origins::default();
+    for c in &caps {
+        origins.insert(host.origin_at(&c.ext));
+    }
+    caps.into_iter()
+        .zip(at)
+        .map(|(mut c, i)| {
+            c.topic = values.get(i).cloned();
+            c.prov = Prov::leaf(origins.clone());
+            c
+        })
+        .collect()
+}
+
 /// `@| outline(level; text)` prints the line instead: the text
 /// indented by its depth below the shallowest level, and behind its
 /// number when the style `"1."` is given. Bare `outline` reads the

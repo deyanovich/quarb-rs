@@ -574,8 +574,11 @@ impl AstAdapter for FirestoreAdapter {
                 })
                 .collect()
         };
+        // labeled by the field without its `_id` suffix
+        let labels = quarb::adapter::reference_labels(refs.iter().map(|(k, _)| k.as_str()));
         refs.into_iter()
-            .filter_map(|(k, p)| self.doc_node(&p).map(|n| (k, n)))
+            .zip(labels)
+            .filter_map(|((_, p), label)| self.doc_node(&p).map(|n| (label, n)))
             .collect()
     }
 }

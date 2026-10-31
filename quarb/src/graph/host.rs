@@ -19,7 +19,11 @@ impl<A: AstAdapter> Host for A {
         !ext.unplaced
     }
     fn scale_of(&self, expr: &str) -> Option<(f64, String)> {
-        self.unit_scale(expr)
+        // The run's declared units first (the model's, installed for
+        // the run by `with_unit_scale`), as every single-value
+        // coercion reads them; the adapter's own otherwise — so a
+        // reducer's stream reads `'18 parasang'` as `convert` does.
+        crate::value::ambient::unit_scale(expr).unwrap_or_else(|| self.unit_scale(expr))
     }
     fn property_of(&self, ext: &GraphExt, name: &str) -> Option<Value> {
         self.property(ext.node, name)
@@ -97,6 +101,7 @@ impl<A: AstAdapter> Host for A {
             trace,
             witness_of(&scope),
             scope,
+            false,
         );
         for &n in &nodes {
             note(n.into());
@@ -104,7 +109,8 @@ impl<A: AstAdapter> Host for A {
         match projection {
             Some(p) => nodes.iter().map(|&n| project(self, n, p)).collect(),
             // The node side of the register read bare (`$$.name`,
-            // `$$.N`, `((@))`): references, as `$$_` is.
+            // `$$.N`, `((@))`) and an edge's end (`$-:source`):
+            // references, as `$$_` is.
             None if steps.is_empty()
                 && matches!(
                     anchor,
@@ -114,11 +120,41 @@ impl<A: AstAdapter> Host for A {
                         | Anchor::MarkBack(_)
                         | Anchor::MarksAll
                         | Anchor::MarksNamed(_)
+                        | Anchor::EdgeEnd(_)
                 ) =>
             {
                 nodes.iter().map(|&n| node_ref(self, n)).collect()
             }
             None => vec![Value::Bool(true); nodes.len()],
+        }
+    }
+    fn rel_exists(
+        &self,
+        ext: &GraphExt,
+        steps: &[PathElem],
+        anchor: &Anchor,
+        projection: Option<&Projection>,
+        trace: &Correlation,
+        scope: Scope<'_, GraphExt>,
+    ) -> bool {
+        // nodes alone are read: a walk expands by node (spec:
+        // Expansion paths)
+        let nodes = rel_nodes(
+            self,
+            ext.node,
+            steps,
+            anchor,
+            trace,
+            witness_of(&scope),
+            scope,
+            true,
+        );
+        for &n in &nodes {
+            note(n.into());
+        }
+        match projection {
+            Some(p) => nodes.iter().any(|&n| project(self, n, p).is_truthy()),
+            None => !nodes.is_empty(),
         }
     }
     fn rel_threads(
@@ -138,6 +174,7 @@ impl<A: AstAdapter> Host for A {
             trace,
             witness_of(&scope),
             scope,
+            false,
         )
         .into_iter()
         .map(|n| {
@@ -201,9 +238,9 @@ impl<A: AstAdapter> Host for A {
             .iter()
             .map(|edge| match projection {
                 None | Some(Projection::Property(None)) => Value::Str(edge.label.clone()),
-                Some(Projection::Property(Some(prop))) => self
-                    .link_property(edge.source, &edge.label, edge.target, prop)
-                    .unwrap_or(Value::Null),
+                Some(Projection::Property(Some(prop))) => {
+                    edge.property(self, prop).unwrap_or(Value::Null)
+                }
                 Some(_) => Value::Null,
             })
             .collect();
@@ -215,9 +252,14 @@ impl<A: AstAdapter> Host for A {
         };
         let v = match projection {
             None | Some(Projection::Property(None)) => Value::Str(edge.label.clone()),
-            Some(Projection::Property(Some(prop))) => self
-                .link_property(edge.source, &edge.label, edge.target, prop)
-                .unwrap_or(Value::Null),
+            Some(Projection::Property(Some(prop))) => {
+                edge.property(self, prop).unwrap_or(Value::Null)
+            }
+            // the edge facts (spec: Edge facts): what the walk knows
+            // of the edge, null outside a quantified group
+            Some(Projection::CoreMeta(key)) => {
+                scope.walk.and_then(|w| w.fact(key)).unwrap_or(Value::Null)
+            }
             Some(_) => Value::Null,
         };
         vec![v]
@@ -281,6 +323,7 @@ impl<A: AstAdapter> Host for A {
             bindings: scope.ext.bindings.clone(),
             arrived: scope.ext.arrived.clone(),
             unplaced: at.unplaced,
+            walk: None,
         }
     }
     fn exists_binding(
@@ -328,6 +371,7 @@ impl<A: AstAdapter> Host for A {
                     // thread (the results carry it on, below).
                     &c.ext.bindings,
                     &c.register,
+                    false,
                 ) {
                     out.push(Capsa {
                         prov: if branch.projection.is_some() {
@@ -350,6 +394,16 @@ impl<A: AstAdapter> Host for A {
                     });
                 }
             }
+        }
+        // A hop folds the threads that arrive alike — one per (node,
+        // arrival, register), the tree axes a node set (spec:
+        // Expansion paths). A bare anchor is no hop: `| $$.H`,
+        // `| $$.H::name` re-seat each thread on its marked node and
+        // keep every thread, as the no-merge rule keeps every walk —
+        // two threads at one node with one register are two threads
+        // until `@| collapse`.
+        if branch.steps.is_empty() && !matches!(branch.anchor, Anchor::Current) {
+            return out;
         }
         dedup_merge(out)
     }
@@ -388,6 +442,68 @@ impl<A: AstAdapter> Host for A {
         Ok(crate::graph::tree::render(self, &nodes, spec, &|n, op| {
             column(&GraphExt::at(n), op)
         }))
+    }
+    fn graph_values(
+        &self,
+        starts: &[GraphExt],
+        what: &crate::graph::edges::GraphTable,
+        seeds: &[NodeId],
+    ) -> Result<Vec<Value>, String> {
+        let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
+        match what {
+            crate::graph::edges::GraphTable::Pagerank {
+                spec,
+                damping,
+                rounds,
+            } => Ok(
+                crate::graph::edges::pagerank_values(self, &nodes, spec, *damping, *rounds)?
+                    .into_iter()
+                    .map(Value::Float)
+                    .collect(),
+            ),
+            crate::graph::edges::GraphTable::Distance { spec, .. } => {
+                crate::graph::edges::distance_values(self, &nodes, spec, seeds)
+            }
+            crate::graph::edges::GraphTable::Kcore { spec } => {
+                crate::graph::edges::kcore_values(self, &nodes, spec)
+            }
+            crate::graph::edges::GraphTable::Betweenness { spec, normalized } => {
+                crate::graph::edges::betweenness_values(self, &nodes, spec, *normalized)
+            }
+            crate::graph::edges::GraphTable::Conncomp { spec } => {
+                crate::graph::edges::conncomp_values(self, &nodes, spec)
+            }
+            _ => Err("the graph library answers a value per node".into()),
+        }
+    }
+    fn graph_table(
+        &self,
+        starts: &[GraphExt],
+        what: &crate::graph::edges::GraphTable,
+    ) -> Result<Table, String> {
+        // the context's nodes, each once in order of first arrival:
+        // several threads may stand on one (spec: Expansion paths)
+        let mut nodes: Vec<NodeId> = Vec::new();
+        for e in starts {
+            if !nodes.contains(&e.node) {
+                nodes.push(e.node);
+            }
+        }
+        match what {
+            crate::graph::edges::GraphTable::Edges(spec) => {
+                crate::graph::edges::edges_table(self, &nodes, spec)
+            }
+            crate::graph::edges::GraphTable::Nodes => {
+                Ok(crate::graph::edges::nodes_table(self, &nodes))
+            }
+            crate::graph::edges::GraphTable::Pagerank { .. }
+            | crate::graph::edges::GraphTable::Distance { .. }
+            | crate::graph::edges::GraphTable::Kcore { .. }
+            | crate::graph::edges::GraphTable::Betweenness { .. }
+            | crate::graph::edges::GraphTable::Conncomp { .. } => {
+                Err("the graph library answers a value per node, not a table".into())
+            }
+        }
     }
 }
 
@@ -580,6 +696,11 @@ pub(crate) fn origin_entries(adapter: &impl AstAdapter, o: &Origins) -> (Vec<Pro
 /// The quantifier bound in force: the run's, else the adapter's.
 pub(crate) fn quantifier_bound(adapter: &impl AstAdapter) -> usize {
     run_option(|o| o.quantifier_bound).unwrap_or_else(|| adapter.quantifier_bound())
+}
+
+/// The frontier bound in force: the run's, else the adapter's.
+pub(crate) fn frontier_bound(adapter: &impl AstAdapter) -> usize {
+    run_option(|o| o.frontier_bound).unwrap_or_else(|| adapter.frontier_bound())
 }
 
 pub fn eval(query: &Query, adapter: &impl AstAdapter) -> QueryResult {
@@ -872,6 +993,29 @@ impl Host for Calc {
         _: &dyn Fn(&(), &Operand) -> Value,
     ) -> Result<String, String> {
         Err(no_arbor("the command `tree`"))
+    }
+    fn graph_table(
+        &self,
+        _: &[()],
+        what: &crate::graph::edges::GraphTable,
+    ) -> Result<Table, String> {
+        Err(no_arbor(match what {
+            crate::graph::edges::GraphTable::Edges(_) => "the command `edges`",
+            crate::graph::edges::GraphTable::Nodes => "the command `nodes`",
+            crate::graph::edges::GraphTable::Pagerank { .. }
+            | crate::graph::edges::GraphTable::Distance { .. }
+            | crate::graph::edges::GraphTable::Kcore { .. }
+            | crate::graph::edges::GraphTable::Betweenness { .. }
+            | crate::graph::edges::GraphTable::Conncomp { .. } => "the graph library",
+        }))
+    }
+    fn graph_values(
+        &self,
+        _: &[()],
+        _: &crate::graph::edges::GraphTable,
+        _: &[()],
+    ) -> Result<Vec<Value>, String> {
+        Err(no_arbor("the graph library"))
     }
 }
 

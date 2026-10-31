@@ -95,9 +95,18 @@ fn pair_edges_close_the_walk() {
         values(&a, "/cookies/cookie[:: = 'ck-9'](--ip--cookie)+:: @| count"),
         vec!["0"]
     );
-    // parallel edge collapsed: ck-1 has exactly one ip neighbour
+    // an edge-declared row is its own edge: posts 1 and 6 are two
+    // edges from ck-1 to ip-a, each naming its row; the node set
+    // behind them is one neighbour (spec: Model Files, edge rows)
     assert_eq!(
         values(&a, "/cookies/cookie[:: = 'ck-1']--ip @| count"),
+        vec!["2"]
+    );
+    let mut rows = values(&a, "/cookies/cookie[:: = 'ck-1']--ip | $-::id");
+    rows.sort();
+    assert_eq!(rows, vec!["1", "6"]);
+    assert_eq!(
+        values(&a, "/cookies/cookie[:: = 'ck-1']--ip @| collapse @| count"),
         vec!["1"]
     );
 }

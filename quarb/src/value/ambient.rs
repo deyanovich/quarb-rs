@@ -5,6 +5,7 @@
 //! the instant and the bonds the tool pins for the session. The pipeline opens an ambient for every run it
 //! begins; the last one closed keeps its refusal until it is taken.
 //! Thread-local, as a run is.
+use crate::diagnostic::Diagnostic;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -121,7 +122,10 @@ pub fn sentence_bonds() -> Option<Rc<dyn SentenceBonds>> {
 pub(crate) struct Ambient {
     pub(crate) collation: Option<String>,
     pub(crate) bonds: Option<Rc<dyn SentenceBonds>>,
-    pub(crate) refusal: Option<String>,
+    /// The first refusal, as the diagnostic it is (an error).
+    pub(crate) refusal: Option<Diagnostic>,
+    /// The warnings and infos raised, in raising order.
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 /// Open an ambient for a run; it closes when the guard drops, and
@@ -163,11 +167,58 @@ pub(crate) fn ambient<R>(f: impl FnOnce(&Ambient) -> R) -> R {
 /// and treat the result as void. Outside an evaluation it is
 /// cleared by the next one.
 pub fn record_refusal(msg: String) {
+    record_refusal_coded(crate::diagnostic::REFUSED, "query", msg);
+}
+
+/// [`record_refusal`] under the code of the rule that declines the
+/// query (`QUANTIFIER_BOUND`, `FRONTIER_BOUND`) and the site that
+/// raised it (`round 17`). The first refusal of a run is the one
+/// reported.
+pub fn record_refusal_coded(code: &str, site: impl Into<String>, msg: String) {
     with_ambient(|a| {
         if a.refusal.is_none() {
-            a.refusal = Some(msg);
+            a.refusal = Some(Diagnostic::error(code, site, msg));
         }
     });
+}
+
+/// Raise a warning or an info beside the answer (spec:
+/// Diagnostics): kept in raising order and handed back with the
+/// run's outcome. An error goes through [`record_refusal_coded`].
+pub fn record_diagnostic(d: Diagnostic) {
+    with_ambient(|a| a.diagnostics.push(d));
+}
+
+/// Raise a debug diagnostic when the run asks for them
+/// (`RunOptions::debug`); the message is built only then. Behind
+/// the `debug-diagnostics` feature: a build without it raises none,
+/// whatever the level.
+#[cfg(feature = "debug-diagnostics")]
+pub fn record_debug(code: &str, site: impl Into<String>, message: impl FnOnce() -> String) {
+    if crate::pipeline::run_option(|o| o.debug) {
+        record_diagnostic(Diagnostic::new(
+            crate::diagnostic::Severity::Debug,
+            code,
+            site,
+            message(),
+        ));
+    }
+}
+
+/// The debug diagnostics are not built in (the `debug-diagnostics`
+/// feature is off): nothing is raised.
+#[cfg(not(feature = "debug-diagnostics"))]
+pub fn record_debug(_code: &str, _site: impl Into<String>, _message: impl FnOnce() -> String) {}
+
+/// Take the warnings and infos the last run raised.
+pub fn take_diagnostics() -> Vec<Diagnostic> {
+    FINISHED.with(|f| std::mem::take(&mut f.borrow_mut().diagnostics))
+}
+
+/// Take the refusal recorded during the last run as the diagnostic
+/// it is: code, site and message.
+pub fn take_refusal_diagnostic() -> Option<Diagnostic> {
+    FINISHED.with(|f| f.borrow_mut().refusal.take())
 }
 
 /// A fetch's outcome inside an evaluation: its value, or — when
@@ -203,9 +254,17 @@ pub fn fetched_opt<T, E: std::fmt::Display>(
     }
 }
 
+/// Whether a refusal stands recorded in this evaluation: a walk
+/// that meets one mid-expansion (a cycle under the acyclic promise,
+/// a negative weight under a budget) ends with nothing rather than
+/// walking on with the paths it has left.
+pub(crate) fn refusal_pending() -> bool {
+    with_ambient(|a| a.refusal.is_some())
+}
+
 /// Take the refusal recorded during the last [`eval`] /
 /// [`eval_traced`], if any. The caller that observes it must treat
 /// the accompanying result as void.
 pub fn take_refusal() -> Option<String> {
-    FINISHED.with(|f| f.borrow_mut().refusal.take())
+    take_refusal_diagnostic().map(|d| d.message)
 }

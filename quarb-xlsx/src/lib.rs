@@ -229,6 +229,9 @@ impl AstAdapter for XlsxAdapter {
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         self.model.prefetch_links(nodes, dir)
     }
+    fn whole_listings(&self) {
+        self.model.whole_listings()
+    }
     fn index_referrers(
         &self,
         scope: &str,

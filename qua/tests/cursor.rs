@@ -213,7 +213,9 @@ fn marks_are_regulae() {
     // One name pool: a value pushed under the name after the mark
     // re-points it, and the node side finds nothing.
     assert_eq!(ok(&d, "/a/* | .n(::k) | .n(7) | $$.n::k @| count"), "0");
-    assert_eq!(ok(&d, "/a/* | .M($$_) | /b/* | $$.M::k"), "1\n2");
+    // the recall re-seats every thread on its mark and folds none:
+    // a0's two children and a1's one make three threads
+    assert_eq!(ok(&d, "/a/* | .M($$_) | /b/* | $$.M::k"), "1\n1\n2");
     // Identity through references.
     assert_eq!(ok(&d, "/a/* | .A | /b/*[$$_ != $$.A] @| count"), "3");
     assert_eq!(ok(&d, "/a/* | .A | /b/*[$$.A = $$__] @| count"), "0");

@@ -56,6 +56,13 @@ pub trait SqlStore: WebStore {
     }
     /// Run a statement (the analytics and index passes).
     fn execute(&self, sql: &str) -> Result<u64, String>;
+    /// The site's base URL, for the resources' site paths.
+    fn site_base_url(&self, site: SiteId) -> Option<String>;
+    /// The distinct URLs of the site's links that landed on no page
+    /// and are no redlink: the resources to make.
+    fn unresolved_targets(&self, site: SiteId) -> Vec<String>;
+    /// The greatest page id in the store, for the next row.
+    fn max_page_id(&self) -> i64;
     /// Every row of a container, for the tree pass.
     fn tree_nodes(&self, site: SiteId, container: Container) -> Vec<TreeNode>;
     /// Write (id, parent, depth, rank) for the rows of a tree.
@@ -161,6 +168,9 @@ pub fn ddl(dialect: Dialect) -> Vec<String> {
             section TEXT,
             kind TEXT NOT NULL DEFAULT 'link',
             via_template {BIG} NOT NULL DEFAULT 0,
+            role TEXT NOT NULL DEFAULT 'link',
+            props TEXT NOT NULL DEFAULT '[]',
+            fragment TEXT,
             PRIMARY KEY (from_id, pos)
         )",
         "CREATE INDEX IF NOT EXISTS links_to ON links (to_id, from_id)",
@@ -195,6 +205,9 @@ pub struct TreeNode {
     pub name: String,
     pub kind: String,
     pub redirect_to: Option<i64>,
+    /// The analytics' pagerank, for the document order; zero before
+    /// the analytics run.
+    pub pagerank: f64,
 }
 
 /// A row as the schema stores it, for the export.
@@ -309,8 +322,64 @@ pub fn kind_of(name: &str) -> PageKind {
         "category" => PageKind::Category,
         "tag" => PageKind::Tag,
         "redirect" => PageKind::Redirect,
+        "resource" => PageKind::Resource,
         _ => PageKind::Page,
     }
+}
+
+/// The columns a store made before the roles lacks, added on open
+/// (an error means the column is there already).
+pub const LINK_COLUMNS_ADDED: [&str; 3] = [
+    "ALTER TABLE links ADD COLUMN role TEXT NOT NULL DEFAULT 'link'",
+    "ALTER TABLE links ADD COLUMN props TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE links ADD COLUMN fragment TEXT",
+];
+
+/// A text as a SQL string literal.
+pub fn sql_text(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// An edge's properties as the JSON the `props` column holds, and
+/// back.
+pub fn props_json(props: &[(String, Value)]) -> String {
+    let items: Vec<String> = props
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "[{}, {}]",
+                serde_json::Value::String(k.clone()),
+                v.to_json()
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+pub fn props_of_json(text: &str) -> Vec<(String, Value)> {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let pair = it.as_array()?;
+            let k = pair.first()?.as_str()?.to_string();
+            // the edge properties are texts, numbers and the hint
+            // booleans
+            let v = match pair.get(1)? {
+                serde_json::Value::String(s) => Value::Str(s.clone()),
+                serde_json::Value::Bool(b) => Value::Bool(*b),
+                serde_json::Value::Number(n) => match n.as_i64() {
+                    Some(i) => Value::Int(i),
+                    None => Value::Float(n.as_f64().unwrap_or(0.0)),
+                },
+                _ => Value::Null,
+            };
+            Some((k, v))
+        })
+        .collect()
 }
 
 pub fn hierarchy_name(h: Hierarchy) -> &'static str {

@@ -7,9 +7,10 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 
 /// PageRank's damping and iteration count (the memory store uses
-/// the same).
-pub const DAMPING: f64 = 0.85;
-pub const ITERATIONS: usize = 20;
+/// the same): the graph library's, so `//page @| graph:pagerank(->link)`
+/// equals the stored column by construction.
+pub const DAMPING: f64 = quarb_lib_graph::DAMPING;
+pub const ITERATIONS: usize = quarb_lib_graph::ROUNDS;
 
 /// The analytics of a page graph: `pages` in document order,
 /// `edges` the resolved links (duplicates allowed; degrees count
@@ -33,28 +34,16 @@ pub fn compute(
             ins[b].insert(a);
         }
     }
-    // PageRank, dangling mass spread.
-    let nf = n.max(1) as f64;
-    let mut pr = vec![1.0 / nf; n];
-    for _ in 0..ITERATIONS {
-        let mut next = vec![(1.0 - DAMPING) / nf; n];
-        let mut dangling = 0.0;
-        for i in 0..n {
-            if outs[i].is_empty() {
-                dangling += pr[i];
-                continue;
-            }
-            let share = DAMPING * pr[i] / outs[i].len() as f64;
-            for &t in &outs[i] {
-                next[t] += share;
-            }
-        }
-        let spread = DAMPING * dangling / nf;
-        for v in &mut next {
-            *v += spread;
-        }
-        pr = next;
-    }
+    // PageRank: the one implementation (quarb-lib-graph), the
+    // dangling mass spread, a self-loop ignored, a repeated edge
+    // once.
+    let folded = quarb_lib_graph::Edges::fold(
+        n,
+        edges
+            .iter()
+            .filter_map(|(f, t)| Some((*idx.get(f)?, *idx.get(t)?, None))),
+    );
+    let pr = quarb_lib_graph::pagerank(&folded, DAMPING, ITERATIONS);
     pages
         .iter()
         .enumerate()
@@ -105,7 +94,7 @@ pub fn analyze(store: &dyn SqlStore, site: SiteId, exclude_templates: bool) -> R
     store.execute(&format!(
         "UPDATE sites SET \
            page_count = (SELECT count(*) FROM pages WHERE site_id = {s} AND kind = 'page'), \
-           link_count = (SELECT count(*) FROM links l JOIN pages p ON p.id = l.from_id WHERE p.site_id = {s} AND l.to_id IS NOT NULL) \
+           link_count = (SELECT count(*) FROM links l JOIN pages p ON p.id = l.from_id JOIN pages t ON t.id = l.to_id WHERE p.site_id = {s} AND l.role = 'link' AND t.kind <> 'resource') \
          WHERE id = {s}"
     ))?;
     Ok(())
@@ -155,6 +144,36 @@ pub fn resolve_links(
             break;
         }
     }
+    // Resources (spec: Text Readings, the web reading): a link whose
+    // target is no page of the site and no redlink points at a node
+    // of kind `resource`, one per URL, named by its site path or its
+    // URL, after every page in the tree.
+    let base = store
+        .site_base_url(site)
+        .and_then(|u| url::Url::parse(&u).ok());
+    let targets = store.unresolved_targets(site);
+    if !targets.is_empty() {
+        let mut next = store.max_page_id() + 1;
+        for to_url in targets {
+            let u = url::Url::parse(&to_url).ok();
+            let path = u
+                .as_ref()
+                .and_then(|u| base.as_ref().and_then(|b| crate::memory::site_path(u, b)))
+                .unwrap_or_else(|| to_url.clone());
+            store.execute(&format!(
+                "INSERT INTO pages (id, site_id, container, parent_id, kind, name, path, url, depth, tree_rank) \
+                 VALUES ({next}, {s}, 'pages', NULL, 'resource', {name}, {path}, {url}, 1, 0)",
+                name = super::sql_text(&path),
+                path = super::sql_text(&path),
+                url = super::sql_text(&to_url),
+            ))?;
+            store.execute(&format!(
+                "UPDATE links SET to_id = {next} WHERE to_id IS NULL AND kind <> 'red' AND to_url = {url}",
+                url = super::sql_text(&to_url)
+            ))?;
+            next += 1;
+        }
+    }
     Ok((n, m))
 }
 
@@ -186,13 +205,24 @@ pub fn index(store: &dyn SqlStore) -> Result<Vec<String>, String> {
 /// Pre-order ranks for a tree given as (id, parent, name): siblings
 /// in byte order of their names, depth from 1. Returns
 /// (id, parent, depth, rank).
-pub fn rank_tree(nodes: &[(i64, Option<i64>, String)]) -> Vec<(i64, Option<i64>, i64, i64)> {
+/// The tree's pre-order with siblings by pagerank descending, ties
+/// by name (spec: Text Readings, the web reading): a site's document
+/// order puts the most linked pages first at every level, so
+/// `//page[..10]` and every search result come most-linked first.
+/// Each node is (id, parent, name, pagerank).
+pub fn rank_tree(nodes: &[(i64, Option<i64>, String, f64)]) -> Vec<(i64, Option<i64>, i64, i64)> {
     let mut kids: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
-    for (i, (_, parent, _)) in nodes.iter().enumerate() {
+    for (i, (_, parent, _, _)) in nodes.iter().enumerate() {
         kids.entry(*parent).or_default().push(i);
     }
     for v in kids.values_mut() {
-        v.sort_by(|&a, &b| nodes[a].2.as_bytes().cmp(nodes[b].2.as_bytes()));
+        v.sort_by(|&a, &b| {
+            nodes[b]
+                .3
+                .partial_cmp(&nodes[a].3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| nodes[a].2.as_bytes().cmp(nodes[b].2.as_bytes()))
+        });
     }
     let mut out = Vec::with_capacity(nodes.len());
     let mut rank = 0i64;

@@ -17,6 +17,7 @@ pub(crate) use crate::value::{SortKey, Table, Value};
 pub(crate) use std::cmp::Ordering;
 pub(crate) use std::collections::{HashMap, HashSet};
 
+mod attached;
 mod commands;
 mod context;
 pub mod env;
@@ -35,6 +36,7 @@ pub(crate) use crate::stdlib::arith::*;
 pub(crate) use crate::stdlib::compare::*;
 pub(crate) use crate::stdlib::text::*;
 pub use crate::thread::prov::*;
+pub(crate) use attached::*;
 pub(crate) use commands::*;
 pub(crate) use context::*;
 pub(crate) use environ::*;
@@ -49,34 +51,17 @@ pub use run::*;
 /// forks one thread per node); a miss yields nothing, never an
 /// error.
 
-/// A command's input context as its expressions see it (`@*`, the
-/// cross-capsa read): the snapshot, and an index of who stands
-/// where, built on first use — `X:.r` over a big context must not
-/// scan every peer per read.
+/// A command's input context as its expressions see it (`@_`,
+/// `#_`): the snapshot. (An index of who stands where served the
+/// location read, retired for the node read of spec: Attached
+/// Regulae, which goes by the node's identity.)
 pub(crate) struct Peers<X: Attachment> {
     pub(crate) caps: Vec<Thread<X>>,
-    pub(crate) by_key: std::cell::OnceCell<HashMap<X::Key, Vec<usize>>>,
 }
 
 impl<X: Attachment> Peers<X> {
     fn new(caps: Vec<Thread<X>>) -> Peers<X> {
-        Peers {
-            caps,
-            by_key: std::cell::OnceCell::new(),
-        }
-    }
-
-    /// The peers standing at `key` (the graph's node), in context
-    /// order.
-    pub(crate) fn at(&self, key: &X::Key) -> &[usize] {
-        let index = self.by_key.get_or_init(|| {
-            let mut m: HashMap<X::Key, Vec<usize>> = HashMap::new();
-            for (i, c) in self.caps.iter().enumerate() {
-                m.entry(c.ext.key()).or_default().push(i);
-            }
-            m
-        });
-        index.get(key).map_or(&[], |v| v.as_slice())
+        Peers { caps }
     }
 }
 
@@ -105,7 +90,15 @@ impl<X: Attachment> Thread<X> {
             named: &self.named,
             ext: &self.ext,
             view: self.ext.view(),
-            crossing: None,
+            // the walk that ended here, for the one command after
+            // it; else the edge the thread most recently walked, a
+            // plain hop's (spec: Arrived-by Edge)
+            crossing: self
+                .ext
+                .walk_exit()
+                .map(|(e, _)| e)
+                .or_else(|| self.ext.crossing()),
+            walk: self.ext.walk_exit().map(|(_, w)| w),
             witness: None,
             peers,
             outer,
@@ -149,6 +142,10 @@ pub(crate) struct Scope<'a, X: Attachment> {
     /// The move being evaluated, before it is the thread's state (the
     /// graph: the edge a hop is crossing).
     pub(crate) crossing: Option<&'a X::Crossing>,
+    /// The walk the crossing belongs to, where one does (a group's
+    /// predicate or push, the one command after a group): its facts
+    /// for `$-:round`, `$-:hops`, `$-:total`.
+    pub(crate) walk: Option<&'a X::Walk>,
     /// The witness under trial, where a correlation search evaluates
     /// a candidate binding; `None` reads the thread's own.
     pub(crate) witness: Option<&'a X::Witness>,
@@ -180,6 +177,7 @@ impl<'a, X: Attachment> Scope<'a, X> {
             ext,
             view: Default::default(),
             crossing: None,
+            walk: None,
             witness: None,
         }
     }
@@ -241,6 +239,24 @@ pub(crate) trait Host {
         trace: &Self::Trace,
         scope: Scope<'_, Self::Ext>,
     ) -> Vec<Value>;
+    /// A relative path operand judged for existence alone — a bare
+    /// path predicate, `[(->flight)+[::code = "PPT"]]`: whether any
+    /// node it reaches yields a truthy value (its projection, else
+    /// the node). What is read is nodes alone, so the graph expands
+    /// a walk by node where that is exact (spec: Expansion paths).
+    fn rel_exists(
+        &self,
+        ext: &Self::Ext,
+        steps: &[PathElem],
+        anchor: &Anchor,
+        projection: Option<&Projection>,
+        trace: &Self::Trace,
+        scope: Scope<'_, Self::Ext>,
+    ) -> bool {
+        self.rel(ext, steps, anchor, projection, trace, scope)
+            .iter()
+            .any(Value::is_truthy)
+    }
     /// The same path as the rows of a piped operand: one thread per
     /// node reached, standing there with the scope's state, its topic
     /// the projection, its provenance the node.
@@ -331,6 +347,23 @@ pub(crate) trait Host {
         spec: &crate::graph::tree::TreeSpec,
         column: &dyn Fn(&Self::Ext, &Operand) -> Value,
     ) -> Result<String, String>;
+    /// `@| edges` / `@| nodes`: the context's graph as a table (spec:
+    /// The graph as a table). Err where the host has no nodes.
+    fn graph_table(
+        &self,
+        starts: &[Self::Ext],
+        what: &crate::graph::edges::GraphTable,
+    ) -> Result<Table, String>;
+    /// `@| graph:pagerank` — the graph library (spec: The graph
+    /// library): one value per start, in the order given, over the
+    /// induced subgraph of the starts. Err where the host has no
+    /// nodes.
+    fn graph_values(
+        &self,
+        starts: &[Self::Ext],
+        what: &crate::graph::edges::GraphTable,
+        seeds: &[<Self::Ext as Attachment>::Key],
+    ) -> Result<Vec<Value>, String>;
     /// A value as an XML element named `tag`.
     fn value_to_xml(&self, v: &Value, tag: &str) -> String;
 }

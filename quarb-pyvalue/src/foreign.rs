@@ -336,7 +336,5 @@ pub(crate) fn as_table(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     // The engine's one rule for an implicit table: flat, it is the
     // table; a frame whose cells hold structures (an object column
     // of lists) keeps its shape as a list of records.
-    Ok(Some(Value::table_or_records(quarb::Table::new(
-        header, rows,
-    ))))
+    Ok(Some(Value::table_or_records(header, rows)))
 }

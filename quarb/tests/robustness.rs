@@ -230,21 +230,55 @@ fn a_nested_run_inherits_the_outer_run_options() {
 
 #[test]
 fn a_run_overrides_the_adapter_quantifier_bound() {
-    // A chain of five; `/a(/a)+` under a bound of 2
-    // still has edges to take when the rounds run out, so the
-    // closure would be silently incomplete: refused out loud.
-    // Under the adapter's own bound (32) it completes.
+    // A chain of five; `/a(/a){2;}` — an exact walk, its floor
+    // above one — under a bound of 2 still has edges to take when
+    // the rounds run out, so the closure would be silently
+    // incomplete: refused out loud. Under the adapter's own bound
+    // (32) it completes.
     let a = Chain(5);
     let tight = quarb::Run {
         quantifier_bound: Some(2),
         ..Default::default()
     };
-    let q = quarb::Query::parse("/a(/a)+ @| count", &a).unwrap();
+    let q = quarb::Query::parse("/a(/a){2;} @| count", &a).unwrap();
     let err = q.run(&a, &tight).unwrap_err();
     assert!(err.to_string().contains("quantifier"), "{err}");
     let out = q.run(&a, &quarb::Run::default()).unwrap();
-    assert!(matches!(out.result, QueryResult::Values(v) if v == [Value::Int(4)]));
+    assert!(matches!(out.result, QueryResult::Values(v) if v == [Value::Int(3)]));
     let shell = quarb::Query::parse("/a:: | `true`", &a).unwrap();
     let err = shell.run(&a, &quarb::Run::default()).unwrap_err();
     assert!(err.to_string().contains("allow-shell"), "{err}");
+}
+
+#[test]
+fn a_refusal_carries_its_code_and_site() {
+    // Spec: Diagnostics. A refusal is an error whose code names the
+    // rule that declined the query; a syntax error is SYNTAX; the
+    // site names what raised it; the message is the displayed one.
+    let a = Chain(5);
+    let tight = quarb::Run {
+        quantifier_bound: Some(2),
+        ..Default::default()
+    };
+    let q = quarb::Query::parse("/a(/a){2;} @| count", &a).unwrap();
+    let err = q.run(&a, &tight).unwrap_err();
+    assert_eq!(err.code(), "QUANTIFIER_BOUND");
+    assert_eq!(err.site(), "round 2");
+    let d = err.diagnostic();
+    assert_eq!(d.severity, quarb::Severity::Error);
+    assert!(
+        d.line()
+            .starts_with("error QUANTIFIER_BOUND (round 2): refused: quantifier bound reached"),
+        "{}",
+        d.line()
+    );
+    let syntax = quarb::Query::parse("/a(/a){2;3", &a).unwrap_err();
+    assert_eq!(syntax.code(), "SYNTAX");
+    assert_eq!(syntax.site(), "query");
+    // An answered run carries no diagnostics yet (nothing warns).
+    let ok = quarb::Query::parse("/a(/a)+ @| count", &a)
+        .unwrap()
+        .run(&a, &quarb::Run::default())
+        .unwrap();
+    assert!(ok.diagnostics.is_empty());
 }

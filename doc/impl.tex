@@ -1182,10 +1182,15 @@ root-anchored sequence of hops, each an axis followed by a name:
     tolerated forms), quantifiers (\texttt{+} \texttt{*}
     \texttt{\{n\}} \texttt{\{m,n\}} \texttt{\{m,\}}) with
     proximal/distal suffixes, the pattern dot wildcard, and the
-    bare-operator sugar. Simple-path expansion (no node revisited
-    within one path, the anchor included), capped by the adapter's
-    quantifier bound (default 32; \texttt{--quantifier-bound}
-    overrides) \\
+    bare-operator sugar. A set walk (an open quantifier with a
+    floor of at most one, under all matches or the proximal reach,
+    no push or mark) reaches each node once, at the fewest rounds,
+    and runs to its fixpoint; every other walk is exact, one acyclic
+    walk per history (no node revisited within one walk, the anchor
+    included), its rounds capped by the adapter's quantifier bound
+    (default 32; \texttt{--quantifier-bound} overrides). Both are
+    capped by the frontier bound on the paths in flight per round
+    (default 100\,000; \texttt{--frontier-bound}) \\
 \texttt{| upper}, \texttt{@| count}, \texttt{| .n}, \texttt{| \$.n}
   & \live per-capsa transform, whole-context aggregation, register
     push and recall \\
@@ -1469,15 +1474,59 @@ root-anchored sequence of hops, each an axis followed by a name:
     lower rungs back. \texttt{qua --kaiv} exports per field and
     per plural on the semicolon with \texttt{;+N} elision
     (\texttt{--kaiv-origins}) \\
-\texttt{X:.r}, \texttt{X:@.}, \texttt{X:\%.}, \texttt{X:(*.)}
-  & \live cross-capsa reads (2026-09-07): the register of the capsa
-    \emph{standing at} the node \texttt{X} reaches, read from the
-    command's input snapshot (\texttt{Operand::PeerReg}, a lazy
-    \texttt{Peers} index by node); location, not lineage --- after
-    a fork nothing stands at the fork node, its children do; null
-    outside a pipeline context. What lets one push read its
-    neighbours: \texttt{<-link:\%.} inside an expression body is
-    the peer's whole register \\
+\texttt{.:name(body)}, \texttt{X:.name}, \texttt{:.name}, \texttt{X:\%.}
+  & \live attached regulae (2026-10-31; the location-based
+    cross-capsa read of 2026-09-07 retired): \texttt{Command::Attach}
+    wraps the push, which files as itself, then attaches the regula
+    it filed to each thread's node in the run's store
+    (\texttt{pipeline/attached.rs}, keyed by
+    \texttt{Attachment::Key}, type-erased in \texttt{RunState});
+    the store commits when the command ends, so reads see the
+    previous command's attachments (the snapshot rule) and threads
+    at one node attaching differing values refuse naming
+    \texttt{@| collapse}. \texttt{Operand::PeerReg} reads by the
+    node's identity (\texttt{at} optional: the current node),
+    wherever a run is in progress --- predicates included; a
+    quantified push's fixpoint counts the node's attachments;
+    \texttt{@| nodes} adds them as columns \\
+\texttt{@| graph:pagerank(hop; --damping --rounds --weight)}, \texttt{graph:distance(hop; --from --weight)}, \texttt{graph:kcore(hop)}
+  & \live the graph library (2026-10-31; spec: The graph library):
+    the engine's own command library, \texttt{graph/library.rs}
+    (prefix \texttt{graph}, synopses with \texttt{InputSlot::Context},
+    answered by \texttt{RunOptions::library} for every build),
+    every command a row-aligned aggregate:
+    \texttt{graph\_library\_command} folds the threads to their
+    distinct positions, \texttt{Host::graph\_values} answers one
+    value per position over the induced subgraph
+    (\texttt{edges.rs}: \texttt{pagerank\_values},
+    \texttt{distance\_values}, \texttt{kcore\_values}, the edge list
+    folded by the hop as \texttt{edges} collects it), and each
+    thread keeps its place with its position's value as the topic.
+    The algorithms are the crate \texttt{quarb-lib-graph} (pure
+    functions over index triples; the web level's stored rank calls
+    the same \texttt{pagerank}). \texttt{--weight} has two forms on
+    \texttt{edges} and the library (\texttt{Weight::Unit},
+    \texttt{Weight::Property}); \texttt{--from} is resolved from the
+    arbor's root with the shared register; a library command never
+    pushes --- \texttt{| .:pr} and \texttt{| .:\%} do
+    (\texttt{Command::Attach} with \texttt{name: None} attaches
+    every regula the fields push filed). New trait method
+    \texttt{AstAdapter::edge\_rows} (default \texttt{link\_rows}; in
+    the forwarding macro): the edges \texttt{edges} collects, which
+    the web level reports page to page where a fragment link lands
+    navigation on a section. The bare \texttt{@| pagerank} table of
+    0.44 is retired (its pointer names \texttt{graph:pagerank}) \\
+\texttt{\$-:source}, \texttt{\$-:target}, \texttt{:source:.l}
+  & \live edge ends (2026-10-31): the arrived-by edge's two ends as
+    node references in the declaration's orientation
+    (\texttt{Host::edge}, \texttt{CoreMeta}); the \texttt{@| edges}
+    columns renamed \texttt{source} / \texttt{target} and, like
+    \texttt{nodes}' \texttt{node}, node-valued (\texttt{node\_ref},
+    printing as the path). A node reference is a node side of the
+    node read: \texttt{operand\_nodes} resolves \texttt{Operand::Edge}
+    and \texttt{Operand::Field} through \texttt{ref\_nodes}, so a row
+    filter on the edges table reads both ends' attachments
+    (\texttt{[:source:.l = :target:.l]}) \\
 \texttt{((!7))}, \texttt{((!\$.v:%origin:id))}
   & \live the node-id anchor (2026-09-07): \texttt{Anchor::Id} takes
     an expression; a number, a \texttt{\%origin} record (by
@@ -1612,6 +1661,25 @@ pub trait AstAdapter {
     /// `->` / `<-` (filesystem: symlinks).
     fn links(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
     fn backlinks(&self, _node: NodeId) -> Vec<(String, NodeId)> { Vec::new() }
+
+    /// The same with each edge's identity: the node that IS the
+    /// edge where edges are rows (a model's `edge … as flight` over
+    /// a flights table), `None` for a plain link. Two rows on one
+    /// leg are two edges, each its own thread and its own `$-`; the
+    /// row's cells are the edge's properties. Defaulted from the
+    /// pair forms with no identity.
+    fn link_rows(&self, _node: NodeId)
+        -> Vec<(String, NodeId, Option<NodeId>)> { … }
+    fn backlink_rows(&self, _node: NodeId)
+        -> Vec<(String, NodeId, Option<NodeId>)> { … }
+
+    /// Whether the link from `source` under `label` is a reference
+    /// an edge declaration consumed: a bare wildcard hop (`->*`,
+    /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
+    /// named still walks it (spec: Edge rows). A model's `edge
+    /// /flights/*: ::origin -- ::dest` consumes the two references
+    /// its fields resolve through. Defaults to nothing consumed.
+    fn link_consumed(&self, _source: NodeId, _label: &str) -> bool { false }
 
     // --- the reference surface (defaulted) ---
 
@@ -1956,7 +2024,7 @@ Three observations that the filesystem work has already forced:
 
 \item \textbf{What a run is given is the run's, never the
   adapter's.} The invocation instant \texttt{now()} denotes, the
-  shell gate, the quantifier bound override, reproducible
+  shell gate, the quantifier and frontier bound overrides, reproducible
   provenance, the reference targets, the output collation and the
   sentence bonds travel in a \texttt{quarb::Run}; a tool parses a
   \texttt{Query} once (data-aware macros expand under the same

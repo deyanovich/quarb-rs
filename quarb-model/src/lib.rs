@@ -17,13 +17,13 @@
 mod parse;
 
 pub use parse::{
-    AliasDecl, AliasKind, AliasRule, EdgeDecl, Model, Mount, NodeDecl, RefDecl, RelDecl, UnitDecl,
-    parse_model, parse_model_file, resolve_mount_target,
+    AliasDecl, AliasKind, AliasRule, EdgeDecl, Label, Model, Mount, NodeDecl, RefDecl, RelDecl,
+    UnitDecl, parse_model, parse_model_file, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Derived nodes carry this tag bit; the base's own ids never set it
 /// (the mount layer's index rides bits 56–63 but never reaches 128,
@@ -134,10 +134,34 @@ struct Fabric {
     /// is one thing, and both ends can walk it.
     rel_fwd: HashMap<NodeId, Vec<(String, NodeId)>>,
     rel_back: HashMap<NodeId, Vec<(String, NodeId)>>,
-    /// derived value node → container-labeled neighbours (the pair
-    /// edges; parallel edges collapsed, undirected so stored both
-    /// ways).
-    edges: HashMap<NodeId, Vec<(String, NodeId)>>,
+    /// node → the pair edges declared from it, in the declaration's
+    /// stored direction (the first reference's end to the second's):
+    /// the forward reading, `->label`, each with the scope row that
+    /// IS the edge (spec: Edge rows) — two rows on one leg are two
+    /// edges.
+    edges: HashMap<NodeId, Vec<(String, NodeId, NodeId)>>,
+    /// The same edges from the far end: the backward reading,
+    /// `<-label`; `--label` reads both.
+    edge_back: HashMap<NodeId, Vec<(String, NodeId, NodeId)>>,
+    /// (source, label, target) → the scope node the edge was made
+    /// from (a stage row): its other cells are the edge's properties
+    /// (`$-::parasangs`), both directions.
+    edge_rows: HashMap<(NodeId, String, NodeId), NodeId>,
+    /// link label → the `acyclic` declaration that promises no walk
+    /// over it returns to a node (spec: Model Files, Acyclic links);
+    /// both ends' labels of a promised ref or edge.
+    acyclic: HashMap<String, String>,
+    /// (source, label, target) of the base's own links a `ref … as
+    /// NAME` on a property the base declares renames: hidden, the
+    /// ref's edge under NAME standing for them.
+    renamed: HashSet<(NodeId, String, NodeId)>,
+    /// (scope row, label) of every link a wildcard hop skips: the
+    /// references an `edge` statement over the same container
+    /// consumed through its two fields — under the ref's own label,
+    /// the field's name and the base's foreign-key label, whichever
+    /// the link carries (spec: Edge rows). The label named still
+    /// walks them.
+    consumed: HashSet<(NodeId, String)>,
 }
 
 /// A base arbor enriched with a model's derived structure.
@@ -190,6 +214,76 @@ fn index_key(v: &Value) -> Option<String> {
 }
 
 impl<A: AstAdapter> ModelAdapter<A> {
+    /// The crosslinks with each edge's identity (spec: Edge rows): a
+    /// declared pair edge is its scope row, a declared ref's edge is
+    /// the source row whose field it resolves (`$-::no` on the hop
+    /// reads that row); a relation and the base's own links carry
+    /// none of their own. `base_rows` reads the base's own: its
+    /// link rows for the hop, its edge rows for the graph as a table
+    /// (the web level's page-to-page edges).
+    fn rows_through(
+        &self,
+        node: NodeId,
+        base_rows: &dyn Fn(NodeId) -> Vec<(String, NodeId, Option<NodeId>)>,
+    ) -> Vec<(String, NodeId, Option<NodeId>)> {
+        let f = self.fabric();
+        let plain = |v: &[(String, NodeId)]| {
+            v.iter()
+                .map(|(l, t)| (l.clone(), *t, None))
+                .collect::<Vec<_>>()
+        };
+        let from_row = |v: &[(String, NodeId)], row: NodeId| {
+            v.iter()
+                .map(|(l, t)| (l.clone(), *t, Some(row)))
+                .collect::<Vec<_>>()
+        };
+        let rows = |v: &[(String, NodeId, NodeId)]| {
+            v.iter()
+                .map(|(l, t, r)| (l.clone(), *t, Some(*r)))
+                .collect::<Vec<_>>()
+        };
+        match self.decode(node) {
+            // A value node's crosslinks are its pair edges and any
+            // relation declared from it.
+            Some((_, v)) if v > 0 => {
+                let mut out = f.edges.get(&node).map(|e| rows(e)).unwrap_or_default();
+                if let Some(rels) = f.rel_fwd.get(&node) {
+                    out.extend(plain(rels));
+                }
+                if let Some(base) = self.aliased(node) {
+                    out.extend(
+                        base_rows(base)
+                            .into_iter()
+                            .filter(|(l, t, _)| !f.renamed.contains(&(base, l.clone(), *t))),
+                    );
+                    if let Some(refs) = f.ref_fwd.get(&base) {
+                        out.extend(from_row(refs, base));
+                    }
+                }
+                out
+            }
+            Some(_) => Vec::new(),
+            // A base node: its own links plus any declared refs,
+            // relations and pair edges from it.
+            None => {
+                let mut out: Vec<(String, NodeId, Option<NodeId>)> = base_rows(node)
+                    .into_iter()
+                    .filter(|(l, t, _)| !f.renamed.contains(&(node, l.clone(), *t)))
+                    .collect();
+                if let Some(refs) = f.ref_fwd.get(&node) {
+                    out.extend(from_row(refs, node));
+                }
+                if let Some(rels) = f.rel_fwd.get(&node) {
+                    out.extend(plain(rels));
+                }
+                if let Some(e) = f.edges.get(&node) {
+                    out.extend(rows(e));
+                }
+                out
+            }
+        }
+    }
+
     fn value_indexes(&self) -> &Vec<ValueIndex> {
         self.indexes.get_or_init(|| {
             let defs = self.seeded_defs();
@@ -379,7 +473,65 @@ impl<A: AstAdapter> ModelAdapter<A> {
         }
         self.check_declared_traits()?;
         self.check_ref_targets()?;
+        self.check_label_properties()?;
         self.check_trees()
+    }
+
+    /// Refuse a label by property (`as ::prop`) where a row's value
+    /// is no text: a label is a name, and a number or a list there
+    /// is a model error, named by its statement and its row. Null or
+    /// missing is no error — that row declares no edge.
+    pub fn check_label_properties(&self) -> Result<(), String> {
+        let defs = self.seeded_defs();
+        let check = |prop: &str, nodes: Vec<NodeId>, statement: String| -> Result<(), String> {
+            for node in nodes {
+                match self.base.property(node, prop) {
+                    None | Some(Value::Null) | Some(Value::Str(_)) => {}
+                    Some(other) => {
+                        return Err(format!(
+                            "the label '::{prop}' is no text on row '{}': a label by property \
+                             takes a text, and this row's value is {} ({statement})",
+                            self.base.name(node).unwrap_or_default(),
+                            other
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+        for decl in &self.model.refs {
+            if let Some(Label::Property(p)) = &decl.label {
+                let mut scoped = self.scope_nodes(&decl.scope, &defs);
+                if scoped.is_empty() {
+                    scoped = self
+                        .view_nodes(&decl.scope, &defs)
+                        .into_iter()
+                        .filter_map(|n| self.aliased(n))
+                        .collect();
+                }
+                check(
+                    p,
+                    scoped,
+                    format!(
+                        "ref {}::{} --> {} as ::{p}",
+                        decl.scope, decl.field, decl.path
+                    ),
+                )?;
+            }
+        }
+        for decl in &self.model.edges {
+            if let Some(Label::Property(p)) = &decl.label {
+                check(
+                    p,
+                    self.scope_nodes(&decl.scope, &defs),
+                    format!(
+                        "edge {}: ::{} -- ::{} as ::{p}",
+                        decl.scope, decl.field_a, decl.field_b
+                    ),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a `tree` whose path names no node.
@@ -705,6 +857,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// The reference and edge fabric, built on first use.
     fn fabric(&self) -> &Fabric {
         self.fabric.get_or_init(|| {
+            // The ref targets and edge scopes below list their
+            // containers; a listing the planner narrowed to the
+            // query's rows would lose every edge whose far end the
+            // predicate excluded.
+            self.base.whole_listings();
             let defs = self.seeded_defs();
             let mut f = Fabric {
                 alias: HashMap::new(),
@@ -715,6 +872,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 rel_fwd: HashMap::new(),
                 rel_back: HashMap::new(),
                 edges: HashMap::new(),
+                edge_back: HashMap::new(),
+                edge_rows: HashMap::new(),
+                acyclic: HashMap::new(),
+                renamed: HashSet::new(),
+                consumed: HashSet::new(),
             };
             for (c, cont) in self.containers().iter().enumerate() {
                 for (i, m) in cont.members.iter().enumerate() {
@@ -805,7 +967,38 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         .filter_map(|n| self.aliased(n))
                         .collect();
                 }
+                // An edge statement over the same container consumes
+                // this reference through its field: every scope row's
+                // link under it, the base's own foreign-key link
+                // included, is one a wildcard hop skips.
+                let consumed = self.model.edges.iter().any(|e| {
+                    scope_container(&e.scope) == scope_container(&decl.scope)
+                        && (e.field_a == decl.field || e.field_b == decl.field)
+                });
                 for node in scoped {
+                    if consumed {
+                        f.consumed.insert((node, decl.field.clone()));
+                        f.consumed.insert((
+                            node,
+                            quarb::adapter::reference_label(&decl.field).to_string(),
+                        ));
+                        if let Some(Label::Name(l)) = &decl.label {
+                            f.consumed.insert((node, l.clone()));
+                        }
+                    }
+                    // `as NAME` one label; `as ::prop` the row's own —
+                    // a row with no text there declares no edge
+                    let label: Option<String> = match &decl.label {
+                        None => None,
+                        Some(Label::Name(l)) => Some(l.clone()),
+                        Some(Label::Property(p)) => match self.base.property(node, p) {
+                            Some(Value::Str(s)) => Some(s),
+                            _ => continue,
+                        },
+                    };
+                    if consumed && let Some(l) = &label {
+                        f.consumed.insert((node, l.clone()));
+                    }
                     let Some(value) = self.base.property(node, &decl.field) else {
                         continue;
                     };
@@ -825,13 +1018,19 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         let Some(target) = index.get(&value.to_string()).copied() else {
                             continue;
                         };
-                        let fwd = self.role_at(target).unwrap_or_else(|| path_label.clone());
+                        // `as NAME` labels both ways; else the role the
+                        // hop arrives at
+                        let fwd = label.clone().unwrap_or_else(|| {
+                            self.role_at(target).unwrap_or_else(|| path_label.clone())
+                        });
                         // Backward the hop lands on the source node — on
                         // the alias if a `node` gave it a role, else on
                         // the raw node, named by the path that found it.
-                        let (back_node, back) = match f.alias.get(&node) {
-                            Some((alias, role)) => (*alias, role.clone()),
-                            None => (node, scope_role(&decl.scope)),
+                        let (back_node, back) = match (f.alias.get(&node), &label) {
+                            (Some((alias, _)), Some(l)) => (*alias, l.clone()),
+                            (None, Some(l)) => (node, l.clone()),
+                            (Some((alias, role)), None) => (*alias, role.clone()),
+                            (None, None) => (node, scope_role(&decl.scope)),
                         };
                         if first {
                             f.resolve.insert((node, decl.field.clone()), target);
@@ -844,6 +1043,55 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         let from = f.sources.entry((target, decl.field.clone())).or_default();
                         if !from.contains(&back_node) {
                             from.push(back_node);
+                        }
+                        if decl.acyclic {
+                            let text = format!(
+                                "ref {}::{} --> {} acyclic",
+                                decl.scope, decl.field, decl.path
+                            );
+                            f.acyclic.entry(fwd.clone()).or_insert_with(|| text.clone());
+                            f.acyclic
+                                .entry(back.clone())
+                                .or_insert_with(|| text.clone());
+                            // the base adapter's own link by the field
+                            // (a foreign key's `->right`, the column
+                            // `right_id` without its suffix) is the
+                            // same edge, unless `as NAME` renamed it
+                            if label.is_none() {
+                                f.acyclic
+                                    .entry(quarb::adapter::reference_label(&decl.field).to_string())
+                                    .or_insert(text);
+                            }
+                        }
+                        // A ref on a property the base already
+                        // declares (a catalog's foreign key) refines
+                        // that one reference: its words (acyclic)
+                        // land on the base's edge under the base's
+                        // label, and no second edge is declared;
+                        // `as NAME` renames that edge, the base's
+                        // own link hidden behind the ref's.
+                        let declared = self.decode(target).is_none()
+                            && self
+                                .base
+                                .reference_properties(node, target)
+                                .iter()
+                                .any(|p| *p == decl.field);
+                        if declared {
+                            match &label {
+                                None => continue,
+                                Some(_) => {
+                                    for (l, t) in self.base.links(node) {
+                                        if t == target
+                                            && (l == decl.field
+                                                || l == quarb::adapter::reference_label(
+                                                    &decl.field,
+                                                ))
+                                        {
+                                            f.renamed.insert((node, l, t));
+                                        }
+                                    }
+                                }
+                            }
                         }
                         f.ref_fwd.entry(node).or_default().push((fwd, target));
                         f.ref_back
@@ -885,10 +1133,10 @@ impl<A: AstAdapter> ModelAdapter<A> {
             // follows a ref by key property, into another mount, or
             // with both ends in one role (a network of pairs) as it
             // follows one into a value container. Each end is
-            // labelled by the role it lands in; parallel edges
-            // collapse.
+            // labelled by the role it lands in. Every scope row is an
+            // edge of its own (spec: Edge rows): two rows on one leg
+            // are two edges, told apart by the row.
             for decl in &self.model.edges {
-                let mut seen = std::collections::HashSet::new();
                 for node in self.scope_nodes(&decl.scope, &defs) {
                     let (Some(ends_a), Some(ends_b)) = (
                         reached.get(&(node, decl.field_a.clone())),
@@ -896,11 +1144,58 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     ) else {
                         continue;
                     };
+                    // `as NAME` one label; `as ::prop` the row's own —
+                    // a row with no text there declares no edge
+                    let label: Option<String> = match &decl.label {
+                        None => None,
+                        Some(Label::Name(l)) => Some(l.clone()),
+                        Some(Label::Property(p)) => match self.base.property(node, p) {
+                            Some(Value::Str(s)) => Some(s),
+                            _ => continue,
+                        },
+                    };
                     for (ra, na) in ends_a {
                         for (rb, nb) in ends_b {
-                            if na != nb && seen.insert((*na, *nb)) {
-                                f.edges.entry(*na).or_default().push((rb.clone(), *nb));
-                                f.edges.entry(*nb).or_default().push((ra.clone(), *na));
+                            if na != nb {
+                                // the label on both ends; else each end
+                                // by the role it lands in
+                                let (fwd, back) = match &label {
+                                    Some(l) => (l.clone(), l.clone()),
+                                    None => (rb.clone(), ra.clone()),
+                                };
+                                if decl.acyclic {
+                                    let text = format!(
+                                        "edge {}: ::{} -- ::{}{} acyclic",
+                                        decl.scope,
+                                        decl.field_a,
+                                        decl.field_b,
+                                        decl.label
+                                            .as_ref()
+                                            .map(|l| format!(" as {}", l.written()))
+                                            .unwrap_or_default()
+                                    );
+                                    f.acyclic.entry(fwd.clone()).or_insert_with(|| text.clone());
+                                    f.acyclic.entry(back.clone()).or_insert(text);
+                                }
+                                f.edges
+                                    .entry(*na)
+                                    .or_default()
+                                    .push((fwd.clone(), *nb, node));
+                                f.edge_back
+                                    .entry(*nb)
+                                    .or_default()
+                                    .push((back.clone(), *na, node));
+                                // The edge context keeps the edge's
+                                // true direction whichever way it was
+                                // walked (`arrived_edge`): the row is
+                                // found under (source, label, target)
+                                // for both readings. Keying the
+                                // backward reading by the ends swapped
+                                // would hand a row of the opposite
+                                // direction the forward key of this
+                                // one under `as NAME`.
+                                f.edge_rows.insert((*na, fwd, *nb), node);
+                                f.edge_rows.insert((*na, back, *nb), node);
                             }
                         }
                     }
@@ -1167,6 +1462,10 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
         }
         self.base.descendants_named(node, name)
     }
+    fn whole_listings(&self) {
+        self.base.whole_listings()
+    }
+
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let base: Vec<NodeId> = nodes
             .iter()
@@ -1648,52 +1947,72 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        let f = self.fabric();
-        match self.decode(node) {
-            // A value node's crosslinks are its pair edges and any
-            // relation declared from it.
-            Some((_, v)) if v > 0 => {
-                let mut out = f.edges.get(&node).cloned().unwrap_or_default();
-                if let Some(rels) = f.rel_fwd.get(&node) {
-                    out.extend(rels.iter().cloned());
-                }
-                if let Some(base) = self.aliased(node) {
-                    out.extend(self.base.links(base));
-                    if let Some(refs) = f.ref_fwd.get(&base) {
-                        out.extend(refs.iter().cloned());
-                    }
-                }
-                out
-            }
-            Some(_) => Vec::new(),
-            // A base node: its own links plus any declared refs and
-            // relations.
-            None => {
-                let mut out = self.base.links(node);
-                if let Some(refs) = f.ref_fwd.get(&node) {
-                    out.extend(refs.iter().cloned());
-                }
-                if let Some(rels) = f.rel_fwd.get(&node) {
-                    out.extend(rels.iter().cloned());
-                }
-                out
-            }
-        }
+        self.link_rows(node)
+            .into_iter()
+            .map(|(l, t, _)| (l, t))
+            .collect()
     }
 
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.backlink_rows(node)
+            .into_iter()
+            .map(|(l, s, _)| (l, s))
+            .collect()
+    }
+
+    /// A wildcard hop skips the references an edge statement
+    /// consumed (spec: Edge rows): the fabric marked every scope
+    /// row's link under them. The row may be asked for through the
+    /// alias a `node` statement gave it.
+    fn link_consumed(&self, source: NodeId, label: &str) -> bool {
         let f = self.fabric();
+        let key = (source, label.to_string());
+        f.consumed.contains(&key)
+            || self
+                .aliased(source)
+                .is_some_and(|base| f.consumed.contains(&(base, key.1.clone())))
+    }
+
+    fn link_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.rows_through(node, &|n| self.base.link_rows(n))
+    }
+
+    /// The edges `edges` collects and the graph library reads (spec:
+    /// The graph as a table): the declared edges as `link_rows`, the
+    /// base's own through its `edge_rows` — the web level's page to
+    /// page where a fragment link lands navigation on a section.
+    fn edge_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.rows_through(node, &|n| self.base.edge_rows(n))
+    }
+
+    fn backlink_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        let f = self.fabric();
+        let plain = |v: &[(String, NodeId)]| {
+            v.iter()
+                .map(|(l, t)| (l.clone(), *t, None))
+                .collect::<Vec<_>>()
+        };
+        let rows = |v: &[(String, NodeId, NodeId)]| {
+            v.iter()
+                .map(|(l, t, r)| (l.clone(), *t, Some(*r)))
+                .collect::<Vec<_>>()
+        };
         match self.decode(node) {
             // A value node: the base nodes whose declared ref points
             // here, its pair edges (undirected), and the far end of
             // any relation declared toward it.
             Some((_, v)) if v > 0 => {
-                let mut out = f.ref_back.get(&node).cloned().unwrap_or_default();
-                if let Some(e) = f.edges.get(&node) {
-                    out.extend(e.iter().cloned());
+                // a ref's backlink: the far end is the source row
+                let mut out: Vec<(String, NodeId, Option<NodeId>)> = f
+                    .ref_back
+                    .get(&node)
+                    .map(|r| r.iter().map(|(l, s)| (l.clone(), *s, Some(*s))).collect())
+                    .unwrap_or_default();
+                if let Some(e) = f.edge_back.get(&node) {
+                    out.extend(rows(e));
                 }
                 if let Some(rels) = f.rel_back.get(&node) {
-                    out.extend(rels.iter().cloned());
+                    out.extend(plain(rels));
                 }
                 out
             }
@@ -1702,12 +2021,21 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             // resolve to it (a ref may target any path, so another
             // mount's row is a target too), and the relations toward it.
             None => {
-                let mut out = self.base.backlinks(node);
+                let mut out: Vec<(String, NodeId, Option<NodeId>)> = self
+                    .base
+                    .backlink_rows(node)
+                    .into_iter()
+                    .filter(|(l, s, _)| !f.renamed.contains(&(*s, l.clone(), node)))
+                    .collect();
                 if let Some(refs) = f.ref_back.get(&node) {
-                    out.extend(refs.iter().cloned());
+                    // the far end is the source row
+                    out.extend(refs.iter().map(|(l, s)| (l.clone(), *s, Some(*s))));
                 }
                 if let Some(rels) = f.rel_back.get(&node) {
-                    out.extend(rels.iter().cloned());
+                    out.extend(plain(rels));
+                }
+                if let Some(e) = f.edge_back.get(&node) {
+                    out.extend(rows(e));
                 }
                 out
             }
@@ -1836,9 +2164,10 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         self.decode(node).is_some() || self.base.has_node(node)
     }
 
-    /// An edge's own properties are the base's: a model adds links
-    /// (refs, relations) that carry none, and a node standing for a
-    /// base one reads through to it.
+    /// A declared edge's properties are its row's other cells (a
+    /// stage row's parasangs and days); any other edge's are the
+    /// base's: a model's refs and relations carry none, and a node
+    /// standing for a base one reads through to it.
     fn link_property(
         &self,
         source: NodeId,
@@ -1846,12 +2175,50 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         target: NodeId,
         name: &str,
     ) -> Option<Value> {
+        if let Some(row) = self
+            .fabric()
+            .edge_rows
+            .get(&(source, label.to_string(), target))
+        {
+            return self.base.property(*row, name);
+        }
         let base_of = |n: NodeId| match self.decode(n) {
             None => Some(n),
             Some(_) => self.aliased(n),
         };
         self.base
             .link_property(base_of(source)?, label, base_of(target)?, name)
+    }
+
+    /// A declared ref or edge's promise, else the base's.
+    fn acyclic_link(&self, label: &str) -> Option<String> {
+        self.fabric()
+            .acyclic
+            .get(label)
+            .cloned()
+            .or_else(|| self.base.acyclic_link(label))
+    }
+
+    fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
+        if let Some(row) = self
+            .fabric()
+            .edge_rows
+            .get(&(source, label.to_string(), target))
+        {
+            return self.base.property_names(*row);
+        }
+        let base_of = |n: NodeId| match self.decode(n) {
+            None => Some(n),
+            Some(_) => self.aliased(n),
+        };
+        match (base_of(source), base_of(target)) {
+            (Some(s), Some(t)) => self.base.link_property_names(s, label, t),
+            _ => Vec::new(),
+        }
+    }
+
+    fn whole_listings(&self) {
+        self.base.whole_listings()
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
@@ -1867,6 +2234,10 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     fn quantifier_bound(&self) -> usize {
         self.base.quantifier_bound()
+    }
+
+    fn frontier_bound(&self) -> usize {
+        self.base.frontier_bound()
     }
     /// The imported libraries first (`units LIBRARY;`), then the
     /// source's own.
@@ -1893,6 +2264,17 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 /// An unnamed node answers to no written name.
 fn canonical_none(_name: &str) -> bool {
     false
+}
+
+/// A scope path without its trailing predicate: the container an
+/// `edge /flights/*[::carrier = "panam"]: …` statement and a `ref
+/// /flights/*::origin --> …` both speak of.
+fn scope_container(scope: &str) -> &str {
+    let s = scope.trim();
+    match s.find('[') {
+        Some(i) if s.ends_with(']') => s[..i].trim_end(),
+        _ => s,
+    }
 }
 
 /// The role of the nodes a scope path selects: the last *named*

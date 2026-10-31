@@ -1339,6 +1339,14 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         self.outer.quantifier_bound()
     }
 
+    fn frontier_bound(&self) -> usize {
+        self.outer.frontier_bound()
+    }
+
+    fn whole_listings(&self) {
+        self.outer.whole_listings()
+    }
+
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let outer: Vec<NodeId> = nodes
             .iter()
@@ -1373,6 +1381,64 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 ls.into_iter().map(|(l, n)| (l, self.wrap(g, n))).collect()
             }
             None => self.outer.backlinks(node),
+        }
+    }
+
+    fn link_consumed(&self, source: NodeId, label: &str) -> bool {
+        match self.split(source) {
+            Some((g, inner)) => {
+                let grafts = self.grafts.borrow();
+                grafts[g].inner.adapter().link_consumed(inner, label)
+            }
+            None => self.outer.link_consumed(source, label),
+        }
+    }
+
+    // The row-bearing forms and the edges `edges` collects, each
+    // node and row wrapped: the trait defaults would read `links`
+    // and lose the row and the grafted level's own edge rule.
+    fn link_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let rows: Vec<(String, NodeId, Option<NodeId>)> = {
+                    let grafts = self.grafts.borrow();
+                    grafts[g].inner.adapter().link_rows(inner)
+                };
+                rows.into_iter()
+                    .map(|(l, t, row)| (l, self.wrap(g, t), row.map(|r| self.wrap(g, r))))
+                    .collect()
+            }
+            None => self.outer.link_rows(node),
+        }
+    }
+
+    fn edge_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let rows: Vec<(String, NodeId, Option<NodeId>)> = {
+                    let grafts = self.grafts.borrow();
+                    grafts[g].inner.adapter().edge_rows(inner)
+                };
+                rows.into_iter()
+                    .map(|(l, t, row)| (l, self.wrap(g, t), row.map(|r| self.wrap(g, r))))
+                    .collect()
+            }
+            None => self.outer.edge_rows(node),
+        }
+    }
+
+    fn backlink_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let rows: Vec<(String, NodeId, Option<NodeId>)> = {
+                    let grafts = self.grafts.borrow();
+                    grafts[g].inner.adapter().backlink_rows(inner)
+                };
+                rows.into_iter()
+                    .map(|(l, s, row)| (l, self.wrap(g, s), row.map(|r| self.wrap(g, r))))
+                    .collect()
+            }
+            None => self.outer.backlink_rows(node),
         }
     }
 

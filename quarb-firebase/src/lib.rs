@@ -500,14 +500,20 @@ impl AstAdapter for FirebaseAdapter {
     }
 
     /// Every declared field with a value is an outgoing crosslink,
-    /// labeled by the field name; a `field/*` declaration yields
-    /// one edge per array element. Each edge is probed (one GET)
-    /// so dangling references stay out.
+    /// labeled by the field name without its `_id` suffix
+    /// ([`quarb::adapter::reference_labels`]); a `field/*`
+    /// declaration yields one edge per array element. Each edge is
+    /// probed (one GET) so dangling references stay out.
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         let mut declared: Vec<(&String, &String)> = self.refs.iter().collect();
         declared.sort();
+        let labels = quarb::adapter::reference_labels(
+            declared
+                .iter()
+                .map(|(f, _)| f.strip_suffix("/*").unwrap_or(f.as_str())),
+        );
         let mut out = Vec::new();
-        for (field, target) in declared {
+        for ((field, target), label) in declared.into_iter().zip(labels) {
             let root_child = self.intern(NodeId(0), target);
             if let Some(elem_field) = field.strip_suffix("/*") {
                 let container = self.intern(node, elem_field);
@@ -522,7 +528,7 @@ impl AstAdapter for FirebaseAdapter {
                         &*nodes[t.0 as usize].kind.borrow(),
                         Some(Kind::Scalar(Value::Null)) | None
                     ) {
-                        out.push((elem_field.to_string(), t));
+                        out.push((label.clone(), t));
                     }
                 }
             } else if let Some(v) = self.field(node, field) {
@@ -533,7 +539,7 @@ impl AstAdapter for FirebaseAdapter {
                     &*nodes[t.0 as usize].kind.borrow(),
                     Some(Kind::Scalar(Value::Null)) | None
                 ) {
-                    out.push((field.clone(), t));
+                    out.push((label, t));
                 }
             }
         }

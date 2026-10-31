@@ -102,11 +102,17 @@ impl Session {
     }
 
     /// Add a `def`/`macro` line to the table (validated first). Unlike
-    /// a query line, a definition is not run.
+    /// a query line, a definition is not run — but it is a cell of the
+    /// session and takes its ordinal (spec: .quai, Numbering): the line
+    /// number advances, with no result behind it, so `&N` of a
+    /// definition is a reference to a cell with no result and `&N#`
+    /// replays nothing.
     pub fn add_def(&mut self, line: &str) -> Result<()> {
         let candidate = format!("{}{}\n", self.defs_text, line);
         quarb::parse_defs(&candidate).context("parsing definition")?;
         self.defs_text = candidate;
+        self.snapshots.insert(self.line_no, Vec::new());
+        self.line_no += 1;
         self.persist();
         Ok(())
     }
@@ -148,6 +154,21 @@ impl Session {
     /// the loop: acquire, remount, re-run.
     pub fn refs(&self) -> Vec<String> {
         self.executor.refs()
+    }
+
+    /// The warnings and infos the last evaluation raised beside its
+    /// answer (spec: Diagnostics), in raising order.
+    pub fn diagnostics(&self) -> Vec<quarb::Diagnostic> {
+        self.executor.diagnostics()
+    }
+
+    /// The diagnostics level the session shows
+    /// (`session(--diagnostics=…)`; warning when the session keeps
+    /// no memory).
+    pub fn diagnostics_level(&self) -> quarb::Severity {
+        self.session_memory()
+            .map(|m| m.borrow().diagnostics)
+            .unwrap_or(quarb::Severity::Warning)
     }
 
     /// The session memory, when the executor keeps one.

@@ -570,6 +570,16 @@ fn a_plan_records_the_column_types_it_assumes() {
     // the literal on the left, and the prefilter, record the same
     let plan = quarb_sql::pushdown("/books/*[300 < ::pages] | ::title", None).unwrap();
     assert_eq!(plan.column_types.numeric, ["pages"]);
+    // a numeric reducer over a column assumes the column numeric:
+    // the scan lifts unit text to quantities, SQL sums its digits
+    let plan = quarb_sql::pushdown("/books/* | ::pages @| sum", None).unwrap();
+    assert_eq!(plan.sql, "SELECT SUM(pages) FROM books");
+    assert_eq!(plan.column_types.numeric, ["pages"]);
+    let plan = quarb_sql::pushdown("/books/* | ::title @| max", None).unwrap();
+    assert_eq!(plan.column_types.numeric, ["title"]);
+    // count assumes nothing of a column
+    let plan = quarb_sql::pushdown("/books/* @| count", None).unwrap();
+    assert!(plan.column_types.is_empty());
     let partial = quarb_sql::partial_pushdown(
         "/books/*[::pages > 300] | ::title @| group(::title) | count",
         None,
