@@ -72,7 +72,7 @@ fn quantital_coercion_and_arith() {
         Some(Ordering::Less)
     );
     // Dimension mismatch: the comparison fails rather than lies.
-    let power = q(290.0, "kg*m^2/s^3", Some((290.0, "W")));
+    let power = q(290.0, "m^2*kg/s^3", Some((290.0, "W")));
     assert_eq!(value_cmp(&power, &Value::Str("5km".into()), sc), None);
     assert!(!value_eq(&power, &Value::Str("5km".into()), sc));
     // kW text against a W-minted quantity — the motivating case.
@@ -2945,6 +2945,7 @@ fn origins(known: &[(u64, u32)]) -> Origins {
             })
             .collect(),
         more: 0,
+        omitted: false,
     }
 }
 
@@ -4126,4 +4127,601 @@ fn quantified_push_iterates() {
     // Only a push takes the quantifier.
     assert!(parse(&lex("/a | upper{3}").unwrap()).is_err());
     assert!(parse(&lex("/a | .v(1){3;2}").unwrap()).is_err());
+}
+
+// ── the graph library's next commands (spec draft.189) ──────────────
+
+fn table_of(q: &str, t: &MockTree) -> (Vec<String>, Vec<Vec<String>>) {
+    let vs = vals(q, t);
+    assert_eq!(vs.len(), 1, "{q}");
+    let Value::Table(tb) = &vs[0] else {
+        panic!("{q}: not a table: {}", vs[0].display_form())
+    };
+    (
+        tb.header.clone().unwrap(),
+        tb.rows
+            .iter()
+            .map(|r| r.iter().map(Value::display_form).collect())
+            .collect(),
+    )
+}
+
+fn list_strs(v: &Value) -> Vec<String> {
+    match v {
+        Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
+        other => panic!("a list, not {other}"),
+    }
+}
+
+#[test]
+fn artpoints_and_bridges_read_the_hop_undirected() {
+    let t = MockTree::roads();
+    // the whole roads graph is a cycle a-x-deep-y-a: nothing cuts
+    let cut = vals("//a(->e)* @| collapse @| graph:artpoints(->e)", &t);
+    assert_eq!(cut, vec![Value::Bool(false); 4]);
+    assert_eq!(table_of("//a(->e)* @| graph:bridges(->e)", &t).1.len(), 0);
+    // without deep it is a path x-a-y: a cuts, both edges are bridges
+    let cut = vals(
+        "//a(->e)*[:name != \"deep\"] @| collapse @| graph:artpoints(->e)",
+        &t,
+    );
+    assert_eq!(
+        cut,
+        vec![Value::Bool(true), Value::Bool(false), Value::Bool(false)]
+    );
+    let (h, rows) = table_of("//a(->e)*[:name != \"deep\"] @| graph:bridges(->e)", &t);
+    assert_eq!(h, ["source", "target", "label", "directed", "len", "time"]);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][..2], ["/a", "/a/x.rs"]);
+    assert_eq!(rows[1][..2], ["/a", "/a/y.txt"]);
+    // the direction of the hop is no matter, and a weight refuses
+    assert_eq!(
+        table_of("//a(->e)*[:name != \"deep\"] @| graph:bridges(<-e)", &t)
+            .1
+            .len(),
+        2
+    );
+    assert!(vals("//a(->e)* @| graph:artpoints(->e; --weight=km)", &t).is_empty());
+}
+
+#[test]
+fn routes_are_lists_of_nodes_seed_first() {
+    let t = MockTree::roads();
+    // by hops: deep is reached through x.rs or y.txt alike, and the
+    // predecessor that stands first in document order wins
+    let routes = vals("//a(->e)* @| collapse @| graph:route(->e; --from=/a)", &t);
+    assert_eq!(list_strs(&routes[0]), ["/a"]);
+    assert_eq!(list_strs(&routes[1]), ["/a", "/a/x.rs"]);
+    assert_eq!(list_strs(&routes[2]), ["/a", "/a/y.txt"]);
+    assert_eq!(list_strs(&routes[3]), ["/a", "/a/x.rs", "/b/deep"]);
+    // by weight the light road through y.txt is shortest
+    let routes = vals(
+        "//a(->e)* @| collapse @| graph:route(->e; --from=/a --weight=km)",
+        &t,
+    );
+    assert_eq!(list_strs(&routes[3]), ["/a", "/a/y.txt", "/b/deep"]);
+    // unreached from deep: a and y.txt (deep's one edge leads to x.rs)
+    let routes = vals(
+        "//a(->e)* @| collapse @| graph:route(->e; --from=/b/deep)",
+        &t,
+    );
+    assert_eq!(routes[0], Value::Null);
+    assert_eq!(list_strs(&routes[1]), ["/b/deep", "/a/x.rs"]);
+    assert_eq!(list_strs(&routes[3]), ["/b/deep"]);
+    // every thread keeps its place and reads its node's route
+    assert_eq!(
+        vals("//a(->e)* @| graph:route(->e; --from=/a)", &t).len(),
+        6
+    );
+    // no seeds refuses
+    assert!(vals("//a(->e)* @| graph:route(->e)", &t).is_empty());
+}
+
+#[test]
+fn edge_betweenness_is_the_edges_table_with_a_column() {
+    let t = MockTree::roads();
+    let (h, rows) = table_of("//a(->e)* @| graph:betweenness(->e; --edges)", &t);
+    assert_eq!(
+        h,
+        [
+            "source",
+            "target",
+            "label",
+            "directed",
+            "len",
+            "time",
+            "betweenness"
+        ]
+    );
+    let got: Vec<f64> = rows.iter().map(|r| r[6].parse().unwrap()).collect();
+    // a->x 1.5, a->y 1.5, x->deep 1.5, y->deep 2.5, deep->x 2
+    assert_eq!(got, [1.5, 1.5, 1.5, 2.5, 2.0]);
+    // normalized by the ordered pairs of distinct nodes, 12
+    let (_, rows) = table_of(
+        "//a(->e)* @| graph:betweenness(->e; --edges --normalized)",
+        &t,
+    );
+    let got: Vec<f64> = rows.iter().map(|r| r[6].parse().unwrap()).collect();
+    assert!((got[3] - 2.5 / 12.0).abs() < 1e-12, "{got:?}");
+}
+
+#[test]
+fn a_library_command_is_refused_under_the_graph_bound_before_computing() {
+    let t = MockTree::roads();
+    let tight = crate::Run {
+        graph_bound: Some(3),
+        ..Default::default()
+    };
+    let run = |q: &str| {
+        crate::Query::parse(q, &t)
+            .unwrap()
+            .run(&t, &tight)
+            .map(|o| o.result)
+    };
+    // four nodes and five edges cost nine; kcore is refused, a walk
+    // of the same context is not
+    let err = run("//a(->e)* @| graph:kcore(->e)").err().expect("refused");
+    let text = format!("{err}");
+    assert!(
+        text.contains("graph bound") && text.contains("4 nodes and 5 edges"),
+        "{text}"
+    );
+    assert!(run("//a(->e)* @| count").is_ok());
+    // betweenness costs nodes times edges
+    let err = format!(
+        "{}",
+        run("//a(->e)* @| graph:betweenness(->e)").err().unwrap()
+    );
+    assert!(err.contains("20 cost units (nodes times edges)"), "{err}");
+}
+
+/// A mock that declares a graph and keeps what the engine computes.
+struct Declaring {
+    inner: MockTree,
+    kept: std::cell::RefCell<HashMap<(String, String, String), Vec<Value>>>,
+    asked: std::cell::Cell<usize>,
+}
+
+impl AstAdapter for Declaring {
+    fn root(&self) -> NodeId {
+        self.inner.root()
+    }
+    fn children(&self, n: NodeId) -> Vec<NodeId> {
+        self.inner.children(n)
+    }
+    fn name(&self, n: NodeId) -> Option<String> {
+        self.inner.name(n)
+    }
+    fn parent(&self, n: NodeId) -> Option<NodeId> {
+        self.inner.parent(n)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.inner.non_tree_nodes()
+    }
+    fn links(&self, n: NodeId) -> Vec<(String, NodeId)> {
+        self.inner.links(n)
+    }
+    fn traits(&self, n: NodeId) -> Vec<String> {
+        self.inner.traits(n)
+    }
+    fn backlinks(&self, n: NodeId) -> Vec<(String, NodeId)> {
+        self.inner.backlinks(n)
+    }
+    fn link_property_names(&self, s: NodeId, l: &str, t: NodeId) -> Vec<String> {
+        self.inner.link_property_names(s, l, t)
+    }
+    fn link_property(&self, s: NodeId, l: &str, t: NodeId, p: &str) -> Option<Value> {
+        self.inner.link_property(s, l, t, p)
+    }
+    fn graph_declarations(&self) -> Vec<crate::GraphDeclaration> {
+        vec![crate::GraphDeclaration {
+            scope: "//a(->e)*".to_string(),
+            hop: "->e".to_string(),
+            measures: vec!["kcore".to_string(), "pagerank(--damping=0.5)".to_string()],
+        }]
+    }
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        self.asked.set(self.asked.get() + 1);
+        let kept = self.kept.borrow();
+        let v = kept.get(&(scope.to_string(), hop.to_string(), measure.to_string()))?;
+        (v.len() == nodes.len()).then(|| v.clone())
+    }
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        _: &[NodeId],
+        values: &[Value],
+    ) {
+        self.kept.borrow_mut().insert(
+            (scope.to_string(), hop.to_string(), measure.to_string()),
+            values.to_vec(),
+        );
+    }
+}
+
+#[test]
+fn a_declared_graph_answers_once_the_context_is_the_scope() {
+    let d = Declaring {
+        inner: MockTree::roads(),
+        kept: Default::default(),
+        asked: Default::default(),
+    };
+    let run = |q: &str| match crate::Query::parse(q, &d)
+        .unwrap()
+        .run(&d, &Default::default())
+        .unwrap()
+        .result
+    {
+        QueryResult::Values(vs) => vs,
+        _ => panic!("values"),
+    };
+    // the first query computes and offers the values back
+    let first = run("//a(->e)* @| collapse @| graph:kcore(->e)");
+    assert_eq!(d.asked.get(), 1);
+    assert_eq!(d.kept.borrow().len(), 1);
+    // the second is answered from what the source kept
+    let second = run("//a(->e)* @| collapse @| graph:kcore(->e)");
+    assert_eq!(first, second);
+    assert_eq!(d.asked.get(), 2);
+    assert_eq!(d.kept.borrow().len(), 1);
+    // a narrower context is not the scope: computed, never stored
+    let narrow = run("//a(->e)*[:name != \"deep\"] @| collapse @| graph:kcore(->e)");
+    assert_eq!(narrow.len(), 3);
+    assert_eq!(d.asked.get(), 2);
+    assert_eq!(d.kept.borrow().len(), 1);
+    // other options are another measure: pagerank at the declared
+    // damping is kept, at the default damping it is not
+    run("//a(->e)* @| collapse @| graph:pagerank(->e; --damping=0.5)");
+    assert_eq!(d.kept.borrow().len(), 2);
+    run("//a(->e)* @| collapse @| graph:pagerank(->e)");
+    assert_eq!(d.kept.borrow().len(), 2);
+}
+
+// ── draft.191: a predicate on a hop operand, reading through a reference ──
+
+#[test]
+fn a_hop_operand_takes_the_walks_predicate() {
+    let t = MockTree::roads();
+    // the target node as topic: only the edges into deep
+    let (_, rows) = table_of("//a(->e)* @| edges(->e[:name = \"deep\"])", &t);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|r| r[1] == "/b/deep"));
+    // `$-` the edge: the roads longer than 2 km
+    let (_, rows) = table_of("//a(->e)* @| edges(->e[$-::len > 2_km])", &t);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    // the library reads the same hop: without the 12 km road deep is
+    // reached through y.txt alone, so x.rs cuts nothing and deep's
+    // route runs through y.txt
+    let routes = vals(
+        "//a(->e)* @| collapse @| graph:route(->e[$-::len < 10_km]; --from=/a)",
+        &t,
+    );
+    assert_eq!(list_strs(&routes[3]), ["/a", "/a/y.txt", "/b/deep"]);
+    // an undirected hop filtered by the edge: the 3 km road back from
+    // deep keeps the cycle whole, so nothing cuts; under 3 km only
+    // a-y.txt-deep remain, a path whose middle node cuts
+    let cut = vals(
+        "//a(->e)* @| collapse @| graph:artpoints(--e[$-::len < 10_km])",
+        &t,
+    );
+    assert_eq!(cut, vec![Value::Bool(false); 4]);
+    let cut = vals(
+        "//a(->e)* @| collapse @| graph:artpoints(--e[$-::len < 3_km])",
+        &t,
+    );
+    assert_eq!(
+        cut,
+        vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false)
+        ]
+    );
+}
+
+#[test]
+fn the_parser_reads_a_property_through_a_reference() {
+    let q = parse(&lex("/x | :source::code").unwrap()).unwrap();
+    assert!(format!("{:?}", q.pipeline).contains("Through"));
+    let t = MockTree::roads();
+    // the edges table's node columns read the node they name
+    let (_, rows) = table_of("//a(->e)* @| edges(->e)", &t);
+    assert_eq!(rows[0][0], "/a");
+    let names = vals("//a(->e)* @| edges(->e) | :source:name", &t);
+    assert_eq!(names.len(), 1);
+    assert_eq!(list_strs(&names[0]), ["a", "a", "x.rs", "y.txt", "deep"]);
+    // a route's nodes read their names along the way
+    let names = vals(
+        "//a(->e)* @| collapse @| graph:route(->e; --from=/a) | map(:name)",
+        &t,
+    );
+    assert_eq!(list_strs(&names[3]), ["a", "x.rs", "deep"]);
+    // a subcontext on a node-valued field reads the node too
+    let names = vals("//a(->e)* @| edges(->e) | (:target | :name)", &t);
+    assert_eq!(
+        list_strs(&names[0]),
+        ["x.rs", "y.txt", "deep", "deep", "x.rs"]
+    );
+}
+
+// ── the third shipment: closeness, communities, modularity, triangles ──
+
+#[test]
+fn closeness_communities_modularity_and_triangles() {
+    let t = MockTree::roads();
+    // closeness along ->e: a reaches the three others in 1, 1, 2 hops
+    let c = vals("//a(->e)* @| collapse @| graph:closeness(->e)", &t);
+    let Value::Float(a) = c[0] else {
+        panic!("{c:?}")
+    };
+    assert!((a - (3.0 / 3.0) * (3.0 / 4.0)).abs() < 1e-12, "{a}");
+    // deep reaches x.rs only
+    let Value::Float(deep) = c[3] else {
+        panic!("{c:?}")
+    };
+    assert!((deep - (1.0 / 3.0) * (1.0 / 1.0)).abs() < 1e-12, "{deep}");
+    let h = vals(
+        "//a(->e)* @| collapse @| graph:closeness(->e; --harmonic)",
+        &t,
+    );
+    let Value::Float(ah) = h[0] else {
+        panic!("{h:?}")
+    };
+    assert!((ah - (1.0 + 1.0 + 0.5) / 3.0).abs() < 1e-12, "{ah}");
+    // by weight the distances are in the unit named: from a, x.rs at
+    // 4 km, y.txt at 1 km, deep at 3 km through y.txt, eight in all
+    let c = vals(
+        "//a(->e)* @| collapse @| graph:closeness(->e; --weight=km)",
+        &t,
+    );
+    let Value::Float(a_km) = c[0] else {
+        panic!("{c:?}")
+    };
+    assert!((a_km - 3.0 / 8.0).abs() < 1e-12, "{a_km}");
+    // the ring a-x-deep-y is one community
+    let cs = vals("//a(->e)* @| collapse @| graph:communities(--e)", &t);
+    assert_eq!(cs, vec![Value::Int(1); 4]);
+    // its modularity under its own partition is zero (one part), and
+    // a partition by name scores below
+    let q = vals(
+        "//a(->e)* @| collapse @| graph:communities(--e) | .:c @| graph:modularity(--e; --by=:.c)",
+        &t,
+    );
+    assert_eq!(q.len(), 1);
+    let Value::Float(q0) = q[0] else {
+        panic!("{q:?}")
+    };
+    assert!(q0.abs() < 1e-12, "{q0}");
+    let q = vals(
+        "//a(->e)* @| collapse | .:p(:name) @| graph:modularity(--e; --by=:.p)",
+        &t,
+    );
+    let Value::Float(q1) = q[0] else {
+        panic!("{q:?}")
+    };
+    assert!(q1 < 0.0, "{q1}");
+    // --by is required
+    assert!(vals("//a(->e)* @| graph:modularity(--e)", &t).is_empty());
+    // no triangle on the roads; the coefficient is zero everywhere;
+    // a weight refuses
+    assert_eq!(
+        vals("//a(->e)* @| collapse @| graph:triangles(--e)", &t),
+        vec![Value::Int(0); 4]
+    );
+    assert_eq!(
+        vals(
+            "//a(->e)* @| collapse @| graph:triangles(--e; --coefficient)",
+            &t
+        ),
+        vec![Value::Float(0.0); 4]
+    );
+    assert!(vals("//a(->e)* @| graph:triangles(--e; --weight=km)", &t).is_empty());
+}
+
+// ── omitted data (spec: omitted data, 2026-11-01) ──────────────────
+
+/// The roads with a `salary` on a, x.rs and y.txt, y.txt's withheld,
+/// and whole nodes dropped when asked.
+struct Withholding {
+    inner: MockTree,
+    dropped_nodes: bool,
+}
+
+impl AstAdapter for Withholding {
+    fn root(&self) -> NodeId {
+        self.inner.root()
+    }
+    fn children(&self, n: NodeId) -> Vec<NodeId> {
+        self.inner.children(n)
+    }
+    fn name(&self, n: NodeId) -> Option<String> {
+        self.inner.name(n)
+    }
+    fn parent(&self, n: NodeId) -> Option<NodeId> {
+        self.inner.parent(n)
+    }
+    fn non_tree_nodes(&self) -> Vec<NodeId> {
+        self.inner.non_tree_nodes()
+    }
+    fn links(&self, n: NodeId) -> Vec<(String, NodeId)> {
+        self.inner.links(n)
+    }
+    fn traits(&self, n: NodeId) -> Vec<String> {
+        self.inner.traits(n)
+    }
+    fn backlinks(&self, n: NodeId) -> Vec<(String, NodeId)> {
+        self.inner.backlinks(n)
+    }
+    fn property(&self, n: NodeId, name: &str) -> Option<Value> {
+        match (n.0, name) {
+            (1, "salary") => Some(Value::Int(10)),
+            (2, "salary") => Some(Value::Int(20)),
+            (1 | 2 | 3, "grade") => Some(Value::Str("b".into())),
+            _ => None,
+        }
+    }
+    fn property_names(&self, n: NodeId) -> Vec<String> {
+        match n.0 {
+            1 | 2 => vec!["salary".into(), "grade".into()],
+            3 => vec!["grade".into()],
+            _ => Vec::new(),
+        }
+    }
+    fn property_withheld(&self, n: NodeId, name: &str) -> bool {
+        n.0 == 3 && name == "salary"
+    }
+    fn nodes_withheld(&self) -> bool {
+        self.dropped_nodes
+    }
+}
+
+fn run_omitting(
+    q: &str,
+    dropped_nodes: bool,
+) -> (
+    Result<Vec<Value>, String>,
+    Vec<crate::diagnostic::Diagnostic>,
+) {
+    let w = Withholding {
+        inner: MockTree::roads(),
+        dropped_nodes,
+    };
+    match crate::Query::parse(q, &w)
+        .unwrap()
+        .run(&w, &Default::default())
+    {
+        Ok(o) => (
+            Ok(match o.result {
+                QueryResult::Values(vs) => vs,
+                QueryResult::Nodes(ns) => ns.into_iter().map(|_| Value::Null).collect(),
+            }),
+            o.diagnostics,
+        ),
+        Err(e) => (Err(e.to_string()), Vec::new()),
+    }
+}
+
+const OMITTED_TEXT: &str = "some data is omitted due to insufficient permissions";
+
+#[test]
+fn withheld_data_reads_absent_with_one_warning() {
+    let (vs, diags) = run_omitting("//a(->e)* @| collapse | ::salary", false);
+    assert_eq!(
+        vs.unwrap(),
+        vec![Value::Int(10), Value::Int(20), Value::Null, Value::Null]
+    );
+    let omitted: Vec<_> = diags.iter().filter(|d| d.code == "OMITTED").collect();
+    assert_eq!(omitted.len(), 1, "{diags:?}");
+    assert_eq!(omitted[0].message, OMITTED_TEXT);
+    assert_eq!(omitted[0].site, "source");
+    assert_eq!(omitted[0].severity, crate::diagnostic::Severity::Warning);
+    // two withheld reads, one warning; without a withheld read, none
+    let (_, diags) = run_omitting(
+        "//a(->e)* @| collapse | %(::salary; ::grade; s = ::salary)",
+        false,
+    );
+    assert_eq!(diags.iter().filter(|d| d.code == "OMITTED").count(), 1);
+    let (_, diags) = run_omitting("//a(->e)* @| collapse | ::grade", false);
+    assert_eq!(diags.iter().filter(|d| d.code == "OMITTED").count(), 0);
+    // whole nodes dropped: the same one warning, even beside a withheld read
+    let (_, diags) = run_omitting("//a(->e)* @| collapse | ::grade", true);
+    assert_eq!(diags.iter().filter(|d| d.code == "OMITTED").count(), 1);
+    let (_, diags) = run_omitting("//a(->e)* @| collapse | ::salary", true);
+    assert_eq!(diags.iter().filter(|d| d.code == "OMITTED").count(), 1);
+    // a count reveals nothing and passes, with the warning
+    let (vs, diags) = run_omitting("//a(->e)* @| collapse | ::salary @| count", false);
+    assert_eq!(vs.unwrap(), vec![Value::Int(4)]);
+    assert_eq!(diags.iter().filter(|d| d.code == "OMITTED").count(), 1);
+}
+
+#[test]
+fn keying_on_a_withheld_property_refuses() {
+    for q in [
+        "//a(->e)*[::salary > 5]",
+        "//a(->e)* @| collapse | [::salary > 5]",
+        "//a(->e)* @| collapse | ::salary @| sum",
+        "//a(->e)* @| collapse | ::salary @| sort",
+        "//a(->e)* @| collapse | ::salary @| unique",
+        "//a(->e)* @| collapse | %(s = ::salary; n = :name) @| top(1; :s)",
+    ] {
+        let (r, _) = run_omitting(q, false);
+        let err = r.err().unwrap_or_else(|| panic!("{q} passed"));
+        assert!(err.contains(OMITTED_TEXT), "{q}: {err}");
+    }
+    // a key on an ordinary property beside it passes
+    assert_eq!(
+        run_omitting("//a(->e)* @| collapse | [::grade = \"b\"] @| count", false)
+            .0
+            .unwrap(),
+        vec![Value::Int(3)]
+    );
+}
+
+// ── the projector after a pipe; round leaves what it cannot round
+// (rulings 2026-11-01) ──────────────────────────────────────────────
+
+#[test]
+fn projector_after_a_pipe() {
+    let t = MockTree::sample();
+    let s = |q: &str| {
+        vals(q, &t)
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    // `| #(:a; :b)` on a table keeps the columns named, in that order
+    assert_eq!(
+        s("#(@(a; b; c); %(1; 2; 3); %(4; 5; 6)) | #(:c; :a)"),
+        s("#(@(c; a); %(3; 1); %(6; 4))")
+    );
+    // on a record `%` keeps the fields named; on a list of records,
+    // each item
+    assert_eq!(
+        s("%(a = 1; b = 2; c = 3) | %(:a; :b)"),
+        s("%(a = 1; b = 2)")
+    );
+    assert_eq!(
+        s("@(%(a = 1; b = 2; c = 3); %(a = 4; b = 5; c = 6)) | %(:a; :b)"),
+        s("@(%(a = 1; b = 2); %(a = 4; b = 5))")
+    );
+    // a constructor with a named item stays the constructor
+    assert_eq!(
+        s("%(a = 1; b = 2) | %(x = :a; b = 2)"),
+        s("%(x = 1; b = 2)")
+    );
+    // the literal's rows still need rows
+    assert!(parse(&lex("@(1) | #(:a; 2)").unwrap()).is_ok());
+}
+
+#[test]
+fn round_leaves_what_it_cannot_round() {
+    let t = MockTree::sample();
+    let s = |q: &str| {
+        vals(q, &t)
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    assert_eq!(
+        s("%(a = \"x\"; b = 1.23456) | round(2)"),
+        s("%(a = \"x\"; b = 1.23)")
+    );
+    assert_eq!(
+        s("#(@(a; b); %(\"x\"; 1.23456); %(\"y\"; 2.5)) | round(2)"),
+        s("#(@(a; b); %(\"x\"; 1.23); %(\"y\"; 2.5))")
+    );
+    assert_eq!(s("@(\"n/a\"; 2.5; null) | floor"), s("@(\"n/a\"; 2; null)"));
+    assert_eq!(s("\"n/a\" | round(2)"), s("\"n/a\""));
+    assert_eq!(s("@(-1; \"x\") | abs"), s("@(1; \"x\")"));
 }

@@ -1493,7 +1493,16 @@ pub(crate) fn dedup_paths(paths: Vec<GPath>) -> Vec<GPath> {
 /// Project one node to a scalar value.
 pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection) -> Value {
     match proj {
-        Projection::Property(Some(name)) => property_or_alias(adapter, node, name),
+        Projection::Property(Some(name)) => {
+            let v = property_or_alias(adapter, node, name);
+            // a property the source withholds reads absent, and the
+            // run knows (spec: omitted data)
+            if matches!(v, Value::Null) && adapter.property_withheld(node, name) {
+                crate::value::ambient::record_omitted();
+                crate::pipeline::note_omitted();
+            }
+            v
+        }
         Projection::Property(None) => adapter.default_value(node).unwrap_or(Value::Null),
         // An unknown core field is refused naming the core fields
         // (draft 164), as an unknown unit is; `:fields` lists them.
@@ -2687,7 +2696,12 @@ pub(crate) fn value_match_step(
         // value's key. Each is still tested below.
         Some(sp) => {
             let text = sp.text();
-            match adapter.index_lookup(&text, target, &own) {
+            let lookup = if adapter.withheld_properties().iter().any(|w| w == target) {
+                None
+            } else {
+                adapter.index_lookup(&text, target, &own)
+            };
+            match lookup {
                 Some(hits) => hits,
                 None => {
                     let walk = || {
@@ -2836,6 +2850,51 @@ pub(crate) fn collect_subtree(adapter: &impl AstAdapter, node: NodeId, out: &mut
     }
 }
 
+/// What a deep step seeks, for the adapter's pruning hint
+/// ([`AstAdapter::may_hold_below`]): the literal name, and the trait
+/// alternatives no clause negates or wildcards (a negated or wildcard
+/// alternative keeps the whole walk, as does a name algebra).
+pub(crate) struct Sought<'a> {
+    name: Option<&'a str>,
+    traits: Vec<&'a str>,
+    hinted: bool,
+}
+
+impl<'a> Sought<'a> {
+    pub(crate) fn of(step: &'a Step) -> Self {
+        let name = match &step.matcher {
+            Matcher::Name(n) if step.labels.is_empty() => Some(n.as_str()),
+            _ => None,
+        };
+        let prunable = step.traits.iter().all(|c| {
+            c.alts
+                .iter()
+                .all(|a| !a.starts_with('!') && !crate::syntax::ast::trait_has_wildcard(a))
+        });
+        let traits: Vec<&str> = if prunable {
+            step.traits
+                .iter()
+                .flat_map(|c| c.alts.iter().map(String::as_str))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let hinted = name.is_some() || (prunable && !traits.is_empty());
+        Sought {
+            name,
+            traits,
+            hinted,
+        }
+    }
+
+    /// Whether the walk descends below `node`: always, unless the
+    /// step gives a hint and the adapter says nothing sought stands
+    /// beneath.
+    pub(crate) fn may_hold_below(&self, adapter: &impl AstAdapter, node: NodeId) -> bool {
+        !self.hinted || adapter.may_hold_below(node, self.name, &self.traits)
+    }
+}
+
 /// Collect proper descendants of `node` matching `step`'s tests (name,
 /// traits, leaf — not predicates), in document order, tagged with
 /// their depth (direct children are depth 1).
@@ -2854,9 +2913,13 @@ pub(crate) fn descendants(
         .rev()
         .map(|c| (c, depth))
         .collect();
+    let sought = Sought::of(step);
     while let Some((child, d)) = stack.pop() {
         if matches_step(adapter, child, step) {
             out.push((child, d));
+        }
+        if !sought.may_hold_below(adapter, child) {
+            continue;
         }
         stack.extend(
             adapter
@@ -3353,7 +3416,21 @@ pub(crate) fn trait_clauses_ok(
     if clauses.is_empty() {
         return true;
     }
-    let traits = adapter.traits(node);
+    // the node's whole trait list is read only where an alternative
+    // carries a wildcard (`<tag:.>`, `<*>`); a literal alternative
+    // asks `has_trait`, which an adapter answers without listing (a
+    // web page's list includes its document's traits, and listing
+    // it parses the document)
+    let needs_list = clauses.iter().any(|c| {
+        c.alts
+            .iter()
+            .any(|a| crate::syntax::ast::trait_has_wildcard(a))
+    });
+    let traits = if needs_list {
+        adapter.traits(node)
+    } else {
+        Vec::new()
+    };
     clauses
         .iter()
         .all(|c| c.matches_with(&traits, |name| adapter.has_trait(node, name)))

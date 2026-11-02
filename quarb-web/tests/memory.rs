@@ -343,11 +343,16 @@ fn a_redirect_stub_stands_for_its_target() {
         },
         files,
     ));
-    assert_eq!(strs(&a, "//page<redirect> @| count"), ["2"]);
+    // a redirect is no page: `//redirect` reaches the stubs, `//page`
+    // leaves them out (spec: Text Readings, the web reading)
+    assert_eq!(strs(&a, "//redirect @| count"), ["2"]);
+    assert_eq!(strs(&a, "//page<redirect> @| count"), ["0"]);
     assert_eq!(
-        strs(&a, "//page<redirect>::path"),
+        strs(&a, "//redirect::path"),
         ["guide/latest", "spec/latest"]
     );
+    assert_eq!(strs(&a, "//page[::path = \"spec/latest\"] @| count"), ["0"]);
+    assert_eq!(strs(&a, "//redirect | :kind"), ["redirect", "redirect"]);
     assert_eq!(
         strs(&a, "/sites/example.org/pages/spec/latest->redirect::path"),
         ["spec/quarb-v1.0-draft.164.html"]
@@ -369,7 +374,7 @@ fn a_redirect_stub_stands_for_its_target() {
         ["0"]
     );
     assert_eq!(
-        strs(&a, "//page[:name = \"latest\"] | ->redirect:name"),
+        strs(&a, "//redirect[:name = \"latest\"] | ->redirect:name"),
         ["jq.html", "quarb-v1.0-draft.164.html"]
     );
     // a hub whose script sends the browser on under a condition (a
@@ -393,6 +398,103 @@ fn a_redirect_stub_stands_for_its_target() {
     assert_eq!(
         strs(&a, "/sites/example.org/pages/about.html->redirect @| count"),
         ["0"]
+    );
+}
+
+#[test]
+fn a_link_to_a_redirect_lands_on_its_target() {
+    use quarb_web::{MemoryStore, PageFile, SiteInput, WebAdapter};
+    let mut files = common::files();
+    files.push(PageFile {
+        path: "spec/quarb-v1.0-draft.164.html".into(),
+        html: common::page("The spec", "", "<p>The language.</p>"),
+    });
+    files.push(PageFile {
+        path: "spec/latest".into(),
+        html: "<!doctype html><html><head><meta charset=\"utf-8\"><title>latest</title><meta http-equiv=\"refresh\" content=\"0; url=quarb-v1.0-draft.164.html\"></head><body></body></html>".into(),
+    });
+    // two pages link to the stub, one to the spec itself
+    files.push(PageFile {
+        path: "a.html".into(),
+        html: common::page("A", "", "<p>See <a href=\"spec/latest\">the spec</a>.</p>"),
+    });
+    files.push(PageFile {
+        path: "b.html".into(),
+        html: common::page("B", "", "<p>See <a href=\"/spec/latest\">the spec</a> and <a href=\"spec/quarb-v1.0-draft.164.html\">this draft</a>.</p>"),
+    });
+    let a = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
+        files,
+    ));
+    // as a symlink resolves: the links land on the spec page, once
+    // per linking page; the stub is on no path and has no backlink
+    assert_eq!(
+        strs(&a, "//page[::path = \"a.html\"] ->link::path"),
+        ["spec/quarb-v1.0-draft.164.html"]
+    );
+    assert_eq!(
+        strs(&a, "//page[::path = \"b.html\"] ->link::path"),
+        ["spec/quarb-v1.0-draft.164.html"]
+    );
+    assert_eq!(
+        strs(
+            &a,
+            "//page[::path = \"spec/quarb-v1.0-draft.164.html\"] <-link::path"
+        ),
+        ["a.html", "b.html"]
+    );
+    assert_eq!(
+        strs(
+            &a,
+            "//page[::path = \"spec/quarb-v1.0-draft.164.html\"]::in_degree"
+        ),
+        ["2"]
+    );
+    assert_eq!(strs(&a, "//redirect <-link @| count"), ["0"]);
+    assert_eq!(
+        strs(&a, "//redirect->redirect::path"),
+        ["spec/quarb-v1.0-draft.164.html"]
+    );
+    assert_eq!(
+        strs(
+            &a,
+            "//page[::path = \"spec/quarb-v1.0-draft.164.html\"] <-redirect::path"
+        ),
+        ["spec/latest"]
+    );
+    // the stub is no node of the page graph: no rank, no orphan
+    assert_eq!(
+        strs(&a, "//page[::in_degree = 0]::path @| count"),
+        strs(&a, "//page<orphan> @| count")
+    );
+    assert_eq!(strs(&a, "//redirect::pagerank"), ["0"]);
+}
+
+#[test]
+fn a_deep_trait_walk_prunes_below_the_pages_and_answers_the_same() {
+    let a = site();
+    // the hint skips the pages' documents when the walk seeks rows;
+    // the answers are the naming rule's
+    assert_eq!(strs(&a, "//<page> @| count"), strs(&a, "//page @| count"));
+    assert_eq!(strs(&a, "//*<page>::path"), strs(&a, "//page::path"));
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages//*<page> @| count"),
+        strs(&a, "//page @| count")
+    );
+    assert_eq!(strs(&a, "//<dir>::path"), strs(&a, "//dir::path"));
+    // a document kind sought keeps the whole walk
+    assert_eq!(
+        strs(&a, "//*<section> @| count"),
+        strs(&a, "//section @| count")
+    );
+    assert_eq!(strs(&a, "//page//paragraph @| count"), ["6"]);
+    // a negated trait keeps it too
+    assert_eq!(
+        strs(&a, "//*<!page> @| count"),
+        strs(&a, "= (//* @| count) - (//page @| count)")
     );
 }
 
@@ -614,5 +716,68 @@ fn the_edge_inventory_reads_every_marker() {
     assert_eq!(
         strs(&a, "/sites/example.org/pages/guides/sql.html::in_degree"),
         ["2"]
+    );
+}
+
+#[test]
+fn redlinks_are_content_links_and_a_page_is_no_backlink_of_its_own() {
+    // The chrome's links to routes a snapshot lacks (`/spec/latest`,
+    // `/search.html`) are site furniture: no redlink on any page. A
+    // body link to a missing page is one redlink however often the
+    // body names it. A page's fragment links land on its sections
+    // and never list the page among its own backlinks.
+    let files = vec![
+        PageFile {
+            path: "index.html".into(),
+            html: "<!doctype html><html><head><title>Home</title></head><body>\
+                   <nav><a href=\"/spec/latest\">Spec</a> <a href=\"/search.html\">Search</a></nav>\
+                   <main><h1>Home</h1><p>See <a href=\"/missing\">this</a> and <a href=\"/missing\">this</a> again, \
+                   <a href=\"#here\">here</a>, <a href=\"/index.html#here\">also here</a>, \
+                   and the <a href=\"about.html\">about page</a>.</p><h2 id=\"here\">Here</h2><p>Text.</p></main>\
+                   <footer><a href=\"/spec/latest\">Spec</a></footer></body></html>"
+                .into(),
+        },
+        PageFile {
+            path: "about.html".into(),
+            html: page("About", "", "<p>Back <a href=\"/\">home</a>.</p>"),
+        },
+    ];
+    let a = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
+        files,
+    ));
+    let index = "/sites/example.org/pages/index.html";
+    assert_eq!(strs(&a, &format!("{index}::redlinks")), ["1"]);
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/about.html::redlinks"),
+        ["0"]
+    );
+    // the chrome's rows are edges under their own labels, to the
+    // resources the routes outside the snapshot stand for, not links
+    assert_eq!(strs(&a, &format!("{index}->navbar @| count")), ["2"]);
+    assert_eq!(
+        strs(&a, &format!("{index}->navbar | :kind")),
+        ["resource", "resource"]
+    );
+    assert_eq!(strs(&a, &format!("{index}->footer @| count")), ["1"]);
+    assert_eq!(
+        strs(&a, &format!("{index}->link | :kind")),
+        ["section", "page"]
+    );
+    // backward: the about page only; the two fragment links are no
+    // backlink of the page itself, and the count agrees with the degree
+    assert_eq!(strs(&a, &format!("{index}<-link::path")), ["about.html"]);
+    assert_eq!(strs(&a, &format!("{index}::in_degree")), ["1"]);
+    // forward and backward name the same thing: the section the
+    // fragment links land on lists the page
+    assert_eq!(
+        strs(
+            &a,
+            &format!("{index}->link[:kind = \"section\"]<-link::path")
+        ),
+        ["index.html"]
     );
 }

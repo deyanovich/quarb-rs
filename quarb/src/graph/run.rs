@@ -21,6 +21,9 @@ pub struct Run {
     pub allow_shell: bool,
     pub quantifier_bound: Option<usize>,
     pub frontier_bound: Option<usize>,
+    /// Override the graph bound (spec: The graph library): the most
+    /// cost units a library command computes over.
+    pub graph_bound: Option<usize>,
     /// Raise the debug diagnostics (`--diagnostics=debug`).
     pub debug: bool,
     pub reproducible: bool,
@@ -52,6 +55,7 @@ impl Run {
             allow_shell: self.allow_shell,
             quantifier_bound: self.quantifier_bound,
             frontier_bound: self.frontier_bound,
+            graph_bound: self.graph_bound,
             debug: self.debug,
             reproducible: self.reproducible,
             collation: self.collation.clone(),

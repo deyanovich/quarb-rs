@@ -327,6 +327,28 @@ impl MountAdapter {
         debug_assert!(inner.0 <= INNER_MASK, "inner id exceeds 2^56 - 1");
         NodeId(((mount as u64 + 1) << SHIFT) | inner.0)
     }
+
+    /// The mount a declared scope `/NAME<rest>` names, and the rest:
+    /// the scope as the mounted source declared it.
+    fn mount_scope<'a>(&self, scope: &'a str) -> Option<(usize, &'a str)> {
+        let rest = scope.strip_prefix('/')?;
+        let m = self.mounts.iter().position(|e| {
+            rest.starts_with(e.name.as_str()) && rest[e.name.len()..].starts_with('/')
+        })?;
+        Some((m, &rest[self.mounts[m].name.len()..]))
+    }
+
+    /// The nodes as the mount `m` knows them; None when one of them
+    /// is another mount's or the layer's own.
+    fn inner_nodes(&self, m: usize, nodes: &[NodeId]) -> Option<Vec<NodeId>> {
+        nodes
+            .iter()
+            .map(|n| match self.decode(*n) {
+                Some((mm, inner)) if mm == m => Some(inner),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl MountAdapter {
@@ -848,6 +870,13 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    fn may_hold_below(&self, node: NodeId, name: Option<&str>, traits: &[&str]) -> bool {
+        match self.decode(node) {
+            None => true,
+            Some((m, inner)) => self.adapter(m).may_hold_below(inner, name, traits),
+        }
+    }
+
     /// Every mount open so far hears it; one opened later hears it
     /// as it opens (`open`).
     fn whole_listings(&self) {
@@ -881,6 +910,55 @@ impl AstAdapter for MountAdapter {
             .map(|a| a.quantifier_bound())
             .max()
             .unwrap_or(32)
+    }
+
+    /// A mount is transparent to a declared graph (spec: The graph
+    /// library, declared graphs): every open mount's declarations,
+    /// their scopes prefixed with the mount's path, so a measure the
+    /// source stores is read through `/NAME//scope` as it is at the
+    /// source's root.
+    fn graph_declarations(&self) -> Vec<quarb::GraphDeclaration> {
+        let mut out = Vec::new();
+        for m in 0..self.mounts.len() {
+            let Some(a) = self.active(m) else { continue };
+            for d in a.graph_declarations() {
+                out.push(quarb::GraphDeclaration {
+                    scope: format!("/{}{}", self.mounts[m].name, d.scope),
+                    hop: d.hop,
+                    measures: d.measures,
+                });
+            }
+        }
+        out
+    }
+
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        let (m, inner_scope) = self.mount_scope(scope)?;
+        let inner = self.inner_nodes(m, nodes)?;
+        self.active(m)?
+            .graph_measure(inner_scope, hop, measure, &inner)
+    }
+
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+        values: &[Value],
+    ) {
+        if let Some((m, inner_scope)) = self.mount_scope(scope)
+            && let Some(inner) = self.inner_nodes(m, nodes)
+            && let Some(a) = self.active(m)
+        {
+            a.store_graph_measure(inner_scope, hop, measure, &inner, values);
+        }
     }
 
     fn frontier_bound(&self) -> usize {

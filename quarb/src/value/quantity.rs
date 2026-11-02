@@ -5,17 +5,24 @@
 //! A quantity is a value on a dimension: a numeric magnitude scaled
 //! to its dimension's base expansion, the written form kept for
 //! display only, exactly as instants keep their written offset.
-//! The built-in table is the appendix's, hand-pinned here like the
-//! civil-calendar arithmetic: spec-law embedded, no dependency. A
-//! model's `unit` declarations extend it through the resolver a
-//! host passes in, and any other name in unit text is an opaque
-//! unit, a base of its own dimension (`12 EUR`, `3 apples/kg`),
-//! scaled by nothing: currencies are exchanged by a rate the query
-//! supplies (`exchange`), never looked up.
+//! The built-in table is the appendix's, read through the quanto
+//! crate (every pack of it: the SI, the accepted and common units,
+//! the CGS and imperial sets, information, the long names), which
+//! parses unit text, keeps the factors exact and spells the base
+//! expansion in the canonical order. What stays here is the engine's
+//! own layer: a model's `unit` declarations through the resolver a
+//! host passes in (a declaration shadows the table), the currency
+//! codes and signs as known units of their own dimension, the
+//! Cyrillic aliases, and the rule that any other name in unit text
+//! is an opaque unit, a base of its own dimension (`12 EUR`,
+//! `3 apples/kg`), scaled by nothing: currencies are exchanged by a
+//! rate the query supplies (`exchange`), never looked up.
 //!
 //! The unit model is factor-only (no affine units, so there is no
 //! °C to tempt anyone) and pure time is excluded: a span of time is
 //! a Duration.
+
+use quanto::{Factor, Prefixes, Resolver, Table, Unit, Unknown};
 
 /// The SI prefixes with their powers of ten ("da" first so the
 /// two-character prefix wins the strip).
@@ -50,105 +57,13 @@ const BINARY_PREFIXES: &[(&str, i32)] = &[
     ("Ti", 40),
     ("Pi", 50),
     ("Ei", 60),
+    ("Zi", 70),
+    ("Yi", 80),
 ];
 
 /// The base units: the SI seven and the bit. Any other factor of a
 /// base expansion is an opaque unit.
 pub const BASE_NAMES: &[&str] = &["m", "kg", "s", "A", "K", "mol", "cd", "b"];
-
-/// The dimension symbol of a base unit (spec: Dimensions); an
-/// opaque unit is its own.
-fn dimension_symbol(base: &str) -> &str {
-    match base {
-        "m" => "L",
-        "kg" => "M",
-        "s" => "T",
-        "A" => "I",
-        "K" => "Θ",
-        "mol" => "N",
-        "cd" => "J",
-        "b" => "B",
-        other => other,
-    }
-}
-
-/// The full names of the table, each row the spellings of one unit
-/// with its exact factor to the base expansion of its dimension
-/// (the appendix's rows); the currencies and their prefix signs
-/// stand apart below.
-const UNIT_TABLE: &[(&[&str], f64, &str)] = &[
-    // the base units
-    (&["m"], 1.0, "m"),
-    (&["kg"], 1.0, "kg"),
-    (&["s"], 1.0, "s"),
-    (&["A"], 1.0, "A"),
-    (&["K"], 1.0, "K"),
-    (&["mol"], 1.0, "mol"),
-    (&["cd"], 1.0, "cd"),
-    (&["b", "bit", "bits"], 1.0, "b"),
-    (&["g"], 0.001, "kg"),
-    (&["B", "byte", "bytes"], 8.0, "b"),
-    // the named derived units, coherent
-    (&["rad", "sr"], 1.0, "1"),
-    (&["Hz", "Bq"], 1.0, "1/s"),
-    (&["N"], 1.0, "kg*m/s^2"),
-    (&["Pa"], 1.0, "kg/m/s^2"),
-    (&["J"], 1.0, "kg*m^2/s^2"),
-    (&["W"], 1.0, "kg*m^2/s^3"),
-    (&["C"], 1.0, "A*s"),
-    (&["V"], 1.0, "kg*m^2/A/s^3"),
-    (&["F"], 1.0, "A^2*s^4/kg/m^2"),
-    (&["ohm"], 1.0, "kg*m^2/A^2/s^3"),
-    (&["S"], 1.0, "A^2*s^3/kg/m^2"),
-    (&["Wb"], 1.0, "kg*m^2/A/s^2"),
-    (&["T"], 1.0, "kg/A/s^2"),
-    (&["H"], 1.0, "kg*m^2/A^2/s^2"),
-    (&["lm"], 1.0, "cd"),
-    (&["lx"], 1.0, "cd/m^2"),
-    (&["Gy", "Sv"], 1.0, "m^2/s^2"),
-    (&["kat"], 1.0, "mol/s"),
-    (&["L"], 0.001, "m^3"),
-    // non-SI, exact by definition; time units as factors of
-    // compounds only (pure time is a Duration)
-    // the time units and their long forms (spec: Duration);
-    // `m` is the metre, `min` the only short minute
-    (&["sec", "second", "seconds"], 1.0, "s"),
-    (&["min", "minute", "minutes"], 60.0, "s"),
-    (&["h", "hr", "hour", "hours"], 3600.0, "s"),
-    (&["d", "day", "days"], 86400.0, "s"),
-    (&["w", "week", "weeks"], 604_800.0, "s"),
-    (&["au"], 149_597_870_700.0, "m"),
-    (&["ha"], 10_000.0, "m^2"),
-    (&["t"], 1000.0, "kg"),
-    (&["eV"], 1.602_176_634e-19, "kg*m^2/s^2"),
-    (&["bar"], 100_000.0, "kg/m/s^2"),
-    (&["atm"], 101_325.0, "kg/m/s^2"),
-    (&["cal"], 4.184, "kg*m^2/s^2"),
-    (&["kcal"], 4184.0, "kg*m^2/s^2"),
-    (&["in"], 0.0254, "m"),
-    // The typographic point, 1/72 inch (spec: Units).
-    (&["pt"], 0.0254 / 72.0, "m"),
-    (&["ft"], 0.3048, "m"),
-    (&["yd"], 0.9144, "m"),
-    (&["mi"], 1609.344, "m"),
-    (&["nmi"], 1852.0, "m"),
-    (&["ac"], 4046.856_422_4, "m^2"),
-    (&["lb"], 0.453_592_37, "kg"),
-    (&["oz"], 0.028_349_523_125, "kg"),
-    (&["st"], 6.350_293_18, "kg"),
-    (&["gal"], 0.003_785_411_784, "m^3"),
-    (&["floz"], 2.957_352_956_25e-5, "m^3"),
-    (&["cup"], 2.365_882_365e-4, "m^3"),
-    (&["psi"], 6894.757_293_168, "kg/m/s^2"),
-    (&["kn"], 1852.0 / 3600.0, "m/s"),
-    (&["mph"], 1609.344 / 3600.0, "m/s"),
-    // the telecom spellings: decimal bits per second
-    (&["bps"], 1.0, "b/s"),
-    (&["kbps"], 1e3, "b/s"),
-    (&["Mbps"], 1e6, "b/s"),
-    (&["Gbps"], 1e9, "b/s"),
-    (&["Tbps"], 1e12, "b/s"),
-];
 
 /// The currency signs a prefix alias reads (`$12`, `€ 12.50`): the
 /// sign with its trailing dash, and the ISO 4217 code it stands for.
@@ -173,25 +88,6 @@ const CURRENCY_SIGNS: &[(&str, &str)] = &[
     ("֏-", "AMD"),
 ];
 
-/// The scale of one full name: a row of the table, a currency code
-/// (spec: Currencies — a base unit of its own dimension), or a
-/// currency sign.
-fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
-    if let Some((_, factor, base)) = UNIT_TABLE
-        .iter()
-        .find(|(names, _, _)| names.contains(&name))
-    {
-        return Some((*factor, base));
-    }
-    if CURRENCIES.contains(&name) {
-        return Some((1.0, intern_base_name(name)));
-    }
-    CURRENCY_SIGNS
-        .iter()
-        .find(|(sign, _)| *sign == name)
-        .map(|(_, code)| (1.0, *code))
-}
-
 /// Every currency ISO 4217 lists as circulating (spec: Currencies),
 /// 154 codes alphabetically, each a built-in base unit of its own
 /// dimension; no rate relates two of them, `exchange` is the only
@@ -212,30 +108,6 @@ pub const CURRENCIES: &[&str] = &[
     "VUV", "WST", "XAF", "XCD", "XCG", "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWG",
 ];
 
-/// The units a decimal prefix attaches to: the base units, the
-/// derived units, the gram, the litre, the bit and the byte.
-const PREFIXABLE: &[&str] = &[
-    "B", "b", "bit", "byte", "m", "s", "g", "A", "K", "mol", "cd", "L", "rad", "sr", "Hz", "N",
-    "Pa", "J", "W", "C", "V", "F", "ohm", "S", "Wb", "T", "H", "lm", "lx", "Bq", "Gy", "Sv", "kat",
-];
-
-fn prefixable(stem: &str) -> bool {
-    PREFIXABLE.contains(&stem)
-}
-
-/// What the table says of one name.
-#[derive(Debug)]
-enum Lookup {
-    /// A unit of the table, with its factor and base expansion.
-    Scaled(f64, &'static str),
-    /// A spelling the table refuses: `KB` and `Kb` (ambiguous:
-    /// `kB` or `KiB`), and a shrinking prefix on the bit or the
-    /// byte (a millibyte is no unit, and `mB` is the MB typo).
-    Refused,
-    /// A name the table does not hold: an opaque unit in unit text.
-    Unknown,
-}
-
 /// The GOST 8.417 designations (spec: Cyrillic Designations): each
 /// a built-in alias of an SI symbol, read always, printed under the
 /// Russian locale.
@@ -249,6 +121,7 @@ const CYRILLIC_UNITS: &[(&str, &str)] = &[
     ("кд", "cd"),
     ("бит", "b"),
     ("байт", "B"),
+    ("Б", "B"),
     ("рад", "rad"),
     ("ср", "sr"),
     ("Гц", "Hz"),
@@ -280,6 +153,15 @@ const CYRILLIC_UNITS: &[(&str, &str)] = &[
     ("атм", "atm"),
     ("кал", "cal"),
     ("уз", "kn"),
+    ("эрг", "erg"),
+    ("дин", "dyn"),
+    ("Гс", "G"),
+    ("Э", "Oe"),
+    ("Ст", "St"),
+    ("Гал", "Gal"),
+    ("Мкс", "Mx"),
+    ("Торр", "Torr"),
+    ("Ба", "Ba"),
 ];
 
 /// The GOST prefixes, the two-letter ones first so they win the
@@ -294,6 +176,8 @@ const CYRILLIC_PREFIXES: &[(&str, &str)] = &[
     ("Ти", "Ti"),
     ("Пи", "Pi"),
     ("Эи", "Ei"),
+    ("Зи", "Zi"),
+    ("Йи", "Yi"),
     ("И", "Y"),
     ("З", "Z"),
     ("Э", "E"),
@@ -481,75 +365,41 @@ pub fn unscale_by(v: f64, factor: f64) -> f64 {
     }
 }
 
-fn lookup(name: &str) -> Lookup {
-    if let Some((f, base)) = full_name_scale(name) {
-        return Lookup::Scaled(f, base);
-    }
-    if let Some(ascii) = micro_of(name) {
-        return lookup(&ascii);
-    }
-    if let Some(ascii) = ohm_of(name) {
-        return lookup(&ascii);
-    }
-    if name == "KB" || name == "Kb" || name == "Кбайт" || name == "Кбит" {
-        return Lookup::Refused;
-    }
-    // a GOST designation reads as its SI symbol
-    if let Some(latin) = latin_of(name) {
-        return lookup(&latin);
-    }
-    for (p, pow) in BINARY_PREFIXES {
-        if let Some(stem) = name.strip_prefix(p)
-            && matches!(stem, "B" | "b" | "bit" | "byte")
-        {
-            let (f, base) = full_name_scale(stem).expect("the bit and the byte are in the table");
-            return Lookup::Scaled(f * 2f64.powi(*pow), base);
-        }
-    }
-    for (p, pow) in PREFIX_POWERS {
-        if let Some(stem) = name.strip_prefix(p)
-            && prefixable(stem)
-        {
-            if matches!(stem, "B" | "b" | "bit" | "byte") && *pow < 0 {
-                return Lookup::Refused;
-            }
-            let (f, base) = full_name_scale(stem).expect("a prefixable unit is in the table");
-            return Lookup::Scaled(f * pow10(*pow), base);
-        }
-    }
-    Lookup::Unknown
-}
-
 /// The scale of one unit name over the built-in table: the factor
 /// to the base and the base expansion. A full name is read before
 /// a prefix is stripped (`mi` is the mile, `min` the minute).
 pub fn unit_scale(name: &str) -> Option<(f64, &'static str)> {
-    match lookup(name) {
-        Lookup::Scaled(f, base) => Some((f, base)),
-        _ => None,
-    }
+    let u = lookup_strict(name)?;
+    Some((u.factor.to_f64(), canonical_base(&u.dimension)))
 }
 
 /// Every spelling the built-in table reads as a unit operand: the
 /// full names, the currency codes, and the prefixed forms the
 /// prefixes admit (a prefix below one never on the bit or the byte).
 pub fn builtin_unit_names() -> Vec<String> {
+    let table = &tables().0;
     let mut out: Vec<String> = Vec::new();
-    for (names, _, _) in UNIT_TABLE {
-        out.extend(names.iter().map(|n| n.to_string()));
+    for e in table.entries() {
+        out.extend(e.names.iter().map(|n| n.to_string()));
     }
     out.extend(CURRENCIES.iter().map(|c| c.to_string()));
-    for (prefix, pow) in PREFIX_POWERS {
-        for stem in PREFIXABLE {
-            if *pow < 0 && matches!(*stem, "B" | "b" | "bit" | "byte") {
-                continue;
+    for e in table.entries() {
+        for stem in e.names {
+            match e.prefixes {
+                Prefixes::None => {}
+                Prefixes::Decimal => {
+                    out.extend(PREFIX_POWERS.iter().map(|(p, _)| format!("{p}{stem}")));
+                }
+                Prefixes::Information => {
+                    out.extend(
+                        PREFIX_POWERS
+                            .iter()
+                            .filter(|(_, pow)| *pow > 0)
+                            .map(|(p, _)| format!("{p}{stem}")),
+                    );
+                    out.extend(BINARY_PREFIXES.iter().map(|(p, _)| format!("{p}{stem}")));
+                }
             }
-            out.push(format!("{prefix}{stem}"));
-        }
-    }
-    for (prefix, _) in BINARY_PREFIXES {
-        for stem in ["B", "b", "bit", "byte"] {
-            out.push(format!("{prefix}{stem}"));
         }
     }
     out
@@ -627,15 +477,18 @@ pub fn unit_operand_refusal(expr: &str, declared: &[String]) -> Option<String> {
         if declared.iter().any(|d| d == factor) {
             continue;
         }
-        match lookup(factor) {
-            Lookup::Scaled(..) => {}
-            Lookup::Refused => return Some(refused_spelling(factor, declared)),
-            Lookup::Unknown => {
+        if refused(factor) {
+            return Some(refused_spelling(factor, declared));
+        }
+        match tables().0.lookup_with(factor, &Names(NO_NAMES)) {
+            Ok(_) => {}
+            Err(quanto::Error::Unknown { .. }) => {
                 return Some(with_nearest(
                     format!("no unit '{factor}'"),
                     &nearest_units(factor, declared),
                 ));
             }
+            Err(_) => return Some(refused_spelling(factor, declared)),
         }
     }
     None
@@ -662,7 +515,7 @@ fn with_nearest(mut msg: String, near: &[String]) -> String {
 }
 
 /// The refusal of a spelling the table refuses by name (see
-/// [`Lookup::Refused`]): the ambiguous kilobyte and kilobit, in
+/// `refused`): the ambiguous kilobyte and kilobit, in
 /// Latin and in Cyrillic, say what the two readings are; a prefix
 /// below one on the bit or the byte says so.
 fn refused_spelling(name: &str, declared: &[String]) -> String {
@@ -747,6 +600,105 @@ fn with_opaque<T>(allowed: bool, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// The unit tables (quanto, every pack): the strict one refuses an
+/// unknown name, the open one reads it as an opaque unit.
+fn tables() -> &'static (Table, Table) {
+    static TABLES: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| (Table::all(), Table::all().unknown(Unknown::Opaque)))
+}
+
+/// The table the moment asks for: opaque units where allowed.
+fn table() -> &'static Table {
+    let (strict, open) = tables();
+    if OPAQUE_ALLOWED.with(|c| c.get()) {
+        open
+    } else {
+        strict
+    }
+}
+
+/// The engine's names in front of the table: a run's declared units
+/// first (a declaration shadows the table), then the Cyrillic aliases
+/// of the built-in units. The table reads these before its packs.
+struct Names<'a>(&'a dyn Fn(&str) -> Option<(f64, String)>);
+
+impl Resolver for Names<'_> {
+    fn resolve(&self, name: &str) -> Option<Unit> {
+        if let Some((factor, base)) = (self.0)(name) {
+            return unit_of(factor, &base);
+        }
+        if let Some(code) = currency_code(name) {
+            return Some(Unit::base(quanto::Dimension::opaque(code)));
+        }
+        // the micro sign and the ohm sign in their other code points,
+        // then the Cyrillic aliases
+        let spelled = micro_of(name)
+            .or_else(|| ohm_of(name))
+            .or_else(|| latin_of(name))?;
+        tables().0.lookup(&spelled).ok()
+    }
+}
+
+/// A factor and a base expansion as a unit: the float exactly as the
+/// dyadic rational it is, the base read by the open table.
+fn unit_of(factor: f64, base: &str) -> Option<Unit> {
+    Some(Unit::new(
+        Factor::from_f64(factor)?,
+        tables().1.dimension(base).ok()?,
+    ))
+}
+
+const NO_NAMES: &dyn Fn(&str) -> Option<(f64, String)> = &|_| None;
+
+/// A currency as the engine knows it: an ISO code of the table, or a
+/// sign standing for one (`€` for EUR, `₸` for KZT). A known unit of
+/// a dimension of its own, exchanged by a rate the query supplies.
+fn currency_code(name: &str) -> Option<&'static str> {
+    if let Some(code) = CURRENCIES.iter().find(|c| **c == name) {
+        return Some(code);
+    }
+    CURRENCY_SIGNS
+        .iter()
+        .find(|(sign, _)| *sign == name)
+        .map(|(_, code)| *code)
+}
+
+/// Spellings read as a refusal, never as a unit: the ambiguous
+/// kilobyte and kilobit, in Latin and in Cyrillic.
+fn refused(name: &str) -> bool {
+    matches!(name, "KB" | "Kb" | "Кбайт" | "Кбит")
+}
+
+/// One name as a unit under the strict table, Cyrillic aliases
+/// included; `None` for an unknown or a refused name.
+fn lookup_strict(name: &str) -> Option<Unit> {
+    if refused(name) {
+        return None;
+    }
+    tables().0.lookup_with(name, &Names(NO_NAMES)).ok()
+}
+
+/// A dimension spelled in base units, interned for the callers that
+/// keep a `&'static str`.
+fn canonical_base(dimension: &quanto::Dimension) -> &'static str {
+    intern_base_name(&tables().0.spell(dimension))
+}
+
+/// Whether a built-in unit takes prefixes.
+fn prefixable(stem: &str) -> bool {
+    tables()
+        .0
+        .entries()
+        .any(|e| e.names.contains(&stem) && e.prefixes != Prefixes::None)
+}
+
+/// A built-in unit by its own name, no prefix: the factor and the
+/// canonical base expansion.
+fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
+    let e = tables().0.entries().find(|e| e.names.contains(&name))?;
+    Some((e.factor.to_f64(), canonical_base(&e.dimension)))
+}
+
 /// The scale of a full unit *expression* over the built-in table
 /// alone (the adapter hook's default): see [`scale_expr_with`].
 pub fn scale_expr(expr: &str) -> Option<(f64, String)> {
@@ -766,7 +718,45 @@ pub fn scale_expr_with(
     expr: &str,
     custom: &dyn Fn(&str) -> Option<(f64, String)>,
 ) -> Option<(f64, String)> {
-    scale_expr_inner(expr, custom).map(|(f, base, _)| (f, base))
+    if expr.is_empty() {
+        return None;
+    }
+    // a prefix alias (`€-`, `$-`) is a name with its trailing dash: a
+    // declared name, a currency sign, or an opaque unit where allowed
+    if let Some(name) = expr.strip_suffix('-')
+        && !name.is_empty()
+        && name.chars().all(is_name_char)
+    {
+        if let Some(hit) = custom(expr) {
+            return Some(hit);
+        }
+        if let Some(code) = currency_code(expr) {
+            return Some((1.0, code.to_string()));
+        }
+        return OPAQUE_ALLOWED
+            .with(|c| c.get())
+            .then(|| (1.0, expr.to_string()));
+    }
+    // the exponent ceiling and the refused spellings, before the
+    // table reads the expression
+    for term in expr.split(['*', '/']) {
+        let (name, exp) = term
+            .split_once('^')
+            .map_or((term, None), |(n, x)| (n, Some(x)));
+        if exp.is_some_and(|x| {
+            x.trim_start_matches('-')
+                .parse::<i64>()
+                .is_ok_and(|n| n > MAX_EXPONENT)
+        }) {
+            return None;
+        }
+        if refused(name) {
+            return None;
+        }
+    }
+    let table = table();
+    let unit = table.unit_with(expr, &Names(custom)).ok()?;
+    Some((unit.factor.to_f64(), table.spell(&unit.dimension)))
 }
 
 /// Whether a base expansion holds an opaque factor.
@@ -801,131 +791,20 @@ pub fn base_factors(base: &str) -> Vec<(&str, i64)> {
     out
 }
 
-fn scale_expr_inner(
-    expr: &str,
-    custom: &dyn Fn(&str) -> Option<(f64, String)>,
-) -> Option<(f64, String, bool)> {
-    if expr.is_empty() {
-        return None;
-    }
-    let cs: Vec<char> = expr.chars().collect();
-    let mut i = 0;
-    let mut factor = 1.0f64;
-    let mut base: std::collections::BTreeMap<&'static str, i64> = Default::default();
-    let mut op = '*';
-    let mut opaque = false;
-    loop {
-        let start = i;
-        while i < cs.len() && is_name_char(cs[i]) {
-            i += 1;
-        }
-        // a prefix alias (`€-`, `$-`) is a name with its trailing dash
-        if i > start && i + 1 == cs.len() && cs[i] == '-' {
-            i += 1;
-        }
-        let name: String = cs[start..i].iter().collect();
-        // The dimensionless identity contributes nothing.
-        let one = name.is_empty() && cs.get(start) == Some(&'1');
-        if one {
-            i += 1;
-        } else if name.is_empty() {
-            return None;
-        }
-        let mut exp: i64 = 1;
-        if cs.get(i) == Some(&'^') {
-            i += 1;
-            let neg = cs.get(i) == Some(&'-');
-            if neg {
-                i += 1;
-            }
-            let ds = i;
-            while i < cs.len() && cs[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i == ds {
-                return None;
-            }
-            let n: i64 = cs[ds..i].iter().collect::<String>().parse().ok()?;
-            // An exponent beyond any unit (`m^99999999999`) is not a
-            // unit: it would overflow the exponent map and the
-            // factor's `powi`.
-            if n > MAX_EXPONENT {
-                return None;
-            }
-            exp = if neg { -n } else { n };
-        }
-        if !one {
-            let signed = if op == '*' { exp } else { -exp };
-            let (f, expansion): (f64, String) = match custom(&name) {
-                Some(hit) => hit,
-                None => match lookup(&name) {
-                    Lookup::Scaled(f, b) => (f, b.to_string()),
-                    Lookup::Refused => return None,
-                    Lookup::Unknown => {
-                        if !OPAQUE_ALLOWED.with(|c| c.get()) {
-                            return None;
-                        }
-                        opaque = true;
-                        (1.0, name.clone())
-                    }
-                },
-            };
-            factor *= f.powi(signed as i32);
-            accumulate(&mut base, intern_base_name(&expansion), signed);
-        }
-        if i >= cs.len() {
-            break;
-        }
-        op = cs[i];
-        if op != '*' && op != '/' {
-            return None;
-        }
-        i += 1;
-    }
-    base.retain(|_, e| *e != 0);
-    Some((factor, format_base(&base), opaque))
-}
-
 /// The dimension of a base expansion as text over the base
-/// dimensions (spec: Dimensions): `L/T` for `m/s`, `M*L^2/T^2` for
-/// `kg*m^2/s^2`, `EUR/M` for `EUR/kg`, `1` for a ratio. The
+/// dimensions (spec: Dimensions): `L/T` for `m/s`, `L^2*M/T^2` for
+/// `m^2*kg/s^2`, `EUR/M` for `EUR/kg`, `1` for a ratio. The
 /// factors keep the expansion's canonical order, so two equal
 /// dimensions print identically.
 pub fn dimension_of(base: &str) -> String {
     if base == "1" || base.is_empty() {
         return "1".to_string();
     }
-    let mut out = String::new();
-    let mut denom = false;
-    for part in base.split_inclusive(['*', '/']) {
-        let (tok, sep) = match part.strip_suffix('*') {
-            Some(t) => (t, Some('*')),
-            None => match part.strip_suffix('/') {
-                Some(t) => (t, Some('/')),
-                None => (part, None),
-            },
-        };
-        let (name, exp) = match tok.split_once('^') {
-            Some((n, x)) => (n, Some(x)),
-            None => (tok, None),
-        };
-        if denom && out.ends_with('*') {
-            out.pop();
-            out.push('/');
-        }
-        out.push_str(dimension_symbol(name));
-        if let Some(x) = exp {
-            out.push('^');
-            out.push_str(x);
-        }
-        if let Some(c) = sep {
-            if c == '/' {
-                denom = true;
-            }
-            out.push(c);
-        }
-    }
-    out
+    tables()
+        .1
+        .dimension(base)
+        .map(|d| d.to_string())
+        .unwrap_or_else(|_| base.to_string())
 }
 
 /// `exchange(RATES[; TARGET])` (spec: The exchange): the one
@@ -1110,58 +989,6 @@ pub fn exchange(
 /// it the text is not a unit.
 pub const MAX_EXPONENT: i64 = 32;
 
-/// Fold one canonical expansion string (`kg*m^2/s^3`) into the
-/// exponent map, scaled by `signed`.
-fn accumulate(
-    base: &mut std::collections::BTreeMap<&'static str, i64>,
-    expansion: &'static str,
-    signed: i64,
-) {
-    let mut denom = false;
-    for part in expansion.split_inclusive(['*', '/']) {
-        let (tok, next_denom) = match part.strip_suffix('*') {
-            Some(t) => (t, denom),
-            None => match part.strip_suffix('/') {
-                Some(t) => (t, true),
-                None => (part, denom),
-            },
-        };
-        let (name, e) = match tok.split_once('^') {
-            Some((n, x)) => (
-                n,
-                x.parse::<i64>()
-                    .unwrap_or(1)
-                    .clamp(-MAX_EXPONENT, MAX_EXPONENT),
-            ),
-            None => (tok, 1),
-        };
-        if name != "1" {
-            let key: &'static str = leak_base_name(name);
-            let sign = if denom { -1 } else { 1 };
-            *base.entry(key).or_insert(0) += e * sign * signed;
-        }
-        denom = next_denom;
-    }
-}
-
-/// The base names the built-in table's expansions mention — the
-/// seven SI bases plus the byte — as 'static strs. Anything else
-/// (an adapter's custom base) is interned: one leaked copy per
-/// distinct name for the process lifetime, never one per parse.
-fn leak_base_name(name: &str) -> &'static str {
-    match name {
-        "m" => "m",
-        "kg" => "kg",
-        "s" => "s",
-        "A" => "A",
-        "K" => "K",
-        "mol" => "mol",
-        "cd" => "cd",
-        "B" => "B",
-        other => intern_base_name(other),
-    }
-}
-
 fn intern_base_name(name: &str) -> &'static str {
     static INTERNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut table = INTERNED.lock().expect("base-name intern table");
@@ -1171,37 +998,6 @@ fn intern_base_name(name: &str) -> &'static str {
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
     table.push(leaked);
     leaked
-}
-
-/// Format the exponent map in kaiv's canonical form.
-fn format_base(base: &std::collections::BTreeMap<&'static str, i64>) -> String {
-    let fmt = |n: &str, e: i64| {
-        if e == 1 {
-            n.to_string()
-        } else {
-            format!("{n}^{e}")
-        }
-    };
-    let num: Vec<String> = base
-        .iter()
-        .filter(|(_, e)| **e > 0)
-        .map(|(n, e)| fmt(n, *e))
-        .collect();
-    let den: Vec<String> = base
-        .iter()
-        .filter(|(_, e)| **e < 0)
-        .map(|(n, e)| fmt(n, -*e))
-        .collect();
-    let mut out = if num.is_empty() {
-        "1".to_string()
-    } else {
-        num.join("*")
-    };
-    for d in den {
-        out.push('/');
-        out.push_str(&d);
-    }
-    out
 }
 
 /// Parse unit text (spec: The Unital Reading): a decimal magnitude
@@ -1495,6 +1291,47 @@ fn prefix_stem(unit: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standard_units_resolve_however_spelled() {
+        // The ruling of 2026-10-31: kWh is an energy, keV an energy,
+        // mbar a pressure; the CGS and other pre-SI units are in the
+        // table; the names that were in it keep their reading.
+        let close = |a: f64, b: f64| ((a - b) / b).abs() < 1e-12;
+        for (text, factor, base) in [
+            ("kWh", 3.6e6, "m^2*kg/s^2"),
+            ("MWh", 3.6e9, "m^2*kg/s^2"),
+            ("mAh", 3.6, "s*A"),
+            ("mbar", 100.0, "kg/m/s^2"),
+            ("keV", 1.602_176_634e-16, "m^2*kg/s^2"),
+            ("GeV", 1.602_176_634e-10, "m^2*kg/s^2"),
+            ("Mt", 1e9, "kg"),
+            ("Mcal", 4.184e6, "m^2*kg/s^2"),
+            ("erg", 1e-7, "m^2*kg/s^2"),
+            ("dyn", 1e-5, "m*kg/s^2"),
+            ("cP", 1e-3, "kg/m/s"),
+            ("cSt", 1e-6, "m^2/s"),
+            ("mGal", 1e-5, "m/s^2"),
+            ("kG", 0.1, "kg/s^2/A"),
+            ("kOe", 1e6 / (4.0 * std::f64::consts::PI), "A/m"),
+            ("Torr", 101_325.0 / 760.0, "kg/m/s^2"),
+            ("Å", 1e-10, "m"),
+            ("ft", 0.3048, "m"),
+            ("pt", 0.0254 / 72.0, "m"),
+            ("kcal", 4184.0, "m^2*kg/s^2"),
+            ("gal", 0.003_785_411_784, "m^3"),
+            ("эрг", 1e-7, "m^2*kg/s^2"),
+            ("кэВ", 1.602_176_634e-16, "m^2*kg/s^2"),
+        ] {
+            let (f, b) = scale_expr(text).unwrap_or_else(|| panic!("{text} resolves"));
+            assert!(close(f, factor), "{text}: {f} vs {factor}");
+            assert_eq!(b, base, "{text}");
+        }
+        for opaque in ["Kbps", "widget", "apples"] {
+            let (_, b) = scale_expr(opaque).unwrap();
+            assert!(has_opaque_factor(&b), "{opaque} stays opaque");
+        }
+    }
+
     use super::*;
 
     /// Finding 19: an exponent beyond any unit is not a unit (it
@@ -1510,7 +1347,7 @@ mod tests {
     fn scale_table() {
         assert_eq!(unit_scale("km"), Some((1000.0, "m")));
         assert_eq!(unit_scale("mg"), Some((1e-6, "kg")));
-        assert_eq!(unit_scale("kW"), Some((1000.0, "kg*m^2/s^3")));
+        assert_eq!(unit_scale("kW"), Some((1000.0, "m^2*kg/s^3")));
         assert_eq!(unit_scale("mi"), Some((1609.344, "m")));
         // Full names beat prefixes; unknown names are out. Time is
         // the dimension T, a quantity like the others.
@@ -1528,7 +1365,7 @@ mod tests {
     fn a_unit_operand_must_be_known() {
         // the table, prefixed forms and compounds pass
         for ok in [
-            "kB", "KiB", "km/h", "kg*m/s^2", "EUR/lb", "mi^2", "USD", "Mbps", "1/s",
+            "kB", "KiB", "km/h", "m*kg/s^2", "EUR/lb", "mi^2", "USD", "Mbps", "1/s",
         ] {
             assert_eq!(unit_operand_refusal(ok, &[]), None, "{ok}");
         }
@@ -1547,6 +1384,16 @@ mod tests {
         );
         // (the readings the message names do read)
         assert_eq!(unit_scale("кбайт"), Some((8000.0, "b")));
+        // the short byte designation Б with the ГОСТ prefixes, and
+        // the IEC Zi and Yi in Cyrillic (the ruling of 2026-10-31)
+        assert_eq!(unit_scale("Б"), Some((8.0, "b")));
+        assert_eq!(unit_scale("кБ"), Some((8000.0, "b")));
+        assert_eq!(unit_scale("МБ"), Some((8e6, "b")));
+        assert_eq!(unit_scale("Мбит"), Some((1e6, "b")));
+        assert_eq!(unit_scale("ЗиБ").map(|(f, _)| f), Some(8.0 * 2f64.powi(70)));
+        assert_eq!(unit_scale("Йибит").map(|(f, _)| f), Some(2f64.powi(80)));
+        assert_eq!(designated_unit("kB", "ru"), "кбайт");
+        assert_eq!(scale_expr("ml"), Some((1e-6, "m^3".to_string())));
         assert_eq!(unit_scale("Кибайт"), Some((8192.0, "b")));
         assert_eq!(unit_scale("кбит"), Some((1000.0, "b")));
         assert_eq!(unit_scale("Кибит"), Some((1024.0, "b")));
@@ -1626,17 +1473,17 @@ mod tests {
             (5000.0, "m", 5.0, "km")
         );
         let (bv, base, ..) = parse_unit_text("0.2 kW").unwrap();
-        assert_eq!((bv, base.as_str()), (200.0, "kg*m^2/s^3"));
+        assert_eq!((bv, base.as_str()), (200.0, "m^2*kg/s^3"));
         assert_eq!(parse_unit_text("-40mm").map(|t| t.0), Some(-0.04));
         // Compound expressions, quoted in query text.
         let (bv, base, ..) = parse_unit_text("100 km/h").unwrap();
         assert!((bv - 100.0 * 1000.0 / 3600.0).abs() < 1e-9);
         assert_eq!(base, "m/s");
         assert_eq!(
-            scale_expr("kg*m/s^2").map(|(f, b)| (f, b)),
-            Some((1.0, "kg*m/s^2".to_string()))
+            scale_expr("m*kg/s^2").map(|(f, b)| (f, b)),
+            Some((1.0, "m*kg/s^2".to_string()))
         );
-        assert_eq!(scale_expr("N").unwrap().1, "kg*m/s^2");
+        assert_eq!(scale_expr("N").unwrap().1, "m*kg/s^2");
         // a span of time is the quantity of dimension T
         assert_eq!(scale_expr("h"), Some((3600.0, "s".to_string())));
         assert_eq!(
@@ -1686,7 +1533,7 @@ mod tests {
         assert_eq!(sc(&q("2500_kg"), false), "2.5_Mg");
         assert_eq!(sc(&q("0.5_kB"), false), "500_B");
         assert_eq!(dimension_of("EUR/kg"), "EUR/M");
-        assert_eq!(dimension_of("kg*m^2/s^2"), "M*L^2/T^2");
+        assert_eq!(dimension_of("m^2*kg/s^2"), "L^2*M/T^2");
         assert_eq!(dimension_of("m/s"), "L/T");
         assert_eq!(dimension_of("1"), "1");
     }
@@ -1694,18 +1541,14 @@ mod tests {
     #[test]
     fn micro_reads_as_u_and_prefixes_are_one_power_of_ten() {
         for name in ["um", "µm", "μm", "мкм"] {
-            match lookup(name) {
-                Lookup::Scaled(f, base) => {
-                    assert_eq!((f, base), (1e-6, "m"), "{name}");
-                    assert_eq!(scale_by(5.0, f), 5e-6, "{name}");
-                }
-                other => panic!("{name}: {other:?}"),
-            }
+            let (f, base) = unit_scale(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!((f, base), (1e-6, "m"), "{name}");
+            assert_eq!(scale_by(5.0, f), 5e-6, "{name}");
         }
         assert_eq!(canonical_unit("µm"), "um");
         assert_eq!(canonical_unit("μs"), "us");
         assert_eq!(canonical_unit("km/µs"), "km/us");
-        assert!(matches!(lookup("µ"), Lookup::Unknown));
+        assert!(unit_scale("µ").is_none());
         assert_eq!(pow10(-9), 1e-9);
         assert_eq!(pow10(24), 1e24);
         // a prefix is one power of ten applied once
@@ -1718,10 +1561,8 @@ mod tests {
     }
 
     fn scaled(name: &str) -> (f64, String) {
-        match lookup(name) {
-            Lookup::Scaled(f, b) => (f, b.to_string()),
-            other => panic!("{name}: {other:?}"),
-        }
+        let (f, b) = unit_scale(name).unwrap_or_else(|| panic!("{name}"));
+        (f, b.to_string())
     }
 
     #[test]
@@ -1744,7 +1585,7 @@ mod tests {
         assert_eq!(unit_scale("см"), Some((0.01, "m")));
         assert_eq!(unit_scale("мс"), Some((0.001, "s")));
         assert_eq!(unit_scale("мкс"), Some((1e-6, "s")));
-        assert_eq!(unit_scale("МВт"), Some((1e6, "kg*m^2/s^3")));
+        assert_eq!(unit_scale("МВт"), Some((1e6, "m^2*kg/s^3")));
         assert_eq!(unit_scale("гПа"), Some((100.0, "kg/m/s^2")));
         assert_eq!(unit_scale("Кибайт"), Some((8192.0, "b")));
         assert_eq!(unit_scale("Мбит"), Some((1e6, "b")));

@@ -60,8 +60,9 @@ fn scalar_commands_broadcast_one_level_deep() {
         one(r#"#(@(a; b); %("x"; 1)) | upper"#),
         "#(@(a; b);\n  %(\"X\"; 1))"
     );
-    // one level: a nested list is handed to the command whole
-    assert_eq!(one("@(@(1.26); 2.5) | round(1)"), "@(null; 2.5)");
+    // one level: a nested list is handed to the command whole, and
+    // a value with no numeric coercion comes back unchanged
+    assert_eq!(one("@(@(1.26); 2.5) | round(1)"), "@(@(1.26); 2.5)");
     // an index column stands
     assert_eq!(
         one(r#"#(@(d; a); %("k"; "x")) | #(-i=:d) | upper | :::index"#),

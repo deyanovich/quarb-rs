@@ -187,6 +187,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                 v.operand(i);
             }
         }
+        Operand::Through { base, .. } => v.operand(base),
         Operand::Projected { base, shape } => {
             v.operand(base);
             match shape {

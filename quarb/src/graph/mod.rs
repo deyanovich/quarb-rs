@@ -15,6 +15,7 @@ pub(crate) mod navigate;
 pub(crate) mod operand;
 pub mod plan;
 pub mod reflect;
+pub mod rooted;
 pub mod run;
 pub(crate) mod serialize;
 pub mod source;

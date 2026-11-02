@@ -124,6 +124,12 @@ pub(crate) struct Ambient {
     pub(crate) bonds: Option<Rc<dyn SentenceBonds>>,
     /// The first refusal, as the diagnostic it is (an error).
     pub(crate) refusal: Option<Diagnostic>,
+    /// Whether withheld data was met this run: one warning at the
+    /// end (spec: omitted data).
+    pub(crate) omitted: bool,
+    /// How deep the run stands in a predicate or another key
+    /// evaluation: a withheld read there refuses.
+    pub(crate) keying: u32,
     /// The warnings and infos raised, in raising order.
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
@@ -139,7 +145,12 @@ pub(crate) struct AmbientGuard;
 
 impl Drop for AmbientGuard {
     fn drop(&mut self) {
-        if let Some(done) = AMBIENTS.with(|s| s.borrow_mut().pop()) {
+        if let Some(mut done) = AMBIENTS.with(|s| s.borrow_mut().pop()) {
+            // the one warning for every omission of the run, unless the
+            // run already refused for the same reason
+            if done.omitted {
+                omitted_warning(&mut done);
+            }
             FINISHED.with(|f| *f.borrow_mut() = done);
         }
     }
@@ -185,6 +196,55 @@ pub fn record_refusal_coded(code: &str, site: impl Into<String>, msg: String) {
 /// Raise a warning or an info beside the answer (spec:
 /// Diagnostics): kept in raising order and handed back with the
 /// run's outcome. An error goes through [`record_refusal_coded`].
+/// Push the omission warning once, unless the run refused as OMITTED.
+fn omitted_warning(a: &mut Ambient) {
+    let refused = a
+        .refusal
+        .as_ref()
+        .is_some_and(|r| r.code == crate::diagnostic::OMITTED);
+    let warned = a.diagnostics.iter().any(|d| {
+        d.code == crate::diagnostic::OMITTED && d.severity == crate::diagnostic::Severity::Warning
+    });
+    if !refused && !warned {
+        a.diagnostics.push(Diagnostic::warning(
+            crate::diagnostic::OMITTED,
+            "source",
+            crate::diagnostic::OMITTED_TEXT,
+        ));
+    }
+}
+/// A withheld property was read (spec: omitted data): the run warns
+/// once at its end; inside a key evaluation it refuses now.
+pub fn record_omitted() {
+    with_ambient(|a| a.omitted = true);
+    if with_ambient(|a| a.keying) > 0 {
+        refuse_omitted();
+    }
+}
+/// The source dropped whole nodes for the caller (spec: omitted
+/// data): the warning, once, after the run.
+pub fn record_omitted_nodes() {
+    with_ambient(|a| {
+        a.omitted = true;
+        omitted_warning(a);
+    });
+}
+/// Run `f` as a key evaluation: a predicate, a sort key, a group or
+/// top key, where a withheld read refuses rather than reads absent.
+pub fn with_keying<R>(f: impl FnOnce() -> R) -> R {
+    with_ambient(|a| a.keying += 1);
+    let out = f();
+    with_ambient(|a| a.keying = a.keying.saturating_sub(1));
+    out
+}
+/// The refusal a key over omitted values raises.
+pub fn refuse_omitted() {
+    record_refusal_coded(
+        crate::diagnostic::OMITTED,
+        "source",
+        crate::diagnostic::OMITTED_TEXT.to_string(),
+    );
+}
 pub fn record_diagnostic(d: Diagnostic) {
     with_ambient(|a| a.diagnostics.push(d));
 }

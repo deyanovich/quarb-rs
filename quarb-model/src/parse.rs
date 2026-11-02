@@ -35,6 +35,12 @@ pub struct Model {
     /// `<--(SCOPE::prop)`) whose scope is the declared one. Cost
     /// only: the answer is the walk's, with or without it.
     pub indexes: Vec<IndexDecl>,
+    /// `graph SCOPE(hop) { measure; … };` — the measures of the
+    /// graph library the source maintains over the whole graph of
+    /// the hop on the scope (spec: Graph Declarations). Cost only:
+    /// a library command is answered from it when its hop, options
+    /// and context are the declared ones.
+    pub graphs: Vec<GraphDecl>,
     /// `tree IDENTITY: PATH;` — the string other trees refer to this
     /// one by, and the path (a mount root or a node inside one) the
     /// tree stands at. An identity ending in a separator is a base.
@@ -68,6 +74,22 @@ pub struct UnitDecl {
 pub struct TreeDecl {
     pub identity: String,
     pub path: String,
+}
+
+/// A declared graph: `graph SCOPE(hop) { measure; measure(options); };`
+/// (spec: Graph Declarations) — the source maintains the named
+/// measures of the graph library over the whole graph of the hop on
+/// the scope, each as a query writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphDecl {
+    /// The node-selecting path.
+    pub scope: String,
+    /// The hop as written (`->link`, `--*`).
+    pub hop: String,
+    /// Each measure as written (`pagerank`, `betweenness(--normalized)`).
+    pub measures: Vec<String>,
+    /// The declaration as written, for messages.
+    pub stmt: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -434,6 +456,74 @@ fn split_acyclic(rest: &str) -> (&str, bool) {
 /// a `;` inside `(…)`, `[…]` or `{…}` separates a call's arguments
 /// or a record's fields (`%(a = ::a; b = ::b)`), never statements;
 /// strings are opaque.
+/// `graph SCOPE(hop) { measure; measure(options); }`: the scope path
+/// up to the hop's parentheses, the hop inside them, the measures
+/// between the braces each ending in `;`.
+fn parse_graph(rest: &str, stmt: &str) -> Result<GraphDecl, String> {
+    let rest = rest.trim();
+    let Some(open) = rest.find('{') else {
+        return Err(format!(
+            "graph takes its measures in braces: 'graph SCOPE(hop) {{ pagerank; }};' — '{stmt}'"
+        ));
+    };
+    let Some(close) = rest.rfind('}') else {
+        return Err(format!("graph: the braces do not close — '{stmt}'"));
+    };
+    if close < open {
+        return Err(format!("graph: the braces do not close — '{stmt}'"));
+    }
+    let head = rest[..open].trim();
+    let Some(hop_open) = head.rfind('(') else {
+        return Err(format!(
+            "graph takes the hop in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
+        ));
+    };
+    if !head.ends_with(')') {
+        return Err(format!(
+            "graph takes the hop in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
+        ));
+    }
+    let scope = head[..hop_open].trim();
+    let hop = head[hop_open + 1..head.len() - 1].trim();
+    if scope.is_empty() || hop.is_empty() {
+        return Err(format!("graph takes a scope path and a hop — '{stmt}'"));
+    }
+    let mut measures = Vec::new();
+    for m in rest[open + 1..close].split(';') {
+        let m = m.trim();
+        if m.is_empty() {
+            continue;
+        }
+        let name = m.split('(').next().unwrap_or(m).trim();
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            || (m.contains('(') && !m.ends_with(')'))
+        {
+            return Err(format!(
+                "graph: '{m}' is no measure; write the command's name with its options as a query does, 'betweenness(--normalized)' — '{stmt}'"
+            ));
+        }
+        if measures
+            .iter()
+            .any(|x: &String| x.split('(').next() == Some(name))
+        {
+            return Err(format!(
+                "graph: the measure '{name}' is declared twice — '{stmt}'"
+            ));
+        }
+        measures.push(m.to_string());
+    }
+    if measures.is_empty() {
+        return Err(format!("graph declares no measure — '{stmt}'"));
+    }
+    Ok(GraphDecl {
+        scope: scope.to_string(),
+        hop: hop.to_string(),
+        measures,
+        stmt: stmt.to_string(),
+    })
+}
+
 fn statements(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
@@ -1045,6 +1135,17 @@ fn parse_model_in(
                 }
                 model.units.extend(sub.units);
             }
+            "graph" => {
+                let decl = parse_graph(rest, stmt)?;
+                if model
+                    .graphs
+                    .iter()
+                    .any(|g| g.scope == decl.scope && g.hop == decl.hop)
+                {
+                    return Err(format!("graph is declared twice: '{stmt}'"));
+                }
+                model.graphs.push(decl);
+            }
             "index" => {
                 let (scope, property) = split_field(rest)?;
                 if model
@@ -1066,7 +1167,7 @@ fn parse_model_in(
             other => {
                 return Err(format!(
                     "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/alias/trait/index/tree/def/macro)"
+                     (expected node/ref/rel/edge/mount/alias/trait/index/graph/tree/def/macro)"
                 ));
             }
         }
@@ -1258,6 +1359,32 @@ mod tests {
     fn a_relation_without_a_condition_is_refused() {
         // two node sets joined by nothing are a cross product
         assert!(parse_model("rel /errors/error -> /deploys/deploy;").is_err());
+    }
+
+    #[test]
+    fn graph_declarations_parse_and_refuse_twice() {
+        let m = parse_model(
+            "graph /pages/*(->link) { pagerank; conncomp; };\n\
+             graph /mod/**(--*) { conncomp; betweenness(--normalized); bridges; };",
+        )
+        .unwrap();
+        assert_eq!(m.graphs.len(), 2);
+        assert_eq!(m.graphs[0].scope, "/pages/*");
+        assert_eq!(m.graphs[0].hop, "->link");
+        assert_eq!(m.graphs[0].measures, ["pagerank", "conncomp"]);
+        assert_eq!(m.graphs[1].hop, "--*");
+        assert_eq!(m.graphs[1].measures[1], "betweenness(--normalized)");
+        let twice = parse_model(
+            "graph /pages/*(->link) { pagerank; };\ngraph /pages/*(->link) { conncomp; };",
+        );
+        assert!(twice.unwrap_err().contains("graph is declared twice"));
+        assert!(parse_model("graph /pages/* { pagerank; };").is_err());
+        assert!(parse_model("graph /pages/*(->link) { };").is_err());
+        assert!(
+            parse_model("graph /pages/*(->link) { pagerank; pagerank(--damping=0.5); };")
+                .unwrap_err()
+                .contains("declared twice")
+        );
     }
 }
 

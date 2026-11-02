@@ -448,6 +448,7 @@ impl<A: AstAdapter> Host for A {
         starts: &[GraphExt],
         what: &crate::graph::edges::GraphTable,
         seeds: &[NodeId],
+        trace: &Correlation,
     ) -> Result<Vec<Value>, String> {
         let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
         match what {
@@ -455,31 +456,113 @@ impl<A: AstAdapter> Host for A {
                 spec,
                 damping,
                 rounds,
-            } => Ok(
-                crate::graph::edges::pagerank_values(self, &nodes, spec, *damping, *rounds)?
-                    .into_iter()
-                    .map(Value::Float)
-                    .collect(),
-            ),
+            } => Ok(crate::graph::edges::pagerank_values(
+                self, &nodes, spec, *damping, *rounds, trace,
+            )?
+            .into_iter()
+            .map(Value::Float)
+            .collect()),
             crate::graph::edges::GraphTable::Distance { spec, .. } => {
-                crate::graph::edges::distance_values(self, &nodes, spec, seeds)
+                crate::graph::edges::distance_values(self, &nodes, spec, seeds, trace)
             }
             crate::graph::edges::GraphTable::Kcore { spec } => {
-                crate::graph::edges::kcore_values(self, &nodes, spec)
+                crate::graph::edges::kcore_values(self, &nodes, spec, trace)
             }
-            crate::graph::edges::GraphTable::Betweenness { spec, normalized } => {
-                crate::graph::edges::betweenness_values(self, &nodes, spec, *normalized)
-            }
+            crate::graph::edges::GraphTable::Betweenness {
+                spec,
+                normalized,
+                edges: false,
+            } => crate::graph::edges::betweenness_values(self, &nodes, spec, *normalized, trace),
             crate::graph::edges::GraphTable::Conncomp { spec } => {
-                crate::graph::edges::conncomp_values(self, &nodes, spec)
+                crate::graph::edges::conncomp_values(self, &nodes, spec, trace)
+            }
+            crate::graph::edges::GraphTable::Artpoints { spec } => {
+                crate::graph::edges::artpoints_values(self, &nodes, spec, trace)
+            }
+            crate::graph::edges::GraphTable::Route { spec, .. } => {
+                crate::graph::edges::route_values(self, &nodes, spec, seeds, trace)
+            }
+            crate::graph::edges::GraphTable::Closeness { spec, harmonic } => {
+                crate::graph::edges::closeness_values(self, &nodes, spec, *harmonic, trace)
+            }
+            crate::graph::edges::GraphTable::Communities { spec, resolution } => {
+                crate::graph::edges::communities_values(self, &nodes, spec, *resolution, trace)
+            }
+            crate::graph::edges::GraphTable::Triangles { spec, coefficient } => {
+                crate::graph::edges::triangles_values(self, &nodes, spec, *coefficient, trace)
             }
             _ => Err("the graph library answers a value per node".into()),
         }
+    }
+    fn graph_reduce(
+        &self,
+        starts: &[GraphExt],
+        what: &crate::graph::edges::GraphTable,
+        part: &[usize],
+        trace: &Correlation,
+    ) -> Result<Value, String> {
+        let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
+        match what {
+            crate::graph::edges::GraphTable::Modularity {
+                spec, resolution, ..
+            } => {
+                crate::graph::edges::modularity_value(self, &nodes, spec, *resolution, part, trace)
+            }
+            _ => Err("the graph library answers one value only for modularity".into()),
+        }
+    }
+    fn graph_size(
+        &self,
+        starts: &[GraphExt],
+        what: &crate::graph::edges::GraphTable,
+        trace: &Correlation,
+    ) -> (usize, usize) {
+        let mut nodes: Vec<NodeId> = Vec::new();
+        for e in starts {
+            if !nodes.contains(&e.node) {
+                nodes.push(e.node);
+            }
+        }
+        match what.spec() {
+            Some(spec) => crate::graph::edges::graph_size(self, &nodes, spec, trace),
+            None => (nodes.len(), 0),
+        }
+    }
+    fn graph_bound(&self) -> usize {
+        AstAdapter::graph_bound(self)
+    }
+    fn ext_at(&self, node: NodeId) -> GraphExt {
+        GraphExt::at(node)
+    }
+    fn graph_declarations(&self) -> Vec<crate::graph::edges::GraphDeclaration> {
+        AstAdapter::graph_declarations(self)
+    }
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        starts: &[GraphExt],
+    ) -> Option<Vec<Value>> {
+        let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
+        AstAdapter::graph_measure(self, scope, hop, measure, &nodes)
+    }
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        starts: &[GraphExt],
+        values: &[Value],
+    ) {
+        let nodes: Vec<NodeId> = starts.iter().map(|e| e.node).collect();
+        AstAdapter::store_graph_measure(self, scope, hop, measure, &nodes, values)
     }
     fn graph_table(
         &self,
         starts: &[GraphExt],
         what: &crate::graph::edges::GraphTable,
+        trace: &Correlation,
     ) -> Result<Table, String> {
         // the context's nodes, each once in order of first arrival:
         // several threads may stand on one (spec: Expansion paths)
@@ -491,18 +574,22 @@ impl<A: AstAdapter> Host for A {
         }
         match what {
             crate::graph::edges::GraphTable::Edges(spec) => {
-                crate::graph::edges::edges_table(self, &nodes, spec)
+                crate::graph::edges::edges_table(self, &nodes, spec, trace)
             }
             crate::graph::edges::GraphTable::Nodes => {
                 Ok(crate::graph::edges::nodes_table(self, &nodes))
             }
-            crate::graph::edges::GraphTable::Pagerank { .. }
-            | crate::graph::edges::GraphTable::Distance { .. }
-            | crate::graph::edges::GraphTable::Kcore { .. }
-            | crate::graph::edges::GraphTable::Betweenness { .. }
-            | crate::graph::edges::GraphTable::Conncomp { .. } => {
-                Err("the graph library answers a value per node, not a table".into())
+            crate::graph::edges::GraphTable::Bridges { spec } => {
+                crate::graph::edges::bridges_table(self, &nodes, spec, trace)
             }
+            crate::graph::edges::GraphTable::Betweenness {
+                spec,
+                normalized,
+                edges: true,
+            } => {
+                crate::graph::edges::edge_betweenness_table(self, &nodes, spec, *normalized, trace)
+            }
+            _ => Err("the graph library answers a value per node, not a table".into()),
         }
     }
 }
@@ -794,6 +881,29 @@ fn calc_refuses(query: &Query) -> Option<String> {
 }
 
 impl Host for Calc {
+    fn graph_size(&self, _: &[()], _: &crate::graph::edges::GraphTable, _: &()) -> (usize, usize) {
+        (0, 0)
+    }
+    fn ext_at(&self, _: NodeId) {}
+    fn graph_reduce(
+        &self,
+        _: &[()],
+        _: &crate::graph::edges::GraphTable,
+        _: &[usize],
+        _: &(),
+    ) -> Result<Value, String> {
+        Err(no_arbor("the graph library"))
+    }
+    fn graph_bound(&self) -> usize {
+        10_000_000
+    }
+    fn graph_declarations(&self) -> Vec<crate::graph::edges::GraphDeclaration> {
+        Vec::new()
+    }
+    fn graph_measure(&self, _: &str, _: &str, _: &str, _: &[()]) -> Option<Vec<Value>> {
+        None
+    }
+    fn store_graph_measure(&self, _: &str, _: &str, _: &str, _: &[()], _: &[Value]) {}
     type Ext = ();
     type Trace = ();
 
@@ -998,15 +1108,12 @@ impl Host for Calc {
         &self,
         _: &[()],
         what: &crate::graph::edges::GraphTable,
+        _: &(),
     ) -> Result<Table, String> {
         Err(no_arbor(match what {
             crate::graph::edges::GraphTable::Edges(_) => "the command `edges`",
             crate::graph::edges::GraphTable::Nodes => "the command `nodes`",
-            crate::graph::edges::GraphTable::Pagerank { .. }
-            | crate::graph::edges::GraphTable::Distance { .. }
-            | crate::graph::edges::GraphTable::Kcore { .. }
-            | crate::graph::edges::GraphTable::Betweenness { .. }
-            | crate::graph::edges::GraphTable::Conncomp { .. } => "the graph library",
+            _ => "the graph library",
         }))
     }
     fn graph_values(
@@ -1014,6 +1121,7 @@ impl Host for Calc {
         _: &[()],
         _: &crate::graph::edges::GraphTable,
         _: &[()],
+        _: &(),
     ) -> Result<Vec<Value>, String> {
         Err(no_arbor("the graph library"))
     }

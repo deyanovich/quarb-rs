@@ -211,5 +211,7 @@ pub(crate) fn eval_pred_expr_at(
     scope: Scope<'_, GraphExt>,
 ) -> bool {
     let scope = at_witness(scope, bound);
-    eval_pred_expr(adapter, &GraphExt::at(node), e, trace, scope)
+    crate::value::ambient::with_keying(|| {
+        eval_pred_expr(adapter, &GraphExt::at(node), e, trace, scope)
+    })
 }

@@ -353,6 +353,7 @@ pub(crate) trait Host {
         &self,
         starts: &[Self::Ext],
         what: &crate::graph::edges::GraphTable,
+        trace: &Self::Trace,
     ) -> Result<Table, String>;
     /// `@| graph:pagerank` — the graph library (spec: The graph
     /// library): one value per start, in the order given, over the
@@ -363,7 +364,51 @@ pub(crate) trait Host {
         starts: &[Self::Ext],
         what: &crate::graph::edges::GraphTable,
         seeds: &[<Self::Ext as Attachment>::Key],
+        trace: &Self::Trace,
     ) -> Result<Vec<Value>, String>;
+    /// Standing at a node with nothing else: the thread a value's
+    /// node reference names (spec: reading through a reference).
+    fn ext_at(&self, node: crate::NodeId) -> Self::Ext;
+    /// `@| graph:modularity`: one value for the context over the
+    /// partition `part`, a part index per start.
+    fn graph_reduce(
+        &self,
+        starts: &[Self::Ext],
+        what: &crate::graph::edges::GraphTable,
+        part: &[usize],
+        trace: &Self::Trace,
+    ) -> Result<Value, String>;
+    /// The induced subgraph's size, nodes and edges, before a library
+    /// command computes (spec: The graph library, the cost).
+    fn graph_size(
+        &self,
+        starts: &[Self::Ext],
+        what: &crate::graph::edges::GraphTable,
+        trace: &Self::Trace,
+    ) -> (usize, usize);
+    /// The adapter's graph bound (spec: Other bounds).
+    fn graph_bound(&self) -> usize;
+    /// The graphs the source declares (spec: Graph Declarations).
+    fn graph_declarations(&self) -> Vec<crate::graph::edges::GraphDeclaration>;
+    /// A declared measure's values for the context, `None` where the
+    /// source declines.
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        starts: &[Self::Ext],
+    ) -> Option<Vec<Value>>;
+    /// The engine's computed values of a declared measure, offered
+    /// to the source to keep.
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        starts: &[Self::Ext],
+        values: &[Value],
+    );
     /// A value as an XML element named `tag`.
     fn value_to_xml(&self, v: &Value, tag: &str) -> String;
 }

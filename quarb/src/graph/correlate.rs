@@ -225,12 +225,16 @@ fn streamed_count(
                         _ => None,
                     };
                     indexed.unwrap_or_else(|| {
+                        let sought = crate::graph::steps::Sought::of(step);
                         let mut out = Vec::new();
                         let mut stack: Vec<NodeId> = adapter.children(host);
                         stack.reverse();
                         while let Some(n) = stack.pop() {
                             if matches_step(adapter, n, step) {
                                 out.push(n);
+                            }
+                            if !sought.may_hold_below(adapter, n) {
+                                continue;
                             }
                             let mut kids = adapter.children(adapter.child_host(n));
                             kids.reverse();
@@ -357,11 +361,15 @@ fn streamed_count(
                         }
                     }
                     None => {
+                        let sought = crate::graph::steps::Sought::of(step);
                         let mut stack: Vec<NodeId> = adapter.children(at);
                         stack.reverse();
                         while let Some(c) = stack.pop() {
                             if matches_step(adapter, c, step) {
                                 tally(c, step, &mut count, &mut origins);
+                            }
+                            if !sought.may_hold_below(adapter, c) {
+                                continue;
                             }
                             let kids = adapter.children(c);
                             stack.extend(kids.into_iter().rev());
@@ -467,11 +475,40 @@ pub(crate) fn eval_query_caps_outer(
     // The command ordinal is the origin coordinate: set at the top
     // level only (a body's commands inherit the command that runs it).
     let top = outer.is_none();
-    caps = apply_commands(&query.pipeline[..at], 0, top, caps, adapter, &trace, outer);
+    // the mode the pipeline enters in is static (spec: Execution
+    // Modes): a projected branch in value mode, plain navigation in
+    // navigation mode; the join's tail continues where the head left
+    let start = if query.branches.iter().any(|b| b.projection.is_some()) {
+        crate::syntax::parser::PipeMode::Scalar
+    } else {
+        crate::syntax::parser::PipeMode::Nav
+    };
+    let mid = query.pipeline[..at]
+        .iter()
+        .fold(start, |m, c| crate::syntax::parser::command_mode_out(c, m));
+    caps = apply_commands(
+        &query.pipeline[..at],
+        start,
+        0,
+        top,
+        caps,
+        adapter,
+        &trace,
+        outer,
+    );
     if !query.correlations.is_empty() {
         caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
     }
-    caps = apply_commands(&query.pipeline[at..], at, top, caps, adapter, &trace, outer);
+    caps = apply_commands(
+        &query.pipeline[at..],
+        mid,
+        at,
+        top,
+        caps,
+        adapter,
+        &trace,
+        outer,
+    );
     (caps, pipeline_projected(query))
 }
 

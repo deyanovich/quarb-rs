@@ -55,8 +55,37 @@ pub(crate) fn eval_bare<H: Host>(
     }
     let at = query.join_at.min(query.pipeline.len());
     let top = outer.is_none();
-    caps = apply_commands(&query.pipeline[..at], 0, top, caps, host, &trace, outer);
-    caps = apply_commands(&query.pipeline[at..], at, top, caps, host, &trace, outer);
+    // the mode the pipeline enters in is static (spec: Execution
+    // Modes): a projected branch in value mode, plain navigation in
+    // navigation mode; the join's tail continues where the head left
+    let start = if query.branches.iter().any(|b| b.projection.is_some()) {
+        crate::syntax::parser::PipeMode::Scalar
+    } else {
+        crate::syntax::parser::PipeMode::Nav
+    };
+    let mid = query.pipeline[..at]
+        .iter()
+        .fold(start, |m, c| crate::syntax::parser::command_mode_out(c, m));
+    caps = apply_commands(
+        &query.pipeline[..at],
+        start,
+        0,
+        top,
+        caps,
+        host,
+        &trace,
+        outer,
+    );
+    caps = apply_commands(
+        &query.pipeline[at..],
+        mid,
+        at,
+        top,
+        caps,
+        host,
+        &trace,
+        outer,
+    );
     (caps, pipeline_projected(query))
 }
 

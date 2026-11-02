@@ -2,6 +2,7 @@
 
 use crate::pipeline::*;
 use crate::syntax::ast::IndexSpec;
+use crate::syntax::parser::{PipeMode, command_mode_out};
 
 /// One group of a keyed aggregate: the key, its fields, its members.
 type Group<X> = (Vec<Value>, Vec<(String, Value, Prov)>, Vec<Thread<X>>);
@@ -141,6 +142,7 @@ pub(crate) fn topic_field(op: &Operand) -> Option<Vec<String>> {
 /// its time on the words instead of on lists it then discards.
 pub(crate) fn apply_commands<H: Host>(
     commands: &[Command],
+    mode: PipeMode,
     offset: usize,
     top: bool,
     mut caps: Vec<Thread<H::Ext>>,
@@ -148,6 +150,11 @@ pub(crate) fn apply_commands<H: Host>(
     trace: &H::Trace,
     outer: Option<&Scope<'_, H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
+    // The mode each command runs in is the parser's, folded along
+    // the pipeline from the mode the slice enters in (spec:
+    // Execution Modes): a push returns a thread to navigation mode
+    // while its topic stays, so the mode is not the topic's presence.
+    let mut mode = mode;
     let mut i = 0;
     while i < commands.len() {
         if top {
@@ -157,11 +164,13 @@ pub(crate) fn apply_commands<H: Host>(
         {
             if call.name == "group" && next.name == "count" && next.args.is_empty() {
                 caps = keyed_agg(call, caps, host, trace, outer, None, true);
+                mode = command_mode_out(&commands[i + 1], command_mode_out(&commands[i], mode));
                 i += 2;
                 continue;
             }
         }
-        caps = apply_command(&commands[i], caps, host, trace, outer);
+        caps = apply_command_in(&commands[i], mode, caps, host, trace, outer);
+        mode = command_mode_out(&commands[i], mode);
         // A walk's facts are in scope for the one command after it.
         for c in &mut caps {
             c.ext.end_walk();
@@ -180,8 +189,33 @@ pub(crate) fn apply_commands<H: Host>(
     caps
 }
 
+/// The mode a pipeline enters in, read off the threads it starts
+/// from: a value head hands over topics (value mode), a node head
+/// none (navigation mode). Right at a head only; further on the
+/// parser's table decides (`apply_commands`).
+pub(crate) fn start_mode<X: crate::thread::Attachment>(caps: &[Thread<X>]) -> PipeMode {
+    if caps.iter().any(|c| c.topic.is_some()) {
+        PipeMode::Scalar
+    } else {
+        PipeMode::Nav
+    }
+}
+
+/// [`apply_command_in`] where the mode is not tracked: the inner
+/// command of a wrapper, which runs as the wrapper's position has it.
 pub(crate) fn apply_command<H: Host>(
     command: &Command,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    apply_command_in(command, PipeMode::Nav, caps, host, trace, outer)
+}
+
+pub(crate) fn apply_command_in<H: Host>(
+    command: &Command,
+    mode: PipeMode,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
     trace: &H::Trace,
@@ -832,7 +866,15 @@ pub(crate) fn apply_command<H: Host>(
         }
         // A value expression against the capsa's node becomes the
         // topic.
-        Command::Expr(expr) => expr_command(expr, caps, host, trace, outer, peers),
+        Command::Expr(expr) => expr_command(
+            expr,
+            matches!(mode, PipeMode::Scalar),
+            caps,
+            host,
+            trace,
+            outer,
+            peers,
+        ),
         // ... and a pushed one is a computed column.
         Command::ExprPush { name, expr } => {
             expr_push_command(name, expr, caps, host, trace, outer, peers)
@@ -944,7 +986,7 @@ pub(crate) fn apply_command<H: Host>(
         // and the one capsa out holds the expression's value.
         Command::AggExpr(expr) => {
             let seed = seed_capsa(&caps, host);
-            expr_command(expr, vec![seed], host, trace, outer, peers)
+            expr_command(expr, true, vec![seed], host, trace, outer, peers)
         }
         // `@| %.` / `@| $.name` — a register accessor after the
         // aggregation pipe reads once: the regulae every capsa
@@ -1018,7 +1060,7 @@ pub(crate) fn apply_command<H: Host>(
         Command::Agg(call)
             if call.name == "edges" || call.name == "nodes" =>
         {
-            graph_table_command(call, caps, host)
+            graph_table_command(call, caps, host, trace)
         }
         // `@| timeline(EXPR[; ANCHOR][; forward])` — the narrative
         // point carried from capsa to capsa. Row-aligned like
@@ -1160,7 +1202,10 @@ pub(crate) fn apply_command<H: Host>(
             .into_iter()
             .enumerate()
             .flat_map(|(i, mut c)| match recall(&c.register, r) {
-                Value::Quarq(q) => apply_commands(&q.body, 0, false, vec![c], host, trace, outer),
+                Value::Quarq(q) => {
+                    let mode = start_mode(std::slice::from_ref(&c));
+                    apply_commands(&q.body, mode, 0, false, vec![c], host, trace, outer)
+                }
                 // a projector is the simplest quarq: read on the capsa
                 v if v.holds_projector() => {
                     let read = {
@@ -1419,6 +1464,16 @@ pub(crate) fn agg_as_func_command<H: Host>(
                         .collect()
                 }
                 None => match c.topic.take() {
+                    // `join` over a null topic is null, as the other
+                    // reductions over nothing are: a null has no
+                    // values to join, where a list of one null joins
+                    // its one empty item
+                    Some(Value::Null) if call.name == "join" => {
+                        c.topic = Some(Value::Null);
+                        c.prov = c.prov.flat();
+                        c.members = Vec::new();
+                        return c;
+                    }
                     // `| type` names the value in front of it, a list
                     // of one included (spec: List Construction, draft
                     // 166: a list of one item is a list)
@@ -1628,6 +1683,7 @@ pub(crate) fn subcontext_command<H: Host>(
 /// `| expr` — an expression over the topic. `apply_command`'s arm.
 pub(crate) fn expr_command<H: Host>(
     expr: &Operand,
+    value_mode: bool,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
     trace: &H::Trace,
@@ -1637,6 +1693,21 @@ pub(crate) fn expr_command<H: Host>(
     caps.into_iter()
         .enumerate()
         .flat_map(|(i, mut c)| {
+            // A bare projection over a null topic in value mode reads
+            // nothing: the read of a missing thing is null (spec:
+            // Projectors, "a read on a null topic later in a pipeline
+            // is null"), so `| :.r | ::path` and `map(::path)` over an
+            // absent route answer null, not a property of the node the
+            // thread stands at. The mode is the parser's, static: after
+            // a push the thread is in navigation mode with its topic
+            // kept (draft 154), and `| .:r | [:.r = null] | ::name`
+            // reads the node whatever was filed. Any other topic
+            // leaves `::key` the position's property, as the colon
+            // ladder has it, and an expression around the projection
+            // (`?? ::b`) still reads the node.
+            if value_mode && matches!(c.topic, Some(Value::Null)) && bare_projection(expr) {
+                return vec![c];
+            }
             let scope = c.scope(Some(i + 1), peers, outer);
             // An operand that yields several values is a hop in
             // value position: each value is its own row, as each
@@ -1663,6 +1734,19 @@ pub(crate) fn expr_command<H: Host>(
             vec![c]
         })
         .collect()
+}
+
+/// A projection standing alone at the cursor: `:k`, `::k`, `:::k`,
+/// no steps before it.
+fn bare_projection(expr: &Operand) -> bool {
+    matches!(
+        expr,
+        Operand::Rel {
+            steps,
+            projection: Some(_),
+            anchor: Anchor::Current,
+        } if steps.is_empty()
+    )
 }
 
 /// `| project(expr)` / `| project(expr; --record)` (spec: Projection
@@ -2524,6 +2608,12 @@ pub(crate) fn order_command<H: Host>(
     caps: Vec<Thread<H::Ext>>,
     host: &H,
 ) -> Vec<Thread<H::Ext>> {
+    // an order over values from a withheld property would reveal
+    // them (spec: omitted data)
+    if caps.iter().any(|c| c.prov.origins.omitted) {
+        crate::value::ambient::refuse_omitted();
+        return Vec::new();
+    }
     // `first` / `last` over an empty context: an empty input
     // reduces to null (spec: Aggregate Commands), a thread with no
     // position.
@@ -2802,6 +2892,23 @@ pub(crate) fn filter_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
+    // a filter over values that came from a withheld property would
+    // reveal them by who survives (spec: omitted data)
+    if caps.iter().any(|c| c.prov.origins.omitted) {
+        crate::value::ambient::refuse_omitted();
+        return Vec::new();
+    }
+    crate::value::ambient::with_keying(|| filter_threads(cond, caps, host, trace, outer, peers))
+}
+
+fn filter_threads<H: Host>(
+    cond: &PredExpr,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
     caps.into_iter()
         .enumerate()
         .filter_map(|(i, mut c)| {
@@ -2895,11 +3002,26 @@ fn of_values<H: Host>(
         .collect()
 }
 
+/// The aggregates that reveal nothing of the values they are given
+/// (spec: omitted data): a count, the structural ones, the renderers
+/// that print what is there.
+const OMISSION_SAFE: &[&str] = &[
+    "count", "collapse", "first", "last", "nodes", "edges", "tree", "outline", "number", "json",
+    "jsonl", "kaiv", "yaml", "toml", "xml", "csv", "tsv", "md", "html", "text", "atrep", "copy",
+    "explain", "timeline",
+];
+
 pub(crate) fn agg_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
 ) -> Vec<Thread<H::Ext>> {
+    // an aggregate over values from a withheld property would reveal
+    // them (spec: omitted data); a count or a rendering does not
+    if !OMISSION_SAFE.contains(&call.name.as_str()) && caps.iter().any(|c| c.prov.origins.omitted) {
+        crate::value::ambient::refuse_omitted();
+        return Vec::new();
+    }
     // The output boundary is the tool's: `qua`, `quai` and the
     // session take `@| encoding(LABEL)` off the end of a query
     // and encode what they print. Reaching the executor means
@@ -3109,6 +3231,12 @@ pub(crate) fn keyed_agg<H: Host>(
     peers: Option<&Peers<H::Ext>>,
     counting: bool,
 ) -> Vec<Thread<H::Ext>> {
+    // a rank over values from a withheld property would reveal them
+    // by who stands where (spec: omitted data)
+    if caps.iter().any(|c| c.prov.origins.omitted) {
+        crate::value::ambient::refuse_omitted();
+        return Vec::new();
+    }
     // `top` / `bottom` carry their count — or a rank band, `top(11..20;
     // ::key)`, `top(-10; ::key)` from the far end — as a leading literal.
     let (count, key_args): (Option<&Arg>, &[Arg]) = match call.args.split_first() {

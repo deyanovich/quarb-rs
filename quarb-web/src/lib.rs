@@ -555,11 +555,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 // A row answers to its kind (`//page`, `//dir`,
                 // `//tag`), to its path segment, to the segment's
                 // stem, and to its title.
-                // A redirect stub is a page that stands for another
-                // (`//page<redirect>`), answering to both words.
+                // A redirect stub stands for a page and is not one
+                // (as a symlink): it answers to `redirect`, never to
+                // `page`.
                 Some(r) => {
                     r.kind.name() == name
-                        || (r.kind == PageKind::Redirect && name == "page")
                         || r.name == name
                         || (matches!(r.kind, PageKind::Page | PageKind::Redirect)
                             && Self::stem(&r.name) == name)
@@ -716,10 +716,6 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     return vec!["row".to_string()];
                 };
                 let mut out = vec![r.kind.name().to_string()];
-                if r.kind == PageKind::Redirect {
-                    // a page wearing the trait (draft 164)
-                    out.insert(0, "page".to_string());
-                }
                 if r.kind == PageKind::Resource {
                     // the target's extension, and `external` for
                     // another host's resource
@@ -813,6 +809,11 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                 if PAGE_PROPS.contains(&name) {
                     return r.tags.iter().any(|t| t == name);
                 }
+                // another row's kind is never a page's trait: no
+                // need to read the document to say so
+                if kind_named(name).is_some() || matches!(name, "site" | "listing" | "web") {
+                    return false;
+                }
                 self.graft(k).is_some_and(|g| g.has_trait(g.root(), name))
             }
             Node::Row(..) => match self.graft_node(id) {
@@ -844,6 +845,9 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                     "title" => r.title.clone().map(Value::Str),
                     "href" | "url" => r.url.clone().map(Value::Str),
                     "path" => Some(Value::Str(r.path.clone())),
+                    // a directory has no head to read: its name is
+                    // its last path segment, as a property too
+                    "name" if r.kind == PageKind::Dir => Some(Value::Str(r.name.clone())),
                     "category" => r.category.clone().map(Value::Str),
                     "categories" => Some(list(&r.categories)),
                     "tags" => Some(list(&r.tags)),
@@ -1065,6 +1069,37 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
     /// section (`links`), but the edge is page to page, as
     /// `backlinks` already reads it and as the stored rank counts
     /// it, so `//page @| graph:pagerank(->link)` equals `::pagerank`.
+    /// The level's own declared graph (spec: Graph Declarations): the
+    /// stored rank is the rank of every page over the link edges, so
+    /// `//page @| graph:pagerank(->link)` is answered from the column
+    /// when the context is every page.
+    fn graph_declarations(&self) -> Vec<quarb::GraphDeclaration> {
+        vec![quarb::GraphDeclaration {
+            scope: "//page".to_string(),
+            hop: "->link".to_string(),
+            measures: vec!["pagerank".to_string()],
+        }]
+    }
+
+    fn graph_measure(
+        &self,
+        _scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        if hop != "->link" || measure != "pagerank" {
+            return None;
+        }
+        nodes
+            .iter()
+            .map(|&id| match self.decode(id) {
+                Node::Row(k, 0) => self.row(k).map(|r| Value::Float(r.analytics.pagerank)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn edge_rows(&self, id: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
         let Node::Row(k, 0) = self.decode(id) else {
             return self
@@ -1122,7 +1157,13 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
                         let rs = self.store.in_roles(k);
                         let ss: Vec<PageKey> = rs.iter().map(|(_, s)| *s).collect();
                         self.hydrate(&ss);
+                        // A page is no backlink of its own: its
+                        // fragment links land on its sections, and
+                        // the sections list it (`in_fragments`).
                         for (role, s) in rs {
+                            if s == k {
+                                continue;
+                            }
                             out.push((role, self.page_node(s)));
                         }
                         for s in self.store.related(k, LinkKind::Redirect, LinkDir::In) {
@@ -1266,6 +1307,32 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
     /// `//page`, `//dir`, `//tag`, `//category` below the root, the
     /// sites, a site, a container, or a directory, from the store's
     /// rank order — no walk of the tree.
+    /// A page's subtree is its document (the text reading's sections
+    /// and paragraphs): no page, dir, redirect, tag, category or
+    /// resource stands below a page, a redirect, a resource or any
+    /// node of a document, so a deep walk for one of those need not
+    /// descend there. A cost hint; the answer is the same.
+    fn may_hold_below(&self, id: NodeId, name: Option<&str>, traits: &[&str]) -> bool {
+        let row_level = |t: &str| {
+            kind_named(t).is_some()
+                || matches!(t, "site" | "orphan" | "row")
+                || t.starts_with("tag:")
+                || t.starts_with("category:")
+        };
+        let seeks_rows = name.is_some_and(row_level) || traits.iter().any(|t| row_level(t));
+        if !seeks_rows {
+            return true;
+        }
+        match self.decode(id) {
+            Node::Row(k, 0) => !matches!(
+                self.row(k).map(|r| r.kind),
+                Some(PageKind::Page | PageKind::Redirect | PageKind::Resource)
+            ),
+            Node::Row(..) => false,
+            _ => true,
+        }
+    }
+
     fn descendants_named(&self, id: NodeId, name: &str) -> Option<Vec<(NodeId, usize)>> {
         let kind = kind_named(name)?;
         let sites: Vec<SiteId> = self.store.catalog().sites.iter().map(|s| s.id).collect();

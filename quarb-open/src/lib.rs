@@ -1912,12 +1912,16 @@ pub fn parse_kaiv_ext(
 /// target first, and the decoding record a read leaves goes on the
 /// mount's root.
 pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
+    // `?root=PATH` comes off any target first (spec: Mounts, the
+    // root option): the source opens whole, then the subtree at
+    // PATH is the tree
+    let (p, root) = take_root_option(p);
     let ctx = &SourceCtx::default();
-    let p = take_encoding_option(p, ctx)?;
+    let p = take_encoding_option(&p, ctx)?;
     let _ = ctx.take_record();
     let m = open_mount_inner(&p, cli, ctx)?;
     ctx.clear_encoding();
-    Ok(match take_source_record(ctx) {
+    let m = match take_source_record(ctx) {
         Some((encoding, replaced)) => Mounted {
             adapter: Box::new(quarb::source::Sourced {
                 inner: m.adapter,
@@ -1928,7 +1932,56 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
             family: m.family,
         },
         None => m,
+    };
+    let Some(root) = root else { return Ok(m) };
+    let adapter = quarb::rooted::Rooted::at(m.adapter, &root)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+    // the locator renders relative to the root as the paths do
+    let inner_render = m.render;
+    let root_loc = inner_render(adapter.root());
+    let render: Box<dyn Fn(NodeId) -> String> = Box::new(move |n| {
+        let loc = inner_render(n);
+        match loc.strip_prefix(root_loc.as_str()) {
+            Some("") => "/".to_string(),
+            Some(rest) if rest.starts_with('/') => rest.to_string(),
+            _ => loc,
+        }
+    });
+    Ok(Mounted {
+        adapter: Box::new(adapter),
+        render,
+        family: m.family,
     })
+}
+
+/// The `root=` option off a target's query, and the target without
+/// it; a path that exists on disk, or one with no query, is taken
+/// as is.
+fn take_root_option(p: &Path) -> (PathBuf, Option<String>) {
+    let Some(s) = p.to_str() else {
+        return (p.to_path_buf(), None);
+    };
+    if p.exists() || !s.contains('?') {
+        return (p.to_path_buf(), None);
+    }
+    let (path, query) = s.rsplit_once('?').unwrap();
+    let mut root = None;
+    let mut rest = Vec::new();
+    for pair in query.split('&').filter(|x| !x.is_empty()) {
+        match pair.split_once('=') {
+            Some(("root", v)) => root = Some(v.to_string()),
+            _ => rest.push(pair),
+        }
+    }
+    if root.is_none() {
+        return (p.to_path_buf(), None);
+    }
+    let target = if rest.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", rest.join("&"))
+    };
+    (PathBuf::from(target), root)
 }
 
 /// A document's text-level model from a text and what the source

@@ -1414,6 +1414,17 @@ pub trait AstAdapter {
         None
     }
 
+    /// Whether a deep walk looking for `name` (None for any name)
+    /// with `traits` may still find a match below `node`; a cost
+    /// hint only, never a reading. An adapter whose subtrees are
+    /// typed answers false where nothing sought can stand beneath
+    /// (a web page's subtree is its document: no page, dir, redirect,
+    /// tag or category below it), and the walk skips the subtree.
+    /// True by default.
+    fn may_hold_below(&self, _node: NodeId, _name: Option<&str>, _traits: &[&str]) -> bool {
+        true
+    }
+
     /// The search fast path: the nodes one step reaches from `from`
     /// under `plan`, answered from an index — `None` keeps the
     /// engine's walk (the default folds `children_named`,
@@ -1521,6 +1532,75 @@ pub trait AstAdapter {
     /// `--frontier-bound`).
     fn frontier_bound(&self) -> usize {
         100_000
+    }
+
+    /// Whether `property(node, name)` answered None because the caller
+    /// may not read the property, rather than the node lacking it
+    /// (spec: omitted data). Asked only after an absent read. The
+    /// property stays absent; the engine warns once per query, and
+    /// refuses where the read would key a filter, a sort, a group or
+    /// an aggregate. False by default.
+    fn property_withheld(&self, _node: NodeId, _name: &str) -> bool {
+        false
+    }
+
+    /// The properties the caller may not read anywhere in the source
+    /// (spec: omitted data): never pushed into the store's query as a
+    /// conjunct or an index lookup. None by default.
+    fn withheld_properties(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether the source dropped whole nodes for the caller in this
+    /// run (spec: omitted data): a gated table or branch that is
+    /// simply not there. Asked once after the run; true raises the
+    /// omission warning. False by default.
+    fn nodes_withheld(&self) -> bool {
+        false
+    }
+
+    /// The graph bound (spec: The graph library, Other bounds): the
+    /// most cost units a library command may compute over, a unit
+    /// being a node or an edge of the induced subgraph (their product
+    /// for betweenness); reaching it refuses before the command
+    /// computes. Ten million unless the adapter says otherwise.
+    fn graph_bound(&self) -> usize {
+        10_000_000
+    }
+
+    /// The graphs the source maintains measures over (spec: Graph
+    /// Declarations): a model's `graph` statements, or a level's own
+    /// stored measures (the web level's rank). None by default.
+    fn graph_declarations(&self) -> Vec<crate::graph::edges::GraphDeclaration> {
+        Vec::new()
+    }
+
+    /// A declared measure's values for `nodes`, the declared scope
+    /// entire in the engine's order, once the engine has found the
+    /// command's hop, options and context to be the declared ones:
+    /// one value per node, or one table for a table-answering
+    /// command. `None` declines, and the engine computes.
+    fn graph_measure(
+        &self,
+        _scope: &str,
+        _hop: &str,
+        _measure: &str,
+        _nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        None
+    }
+
+    /// The values the engine computed for a declared measure the
+    /// source declined, offered for the source to keep and answer
+    /// next time; nothing by default.
+    fn store_graph_measure(
+        &self,
+        _scope: &str,
+        _hop: &str,
+        _measure: &str,
+        _nodes: &[NodeId],
+        _values: &[Value],
+    ) {
     }
 
     /// The data provenance of `node` — the `:source` /
@@ -1635,9 +1715,11 @@ macro_rules! forward_ast_adapter {
             aliased_metadata links backlinks link_rows edge_rows backlink_rows link_consumed resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
-            descendants_where select select_plan estimate count
+            descendants_where may_hold_below select select_plan estimate count
             prefetch_properties
             prefetch_links whole_listings link_property_names acyclic_link quantifier_bound frontier_bound
+            property_withheld withheld_properties nodes_withheld
+            graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
             provenance_list unit_scale unit_names declared_notation
         );
@@ -1679,6 +1761,14 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [backlinks $($r:ident)*] backlinks) => {};
     (@unless [$i:tt] [link_rows $($r:ident)*] link_rows) => {};
     (@unless [$i:tt] [edge_rows $($r:ident)*] edge_rows) => {};
+    (@unless [$i:tt] [graph_bound $($r:ident)*] graph_bound) => {};
+    (@unless [$i:tt] [may_hold_below $($r:ident)*] may_hold_below) => {};
+    (@unless [$i:tt] [property_withheld $($r:ident)*] property_withheld) => {};
+    (@unless [$i:tt] [withheld_properties $($r:ident)*] withheld_properties) => {};
+    (@unless [$i:tt] [nodes_withheld $($r:ident)*] nodes_withheld) => {};
+    (@unless [$i:tt] [graph_declarations $($r:ident)*] graph_declarations) => {};
+    (@unless [$i:tt] [graph_measure $($r:ident)*] graph_measure) => {};
+    (@unless [$i:tt] [store_graph_measure $($r:ident)*] store_graph_measure) => {};
     (@unless [$i:tt] [backlink_rows $($r:ident)*] backlink_rows) => {};
     (@unless [$i:tt] [link_consumed $($r:ident)*] link_consumed) => {};
     (@unless [$i:tt] [resolve $($r:ident)*] resolve) => {};
@@ -1890,6 +1980,46 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] edge_rows) => {
         fn edge_rows(&self, node: $crate::NodeId) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
             $crate::forward_ast_adapter!(@target self $i).edge_rows(node)
+        }
+    };
+    (@fwd [$i:tt] graph_bound) => {
+        fn graph_bound(&self) -> usize {
+            $crate::forward_ast_adapter!(@target self $i).graph_bound()
+        }
+    };
+    (@fwd [$i:tt] may_hold_below) => {
+        fn may_hold_below(&self, node: $crate::NodeId, name: Option<&str>, traits: &[&str]) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).may_hold_below(node, name, traits)
+        }
+    };
+    (@fwd [$i:tt] property_withheld) => {
+        fn property_withheld(&self, node: $crate::NodeId, name: &str) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).property_withheld(node, name)
+        }
+    };
+    (@fwd [$i:tt] withheld_properties) => {
+        fn withheld_properties(&self) -> Vec<String> {
+            $crate::forward_ast_adapter!(@target self $i).withheld_properties()
+        }
+    };
+    (@fwd [$i:tt] nodes_withheld) => {
+        fn nodes_withheld(&self) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).nodes_withheld()
+        }
+    };
+    (@fwd [$i:tt] graph_declarations) => {
+        fn graph_declarations(&self) -> Vec<$crate::GraphDeclaration> {
+            $crate::forward_ast_adapter!(@target self $i).graph_declarations()
+        }
+    };
+    (@fwd [$i:tt] graph_measure) => {
+        fn graph_measure(&self, scope: &str, hop: &str, measure: &str, nodes: &[$crate::NodeId]) -> Option<Vec<$crate::Value>> {
+            $crate::forward_ast_adapter!(@target self $i).graph_measure(scope, hop, measure, nodes)
+        }
+    };
+    (@fwd [$i:tt] store_graph_measure) => {
+        fn store_graph_measure(&self, scope: &str, hop: &str, measure: &str, nodes: &[$crate::NodeId], values: &[$crate::Value]) {
+            $crate::forward_ast_adapter!(@target self $i).store_graph_measure(scope, hop, measure, nodes, values)
         }
     };
     (@fwd [$i:tt] backlink_rows) => {

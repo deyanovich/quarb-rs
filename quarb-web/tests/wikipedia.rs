@@ -191,17 +191,17 @@ fn the_path_tree() {
     let store = build(Tree::Path, "path");
     let a = WebAdapter::new(store);
     assert_eq!(lines(&a, "/sites/*::host"), ["it.example.org"]);
-    // the four articles and the redirect stub, which answers
-    // `//page` too (draft 164)
-    assert_eq!(lines(&a, "//page @| count"), ["5"]);
+    // the four articles; the redirect stub stands for one and is no
+    // page (spec: Text Readings, the web reading)
+    assert_eq!(lines(&a, "//page @| count"), ["4"]);
+    assert_eq!(lines(&a, "//redirect @| count"), ["1"]);
     assert_eq!(
         lines(&a, "//page::path"),
         [
             "wiki/Roma",
             "wiki/Guerra_degli_emù",
             "wiki/Lazio",
-            "wiki/Italia",
-            "wiki/Rome"
+            "wiki/Italia"
         ]
     );
     assert_eq!(lines(&a, "//dir::path"), ["wiki"]);
@@ -332,9 +332,8 @@ fn the_path_tree() {
 fn the_category_tree() {
     let store = build(Tree::Category, "cat");
     let a = WebAdapter::new(store);
-    // the four articles and the redirect stub, which answers
-    // `//page` too (draft 164)
-    assert_eq!(lines(&a, "//page @| count"), ["5"]);
+    // the four articles; the redirect stub is no page
+    assert_eq!(lines(&a, "//page @| count"), ["4"]);
     assert_eq!(lines(&a, "//dir @| count"), ["0"]);
     // Roma's shallowest declared category is Città (depth 3), so it
     // hangs there, not under Capitali (depth 4).

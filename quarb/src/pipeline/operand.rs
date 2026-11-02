@@ -124,6 +124,16 @@ pub(crate) fn eval_operand<H: Host>(
         // thread still stands at a node, a key that is no core
         // field answering null without a refusal (`| :name |
         // indent(:depth - 1)`, `bibref(cmos) | :genus`).
+        // `:name` with a node reference as the topic reads the node the
+        // reference names (`map(:name)` over a route)
+        Operand::Field { base, name }
+            if matches!(**base, Operand::Topic)
+                && crate::graph::navigate::CORE_FIELDS.contains(&name.as_str())
+                && scope.topic.is_some_and(|t| matches!(t, Value::Node(_))) =>
+        {
+            let topic = scope.topic.cloned().unwrap_or(Value::Null);
+            vec![through(host, &topic, &Projection::CoreMeta(name.clone()))]
+        }
         Operand::Field { base, name }
             if matches!(**base, Operand::Topic) && scope.topic.is_none() =>
         {
@@ -146,7 +156,20 @@ pub(crate) fn eval_operand<H: Host>(
         }
         Operand::Field { base, name } => eval_operand(host, ext, base, trace, scope)
             .into_iter()
-            .map(|v| record_field(v, name))
+            .map(|v| match &v {
+                // a core field read through the node a value names
+                Value::Node(_) | Value::List(_)
+                    if crate::graph::navigate::CORE_FIELDS.contains(&name.as_str())
+                        && !crate::graph::navigate::ref_nodes(&v).is_empty() =>
+                {
+                    through(host, &v, &Projection::CoreMeta(name.clone()))
+                }
+                _ => record_field(v, name),
+            })
+            .collect(),
+        Operand::Through { base, projection } => eval_operand(host, ext, base, trace, scope)
+            .into_iter()
+            .map(|v| through(host, &v, projection))
             .collect(),
         // `t[[x]]`, `t[[x; y]]`, `t[[a..b]]`, `r[[k]]` — the lookup by
         // label (spec: Indexing a Value, draft 166)
@@ -218,19 +241,43 @@ pub(crate) fn eval_operand<H: Host>(
                         // a record shape builds its fields on the
                         // probe itself (a node reads its core fields
                         // there), not in a sub-capsa that would take
-                        // the enclosing topic
+                        // the enclosing topic; on a list of records
+                        // it reads each item (ruling 2026-11-01)
                         let values = match v.as_ref() {
                             Operand::Piped { expr, commands }
                                 if matches!(**expr, Operand::Topic)
                                     && let [Command::Func(call)] = commands.as_slice()
                                     && matches!(call.name.as_str(), "rec" | "record") =>
                             {
-                                match record_build(&call.args, host, x, trace, pscope) {
-                                    Ok((r, _)) => vec![Value::Record(r)],
+                                let build = |pscope: Scope<'_, H::Ext>| match record_build(
+                                    &call.args, host, x, trace, pscope,
+                                ) {
+                                    Ok((r, _)) => Value::Record(r),
                                     Err(why) => {
                                         crate::pipeline::record_refusal(why);
-                                        vec![Value::Null]
+                                        Value::Null
                                     }
+                                };
+                                match topic {
+                                    Some(Value::List(items))
+                                        if !items.is_empty()
+                                            && items
+                                                .iter()
+                                                .all(|i| matches!(i, Value::Record(_))) =>
+                                    {
+                                        vec![Value::list(
+                                            items
+                                                .iter()
+                                                .map(|item| {
+                                                    build(Scope {
+                                                        topic: Some(item),
+                                                        ..pscope
+                                                    })
+                                                })
+                                                .collect(),
+                                        )]
+                                    }
+                                    _ => vec![build(pscope)],
                                 }
                             }
                             other => eval_operand(host, x, other, trace, pscope),
@@ -816,6 +863,7 @@ pub(crate) fn eval_operand<H: Host>(
                         .collect()
                 }
             };
+            let mut mode = crate::pipeline::commands::start_mode(&caps);
             for command in commands.iter() {
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
@@ -884,7 +932,15 @@ pub(crate) fn eval_operand<H: Host>(
                 // a command over values that hands on a capsa without a
                 // topic hands on null.
                 let had_nodes = caps.iter().any(|c| c.topic.is_none());
-                caps = apply_command(command, caps, host, trace, Some(&scope));
+                caps = crate::pipeline::commands::apply_command_in(
+                    command,
+                    mode,
+                    caps,
+                    host,
+                    trace,
+                    Some(&scope),
+                );
+                mode = crate::syntax::parser::command_mode_out(command, mode);
                 if !had_nodes {
                     for c in &mut caps {
                         if c.topic.is_none() {
@@ -1016,6 +1072,19 @@ pub(crate) fn eval_operand<H: Host>(
         // null. `::key` stays the position's property whatever the
         // topic (the double colon picks up from navigation), and a
         // record's field has the single colon alone.
+        // a bare projection with one node reference as the topic reads
+        // the node the reference names (`map(::code)` over a route, a
+        // cell's reference in a subcontext); a list as the topic keeps
+        // the thread's own node, so `.:r | [::code = "PPT"]` after an
+        // attach still filters by the node the thread stands at
+        Operand::Rel {
+            steps,
+            projection: Some(projection @ (Projection::Property(_) | Projection::CoreMeta(_))),
+            anchor: Anchor::Current,
+        } if steps.is_empty() && scope.topic.is_some_and(|t| matches!(t, Value::Node(_))) => {
+            let topic = scope.topic.cloned().unwrap_or(Value::Null);
+            vec![through(host, &topic, projection)]
+        }
         Operand::Rel {
             steps,
             projection: Some(Projection::AdapterMeta(key)),
@@ -2342,4 +2411,17 @@ pub(crate) fn matrix<X: crate::thread::Attachment>(
         rows.push(row);
     }
     vec![Value::table(crate::value::Table::new(Some(header), rows))]
+}
+
+/// A projection read through the node a value names: on a node
+/// reference the node's reading, on a list each item's, null for
+/// anything else (spec: reading through a reference).
+pub(crate) fn through<H: Host>(host: &H, v: &Value, projection: &Projection) -> Value {
+    match v {
+        Value::Node(n) => host.project(&host.ext_at(crate::NodeId(n.id)), projection),
+        Value::List(items) => {
+            Value::list(items.iter().map(|x| through(host, x, projection)).collect())
+        }
+        _ => Value::Null,
+    }
 }

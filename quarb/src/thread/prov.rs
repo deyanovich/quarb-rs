@@ -35,6 +35,10 @@ impl Default for Origin {
 pub struct Origins {
     pub known: Vec<Origin>,
     pub more: u32,
+    /// Whether a value these origins describe came, in part, from a
+    /// property the source withheld (spec: omitted properties): the
+    /// commands that would reveal it by order or survival refuse.
+    pub omitted: bool,
 }
 
 impl Origins {
@@ -45,6 +49,7 @@ impl Origins {
                 command: command,
             }],
             more: 0,
+            omitted: false,
         }
     }
 
@@ -68,6 +73,7 @@ impl Origins {
             self.insert(*o);
         }
         self.more = self.more.saturating_add(other.more);
+        self.omitted |= other.omitted;
     }
 
     /// The origins' nodes, in first-read order.

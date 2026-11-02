@@ -50,9 +50,11 @@ impl PageKind {
     }
 
     /// Whether a row of kind `have` answers a walk for `want`: its
-    /// own kind, and a redirect stub under `page` (draft 164).
+    /// own kind only. A redirect stands for a page and is not one
+    /// (spec: Text Readings, the web reading): `//page` leaves the
+    /// stubs out, `//redirect` reaches them.
     pub fn answers_kind(have: PageKind, want: PageKind) -> bool {
-        have == want || (want == PageKind::Page && have == PageKind::Redirect)
+        have == want
     }
 }
 

@@ -77,6 +77,12 @@ struct Cli {
     #[arg(short = 'l', long = "lines", hide = true)]
     lines: bool,
 
+    /// Mount the subtree at PATH as the tree (`?root=PATH` on the
+    /// one source): paths print relative to it, `//` sweeps it, and
+    /// what lies above or beside it is not mounted at all.
+    #[arg(long, value_name = "PATH")]
+    root: Option<String>,
+
     /// Include hidden entries (filesystem only).
     #[arg(long)]
     hidden: bool,
@@ -309,6 +315,13 @@ struct Cli {
     #[arg(long, value_name = "N")]
     frontier_bound: Option<usize>,
 
+    /// Override the graph bound: the most cost units a graph library
+    /// command may compute over, a node or an edge of the induced
+    /// subgraph each (their product for betweenness). Default:
+    /// 10000000.
+    #[arg(long, value_name = "N")]
+    graph_bound: Option<usize>,
+
     /// Allow the sh(...) pipeline command to run external commands.
     /// Off by default: query text stays inert data — a .quarb
     /// file, a defs file, or a macro can never run a command
@@ -401,6 +414,7 @@ struct OutputCtx {
     quant_bound: Option<usize>,
     /// --frontier-bound.
     front_bound: Option<usize>,
+    graph_bound: Option<usize>,
     allow_shell: bool,
     /// The session memory (`| ,name`, `$,name`, `%,`): for a one-shot
     /// run the run itself, for the REPL the whole session.
@@ -800,6 +814,9 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     if let Some(n) = cli.frontier_bound {
         anyhow::ensure!(n >= 1, "--frontier-bound must be at least 1");
     }
+    if let Some(n) = cli.graph_bound {
+        anyhow::ensure!(n >= 1, "--graph-bound must be at least 1");
+    }
     // Bind the invocation instant: --now pins it; otherwise the
     // clock, read exactly once, here — never during evaluation.
     let now = match &cli.now {
@@ -914,6 +931,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         save: cli.save.as_ref().map(|p| (p.clone(), cli.save_as.clone())),
         quant_bound: cli.quantifier_bound,
         front_bound: cli.frontier_bound,
+        graph_bound: cli.graph_bound,
         allow_shell: cli.allow_shell,
         session: {
             // The switch seeds the session's level; `session(…)` in a
@@ -1770,6 +1788,13 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if (oc.plan || oc.budget.is_some()) && preflight(cli, query, oc)? {
         return Ok(());
     }
+    // `--root PATH` is the sugar for one source (spec: Mounts, the
+    // root option); several carry `?root=PATH` each.
+    if cli.root.is_some() && cli.paths.len() != 1 {
+        anyhow::bail!(
+            "--root takes one mounted source; with several, write ?root=PATH on each target"
+        );
+    }
     // Several inputs are mounted as named children of one root; a
     // single `NAME=TARGET` input mounts too, so its name is real.
     if cli.paths.len() >= 2 || cli.paths.iter().any(|p| split_alias(p).is_some()) {
@@ -1822,6 +1847,23 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 }
             },
             cli.kaiv.then_some(sources.as_str()),
+            ctx,
+            oc,
+        );
+    }
+    // `--root PATH`, or `?root=PATH` on the one source: the subtree
+    // mounted as the tree, through the mount path whatever the
+    // source's kind (spec: Mounts, the root option).
+    if let Some(p) = cli.paths.first()
+        && let Some(target) = rooted_target(p, cli.root.as_deref())
+    {
+        let src = target.display().to_string();
+        let m = open_mount(&target, &OpenOpts::from(cli))?;
+        return run(
+            query,
+            &m.adapter,
+            |n| (m.render)(n),
+            cli.kaiv.then_some(src.as_str()),
             ctx,
             oc,
         );
@@ -3087,6 +3129,25 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
     }
 }
 
+/// The target with its root: `--root PATH` appended as `?root=PATH`,
+/// or the target as written when it carries the option itself; None
+/// when neither.
+fn rooted_target(p: &Path, flag: Option<&str>) -> Option<PathBuf> {
+    let s = p.to_str()?;
+    if let Some(root) = flag {
+        let sep = if s.contains('?') { '&' } else { '?' };
+        return Some(PathBuf::from(format!("{s}{sep}root={root}")));
+    }
+    if p.exists() {
+        return None;
+    }
+    let (_, query) = s.rsplit_once('?')?;
+    query
+        .split('&')
+        .any(|pair| pair.starts_with("root="))
+        .then(|| p.to_path_buf())
+}
+
 #[cfg(feature = "adapters")]
 fn web_rung_name(r: &quarb_web::plan::Rung) -> &'static str {
     match r {
@@ -3256,6 +3317,7 @@ impl OutputCtx {
             libraries: self.libraries.clone(),
             quantifier_bound: self.quant_bound,
             frontier_bound: self.front_bound,
+            graph_bound: self.graph_bound,
             debug: self.session.borrow().diagnostics == quarb::Severity::Debug,
             reproducible: self.reproducible,
             collation: self.locale.map(|(l, _)| l.tag.to_string()),

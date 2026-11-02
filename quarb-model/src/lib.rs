@@ -198,6 +198,12 @@ pub struct ModelAdapter<A: AstAdapter> {
     /// → its factor to the base and its base expansion. An error here
     /// is what `check` reports.
     units: Result<BTreeMap<String, (f64, String)>, String>,
+    /// The measures of the declared graphs the engine computed over
+    /// their scope and offered back (spec: Graph Declarations): per
+    /// (scope, hop, measure), each node's value. The model has no
+    /// store of its own, so this is how it maintains a measure:
+    /// once computed, answered from here for the mount's life.
+    graph_measures: RefCell<HashMap<(String, String, String), HashMap<NodeId, Value>>>,
 }
 
 /// One `index SCOPE::prop;` declaration, materialized.
@@ -395,6 +401,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             trees: OnceCell::new(),
             referrers: RefCell::new(HashMap::new()),
             units: Self::load_units(&model_units),
+            graph_measures: RefCell::new(HashMap::new()),
         }
     }
 
@@ -848,6 +855,12 @@ impl<A: AstAdapter> ModelAdapter<A> {
         let c = ((node.0 & !MODEL_TAG) >> CIDX_SHIFT) as usize;
         let v = (node.0 & VAL_MASK) as usize;
         (c < self.containers().len()).then_some((c, v))
+    }
+
+    /// Whether the model's own `graph` blocks declare `scope`; a
+    /// scope they do not is the source's, read and stored below.
+    fn declares_graph(&self, scope: &str) -> bool {
+        self.model.graphs.iter().any(|g| g.scope == scope)
     }
 
     fn container_by_name(&self, name: &str) -> Option<usize> {
@@ -1612,6 +1625,70 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
         ps
     }
+    /// The model's own `graph` blocks, then whatever the source
+    /// below declares (a mounted site's stored measures): a model is
+    /// transparent to a declared graph it does not redeclare.
+    fn graph_declarations(&self) -> Vec<quarb::GraphDeclaration> {
+        let mut out: Vec<quarb::GraphDeclaration> = self
+            .model
+            .graphs
+            .iter()
+            .map(|g| quarb::GraphDeclaration {
+                scope: g.scope.clone(),
+                hop: g.hop.clone(),
+                measures: g.measures.clone(),
+            })
+            .collect();
+        for d in self.base.graph_declarations() {
+            if !out.iter().any(|o| o.scope == d.scope && o.hop == d.hop) {
+                out.push(d);
+            }
+        }
+        out
+    }
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        if !self.declares_graph(scope) && nodes.iter().all(|n| self.decode(*n).is_none()) {
+            return self.base.graph_measure(scope, hop, measure, nodes);
+        }
+        let store = self.graph_measures.borrow();
+        let kept = store.get(&(scope.to_string(), hop.to_string(), measure.to_string()))?;
+        if kept.len() == 1 && nodes.len() != 1 {
+            // a table answered once for the scope, keyed by its first node
+            return kept.get(nodes.first()?).cloned().map(|t| vec![t]);
+        }
+        nodes.iter().map(|n| kept.get(n).cloned()).collect()
+    }
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+        values: &[Value],
+    ) {
+        if !self.declares_graph(scope) && nodes.iter().all(|n| self.decode(*n).is_none()) {
+            self.base
+                .store_graph_measure(scope, hop, measure, nodes, values);
+            return;
+        }
+        let kept: HashMap<NodeId, Value> = if values.len() == nodes.len() {
+            nodes.iter().copied().zip(values.iter().cloned()).collect()
+        } else if let (Some(&first), [table]) = (nodes.first(), values) {
+            HashMap::from([(first, table.clone())])
+        } else {
+            return;
+        };
+        self.graph_measures.borrow_mut().insert(
+            (scope.to_string(), hop.to_string(), measure.to_string()),
+            kept,
+        );
+    }
     fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
         let (_, ix) = self.value_index(scope, property)?;
         let key = index_key(value)?;
@@ -1878,6 +1955,15 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     /// A written trait reaches a node under a canonical trait or any
     /// `alias <...>` the model declares.
+    fn may_hold_below(&self, node: NodeId, name: Option<&str>, traits: &[&str]) -> bool {
+        // a model's own nodes keep the whole walk; a source's node
+        // answers as the source does
+        match self.decode(node) {
+            Some(_) => true,
+            None => self.base.may_hold_below(node, name, traits),
+        }
+    }
+
     fn has_trait(&self, node: NodeId, name: &str) -> bool {
         let traits = self.traits(node);
         if traits.iter().any(|t| t == name) {

@@ -452,8 +452,8 @@ fn walks_reverse_resolve(elems: &[PathElem]) -> bool {
 /// command has produced a live topic — a hop would drop it, so
 /// path-shaped commands refuse until a push (`| .`) files the topic
 /// and returns the thread to navigation mode.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PipeMode {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PipeMode {
     Nav,
     Scalar,
 }
@@ -465,7 +465,7 @@ enum PipeMode {
 /// that produces or transforms a topic enters scalar mode; a
 /// navigation command ends in the mode its optional projection
 /// implies.
-fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
+pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
     match command {
         // the session push leaves the cursor untouched, as a push does
         Command::SessionPush(_) => cur,
@@ -1479,6 +1479,17 @@ impl Parser<'_> {
                 }
                 self.expect_dot("@")?;
                 Ok(Command::Recall(RegRef::Whole))
+            }
+            // `| %(:a; :b)` — a `%(` whose items are projections is
+            // the projector applied to the topic, the pipe form of
+            // `v:%(:a; :b)` (ruling 2026-11-01): on a record the
+            // fields named, on a list of records each item.
+            Some(Token::Percent) if self.projector_items_ahead() => {
+                let v = self.unary()?;
+                Ok(Command::Expr(Operand::Projected {
+                    base: Box::new(Operand::Topic),
+                    shape: ProjShape::Value(Box::new(v)),
+                }))
             }
             // `| #` bare — the table reading (spec: The Table Kind):
             // a list of records as a frame, a list of lists as an
@@ -3983,6 +3994,20 @@ impl Parser<'_> {
             return Err(err);
         }
         if !self.table_option_ahead() {
+            // `| #(:a; :b)` — a `#(` whose items are projections is
+            // the projector applied to the topic, the pipe form of
+            // `t:#(:a; :b)` (spec: The Projection Operator, ruling
+            // 2026-11-01): the columns named, in that order. The
+            // literal's rows are `%(…)` / `@(…)`, so nothing is
+            // ambiguous.
+            if self.projector_items_ahead() {
+                self.pos += 2;
+                let shape = self.shape_columns()?;
+                return Ok(Command::Expr(Operand::Projected {
+                    base: Box::new(Operand::Topic),
+                    shape,
+                }));
+            }
             let expr = self.additive()?;
             if let Operand::Table {
                 header: Some(h),
@@ -4017,6 +4042,18 @@ impl Parser<'_> {
             return Ok(Command::Expr(self.additive_from(left)?));
         }
         Ok(Command::Func(call))
+    }
+
+    /// Whether the constructor at the head (`#(` or `%(`) opens on a
+    /// projection — `:name`, `::prop` — so it is the projector on
+    /// the topic rather than a literal (a literal's first item is a
+    /// row or a value).
+    fn projector_items_ahead(&self) -> bool {
+        matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            && matches!(
+                self.toks.get(self.pos + 2),
+                Some(Token::Field | Token::ColonColon)
+            )
     }
 
     /// A table row's items after its `%(`, through the `)`: each
@@ -4471,13 +4508,17 @@ impl Parser<'_> {
                         }
                     {
                         self.pos += 2;
+                        // the hop takes a walk's traits and predicates
+                        // (spec: The graph library, draft.191)
+                        let traits = self.group_traits()?;
+                        let predicates = self.group_predicates()?;
                         args.push(Arg::Expr(Operand::Rel {
                             steps: vec![PathElem::Step(Step {
                                 axis: Axis::BothLink,
                                 matcher,
                                 labels: Vec::new(),
-                                traits: Vec::new(),
-                                predicates: Vec::new(),
+                                traits,
+                                predicates,
                                 leaf: false,
                             })],
                             projection: None,
@@ -6779,6 +6820,16 @@ impl Parser<'_> {
                     o = Operand::Projected {
                         base: Box::new(o),
                         shape,
+                    };
+                }
+                // `REF::prop`: a property read through the node the
+                // value names (spec: reading through a reference)
+                Some(Token::ColonColon) => {
+                    self.pos += 1;
+                    let name = self.opt_projection_name();
+                    o = Operand::Through {
+                        base: Box::new(o),
+                        projection: Projection::Property(name),
                     };
                 }
                 Some(Token::Field) => {
@@ -10685,6 +10736,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         | Operand::Desc(inner)
         | Operand::Gathered(inner)
         | Operand::Spread(inner) => subst_operand(inner, map),
+        Operand::Through { base, .. } => subst_operand(base, map),
         Operand::Projected { base, shape } => {
             subst_operand(base, map);
             match shape {
@@ -10856,6 +10908,18 @@ impl visit::Visitor for MaxCtx {
 fn quarq_literal(commands: Vec<Command>) -> Value {
     use crate::syntax::ast::{Anchor, Projection};
     let projector = match commands.as_slice() {
+        // `q(%(::Name; ::Fare))` as the pipe reads it now: the record
+        // projector on the topic (ruling 2026-11-01)
+        [Command::Expr(Operand::Projected { base, shape })]
+            if matches!(**base, Operand::Topic)
+                && let ProjShape::Value(v) = shape
+                && let Operand::Piped { expr, commands } = &**v
+                && matches!(**expr, Operand::Topic)
+                && let [Command::Func(call)] = commands.as_slice()
+                && matches!(call.name.as_str(), "rec" | "record") =>
+        {
+            fold_projector_record(call)
+        }
         [Command::Expr(op)] => {
             let mut folded = op.clone();
             head_projections(&mut folded);
@@ -10871,20 +10935,28 @@ fn quarq_literal(commands: Vec<Command>) -> Value {
                 _ => None,
             }
         }
-        // `q(%(::Name; ::Fare))` read as the pipeline reads `| %(…)`
+        // `q(%(::Name; ::Fare))` read as the pipeline reads `| %(…)`:
+        // the record command, or the projector on the topic it is
+        // when its items are projections (ruling 2026-11-01)
         [Command::Func(call)] if matches!(call.name.as_str(), "rec" | "record") => {
-            let mut args = call.args.clone();
-            for a in &mut args {
-                if let Arg::Expr(e) = a {
-                    head_projections(e);
-                }
-            }
-            fold_record(&args)
+            fold_projector_record(call)
         }
         _ => None,
     }
     .filter(Value::holds_projector);
     Value::quarq(commands, projector)
+}
+
+/// The structured projector a record of projections folds to
+/// (`%(::Name; ::Fare)`), each item read as the head reads it.
+fn fold_projector_record(call: &FnCall) -> Option<Value> {
+    let mut args = call.args.clone();
+    for a in &mut args {
+        if let Arg::Expr(e) = a {
+            head_projections(e);
+        }
+    }
+    fold_record(&args)
 }
 
 /// A constant operand's value: a literal, a list of constants, a

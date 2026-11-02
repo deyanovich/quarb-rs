@@ -773,16 +773,30 @@ impl MemoryStore {
             let doc = scraper::Html::parse_document(&html);
             let head = quarb_text_html::head_meta(&doc);
             // The page's own URL: declared (canonical, or Parsoid's
-            // dc:isVersionOf), else its path under the base.
-            let url = match head.declared_value("canonical") {
-                Some(Value::Str(u)) => Some(u),
-                _ => declared_url(&doc).map(|u| u.to_string()).or_else(|| {
-                    base.as_ref()
-                        .and_then(|b| b.join(&path).ok())
-                        .map(|u| u.to_string())
-                }),
-            };
+            // dc:isVersionOf), else its path under the base. A
+            // relative canonical is joined against the path's URL;
+            // a redirect stub keeps its path's URL, since its
+            // canonical names the page it stands for, not itself.
             let redirect = redirect_target(&doc);
+            let own = base
+                .as_ref()
+                .and_then(|b| b.join(&path).ok())
+                .map(|u| u.to_string());
+            let url = match head.declared_value("canonical") {
+                Some(Value::Str(u)) if redirect.is_none() => {
+                    if url::Url::parse(&u).is_ok() {
+                        Some(u)
+                    } else {
+                        own.as_deref()
+                            .and_then(|o| url::Url::parse(o).ok())
+                            .and_then(|o| o.join(&u).ok())
+                            .map(|j| j.to_string())
+                            .or(Some(u))
+                    }
+                }
+                Some(Value::Str(_)) => own,
+                _ => declared_url(&doc).map(|u| u.to_string()).or(own),
+            };
             let mut row = blank(k, parent, PageKind::Page, name, path.clone());
             row.title = head.title.clone();
             row.url = url;
@@ -835,12 +849,14 @@ impl MemoryStore {
             }
         }
 
-        // 2b. Redirect stubs (spec: Text Readings, the web model,
-        // draft 164): a page whose head carries a meta refresh, or
-        // whose script sends the browser on, stands for the page its
-        // URL resolves to within the site — kind `redirect`,
-        // `->redirect` the target; its own text is no content, so
-        // its html is dropped before the lowering and the links.
+        // 2b. Redirect stubs (spec: Text Readings, the web reading):
+        // a document whose head carries a meta refresh, or whose
+        // script sends the browser on, stands for the page its URL
+        // resolves to within the site and is no page itself, as a
+        // symlink — kind `redirect`, `->redirect` the target; its own
+        // text is no content, so its html is dropped before the
+        // lowering and the links; a link to it lands on its target
+        // (step 4 below).
         let targets: Vec<(usize, Option<usize>)> = built
             .iter()
             .enumerate()
@@ -884,11 +900,26 @@ impl MemoryStore {
         }
         let mut rows: Vec<LightRow> = built.iter().map(|b| b.row.clone()).collect();
         let mut in_redirects: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
+        let mut redirect_of: HashMap<PageKey, PageKey> = HashMap::new();
         for r in &rows {
             if let Some(t) = r.redirect_to {
                 in_redirects.entry(t).or_default().push(r.key);
+                redirect_of.insert(r.key, t);
             }
         }
+        // a link to a redirect lands on the page it stands for, as a
+        // symlink resolves (chains of at most three, as the
+        // index-backed stores follow them); the stub itself is on no
+        // path and takes no rank
+        let through_redirects = |mut k: PageKey| {
+            for _ in 0..3 {
+                match redirect_of.get(&k) {
+                    Some(&t) if t != k => k = t,
+                    _ => break,
+                }
+            }
+            k
+        };
         let mut members: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
         let mut page_categories: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
         let mut page_tags: HashMap<PageKey, Vec<PageKey>> = HashMap::new();
@@ -990,6 +1021,7 @@ impl MemoryStore {
             let k = b.row.key;
             let page_url = b.row.url.as_deref().and_then(|u| url::Url::parse(u).ok());
             let mut seen: HashMap<(String, PageKey, Option<String>), ()> = HashMap::new();
+            let mut seen_red: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut lrs = Vec::new();
             let (base_href, found) = dom_links(&h);
             // `<base href>` moves the join base (Parsoid pages
@@ -1021,18 +1053,29 @@ impl MemoryStore {
                                     .iter()
                                     .find_map(|v| key_by_path.get(v.as_str()).copied())
                             })
-                    });
+                    })
+                    .map(through_redirects);
                 // A same-site path no page answers to is a redlink —
                 // unless it names a file by its extension (the
                 // spec's PDF): that is a resource, shipped or not,
                 // as another host's target is (spec: Text Readings,
                 // the web reading).
+                // A redlink is a content link (`link`, the body) to a
+                // page the site does not have: the chrome's links to
+                // routes outside a snapshot are site furniture and
+                // count on no page; one unresolved target counts once
+                // however often the body names it. Wikipedia's
+                // `class="new"` marks a redlink wherever it stands.
                 let red = f.red
-                    || (to.is_none()
+                    || (f.role == "link"
+                        && to.is_none()
                         && base
                             .as_ref()
                             .is_some_and(|bs| bs.host_str() == u.host_str())
                         && !has_file_extension(&u));
+                if red && to.is_none() && !seen_red.insert(u.to_string()) {
+                    continue;
+                }
                 // a same-page fragment lands on the page's own node
                 // bearing the name; a page's own canonical points at
                 // itself and stays; any other self-link is no edge

@@ -347,6 +347,7 @@ pub(crate) fn graph_table_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
+    trace: &H::Trace,
 ) -> Vec<Thread<H::Ext>> {
     // The positions are tabled whatever the topic: a thread in
     // value mode still stands on its node (spec: The graph as a
@@ -372,7 +373,7 @@ pub(crate) fn graph_table_command<H: Host>(
     for c in &caps {
         origins.insert(host.origin_at(&c.ext));
     }
-    match host.graph_table(&starts, &what) {
+    match host.graph_table(&starts, &what, trace) {
         Ok(table) => vec![Thread::<H::Ext> {
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
@@ -404,8 +405,7 @@ pub(crate) fn graph_library_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
-    // the positions are read whatever the topic (spec: The graph
-    // library); a thread standing nowhere has none
+    use crate::graph::edges::GraphTable;
     if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
         record_refusal(format!(
             "graph:{name} reads the context's nodes, and a thread of the context stands nowhere \
@@ -413,13 +413,14 @@ pub(crate) fn graph_library_command<H: Host>(
         ));
         return Vec::new();
     }
-    let what = match crate::graph::edges::GraphTable::from_call(call) {
+    let what = match GraphTable::from_call(call) {
         Ok(w) => w,
         Err(why) => {
             record_refusal(why);
             return Vec::new();
         }
     };
+    // the threads folded to their distinct positions
     let mut keys: Vec<<H::Ext as Attachment>::Key> = Vec::new();
     let mut starts: Vec<H::Ext> = Vec::new();
     let mut at: Vec<usize> = Vec::with_capacity(caps.len());
@@ -434,12 +435,35 @@ pub(crate) fn graph_library_command<H: Host>(
             }
         }
     }
-    // `--from=NODES`: the seeds, an anchored node operand resolved
-    // from the arbor's root (a path from the root), the shared
-    // register (a mark) or an id anchor — never from one thread's
-    // position, the context being many
+    // the cost and the bound (spec: The graph library; Other bounds):
+    // the induced subgraph's nodes and edges, their product for
+    // betweenness, refused before anything is computed
+    let (n, e) = host.graph_size(&starts, &what, trace);
+    let cost = if what.quadratic() {
+        n.saturating_mul(e)
+    } else {
+        n.saturating_add(e)
+    };
+    let bound =
+        crate::pipeline::run::run_option(|o| o.graph_bound).unwrap_or_else(|| host.graph_bound());
+    if cost > bound {
+        crate::value::ambient::record_refusal_coded(
+            "GRAPH_BOUND",
+            format!("graph:{name}"),
+            format!(
+                "graph:{name} would compute over {n} nodes and {e} edges, {cost} cost units{} past \
+                 the graph bound {bound}: narrow the context, or raise the bound with --graph-bound",
+                if what.quadratic() {
+                    " (nodes times edges)"
+                } else {
+                    ""
+                }
+            ),
+        );
+        return Vec::new();
+    }
     let seeds: Vec<<H::Ext as Attachment>::Key> = match &what {
-        crate::graph::edges::GraphTable::Distance { from, .. } => {
+        GraphTable::Distance { from, .. } | GraphTable::Route { from, .. } => {
             let seed = seed_capsa(&caps, host);
             let scope = seed.scope(None, peers, outer);
             let root = host.unplaced_ext();
@@ -447,17 +471,113 @@ pub(crate) fn graph_library_command<H: Host>(
         }
         _ => Vec::new(),
     };
-    let values = match host.graph_values(&starts, &what, &seeds) {
-        Ok(v) => v,
-        Err(why) => {
-            record_refusal(why);
-            return Vec::new();
-        }
-    };
+    // a declared graph (spec: Graph Declarations): the source answers
+    // when the hop, the options and the context are the declared ones
+    let declared = declared_measure(
+        host, name, &what, &keys, &starts, &caps, trace, outer, peers,
+    );
     let mut origins = Origins::default();
     for c in &caps {
         origins.insert(host.origin_at(&c.ext));
     }
+    if what.answers_table() {
+        // a table once for the context, a reducing aggregate
+        let table = match declared.answer {
+            Some(mut v) if v.len() == 1 && matches!(v[0], Value::Table(_)) => match v.remove(0) {
+                Value::Table(t) => t,
+                _ => unreachable!(),
+            },
+            _ => match host.graph_table(&starts, &what, trace) {
+                Ok(t) => {
+                    let t = std::sync::Arc::new(t);
+                    if let Some((scope, hop, measure)) = &declared.key {
+                        host.store_graph_measure(
+                            scope,
+                            hop,
+                            measure,
+                            &starts,
+                            &[Value::Table(t.clone())],
+                        );
+                    }
+                    t
+                }
+                Err(why) => {
+                    record_refusal(why);
+                    return Vec::new();
+                }
+            },
+        };
+        return vec![Thread::<H::Ext> {
+            prov: Prov::leaf(origins),
+            register: shared_register(&caps),
+            topic: Some(Value::Table(table)),
+            members: Vec::new(),
+            captures: Vec::new(),
+            named: Vec::new(),
+            ext: host.unplaced_ext(),
+        }];
+    }
+    if what.answers_one() {
+        // the partition the attached regula names, one part index per
+        // position, parts numbered by first appearance; a node with
+        // nothing attached is a part of its own
+        let GraphTable::Modularity { by, .. } = &what else {
+            unreachable!()
+        };
+        let mut part_of: Vec<Option<usize>> = vec![None; starts.len()];
+        let mut parts: Vec<Value> = Vec::new();
+        for (i, c) in caps.iter().enumerate() {
+            let position = at[i];
+            if part_of[position].is_some() {
+                continue;
+            }
+            let v = operand_scalar(host, &c.ext, by, trace, c.scope(Some(i + 1), peers, outer));
+            part_of[position] = Some(match v {
+                Value::Null => {
+                    parts.push(Value::Null);
+                    parts.len() - 1
+                }
+                v => match parts.iter().position(|p| *p == v) {
+                    Some(k) => k,
+                    None => {
+                        parts.push(v);
+                        parts.len() - 1
+                    }
+                },
+            });
+        }
+        let part: Vec<usize> = part_of.into_iter().map(|p| p.unwrap_or(0)).collect();
+        return match host.graph_reduce(&starts, &what, &part, trace) {
+            Ok(value) => vec![Thread::<H::Ext> {
+                prov: Prov::leaf(origins),
+                register: shared_register(&caps),
+                topic: Some(value),
+                members: Vec::new(),
+                captures: Vec::new(),
+                named: Vec::new(),
+                ext: host.unplaced_ext(),
+            }],
+            Err(why) => {
+                record_refusal(why);
+                Vec::new()
+            }
+        };
+    }
+    let values = match declared.answer {
+        Some(v) if v.len() == starts.len() => v,
+        _ => match host.graph_values(&starts, &what, &seeds, trace) {
+            Ok(v) => {
+                if let Some((scope, hop, measure)) = &declared.key {
+                    host.store_graph_measure(scope, hop, measure, &starts, &v);
+                }
+                v
+            }
+            Err(why) => {
+                record_refusal(why);
+                return Vec::new();
+            }
+        },
+    };
     caps.into_iter()
         .zip(at)
         .map(|(mut c, i)| {
@@ -468,11 +588,186 @@ pub(crate) fn graph_library_command<H: Host>(
         .collect()
 }
 
-/// `@| outline(level; text)` prints the line instead: the text
-/// indented by its depth below the shallowest level, and behind its
-/// number when the style `"1."` is given. Bare `outline` reads the
-/// fields `depth` and `title` of a record stream. Consumes any
-/// members.
+/// What a declared graph gives a library command: the source's
+/// answer, or the key of the declared measure the source declined
+/// (the engine computes and offers the values back), or nothing.
+#[derive(Default)]
+struct Declared {
+    key: Option<(String, String, String)>,
+    answer: Option<Vec<Value>>,
+}
+
+/// `name(options)` as written in a declaration, split.
+fn split_measure(m: &str) -> (&str, Option<&str>) {
+    match m.split_once('(') {
+        Some((n, rest)) => (n.trim(), Some(rest.trim_end_matches(')').trim())),
+        None => (m.trim(), None),
+    }
+}
+
+/// A declared measure read as the engine reads a command: the text
+/// `graph:NAME(HOP; OPTIONS)` through the parser.
+fn parse_declared(
+    hop: &str,
+    name: &str,
+    options: Option<&str>,
+) -> Result<crate::graph::edges::GraphTable, String> {
+    // a head the parser accepts stands in for the context
+    let text = format!(
+        "/x @| graph:{name}({hop}{})",
+        options
+            .filter(|o| !o.is_empty())
+            .map(|o| format!("; {o}"))
+            .unwrap_or_default()
+    );
+    let tokens = crate::syntax::lexer::lex(&text).map_err(|e| e.to_string())?;
+    let query = crate::syntax::parser::parse(&tokens).map_err(|e| e.to_string())?;
+    let call = query
+        .pipeline
+        .iter()
+        .find_map(|c| match c {
+            crate::syntax::ast::Command::Agg(call) => Some(call),
+            _ => None,
+        })
+        .ok_or_else(|| "no command".to_string())?;
+    crate::graph::edges::GraphTable::from_call(call)
+}
+
+/// The nodes a declared scope path selects, from the root.
+fn scope_keys<H: Host>(
+    host: &H,
+    scope_text: &str,
+    caps: &[Thread<H::Ext>],
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Result<Vec<<H::Ext as Attachment>::Key>, String> {
+    // the scope read as a node operand, the way `--from` takes one:
+    // a path from the root, every conjunct of it applied
+    let parsed = parse_declared("->*", "distance", Some(&format!("--from={scope_text}")))?;
+    let crate::graph::edges::GraphTable::Distance { from: op, .. } = parsed else {
+        return Err("a scope is one path".to_string());
+    };
+    let seed = seed_capsa(caps, host);
+    let scope = seed.scope(None, peers, outer);
+    let root = host.unplaced_ext();
+    Ok(discard(|| host.operand_keys(&root, &op, trace, scope)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn declared_measure<H: Host>(
+    host: &H,
+    name: &str,
+    what: &crate::graph::edges::GraphTable,
+    keys: &[<H::Ext as Attachment>::Key],
+    starts: &[H::Ext],
+    caps: &[Thread<H::Ext>],
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Declared {
+    use crate::diagnostic::Diagnostic;
+    use crate::value::ambient::record_diagnostic;
+    let decls = host.graph_declarations();
+    if decls.is_empty() {
+        return Declared::default();
+    }
+    let fingerprint = what.fingerprint();
+    let mut reason: Option<String> = None;
+    for d in &decls {
+        for m in &d.measures {
+            let (mname, mopts) = split_measure(m);
+            if mname != name {
+                continue;
+            }
+            let shown = format!(
+                "{mname}({}{})",
+                d.hop,
+                mopts
+                    .filter(|o| !o.is_empty())
+                    .map(|o| format!("; {o}"))
+                    .unwrap_or_default()
+            );
+            match parse_declared(&d.hop, mname, mopts) {
+                Err(why) => {
+                    reason = Some(format!(
+                        "the declared {shown} on {} is not read: {why}",
+                        d.scope
+                    ));
+                    continue;
+                }
+                Ok(t) if t.fingerprint() != fingerprint => {
+                    reason = Some(format!(
+                        "the hop or the options differ from the declared {shown} on {}",
+                        d.scope
+                    ));
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            let declared_keys = match scope_keys(host, &d.scope, caps, trace, outer, peers) {
+                Ok(k) => k,
+                Err(why) => {
+                    reason = Some(format!("the declared scope {} is not read: {why}", d.scope));
+                    continue;
+                }
+            };
+            let inside = keys.iter().filter(|k| declared_keys.contains(k)).count();
+            let entire = inside == keys.len() && declared_keys.iter().all(|k| keys.contains(k));
+            if !entire {
+                reason = Some(if inside == keys.len() {
+                    format!(
+                        "the context is {inside} of the {} nodes of {}, computed over {inside} nodes",
+                        declared_keys.len(),
+                        d.scope
+                    )
+                } else {
+                    format!(
+                        "the context is not the declared scope {} ({} of its nodes, {} outside it), computed over {} nodes",
+                        d.scope,
+                        inside,
+                        keys.len() - inside,
+                        keys.len()
+                    )
+                });
+                continue;
+            }
+            return match host.graph_measure(&d.scope, &d.hop, m, starts) {
+                Some(values) => {
+                    record_diagnostic(Diagnostic::info(
+                        "PUSHED",
+                        "graph",
+                        format!("{shown} from the declared graph on {}", d.scope),
+                    ));
+                    Declared {
+                        key: None,
+                        answer: Some(values),
+                    }
+                }
+                None => {
+                    record_diagnostic(Diagnostic::info(
+                        "NOT_PUSHED",
+                        "graph",
+                        format!(
+                            "the source has no answer for the declared {shown} on {}; computed over {} nodes",
+                            d.scope,
+                            keys.len()
+                        ),
+                    ));
+                    Declared {
+                        key: Some((d.scope.clone(), d.hop.clone(), m.clone())),
+                        answer: None,
+                    }
+                }
+            };
+        }
+    }
+    if let Some(r) = reason {
+        record_diagnostic(Diagnostic::info("NOT_PUSHED", "graph", r));
+    }
+    Declared::default()
+}
+
 pub(crate) fn outline_command<H: Host>(
     call: &FnCall,
     caps: Vec<Thread<H::Ext>>,

@@ -85,7 +85,7 @@ pub enum Value {
     },
     /// A value on a dimension (spec: The Quantital Fragment):
     /// the magnitude scaled to the dimension's SI-base expansion
-    /// (`base`, e.g. `m`, `kg*m^2/s^3`), the written form kept
+    /// (`base`, e.g. `m`, `m^2*kg/s^3`), the written form kept
     /// for display only — exactly as instants keep their written
     /// offset. Minted by unit-aware adapters (kaiv); compared and
     /// combined on the base, so `42 km` orders above `5000 m`.

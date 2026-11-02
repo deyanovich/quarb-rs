@@ -815,6 +815,15 @@ pub enum Operand {
         base: Box<Operand>,
         shape: ProjShape,
     },
+    /// `REF::prop`, `REF::` — a property read through the node a
+    /// value names (spec: reading through a reference, draft.191):
+    /// the base's value is a node reference, or a list of them, and
+    /// the projection is read on that node, as `:source::code` reads
+    /// the source's code off the edges table.
+    Through {
+        base: Box<Operand>,
+        projection: Projection,
+    },
     /// `:props...` — the spread suffix on a record item: a list of
     /// projectors spread into the record's fields, each keyed
     /// by its bare key and read on the cursor (`%(:props...)` is what

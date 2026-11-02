@@ -133,6 +133,9 @@ pub struct RunOptions {
     /// walk holds in flight (`qua --frontier-bound`); `None` leaves
     /// the adapter's own ([`AstAdapter::frontier_bound`], 100,000).
     pub frontier_bound: Option<usize>,
+    /// The graph bound override; the adapter's own
+    /// ([`AstAdapter::graph_bound`]) otherwise.
+    pub graph_bound: Option<usize>,
     /// Whether the run raises its debug diagnostics (the level asks
     /// for `debug`): what the evaluation did on the way, round by
     /// round — raised only on request, since a walk inside a
@@ -283,6 +286,8 @@ pub(crate) fn begin_run(options: Option<RunOptions>) -> RunGuard {
             bonds: options.bonds.clone(),
             refusal: None,
             diagnostics: Vec::new(),
+            omitted: false,
+            keying: 0,
         };
         runs.push(RunState {
             options,
@@ -359,6 +364,15 @@ pub(crate) fn note(position: Position) {
 }
 
 /// Record a value's origins into the innermost frame, if any.
+/// A value being read came from a property the source withheld
+/// (spec: omitted data): the capture carries the mark.
+pub(crate) fn note_omitted() {
+    with_run(|s| {
+        if let Some(top) = s.reads.last_mut() {
+            top.omitted = true;
+        }
+    });
+}
 pub(crate) fn note_all(o: &Origins) {
     with_run(|s| {
         if let Some(top) = s.reads.last_mut() {

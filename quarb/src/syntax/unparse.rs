@@ -824,6 +824,15 @@ pub(crate) fn operand(o: &Operand) -> String {
             format!("%({})", inner.join("; "))
         }
         Operand::Desc(inner) => format!("-{}", operand(inner)),
+        Operand::Through { base, projection } => {
+            let key = match projection {
+                Projection::Property(Some(k)) => format!("::{k}"),
+                Projection::Property(None) => "::".to_string(),
+                Projection::CoreMeta(k) => format!(":{k}"),
+                Projection::AdapterMeta(k) => format!(":::{k}"),
+            };
+            format!("{}{key}", operand(base))
+        }
         Operand::Spread(inner) => format!("{}...", operand(inner)),
         Operand::Projected { base, shape } => {
             let b = match **base {
@@ -835,11 +844,20 @@ pub(crate) fn operand(o: &Operand) -> String {
             match shape {
                 crate::syntax::ast::ProjShape::Value(v) => match &**v {
                     Operand::List(_) | Operand::Recall(_) => format!("{b}:{}", operand(v)),
+                    // the record shape prints as the constructor it
+                    // was written as; on the topic, bare: `| %(:a;
+                    // :b)` is the pipe form of `$_:%(:a; :b)` (ruling
+                    // 2026-11-01), and the two spellings are one
                     Operand::Piped { expr, commands }
                         if matches!(**expr, Operand::Topic)
-                            && matches!(commands.as_slice(), [Command::Func(c)] if c.name == "rec") =>
+                            && let [Command::Func(c)] = commands.as_slice()
+                            && c.name == "rec" =>
                     {
-                        format!("{b}:{}", operand(v))
+                        if matches!(**base, Operand::Topic) {
+                            format!("%{}", record_args(c, "; "))
+                        } else {
+                            format!("{b}:%{}", record_args(c, "; "))
+                        }
                     }
                     other => format!("{b}:({})", operand(other)),
                 },

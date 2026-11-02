@@ -604,12 +604,18 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-web} & The \emph{web level}: a site as an arbor —
   \texttt{/sites/<host>/pages/<path>} for every page (directories
   from the URL paths, \texttt{<dir>} / \texttt{<page>} /
-  \texttt{<redirect>}), the declared categories and tags as rows
+  \texttt{<redirect>}; a redirect stub stands for a page and is
+  not one, as a symlink: \texttt{//redirect} reaches it,
+  \texttt{//page} never does, a link to it lands on its target
+  and it takes no rank; a relative \texttt{rel=canonical} is
+  joined against the page's URL), the declared categories and tags as rows
   of their own containers, every hyperlink of the DOM resolved
   into \texttt{->link} / \texttt{<-link} (\texttt{->category},
   \texttt{->tag}, \texttt{<-page}, \texttt{<-category}), the
-  degrees, \texttt{::pagerank}, \texttt{::redlinks}, and
-  \texttt{<orphan>} as columns; each page grafts at the text
+  degrees, \texttt{::pagerank}, \texttt{::redlinks} (the distinct
+  content links to pages the site lacks, the chrome's rows never
+  counted), and \texttt{<orphan>} as columns; a page is no backlink
+  of its own, its fragment links land on its sections; each page grafts at the text
   level on entry, and a prose \texttt{ref} that leaves its page
   resolves to the page it names. Rows answer to their kind
   (\texttt{//page}), their segment, its stem, their title. A
@@ -1516,6 +1522,153 @@ root-anchored sequence of hops, each an axis followed by a name:
     the web level reports page to page where a fragment link lands
     navigation on a section. The bare \texttt{@| pagerank} table of
     0.44 is retired (its pointer names \texttt{graph:pagerank}) \\
+\texttt{graph:artpoints(hop)}, \texttt{graph:bridges(hop)}, \texttt{graph:route(hop; --from --weight)}, \texttt{graph:betweenness(hop; --edges)}, \texttt{graph SCOPE(hop) \{ measure; \}}
+  & \live the graph library's second shipment (2026-10-31; spec
+    draft.189: The graph library, Graph Declarations, Other bounds):
+    \texttt{GraphTable::\{Artpoints, Bridges, Route\}} and
+    \texttt{Betweenness.edges}; a command that answers a table is
+    a reducing aggregate (\texttt{GraphTable::answers\_table}:
+    \texttt{bridges\_table}, \texttt{edge\_betweenness\_table} over
+    \texttt{edges\_table\_of}, the edges table kept to a subset or
+    with one more column), \texttt{artpoints\_values} and
+    \texttt{route\_values} (lists of node references) per node. The
+    algorithms are \texttt{quarb-lib-graph}: Tarjan's low-link over
+    \texttt{Edges::symmetric} (the undirected reading), edge
+    betweenness from the shared Brandes pass, routes with the
+    predecessor of smaller index on a tie. The cost: before a
+    library command computes, \texttt{Host::graph\_size} counts the
+    induced subgraph and the sum (the product for betweenness)
+    against the graph bound (\texttt{AstAdapter::graph\_bound},
+    ten million; \texttt{Run::graph\_bound} /
+    \texttt{qua --graph-bound}), refusing as \texttt{GRAPH\_BOUND}.
+    The declared graph: \texttt{AstAdapter::graph\_declarations}
+    (quarb-model's \texttt{graph} statements, \texttt{GraphDecl}; the
+    web level's own \texttt{//page(->link) \{ pagerank; \}}),
+    \texttt{graph\_measure} (the source's answer, \texttt{None}
+    declines) and \texttt{store\_graph\_measure} (the engine's
+    values offered back; quarb-model keeps them per mount), all in
+    the forwarding macro. A mount is transparent to a declared
+    graph (2026-11-01): quarb-mount lists every open mount's
+    declarations with the scope prefixed by the mount's path
+    (\texttt{/after//page}) and forwards the measure calls with
+    the nodes translated to the mount's ids; quarb-model lists the
+    base's declarations after its own and forwards the measure
+    calls for a scope it does not redeclare, so a model's
+    \texttt{mount} reads the site's stored column and
+    \texttt{--explain} says \texttt{PUSHED (graph)} there too. \texttt{declared\_measure} matches a
+    command to a declaration by the command's fingerprint (hop,
+    weight and options, the declared measure parsed through the
+    engine's own parser) and by the scope test (the declared path
+    read as a node operand from the root equals the context's
+    positions as a set), and reports \texttt{info PUSHED (graph)} /
+    \texttt{NOT\_PUSHED (graph)} with the reason. A declared hop with
+    a predicate is not read yet (the declaration is reported as not
+    read) \\
+\texttt{edges(->link[::lang = "en"])}, \texttt{graph:conncomp(--*[\$-::since > d])}, \texttt{:source::code}, \texttt{map(::code)}
+  & \live a predicate on a hop operand and reading through a
+    reference (2026-11-01; spec draft.191): a hop operand takes
+    exactly the predicate (and traits) a walk's hop takes, kept on
+    \texttt{Hop::filter} and applied in \texttt{collect\_rows} through
+    the walk's own \texttt{apply\_predicates} (the node arrived at
+    the topic, \texttt{\$-} the edge, \texttt{trait\_clauses\_ok} for
+    traits), in \texttt{edges}, every library command and the
+    declared graph's hop, whose fingerprint now carries the step; the
+    \texttt{--label} special case of the argument parser reads the
+    traits and predicates after the name. The graph methods of
+    \texttt{Host} take the trace for it. \texttt{Operand::Through}
+    (\texttt{REF::prop}, the postfix \texttt{::} after any operand)
+    and the core-field read \texttt{REF:name} read the node a value
+    names through \texttt{Host::ext\_at} (\texttt{through} in
+    \texttt{operand.rs}): a node reference, or each item of a list;
+    a bare projection whose topic is a node reference reads it too,
+    so \texttt{map(::code)} over a route and \texttt{(:source |
+    ::code)} read the named nodes. Attachments read through as before \\
+\texttt{graph:closeness(hop; --harmonic)}, \texttt{graph:communities(hop; --resolution)}, \texttt{graph:modularity(hop; --by=:.c)}, \texttt{graph:triangles(hop; --coefficient)}
+  & \live the graph library's third shipment (2026-11-01; spec
+    draft.191): closeness in Wasserman and Faust's form or the
+    harmonic (\texttt{quarb-lib-graph::closeness} over
+    \texttt{distance} per source, in the hop's direction), the
+    Leiden communities (\texttt{communities}: deterministic local
+    moving in index order with ties to the earlier community,
+    refinement from singletons, aggregation until nothing moves,
+    over the undirected weighted adjacency), modularity of a given
+    partition (\texttt{modularity}: Newman and Girvan over an
+    undirected fold, Leicht and Newman over a directed one, the
+    expectation scaled by the resolution), triangles and the
+    clustering coefficient. \texttt{graph:modularity} is the
+    library's first reducing aggregate that answers a value, not a
+    table: \texttt{GraphTable::answers\_one}; the executor reads the
+    \texttt{--by} operand on every thread (\texttt{operand\_scalar}),
+    numbers the parts by first appearance, a null its own part, and
+    \texttt{Host::graph\_reduce} answers one float for the context.
+    The inventory carries the four rows (lang 4a1b01db) \\
+\texttt{AstAdapter::may\_hold\_below}
+  & \live a pruning hint for the deep walk (2026-11-01, cost only):
+    whether a walk for a name and trait set may still find a match
+    below a node, true by default; the engine's
+    \texttt{descendants} asks it before descending when the step
+    names a literal or carries un-negated, wildcard-free trait
+    alternatives. The web level answers false below a page, a
+    redirect, a resource or any document node when the walk seeks a
+    row kind (page, dir, redirect, tag, category, resource) or a
+    page-level trait (\texttt{tag:X}, \texttt{category:X},
+    \texttt{orphan}), so \texttt{//<page>} scans the page tree, not
+    every page's document; mounts and models forward it \\
+\texttt{?root=PATH}, \texttt{qua --root PATH}; \texttt{quarb::rooted::Rooted}
+  & \live a root on a mount (ruling 2026-11-01; spec: Mounts, the
+    root option): the subtree at PATH mounted as the tree, on any
+    source (\texttt{web:after.tgz?root=/sites/quarb.org}, a model's
+    \texttt{mount after: …?root=…;}). \texttt{Rooted<A>} keeps the
+    inner's node ids and forwards every reading; the root's parent is
+    none, paths and provenance come back relative to the root
+    (\texttt{/pages/index.html}), and the membership test (the parent
+    chain reaches the root) gates what would reach out: links,
+    backlinks, edge rows, resolutions, index lookups, selections and
+    the non-tree nodes drop whatever lies above or beside the root, so
+    a hop that would leave it answers nothing. A declared graph's
+    scope is read inside it (the web level's \texttt{//page(->link)}
+    still matches). quarb-open takes \texttt{root=} off any target
+    before the source opens (\texttt{open\_mount}) and renders the
+    locator relative too; \texttt{qua --root PATH} is the sugar for
+    one source. A PATH no node matches, or several, refuses at
+    mount \\
+\texttt{| \#(:a; :b)}, \texttt{| \%(:a; :b)}; \texttt{round} / \texttt{floor} / \texttt{ceil} / \texttt{abs}
+  & \live rulings 2026-11-01: a \texttt{\#(} or \texttt{\%(} after a
+    pipe whose items open on a projection is the projector applied
+    to the topic, the pipe form of \texttt{t:\#(:a; :b)} /
+    \texttt{v:\%(:a; :b)} (\texttt{Operand::Projected} over
+    \texttt{Operand::Topic}; the parser's
+    \texttt{projector\_items\_ahead}); a record shape over a list of
+    records reads each item; the web planner keeps its prefilter
+    rung under such a projector. The finishers that read a number
+    leave a value with no numeric coercion unchanged wherever they
+    broadcast (\texttt{numeric\_or\_same}), so a text column of a
+    table survives \texttt{| round(3)}. Beside them: a web
+    \texttt{<dir>} row answers \texttt{::name}, and a page reference
+    held in a value prints its arbor path (a root-only provenance
+    path falls back to the name path) \\
+\texttt{AstAdapter::property\_withheld}, \texttt{withheld\_properties}, \texttt{nodes\_withheld}; \texttt{OMITTED}
+  & \live omitted data (2026-11-01; spec: omitted data, draft.192):
+    data a source withholds from the caller. Three hooks, all
+    defaulting to silence: \texttt{property\_withheld(node, name)}
+    (asked after an absent read: the property stays absent, never
+    null, and the run marks the omission), \texttt{withheld\_properties()}
+    (source-wide names the planner never pushes as a conjunct or an
+    index lookup) and \texttt{nodes\_withheld()} (asked once after
+    the run: whole nodes dropped, simply not there). The report is
+    one \texttt{warning OMITTED (source): some data is omitted due to
+    insufficient permissions} per run (\texttt{Ambient::omitted},
+    pushed when the ambient closes, or by \texttt{Query::run} for
+    nodes), never twice and never beside the error of the same code.
+    The error: a withheld read inside a key evaluation
+    (\texttt{Ambient::keying}, raised by \texttt{eval\_pred\_expr\_at}
+    and the filter command) refuses as \texttt{error OMITTED (source)}
+    with the same text; a value that came from a withheld read
+    carries \texttt{Origins::omitted} through the captures, and the
+    order, rank (top/bottom), filter and value-combining aggregates
+    refuse over a marked thread, while \texttt{count}, the structural
+    commands and the renderers (\texttt{OMISSION\_SAFE}) pass. Nothing
+    is ever null for this reason \\
 \texttt{\$-:source}, \texttt{\$-:target}, \texttt{:source:.l}
   & \live edge ends (2026-10-31): the arrived-by edge's two ends as
     node references in the declaration's orientation

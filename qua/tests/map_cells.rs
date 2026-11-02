@@ -139,3 +139,33 @@ fn the_null_default_broadcasts_and_stands_after_a_pipe() {
     assert_eq!(run("= 2 | > 3 ? $_ : null").unwrap(), vec!["null"]);
     assert_eq!(one("= 5 | = 5"), "true");
 }
+
+/// A bare projection over a null topic reads nothing (spec:
+/// Projectors, "a read on a null topic later in a pipeline is
+/// null"): `map(::k)` and `| ::k` over null answer null, not the
+/// property of the node the thread stands at; an expression around
+/// the projection still reads the node, and any other topic leaves
+/// `::k` the position's property. `join` over a null topic is null,
+/// as the other reductions over nothing are.
+#[test]
+fn a_projection_over_a_null_topic_is_null() {
+    assert_eq!(one("^ | ::missing | ::n"), "null");
+    assert_eq!(one("^ | ::missing | map(::n)"), "null");
+    assert_eq!(one("^ | ::missing | :::type"), "null");
+    // the node is still there for an expression that asks for it
+    assert_eq!(one("^ | ::missing | ?? ::n"), "1");
+    assert_eq!(one("^ | ::missing | map(?? 0)"), "0");
+    // a non-null topic leaves the projection at the node
+    assert_eq!(one("^ | .:x(7) | :.x | ::n"), "1");
+    // the mode is the parser's, static: a push returns the thread to
+    // navigation mode with its topic kept, and a projection there is
+    // a node read whatever was filed
+    assert_eq!(one("^ | ::missing | .r | ::n"), "1");
+    assert_eq!(one("^ | ::missing | .:r | [:.r = null] | ::n"), "1");
+    assert_eq!(one("^ | ::missing | .:r | [:.r = null] | :.r"), "null");
+    // join over null, over a list of one null
+    assert_eq!(one("^ | ::missing | join(\",\")"), "null");
+    assert_eq!(one("^ | ::missing | map(::n) | join(\" > \")"), "null");
+    assert_eq!(one("= @(null) | join(\",\")"), "");
+    assert_eq!(one("= @(1; null) | join(\",\")"), "1,");
+}

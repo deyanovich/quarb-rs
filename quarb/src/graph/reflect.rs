@@ -539,6 +539,22 @@ impl QueryArbor {
                 let id = self.intern(Some("desc"), Vec::new(), Some(parent));
                 self.walk_operand(inner, id);
             }
+            // a projection read through the node a value names:
+            // `through`, its `key` the projection's name
+            Operand::Through { base, projection } => {
+                let key = match projection {
+                    Projection::Property(Some(k))
+                    | Projection::CoreMeta(k)
+                    | Projection::AdapterMeta(k) => k.clone(),
+                    Projection::Property(None) => String::new(),
+                };
+                let id = self.intern(
+                    Some("through"),
+                    vec![("key".to_string(), Value::Str(key))],
+                    Some(parent),
+                );
+                self.walk_operand(base, id);
+            }
             // the projection operator: `project`, its `shape` the
             // constructor's sigil (list, record, table, expr), the
             // base first and the shape's operands after it
@@ -991,6 +1007,25 @@ impl QueryArbor {
                 }
                 let id = self.intern(Some("subcontext"), props, Some(parent));
                 self.walk_query(body, id, None);
+            }
+            // `| %(:a; :b)` — the record projector on the topic
+            // (ruling 2026-11-01) reflects as the record command it
+            // is in every reading but the list's: the vocabulary and
+            // the bridges see `cmd rec`, as they did
+            Command::Expr(Operand::Projected { base, shape })
+                if matches!(**base, Operand::Topic)
+                    && let crate::syntax::ast::ProjShape::Value(v) = shape
+                    && let Operand::Piped { expr, commands } = &**v
+                    && matches!(**expr, Operand::Topic)
+                    && let [Command::Func(call)] = commands.as_slice()
+                    && matches!(call.name.as_str(), "rec" | "record") =>
+            {
+                let id = self.intern(
+                    Some("cmd"),
+                    vec![("name".to_string(), Value::Str(call.name.clone()))],
+                    Some(parent),
+                );
+                self.walk_args(&call.args, id);
             }
             Command::Expr(e) => {
                 let id = self.intern(Some("expr"), Vec::new(), Some(parent));

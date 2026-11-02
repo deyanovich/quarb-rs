@@ -1923,10 +1923,14 @@ fn apply_scalar_inner(
             _ => Value::Null,
         }],
 
-        // Numeric scalars: a non-numeric topic becomes Null. A
-        // QUANTITY rounds in its display unit and stays a quantity
-        // — `(::speed | convert('km/h')) | round` is a whole
-        // number of km/h, not of base meters-per-second.
+        // Numeric scalars: a value with no numeric coercion is
+        // answered unchanged (ruling 2026-11-01), so a text or null
+        // cell of a table, a field of a record, an item of a list
+        // and a lone text piped in all come back as they were, one
+        // rule at every size. A QUANTITY rounds in its display unit
+        // and stays a quantity — `(::speed | convert('km/h')) |
+        // round` is a whole number of km/h, not of base
+        // meters-per-second.
         "round" | "floor" | "ceil" if matches!(topic, Value::Quantity { .. }) => {
             round_quantity(topic, call, scale)
         }
@@ -1938,12 +1942,12 @@ fn apply_scalar_inner(
         // remedy for presenting arithmetic like 68.99000000000001.
         // (a whole number past the integers stays a float: the
         // cast would saturate at i64::MAX)
-        "round" => vec![numeric_scalar(&topic, |n| match round_digits(call) {
+        "round" => vec![numeric_or_same(topic, |n| match round_digits(call) {
             Some(d) => Value::Float(round_to(n, d)),
             None => whole(n.round()),
         })],
-        "floor" => vec![numeric_scalar(&topic, |n| whole(n.floor()))],
-        "ceil" => vec![numeric_scalar(&topic, |n| whole(n.ceil()))],
+        "floor" => vec![numeric_or_same(topic, |n| whole(n.floor()))],
+        "ceil" => vec![numeric_or_same(topic, |n| whole(n.ceil()))],
         "abs" => vec![match topic {
             // (`i64::MIN` has no integer absolute value)
             Value::Int(n) => n
@@ -1960,7 +1964,7 @@ fn apply_scalar_inner(
                 base,
                 written: written.map(|(v, u)| (v.abs(), u)),
             },
-            other => numeric_scalar(&other, |n| Value::Float(n.abs())),
+            other => numeric_or_same(other, |n| Value::Float(n.abs())),
         }],
         // The elementary functions over the numeric reading: an
         // undefined value (a logarithm of a non-positive, a root of
@@ -2479,6 +2483,16 @@ fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
 /// none.
 fn numeric_scalar(topic: &Value, f: impl Fn(f64) -> Value) -> Value {
     topic.numeric().map(f).unwrap_or(Value::Null)
+}
+
+/// The finishers that read a number and leave what they cannot
+/// round (spec: the stdlib appendix, `round`): the numeric coercion
+/// of the topic under `f`, else the topic itself, unchanged.
+fn numeric_or_same(topic: Value, f: impl Fn(f64) -> Value) -> Value {
+    match topic.numeric() {
+        Some(n) => f(n),
+        None => topic,
+    }
 }
 
 /// The digits argument of `round(d)`, when one was given. A
@@ -7459,7 +7473,7 @@ mod tests {
     fn quantital_folds_type_and_refuse() {
         let q = |value: f64, written: Option<(f64, &str)>| Value::Quantity {
             value,
-            base: "kg*m^2/s^3".into(),
+            base: "m^2*kg/s^3".into(),
             written: written.map(|(m, u)| (m, u.to_string())),
         };
         // Same written unit: the total keeps it.
@@ -8084,7 +8098,13 @@ mod tests {
         assert_eq!(sc("ceil", Value::Float(2.1)), vec![Value::Int(3)]);
         assert_eq!(sc("abs", Value::Int(-4)), vec![Value::Int(4)]);
         assert_eq!(sc("abs", Value::Float(-1.5)), vec![Value::Float(1.5)]);
-        assert_eq!(sc("round", Value::Str("n/a".into())), vec![Value::Null]);
+        // a value with no numeric coercion comes back unchanged
+        assert_eq!(
+            sc("round", Value::Str("n/a".into())),
+            vec![Value::Str("n/a".into())]
+        );
+        assert_eq!(sc("floor", Value::Null), vec![Value::Null]);
+        assert_eq!(sc("abs", Value::Bool(true)), vec![Value::Bool(true)]);
     }
 
     fn sc_args(name: &str, args: Vec<Arg>, topic: Value) -> Vec<Value> {
@@ -8117,14 +8137,14 @@ mod tests {
             sc_args("round", d(-1), Value::Float(2568.5)),
             vec![Value::Float(2570.0)]
         );
-        // Numeric reading still applies; no reading is still null.
+        // Numeric reading still applies; no reading comes back unchanged.
         assert_eq!(
             sc_args("round", d(1), Value::Str("2.44".into())),
             vec![Value::Float(2.4)]
         );
         assert_eq!(
             sc_args("round", d(2), Value::Str("n/a".into())),
-            vec![Value::Null]
+            vec![Value::Str("n/a".into())]
         );
         // A quantity rounds in its display unit and stays one.
         let q = Value::Quantity {

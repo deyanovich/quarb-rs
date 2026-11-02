@@ -476,7 +476,8 @@ fn plan_steps(
             _ => None,
         };
         let lowered = match step.predicates.first() {
-            Some(Predicate::Expr(e)) => super::indexable_comparison(e),
+            Some(Predicate::Expr(e)) => super::indexable_comparison(e)
+                .filter(|(p, _, _)| !adapter.withheld_properties().iter().any(|w| w == p)),
             _ => None,
         };
         let conjuncts: Vec<(String, Cmp, Value)> = lowered

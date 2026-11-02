@@ -180,11 +180,14 @@ pub(crate) fn references(register: &[Reg]) -> impl Iterator<Item = NodeId> + '_ 
 
 /// A reference to `node` (spec: The Capsa, "Node references"): its
 /// coordinate and its locator, the provenance path where the
-/// adapter gives one, else the name path.
+/// adapter gives one, else the name path. A provenance path of `/`
+/// alone says the node is its source's root (a web page within its
+/// URL) and locates nothing in the arbor: the name path then.
 pub(crate) fn node_ref(adapter: &impl AstAdapter, node: NodeId) -> Value {
     let locator = resolved_provenance(adapter, node)
         .first()
         .path
+        .filter(|p| p != "/")
         .unwrap_or_else(|| ancestor_path(adapter, node, |a, n| a.name(n)));
     Value::Node(crate::value::NodeRef::new(node.0, locator))
 }

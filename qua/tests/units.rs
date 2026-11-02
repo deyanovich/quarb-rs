@@ -226,7 +226,8 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     // spaced or glued, an undeclared name is text
     assert_eq!(all("/rows/*::tag | quantity"), "null | null | null");
     assert_eq!(one("= '2nd' | quantity"), "null");
-    assert_eq!(one("= '5G' | quantity"), "null");
+    // (5G is five gauss since the pre-SI table; a name that is no unit)
+    assert_eq!(one("= '5Q' | quantity"), "null");
     assert_eq!(one("= '12 EUR' | quantity"), "12_EUR");
     assert_eq!(one("= '12€' | quantity"), "null");
     // the built-in units read either way
@@ -248,8 +249,8 @@ fn convert_keeps_an_opaque_factor_and_scales_the_rest() {
 fn the_dimension_names_the_base_dimensions() {
     assert_eq!(one("= '10 m/s' | dimension"), "L/T");
     assert_eq!(one("= '36 km/h' | dimension"), "L/T");
-    assert_eq!(one("= '1 J' | dimension"), "M*L^2/T^2");
-    assert_eq!(one("= '1 N' | dimension"), "M*L/T^2");
+    assert_eq!(one("= '1 J' | dimension"), "L^2*M/T^2");
+    assert_eq!(one("= '1 N' | dimension"), "L*M/T^2");
     assert_eq!(one("= '1 K' | dimension"), "Θ");
     assert_eq!(one("= '1 mol/s' | dimension"), "N/T");
     assert_eq!(one("= 'soon' | dimension"), "null");

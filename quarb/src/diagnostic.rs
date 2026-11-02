@@ -137,6 +137,12 @@ impl fmt::Display for Diagnostic {
 
 /// The code of a refusal no rule has named yet.
 pub const REFUSED: &str = "REFUSED";
+/// Data the source withholds from the caller (spec: omitted data): a
+/// property, or whole nodes; a warning once per query where data was
+/// omitted, an error where the query keyed on an omitted property.
+pub const OMITTED: &str = "OMITTED";
+/// The one wording of both, naming no field, no node and no count.
+pub const OMITTED_TEXT: &str = "some data is omitted due to insufficient permissions";
 /// A query text the lexer or the parser could not read.
 pub const SYNTAX: &str = "SYNTAX";
 /// An open walk or loop that reached the quantifier bound with

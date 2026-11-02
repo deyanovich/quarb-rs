@@ -49,11 +49,12 @@ mod thread;
 mod value;
 // The public module paths, as they were before the layering.
 pub use graph::complete;
+pub use graph::edges::GraphDeclaration;
 pub use graph::host::{QueryResult, Traced, resolved_provenance};
 pub use graph::identity::{canonical_identity, canonical_identity_at_open, is_url, name_path};
 pub use graph::run::{Run, inherited};
 pub use graph::tabula::{table_node_records, table_rows_of};
-pub use graph::{adapter, conformance, koine, names, plan, reflect, source, target, trace};
+pub use graph::{adapter, conformance, koine, names, plan, reflect, rooted, source, target, trace};
 #[cfg(feature = "kaiv")]
 pub use pipeline::kaiv_out;
 pub use pipeline::{PrettyMode, SessionMemory, SessionStore, session_memory};
@@ -388,6 +389,11 @@ impl Query {
             adapter,
             Some(run.clone()),
         ))?;
+        // the source dropped whole nodes for the caller: the omission
+        // warning, once (spec: omitted data)
+        if adapter.nodes_withheld() {
+            value::ambient::record_omitted_nodes();
+        }
         Ok(Outcome {
             result,
             closing: self.closing.clone(),

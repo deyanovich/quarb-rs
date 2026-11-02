@@ -220,3 +220,94 @@ fn too_many_mounts_are_refused() {
     let err = MountAdapter::try_new(mounts(255)).err().unwrap();
     assert!(err.contains("255 mounts"), "{err}");
 }
+
+/// A source declaring a graph over its pages with a stored measure.
+struct Declaring;
+
+impl AstAdapter for Declaring {
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+    fn children(&self, n: NodeId) -> Vec<NodeId> {
+        match n.0 {
+            0 => vec![NodeId(1), NodeId(2)],
+            _ => Vec::new(),
+        }
+    }
+    fn name(&self, n: NodeId) -> Option<String> {
+        match n.0 {
+            1 => Some("a".into()),
+            2 => Some("b".into()),
+            _ => None,
+        }
+    }
+    fn parent(&self, n: NodeId) -> Option<NodeId> {
+        (n.0 > 0).then_some(NodeId(0))
+    }
+    fn answers_to(&self, n: NodeId, name: &str) -> bool {
+        (n.0 == 1 || n.0 == 2) && name == "page" || self.name(n).as_deref() == Some(name)
+    }
+    fn links(&self, n: NodeId) -> Vec<(String, NodeId)> {
+        match n.0 {
+            1 => vec![("link".into(), NodeId(2))],
+            _ => Vec::new(),
+        }
+    }
+    fn graph_declarations(&self) -> Vec<quarb::GraphDeclaration> {
+        vec![quarb::GraphDeclaration {
+            scope: "//page".into(),
+            hop: "->link".into(),
+            measures: vec!["pagerank".into()],
+        }]
+    }
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        assert_eq!((scope, hop, measure), ("//page", "->link", "pagerank"));
+        Some(
+            nodes
+                .iter()
+                .map(|n| Value::Float(if n.0 == 2 { 0.75 } else { 0.25 }))
+                .collect(),
+        )
+    }
+}
+
+#[test]
+fn declared_graphs_read_through_a_mount() {
+    let m = MountAdapter::new(vec![Mount {
+        name: "site".into(),
+        target: None,
+        adapter: Box::new(Declaring),
+    }]);
+    // the mount's root must be opened for the declaration to show
+    let _ = m.children(m.root());
+    let decls = m.graph_declarations();
+    assert_eq!(decls.len(), 1);
+    assert_eq!(decls[0].scope, "/site//page");
+    assert_eq!(decls[0].hop, "->link");
+    // the stored measure, through the mount's ids
+    let pages: Vec<NodeId> = m.children(m.children(m.root())[0]);
+    assert_eq!(pages.len(), 2);
+    let got = m
+        .graph_measure("/site//page", "->link", "pagerank", &pages)
+        .unwrap();
+    assert_eq!(got, vec![Value::Float(0.25), Value::Float(0.75)]);
+    // another scope is nobody's
+    assert!(
+        m.graph_measure("//page", "->link", "pagerank", &pages)
+            .is_none()
+    );
+    // the engine reads the stored column under the mount
+    let a = m;
+    let out = quarb::run("/site//page @| graph:pagerank(->link)", &a).unwrap();
+    let vs = match out {
+        quarb::QueryResult::Values(v) => v,
+        _ => panic!(),
+    };
+    assert_eq!(vs, vec![Value::Float(0.25), Value::Float(0.75)]);
+}

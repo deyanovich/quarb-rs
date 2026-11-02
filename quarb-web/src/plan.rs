@@ -151,6 +151,18 @@ impl Q<'_> {
             .collect()
     }
     /// Every node below `n` (depth-first).
+    /// Whether `n` stands inside a projection operator (`project`):
+    /// the topic read there is the enumerated row's own.
+    fn under_project(&self, n: NodeId) -> bool {
+        let mut cur = self.a.parent(n);
+        while let Some(p) = cur {
+            if self.name(p) == "project" {
+                return true;
+            }
+            cur = self.a.parent(p);
+        }
+        false
+    }
     fn all_below(&self, n: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut stack = self.kids(n);
@@ -826,6 +838,12 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
             for n in q.all_below(*s) {
                 if q.name(n) == "path" && anchored(&q, n) {
                     return Plan::scan("an anchored path in the pipeline");
+                }
+                // the topic as a projector's base (`| #(:a; :b)`,
+                // `| %(::path)`) reads the enumerated row itself, as
+                // the constructor it stands for does
+                if q.name(n) == "topic" && q.under_project(n) {
+                    continue;
                 }
                 if UNSAFE_KINDS.contains(&q.name(n).as_str()) {
                     return Plan::scan(format!("a {} in the pipeline", q.name(n)));
