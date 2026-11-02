@@ -146,7 +146,7 @@ fn the_point_is_carried_from_capsa_to_capsa() {
     // left behind), and a date with its year left out is the first
     // such date at or after the point
     assert_eq!(
-        diary("; forward"),
+        diary("; --forward"),
         "text,when,from\n\
          8:35 P.M,1897-05-03T20:35,0\n\
          the next morning,1897-05-04,1\n\
@@ -173,7 +173,7 @@ fn the_point_is_carried_from_capsa_to_capsa() {
     );
     let (_, err) = qua(&dir, &["= 1 @| timeline(1; 2; 3; 4)"]);
     assert!(
-        err.contains("'timeline' takes 3 operands at most, 4 given"),
+        err.contains("'timeline' takes 2 operands at most, 4 given"),
         "{err}"
     );
 }

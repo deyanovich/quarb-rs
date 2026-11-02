@@ -1583,7 +1583,7 @@ fn fn_call(call: &crate::syntax::ast::FnCall) -> String {
         .collect();
     // The operands first, then the one option segment; a segment
     // whose first option would not open one (a dash before a
-    // digit) opens with the void option.
+    // digit) opens with `;;` (draft 203).
     let (operands, options): (Vec<_>, Vec<_>) = args
         .into_iter()
         .zip(call.args.iter())
@@ -1592,18 +1592,21 @@ fn fn_call(call: &crate::syntax::ast::FnCall) -> String {
     // — the canonical spelling (draft 164), a dash-led field being
     // the option segment on the reparse; the trailing separator,
     // `f(--author;)`, is an input spelling only.
-    let mut fields: Vec<String> = operands.into_iter().map(|(t, _)| grouped(t)).collect();
+    let fields: Vec<String> = operands.into_iter().map(|(t, _)| grouped(t)).collect();
+    let mut text = fields.join("; ");
     if !options.is_empty() {
-        let mut segment: Vec<String> = options.into_iter().map(|(t, _)| t).collect();
+        let segment: Vec<String> = options.into_iter().map(|(t, _)| t).collect();
         let opens = segment[0] == "--"
             || segment[0].starts_with("--")
             || crate::syntax::lexer::is_option_word(segment[0].split('=').next().unwrap_or(""));
-        if !opens {
-            segment.insert(0, "-=".to_string());
-        }
-        fields.push(segment.join(" "));
+        let sep = match (fields.is_empty(), opens) {
+            (true, true) => "",
+            (false, true) => "; ",
+            (_, false) => ";; ",
+        };
+        text = format!("{text}{sep}{}", segment.join(" "));
     }
-    format!("{}({})", call.name, fields.join("; "))
+    format!("{}({})", call.name, text)
 }
 
 pub(crate) fn reg(r: &RegRef) -> String {

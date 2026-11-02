@@ -11,9 +11,14 @@
 //! (after `|` once per capsa on the topic's text, stdout minus one
 //! trailing newline as the value; after `@|` once over the context,
 //! one line per capsa on stdin, every stdout line a value, each
-//! carrying the shared regulae). The first kinds are the text ones,
-//! `exec:` and `shell:`; `python:` is named here and refused until
-//! the native framing lands.
+//! carrying the shared regulae). The text kinds, `exec:` and
+//! `shell:`, run here; `python:`, a module file or an import path
+//! with the native framing, is parsed here and bound by the host,
+//! which mounts the module as a command library under the alias
+//! (qua's `python` feature, through quarb-pyvalue): the module's
+//! functions become commands, the input the first positional
+//! parameter unless `$_` places it, options the keyword arguments,
+//! a raised exception a failed call.
 pub use crate::syntax::registry::split_env;
 
 use crate::syntax::ast::{Arg, FnCall};
@@ -31,6 +36,10 @@ pub enum EnvKind {
     /// functions and aliases beside the path. `--allow-shell` is
     /// `sh=shell:` under its older name.
     Shell,
+    /// `python:MODULE.py` / `python:pkg.module` — a Python module,
+    /// its functions the commands, with the native framing. Bound
+    /// by the host at mount time; an interpreter alone is no target.
+    Python,
 }
 
 /// One mounted environment.
@@ -40,7 +49,8 @@ pub struct Environment {
     pub alias: String,
     pub kind: EnvKind,
     /// The kind's target: a directory or a program for `exec:`,
-    /// nothing for `shell:`.
+    /// nothing for `shell:`, a module file or an import path for
+    /// `python:`.
     pub target: String,
 }
 
@@ -111,10 +121,41 @@ impl Environment {
                     target: String::new(),
                 })
             }
-            "python" => Err(crate::QuarbError::unsupported(format!(
-                "the python: environment ('{alias}=python:{target}'): the native framing \
-                 arrives with the plugin round; exec: and shell: are built"
-            ))),
+            "python" => {
+                let module = |target: String| {
+                    Ok(Environment {
+                        alias: alias.to_string(),
+                        kind: EnvKind::Python,
+                        target,
+                    })
+                };
+                let forms = format!(
+                    "a module file ('{alias}=python:./helpers.py') or an import path \
+                     ('{alias}=python:pkg.helpers')"
+                );
+                if target.is_empty() {
+                    return Err(bad(format!(
+                        "'{alias}=python:' names no module: mount {forms}; an interpreter \
+                         alone is no target"
+                    )));
+                }
+                let expanded = expand_home(target);
+                if expanded.ends_with(".py") {
+                    if !std::path::Path::new(&expanded).is_file() {
+                        return Err(bad(format!(
+                            "'{alias}=python:{target}': no such module file"
+                        )));
+                    }
+                    return module(expanded);
+                }
+                if is_import_path(&expanded) {
+                    return module(expanded);
+                }
+                Err(bad(format!(
+                    "'{alias}=python:{target}' names no module: an interpreter alone is no \
+                     target; mount {forms}"
+                )))
+            }
             other => Err(bad(format!("'{other}:' is not an environment kind"))),
         }
     }
@@ -154,6 +195,15 @@ impl Environment {
                 }
             }
             EnvKind::Shell => Ok(Program::ShellWord(name.to_string())),
+            // Bound by the host as a command library under the
+            // alias, which the pipeline reaches before any
+            // environment; a call landing here runs on a host that
+            // did not bind it.
+            EnvKind::Python => Err(crate::QuarbError::unsupported(format!(
+                "environment '{}' (python:{}) needs a host built with the python feature \
+                 (cargo install qua --features python); this one binds no Python module",
+                self.alias, self.target
+            ))),
         }
     }
 
@@ -293,6 +343,24 @@ fn is_alias(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+}
+
+/// An import path: identifiers joined by dots (`helpers`,
+/// `pkg.helpers`). A path with a slash, or a name that reads as an
+/// interpreter (`python3`), is none: an interpreter alone is no
+/// target.
+fn is_import_path(s: &str) -> bool {
+    !s.contains('/')
+        && !s.is_empty()
+        && s.split('.').all(|seg| {
+            let mut chars = seg.chars();
+            chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_')
+        })
+        && !s
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.starts_with("python") || last == "py")
 }
 
 fn expand_home(path: &str) -> String {

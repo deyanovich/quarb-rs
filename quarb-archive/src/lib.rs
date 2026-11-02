@@ -1590,6 +1590,16 @@ impl AstAdapter for ArchiveAdapter {
         &["encoding", "size", "compressed"]
     }
 
+    /// An entry has no `::` properties of its own (its content, when
+    /// it grafts, has them, and data wins), so the adapter's fields
+    /// mirror as data properties where no conflict is possible (the
+    /// user's mirroring rule, ruling #29): `::size` and
+    /// `::compressed` on an entry, `::n-entries` on the root, as the
+    /// file system mirrors `::size`.
+    fn aliased_metadata(&self, _node: NodeId) -> &'static [&'static str] {
+        &["size", "compressed", "n-entries"]
+    }
+
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         if matches!(key, "encoding" | "replaced")

@@ -68,7 +68,7 @@ fn groups_in_operand_position() {
         "//commit[:::short = ^/tags/*:::short]",
         "/movie .m <-ACTED_IN[::born > $$.m::released] | %(::name; $$.m::title)",
         "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
-        "/tags/* | .t(:name) | `cloc --git ${$.t}` | %($.t; lines = $_)",
+        "/tags/* | .t(:name) | sh:cloc($.t; --git) | %($.t; lines = $_)",
         "/x::v | base64 | decode(\"base64\")",
         "/x::v @| sort(\"ru-RU\")",
         "/a/*[^//error] | %(n = :name; of = (^//*.rs @| count))",
@@ -742,8 +742,9 @@ fn decimal_comma_and_group_underscores_canonicalize() {
     // the union word follows the glyph into branch position
     assert_eq!(canon("//p .or. //q"), "//p || //q");
     assert_eq!(canon("//p .или. //q | ::n"), "//p || //q | ::n");
-    // the rounded shell literal prints as the backtick
-    assert_eq!(canon("/f/* | (;wc -l)"), "/f/* | `wc -l`");
+    // the shell literals are retired (the shell is an environment mount)
+    let e = refuse("/f/* | (;wc -l)");
+    assert!(e.contains("is retired") && e.contains("sh=shell:"), "{e}");
     assert_eq!(canon("/a(->b){2;}"), "/a(->b){2;}");
     assert_eq!(canon("/a(->b)(+2;)"), "/a(->b){2;}");
     // the join binds where it is written: the driver's commands before

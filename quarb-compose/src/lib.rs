@@ -331,6 +331,64 @@ fn parse_as(
     None
 }
 
+/// The text reading of a string in the notations this crate
+/// parses at the text level: plain text, Markdown, HTML, RTF,
+/// CoNLL-U, and the XML vocabularies the koine route knows.
+fn text_reading_native(notation: &str, text: &str) -> Option<Inner> {
+    let model = match notation {
+        "text" | "plain" => quarb_text::TextModel::parse_plain(text),
+        "markdown" | "md" => quarb_text_markdown::parse(text),
+        "html" | "htm" => quarb_text_html::parse(text),
+        "rtf" => quarb_text_rtf::parse(text.as_bytes()).ok()?,
+        "conllu" => quarb_text::TextModel::parse_conllu_text(text).ok()?,
+        #[cfg(feature = "koine")]
+        "fb2" | "usfm" | "sfm" | "tei" | "docbook" | "jats" | "usx" | "osis" | "rnc"
+        | "opencorpora" | "proiel" => {
+            let kind = match notation {
+                "sfm" => "usfm",
+                k => k,
+            };
+            quarb_text_koine::parse_xml_as(text, kind).ok()?
+        }
+        #[cfg(feature = "koine")]
+        "xml" => {
+            let kind = quarb_text_koine::detect_xml_kind(text)?;
+            quarb_text_koine::parse_xml_as(text, kind).ok()?
+        }
+        _ => return None,
+    };
+    Some(Inner::Text(model))
+}
+
+/// Whether a reading operand named no notation and the string
+/// declared none (`graft(code)` over plain text).
+fn named_is_text(label: &str) -> bool {
+    label.ends_with(":text")
+}
+
+/// The code reading of a string: the language by its extension or
+/// its name (`rs`/`rust`, `py`/`python`, `js`/`javascript`, `c`).
+#[cfg(feature = "source")]
+fn code_graft(text: &str, language: &str) -> Option<Inner> {
+    let ext = match language {
+        "rust" => "rs",
+        "python" => "py",
+        "javascript" => "js",
+        other => other,
+    };
+    if !quarb_tree_sitter::supported(ext) {
+        return None;
+    }
+    quarb_code::CodeModel::parse(text, ext)
+        .ok()
+        .map(Inner::Code)
+}
+
+#[cfg(not(feature = "source"))]
+fn code_graft(_text: &str, _language: &str) -> Option<Inner> {
+    None
+}
+
 /// One graft: an inner arbor mounted at an outer leaf.
 struct Graft {
     outer: NodeId,
@@ -359,6 +417,18 @@ pub type DocumentReader = std::rc::Rc<dyn Fn(&std::path::Path) -> Option<quarb_t
 /// under `?doc=`, a model file's `document` member), or `None` to
 /// leave the leaf to the default grafting (spec: The Corpus Reading).
 pub type DocumentNodes<A> = std::rc::Rc<dyn Fn(&A, NodeId) -> Option<quarb_text::TextModel>>;
+
+/// A host's reading of a lone string (spec: Grafting,
+/// `graft(READING:NOTATION)`): the reading's name (`text`, `corpus`,
+/// `lit`, `koine`), the notation the string is to be read as, and
+/// the string in; its text-level model out, `Some(Err)` the
+/// reading's own refusal, `None` where the host has no such reading.
+pub type StringReader =
+    std::rc::Rc<dyn Fn(&str, &str, &str) -> Option<Result<quarb_text::TextModel, String>>>;
+
+/// The readings a graft operand may name as a prefix
+/// (`graft(text:markdown)`), as the mount prefixes spell them.
+pub const READINGS: &[&str] = &["text", "corpus", "lit", "koine", "code", "web"];
 
 pub struct ComposeAdapter<A: AstAdapter> {
     outer: A,
@@ -405,6 +475,20 @@ pub struct ComposeAdapter<A: AstAdapter> {
     default_notation: Option<String>,
     /// The host's reading of document leaves that have no path.
     document_nodes: Option<DocumentNodes<A>>,
+    /// The grafts made on demand from a text (`graft(NOTATION)`):
+    /// each a free root, its `outer` the composite id of its own
+    /// inner root rather than an outer leaf, so nothing of the
+    /// outer substrate is asked about it.
+    free: RefCell<std::collections::HashSet<usize>>,
+    /// The host's readings of a lone string, for
+    /// `graft(READING:NOTATION)`.
+    string_reader: Option<StringReader>,
+    /// Graft on demand only: no leaf is probed for a declared
+    /// notation (the layer a host puts over a plain source so that
+    /// `graft(NOTATION)` and a `<NOTATION>` trait at a hop have a
+    /// composing layer to answer from, the leaves otherwise as they
+    /// were).
+    on_demand_only: bool,
 }
 
 impl<A: AstAdapter> ComposeAdapter<A> {
@@ -426,7 +510,25 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             csv: quarb_csv::CsvOptions::default(),
             default_notation: None,
             document_nodes: None,
+            free: RefCell::new(std::collections::HashSet::new()),
+            string_reader: None,
+            on_demand_only: false,
         }
+    }
+
+    /// Graft on demand only (`graft(NOTATION)`, a `<NOTATION>` trait
+    /// at a hop): no leaf is read for a declared notation of its
+    /// own, so a plain source keeps its leaves as they were.
+    pub fn on_demand_only(mut self) -> Self {
+        self.on_demand_only = true;
+        self
+    }
+
+    /// The host's readings of a lone string (`graft(corpus:latex)`):
+    /// without one, a reading prefix other than `code` refuses.
+    pub fn with_string_reader(mut self, reader: StringReader) -> Self {
+        self.string_reader = Some(reader);
+        self
     }
 
     /// The delimited-text options for this mount (builder-style).
@@ -539,6 +641,11 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             Some((g, inner)) => {
                 let grafts = self.grafts.borrow();
                 let graft = &grafts[g];
+                if self.free.borrow().contains(&g) {
+                    // A graft on demand has no outer leaf: the text
+                    // it was parsed from stands for the source.
+                    return format!("graft({})!{}", graft.notation, graft.inner.locator(inner));
+                }
                 format!(
                     "{}!{}",
                     outer_locator(graft.outer),
@@ -546,6 +653,136 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 )
             }
         }
+    }
+
+    /// Graft a text on demand (spec: Grafting, `graft(NOTATION)`).
+    /// The operand is written as a mount target is: `NOTATION` reads
+    /// the string under the notation's default reading (`json`; the
+    /// DOM for `markdown` and `html`; `text` is plain text under its
+    /// only reading); `READING:NOTATION` reads it under that
+    /// reading over that notation, as `READING:file.ext` would read
+    /// a source (`text:markdown`, `corpus:latex`, `koine:markdown`,
+    /// `lit:tei`, `code:rust`); `READING` alone takes the notation
+    /// the string declares (an XML declaration, a DOCTYPE) and plain
+    /// text otherwise; no operand takes the default reading of a
+    /// self-declaring string and refuses one that declares nothing.
+    /// The parsed document becomes a free root, parentless in the
+    /// arbor, that a path walks into; `Err` names what did not parse
+    /// or what the operand did not name. The `web` reading reads a
+    /// crawl, not a lone string, and refuses.
+    pub fn graft_text(&self, text: &str, operand: Option<&str>) -> Result<NodeId, String> {
+        let (reading, named): (Option<&str>, Option<String>) = match operand.map(str::trim) {
+            None | Some("") => (None, None),
+            Some(op) => match op.split_once(':') {
+                Some((r, n)) if READINGS.contains(&r) => (
+                    Some(r),
+                    (!n.trim().is_empty()).then(|| canonical_notation(n)),
+                ),
+                None if READINGS.contains(&op) => (Some(op), None),
+                _ => (None, Some(canonical_notation(op))),
+            },
+        };
+        let shown = operand.unwrap_or("").trim();
+        if reading == Some("web") {
+            return Err(format!(
+                "graft({shown}): the web reading reads a crawl, not a lone string"
+            ));
+        }
+        let declared = self_declared(text).map(str::to_string);
+        let notation = match (reading, named) {
+            (_, Some(n)) => n,
+            (Some(_), None) => declared.unwrap_or_else(|| "text".to_string()),
+            (None, None) => declared.ok_or_else(|| {
+                format!(
+                    "graft: the text declares no notation (no XML declaration or DOCTYPE); \
+                     name one, graft(NOTATION), with NOTATION one of {}, or a reading, \
+                     graft(text), graft(corpus:markdown)",
+                    NOTATIONS.join(", ")
+                )
+            })?,
+        };
+        let label = match reading {
+            Some(r) => format!("{r}:{notation}"),
+            None => notation.clone(),
+        };
+        let inner = match reading {
+            None => {
+                if !is_notation(&notation) {
+                    return Err(format!(
+                        "graft({shown}): '{notation}' names no notation; one of {} (or a \
+                         source language), or a reading prefix, graft(text:{notation})",
+                        NOTATIONS.join(", ")
+                    ));
+                }
+                // The notation's default reading: the DOM for the
+                // marked-up ones, plain text for `text`.
+                parse_as(
+                    &notation,
+                    text,
+                    self.source_graft,
+                    DocumentGraft::Dom,
+                    self.csv,
+                )
+                .ok_or_else(|| format!("graft({shown}): the text does not parse as {notation}"))?
+            }
+            Some("code") => {
+                if named_is_text(&label) {
+                    return Err(
+                        "graft(code): name the language, graft(code:rust), graft(code:py)"
+                            .to_string(),
+                    );
+                }
+                code_graft(text, &notation).ok_or_else(|| {
+                    format!(
+                        "graft({shown}): no source language '{notation}' here (rs/rust, \
+                         py/python, js/javascript, c), or the text does not parse as it"
+                    )
+                })?
+            }
+            Some(r) => {
+                // The host's reading first; the text reading of the
+                // notations this crate parses stands where the host
+                // has none.
+                let host = self
+                    .string_reader
+                    .as_ref()
+                    .and_then(|read| read(r, &notation, text));
+                match host {
+                    Some(Ok(model)) => Inner::Text(model),
+                    Some(Err(m)) => return Err(format!("graft({shown}): {m}")),
+                    None => match (r, text_reading_native(&notation, text)) {
+                        ("text", Some(inner)) => inner,
+                        _ if self.string_reader.is_none() => {
+                            return Err(format!(
+                                "graft({shown}): the {r} reading of a string is not available \
+                                 in this host"
+                            ));
+                        }
+                        _ => {
+                            return Err(format!(
+                                "graft({shown}): the {r} reading does not read {notation}"
+                            ));
+                        }
+                    },
+                }
+            }
+        };
+        let notation = label;
+        let root = inner.adapter().root();
+        let g = {
+            let mut grafts = self.grafts.borrow_mut();
+            grafts.push(Graft {
+                // filled below with the root's own composite id
+                outer: NodeId(0),
+                inner,
+                notation,
+            });
+            grafts.len() - 1
+        };
+        let id = self.intern(g, root);
+        self.grafts.borrow_mut()[g].outer = id;
+        self.free.borrow_mut().insert(g);
+        Ok(id)
     }
 
     /// Decode a composite id.
@@ -557,6 +794,17 @@ impl<A: AstAdapter> ComposeAdapter<A> {
         let mut fill = self.outer.provenance(outer_leaf).as_source_rung();
         fill.path = Some(inner_path);
         fill
+    }
+
+    /// The fill for a node of a graft made on demand: no outer leaf
+    /// stands behind it, so only the node's path inside the parsed
+    /// document is known here; the text's own origins ride the
+    /// thread that grafted it.
+    fn free_fill(inner_path: String) -> quarb::Provenance {
+        quarb::Provenance {
+            path: Some(inner_path),
+            ..quarb::Provenance::default()
+        }
     }
 
     fn split(&self, node: NodeId) -> Option<(usize, NodeId)> {
@@ -578,6 +826,24 @@ impl<A: AstAdapter> ComposeAdapter<A> {
         rev.push((graft, inner));
         self.interned.borrow_mut().insert((graft, inner), id);
         id
+    }
+
+    /// Whether a literal scope names a childless outer node, one a
+    /// child step would read into as a graft. The root is no leaf;
+    /// a scope that names several nodes, or none, counts as one.
+    fn scope_is_leaf(&self, scope: &[&str]) -> bool {
+        let mut at = self.outer.root();
+        for name in scope {
+            let mut hits = self.outer.children_named(at, name).into_iter();
+            let Some(first) = hits.next() else {
+                return true;
+            };
+            if hits.next().is_some() {
+                return true;
+            }
+            at = first;
+        }
+        at != self.outer.root() && self.outer.children(at).is_empty()
     }
 
     /// The graft at an outer leaf, probing (read + parse) on first
@@ -604,6 +870,9 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     }
 
     fn graft_probe(&self, node: NodeId, requested: Option<&str>) -> Option<usize> {
+        if self.on_demand_only && requested.is_none() {
+            return None;
+        }
         if let Some(&g) = self.probed.borrow().get(&node) {
             return g;
         }
@@ -744,6 +1013,14 @@ impl<A: AstAdapter> ComposeAdapter<A> {
 impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     fn root(&self) -> NodeId {
         self.outer.root()
+    }
+
+    fn graft_text(&self, text: &str, notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        Some(ComposeAdapter::graft_text(self, text, notation))
+    }
+
+    fn grafts_on_demand(&self) -> bool {
+        true
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -1106,6 +1383,9 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                         quarb::name_path(a, inner),
                     )
                 };
+                if self.free.borrow().contains(&g) {
+                    return inner_prov.or(Self::free_fill(inner_path));
+                }
                 inner_prov.or(self.graft_fill(outer_leaf, inner_path))
             }
             None => self.outer.provenance(node),
@@ -1124,6 +1404,9 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                         quarb::name_path(a, inner),
                     )
                 };
+                if self.free.borrow().contains(&g) {
+                    return inner_list.or(Self::free_fill(inner_path));
+                }
                 inner_list.or(self.graft_fill(outer_leaf, inner_path))
             }
             None => self.outer.provenance_list(node),
@@ -1320,8 +1603,31 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         self.outer.select_plan(scope, plan)
     }
 
+    /// The outer source prices its own tree. Where this layer grafts
+    /// by kind, a leaf beneath the scope may be a document it has not
+    /// read, so a step that reaches into leaves (a descendant step
+    /// anywhere, a child step from a leaf) keeps the outer's lower
+    /// bound and loses its upper one: a strict budget refuses it as
+    /// unbounded, a lenient one lets the walk price it. A layer that
+    /// grafts on demand only reads no leaf the query does not name,
+    /// so the outer's estimate stands.
     fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
-        self.outer.estimate(scope, plan)
+        let e = self.outer.estimate(scope, plan)?;
+        if self.on_demand_only {
+            return Some(e);
+        }
+        let reaches_leaves = match plan.axis {
+            quarb::PlanAxis::Descendant => true,
+            quarb::PlanAxis::Child => self.scope_is_leaf(scope),
+        };
+        if !reaches_leaves {
+            return Some(e);
+        }
+        Some(quarb::Estimate {
+            nodes: (e.nodes.0, u64::MAX),
+            confidence: quarb::Confidence::Bound,
+            ..e
+        })
     }
 
     fn has_node(&self, node: NodeId) -> bool {
@@ -1333,6 +1639,132 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
 
     fn unit_scale(&self, expr: &str) -> Option<(f64, String)> {
         self.outer.unit_scale(expr)
+    }
+
+    // The hooks that are the outer source's alone, forwarded as they
+    // are: a document's unit names (a kaiv document's `.faiv`
+    // imports), its metadata catalogue, the graph it declares and the
+    // measures it stores, what it withholds. Every source carries
+    // this layer now (grafting on demand), so a hook this layer does
+    // not forward is a hook no source answers.
+    fn unit_names(&self) -> Vec<String> {
+        self.outer.unit_names()
+    }
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        self.outer.metadata_catalogue()
+    }
+
+    fn graph_bound(&self) -> usize {
+        self.outer.graph_bound()
+    }
+
+    fn graph_declarations(&self) -> Vec<quarb::GraphDeclaration> {
+        self.outer.graph_declarations()
+    }
+
+    fn graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+    ) -> Option<Vec<Value>> {
+        if nodes.iter().any(|&n| self.split(n).is_some()) {
+            return None;
+        }
+        self.outer.graph_measure(scope, hop, measure, nodes)
+    }
+
+    fn store_graph_measure(
+        &self,
+        scope: &str,
+        hop: &str,
+        measure: &str,
+        nodes: &[NodeId],
+        values: &[Value],
+    ) {
+        if nodes.iter().all(|&n| self.split(n).is_none()) {
+            self.outer
+                .store_graph_measure(scope, hop, measure, nodes, values);
+        }
+    }
+
+    fn acyclic_link(&self, label: &str) -> Option<String> {
+        self.outer.acyclic_link(label)
+    }
+
+    fn nodes_withheld(&self) -> bool {
+        self.outer.nodes_withheld()
+    }
+
+    fn withheld_properties(&self) -> Vec<String> {
+        self.outer.withheld_properties()
+    }
+
+    fn property_withheld(&self, node: NodeId, name: &str) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .property_withheld(inner, name),
+            None => self.outer.property_withheld(node, name),
+        }
+    }
+
+    fn declared_notation(&self, node: NodeId) -> Option<String> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .declared_notation(inner),
+            None => self.outer.declared_notation(node),
+        }
+    }
+
+    fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
+        match (self.split(source), self.split(target)) {
+            (None, None) => self.outer.link_property_names(source, label, target),
+            (Some((g, s)), Some((h, t))) if g == h => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .link_property_names(s, label, t),
+            _ => Vec::new(),
+        }
+    }
+
+    fn prefetch_properties(&self, nodes: &[NodeId], names: &[&str]) {
+        let outer: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|&n| self.split(n).is_none())
+            .collect();
+        if !outer.is_empty() {
+            self.outer.prefetch_properties(&outer, names);
+        }
+    }
+
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        match self.split(from) {
+            Some(_) => None,
+            None => self.outer.count(from, plan),
+        }
+    }
+
+    /// The outer source's own hint for its nodes; a leaf that may
+    /// still graft (the layer probes leaves) may hold a document
+    /// below, so the hint stands open there.
+    fn may_hold_below(&self, node: NodeId, name: Option<&str>, traits: &[&str]) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g]
+                .inner
+                .adapter()
+                .may_hold_below(inner, name, traits),
+            None => {
+                self.outer.may_hold_below(node, name, traits)
+                    || (!self.on_demand_only && self.outer.children(node).is_empty())
+            }
+        }
     }
 
     fn quantifier_bound(&self) -> usize {

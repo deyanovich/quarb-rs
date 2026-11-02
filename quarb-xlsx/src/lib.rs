@@ -188,6 +188,12 @@ impl AstAdapter for XlsxAdapter {
     fn declared_notation(&self, node: NodeId) -> Option<String> {
         self.model.declared_notation(node)
     }
+    fn graft_text(&self, text: &str, notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        self.model.graft_text(text, notation)
+    }
+    fn grafts_on_demand(&self) -> bool {
+        self.model.grafts_on_demand()
+    }
     fn metadata_catalogue(&self) -> &'static [&'static str] {
         self.model.metadata_catalogue()
     }

@@ -140,7 +140,7 @@ fn desc_on_values_and_the_option_checks() {
         vec!["683", "474", "342"]
     );
     assert_eq!(
-        run("/rows/*[1..3] | ::name @| sort(atergo; --desc)").unwrap(),
+        run("/rows/*[1..3] | ::name @| sort(--atergo --desc)").unwrap(),
         vec!["Hamlet", "Iliad", "Emma"]
     );
     assert_eq!(

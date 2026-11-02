@@ -211,11 +211,11 @@ fn the_layers_nearest_wins() {
         ),
         "1234567.5"
     );
-    // --explain names the locale and its layer
+    // --diagnostics=info names the locale and its layer
     let (_, err, _) = qua(
         &dir,
         &[("QUARB_LOCALE", "ru-RU")],
-        &["--explain", q, "sales.json"],
+        &["--diagnostics=info", q, "sales.json"],
     );
     assert!(err.contains("locale: ru-RU (from QUARB_LOCALE)"), "{err}");
     // an uncovered tag: a LOCALE_UNKNOWN warning on any layer, the
@@ -241,6 +241,19 @@ fn a_closing_table_renders_and_the_value_never_changes() {
     assert_eq!(
         ok(&dir, &[], &[ru[0], ru[1], &q("@| csv"), "sales.json"]),
         "city;n\nЯрославль;1234567,5\nЁлкино;42\nЕлец;0,5"
+    );
+    // ... the pretty table's floats in the locale's decimal mark
+    // too, to the digits (the command and the flag alike)
+    let table = ok(&dir, &[], &[ru[0], ru[1], &q("@| pretty"), "sales.json"]);
+    assert!(
+        table.contains("1234567,5") && table.contains("0,5"),
+        "{table}"
+    );
+    assert!(!table.contains("1234567.5"), "{table}");
+    let flag = ok(&dir, &[], &[ru[0], ru[1], "--pretty", &q(""), "sales.json"]);
+    assert!(
+        flag.contains("1234567,5") && !flag.contains("1234567.5"),
+        "{flag}"
     );
     // a named delimiter wins over the locale's
     assert_eq!(

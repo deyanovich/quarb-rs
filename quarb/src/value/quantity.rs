@@ -1090,7 +1090,7 @@ pub fn parse_unit_text_with(
     Some((scale_by(value, factor), base, value, unit.to_string()))
 }
 
-/// `scale` / `scale(binary)` (spec: Quantity Commands): the quantity
+/// `scale` / `scale(--binary)` (spec: Quantity Commands): the quantity
 /// re-expressed in the prefix of its unit's own family that brings
 /// the magnitude to one or more (`1400000_B` is `1.4_MB`), display
 /// only. A compound unit, a unit without prefixes (`mi`) and an

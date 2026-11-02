@@ -117,9 +117,9 @@ const CORPUS: &[&str] = &[
     "/movie .m /cast | .n($$.m/tags @| count) | %.",
     // the value match, equality and regex arms (2026-07-11)
     "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
-    // the shell command, backtick-sugared (2026-07-11; reflects as
-    // an ordinary func named sh)
-    "/files/* | `wc -l`",
+    // the shell as an environment command (2026-11-02; the backtick and
+    // sh(cmd) are retired; reflects as a cmd with its lib)
+    "/files/* | sh:wc(-l)",
     // the value-side provenance projection (2026-09-06): `:key`
     // after a recall
     "/x | .v(::a) | $.v:%provenance:text",

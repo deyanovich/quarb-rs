@@ -55,9 +55,9 @@ impl DaemonExecutor {
             flags.push("--model".to_string());
             flags.push(f.display().to_string());
         }
-        if allow_shell {
-            flags.push("--allow-shell".to_string());
-        }
+        // The shell gate travels as the `sh=shell:` mount among the
+        // raw inputs; `--allow-shell` is retired.
+        let _ = allow_shell;
         if hidden {
             flags.push("--hidden".to_string());
         }

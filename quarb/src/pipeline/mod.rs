@@ -303,6 +303,11 @@ pub(crate) trait Host {
     /// in a piped operand carries the scope's marks, witness and
     /// arrivals at the given position.
     fn restate(&self, scope: &Scope<'_, Self::Ext>, at: &Self::Ext) -> Self::Ext;
+    /// `graft(NOTATION)`: the text parsed as the notation (or as it
+    /// declares itself), the attachment standing on the parsed
+    /// document's root. `None` where the host has no arbor or no
+    /// composing layer; `Some(Err)` the refusal's text.
+    fn graft(&self, text: &str, notation: Option<&str>) -> Option<Result<Self::Ext, String>>;
     fn exists_binding(
         &self,
         ext: &Self::Ext,

@@ -79,6 +79,7 @@ impl<A: AstAdapter> Rooted<A> {
             return b;
         }
         let mut cur = self.inner.parent(n);
+        let mut top = n;
         let mut found = false;
         let mut steps = 0usize;
         while let Some(p) = cur {
@@ -86,11 +87,18 @@ impl<A: AstAdapter> Rooted<A> {
                 found = true;
                 break;
             }
+            top = p;
             steps += 1;
             if steps > 1_000_000 {
                 break;
             }
             cur = self.inner.parent(p);
+        }
+        // A chain that ends short of the source's own root is a
+        // graft on demand (`graft(NOTATION)`), a free root the query
+        // made: it belongs to no subtree and is kept under any.
+        if !found && cur.is_none() && steps <= 1_000_000 && top != self.inner.root() {
+            found = true;
         }
         self.inside.borrow_mut().insert(n, found);
         found

@@ -73,8 +73,22 @@ impl Budget {
     /// message, naming the bound and the estimate's end that
     /// passes it (the lower end when even the least already does).
     pub fn exceeded_by(&self, plan: &Plan) -> Option<String> {
+        self.exceeded(plan, false)
+    }
+
+    /// [`exceeded_by`](Self::exceeded_by) for a plan priced on the
+    /// inputs' catalogs before any is opened: a definite excess
+    /// refuses here, but what is unknown or unbounded is left to the
+    /// opened adapters' own estimates, whose estimators walk as far
+    /// as the cap lets them, so a strict budget's refusal names the
+    /// same lower bound a lenient one does.
+    pub fn exceeded_before_opening(&self, plan: &Plan) -> Option<String> {
+        self.exceeded(plan, true)
+    }
+
+    fn exceeded(&self, plan: &Plan, deferring: bool) -> Option<String> {
         let Some(e) = plan.estimate() else {
-            return self.strict.then(|| {
+            return (self.strict && !deferring).then(|| {
                 "the plan's cost is unknown (no estimator answers) and the budget is strict"
                     .to_string()
             });
@@ -94,7 +108,7 @@ impl Budget {
                 });
             }
             if e.nodes.1 == u64::MAX {
-                if self.strict {
+                if self.strict && !deferring {
                     return Some(format!(
                         "the plan's nodes are unbounded (at least {}) and the budget is strict",
                         e.nodes.0
@@ -124,7 +138,7 @@ impl Budget {
                 });
             }
             if bytes.1 == u64::MAX {
-                if self.strict {
+                if self.strict && !deferring {
                     return Some(format!(
                         "the plan's bytes are unbounded (at least {}) and the budget is strict",
                         bytes.0

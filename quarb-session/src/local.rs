@@ -29,6 +29,10 @@ pub struct LocalExecutor {
     /// The environments the host mounted (`go=exec:DIR`,
     /// `sh=shell:`), the namespaces `ALIAS:name(…)` reaches.
     environments: Vec<quarb::Environment>,
+    /// The command libraries the host linked, and the Python
+    /// modules it mounted as environments, bound as libraries under
+    /// their aliases.
+    libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>>,
     /// A `--model` file enriching the source with derived structure
     /// (wasm-safe — the playground uses it too).
     model: Option<quarb_model::Model>,
@@ -65,6 +69,7 @@ impl LocalExecutor {
             now,
             allow_shell,
             environments: Vec::new(),
+            libraries: Vec::new(),
             #[cfg(feature = "native")]
             respec: None,
             model: None,
@@ -79,6 +84,17 @@ impl LocalExecutor {
             self.allow_shell = true;
         }
         self.environments = environments;
+        self
+    }
+
+    /// The command libraries the session's queries reach by prefix:
+    /// the linked ones and the Python modules mounted as
+    /// environments.
+    pub fn with_libraries(
+        mut self,
+        libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>>,
+    ) -> Self {
+        self.libraries = libraries;
         self
     }
 
@@ -114,6 +130,7 @@ impl LocalExecutor {
             now,
             allow_shell,
             environments: Vec::new(),
+            libraries: Vec::new(),
             respec: Some((specs, opts)),
             model: None,
             session: quarb::session_memory(),
@@ -166,6 +183,7 @@ impl LocalExecutor {
             now: Some(self.now),
             allow_shell: self.allow_shell,
             environments: self.environments.clone(),
+            libraries: self.libraries.clone(),
             ref_targets: self.url_roots.clone(),
             session: Some(self.session.clone()),
             debug: self.session.borrow().diagnostics == quarb::Severity::Debug,

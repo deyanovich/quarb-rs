@@ -137,11 +137,13 @@ def _params(f, drop_self):
 class Seg:
     __slots__ = ("name", "kind", "params", "obj")
 
-def _plan(root, classes, path, dynamic):
+def _plan(root, classes, path, dynamic, pure=True):
     """Resolve a dotted name from the root package, or from one of
     the method classes, as far as the signatures allow. Where the
     receiver's attributes are its data (`dynamic`: a frame's columns),
-    a name found nowhere is the receiver's, resolved during the run."""
+    a name found nowhere is the receiver's, resolved during the run.
+    A library is pure and its I/O names are withheld; a mounted
+    module (`pure=False`) is an environment and keeps them."""
     rootmod = importlib.import_module(root)
     names = path.split(".")
     start = "module"
@@ -175,7 +177,8 @@ def _plan(root, classes, path, dynamic):
                 s.kind = "unknown"; cur = None; segs.append(s); continue
             raise AttributeError(f"{_qual(cur)} has no '{n}'{_nearest(cur, n)}")
         s.obj = a
-        _withhold(a, n, path, root)
+        if pure:
+            _withhold(a, n, path, root)
         if inspect.ismodule(a):
             s.kind = "module"; cur = a; standing = False
         elif inspect.isclass(a):
@@ -213,15 +216,18 @@ def _first_line(o):
     line = doc.strip().splitlines()[0].strip()
     return line.rstrip(".")
 
-def _synopsis(root, classes, path, dynamic):
+def _synopsis(root, classes, path, dynamic, first_slot=False, pure=True):
     """A parameter is reachable as Python takes it (spec: "Reflected
     commands"): operands fill the positional parameters in signature
     order — the required ones of every call on the path, then the
     defaulted ones of the first call, where surplus operands go —
     and `--name=` fills the parameter so named wherever it stands;
     positional-only is an operand alone, keyword-only an option
-    alone; `*args` admits surplus operands, `**kwargs` any option."""
-    start, segs = _plan(root, classes, path, dynamic)
+    alone; `*args` admits surplus operands, `**kwargs` any option.
+    With `first_slot` the input is the first positional parameter
+    whatever its name (an environment's stdin slot, spec: The stdin
+    slot)."""
+    start, segs = _plan(root, classes, path, dynamic, pure)
     operands, options, seen = [], [], set()
     deferred = []
     variadic = open_ = False
@@ -269,7 +275,7 @@ def _synopsis(root, classes, path, dynamic):
     # X, y)`, `data` of a constructor), else the first — judged before
     # the first call's defaulted positionals join the operands.
     input_at = 0
-    if start != "input":
+    if start != "input" and not first_slot:
         input_at = next((i for i, (n, _, _) in enumerate(operands) if n in _DATA_NAMES), 0)
     operands += deferred
     last = segs[-1]
@@ -469,11 +475,11 @@ def _takes_data(s):
     first = _first_positional(s)
     return s.params is None or (first is not None and first.name in _DATA_NAMES)
 
-def _call(root, classes, path, construct, dynamic, args, kwargs, input_at=None):
+def _call(root, classes, path, construct, dynamic, args, kwargs, input_at=None, pure=True):
     with contextlib.redirect_stdout(sys.stderr):
-        key = (root, tuple(classes), path)
+        key = (root, tuple(classes), path, pure)
         if key not in _plans:
-            _plans[key] = _plan(root, classes, path, dynamic)
+            _plans[key] = _plan(root, classes, path, dynamic, pure)
         start, segs = _plans[key]
         # Every operand keeps the kind its expression yields and a list
         # is read as the input is (the table rule): a list of records
@@ -548,7 +554,7 @@ def _call(root, classes, path, construct, dynamic, args, kwargs, input_at=None):
         cur = receiver if start == "input" else importlib.import_module(root)
         for s in segs:
             a = _attr(cur, s.name)
-            if s.kind == "unknown":
+            if s.kind == "unknown" and pure:
                 _withhold(a, s.name, path, root)
             if s.kind == "module":
                 cur = a
@@ -581,6 +587,14 @@ pub struct Reflective {
     /// columns: `pd:x.mean`), so a name the package and the classes
     /// lack is the receiver's, resolved during the run.
     dynamic: bool,
+    /// Whether the input is the first positional parameter whatever
+    /// its name (an environment's stdin slot), rather than the
+    /// first named as data.
+    first_slot: bool,
+    /// Whether the names that read or write outside the query are
+    /// withheld: a library is pure; a mounted module is an
+    /// environment and keeps them.
+    pure: bool,
     cache: OnceLock<Mutex<HashMap<String, &'static Synopsis>>>,
 }
 
@@ -600,6 +614,24 @@ impl Reflective {
             classes,
             construct,
             dynamic,
+            first_slot: false,
+            pure: true,
+            cache: OnceLock::new(),
+        }
+    }
+
+    /// The reflection of a module mounted as an environment (spec:
+    /// Environment Mounts, `python:`): its functions the commands,
+    /// the input the first positional parameter unless `$_` places
+    /// it, values passed as they are, nothing withheld.
+    pub const fn module(root: &'static str) -> Reflective {
+        Reflective {
+            root,
+            classes: &[],
+            construct: "none",
+            dynamic: false,
+            first_slot: true,
+            pure: false,
             cache: OnceLock::new(),
         }
     }
@@ -621,7 +653,16 @@ impl Reflective {
             let m = PY.module(py).map_err(|e| e.to_string())?;
             let d = m
                 .getattr("_synopsis")
-                .and_then(|f| f.call1((self.root, self.classes, name, self.dynamic)))
+                .and_then(|f| {
+                    f.call1((
+                        self.root,
+                        self.classes,
+                        name,
+                        self.dynamic,
+                        self.first_slot,
+                        self.pure,
+                    ))
+                })
                 .map_err(|e| e.value(py).to_string())?;
             let d = d.cast::<PyDict>().map_err(|e| e.to_string())?;
             let get = |k: &str| d.get_item(k).ok().flatten();
@@ -725,6 +766,7 @@ impl Reflective {
                     args,
                     kwargs,
                     input_at,
+                    self.pure,
                 ))
                 .map_err(failed)?;
             crate::py_to_value(&out).map_err(failed)

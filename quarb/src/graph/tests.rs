@@ -2324,10 +2324,16 @@ fn marks() {
 #[test]
 fn shell_command() {
     let t = MockTree::sample();
-    // Gated: without allow_shell the run family refuses.
-    let q = "/a/x.rs | :name | `tr a-z A-Z`";
-    assert!(crate::run(q, &t).is_err());
-    // Allowed: topic through the command; failure nulls.
+    // The literal spellings are retired (ruling 2026-11-02): the
+    // backtick refuses at the lexer, naming the mount.
+    let e = crate::Query::parse("/a/x.rs | :name | `tr a-z A-Z`", &t)
+        .err()
+        .expect("retired")
+        .to_string();
+    assert!(e.contains("sh=shell:"), "{e}");
+    // Unmounted, the environment command refuses before the run.
+    assert!(crate::run("/a/x.rs | :name | sh:tr(a-z; A-Z)", &t).is_err());
+    // Mounted, the topic goes through the program; a failure nulls.
     struct Shelly(MockTree);
     impl AstAdapter for Shelly {
         fn root(&self) -> NodeId {
@@ -2348,21 +2354,21 @@ fn shell_command() {
     }
     let t = Shelly(MockTree::sample());
     let shell = crate::Run {
-        allow_shell: true,
-        ..Default::default()
+        environments: vec![crate::Environment::parse("sh", "shell:").unwrap()],
+        ..crate::Run::ambient()
     };
     let run_shell = |q: &str| {
-        crate::Query::parse(q, &t)
+        crate::Query::parse_with(q, &crate::Defs::default(), &t, &shell)
             .unwrap()
             .run(&t, &shell)
             .map(|o| o.result)
     };
-    let got = match run_shell(q).unwrap() {
+    let got = match run_shell("/a/x.rs | :name | sh:tr(a-z; A-Z)").unwrap() {
         QueryResult::Values(vs) => vs,
         _ => panic!("values"),
     };
     assert_eq!(got, vec![Value::Str("X.RS".into())]);
-    let got = match run_shell("/a/x.rs | :name | `false`").unwrap() {
+    let got = match run_shell("/a/x.rs | :name | sh:false").unwrap() {
         QueryResult::Values(vs) => vs,
         _ => panic!("values"),
     };

@@ -101,15 +101,16 @@ fn a_budget_refuses_before_opening_and_admits_within() {
     assert!(ok, "{err}");
     assert!(out.contains("emma.txt"), "{out}");
     // A plain file's node count is unknown before the reading: a
-    // rows budget passes it unless strict.
+    // rows budget passes the catalog's pricing, and the opened
+    // reading prices it exactly — under strict too, which refuses
+    // only what stays unknown or unbounded once the inputs are open.
     let (_, err, ok) = qua(&dir, &["--budget", "nodes=1", "/*", "shelf/emma.txt"]);
     assert!(ok, "{err}");
     let (_, err, ok) = qua(
         &dir,
         &["--budget", "nodes=1,strict", "/*", "shelf/emma.txt"],
     );
-    assert!(!ok);
-    assert!(err.contains("unbounded"), "{err}");
+    assert!(ok, "{err}");
 }
 
 #[test]
@@ -285,4 +286,120 @@ fn a_listing_prices_a_size_filter_and_statistics_price_a_key() {
     let (out, err, ok) = qua(&dir, &["--plan", "/loans/7", "loans.db"]);
     assert!(ok, "{err}");
     assert!(out.contains("nodes-min=0\n!int\nnodes-max=1\n"), "{out}");
+}
+
+#[test]
+fn a_strict_budget_names_the_bound_the_walk_reached() {
+    // A text file's catalog says nothing of its paragraphs, so the
+    // deep count is unbounded before opening: the strict budget used
+    // to refuse there with "at least 0", where the lenient one let
+    // the opened adapter walk to the cap and named 1001. Both name
+    // the walked bound now.
+    let dir = scratch();
+    std::fs::write(
+        dir.join("prose.txt"),
+        "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.\n",
+    )
+    .unwrap();
+    let (_, lenient, ok) = qua(
+        &dir,
+        &[
+            "--budget",
+            "nodes=2",
+            "//paragraph @| count",
+            "text:prose.txt",
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        lenient.contains("reaches at least 3 nodes; the budget allows 2"),
+        "{lenient}"
+    );
+    let (_, strict, ok) = qua(
+        &dir,
+        &[
+            "--budget",
+            "nodes=2,strict",
+            "//paragraph @| count",
+            "text:prose.txt",
+        ],
+    );
+    assert!(!ok);
+    assert_eq!(strict, lenient);
+    // Within the budget, the opened reading prices the paragraphs
+    // exactly, so strict runs.
+    let (out, err, ok) = qua(
+        &dir,
+        &[
+            "--budget",
+            "nodes=100,strict",
+            "//paragraph @| count",
+            "text:prose.txt",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "5");
+}
+
+#[test]
+fn a_folder_of_documents_is_unbounded_below_its_leaves() {
+    // The folder's tree prices its files; what a document holds is
+    // read only when the walk crosses into it, so a step into the
+    // leaves has no upper bound before the reading: a strict budget
+    // refuses it as unbounded, a lenient one lets the walk count.
+    let dir = scratch();
+    let (out, err, ok) = qua(
+        &dir,
+        &[
+            "--budget",
+            "nodes=1000",
+            "//paragraph @| count",
+            "text:shelf",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "3");
+    let (_, err, ok) = qua(
+        &dir,
+        &[
+            "--budget",
+            "nodes=1000,strict",
+            "//paragraph @| count",
+            "text:shelf",
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        err.contains("the plan's nodes are unbounded (at least 0) and the budget is strict"),
+        "{err}"
+    );
+    // The files themselves are the folder's to count: a child step
+    // from the root stays exact under strict.
+    let (out, err, ok) = qua(
+        &dir,
+        &["--budget", "nodes=10,strict", "/* @| count", "text:shelf"],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "3");
+}
+
+#[test]
+fn a_parse_error_prints_one_line_with_or_without_a_target() {
+    // The same refusal, whether the query runs as a calculator or
+    // over a target: one line, no context chain.
+    let dir = scratch();
+    let (_, head, ok) = qua(&dir, &["= null | mi(22; 355; 690; 71275)"]);
+    assert!(!ok);
+    assert!(
+        head.starts_with("Error: parse error: 'mi' takes 3 operands at most, 4 given"),
+        "{head}"
+    );
+    assert!(!head.contains("Caused by"), "{head}");
+    let (_, target, ok) = qua(&dir, &["/* | upper(::name)", "shelf/emma.txt"]);
+    assert!(!ok);
+    assert!(
+        target.starts_with("Error: parse error: 'upper' takes no operand, 1 given"),
+        "{target}"
+    );
+    assert!(!target.contains("Caused by"), "{target}");
 }

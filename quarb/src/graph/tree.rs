@@ -41,7 +41,9 @@ pub(crate) struct TreeSpec {
 }
 
 impl TreeSpec {
-    /// The call's operands, in any order (the parser admitted them).
+    /// The call's operands: column expressions by position, the
+    /// depth and the display switches in the option segment (the
+    /// parser admitted them).
     pub(crate) fn from_call(call: &FnCall) -> TreeSpec {
         let mut spec = TreeSpec {
             depth: None,
@@ -50,7 +52,11 @@ impl TreeSpec {
         };
         for arg in &call.args {
             match arg {
-                Arg::Lit(Value::Int(n)) => spec.depth = Some((*n).max(0) as usize),
+                // the depth (draft 203: an option, `-d=2`)
+                Arg::Opt {
+                    name,
+                    value: Some(Operand::Lit(Value::Int(n))),
+                } if name == "--depth" || name == "-d" => spec.depth = Some((*n).max(0) as usize),
                 // the display switches (draft 164)
                 Arg::Opt { name, .. } if name == "--kind" || name == "-k" => {
                     spec.parts.push(Part::Kind)

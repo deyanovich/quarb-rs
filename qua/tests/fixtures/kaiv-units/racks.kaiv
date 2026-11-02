@@ -1,0 +1,31 @@
+.!kaiv 1
+.!units hvac/units
+.!registry hvac=units
+
+[/@racks]
+name=r1
+!float:U
+height=42
+!float:BTU/h
+cooling=24000
+!float:W
+draw=6400
+!float:L/min
+flow=45
+!float:W*h
+ups=12000
+[]
+
+[/@racks]
+name=r2
+!float:U
+height=48
+!float:BTU/h
+cooling=17000
+!float:W
+draw=5900
+!float:L/min
+flow=30
+!float:W*h
+ups=8000
+[]

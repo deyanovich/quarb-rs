@@ -249,9 +249,6 @@ pub enum Token {
     /// A double-quoted string with `${...}` holes — an interpolation.
     /// Hole expressions are lexed and parsed at parse time.
     Interp(Vec<InterpPart>),
-    /// A backtick shell literal — sugar for the `sh(...)` command,
-    /// interpolated like a double-quoted string (Perl's `qx`).
-    Shell(Vec<InterpPart>),
 }
 
 /// One segment of an interpolated string: literal text, or the raw
@@ -1712,19 +1709,19 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // quotes protect a paren, `\)` is a literal one) and
             // interpolates exactly like the backtick.
             '(' if at(i + 1) == Some(';') && !after_call_head(&tokens, glued) => {
-                let (body, next) = read_shell_paren(&chars, i + 2)?;
+                let (body, _) = read_shell_paren(&chars, i + 2)?;
                 if body.iter().any(|c| c.is_ascii_digit())
                     && body.iter().all(|c| c.is_ascii_digit() || *c == ';')
                 {
                     return Err(QuarbError::lex(
-                        "the rounded quantifier is (+m;n) — (;…) is the shell literal",
+                        "the rounded quantifier is (+m;n) — (;…) was the shell literal, retired",
                     ));
                 }
-                let mut tmp = body;
-                tmp.push('\0');
-                let (parts, _) = read_interpolated_until(&tmp, 0, '\0')?;
-                tokens.push(Token::Shell(parts));
-                i = next;
+                // Retired with `sh(cmd)` and the backtick (ruling
+                // 2026-11-02): the shell is an environment mount.
+                return Err(QuarbError::lex(
+                    "the rounded shell literal (;cmd) is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)",
+                ));
             }
             // `sh(cmd)` — the one call whose parentheses hold no
             // Quarb syntax: the body runs raw to the balancing `)`
@@ -1733,28 +1730,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // the backtick; the three are one lexeme. A body that is
             // one quoted word is the retired `sh('cmd')`: its quotes
             // would reach the shell, so it is refused with the hint.
+            // `sh(cmd)` — retired (ruling 2026-11-02): the shell joins a
+            // query only as an environment mount, `sh=shell:`, its
+            // programs the commands `sh:tr(a-z; A-Z)`.
             '(' if after_call_head(&tokens, glued)
                 && matches!(tokens.last(), Some(Token::Name { text, quoted: false, .. }) if text == "sh") =>
             {
-                let (body, next) = read_shell_paren(&chars, i + 1)?;
-                let raw: String = body.iter().collect();
-                let t = raw.trim();
-                let one_quoted_word = t.len() >= 2
-                    && ['\'', '"'].iter().any(|q| {
-                        t.starts_with(*q)
-                            && t.ends_with(*q)
-                            && !t[q.len_utf8()..t.len() - q.len_utf8()].contains(*q)
-                    });
-                if one_quoted_word {
-                    return Err(QuarbError::lex("sh reads its command raw: sh(cmd)"));
-                }
-                tokens.pop();
-                spans.pop();
-                let mut tmp = body;
-                tmp.push('\0');
-                let (parts, _) = read_interpolated_until(&tmp, 0, '\0')?;
-                tokens.push(Token::Shell(parts));
-                i = next;
+                return Err(QuarbError::lex(
+                    "the sh(cmd) command is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)",
+                ));
             }
             '(' => {
                 openers.push(Opener::Paren);
@@ -1810,6 +1794,21 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     glued: true,
                 });
                 i = j;
+            }
+            // A comma right after an option's `=` is the option's value:
+            // `sh:cut(--delimiter=, --fields=5)` and `sh:cut(-d=, -f=5)`
+            // reach cut as `--delimiter=,` and `-d ,`. A comma glued to
+            // the option's NAME is not: a short option is one character
+            // and takes its value through `=`, so `sort(-d, ::k)` keeps
+            // the spaced-comma separator sugar (getopt's `-d,` is the
+            // utility's grammar, written quoted here: `"-d,"`).
+            ',' if glued && matches!(tokens.last(), Some(Token::OptEq)) => {
+                tokens.push(Token::Name {
+                    text: ",".to_string(),
+                    quoted: true,
+                    glued: true,
+                });
+                i += 1;
             }
             ',' => {
                 if at(i + 1).is_some_and(|c| !c.is_whitespace()) {
@@ -1947,10 +1946,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // Double quotes are interpolated: `${expr}` holes evaluate
             // in the current scope. A hole-free string stays a plain
             // quoted name.
+            // The backtick command — retired with `sh(cmd)`.
             '`' => {
-                let (parts, next) = read_interpolated_until(&chars, i + 1, '`')?;
-                tokens.push(Token::Shell(parts));
-                i = next;
+                return Err(QuarbError::lex(
+                    "the backtick command is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)",
+                ));
             }
             '"' => {
                 let (parts, next) = read_interpolated(&chars, i + 1)?;
@@ -2924,40 +2924,47 @@ mod glued_operator_tests {
     }
 
     #[test]
-    fn sh_reads_its_command_raw() {
-        let shell = |q: &str| -> String {
-            let tokens = lex(q).unwrap();
-            match tokens.as_slice() {
-                [Token::Shell(parts)] => parts
-                    .iter()
-                    .map(|p| match p {
-                        InterpPart::Text(t) => t.clone(),
-                        InterpPart::Hole(h) => format!("${{{h}}}"),
-                    })
-                    .collect(),
-                other => panic!("{other:?}"),
-            }
-        };
-        // no Quarb syntax inside: quotes, pipes and parens are the shell's
-        assert_eq!(
-            shell("sh(grep -c \"x\" f | wc -l)"),
-            "grep -c \"x\" f | wc -l"
-        );
-        assert_eq!(shell("sh(echo '(a)' \\) b)"), "echo '(a)' ) b");
-        assert_eq!(shell("sh(wc -l ${.f})"), "wc -l ${.f}");
-        // the three spellings are one lexeme
-        assert_eq!(shell("`tr a-z A-Z`"), shell("sh(tr a-z A-Z)"));
-        assert_eq!(shell("(;tr a-z A-Z)"), shell("sh(tr a-z A-Z)"));
-        // the retired quoted form is refused with the hint
-        let e = lex("sh('tr a-z A-Z')").unwrap_err().to_string();
-        assert!(e.contains("sh reads its command raw: sh(cmd)"), "{e}");
-        let e = lex("sh(\"tr a-z A-Z\")").unwrap_err().to_string();
-        assert!(e.contains("sh reads its command raw"), "{e}");
+    fn the_shell_spellings_are_retired_with_the_pointer() {
+        // The shell joins a query only as an environment mount
+        // (ruling 2026-11-02): the three literal spellings refuse,
+        // each naming the mount and the command form.
+        for q in [
+            "sh(tr a-z A-Z)",
+            "sh('tr a-z A-Z')",
+            "`tr a-z A-Z`",
+            "(;tr a-z A-Z)",
+        ] {
+            let e = lex(q).unwrap_err().to_string();
+            assert!(e.contains("is retired"), "{q}: {e}");
+            assert!(
+                e.contains("sh=shell:") && e.contains("sh:tr(a-z; A-Z)"),
+                "{q}: {e}"
+            );
+        }
         // a spaced `sh (` is not the call
         assert!(matches!(
             lex("sh (x)").unwrap().first(),
             Some(Token::Name { .. })
         ));
+        // the environment command keeps its colon spelling
+        assert!(lex("sh:tr(a-z; A-Z)").is_ok());
+        // a comma glued to an option's `=` is its value
+        for q in ["sh:cut(--delimiter=, --fields=5)", "sh:cut(-d=, -f=5)"] {
+            let toks = lex(q).unwrap();
+            assert!(
+                toks.iter()
+                    .any(|t| matches!(t, Token::Name { text, quoted: true, .. } if text == ",")),
+                "{q}: {toks:?}"
+            );
+            assert!(!toks.contains(&Token::Comma), "{q}: {toks:?}");
+        }
+        // the spaced comma after a value stays the separator sugar,
+        // after an option's name too: a short option takes its value
+        // through `=`, never glued
+        assert!(lex("f(a, b)").unwrap().contains(&Token::Comma));
+        assert!(lex("f(-1, 2)").unwrap().contains(&Token::Comma));
+        assert!(lex("sh:cut(-d, -f5)").unwrap().contains(&Token::Comma));
+        assert!(lex("sort(-d, ::k)").unwrap().contains(&Token::Comma));
     }
 
     #[test]
@@ -3183,19 +3190,9 @@ mod glued_operator_tests {
             lex("(+2)").unwrap().as_slice(),
             [Token::LParen, ..]
         ));
-        // the shell literal: to the balancing paren, quotes protect
-        assert!(matches!(
-            lex("| (;wc -l)").unwrap().as_slice(),
-            [Token::Pipe, Token::Shell(_)]
-        ));
-        assert!(matches!(
-            lex("| (;echo \"(\" $(date))").unwrap().as_slice(),
-            [Token::Pipe, Token::Shell(_)]
-        ));
-        assert!(matches!(
-            lex("| (;echo \\))").unwrap().as_slice(),
-            [Token::Pipe, Token::Shell(_)]
-        ));
+        // the rounded shell literal is retired with the pointer
+        let e = lex("| (;wc -l)").unwrap_err().to_string();
+        assert!(e.contains("is retired") && e.contains("sh=shell:"), "{e}");
     }
 
     #[test]

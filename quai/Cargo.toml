@@ -19,13 +19,24 @@ path = "src/main.rs"
 
 [dependencies]
 ureq.workspace = true
-quarb = { path = "../quarb", version = "0.46.0" }
-quarb-session = { path = "../quarb-session", version = "0.46.0" }
+quarb = { path = "../quarb", version = "0.47.0" }
+quarb-session = { path = "../quarb-session", version = "0.47.0" }
 syndesmos = { version = "0.3.1", default-features = false, features = ["uax29"] }
-quarb-model = { path = "../quarb-model", version = "0.46.0" }
-quarb-relational = { path = "../quarb-relational", version = "0.46.0" }
+quarb-model = { path = "../quarb-model", version = "0.47.0" }
+quarb-relational = { path = "../quarb-relational", version = "0.47.0" }
 # The full mounting dispatch — quai opens every target qua opens.
-qua = { path = "../qua", version = "0.46.0" }
+qua = { path = "../qua", version = "0.47.0" }
 clap.workspace = true
 anyhow.workspace = true
 rustyline = "14"
+
+[features]
+# The Python-wrapping command libraries and the `python:` environment
+# kind, as qua has them (`cargo install quai --features python`).
+python = ["qua/python"]
+morph = ["qua/morph"]
+scipy = ["qua/scipy"]
+sklearn = ["qua/sklearn"]
+numpy = ["qua/numpy"]
+pandas = ["qua/pandas"]
+python-libs = ["qua/python-libs"]

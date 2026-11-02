@@ -104,9 +104,27 @@ fn grid(
     pretty: Option<usize>,
 ) -> String {
     let columns = crate::value::table::table_columns(values, named);
+    // Under `pretty` a float is written to the digits, in the
+    // decimal mark the cell renderer writes (an output locale's
+    // `98765,5`; the point otherwise), so the command and the flag
+    // render alike (spec: Output Commands).
+    let mark: Option<String> = pretty.map(|_| {
+        let half = cell(&Value::Float(0.5));
+        half.strip_prefix('0')
+            .and_then(|r| r.strip_suffix('5'))
+            .filter(|m| !m.is_empty() && *m != ".")
+            .map(str::to_string)
+            .unwrap_or_default()
+    });
     let draw = |v: &Value| -> String {
         match (v, pretty) {
-            (Value::Float(f), Some(p)) => crate::value::pretty_float(*f, p),
+            (Value::Float(f), Some(p)) => {
+                let text = crate::value::pretty_float(*f, p);
+                match mark.as_deref() {
+                    Some(m) if !m.is_empty() => text.replacen('.', m, 1),
+                    _ => text,
+                }
+            }
             _ => cell(v),
         }
     };
@@ -337,7 +355,7 @@ pub fn desc_flag(call: &FnCall) -> bool {
 pub fn atergo_flag(call: &FnCall) -> bool {
     call.args
         .iter()
-        .any(|a| matches!(a, Arg::Lit(Value::Str(s)) if s == "atergo"))
+        .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--atergo" || name == "-a"))
 }
 
 /// The text ordering a `sort` call asks for, where it asks for one:
@@ -412,9 +430,8 @@ fn default_collator() -> Option<NeverCollator> {
 /// not certified fidelity.
 #[cfg(feature = "colligo")]
 pub(crate) fn collator_for(call: &FnCall) -> Option<colligo::Collator> {
-    // The locale is the literal argument that is not the mode word.
+    // The locale is the one literal operand (the modes are flags).
     let tag = call.args.iter().find_map(|a| match a {
-        Arg::Lit(Value::Str(s)) if s == "atergo" => None,
         Arg::Lit(l) => Some(l.to_string()),
         _ => None,
     })?;
@@ -1648,24 +1665,34 @@ fn apply_scalar_inner(
         // `duration(FROM; TO)` (spec: Duration): the duration from
         // one instant to another, TO − FROM, negative when TO
         // precedes FROM; both take the instant coercion, null when
-        // either does not. After a pipe the topic fills
-        // FROM: `::born | duration(::died)`.
-        "duration" | "td" if !call.args.is_empty() => {
-            // two arguments: FROM and TO as given, the topic only the
-            // capsa their expressions read (`/*[1] | duration(::born;
-            // ::died)`); one argument: the topic is FROM
-            let instant = |arg: Option<&Arg>| match arg {
-                Some(Arg::Lit(v)) => Some(v.temporal_reading()),
-                _ => None,
+        // either does not. The topic fills FROM, the option names
+        // TO: `::born | duration(--to=::died)`.
+        "duration" | "td"
+            if call.args.iter().any(
+                |a| matches!(a, Arg::Opt { name, .. } if name == "--to" || name == "--from"),
+            ) =>
+        {
+            // `--to=TO` (draft 203): the topic is FROM and the option
+            // the other instant (`::born | duration(--to=::died)`; at
+            // the head `duration(FROM; --to=TO)` rides FROM as the
+            // topic); `--from=FROM` mirrors it, the topic then TO.
+            // The parser refuses both at once.
+            let option = |which: &str| {
+                call.args.iter().find_map(|a| match a {
+                    Arg::Opt {
+                        name,
+                        value: Some(crate::syntax::ast::Operand::Lit(v)),
+                    } if name == which => Some(v.temporal_reading()),
+                    _ => None,
+                })
             };
-            let (from, to) = match call.args.len() {
-                1 => (Some(topic.temporal_reading()), instant(call.args.first())),
-                2 => (instant(call.args.first()), instant(call.args.get(1))),
-                _ => (None, None),
+            let (from, to) = match option("--to") {
+                Some(to) => (Some(topic.temporal_reading()), Some(to)),
+                None => (option("--from"), Some(topic.temporal_reading())),
             };
             let (Some(from), Some(to)) = (from, to) else {
                 crate::value::ambient::record_refusal(format!(
-                    "{}: two instants — duration(FROM; TO), or FROM | duration(TO)",
+                    "{}: two instants — FROM | duration(--to=TO), TO | duration(--from=FROM)",
                     call.name
                 ));
                 return vec![Value::Null];
@@ -1708,7 +1735,7 @@ fn apply_scalar_inner(
                 .map(|(secs, nanos)| Value::seconds(secs, nanos))
                 .unwrap_or(Value::Null),
         }],
-        // `dfmt` / `dfmt(iso)` / `dfmt(LOCALE)`: the duration
+        // `dfmt` / `dfmt(--iso)` / `dfmt(LOCALE)`: the duration
         // formatter (spec: Duration): the mixed span text, largest
         // unit first, in the Latin designations under every
         // environment, in a locale's designations with a locale tag
@@ -1716,8 +1743,19 @@ fn apply_scalar_inner(
         // duration; text, null for a topic with no durational
         // coercion. A locale no table covers is refused.
         "dfmt" => {
-            let how = arg_str(call, 0, "");
-            let names = if how.is_empty() || how == "iso" {
+            let iso = call
+                .args
+                .iter()
+                .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--iso"));
+            let how = call
+                .args
+                .iter()
+                .find_map(|a| match a {
+                    Arg::Lit(Value::Str(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let names = if how.is_empty() || iso {
                 None
             } else {
                 match crate::durnames::names(how) {
@@ -1746,7 +1784,7 @@ fn apply_scalar_inner(
                                     n.to_string()
                                 })
                             }
-                            None => crate::value::quantity::duration_text(seconds, how == "iso"),
+                            None => crate::value::quantity::duration_text(seconds, iso),
                         })
                     })
                     .unwrap_or(Value::Null),
@@ -1873,11 +1911,13 @@ fn apply_scalar_inner(
                 _ => Value::Null,
             }
         }],
-        // `scale` / `scale(binary)` — the prefix of the unit's own
+        // `scale` / `scale(--binary)` — the prefix of the unit's own
         // family that brings the magnitude to one or more.
         "scale" => vec![crate::value::quantity::scale_prefix(
             &topic,
-            arg_str(call, 0, "") == "binary",
+            call.args
+                .iter()
+                .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--binary")),
             scale,
         )],
         // `dimension` — the dimension of the topic quantity as text
@@ -2345,7 +2385,7 @@ fn bibref_scalar(call: &FnCall, topic: Value) -> Vec<Value> {
 fn reads_topic(call: &FnCall) -> bool {
     let n = call.args.len();
     match call.name.as_str() {
-        "levenshtein" | "jaro_winkler" | "pow" | "log" | "duration" => n < 2,
+        "levenshtein" | "jaro_winkler" | "pow" | "log" => n < 2,
         "log_dice" | "dice" => n < 3,
         "haversine" | "loglik" | "chi2" | "mi" | "t_score" => n < 4,
         _ => true,
@@ -3096,7 +3136,8 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // the top k.
         "frequencies" => {
             // `--nulls` (`-n`) adds a row for the nulls, `%(value =
-            // null; n = k)`, last; `--values` (`-v`) is the default
+            // null; n = k)`, last (the former `--values` restated the
+            // default and is gone, draft 203)
             let with_nulls = call
                 .args
                 .iter()
@@ -7191,6 +7232,7 @@ mod tests {
 
     fn agg(name: &str, input: Vec<Value>) -> Vec<Value> {
         let call = FnCall {
+            headless: false,
             name: name.into(),
             args: Vec::new(),
         };
@@ -7199,6 +7241,7 @@ mod tests {
 
     fn sc(name: &str, topic: Value) -> Vec<Value> {
         let call = FnCall {
+            headless: false,
             name: name.into(),
             args: Vec::new(),
         };
@@ -7271,6 +7314,7 @@ mod tests {
     #[test]
     fn ngrams_windows_the_words() {
         let call = |n: Option<i64>| FnCall {
+            headless: false,
             name: "ngrams".into(),
             args: n.map(|n| vec![Arg::Lit(Value::Int(n))]).unwrap_or_default(),
         };
@@ -7309,6 +7353,7 @@ mod tests {
     #[test]
     fn character_classes_space_out_the_rest() {
         let call = |name: &str, keep: Option<&str>| FnCall {
+            headless: false,
             name: name.into(),
             args: keep
                 .map(|k| vec![Arg::Lit(Value::Str(k.into()))])
@@ -7350,6 +7395,7 @@ mod tests {
 
     fn scalar_with(name: &str, topic: Value, args: Vec<crate::syntax::ast::Arg>) -> Vec<Value> {
         let call = FnCall {
+            headless: false,
             name: name.into(),
             args,
         };
@@ -7716,6 +7762,7 @@ mod tests {
 
     fn sample(name: &str) -> FnCall {
         FnCall {
+            headless: false,
             name: name.into(),
             args: vec![Arg::Opt {
                 name: "--sample".into(),
@@ -7741,6 +7788,7 @@ mod tests {
         );
         assert!(sample_flag(&sample("stddev")));
         assert!(!sample_flag(&FnCall {
+            headless: false,
             name: "stddev".into(),
             args: Vec::new(),
         }));
@@ -7767,6 +7815,7 @@ mod tests {
             .map(|s| Value::Str(s.to_string()))
             .collect();
         let half = FnCall {
+            headless: false,
             name: "mtld".into(),
             args: vec![Arg::Lit(Value::Float(0.5))],
         };
@@ -7784,6 +7833,7 @@ mod tests {
         assert_eq!(agg("mtld", vec![]), vec![Value::Null]);
         // A threshold outside (0, 1) is refused.
         let bad = FnCall {
+            headless: false,
             name: "mtld".into(),
             args: vec![Arg::Lit(Value::Int(2))],
         };
@@ -7915,6 +7965,7 @@ mod tests {
     #[test]
     fn math_scalars() {
         let c = |name: &str, args: Vec<Arg>| FnCall {
+            headless: false,
             name: name.into(),
             args,
         };
@@ -7976,6 +8027,7 @@ mod tests {
     #[test]
     fn keyness_scalars() {
         let c = |name: &str, args: &[i64]| FnCall {
+            headless: false,
             name: name.into(),
             args: args.iter().map(|&n| Arg::Lit(Value::Int(n))).collect(),
         };
@@ -8010,6 +8062,7 @@ mod tests {
     #[cfg(feature = "colligo")]
     fn locale_collation() {
         let call = |loc: Option<&str>| FnCall {
+            headless: false,
             name: "sort".into(),
             args: loc
                 .map(|l| vec![crate::syntax::ast::Arg::Lit(Value::Str(l.into()))])
@@ -8070,6 +8123,7 @@ mod tests {
         let apply1 = |name: &str, v: &str| {
             apply_scalar(
                 &FnCall {
+                    headless: false,
                     name: name.into(),
                     args: Vec::new(),
                 },
@@ -8109,6 +8163,7 @@ mod tests {
 
     fn sc_args(name: &str, args: Vec<Arg>, topic: Value) -> Vec<Value> {
         let call = FnCall {
+            headless: false,
             name: name.into(),
             args,
         };
@@ -8280,6 +8335,7 @@ mod tests {
         assert_eq!(sc("json", Value::Null), vec![Value::Str("null".into())]);
         // first and last of an empty input reduce to null
         let first = FnCall {
+            headless: false,
             name: "first".into(),
             args: Vec::new(),
         };
@@ -8288,6 +8344,7 @@ mod tests {
             vec![Value::Null]
         );
         let last = FnCall {
+            headless: false,
             name: "last".into(),
             args: Vec::new(),
         };
@@ -8329,6 +8386,7 @@ mod tests {
     fn rounding_past_the_integers_stays_a_float() {
         let f = |name: &str, v: Value| {
             let call = FnCall {
+                headless: false,
                 name: name.into(),
                 args: vec![],
             };
@@ -8407,6 +8465,7 @@ mod distance_and_quantile_tests {
 
     fn call(name: &str, args: Vec<Arg>) -> FnCall {
         FnCall {
+            headless: false,
             name: name.into(),
             args,
         }
@@ -8479,10 +8538,18 @@ mod atergo_and_stress_tests {
 
     fn call(name: &str, args: Vec<Arg>) -> FnCall {
         FnCall {
+            headless: false,
             name: name.into(),
             args,
         }
     }
+    fn flag(s: &str) -> Arg {
+        Arg::Opt {
+            name: s.into(),
+            value: None,
+        }
+    }
+
     fn word(s: &str) -> Arg {
         Arg::Lit(Value::Str(s.into()))
     }
@@ -8505,7 +8572,7 @@ mod atergo_and_stress_tests {
     fn atergo_compares_from_the_end() {
         let words = ["дом", "стол", "ёж", "еда", "нож"];
         let got = texts(apply(
-            &call("sort", vec![word("atergo")]),
+            &call("sort", vec![flag("--atergo")]),
             strs(&words),
             &crate::value::quantity::scale_expr,
         ));
@@ -8518,7 +8585,7 @@ mod atergo_and_stress_tests {
         assert_eq!(got, ["еда", "нож", "ёж", "стол", "дом"]);
         // a suffix sorts before what it ends: ties fall forward
         let got = texts(apply(
-            &call("sort", vec![word("atergo")]),
+            &call("sort", vec![flag("--atergo")]),
             strs(&["стол", "ол", "л"]),
             &crate::value::quantity::scale_expr,
         ));
@@ -8530,7 +8597,7 @@ mod atergo_and_stress_tests {
     fn atergo_under_a_locale() {
         let words = ["ёж", "еж", "нож", "стол", "дом", "Öl"];
         let got = texts(apply(
-            &call("sort", vec![word("ru-RU"), word("atergo")]),
+            &call("sort", vec![word("ru-RU"), flag("--atergo")]),
             strs(&words),
             &crate::value::quantity::scale_expr,
         ));
@@ -8560,13 +8627,15 @@ mod atergo_and_stress_tests {
     fn sort_argument_shapes() {
         assert!(parses("/w @| sort"));
         assert!(parses("/w @| sort(ru-RU)"));
-        assert!(parses("/w @| sort(atergo)"));
-        assert!(parses("/w @| sort(ru-RU; atergo)"));
-        assert!(parses("/w | sort(ru-RU, atergo)"));
-        // the mode follows the locale, and there is one locale
+        assert!(parses("/w @| sort(-a)"));
+        assert!(parses("/w @| sort(--atergo)"));
+        assert!(parses("/w @| sort(ru-RU; -a)"));
+        assert!(parses("/w | sort(ru-RU, -a)"));
+        assert!(parses("/w @| sort(ru-RU; -ad)"));
+        // the word is a flag now (draft 203), and there is one locale
+        assert!(!parses("/w @| sort(atergo)"));
         assert!(!parses("/w @| sort(atergo; ru-RU)"));
         assert!(!parses("/w @| sort(ru-RU; sv-SE)"));
-        assert!(!parses("/w @| sort(atergo; atergo)"));
         assert!(!parses("/w @| sort(nonsense!)"));
     }
 

@@ -203,10 +203,18 @@ pub(crate) fn timeline_command<H: Host>(
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
     use crate::period::{Period, Shape};
-    let (forward, args) = match call.args.split_last() {
-        Some((Arg::Lit(Value::Str(w)), rest)) if w == "forward" => (true, rest),
-        _ => (false, call.args.as_slice()),
-    };
+    // `--forward` is a flag (draft 203); the operands by position.
+    let forward = call
+        .args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--forward"));
+    let positional: Vec<Arg> = call
+        .args
+        .iter()
+        .filter(|a| !matches!(a, Arg::Opt { .. }))
+        .cloned()
+        .collect();
+    let args = positional.as_slice();
     let rows: Vec<(Value, Option<Value>)> = caps
         .iter()
         .enumerate()
@@ -785,7 +793,12 @@ pub(crate) fn outline_command<H: Host>(
         })
         .collect();
     let lines = call.name == "outline";
-    let numbered = !lines || call.args.iter().any(|a| matches!(a, Arg::Lit(_)));
+    // `--style="1."` numbers the lines (draft 203: an option).
+    let numbered = !lines
+        || call
+            .args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--style"));
     let field = |c: &Thread<H::Ext>, key: &str| match effective_topic(c, host) {
         Value::Record(o) => o
             .iter()

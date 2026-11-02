@@ -78,7 +78,7 @@ fn a_source_is_refused_by_name() {
         "{text}"
     );
     let (ok, text) = qc(&["= 1", "data.json"]);
-    assert!(!ok && text.contains("parsing the query"), "{text}");
+    assert!(!ok && text.contains("parse error"), "{text}");
     let (ok, text) = qc(&["/rows/*::x"]);
     assert!(
         !ok && text.contains("reads a document") && text.contains("'/rows/*::x'"),
@@ -89,7 +89,7 @@ fn a_source_is_refused_by_name() {
     let (ok, text) = qc(&["--model", "x.model", "= 1"]);
     assert!(!ok && text.contains("--model"), "{text}");
     let (ok, text) = qc(&["= 1 +"]);
-    assert!(!ok && text.contains("parsing the query"), "{text}");
+    assert!(!ok && text.contains("parse error"), "{text}");
 }
 
 /// The pipe is the topic: read whole, as one text, never parsed;

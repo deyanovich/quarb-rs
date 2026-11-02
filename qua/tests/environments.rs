@@ -53,16 +53,47 @@ fn the_mount_grammar_names_the_kinds() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("takes no target"), "{e}");
-    let e = Environment::parse_mount("py=python:./helpers.py")
+    // The python kind: a module file that exists, or an import
+    // path; an interpreter alone is no target.
+    let e = Environment::parse_mount("py=python:./no-such-helpers.py")
         .unwrap()
         .unwrap_err()
         .to_string();
-    assert!(e.contains("plugin round"), "{e}");
+    assert!(e.contains("no such module file"), "{e}");
+    let e = Environment::parse_mount("py=python:python3")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("an interpreter alone is no target"), "{e}");
+    let e = Environment::parse_mount("py=python:/usr/bin/python")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("an interpreter alone is no target"), "{e}");
+    let e = Environment::parse_mount("py=python:")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("names no module"), "{e}");
+    let py = Environment::parse_mount("py=python:pkg.helpers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(py.kind, EnvKind::Python);
+    assert_eq!(py.target, "pkg.helpers");
     let e = Environment::parse_mount("9x=exec:/usr/bin")
         .unwrap()
         .unwrap_err()
         .to_string();
     assert!(e.contains("alias is a word"), "{e}");
+}
+
+#[test]
+fn a_python_mount_a_host_did_not_bind_refuses_naming_the_feature() {
+    let py = Environment::parse("py", "python:textwrap").unwrap();
+    let e = run_with("/w/* | :: | py:dedent", vec![py])
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("python feature"), "{e}");
 }
 
 #[test]
@@ -132,31 +163,88 @@ fn the_shell_kind_reaches_the_users_shell() {
         run_with("/w/* | :: @| [1] | sh:echo(hi; there)", vec![shell()]).unwrap(),
         vec!["hi there"]
     );
-    // A `shell:` mount opens the shell gate: `sh(...)` runs, its
-    // command read raw to the balancing paren; shell quotes shield
-    // a paren and the backtick spelling is the same lexeme.
     assert_eq!(
-        run_with("/w/* | :: @| [1] | sh(tr a-z A-Z)", vec![shell()]).unwrap(),
+        run_with("/w/* | :: @| [1] | sh:tr(a-z; A-Z)", vec![shell()]).unwrap(),
         vec!["PEAR"]
     );
-    assert_eq!(
-        run_with(
-            "/w/* | :: @| [1] | sh(tr 'a-z' \"A-Z\" | sed 's/^/(/; s/$/)/')",
-            vec![shell()]
-        )
-        .unwrap(),
-        vec!["(PEAR)"]
-    );
-    assert_eq!(
-        run_with("/w/* | :: @| [1] | `tr a-z A-Z`", vec![shell()]).unwrap(),
-        vec!["PEAR"]
-    );
-    // The quoted form is retired: its quotes would reach the shell.
-    let e = run_with("/w/* | :: @| [1] | sh('tr a-z A-Z')", vec![shell()]).unwrap_err();
+    // The shell joins a query only as the mount (ruling 2026-11-02):
+    // the literal spellings refuse with the pointer, mounted or not.
+    for q in [
+        "/w/* | :: @| [1] | sh(tr a-z A-Z)",
+        "/w/* | :: @| [1] | sh('tr a-z A-Z')",
+        "/w/* | :: @| [1] | `tr a-z A-Z`",
+        "/w/* | :: @| [1] | (;tr a-z A-Z)",
+    ] {
+        let e = run_with(q, vec![shell()]).unwrap_err().to_string();
+        assert!(
+            e.contains("is retired") && e.contains("sh=shell:"),
+            "{q}: {e}"
+        );
+    }
+}
+
+#[test]
+fn an_option_takes_a_comma_after_its_equals_as_its_value() {
+    // `cut -d ,` in Quarb's spellings: the comma after the option's
+    // `=` is the value; the quoted getopt form passes verbatim. A
+    // comma glued to the option's NAME is the separator sugar, so
+    // `-d, -f2` hands cut `-d -f2` and cut refuses.
+    for q in [
+        "/w/* | :: @| [1] | u:echo(\"a,b,c\") | u:cut(--delimiter=, --fields=2)",
+        "/w/* | :: @| [1] | u:echo(\"a,b,c\") | u:cut(-d=, -f=2)",
+        "/w/* | :: @| [1] | u:echo(\"a,b,c\") | u:cut(\"-d,\"; -f2)",
+    ] {
+        assert_eq!(run_with(q, vec![bin()]).unwrap(), vec!["b"], "{q}");
+    }
     assert!(
-        e.to_string().contains("sh reads its command raw: sh(cmd)"),
-        "{e}"
+        run_with(
+            "/w/* | :: @| [1] | u:echo(\"a,b,c\") | u:cut(-d, -f2)",
+            vec![bin()]
+        )
+        .is_err()
     );
+}
+
+#[test]
+fn headless_a_text_callee_reads_its_first_operand_on_stdin() {
+    // At the head of an expression the first operand is the stdin
+    // slot (spec: The stdin slot): `u:tr(abc; a-z; A-Z)` feeds abc.
+    assert_eq!(
+        run_with("= u:tr(abc; a-z; A-Z)", vec![bin()]).unwrap(),
+        vec!["ABC"]
+    );
+    // after a pipe the pipe is the slot, the operands the words
+    assert_eq!(
+        run_with("= \"abc\" | u:tr(a-z; A-Z)", vec![bin()]).unwrap(),
+        vec!["ABC"]
+    );
+    // the alias `sh`, once a command word, is an alias like any
+    // other at the head
+    assert_eq!(
+        run_with("= sh:tr(abc; a-z; A-Z)", vec![shell()]).unwrap(),
+        vec!["ABC"]
+    );
+}
+
+#[test]
+fn the_allow_shell_switch_is_retired_naming_the_mount() {
+    let dir = std::env::temp_dir().join(format!("quarb-allow-shell-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("w.json"), r#"{"w":["pear"]}"#).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .arg("--allow-shell")
+        .arg("/w/*::")
+        .arg(dir.join("w.json"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--allow-shell is retired") && err.contains("sh=shell:"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

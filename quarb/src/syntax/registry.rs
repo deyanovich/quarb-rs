@@ -124,6 +124,11 @@ const fn with_null(spec: FnSpec, null: OnNull) -> FnSpec {
 /// draft 164) — the expression is read on each item of the input in
 /// turn, and the reduction runs over the results.
 pub fn takes_of(name: &str) -> bool {
+    // Under the signature notation the row says so (`-o|--of=expr?`
+    // on every reducing row).
+    if let Some(by_row) = crate::syntax::man::takes_of_by_signature(name) {
+        return by_row;
+    }
     spec(name).is_some_and(|s| matches!(s.agg, Some(Agg::Reducing)) && !s.scalar)
 }
 
@@ -508,6 +513,13 @@ pub const SPECS: &[FnSpec] = &[
         OnNull::Keep,
     ),
     on_node(scalar("link", "the node's link address")),
+    with_null(
+        scalar(
+            "graft",
+            "the text parsed as the notation named (json, yaml, xml, csv, …), under a reading (text:markdown, corpus:latex, koine:tei, code:rust) or as it declares itself; the thread then stands on the document's root",
+        ),
+        OnNull::Keep,
+    ),
     scalar("xml", "the node as XML"),
     scalar("markdown", "the node as Markdown"),
     scalar("html", "the node as HTML"),
@@ -593,11 +605,8 @@ pub const SPECS: &[FnSpec] = &[
         Check::Decode,
     ),
     with_check(scalar("dec", "decode, short"), Check::Decode),
-    scalar(
-        "sh",
-        "the topic through a shell command, read raw to the balancing paren: \
-         sh(tr a-z A-Z) (needs --allow-shell)",
-    ),
+    // (`sh(cmd)` is retired, 2026-11-02: the shell is the environment
+    // mount `sh=shell:`, its programs the commands `sh:tr(…)`.)
     // Reductions.
     with_options(
         reducing(
@@ -699,9 +708,9 @@ pub const SPECS: &[FnSpec] = &[
                 "frequencies",
                 "each distinct value with its count, most frequent first, as \
                  records (value, n); frequencies(K) keeps the top K; --nulls (-n) adds a \
-                 row for the nulls, --values (-v) the default without it",
+                 row for the nulls",
             ),
-            &["--values", "-v", "--nulls", "-n"],
+            &["--nulls", "-n"],
         ),
         Check::Command,
     ),
@@ -739,7 +748,7 @@ pub const SPECS: &[FnSpec] = &[
         with_check(
             reducing(
                 "sort",
-                "the capsae sorted by value (sort(LOCALE), sort(atergo)); --desc (-d) descending",
+                "the capsae sorted by value (sort(LOCALE), sort(-a) a tergo); --desc (-d) descending",
             ),
             Check::Keyed,
         ),
@@ -828,7 +837,7 @@ pub const SPECS: &[FnSpec] = &[
                 "collapse",
                 "one thread per distinct node among the context's threads, in order of first arrival: @- the union of their arriving edges, the capsa gathered (equal regulae once, differing ones as lists); collapse(-e) one thread per node and arriving edge",
             )),
-            &["-e", "--edge"],
+            &["-e", "--edges"],
         ),
         Check::Command,
     ),
@@ -836,11 +845,11 @@ pub const SPECS: &[FnSpec] = &[
         with_options(
             on_node(context(
                 "tree",
-                "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: a depth and column expressions; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
+                "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: column expressions; --depth=n (-d=n) the depth; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
             )),
             &[
-                "--kind", "-k", "--traits", "-t", "--props", "-p", "--record", "-r", "--sample",
-                "-s",
+                "--depth", "-d", "--kind", "-k", "--traits", "-t", "--props", "-p", "--record",
+                "-r", "--sample", "-s",
             ],
         ),
         Check::Command,

@@ -265,6 +265,18 @@ pub trait CommandLibrary: Send + Sync {
     }
 }
 
+/// Whether the written call takes the input at all: `$_` places it
+/// by hand, and a headless call whose operands reach the synopsis's
+/// parameters has filled the slot with its first operand (spec: The
+/// stdin slot).
+pub fn takes_input(syn: &Synopsis, call: &FnCall, operands_written: usize) -> bool {
+    if places_input(call) {
+        return false;
+    }
+    let fixed = syn.operands.len() - usize::from(syn.variadic());
+    !(call.headless && operands_written >= fixed && !matches!(syn.input, InputSlot::Context))
+}
+
 /// Whether an operand or option value is the topic variable `$_`,
 /// which places the input itself.
 pub fn places_input(call: &FnCall) -> bool {
@@ -306,8 +318,14 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
     // by hand, or every operand is written and the input may stand
     // as the receiver instead.
     let fixed = syn.operands.len() - usize::from(syn.variadic());
+    // After a pipe the pipe fills the slot; headless (the head of an
+    // expression, a subcontext body) the first operand does when the
+    // operands reach the parameters, the seed otherwise (spec: The
+    // stdin slot, ruling 2026-11-02).
     let slot_takes = match syn.input {
-        InputSlot::Operand(_) => !places_input(call),
+        InputSlot::Operand(_) => {
+            !places_input(call) && !(call.headless && written_operands >= fixed)
+        }
         InputSlot::OperandOrSelf(_) => !places_input(call) && written_operands < fixed,
         InputSlot::Option(_) | InputSlot::Context => false,
     };

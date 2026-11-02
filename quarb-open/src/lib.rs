@@ -482,6 +482,114 @@ pub fn set_references_option(standard: &str, ctx: &SourceCtx) -> anyhow::Result<
 
 /// Apply the mount's `?references=` to a model just built (every
 /// document of a folder mount alike).
+/// The readings of a lone string, for `graft(READING:NOTATION)`
+/// (spec: Grafting): the string read as `READING:x.NOTATION` would
+/// read a source. `text` is the text model of the notation, `corpus`
+/// the same with the tokenizer run under the session's bonds,
+/// `koine` atrep's importer fed the string, `lit` the literary
+/// vocabularies; the options a mount takes (`?conllu=`, `?cast=`)
+/// have no place on a string. `None` for a reading this host does
+/// not read from a string.
+pub fn string_reader(ctx: &SourceCtx) -> quarb_compose::StringReader {
+    let ctx = ctx.clone();
+    Rc::new(move |reading: &str, notation: &str, text: &str| {
+        let ctx = &ctx;
+        let err = |e: anyhow::Error| format!("{e:#}");
+        // The notation as the extension `text_level` dispatches on.
+        let ext = match notation {
+            "markdown" => "md",
+            "latex" => "tex",
+            "text" | "plain" => "txt",
+            "tei" => "xml",
+            other => other,
+        };
+        let faux = std::path::PathBuf::from(format!("graft.{ext}"));
+        let text_model = || -> anyhow::Result<quarb_text::TextModel> {
+            if notation == "conllu" {
+                return quarb_text::TextModel::parse_conllu_text(text)
+                    .map_err(|e| anyhow::anyhow!("reading CoNLL-U: {e}"));
+            }
+            text_level(text, Some(&faux), ctx)
+        };
+        let finish = |m: quarb_text::TextModel, level: &str| {
+            finish_corpus(
+                m,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+                false,
+                level,
+                ctx,
+            )
+        };
+        Some(match reading {
+            "text" => text_model().map_err(err),
+            "corpus" => {
+                if notation == "conllu" {
+                    quarb_text::TextModel::parse_conllu_corpus(text)
+                        .map_err(|e| format!("reading CoNLL-U: {e}"))
+                } else {
+                    text_model().and_then(|m| finish(m, "corpus")).map_err(err)
+                }
+            }
+            "koine" => {
+                let k = |r: Result<quarb_text::TextModel, quarb_text_koine::KoineError>| {
+                    r.map_err(anyhow::Error::from)
+                };
+                let imported: anyhow::Result<quarb_text::TextModel> = match notation {
+                    "md" | "markdown" => k(quarb_text_koine::parse_markdown(text)),
+                    "html" => k(quarb_text_koine::parse_html(text)),
+                    "rst" => k(quarb_text_koine::parse_rst(text)),
+                    "org" => k(quarb_text_koine::parse_org(text)),
+                    "dj" | "djot" => k(quarb_text_koine::parse_djot(text)),
+                    "tei" | "docbook" | "jats" | "usx" | "osis" | "fb2" | "rnc" | "opencorpora"
+                    | "proiel" => k(quarb_text_koine::parse_xml_as(text, notation)),
+                    "usfm" | "sfm" => k(quarb_text_koine::parse_xml_as(text, "usfm")),
+                    "xml" => match quarb_text_koine::detect_xml_kind(text) {
+                        Some(kind) => k(quarb_text_koine::parse_xml_as(text, kind)),
+                        None => Err(anyhow::anyhow!(
+                            "the string declares no XML identity the koine route knows (no \
+                             namespace, DOCTYPE, or unambiguous root); name the vocabulary, \
+                             graft(koine:tei)"
+                        )),
+                    },
+                    other => Err(anyhow::anyhow!(
+                        "no atrep import for {other}; the koine reading takes md, html, rst, \
+                         org, djot, tei, docbook, jats, usx, osis, fb2, usfm"
+                    )),
+                };
+                imported.and_then(|m| apply_references(m, ctx)).map_err(err)
+            }
+            "lit" => {
+                let kind = match notation {
+                    "tei" | "usx" | "osis" | "fb2" | "usfm" | "rnc" | "opencorpora" | "proiel" => {
+                        Some(notation.to_string())
+                    }
+                    "sfm" => Some("usfm".to_string()),
+                    "xml" => quarb_text_koine::detect_xml_kind(text).map(str::to_string),
+                    _ => None,
+                };
+                let Some(kind) = kind else {
+                    return Some(Err(format!(
+                        "the lit reading reads TEI, USX, OSIS, USFM, FictionBook, RNC, \
+                         OpenCorpora and PROIEL, not {notation}"
+                    )));
+                };
+                quarb_text_koine::parse_lit_xml_as_with(text, &kind, None)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|m| finish(m, "lit"))
+                    .map_err(err)
+            }
+            _ => return None,
+        })
+    })
+}
+
 pub fn apply_references(
     mut model: quarb_text::TextModel,
     ctx: &SourceCtx,
@@ -945,7 +1053,7 @@ pub fn finish_corpus(
         (None, Some(cmd)) => {
             anyhow::ensure!(
                 allow_shell,
-                "{level}: annotate= runs a command; pass --allow-shell to permit it"
+                "{level}: annotate= runs a command; mount the shell (sh=shell:) to permit it"
             );
             Some(annotate_with(&cmd, &model.corpus_text())?)
         }
@@ -1363,7 +1471,8 @@ pub fn document_folder(
         .with_document_graft(DocumentGraft::Text)
         .with_document_reader(reader)
         .with_decoding(current_decoding(ctx)?)
-        .with_csv_options(ctx.csv()),
+        .with_csv_options(ctx.csv())
+        .with_string_reader(string_reader(ctx)),
     )
 }
 
@@ -1605,6 +1714,24 @@ impl Mounted {
     /// adapter's type (its crate's name after `quarb-`, the inner
     /// type of a composed adapter).
     pub fn of<A: AstAdapter + 'static>(a: Rc<A>, render: Box<dyn Fn(NodeId) -> String>) -> Mounted {
+        // A source with no composing layer of its own gets one that
+        // grafts on demand only (spec: Grafting, `graft(NOTATION)`;
+        // a `<NOTATION>` trait at a hop), its leaves as they were;
+        // the layer's locator marks a grafted node, the source's own
+        // renders the rest.
+        if !a.grafts_on_demand() {
+            let composed = Rc::new(
+                ComposeAdapter::new(Shared(a))
+                    .on_demand_only()
+                    .with_string_reader(string_reader(&SourceCtx::default())),
+            );
+            let c = composed.clone();
+            return Mounted {
+                adapter: Box::new(Shared(composed)),
+                render: Box::new(move |n| c.locator(n, |o| render(o))),
+                family: family_of::<A>(),
+            };
+        }
         Mounted {
             adapter: Box::new(Shared(a)),
             render,
@@ -1655,7 +1782,9 @@ pub fn mounted_relational<A: AstAdapter + 'static>(
         let r = a.clone();
         return Mounted::of(a, Box::new(move |n| outer_loc(&r, n)));
     }
-    let a = Rc::new(ComposeAdapter::new(inner));
+    let a = Rc::new(
+        ComposeAdapter::new(inner).with_string_reader(string_reader(&SourceCtx::default())),
+    );
     let r = a.clone();
     Mounted::of(
         a,
@@ -1674,8 +1803,8 @@ pub struct OpenOpts {
     /// Disable grafting entirely (the CLI's --no-graft).
     pub no_graft: bool,
     pub refs: Option<PathBuf>,
-    /// Let `sh(...)` / backtick commands run (the CLI's --allow-shell);
-    /// the literary and corpus readings' `annotate=` needs it.
+    /// The shell gate (a `shell:` environment mounted): the literary
+    /// and corpus readings' `annotate=` runs under it.
     pub allow_shell: bool,
 }
 
@@ -2142,7 +2271,8 @@ fn documents_at(
                 .with_document_graft(DocumentGraft::Text)
                 .with_document_nodes(reader)
                 .with_decoding(current_decoding(ctx)?)
-                .with_csv_options(ctx.csv()),
+                .with_csv_options(ctx.csv())
+                .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
         Ok(Mounted::of(
@@ -2359,7 +2489,8 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                 )
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
-                .with_document_graft(DocumentGraft::Text),
+                .with_document_graft(DocumentGraft::Text)
+                .with_string_reader(string_reader(ctx)),
             );
             let r = a.clone();
             return Ok(Mounted::of(
@@ -2803,7 +2934,8 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let a = Rc::new(
             ComposeAdapter::new(ObjstoreAdapter::connect(t).context("connecting to bucket")?)
                 .with_decoding(current_decoding(ctx)?)
-                .with_csv_options(ctx.csv()),
+                .with_csv_options(ctx.csv())
+                .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
         return Ok(Mounted::of(
@@ -2886,7 +3018,8 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                     .context("opening archive")?,
             )
             .with_decoding(current_decoding(ctx)?)
-            .with_csv_options(ctx.csv()),
+            .with_csv_options(ctx.csv())
+            .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
         return Ok(Mounted::of(

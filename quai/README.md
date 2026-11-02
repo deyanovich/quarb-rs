@@ -39,12 +39,12 @@ XML, HTML, Markdown, SQLite, kaiv, the filesystem, git, archives, XLSX,
 and source code — and several at once mount under one root for
 cross-source `<=>` joins.
 
-Try it in the browser at [demo.quarb.org/quai][playground] (no
+Try it in the browser at [demo.quarb.org/quai.html][playground] (no
 install), and read the [graph guide][guide] for the recipes.
 `pip install quai` gives the same REPL in Python.
 
 [quarb]: https://quarb.org/
-[playground]: https://demo.quarb.org/quai/
+[playground]: https://demo.quarb.org/quai.html
 [guide]: https://quarb.org/guides/quai.html
 
 ## License

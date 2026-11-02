@@ -639,7 +639,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   through redirects; \texttt{--tree=path|category}),
   \texttt{analyze}, \texttt{index} (pg\_trgm). \texttt{qua}:
   \texttt{web:<dir|archive|site.db|postgres://…>},
-  \texttt{--explain} / \texttt{--no-pushdown}. \\
+  \texttt{--diagnostics=info} / \texttt{--no-pushdown}. \\
 \texttt{quarb-trace} & The \texttt{quarb/trace} viz contract as
   Rust: the payload types (arbor snapshot, steps, threads,
   snapshots, window and stubs, positions, ribbons, lookahead
@@ -923,7 +923,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   server, with rows ordered by the catalog key so output is
   identical to the scan path (\texttt{--no-pushdown} opts out;
   any refusal or error falls back silently, and
-  \texttt{--explain} prints the decision — the pushed SQL, or the
+  \texttt{--diagnostics=info} prints the decision — the pushed SQL, or the
   construct that kept the query on the scan path). When full
   pushdown refuses, \emph{partial} pushdown pushes the leading
   row predicates as the table's fetch filter and runs the original
@@ -1089,7 +1089,7 @@ hold this), so the rungs trade only latency and transfer:
     driver's catalog (\texttt{column\_catalog}: SQLite's
     affinity, MySQL's \texttt{data\_type}) before using a plan,
     full or partial; an unmet assumption scans, and
-    \texttt{--explain} names the column. The strictly typed
+    \texttt{--diagnostics=info} names the column. The strictly typed
     engines reject the mismatch themselves, which falls back the
     same way. What remains outside: a SQLite cell that violates
     its column's declared type. Measured: COUNT over 500k
@@ -1130,7 +1130,7 @@ hold this), so the rungs trade only latency and transfer:
 \end{enumerate}
 
 \noindent
-\texttt{qua --explain} prints the decision chain; \texttt{qua
+\texttt{qua --diagnostics=info} prints the decision chain; \texttt{qua
 --no-pushdown} pins the scan rung; \texttt{qua --save FILE
 [--as NAME]} materializes any result as a first-class input
 (\texttt{.db} table / \texttt{.json} array) so expensive
@@ -1555,7 +1555,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     base's declarations after its own and forwards the measure
     calls for a scope it does not redeclare, so a model's
     \texttt{mount} reads the site's stored column and
-    \texttt{--explain} says \texttt{PUSHED (graph)} there too. \texttt{declared\_measure} matches a
+    \texttt{--diagnostics=info} says \texttt{PUSHED (graph)} there too. \texttt{declared\_measure} matches a
     command to a declaration by the command's fingerprint (hop,
     weight and options, the declared measure parsed through the
     engine's own parser) and by the scope test (the declared path
@@ -2398,7 +2398,7 @@ nothing about encodings.
   named delimiter (\texttt{ClosingTable}). \texttt{@| json}, \texttt{@| jsonl} and
   \texttt{@| kaiv} stay canonical. A reader
   (\texttt{number}, \texttt{tp}) takes its locale from its operand
-  alone, and refuses a locale it has no table for. \texttt{qua --explain} reports the locale and its layer;
+  alone, and refuses a locale it has no table for. \texttt{qua --diagnostics=info} reports the locale and its layer;
   the gates run with the environment's locale cleared. The session
   and wasm doors have no locale yet (the browser's
   \texttt{navigator.language} would be their system layer).

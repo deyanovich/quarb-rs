@@ -216,8 +216,10 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '֏500' | quantity"), "500_AMD");
     assert_eq!(one("= '12 ISK' | quantity"), "12_ISK");
     assert_eq!(one("= '12 XCD' | quantity"), "12_XCD");
-    // the second, retired, metal and fund codes are not units
+    // the second (VED beside VES), retired (DEM), metal and fund
+    // codes are not units (spec: Currencies; ruling 2026-11-02)
     assert_eq!(one("= '12 VED' | quantity"), "null");
+    assert_eq!(one("= '12 DEM' | quantity"), "null");
     assert_eq!(one("= '12 XAU' | quantity"), "null");
     assert_eq!(one("= '12 HRK' | quantity"), "null");
     assert_eq!(one("= '₸500' | quantity"), "500_KZT");
@@ -372,7 +374,7 @@ fn a_computed_quantity_displays_in_the_first_operands_unit() {
 #[test]
 fn scale_picks_the_prefix_that_brings_the_magnitude_to_one() {
     assert_eq!(one("= 1400000_B | scale"), "1.4_MB");
-    assert_eq!(one("= 1400000_B | scale(binary) | round(3)"), "1.335_MiB");
+    assert_eq!(one("= 1400000_B | scale(--binary) | round(3)"), "1.335_MiB");
     assert_eq!(one("= 0.002_m | scale"), "2_mm");
     assert_eq!(one("= 2500_kg | scale"), "2.5_Mg");
     assert_eq!(one("= 3_mi | scale"), "3_mi");
@@ -461,7 +463,7 @@ fn scale_walks_the_time_ladder_and_dfmt_writes_two_components() {
     assert_eq!(one("= 45_s | dfmt"), "45s");
     assert_eq!(one("= 8_d | dfmt"), "8d");
     assert_eq!(one("= 1.5_h | dfmt"), "1h 30min");
-    assert_eq!(one("= 5400_s | dfmt(iso)"), "PT1H30M");
+    assert_eq!(one("= 5400_s | dfmt(--iso)"), "PT1H30M");
     assert_eq!(one("= 'x' | dfmt"), "null");
     assert_eq!(one("= 2.5_h | dfmt"), "2h 30min");
     assert_eq!(one("= 0.0015_s | duration"), "0.0015_s");
@@ -529,37 +531,65 @@ fn a_bare_compound_unit_is_one_operand() {
     assert_eq!(one("= 5_ohm | unit(V/A)"), "5_V/A");
 }
 
-/// `duration(FROM; TO)` is the duration from one instant to another
+/// `duration(FROM; --to=TO)` is the duration from one instant to another
 /// (spec: Duration): TO − FROM, negative when TO precedes FROM, null
 /// when either does not coerce; the topic fills FROM in command
 /// position, and the bare cast stays.
 #[test]
 fn a_duration_between_two_instants() {
-    assert_eq!(one("= duration('1775-12-16'; '1817-07-18')"), "15189d");
-    assert_eq!(one("= '1775-12-16' | duration('1817-07-18')"), "15189d");
-    assert_eq!(one("= '1775-12-16' | td('1817-07-18')"), "15189d");
-    assert_eq!(one("= duration('1817-07-18'; '1775-12-16')"), "-15189d");
+    assert_eq!(one("= duration('1775-12-16'; --to='1817-07-18')"), "15189d");
     assert_eq!(
-        one("= duration('1775-12-16'; '1817-07-18') | days"),
+        one("= '1775-12-16' | duration(--to='1817-07-18')"),
+        "15189d"
+    );
+    assert_eq!(one("= '1775-12-16' | td(--to='1817-07-18')"), "15189d");
+    assert_eq!(
+        one("= duration('1817-07-18'; --to='1775-12-16')"),
+        "-15189d"
+    );
+    assert_eq!(
+        one("= duration('1775-12-16'; --to='1817-07-18') | days"),
         "15189"
     );
     assert_eq!(
-        one("= duration('2024-03-05T09:00:00Z'; '2024-03-05T10:30:00Z')"),
+        one("= duration('2024-03-05T09:00:00Z'; --to='2024-03-05T10:30:00Z')"),
         "1h 30min"
     );
-    assert_eq!(one("= duration(0; 90)"), "1min 30s");
-    assert_eq!(one("= duration('x'; '1817-07-18')"), "null");
-    // in command position with both arguments, the topic is only the
-    // capsa the expressions read
+    assert_eq!(one("= duration(0; --to=90)"), "1min 30s");
+    assert_eq!(one("= duration('x'; --to='1817-07-18')"), "null");
+    // after a pipe the pipe fills the slot (FROM) and one parameter
+    // remains (spec: The stdin slot, ruling 2026-11-02): the
+    // two-argument form after a pipe is an arity error, never a
+    // silent drop of the topic
     assert_eq!(
-        one("/rows/*[1] | duration(::when; '2025-10-07') | days"),
+        one("/rows/*[1] | ::when | duration(--to='2025-10-07') | days"),
         "1"
     );
     assert_eq!(
-        one("/rows/*[2] | duration(::when; '2024-01-02') | hours"),
+        one("/rows/*[2] | ::when | duration(--to='2024-01-02') | hours"),
         "24"
     );
-    assert_eq!(one("= duration('1775-12-16'; 'x')"), "null");
+    let e = refused("/rows/*[1] | duration(::when; '2025-10-07')");
+    assert!(e.contains("'duration' takes no operand, 2 given"), "{e}");
+    // the old head form points at the option (draft 203)
+    let e = refused("= duration('1775-12-16'; '1817-07-18')");
+    assert!(
+        e.contains("takes its input and no operand after it, 1 given"),
+        "{e}"
+    );
+    // `--from` mirrors `--to`: the slot is then TO (draft 203)
+    assert_eq!(
+        one("= '1817-07-18' | duration(--from='1775-12-16')"),
+        "15189d"
+    );
+    assert_eq!(
+        one("= duration('1817-07-18'; --from='1775-12-16')"),
+        "15189d"
+    );
+    assert_eq!(one("= '1775-12-16' | td(--from='1817-07-18')"), "-15189d");
+    let e = refused("= '1817-07-18' | duration(--from='1775-12-16' --to='1817-07-18')");
+    assert!(e.contains("duration takes --from or --to, not both"), "{e}");
+    assert_eq!(one("= duration('1775-12-16'; --to='x')"), "null");
     assert_eq!(one("= '1h 30min' | duration"), "1h 30min");
 }
 
@@ -606,7 +636,7 @@ fn dfmt_writes_a_locales_designations() {
     assert_eq!(one("= 259200_s | duration | dfmt(ar)"), "3 أيام");
     assert_eq!(one("= 1.5_s | duration | dfmt(ar)"), "1 ث 500 ملي ث");
     assert_eq!(one("= 0_s | duration | dfmt(de)"), "0 Sek.");
-    assert_eq!(one("= 443100_s | duration | dfmt(iso)"), "P5DT3H5M");
+    assert_eq!(one("= 443100_s | duration | dfmt(--iso)"), "P5DT3H5M");
     let err = refuse("= 90_s | duration | dfmt(xx)");
     assert!(
         err.contains("no duration designations for locale \"xx\""),
@@ -645,4 +675,45 @@ fn two_texts_that_coerce_compare_by_magnitude() {
     assert_eq!(one("= (\"800 g\" > \"1 m\")"), "true");
     assert_eq!(one("= (\"abc\" > \"abd\")"), "false");
     assert_eq!(one("= (\"10\" > \"9\")"), "true");
+}
+
+/// A kaiv document's own units (`.!units` imports from a `.faiv`
+/// namespace) reach the unit table through every layer the tool
+/// puts over the source — the graft-on-demand layer every source
+/// carries forwards `unit_names` and `unit_scale` (the 0.47
+/// regression lang found: `no unit 'BTU'`).
+#[test]
+fn a_documents_imported_units_reach_the_table_through_the_mount() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kaiv-units");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .arg("= 5000J | convert(BTU)")
+        .arg("racks.kaiv")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "4.739085601566586_BTU"
+    );
+    // ... and a unit the document does not define still refuses,
+    // naming the nearest.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .arg("= 5000J | convert(BTX)")
+        .arg("racks.kaiv")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no unit 'BTX'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

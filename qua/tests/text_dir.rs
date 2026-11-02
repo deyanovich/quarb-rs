@@ -120,7 +120,7 @@ fn qua_full(args: &[&str]) -> (bool, String, String) {
 
 /// A leaf whose declared identity the reading knows but whose import
 /// it refuses stays a document: its declared fields answer null and
-/// the refusal rides into --explain, so one unreadable file does not
+/// the refusal rides into --diagnostics=info, so one unreadable file does not
 /// refuse the shelf. The same file mounted alone is refused with the
 /// reason. An `.xml` declaring no identity the readings know is left
 /// to the default grafting, its markup as a DOM.
@@ -176,8 +176,8 @@ fn an_unreadable_leaf_answers_null_with_the_reason_in_explain() {
             "bad.xml\ngood.xml\nplain.xml\n",
             "{level}"
         );
-        // the reason rides into --explain, and only there
-        let (ok, out, err) = qua_full(&["--explain", "//paragraph @| count", &mount]);
+        // the reason rides into --diagnostics=info, and only there
+        let (ok, out, err) = qua_full(&["--diagnostics=info", "//paragraph @| count", &mount]);
         assert!(ok && out == "2\n", "{level}: {out} {err}");
         assert!(
             err.contains("bad.xml") && err.contains("answer null") && err.contains("sub"),

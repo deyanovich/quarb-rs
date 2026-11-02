@@ -53,8 +53,8 @@ fn the_planner_reports_as_infos() {
     let (out, err) = qua(&dir, &["/books/* @| count", "lib.db"]);
     assert_eq!(out, "2");
     assert!(err.trim().is_empty(), "{err}");
-    // --explain shows the infos as before, now as diagnostics
-    let (_, err) = qua(&dir, &["--explain", "/books/* @| count", "lib.db"]);
+    // --diagnostics=info shows the infos as before, now as diagnostics
+    let (_, err) = qua(&dir, &["--diagnostics=info", "/books/* @| count", "lib.db"]);
     assert!(
         err.contains("info PUSHED (query): pushdown: SELECT COUNT(*) FROM books"),
         "{err}"
@@ -130,4 +130,77 @@ fn a_locale_without_rules_warns_and_falls_back() {
     );
     assert_eq!(out, "1.5");
     assert!(err.trim().is_empty(), "{err}");
+}
+
+/// Raw stdout, stderr and status of a run, whatever its outcome.
+fn raw(dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .env("QUARB_LOCALE", "C")
+        .current_dir(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+#[test]
+fn colour_paints_the_severity_word_only_when_asked_or_on_a_terminal() {
+    let dir = fixture("colour");
+    // A pipe is no terminal: the automatic rule leaves the line
+    // plain, so a captured stderr reads the same whatever the
+    // terminal would have shown.
+    let (ok, err) = raw(
+        &dir,
+        &["--diagnostics=info", "/books/* | ::pages", "lib.db"],
+    );
+    assert!(ok, "{err}");
+    assert!(err.contains("info "), "{err}");
+    assert!(!err.contains('\x1b'), "{err}");
+    // `--color=always` paints the severity word and nothing else.
+    let (ok, err) = raw(
+        &dir,
+        &[
+            "--color=always",
+            "--diagnostics=info",
+            "/books/* | ::pages",
+            "lib.db",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(err.contains("\x1b[32minfo\x1b[0m "), "{err}");
+    // The refusal that ends a run: `Error` painted, the text as before.
+    let (ok, err) = raw(&dir, &["--color=always", "/books/* | nope", "lib.db"]);
+    assert!(!ok);
+    assert!(err.starts_with("\x1b[1;31mError\x1b[0m: "), "{err}");
+    let (ok, plain) = raw(&dir, &["/books/* | nope", "lib.db"]);
+    assert!(!ok);
+    assert!(plain.starts_with("Error: "), "{plain}");
+    assert_eq!(plain, err.replace("\x1b[1;31m", "").replace("\x1b[0m", ""));
+    // `--color=never` under a forcing environment stays plain.
+    let (_, err) = raw(&dir, &["--color=never", "/books/* | nope", "lib.db"]);
+    assert!(!err.contains('\x1b'), "{err}");
+}
+
+#[test]
+fn info_and_debug_are_the_levels_shorter() {
+    let dir = fixture("shorthand");
+    let (_, long) = qua(
+        &dir,
+        &["--diagnostics=info", "/books/* | ::pages", "lib.db"],
+    );
+    let (_, short) = qua(&dir, &["--info", "/books/* | ::pages", "lib.db"]);
+    assert!(long.contains("info "), "{long}");
+    assert_eq!(long, short);
+    let (_, debug) = qua(&dir, &["--debug", "/books/* | ::pages", "lib.db"]);
+    assert!(debug.contains("info "), "{debug}");
+    // One level at a time: the shorthand and the switch conflict.
+    let (ok, err) = raw(
+        &dir,
+        &["--info", "--diagnostics=error", "/books/*", "lib.db"],
+    );
+    assert!(!ok && err.contains("cannot be used with"), "{err}");
 }

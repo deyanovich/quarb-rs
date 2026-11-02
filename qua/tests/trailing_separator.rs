@@ -60,7 +60,7 @@ fn a_dash_led_last_field_is_the_option_segment_in_every_parenthesis() {
     assert!(e.contains("'--author'"), "{e}");
     // a command: the segment as before, the void and the flags
     let e = refuse("/a | join(--author)");
-    assert!(e.contains("'--author' given"), "{e}");
+    assert!(e.contains("'join' has no option '--author'"), "{e}");
 }
 
 #[test]

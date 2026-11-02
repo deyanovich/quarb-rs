@@ -88,14 +88,14 @@ fn histogram_draws_the_bars() {
     assert_eq!(one("/m/*:: @| histogram(-w=1)"), "a  █  20\nb  ▏   1");
     // the switch stands last; an unknown one names the options
     let e = refuse("/n/*:: @| histogram(-x)");
-    assert!(e.contains("the options --width -w"), "{e}");
+    assert!(e.contains("'histogram' has no option '-x'"), "{e}");
     let e = refuse("/n/*:: @| histogram(--width=0)");
     assert!(e.contains("at least 1"), "{e}");
 }
 
 /// `count(--values)` / `-v` counts the non-null values, `count(--nulls)`
 /// / `-n` the nulls, bare `count` everything; `frequencies(--nulls)` /
-/// `-n` adds a row for the nulls, `--values` / `-v` the default.
+/// `-n` adds a row for the nulls.
 #[test]
 fn count_and_frequencies_take_the_values_and_nulls_switches() {
     assert_eq!(one("/n/*:: @| count"), "6");
@@ -110,10 +110,9 @@ fn count_and_frequencies_take_the_values_and_nulls_switches() {
         one("/s/*:: @| frequencies(2; -n)"),
         "%(value = \"a\"; n = 3)\n%(value = \"b\"; n = 2)\n%(value = null; n = 1)"
     );
-    assert_eq!(
-        one("/s/*:: @| frequencies(--values)"),
-        one("/s/*:: @| frequencies")
-    );
+    // `--values` restated the default and is gone (draft 203)
+    let e = refuse("/s/*:: @| frequencies(--values)");
+    assert!(e.contains("'frequencies' has no option '--values'"), "{e}");
     let e = refuse("/n/*:: @| sum(-n)");
-    assert!(e.contains("'-n' given"), "{e}");
+    assert!(e.contains("'sum' has no option '-n'"), "{e}");
 }

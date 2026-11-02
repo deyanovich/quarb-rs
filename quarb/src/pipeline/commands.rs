@@ -460,6 +460,7 @@ pub(crate) fn apply_command_in<H: Host>(
                         }
                     };
                     let rebuilt = FnCall {
+                        headless: false,
                         name: "#".into(),
                         args: std::iter::once(arg)
                             .chain(call.args.iter().filter(|a| matches!(a, Arg::Opt { .. })).cloned())
@@ -482,13 +483,6 @@ pub(crate) fn apply_command_in<H: Host>(
             }
             out
         }
-        Command::Func(call) if call.name == "sh" && !run_option(|o| o.shell_allowed()) => {
-            record_refusal("the sh(...) command runs external commands; pass --allow-shell".into());
-            Vec::new()
-        }
-        Command::Func(call) if call.name == "sh" => {
-            shell_command(call, caps, host, trace, outer, peers)
-        }
         // `default(fallback)`: the topic when non-null, else the
         // fallback — which may be an expression evaluated against
         // the capsa's own node, making `(a) | default$$.b` the
@@ -497,6 +491,9 @@ pub(crate) fn apply_command_in<H: Host>(
         // callers.
         Command::Func(call) if call.name == "exchange" => {
             exchange_command(call, caps, host, trace, outer, peers)
+        }
+        Command::Func(call) if call.name == "graft" => {
+            graft_command(call, caps, host, trace, outer, peers)
         }
         Command::Func(call) if call.name == "default" => {
             default_command(call, caps, host, trace, outer, peers)
@@ -589,6 +586,7 @@ pub(crate) fn apply_command_in<H: Host>(
                     match crate::pipeline::positions_of(&value) {
                         Some(_) => {
                             let resolved = FnCall {
+                                headless: false,
                                 name: "[]".into(),
                                 args: vec![Arg::Lit(value)],
                             };
@@ -1039,7 +1037,7 @@ pub(crate) fn apply_command_in<H: Host>(
         Command::Agg(call) if call.name == "zscore" => {
             zscore_command(call, caps, host, trace, outer, peers)
         }
-        // `@| number[(level)]` and `@| outline[(level; text[; "1."])]`
+        // `@| number[(level)]` and `@| outline[(level; text; --style="1.")]`
         // — each capsa's topic becomes its dotted number in the
         // stream of levels, or its line of the outline. Row-aligned
         // like `shift`.
@@ -1136,6 +1134,7 @@ pub(crate) fn apply_command_in<H: Host>(
         {
             let resolved = match caps.first() {
                 Some(c) => FnCall {
+                    headless: false,
                     name: call.name.clone(),
                     args: call
                         .args
@@ -2248,6 +2247,104 @@ pub(crate) fn map_cells_command<H: Host>(
 }
 
 /// Every thread refused with one message, the topic null.
+/// `| graft(NOTATION)` — grafting on demand (spec: Grafting): each
+/// thread's text topic (a node's text where it has none) parses as
+/// the notation named, or as it declares itself when none is, and
+/// the thread then stands on the parsed document's root in
+/// navigation mode, as a filing leaves it, its register and origins
+/// kept, so a hop walks on into what a program or a column handed
+/// over as text. A text that does not parse as asked refuses the
+/// query; a null topic stays null; a topic that is no text refuses
+/// naming its kind.
+fn graft_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    let mut out = Vec::with_capacity(caps.len());
+    for (i, mut c) in caps.into_iter().enumerate() {
+        let scope = c.scope(Some(i + 1), peers, outer);
+        let notation = match call.args.first() {
+            None => None,
+            Some(Arg::Lit(v) | Arg::Key(v)) => Some(v.to_string()),
+            // A reading prefix written bare, `graft(text:markdown)`,
+            // `graft(code:rust)`, reads as the words it is, not as
+            // the typed operand (`"text":markdown`) or the path the
+            // parser took it for; any other expression names the
+            // notation by its value (`graft($.fmt)`).
+            Some(Arg::Expr(e)) => {
+                let written = crate::syntax::unparse::operand_text(e).replace('"', "");
+                if is_graft_operand(&written) {
+                    Some(written)
+                } else {
+                    Some(operand_scalar(host, &c.ext, e, trace, scope).to_string())
+                }
+            }
+            Some(_) => {
+                record_refusal(
+                    "graft takes one operand, the notation's name: graft(json), graft(csv)".into(),
+                );
+                return Vec::new();
+            }
+        };
+        let text = match effective_topic(&c, host) {
+            Value::Null => {
+                c.topic = Some(Value::Null);
+                out.push(c);
+                continue;
+            }
+            Value::Str(s) => s,
+            other => {
+                let shown: String = other.to_string().chars().take(40).collect();
+                record_refusal(format!(
+                    "graft reads a text; the topic is {} ({shown})",
+                    crate::stdlib::functions::type_of(&other)
+                ));
+                return Vec::new();
+            }
+        };
+        match host.graft(&text, notation.as_deref()) {
+            None => {
+                record_refusal(
+                    "graft needs an arbor with a composing layer behind it; this host has none"
+                        .into(),
+                );
+                return Vec::new();
+            }
+            Some(Err(why)) => {
+                record_refusal(why);
+                return Vec::new();
+            }
+            Some(Ok(at)) => {
+                c.ext = host.restate(&scope, &at);
+                c.topic = None;
+                c.prov = c.prov.flat();
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Whether a written operand is a graft operand's shape: a word, or
+/// `word:word` (a reading prefix over a notation), letters, digits,
+/// `_`, `-`, `+` and `.` in the words.
+fn is_graft_operand(written: &str) -> bool {
+    let word = |w: &str| {
+        !w.is_empty()
+            && w.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.'))
+    };
+    match written.split_once(':') {
+        Some((r, n)) => word(r) && (n.is_empty() || word(n)),
+        None => word(written),
+    }
+}
+
 fn refuse_all<H: Host>(caps: Vec<Thread<H::Ext>>, why: &str) -> Vec<Thread<H::Ext>> {
     record_refusal(why.into());
     caps.into_iter()
@@ -2563,7 +2660,7 @@ pub(crate) fn collapse_command<H: Host>(
     let by_edge = call
         .args
         .iter()
-        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "-e" || name == "--edge"));
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "-e" || name == "--edges"));
     let mut out: Vec<Thread<H::Ext>> = Vec::new();
     let mut index: HashMap<(<H::Ext as Attachment>::Key, Option<String>), usize> = HashMap::new();
     for c in caps {
@@ -2735,42 +2832,6 @@ pub(crate) fn order_command<H: Host>(
     caps
 }
 
-/// `sh('cmd')` — the shell command, one command per capsa with the topic as stdin: `apply_command`'s shell arm.
-pub(crate) fn shell_command<H: Host>(
-    call: &FnCall,
-    caps: Vec<Thread<H::Ext>>,
-    host: &H,
-    trace: &H::Trace,
-    outer: Option<&Scope<'_, H::Ext>>,
-    peers: Option<&Peers<H::Ext>>,
-) -> Vec<Thread<H::Ext>> {
-    caps.into_iter()
-        .enumerate()
-        .map(|(i, mut c)| {
-            let scope = c.scope(Some(i + 1), peers, outer);
-            let (cmd, o) = capture(|| {
-                call.args.first().map(|a| match a {
-                    Arg::Lit(v) | Arg::Key(v) => v.to_string(),
-                    Arg::Expr(e) => operand_scalar(host, &c.ext, e, trace, scope).to_string(),
-                    Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => {
-                        String::new()
-                    }
-                })
-            });
-            c.topic = Some(match cmd {
-                Some(cmd) if !cmd.is_empty() => {
-                    run_shell(&cmd, c.topic.as_ref()).unwrap_or(Value::Null)
-                }
-                _ => Value::Null,
-            });
-            let mut prov = c.prov.flat();
-            prov.origins.union(&o);
-            c.prov = prov;
-            c
-        })
-        .collect()
-}
-
 /// `| f(...)` — a per-capsa command on the topic: `apply_command`'s simple-command arm.
 pub(crate) fn func_command<H: Host>(
     call: &FnCall,
@@ -2786,10 +2847,17 @@ pub(crate) fn func_command<H: Host>(
             let prov = c.prov.flat();
             // Expression arguments evaluate per capsa, against
             // its node and register (the spec's Expression
-            // Arguments): `levenshtein(::alt)`, `lpad(::width)`.
+            // Arguments): `levenshtein(::alt)`, `lpad(::width)`;
+            // an option's expression value too (`duration(--to=::died)`,
+            // draft 203), a literal value staying as written.
+            let unresolved = |a: &Arg| {
+                matches!(a, Arg::Expr(_))
+                    || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
+            };
             let resolved;
-            let call = if call.args.iter().any(|a| matches!(a, Arg::Expr(_))) {
+            let call = if call.args.iter().any(unresolved) {
                 resolved = FnCall {
+                    headless: false,
                     name: call.name.clone(),
                     args: call
                         .args
@@ -2802,6 +2870,19 @@ pub(crate) fn func_command<H: Host>(
                                 trace,
                                 c.scope(None, peers, outer),
                             )),
+                            Arg::Opt {
+                                name,
+                                value: Some(e),
+                            } if !matches!(e, Operand::Lit(_)) => Arg::Opt {
+                                name: name.clone(),
+                                value: Some(Operand::Lit(operand_scalar(
+                                    host,
+                                    &c.ext,
+                                    e,
+                                    trace,
+                                    c.scope(None, peers, outer),
+                                ))),
+                            },
                             other => other.clone(),
                         })
                         .collect(),

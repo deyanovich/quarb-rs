@@ -326,6 +326,9 @@ impl<A: AstAdapter> Host for A {
             walk: None,
         }
     }
+    fn graft(&self, text: &str, notation: Option<&str>) -> Option<Result<GraphExt, String>> {
+        Some(self.graft_text(text, notation)?.map(GraphExt::at))
+    }
     fn exists_binding(
         &self,
         ext: &GraphExt,
@@ -1025,6 +1028,9 @@ impl Host for Calc {
         Vec::new()
     }
     fn restate(&self, _: &Scope<'_, ()>, _: &()) {}
+    fn graft(&self, _: &str, _: Option<&str>) -> Option<Result<(), String>> {
+        None
+    }
     fn exists_binding(
         &self,
         ext: &(),

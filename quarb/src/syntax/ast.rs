@@ -391,6 +391,11 @@ pub enum RegRef {
 pub struct FnCall {
     pub name: String,
     pub args: Vec<Arg>,
+    /// Written at the head of an expression or in a subcontext body,
+    /// where no pipe fills the stdin slot (spec: The stdin slot,
+    /// ruling 2026-11-02): the first operand fills it when the
+    /// operands reach the parameters, the seed otherwise.
+    pub headless: bool,
 }
 
 impl FnCall {
@@ -410,6 +415,7 @@ impl FnCall {
     /// The call without its `--of` option, for the reduction itself.
     pub fn without_of(&self) -> FnCall {
         FnCall {
+            headless: self.headless,
             name: self.name.clone(),
             args: self
                 .args

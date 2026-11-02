@@ -310,7 +310,9 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 
 pub mod foreign;
 pub mod glue;
+pub mod module;
 pub mod reflect;
 pub use foreign::PyForeign;
 pub use glue::{PyGlue, importable};
+pub use module::ModuleEnvironment;
 pub use reflect::Reflective;

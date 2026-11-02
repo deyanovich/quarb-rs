@@ -86,11 +86,11 @@ fn every_node_is_unix_tree() {
     // the depth counts below each starting point; the traits follow
     // the name
     assert_eq!(
-        text("/SYNOPSIS @| tree(0; -t)", &fs),
+        text("/SYNOPSIS @| tree(-d=0 -t)", &fs),
         ". <dir>\n└── SYNOPSIS <dir>"
     );
     assert_eq!(
-        text("/* @| tree(1)", &fs),
+        text("/* @| tree(-d=1)", &fs),
         "\
 .
 ├── CLAUDE.md -> SYNOPSIS/CLAUDE.md
@@ -144,7 +144,7 @@ fn a_document_hangs_its_starting_points_by_their_path() {
         └── given"
     );
     assert_eq!(
-        text("/archives/gro/entries/* @| tree(0; ::given)", &d),
+        text("/archives/gro/entries/* @| tree(::given; -d=0)", &d),
         "\
 /
 └┄┄ archives/gro/entries
@@ -153,28 +153,28 @@ fn a_document_hangs_its_starting_points_by_their_path() {
     );
     // props names the properties, % gives them as a record
     assert_eq!(
-        text("/archives/gro/entries/0 @| tree(0; --props)", &d),
+        text("/archives/gro/entries/0 @| tree(-d=0 --props)", &d),
         "/ ::archives\n└┄┄ archives/gro/entries\n    └── 0 ::surname ::given"
     );
     assert_eq!(
-        text("/archives/gro/entries/1 @| tree(0; -r)", &d),
+        text("/archives/gro/entries/1 @| tree(-d=0 -r)", &d),
         "/\n└┄┄ archives/gro/entries\n    └── 1 %(surname = \"Crease\"; given = \"Ernest\")"
     );
     // a parenthesised column is a body on each node, a bare word
     // in it a command
     assert_eq!(
-        text("/archives/gro/entries/0 @| tree(0; (count))", &d),
+        text("/archives/gro/entries/0 @| tree((count); -d=0)", &d),
         "/  1\n└┄┄ archives/gro/entries\n    └── 0  1"
     );
     // the root itself as a starting point draws the whole document
-    assert_eq!(text("^ @| tree(2)", &d), "/\n└── archives\n    └── gro");
+    assert_eq!(text("^ @| tree(-d=2)", &d), "/\n└── archives\n    └── gro");
     // a value context is refused; so is the pipe form and a stray word
     let e = refused("/archives/gro/entries/*::surname @| tree", &d);
     assert!(e.contains("tree draws nodes"), "{e}");
     let e = refused("/archives/gro/entries/* | tree", &d);
     assert!(e.contains("'tree' uses '@|'"), "{e}");
     let e = refused("/archives/gro/entries/* @| tree(sizes)", &d);
-    assert!(e.contains("tree takes a depth"), "{e}");
+    assert!(e.contains("tree takes column expressions"), "{e}");
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn several_mounts_are_a_forest() {
         },
     ]);
     assert_eq!(
-        text("/*/archives/gro/entries/0 @| tree(0; ::surname)", &m),
+        text("/*/archives/gro/entries/0 @| tree(::surname; -d=0)", &m),
         "\
 r
 └┄┄ archives/gro/entries
@@ -287,7 +287,7 @@ fn the_display_words_are_switches_and_the_old_spellings_point_at_them() {
             "'kind' is a string here: write --kind or -k",
         ),
         (
-            "/a @| tree(0; props)",
+            "/a @| tree(props)",
             "'props' is a string here: write --props or -p",
         ),
         (
@@ -302,9 +302,9 @@ fn the_display_words_are_switches_and_the_old_spellings_point_at_them() {
     // (the switches stand last, after the depth and the columns, as
     // the one option rule has it)
     for q in [
-        "/a @| tree(1; -t)",
-        "/a @| tree(0; ::x; -r)",
-        "/a @| tree(0; --traits --props)",
+        "/a @| tree(-d=1 -t)",
+        "/a @| tree(::x; -d=0 -r)",
+        "/a @| tree(-d=0 --traits --props)",
         "/a @| tree(-p)",
     ] {
         quarb::run(q, &d).unwrap_or_else(|e| panic!("{q}: {e}"));
@@ -322,40 +322,41 @@ fn short_switches_bundle_as_in_the_shell() {
             .join("\n"),
         other => panic!("{q}: {other:?}"),
     };
-    assert_eq!(text("/a @| tree(1; -tp)"), text("/a @| tree(1; -t -p)"));
+    assert_eq!(text("/a @| tree(-d=1 -tp)"), text("/a @| tree(-d=1 -t -p)"));
     // --kind prints the first trait alone, where -t prints them all
     assert_eq!(
-        text("/a @| tree(1; -k)"),
+        text("/a @| tree(-d=1 -k)"),
         "/ <object>\n└── a <object>\n    └── x <number>"
     );
     assert_eq!(
-        text("/a @| tree(1; -kt)"),
-        text("/a @| tree(1; --kind --traits)")
+        text("/a @| tree(-d=1 -kt)"),
+        text("/a @| tree(-d=1 --kind --traits)")
     );
-    assert_eq!(text("/a @| tree(1; -pt)"), text("/a @| tree(1; -p -t)"));
+    assert_eq!(text("/a @| tree(-d=1 -pt)"), text("/a @| tree(-d=1 -p -t)"));
     assert_eq!(
-        text("/a @| tree(0; ::x; -rt)"),
-        text("/a @| tree(0; ::x; -r -t)")
+        text("/a @| tree(::x; -d=0 -rt)"),
+        text("/a @| tree(::x; -d=0 -r -t)")
     );
-    // the unparse prints them singly
+    // the unparse prints them singly, by their long names (a short
+    // letter is a spelling of its long name, draft 203)
     assert_eq!(
-        quarb::Query::parse("/a @| tree(1; -tp)", &d)
+        quarb::Query::parse("/a @| tree(-d=1 -tp)", &d)
             .unwrap()
             .canonical(),
-        "/a @| tree(1; -t -p)"
+        "/a @| tree(--depth=1 --traits --props)"
     );
     // an unknown letter names itself and the command's short switches
-    let e = quarb::run("/a @| tree(1; -tx)", &d)
+    let e = quarb::run("/a @| tree(-d=1 -tx)", &d)
         .unwrap_err()
         .to_string();
     assert!(
-        e.contains("'-x' in '-tx' is no switch of 'tree' (its short switches: -k -t -p -r -s)"),
+        e.contains("'-x' in '-tx' is no switch of 'tree' (its short switches: -d -k -t -p -r -s)"),
         "{e}"
     );
     // the last letter keeps its value: `-to=…` on a reducer
     assert_eq!(text("/a | ::x @| sum(-o=$_ * 2)"), "2");
     // long options never bundle
-    let e = quarb::run("/a @| tree(1; --tp)", &d)
+    let e = quarb::run("/a @| tree(-d=1 --tp)", &d)
         .unwrap_err()
         .to_string();
     assert!(e.contains("no option '--tp'"), "{e}");
@@ -384,40 +385,43 @@ fn leaf_runs_collapse_sampling_and_the_record_part() {
     // leaves named by position differ, and do not collapse; rows
     // with children are not leaves
     assert_eq!(
-        text("/flat @| tree(1)"),
+        text("/flat @| tree(-d=1)"),
         "/\n└── flat\n    ├── 0\n    ├── 1\n    ├── 2\n    └── 3"
     );
     assert_eq!(
-        text("/rows @| tree(1)"),
+        text("/rows @| tree(-d=1)"),
         "/\n└── rows\n    ├── 0\n    ├── 1\n    └── 2"
     );
     // same-named leaves whose lines read alike collapse; a column
     // that differs keeps them apart
     assert_eq!(
-        text("/rows/*/k @| tree(0)"),
+        text("/rows/*/k @| tree(-d=0)"),
         "/\n└── rows\n    ├┄┄ 0\n    │   └── k\n    ├┄┄ 1\n    │   └── k\n    └┄┄ 2\n        └── k"
     );
     assert_eq!(
-        text("/flat/* @| tree(0; -k)"),
+        text("/flat/* @| tree(-d=0 -k)"),
         "/ <object>\n└┄┄ flat\n    ├── 0 <string>\n    ├── 1 <string>\n    ├── 2 <string>\n    └── 3 <string>"
     );
     // --sample=n: the first n, then the more line
     assert_eq!(
-        text("/flat @| tree(1; -s=2)"),
+        text("/flat @| tree(-d=1 -s=2)"),
         "/\n└── flat\n    ├── 0\n    ├── 1\n    └── … and 2 more"
     );
     assert_eq!(
-        text("/o @| tree(1; --sample=3)"),
+        text("/o @| tree(-d=1 --sample=3)"),
         "/\n└── o\n    ├── x\n    ├── y\n    ├── z\n    └── … and 7 more"
     );
     // -r: the scalar properties, six then an ellipsis; a child with
     // children (z, w) and a null member are no fields; none → nothing
     assert_eq!(
-        text("/o @| tree(0; -r)"),
+        text("/o @| tree(-d=0 -r)"),
         "/\n└── o %(x = 1; y = \"two\"; b = true; d = 3; e = 4; f = 5; …)"
     );
-    assert_eq!(text("/o/w @| tree(0; -r)"), "/\n└┄┄ o\n    └── w %(k = 1)");
-    assert_eq!(text("/o/x @| tree(0; -r)"), "/\n└┄┄ o\n    └── x");
+    assert_eq!(
+        text("/o/w @| tree(-d=0 -r)"),
+        "/\n└┄┄ o\n    └── w %(k = 1)"
+    );
+    assert_eq!(text("/o/x @| tree(-d=0 -r)"), "/\n└┄┄ o\n    └── x");
 }
 
 #[test]
@@ -436,13 +440,13 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     };
     // one skipped path: one stub, as before
     assert_eq!(
-        text("/archives/gro/entries/* @| tree(0; ::s)"),
+        text("/archives/gro/entries/* @| tree(::s; -d=0)"),
         "/\n└┄┄ archives/gro/entries\n    ├── 0  Ali\n    └── 1  Crease"
     );
     // the paths diverge under gro: archives and gro drawn once, solid,
     // the stubs hanging from the divergence
     assert_eq!(
-        text("/archives/gro/*/* @| tree(0)"),
+        text("/archives/gro/*/* @| tree(-d=0)"),
         "\
 /
 └── archives
@@ -455,7 +459,7 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     );
     // a divergence right below the top
     assert_eq!(
-        text("/archives/*/* @| tree(0)"),
+        text("/archives/*/* @| tree(-d=0)"),
         "\
 /
 └── archives
@@ -467,7 +471,7 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     );
     // a starting point beside a divergence hangs from the shared node
     assert_eq!(
-        text("/archives/gro//*[::s || :name = \"index\"] @| tree(0)"),
+        text("/archives/gro//*[::s || :name = \"index\"] @| tree(-d=0)"),
         "\
 /
 └── archives
@@ -479,7 +483,7 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     );
     // the column prints on every solid line, the top's included
     assert_eq!(
-        text("/archives/gro/*/* @| tree(0; (/* @| count))"),
+        text("/archives/gro/*/* @| tree((/* @| count); -d=0)"),
         "\
 /  1
 └── archives  2
@@ -490,4 +494,21 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
         └┄┄ index
             └── a  0"
     );
+}
+
+#[test]
+fn the_depth_is_an_option() {
+    // draft 203: a bare number was the depth; it points at the option.
+    let d = quarb_json::JsonAdapter::parse(r#"{"a":{"b":1}}"#).unwrap();
+    let e = quarb::run("/a @| tree(2)", &d).unwrap_err().to_string();
+    assert!(
+        e.contains("tree's depth is an option: write tree(-d=2)"),
+        "{e}"
+    );
+    let e = quarb::run("/a @| tree(-d=x)", &d).unwrap_err().to_string();
+    assert!(e.contains("tree's depth is a count"), "{e}");
+    let e = quarb::run("/a @| tree(::x; 1)", &d)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("depth is an option"), "{e}");
 }

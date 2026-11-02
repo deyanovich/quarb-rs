@@ -245,9 +245,9 @@ fn a_run_overrides_the_adapter_quantifier_bound() {
     assert!(err.to_string().contains("quantifier"), "{err}");
     let out = q.run(&a, &quarb::Run::default()).unwrap();
     assert!(matches!(out.result, QueryResult::Values(v) if v == [Value::Int(3)]));
-    let shell = quarb::Query::parse("/a:: | `true`", &a).unwrap();
-    let err = shell.run(&a, &quarb::Run::default()).unwrap_err();
-    assert!(err.to_string().contains("allow-shell"), "{err}");
+    // the backtick command is retired: the shell is an environment mount
+    let err = quarb::Query::parse("/a:: | `true`", &a).unwrap_err();
+    assert!(err.to_string().contains("sh=shell:"), "{err}");
 }
 
 #[test]

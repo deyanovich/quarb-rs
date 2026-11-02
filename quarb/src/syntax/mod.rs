@@ -9,4 +9,5 @@ pub mod lexer;
 pub mod man;
 pub mod parser;
 pub mod registry;
+pub mod signature;
 pub mod unparse;

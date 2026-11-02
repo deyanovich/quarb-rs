@@ -95,7 +95,7 @@ derived nodes, edges).
 ## Sessions: `@quarb/wasm/quai`
 
 The second entry point is the **session engine** — the build
-behind the [quai playground](https://demo.quarb.org/quai/) and
+behind the [quai playground](https://demo.quarb.org/quai.html) and
 the Quarb Chrome extension. Mount several named sources (json,
 yaml, toml, csv, xml, html, markdown, **kaiv**, SQLite bytes)
 as children of one root and join across them; every line

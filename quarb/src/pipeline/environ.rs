@@ -56,7 +56,7 @@ fn environment_of(call: &FnCall) -> Option<(Environment, String)> {
         None => {
             record_refusal(format!(
                 "environment '{alias}' is not mounted; mount it from the command line \\
-                 ('{alias}=exec:DIR', '{alias}=shell:')"
+                 ('{alias}=exec:DIR', '{alias}=shell:', '{alias}=python:MODULE.py')"
             ));
             None
         }
@@ -159,13 +159,13 @@ fn lib_command<H: Host>(
             return Vec::new();
         }
     };
-    let places = crate::pipeline::library::places_input(call);
     let mut out = Vec::with_capacity(caps.len());
     let mut warned = false;
     for (i, mut c) in caps.into_iter().enumerate() {
         let scope = c.scope(Some(i + 1), peers, outer);
         let ((operands, options), o) = capture(|| lib_values(call, host, &c.ext, trace, scope));
-        let input = (!places).then(|| match &c.topic {
+        let takes = crate::pipeline::library::takes_input(syn, call, operands.len());
+        let input = takes.then(|| match &c.topic {
             Some(t) => t.clone(),
             None => node_record(host, &c.ext),
         });
@@ -229,12 +229,12 @@ fn lib_agg_command<H: Host>(
             None => origins.insert(host.origin_at(&c.ext)),
         }
     }
-    let places = crate::pipeline::library::places_input(call);
+    let takes = crate::pipeline::library::takes_input(syn, call, operands.len());
     // A stream of one library value, table or list (the frame a
     // previous command built, a list literal) crosses as that value,
     // not as a list around it, so either pipe continues a chain and
     // `= @(1; 2) @| np:log` is the sample, not a one-row matrix.
-    let input = (!places).then(|| match caps.as_slice() {
+    let input = takes.then(|| match caps.as_slice() {
         [one]
             if matches!(
                 one.topic,
@@ -314,9 +314,15 @@ pub(crate) fn env_command<H: Host>(
     let mut out = Vec::with_capacity(caps.len());
     for (i, mut c) in caps.into_iter().enumerate() {
         let scope = c.scope(Some(i + 1), peers, outer);
-        let ((operands, options), o) = capture(|| words(call, host, &c.ext, trace, scope));
+        let ((mut operands, options), o) = capture(|| words(call, host, &c.ext, trace, scope));
+        // Headless, the first operand is the stdin slot (spec: The
+        // stdin slot): a text callee reads it on its standard input.
+        let input = if call.headless && !operands.is_empty() {
+            operands.remove(0)
+        } else {
+            effective_topic(&c, host).to_string()
+        };
         let argv = Environment::argv(&operands, &options);
-        let input = effective_topic(&c, host).to_string();
         c.topic = Some(match env.call(&name, &argv, &input) {
             Ok(text) => Value::Str(trim_one_newline(text)),
             Err(CallFailure::Failed(_)) => Value::Null,
@@ -396,44 +402,4 @@ pub(crate) fn env_agg_command<H: Host>(
             ext: node.clone(),
         })
         .collect()
-}
-
-/// Run one shell command for the `sh(...)` command: `cmd` under
-/// `sh -c`, the topic's text on stdin, stdout (one trailing newline
-/// trimmed) as the result. A failing spawn or exit status is `None`
-/// (the command nulls it); stderr is inherited so diagnostics stay
-/// visible.
-pub(crate) fn run_shell(cmd: &str, topic: Option<&Value>) -> Option<Value> {
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-    if let Some(v) = topic
-        && let Some(stdin) = child.stdin.take()
-    {
-        let mut text = v.to_string();
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        // Fed from a thread of its own, SIGPIPE blocked there (see
-        // `env::feed_stdin`): the parent drains stdout meanwhile,
-        // and a command that stops reading early cannot kill the
-        // process.
-        crate::pipeline::env::feed_stdin(stdin, text);
-    }
-    // Any stdin handle not moved into the writer thread (the
-    // topicless case) is dropped so the child still sees EOF.
-    drop(child.stdin.take());
-    let out = child.wait_with_output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if text.ends_with('\n') {
-        text.pop();
-    }
-    Some(Value::Str(text))
 }

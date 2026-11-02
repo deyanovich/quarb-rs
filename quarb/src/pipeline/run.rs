@@ -415,7 +415,7 @@ pub(crate) fn take_refs() -> Vec<String> {
 pub(crate) fn gate(query: &Query, run: &RunOptions) -> crate::Result<()> {
     if uses_shell_query(query) && !run.shell_allowed() {
         return Err(crate::QuarbError::unsupported(
-            "the sh(...) command runs external commands; pass --allow-shell",
+            "the sh(cmd) command is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)",
         ));
     }
     // Every prefix a command carries names a linked library or a

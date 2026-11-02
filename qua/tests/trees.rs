@@ -99,10 +99,15 @@ fn declared_trees_exact_base_urn_and_locator() {
     assert_eq!(run("/main/book-->::title"), "Pride and Prejudice");
     // the engine's own locator boundary, a Quarb path inside the tree
     assert_eq!(run("/main/row-->::name"), "bo");
-    // an identity nothing answers is reported under --explain
+    // an identity nothing answers is reported under --diagnostics=info
     let (out, err) = qua(
         &dir,
-        &["--explain", "--model", "trees.model", "/main/lost-->"],
+        &[
+            "--diagnostics=info",
+            "--model",
+            "trees.model",
+            "/main/lost-->",
+        ],
     );
     assert_eq!(out, "");
     assert!(

@@ -16,13 +16,13 @@ fn outcome(q: &str) -> quarb::Outcome {
 
 #[test]
 fn a_drawing_leaves_its_html_form_on_the_outcome() {
-    assert!(quarb::closes_with_drawing("/a @| tree(1; -k)"));
+    assert!(quarb::closes_with_drawing("/a @| tree(-d=1 -k)"));
     assert!(quarb::closes_with_drawing("/n/*:: @| histogram(3)"));
     assert!(!quarb::closes_with_drawing("/a @| count"));
     assert!(!quarb::closes_with_drawing("/a | tree"));
     // the tree: the controls, a folding node per node with children,
     // a plain line per leaf, the text escaped
-    let o = outcome("/a @| tree(1; -k)");
+    let o = outcome("/a @| tree(-d=1 -k)");
     let html = o.html.expect("the tree's html");
     assert!(
         html.starts_with("<div class=\"quarb-tree\"><div class=\"controls\"><button"),
@@ -50,7 +50,7 @@ fn a_drawing_leaves_its_html_form_on_the_outcome() {
     );
     assert!(html.ends_with("</details></details></div>"), "{html}");
     // a stub is a dotted container, a crosslink a line of its own
-    let o = outcome("/a/z/w @| tree(0)");
+    let o = outcome("/a/z/w @| tree(-d=0)");
     let html = o.html.expect("the tree's html");
     assert!(html.contains("<details open class=\"stub\"><summary>a/z</summary><div class=\"node\">w</div></details>"), "{html}");
     // the histogram: a row per bar, the width the count's share of

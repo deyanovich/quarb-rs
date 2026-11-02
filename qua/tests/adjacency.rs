@@ -43,12 +43,27 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
         e.contains("round reads its input from the pipe: write | round(2)"),
         "{e}"
     );
-    // a command that takes no operand, written with a parenthesis
-    // after a pipe, is the call operand it is anywhere else (draft
-    // 166): `upper($_)` is `($_ | upper)`, `upper("b")` is `("b" | upper)`
-    assert_eq!(one("= \"a\" | upper($_)"), "A");
-    assert_eq!(one("= \"a\" | upper(\"b\")"), "B");
-    assert_eq!(one("= 1 | date(2013-01-01) + 1_d"), "2013-01-02");
+    // After a pipe the pipe fills the stdin slot and the operands
+    // fill the parameters that remain; a command that takes no
+    // operand refuses any (spec: The stdin slot, ruling 2026-11-02;
+    // draft 166's reading of `upper("b")` as `("b" | upper)` is
+    // retired), and `$_` written as a surplus operand gets the pointer.
+    let e = refuse("= \"a\" | upper(\"b\")");
+    assert!(e.contains("'upper' takes no operand, 1 given"), "{e}");
+    let e = refuse("= \"a\" | upper($_)");
+    assert!(e.contains("upper reads its input from the pipe"), "{e}");
+    let e = refuse("= 1 | date(2013-01-01) + 1_d");
+    assert!(e.contains("'date' takes no operand, 1 given"), "{e}");
+    // The arity check runs before the on-null rule: a null topic
+    // still fills the slot, and the fourth operand is surplus.
+    let e = refuse("= null | mi(22; 355; 690; 71275) | round(2)");
+    assert!(e.contains("'mi' takes 3 operands at most, 4 given"), "{e}");
+    let e = refuse("= 5 | mi(22; 355; 690; 71275)");
+    assert!(e.contains("'mi' takes 3 operands at most, 4 given"), "{e}");
+    // ... and at the head of an expression the first operand is
+    // the slot, so the full form stands.
+    assert_eq!(one("= mi(22; 355; 690; 71275) | round(2)"), "2.68");
+    assert_eq!(one("= 5 | mi(22; 355; 690) | round(2)"), "-1.18");
     // a reducer keeps its refusal: the key goes through --of
     let e = refuse("= @(1; 2) | sum($_)");
     assert!(
@@ -63,7 +78,9 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
     // any other surplus is refused with the synopsis
     let e = refuse("= 3.14159 | round(2; 3)");
     assert!(
-        e.contains("'round' takes 1 operand at most, 2 given; the synopsis: round / round(d)"),
+        e.contains(
+            "'round' takes 1 operand at most, 2 given; the synopsis: round{number}(places?)"
+        ),
         "{e}"
     );
 }
@@ -111,4 +128,23 @@ fn a_reduction_reads_its_field_through_of_and_a_keyed_aggregate_takes_the_topic_
     );
     let e = refuse("/rows/* | ::x @| top(1; $_; ::x)");
     assert!(e.contains("'top' takes 2 operands at most, 3 given"), "{e}");
+}
+
+#[test]
+fn a_distance_after_a_pipe_takes_the_other_text_only() {
+    // The inventory pairs `levenshtein(a; other)` with
+    // `levenshtein(other)`: the head form's first operand is the
+    // input, so after a pipe a second operand is surplus.
+    assert_eq!(one(r#"= levenshtein("kitten"; "sitting")"#), "3");
+    assert_eq!(one(r#"= "kitten" | levenshtein("sitting")"#), "3");
+    let e = refuse(r#"= "kitten" | levenshtein("sitting"; "x")"#);
+    assert!(
+        e.contains("'levenshtein' takes 1 operand at most, 2 given"),
+        "{e}"
+    );
+    let e = refuse(r#"= "kitten" | jaro_winkler("sitting"; "x")"#);
+    assert!(
+        e.contains("'jaro_winkler' takes 1 operand at most, 2 given"),
+        "{e}"
+    );
 }

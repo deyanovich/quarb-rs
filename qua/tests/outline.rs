@@ -55,7 +55,7 @@ fn outline_indents_and_numbers() {
         ["Book", "  One", "    Aside", "  Two", "Appendix"]
     );
     assert_eq!(
-        values(r#"/toc/* @| outline(::depth; ::title; "1.")"#),
+        values(r#"/toc/* @| outline(::depth; ::title; --style="1.")"#),
         [
             "1 Book",
             "  1.1 One",
@@ -74,7 +74,7 @@ fn outline_indents_and_numbers() {
 #[test]
 fn the_shallowest_level_is_the_top_and_a_skipped_one_counts_once() {
     assert_eq!(
-        values(r#"/deep/* @| outline(::d; ::t; "1.")"#),
+        values(r#"/deep/* @| outline(::d; ::t; --style="1.")"#),
         ["1 a", "    1.1.1 b", "  1.2 c"]
     );
 }

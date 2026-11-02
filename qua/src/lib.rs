@@ -192,11 +192,6 @@ struct Cli {
     #[arg(long = "no-pushdown")]
     no_pushdown: bool,
 
-    /// Explain the pushdown decision on stderr: the SQL a database
-    /// query runs server-side, or why it fell back to the scan.
-    #[arg(long)]
-    explain: bool,
-
     /// The diagnostics shown on stderr beside a query's answer:
     /// error (the refusals and syntax errors alone), warning (the
     /// default), info (every note the run raised: what was pushed
@@ -208,6 +203,25 @@ struct Cli {
     /// and READING (a reading a mount declined), both infos.
     #[arg(long, value_name = "LEVEL", default_value = "warning")]
     diagnostics: String,
+
+    /// `--diagnostics=info`, shorter: the infos too (the pushdown's
+    /// account, what was delegated, the locale in force).
+    #[arg(long, conflicts_with_all = ["diagnostics", "debug"])]
+    info: bool,
+
+    /// `--diagnostics=debug`, shorter: everything the evaluation
+    /// raised, round by round.
+    #[arg(long, conflicts_with = "diagnostics")]
+    debug: bool,
+
+    /// Colour on stderr: the severity word of a diagnostic (error
+    /// red, warning yellow, info green, debug blue) and the `Error` of
+    /// a refusal. `auto` (the default) colours only when stderr is a
+    /// terminal, NO_COLOR is unset and TERM is not dumb; `always`
+    /// and `never` decide outright. The text itself never changes,
+    /// so a captured stderr reads the same whatever the colour.
+    #[arg(long, value_name = "WHEN", default_value = "auto")]
+    color: ColorMode,
 
     /// Print the static plan (what the query will touch, step by
     /// step, with each adapter's estimate) as a kaiv document and
@@ -322,11 +336,10 @@ struct Cli {
     #[arg(long, value_name = "N")]
     graph_bound: Option<usize>,
 
-    /// Allow the sh(...) pipeline command to run external commands.
-    /// Off by default: query text stays inert data — a .quarb
-    /// file, a defs file, or a macro can never run a command
-    /// without this explicit per-run opt-in.
-    #[arg(long)]
+    /// Retired: the shell joins a query only as an environment
+    /// mount, `sh=shell:` among the inputs, its programs the
+    /// commands `sh:tr(a-z; A-Z)`; the switch refuses, naming it.
+    #[arg(long, hide = true)]
     allow_shell: bool,
 
     /// Pin the invocation instant now() denotes (ISO-8601, e.g.
@@ -350,7 +363,7 @@ struct Cli {
 
     /// Idle seconds before a resident session exits. Fixed when
     /// the session starts; later clients of the same session
-    /// inherit it (as they do --explain and the other flags the
+    /// inherit it (as they do --diagnostics and the other flags the
     /// session was started with).
     #[arg(long, value_name = "SECS", default_value_t = 1800)]
     resident_ttl: u64,
@@ -420,11 +433,12 @@ struct OutputCtx {
     /// run the run itself, for the REPL the whole session.
     session: quarb::SessionMemory,
     /// The environments mounted from the command line
-    /// (`go=exec:~/go/bin`, `sh=shell:`; `--allow-shell` is
-    /// `sh=shell:` under its older name).
+    /// (`go=exec:~/go/bin`, `sh=shell:`, `py=python:./helpers.py`).
     environments: Vec<quarb::Environment>,
     /// The command libraries this build links (`morph:` under the
-    /// `morph` feature), reached by their prefix with no mount.
+    /// `morph` feature), reached by their prefix with no mount, and
+    /// the Python modules mounted as environments, bound as
+    /// libraries under their aliases.
     libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>>,
     /// --reproducible: provenance without the machine-dependent
     /// instant rungs.
@@ -433,9 +447,6 @@ struct OutputCtx {
     /// read once at startup (per query in an unpinned resident
     /// session), so evaluation never reads a clock.
     now: (i64, u32),
-    /// --explain: print the executed statement once a driver has
-    /// run one, and the unresolved references.
-    explain: bool,
     /// --plan: print the static plan and stop.
     plan: bool,
     /// The calculator's input: its pipe, read as one text, the topic
@@ -535,7 +546,19 @@ pub fn cli_main() -> anyhow::Result<()> {
     let r = cli_main_with(Profile::Qua);
     #[cfg(feature = "alloc-stats")]
     alloc_stats::report();
-    r
+    report_top_error(r)
+}
+
+/// The refusal that ends a run, on stderr as the runtime would print
+/// it (`Error: …`, the causes under it), the word painted when
+/// colour is on; the exit status stays 1.
+fn report_top_error(r: anyhow::Result<()>) -> anyhow::Result<()> {
+    let Err(e) = r else {
+        return Ok(());
+    };
+    let (pre, post) = paint(quarb::Severity::Error);
+    eprintln!("{pre}Error{post}: {e:?}");
+    std::process::exit(1)
 }
 
 /// `qc`'s entry point: the calculator. The query runs as `qua` runs
@@ -546,7 +569,99 @@ pub fn calc_main() -> anyhow::Result<()> {
     let r = cli_main_with(Profile::Calc);
     #[cfg(feature = "alloc-stats")]
     alloc_stats::report();
-    r
+    report_top_error(r)
+}
+
+/// `--color=auto|always|never`, qua's and quai's alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// Colour on one output stream, decided once: the severity word of
+/// a diagnostic (error bold red, warning yellow, info green, debug
+/// blue) and the `error` of a refusal, and nothing else, so a
+/// captured stream reads the same text whatever a terminal would
+/// have shown. The tools share it: qua paints stderr, quai its
+/// stdout (where its diagnostics go) and its stderr.
+#[derive(Debug, Clone, Copy)]
+pub struct Paint {
+    on: bool,
+}
+
+impl Paint {
+    /// The decision for a stream: `always` and `never` outright;
+    /// `auto` paints only when the stream is a terminal, `NO_COLOR`
+    /// is unset (no-color.org) and `TERM` is set and not `dumb`.
+    pub fn decide(mode: ColorMode, stream_is_terminal: bool) -> Paint {
+        let on = match mode {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => {
+                stream_is_terminal
+                    && std::env::var_os("NO_COLOR").is_none()
+                    && std::env::var_os("TERM").is_some_and(|t| t != "dumb")
+            }
+        };
+        Paint { on }
+    }
+
+    /// The escape sequences around a severity word, empty when
+    /// colour is off.
+    pub fn word(&self, severity: quarb::Severity) -> (&'static str, &'static str) {
+        if !self.on {
+            return ("", "");
+        }
+        let pre = match severity {
+            quarb::Severity::Error => "\x1b[1;31m",
+            quarb::Severity::Warning => "\x1b[33m",
+            quarb::Severity::Info => "\x1b[32m",
+            quarb::Severity::Debug => "\x1b[34m",
+        };
+        (pre, "\x1b[0m")
+    }
+
+    /// A diagnostic's line: `severity CODE (site): message`, the
+    /// severity word alone painted.
+    pub fn line(&self, d: &quarb::Diagnostic) -> String {
+        let (pre, post) = self.word(d.severity);
+        format!(
+            "{pre}{}{post} {} ({}): {}",
+            d.severity, d.code, d.site, d.message
+        )
+    }
+
+    /// The word `text` painted as an error (the `Error` of a
+    /// refusal).
+    pub fn error_word(&self, text: &str) -> String {
+        let (pre, post) = self.word(quarb::Severity::Error);
+        format!("{pre}{text}{post}")
+    }
+}
+
+/// qua's stderr paint, decided once from `--color`; before the flag
+/// is read (a usage error) the automatic rule holds.
+static STDERR_PAINT: std::sync::OnceLock<Paint> = std::sync::OnceLock::new();
+
+fn set_color(mode: ColorMode) {
+    use std::io::IsTerminal;
+    let _ = STDERR_PAINT.set(Paint::decide(mode, std::io::stderr().is_terminal()));
+}
+
+fn stderr_paint() -> Paint {
+    use std::io::IsTerminal;
+    *STDERR_PAINT.get_or_init(|| Paint::decide(ColorMode::Auto, std::io::stderr().is_terminal()))
+}
+
+fn paint(severity: quarb::Severity) -> (&'static str, &'static str) {
+    stderr_paint().word(severity)
+}
+
+fn painted_line(d: &quarb::Diagnostic) -> String {
+    stderr_paint().line(d)
 }
 
 /// The benchmark harness's allocation counter (feature
@@ -682,7 +797,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     // scheme) are taken off the inputs here, from the command line
     // only: mounting one is the opt-in that lets `ALIAS:name(…)`
     // run code outside the query.
-    let environments = take_environments(&mut cli)?;
+    let (environments, mounted) = take_environments(&mut cli)?;
     let locale = set_output_locale(&cli)?;
     let mut piped = if profile == Profile::Calc {
         calc_check_options(&mut cli)?
@@ -749,6 +864,8 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
         cli.query = translation.query;
     }
+
+    set_color(cli.color);
 
     if cli.highlight {
         // Explicit --highlight forces color (the query is the
@@ -937,10 +1054,15 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
             // The switch seeds the session's level; `session(…)` in a
             // query may move it.
             let memory = quarb::session_memory();
-            let level = cli
-                .diagnostics
-                .parse::<quarb::Severity>()
-                .map_err(|e| anyhow::anyhow!("--diagnostics: {e}"))?;
+            let level = if cli.debug {
+                quarb::Severity::Debug
+            } else if cli.info {
+                quarb::Severity::Info
+            } else {
+                cli.diagnostics
+                    .parse::<quarb::Severity>()
+                    .map_err(|e| anyhow::anyhow!("--diagnostics: {e}"))?
+            };
             memory.borrow_mut().diagnostics = level;
             // the debug licence: debug notes are raised only when
             // the level asks for them
@@ -948,10 +1070,13 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
             memory
         },
         environments: environments.clone(),
-        libraries: linked_libraries(),
+        libraries: {
+            let mut libraries = linked_libraries();
+            libraries.extend(mounted.iter().cloned());
+            libraries
+        },
         reproducible: cli.reproducible,
         now,
-        explain: cli.explain,
         plan: cli.plan,
         calc: profile == Profile::Calc,
         topic: None,
@@ -1092,7 +1217,7 @@ fn calc_check_query(cli: &Cli) -> anyhow::Result<()> {
                     p.display()
                 );
             }
-            return Err(e).context("parsing the query");
+            return Err(e.into());
         }
         anyhow::bail!(
             "qc is the calculator: this query navigates (a path from a node, or a mount) — run it with qua"
@@ -1110,14 +1235,34 @@ fn calc_check_query(cli: &Cli) -> anyhow::Result<()> {
 /// for an expression head without an input, and what `qc` runs for
 /// everything — one path, so the two print the same bytes.
 fn calc_execute(query: &str, kaiv: bool, oc: &OutputCtx) -> anyhow::Result<()> {
-    let adapter = quarb::adapter::Bare;
-    run_wrapped(
-        query,
-        &adapter,
-        |_| String::new(),
-        kaiv.then_some("stdin"),
-        oc,
-    )
+    // The bare root carries the composing layer too where the
+    // readers are linked, so `= "…" | graft(json) | /a/*::` grafts a
+    // literal or a program's output with no file behind it; the
+    // calculator build, with no readers, keeps the bare root.
+    #[cfg(feature = "adapters")]
+    {
+        let adapter = ComposeAdapter::new(quarb::adapter::Bare)
+            .on_demand_only()
+            .with_string_reader(quarb_open::string_reader(&SourceCtx::default()));
+        return run_wrapped(
+            query,
+            &adapter,
+            |n| adapter.locator(n, |_| String::new()),
+            kaiv.then_some("stdin"),
+            oc,
+        );
+    }
+    #[cfg(not(feature = "adapters"))]
+    {
+        let adapter = quarb::adapter::Bare;
+        run_wrapped(
+            query,
+            &adapter,
+            |_| String::new(),
+            kaiv.then_some("stdin"),
+            oc,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,8 +1820,12 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
         print!("{}", plan.to_kaiv(query));
         return Ok(true);
     }
+    // A definite excess refuses here; what the catalogs leave
+    // unknown or unbounded is the opened adapters' to price, so a
+    // strict budget names the bound the walk reached, as a lenient
+    // one does.
     if let Some(budget) = &oc.budget
-        && let Some(why) = budget.exceeded_by(&plan)
+        && let Some(why) = budget.exceeded_before_opening(&plan)
     {
         return Err(quarb::QuarbError::refused(why).into());
     }
@@ -1684,11 +1833,13 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
 }
 
 /// Take the environment mounts off the inputs: `go=exec:~/go/bin`,
-/// `sh=shell:`. `--allow-shell` mounts `sh=shell:`, and a `shell:`
-/// mount opens the shell gate: the two are one opt-in. Two
-/// environments may not share an alias.
+/// `sh=shell:`, `py=python:./helpers.py`. A `shell:` mount opens the
+/// shell gate (`--allow-shell`, retired, refuses naming it). Two
+/// environments may not share an alias. A
+/// `python:` mount imports its module here and binds it as a
+/// command library under the alias, the second value.
 /// The command libraries compiled into this binary, by feature.
-fn linked_libraries() -> Vec<std::sync::Arc<dyn quarb::CommandLibrary>> {
+pub fn linked_libraries() -> Vec<std::sync::Arc<dyn quarb::CommandLibrary>> {
     #[allow(unused_mut)]
     let mut libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>> = Vec::new();
     #[cfg(feature = "morph")]
@@ -1704,21 +1855,39 @@ fn linked_libraries() -> Vec<std::sync::Arc<dyn quarb::CommandLibrary>> {
     libraries
 }
 
-fn take_environments(cli: &mut Cli) -> anyhow::Result<Vec<quarb::Environment>> {
-    let libraries = linked_libraries();
+type BoundModules = Vec<std::sync::Arc<dyn quarb::CommandLibrary>>;
+
+/// The command libraries a session runs with: the linked ones, and
+/// every `python:` mount bound as one under its alias (the module
+/// imported now, so one that does not import refuses before any
+/// query). An alias that is a linked library's prefix refuses. The
+/// one binding qua and quai share.
+pub fn session_libraries(
+    environments: &[quarb::Environment],
+) -> anyhow::Result<Vec<std::sync::Arc<dyn quarb::CommandLibrary>>> {
+    let mut libraries = linked_libraries();
+    for e in environments {
+        if libraries.iter().any(|l| l.prefix() == e.alias) {
+            anyhow::bail!(
+                "'{}' is the prefix of a linked command library; an environment takes \
+                 another alias",
+                e.alias
+            );
+        }
+        if e.kind == quarb::EnvKind::Python {
+            libraries.push(python_environment(e)?);
+        }
+    }
+    Ok(libraries)
+}
+
+fn take_environments(cli: &mut Cli) -> anyhow::Result<(Vec<quarb::Environment>, BoundModules)> {
     let mut environments: Vec<quarb::Environment> = Vec::new();
     let mut kept = Vec::new();
     for p in std::mem::take(&mut cli.paths) {
         match quarb::Environment::parse_mount(&p.to_string_lossy()) {
             None => kept.push(p),
             Some(Ok(e)) => {
-                if libraries.iter().any(|l| l.prefix() == e.alias) {
-                    anyhow::bail!(
-                        "'{}' is the prefix of a linked command library; an environment \
-                         takes another alias",
-                        e.alias
-                    );
-                }
                 if environments.iter().any(|x| x.alias == e.alias) {
                     anyhow::bail!(
                         "two environments mounted as '{}'; give each its own alias",
@@ -1730,18 +1899,46 @@ fn take_environments(cli: &mut Cli) -> anyhow::Result<Vec<quarb::Environment>> {
             Some(Err(e)) => anyhow::bail!("{e}"),
         }
     }
+    // The python: mounts bound as libraries, beside the linked ones.
+    let mounted: BoundModules = session_libraries(&environments)?
+        .into_iter()
+        .filter(|l| environments.iter().any(|e| e.alias == l.prefix()))
+        .collect();
     cli.paths = kept;
-    if cli.allow_shell && !environments.iter().any(|e| e.alias == "sh") {
-        environments.push(quarb::Environment {
-            alias: "sh".to_string(),
-            kind: quarb::EnvKind::Shell,
-            target: String::new(),
-        });
+    if cli.allow_shell {
+        anyhow::bail!(
+            "--allow-shell is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)"
+        );
     }
+    // The shell gate (a corpus mount's `annotate=`) is the mount.
     if environments.iter().any(|e| e.kind == quarb::EnvKind::Shell) {
         cli.allow_shell = true;
     }
-    Ok(environments)
+    Ok((environments, mounted))
+}
+
+/// A `python:` mount bound as a command library: the module
+/// imported now, so a module that does not import refuses at the
+/// mount, before any query.
+#[cfg(feature = "python")]
+fn python_environment(
+    e: &quarb::Environment,
+) -> anyhow::Result<std::sync::Arc<dyn quarb::CommandLibrary>> {
+    let module = quarb_pyvalue::ModuleEnvironment::mount(&e.alias, &e.target)
+        .map_err(|m| anyhow::anyhow!("{m}"))?;
+    Ok(std::sync::Arc::new(module))
+}
+
+#[cfg(not(feature = "python"))]
+fn python_environment(
+    e: &quarb::Environment,
+) -> anyhow::Result<std::sync::Arc<dyn quarb::CommandLibrary>> {
+    anyhow::bail!(
+        "'{}=python:{}': this build is without the python feature; build qua or quai with \
+         `--features python` to mount a Python module",
+        e.alias,
+        e.target
+    )
 }
 
 #[cfg(feature = "adapters")]
@@ -2052,7 +2249,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 Err(e) => {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
-                    // the scan, but never silently under --explain.
+                    // the scan, but never silently under --diagnostics=info.
                     note_info(
                         NOT_PUSHED,
                         "query",
@@ -2180,7 +2377,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 Err(e) => {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
-                    // the scan, but never silently under --explain.
+                    // the scan, but never silently under --diagnostics=info.
                     note_info(
                         NOT_PUSHED,
                         "query",
@@ -2248,7 +2445,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 Err(e) => {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
-                    // the scan, but never silently under --explain.
+                    // the scan, but never silently under --diagnostics=info.
                     note_info(
                         NOT_PUSHED,
                         "query",
@@ -2312,7 +2509,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 Err(e) => {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
-                    // the scan, but never silently under --explain.
+                    // the scan, but never silently under --diagnostics=info.
                     note_info(
                         NOT_PUSHED,
                         "query",
@@ -2365,7 +2562,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 Err(e) => {
                     // The plan can fail catalog-side checks (e.g. the
                     // witness-JOIN uniqueness obligation): fall back to
-                    // the scan, but never silently under --explain.
+                    // the scan, but never silently under --diagnostics=info.
                     note_info(
                         NOT_PUSHED,
                         "query",
@@ -2442,7 +2639,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             if !quarb::is_calculator(&cli.query) {
                 // A query that fails to parse should say so — not
                 // masquerade as a missing target.
-                quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
+                quarb::expand(&cli.query, &quarb::Defs::default())?;
                 anyhow::bail!(
                     "no input: give a directory, a file, or pipe a document to \
                      stdin — an expression head '= expr' runs without one; a \
@@ -2469,7 +2666,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         if quarb::is_calculator(&cli.query) {
             return calc_execute(query, cli.kaiv, oc);
         }
-        quarb::expand(&cli.query, &quarb::Defs::default()).context("parsing the query")?;
+        quarb::expand(&cli.query, &quarb::Defs::default())?;
         anyhow::bail!(
             "no input: standard input is empty — give a directory, a file, or pipe a document; \
              an expression head '= expr' runs without one"
@@ -2633,7 +2830,7 @@ fn pushdown_applies(cli: &Cli) -> bool {
 }
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
-/// --explain commentary. Tried only after full pushdown refused.
+/// --diagnostics=info commentary. Tried only after full pushdown refused.
 #[cfg(feature = "adapters")]
 fn partial_plan(
     cli: &Cli,
@@ -2723,7 +2920,7 @@ fn partial_plan_with(
     }
 }
 
-/// The pushdown plan for a database input, with --explain
+/// The pushdown plan for a database input, with --diagnostics=info
 /// commentary on stderr either way.
 #[cfg(feature = "adapters")]
 fn pushdown_plan(
@@ -2760,7 +2957,7 @@ fn pushdown_plan(
 /// flush at the end, not a syscall per line.
 #[cfg(feature = "adapters")]
 fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::Result<()> {
-    // --explain: the statement the driver executed, verbatim,
+    // Under --diagnostics=info: the statement the driver executed, verbatim,
     // ORDER BY and all. Recorded at execution because the key is
     // a per-adapter catalog lookup.
     if let Some(sql) = quarb_relational::take_executed() {
@@ -2884,17 +3081,16 @@ fn copy_to_clipboard(text: &str, rendering: &str) -> anyhow::Result<()> {
     );
     // the output's stand-in: shown whatever the diagnostics level,
     // through the resident server's sink when one is set
-    let line = d.to_string();
     let sunk = DIAG_SINK.with(|s| {
         if let Some(v) = s.borrow_mut().as_mut() {
-            v.push(line.clone());
+            v.push(d.to_string());
             true
         } else {
             false
         }
     });
     if !sunk {
-        eprintln!("{line}");
+        eprintln!("{}", painted_line(&d));
     }
     Ok(())
 }
@@ -3038,7 +3234,7 @@ fn take_output_encoding(query: &str) -> anyhow::Result<(String, OutputEncoding)>
 /// canonical URL.
 /// Run a query over an index-backed site store: the planner first
 /// — a count outright, a candidate set the engine re-verifies, or
-/// nothing (the scan) — with `--explain` commentary on stderr.
+/// nothing (the scan) — with the pushdown account among the infos on stderr.
 #[cfg(feature = "adapters")]
 fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
     cli: &Cli,
@@ -3186,7 +3382,8 @@ fn run_relational<A: AstAdapter>(
     }
     let adapter = ComposeAdapter::new(inner)
         .with_decoding(current_decoding(ctx)?)
-        .with_csv_options(ctx.csv());
+        .with_csv_options(ctx.csv())
+        .with_string_reader(quarb_open::string_reader(ctx));
     run(
         query,
         &adapter,
@@ -3271,7 +3468,8 @@ fn run_modelled<A: AstAdapter>(
             });
             let composed = ComposeAdapter::new(enriched)
                 .with_document_graft(quarb_compose::DocumentGraft::Text)
-                .with_document_nodes(reader);
+                .with_document_nodes(reader)
+                .with_string_reader(quarb_open::string_reader(&SourceCtx::default()));
             let model_render =
                 |n: NodeId| composed.locator(n, |o| composed.outer().locator(o, base_render));
             return run_dispatch(query, &composed, model_render, kaiv_source, oc);
@@ -3329,41 +3527,40 @@ impl OutputCtx {
     }
 
     /// The diagnostics a run raised beside its answer, on stderr,
-    /// down to the level in force (`--diagnostics`; `--explain`
+    /// down to the level in force (`--diagnostics`; `session(--diagnostics=…)`
     /// shows the infos as well), in raising order, each on its own
     /// line as `SEVERITY CODE (site): message`.
     fn report_diagnostics(&self, diagnostics: &[quarb::Diagnostic]) {
         // The level: the session's setting (`session(--diagnostics=…)`
-        // in the query sets it; the switch seeded it), raised to info
-        // under --explain.
-        let mut level = self.session.borrow().diagnostics;
-        if self.explain && level < quarb::Severity::Info {
-            level = quarb::Severity::Info;
-        }
+        // in the query sets it; the switch seeded it). The
+        // diagnostics are the one channel: `--diagnostics=info` shows
+        // the pushdown's account where `--explain` once did.
+        let level = self.session.borrow().diagnostics;
         // the tool's own notes around the run come first: the
         // planner's account, the locale in force
-        let shown: Vec<String> = take_notes()
-            .iter()
-            .chain(diagnostics)
+        let shown: Vec<quarb::Diagnostic> = take_notes()
+            .into_iter()
+            .chain(diagnostics.iter().cloned())
             .filter(|d| d.severity.shown_at(level))
-            .map(|d| d.to_string())
             .collect();
         if shown.is_empty() {
             return;
         }
         // Under the resident server the lines travel to the client
-        // with the answer; otherwise they go to stderr here.
+        // with the answer, plain (the client's stderr decides its
+        // own colour); otherwise they go to stderr here, the
+        // severity word painted when colour is on.
         let sunk = DIAG_SINK.with(|s| {
             if let Some(v) = s.borrow_mut().as_mut() {
-                v.extend(shown.iter().cloned());
+                v.extend(shown.iter().map(|d| d.to_string()));
                 true
             } else {
                 false
             }
         });
         if !sunk {
-            for line in shown {
-                eprintln!("{line}");
+            for d in &shown {
+                eprintln!("{}", painted_line(d));
             }
         }
     }

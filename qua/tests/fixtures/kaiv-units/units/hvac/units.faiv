@@ -1,0 +1,9 @@
+.!faiv 1 hvac/units
+
+// British thermal unit (International Table)
+J 1055.05585262
+&BTU=
+
+// Rack unit (EIA-310): 1.75 in
+m 0.04445
+&U=

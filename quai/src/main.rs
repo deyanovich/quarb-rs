@@ -51,9 +51,32 @@ struct Cli {
     #[arg(long = "no-graft", conflicts_with = "graft")]
     no_graft: bool,
 
-    /// Allow the `sh(...)` pipeline command to run external commands.
-    #[arg(long)]
+    /// Retired: the shell is the environment mount `sh=shell:`
+    /// among the inputs (`sh:tr(a-z; A-Z)`); the switch refuses.
+    #[arg(long, hide = true)]
     allow_shell: bool,
+
+    /// The diagnostics shown after a line's cells: error, warning
+    /// (the default), info or debug; `session(--diagnostics=…)` in a
+    /// line moves it for the rest of the session.
+    #[arg(long, value_name = "LEVEL", default_value = "warning")]
+    diagnostics: String,
+
+    /// `--diagnostics=info`, shorter.
+    #[arg(long, conflicts_with_all = ["diagnostics", "debug"])]
+    info: bool,
+
+    /// `--diagnostics=debug`, shorter.
+    #[arg(long, conflicts_with = "diagnostics")]
+    debug: bool,
+
+    /// Colour: the severity word of a diagnostic and the `error` of a
+    /// refusal, on a terminal (`auto`, the default: the stream is a
+    /// terminal, NO_COLOR unset, TERM not dumb), `always`, or
+    /// `never`. The text never changes, so a piped session reads
+    /// the same.
+    #[arg(long, value_name = "WHEN", default_value = "auto")]
+    color: qua::ColorMode,
 
     /// Pin the invocation instant `now()` denotes (ISO-8601). Default:
     /// the clock, read once at startup, so a session's `now()` is
@@ -123,8 +146,14 @@ struct Remount {
     opts: Options,
     now: (i64, u32),
     allow_shell: bool,
+    /// The diagnostics level the command line seeded; a rebuilt
+    /// executor starts from it again.
+    diagnostics: quarb::Severity,
     /// The environments mounted from the command line.
     environments: Vec<quarb::Environment>,
+    /// The command libraries the session runs with: the linked ones
+    /// and the `python:` mounts bound as libraries.
+    libraries: Vec<std::sync::Arc<dyn quarb::CommandLibrary>>,
     /// The `--model` view, reapplied on every rebuild.
     model: Option<quarb_model::Model>,
     /// `:follow` rounds per line: 0 = off (the default — refs are
@@ -163,6 +192,49 @@ fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
 
 /// Build the in-process executor over the current mount specs plus
 /// any `:follow`-fetched documents, the `--model` view reapplied.
+/// A fresh session memory at the command line's diagnostics level:
+/// what every executor the session builds starts from.
+fn seeded_memory(remount: &Remount) -> quarb::SessionMemory {
+    let memory = quarb::session_memory();
+    memory.borrow_mut().diagnostics = remount.diagnostics;
+    memory
+}
+
+/// The paint of each stream, decided once from `--color`: the
+/// diagnostics go to stdout with the cells, the refusals to stderr.
+static OUT_PAINT: std::sync::OnceLock<qua::Paint> = std::sync::OnceLock::new();
+static ERR_PAINT: std::sync::OnceLock<qua::Paint> = std::sync::OnceLock::new();
+
+fn set_color(mode: qua::ColorMode) {
+    let _ = OUT_PAINT.set(qua::Paint::decide(mode, std::io::stdout().is_terminal()));
+    let _ = ERR_PAINT.set(qua::Paint::decide(mode, std::io::stderr().is_terminal()));
+}
+
+fn out_paint() -> qua::Paint {
+    *OUT_PAINT
+        .get_or_init(|| qua::Paint::decide(qua::ColorMode::Auto, std::io::stdout().is_terminal()))
+}
+
+/// The `error` a refusal opens with, painted when stderr is.
+fn error_prefix() -> String {
+    ERR_PAINT
+        .get_or_init(|| qua::Paint::decide(qua::ColorMode::Auto, std::io::stderr().is_terminal()))
+        .error_word("error")
+}
+
+/// The level the command line asks for.
+fn cli_level(cli: &Cli) -> Result<quarb::Severity> {
+    if cli.debug {
+        return Ok(quarb::Severity::Debug);
+    }
+    if cli.info {
+        return Ok(quarb::Severity::Info);
+    }
+    cli.diagnostics
+        .parse::<quarb::Severity>()
+        .map_err(|e| anyhow::anyhow!("--diagnostics: {e}"))
+}
+
 fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
     // No source at all: the calculator session — a bare root for
     // expression-headed lines (`= expr`; spec: The Expression
@@ -173,7 +245,9 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         return Ok(Box::new(
             LocalExecutor::new(doc, remount.now, remount.allow_shell)
                 .with_environments(remount.environments.clone())
-                .with_model(remount.model.clone()),
+                .with_libraries(remount.libraries.clone())
+                .with_model(remount.model.clone())
+                .with_session(seeded_memory(remount)),
         ));
     }
     let mut schemed = false;
@@ -237,7 +311,10 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
         return Ok(Box::new(
             LocalExecutor::new(doc, remount.now, remount.allow_shell)
                 .with_model(remount.model.clone())
-                .with_url_roots(roots),
+                .with_url_roots(roots)
+                .with_environments(remount.environments.clone())
+                .with_libraries(remount.libraries.clone())
+                .with_session(seeded_memory(remount)),
         ));
     }
     Ok(Box::new(
@@ -249,7 +326,9 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
             remount.opts.clone(),
         )
         .with_environments(remount.environments.clone())
-        .with_model(remount.model.clone()),
+        .with_model(remount.model.clone())
+        .with_libraries(remount.libraries.clone())
+        .with_session(seeded_memory(remount)),
     ))
 }
 
@@ -263,6 +342,7 @@ fn main() -> Result<()> {
         }
     }
     let mut cli = Cli::parse();
+    set_color(cli.color);
     // A --model file may declare its own sources; parse it and inject
     // the mounts (relative targets resolved against the model file's
     // directory) as NAME=TARGET inputs, ahead of any positional ones.
@@ -314,16 +394,17 @@ fn main() -> Result<()> {
         }
     }
     cli.paths = kept;
-    if cli.allow_shell && !environments.iter().any(|e| e.alias == "sh") {
-        environments.push(quarb::Environment {
-            alias: "sh".to_string(),
-            kind: quarb::EnvKind::Shell,
-            target: String::new(),
-        });
+    if cli.allow_shell {
+        anyhow::bail!(
+            "--allow-shell is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)"
+        );
     }
     if environments.iter().any(|e| e.kind == quarb::EnvKind::Shell) {
         cli.allow_shell = true;
     }
+    // The linked libraries and the python: mounts bound as
+    // libraries, as qua binds them.
+    let libraries = qua::session_libraries(&environments)?;
     let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
     let mut remount: Option<Remount> = None;
     let session = if cli.daemon {
@@ -380,7 +461,9 @@ fn main() -> Result<()> {
             opts,
             now,
             allow_shell: cli.allow_shell,
+            diagnostics: cli_level(&cli)?,
             environments,
+            libraries,
             model: model.clone(),
             // Batteries included: the arrow in a hand-typed line is
             // the consent, so an interactive session follows refs
@@ -691,7 +774,7 @@ fn repl(
                 break;
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("{}: {e}", error_prefix());
                 break;
             }
         };
@@ -714,7 +797,7 @@ fn repl(
             || line == "macro"
         {
             if let Err(e) = session.borrow_mut().add_def(line) {
-                eprintln!("error: {e:#}");
+                eprintln!("{}: {e:#}", error_prefix());
             }
             continue;
         }
@@ -722,7 +805,7 @@ fn repl(
         // by the session, not the engine — the engine's lexer has no
         // `#`, and its `!` signage rejects a bang on a pure fragment.
         match prepare(line) {
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("{}: {e}", error_prefix()),
             Ok(Prepared::Frozen(n)) => match session.borrow().frozen(n).cloned() {
                 Some(cells) => {
                     for c in &cells {
@@ -730,7 +813,10 @@ fn repl(
                     }
                     session.borrow_mut().record_frozen(cells);
                 }
-                None => eprintln!("error: &{n}# has no captured result (line {n} hasn't run)"),
+                None => eprintln!(
+                    "{}: &{n}# has no captured result (line {n} hasn't run)",
+                    error_prefix()
+                ),
             },
             Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, true),
             Ok(Prepared::Eval(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, false),
@@ -927,7 +1013,7 @@ fn follow_refs(
         match local_executor(ctx) {
             Ok(executor) => session.set_executor(executor),
             Err(e) => {
-                eprintln!("error rebuilding the mount: {e:#}");
+                eprintln!("{} rebuilding the mount: {e:#}", error_prefix());
                 break;
             }
         }
@@ -980,7 +1066,7 @@ fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str,
                 eprintln!("note: &{n} is not referenceable (its shape can't be a macro body)");
             }
         }
-        Err(e) => eprintln!("error: {e:#}"),
+        Err(e) => eprintln!("{}: {e:#}", error_prefix()),
     }
 }
 
@@ -990,9 +1076,10 @@ fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str,
 /// diagnostic belongs to the cell that raised it).
 fn print_diagnostics(session: &Session, indent: &str) {
     let level = session.diagnostics_level();
+    let paint = out_paint();
     for d in session.diagnostics() {
         if d.severity.shown_at(level) {
-            println!("{indent}{d}");
+            println!("{indent}{}", paint.line(&d));
         }
     }
 }
@@ -1071,7 +1158,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                     }
                     Err(e) => {
                         ctx.specs.pop();
-                        eprintln!("error: {e:#}");
+                        eprintln!("{}: {e:#}", error_prefix());
                     }
                 }
             }
@@ -1083,7 +1170,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
     {
         match session.plan_text(arg) {
             Ok(text) => print!("{text}"),
-            Err(e) => eprintln!("error: {e:#}"),
+            Err(e) => eprintln!("{}: {e:#}", error_prefix()),
         }
         return false;
     }

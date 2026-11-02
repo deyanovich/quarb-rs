@@ -25,12 +25,12 @@ fn fixture(tag: &str) -> PathBuf {
     dir
 }
 
-/// stdout, and what `--explain` said on stderr.
+/// stdout, and what `--diagnostics=info` said on stderr.
 fn qua(dir: &Path, query: &str) -> (String, String) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
         .env("QUARB_LOCALE", "C")
         .current_dir(dir)
-        .args(["--explain", query, "lib.db"])
+        .args(["--diagnostics=info", query, "lib.db"])
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();

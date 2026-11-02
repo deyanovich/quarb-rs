@@ -58,3 +58,21 @@ fn an_archive_at_the_text_level_mounts_as_it_reads_alone() {
         "Alpha\nBeta"
     );
 }
+
+#[test]
+fn an_entrys_size_mirrors_as_a_data_property() {
+    // The mirroring rule: an adapter field answers at `::` where no
+    // conflict is possible, `::size` beside `:::size`, as the file
+    // system's does — on an entry that grafts too, since data wins
+    // and the document has no `size`.
+    let dir = fixture();
+    let both = ok(&dir, &["/b.md | %(a = ::size; b = :::size)", "site.zip"]);
+    assert!(both.contains("_B"), "{both}");
+    let (a, b) = both
+        .trim_start_matches("%(a = ")
+        .trim_end_matches(')')
+        .split_once("; b = ")
+        .unwrap();
+    assert_eq!(a, b, "{both}");
+    assert_ne!(a, "null", "{both}");
+}

@@ -473,6 +473,10 @@ pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         // heads continues as after `=`, navigation included
         // (spec: Session settings)
         Command::Func(call) if call.name == "session" && !call.args.is_empty() => cur,
+        // `graft(NOTATION)` parses the text and leaves the thread on
+        // the parsed document's root, in navigation mode, as a filing
+        // does (spec: Grafting)
+        Command::Func(call) if call.name == "graft" => PipeMode::Nav,
         // `@| collapse` gathers node threads into node threads: the
         // context stays node-typed, and a hop may follow (spec:
         // Attached Regulae, "a hop after collapse reads it")
@@ -879,6 +883,7 @@ impl Parser<'_> {
                 anchor: Anchor::Root,
             });
             pipeline.push(Command::Func(FnCall {
+                headless: false,
                 name: "session".into(),
                 args,
             }));
@@ -1473,6 +1478,7 @@ impl Parser<'_> {
                 // its rows, a record of lists as a list of records.
                 if !matches!(self.peek(), Some(Token::Name { text, .. }) if text == ".") {
                     return Ok(Command::Func(FnCall {
+                        headless: false,
                         name: "@".into(),
                         args: Vec::new(),
                     }));
@@ -1502,33 +1508,9 @@ impl Parser<'_> {
                 }
                 self.pos += 1;
                 Ok(Command::Func(FnCall {
+                    headless: false,
                     name: "#".into(),
                     args: Vec::new(),
-                }))
-            }
-            // A backtick literal is the sh(...) command, sugared
-            // (Perl's qx): interpolation holes parameterize the
-            // command per capsa.
-            Some(Token::Shell(parts)) => {
-                let parts = parts.clone();
-                self.pos += 1;
-                let arg = if let [lexer::InterpPart::Text(t)] = parts.as_slice() {
-                    Arg::Lit(Value::Str(t.clone()))
-                } else {
-                    let mut segs = Vec::new();
-                    for part in parts {
-                        match part {
-                            lexer::InterpPart::Text(t) => segs.push(InterpSeg::Text(t)),
-                            lexer::InterpPart::Hole(src) => {
-                                segs.push(self.parse_hole(&src)?);
-                            }
-                        }
-                    }
-                    Arg::Expr(Operand::Interp(segs))
-                };
-                Ok(Command::Func(FnCall {
-                    name: "sh".into(),
-                    args: vec![arg],
                 }))
             }
             // The record sigil. `| %(...)` — the record
@@ -1583,6 +1565,7 @@ impl Parser<'_> {
                 }
                 if !self.at_view_dots() {
                     return Ok(Command::Func(FnCall {
+                        headless: false,
                         name: "%".into(),
                         args: Vec::new(),
                     }));
@@ -1738,6 +1721,7 @@ impl Parser<'_> {
                 Regex::new(&format!("{flags}{pattern}"))
                     .map_err(|e| QuarbError::parse(format!("bad substitution pattern: {e}")))?;
                 let call = FnCall {
+                    headless: false,
                     name: "s".to_string(),
                     args: vec![
                         Arg::Lit(Value::Str(pattern.clone())),
@@ -1775,12 +1759,14 @@ impl Parser<'_> {
                     Predicate::Expr(e) => e,
                     Predicate::Index(n) => {
                         return Ok(Command::Func(FnCall {
+                            headless: false,
                             name: "[]".into(),
                             args: vec![Arg::Lit(Value::Int(n))],
                         }));
                     }
                     Predicate::Range(a, b) => {
                         return Ok(Command::Func(FnCall {
+                            headless: false,
                             name: "[]".into(),
                             args: vec![Arg::Range(a, b)],
                         }));
@@ -1790,6 +1776,7 @@ impl Parser<'_> {
                     // read per capsa.
                     Predicate::Positions(parts) => {
                         return Ok(Command::Func(FnCall {
+                            headless: false,
                             name: "[]".into(),
                             args: parts
                                 .into_iter()
@@ -1803,6 +1790,7 @@ impl Parser<'_> {
                     }
                     Predicate::Computed(op) => {
                         return Ok(Command::Func(FnCall {
+                            headless: false,
                             name: "[]".into(),
                             args: vec![Arg::Expr(op)],
                         }));
@@ -1847,25 +1835,11 @@ impl Parser<'_> {
                 Ok(Command::Expr(self.expr_head()?))
             }
             Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.expr_head()?)),
-            // `| date(2013-01-01) + 1_d` — a command that takes no
-            // operand of its own, written with a parenthesis holding
-            // an operand, is the call operand it is anywhere else
-            // (draft 166): the parenthesis's value piped into it, then
-            // an expression as a literal opens
-            Some(Token::Name {
-                text,
-                quoted: false,
-                ..
-            }) if matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
-                && crate::syntax::man::operand_bound(text) == Some(0)
-                // (a reducer keeps its refusal of a key written as an
-                // operand, with the pointer to `--of`: `sum(:x)`)
-                && crate::syntax::registry::spec(text).is_some_and(|s| s.agg.is_none())
-                && !matches!(self.toks.get(self.pos + 2), Some(Token::RParen | Token::DashDash))
-                && !matches!(self.toks.get(self.pos + 2), Some(Token::Name { text: t, quoted: false, .. }) if lexer::is_option_word(t)) =>
-            {
-                Ok(Command::Expr(self.expr_head()?))
-            }
+            // (`| date(2013-01-01)`, draft 166's reading of a lone operand
+            // as the input after a pipe, is retired: after a pipe the
+            // pipe fills the slot and a surplus operand is an arity
+            // error, spec: The stdin slot, ruling 2026-11-02; the
+            // command path below refuses it with the synopsis.)
             // `| q(cmd)` — the quarq literal stands where a literal
             // stands (spec: Quarqs); `q` is no command.
             Some(Token::Name {
@@ -3848,6 +3822,7 @@ impl Parser<'_> {
             });
         }
         Ok(FnCall {
+            headless: false,
             name: "#".into(),
             args,
         })
@@ -3933,6 +3908,21 @@ impl Parser<'_> {
     /// the call form (`= upper("ab")`: the first argument the input).
     fn command_head_ahead(&self) -> bool {
         let next_paren = matches!(self.toks.get(self.pos + 1), Some(Token::LParen));
+        // `ALIAS:name` — an environment or library command at the
+        // head is the call operand it is anywhere else, whatever word
+        // the alias is (`sh:tr(abc; a-z; A-Z)`, headless: the first
+        // operand its stdin), never a `^ |` stage.
+        let env_call = matches!(
+            (self.toks.get(self.pos + 1), self.toks.get(self.pos + 2)),
+            (
+                Some(Token::Field | Token::Colon { spaced: false }),
+                Some(Token::Name {
+                    quoted: false,
+                    glued: true,
+                    ..
+                })
+            )
+        );
         match self.peek() {
             Some(Token::Name {
                 text,
@@ -3940,6 +3930,7 @@ impl Parser<'_> {
                 ..
             }) => {
                 !self.literal_word(text)
+                    && !env_call
                     && (text.starts_with('.')
                         || (!next_paren
                             && !text.starts_with('-')
@@ -4309,6 +4300,7 @@ impl Parser<'_> {
         }
         self.expect(Token::RParen, "')' to close the record")?;
         Ok(FnCall {
+            headless: false,
             name: "rec".to_string(),
             args,
         })
@@ -4345,6 +4337,7 @@ impl Parser<'_> {
             };
             self.pos += 1;
             return Ok(FnCall {
+                headless: false,
                 name: name.to_string(),
                 args: Vec::new(),
             });
@@ -4531,6 +4524,23 @@ impl Parser<'_> {
                             }
                             continue;
                         }
+                        break;
+                    }
+                    // `;;` opens the option segment (spec: Options,
+                    // draft 203): `zstd(file;; -9)` — the operands end
+                    // at it and every token after it is an option, a
+                    // numeric one included; with nothing after it the
+                    // operands simply end. (The loop consumed one `;`
+                    // as the separator; a second stands here.)
+                    if matches!(self.peek(), Some(Token::Semi)) {
+                        self.pos += 1;
+                        if matches!(self.peek(), Some(Token::Semi)) {
+                            self.pos += 1;
+                        }
+                        if matches!(self.peek(), Some(Token::RParen)) {
+                            break;
+                        }
+                        self.option_segment(name, args)?;
                         break;
                     }
                     if self.option_ahead() && !self.trailing_separator_ahead() {
@@ -4720,6 +4730,42 @@ impl Parser<'_> {
                     if letters.len() >= 2
                         && letters.iter().all(|c| c.is_alphabetic())
                         && crate::syntax::registry::split_env(command).is_none()
+                        && let Some(opts) = crate::syntax::man::options_of(command)
+                    {
+                        // Under the signature notation the row lists
+                        // the letters; one valued switch per bundle,
+                        // at its tail (draft 203).
+                        for (i, c) in letters.iter().enumerate() {
+                            let short = format!("-{c}");
+                            let Some(spec) = opts.iter().find(|o| o.answers_to(&short)) else {
+                                let shorts: Vec<&str> =
+                                    opts.iter().filter_map(|o| o.short.as_deref()).collect();
+                                return Err(QuarbError::parse(format!(
+                                    "'{short}' in '{t}' is no switch of '{command}' (its short switches: {})",
+                                    if shorts.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        shorts.join(" ")
+                                    }
+                                )));
+                            };
+                            if spec.value.is_some() && i + 1 != letters.len() {
+                                return Err(QuarbError::parse(format!(
+                                    "'{short}' in '{t}' takes a value and stands last in a bundle: '{short}={}' after the switches",
+                                    spec.value.as_deref().unwrap_or("value")
+                                )));
+                            }
+                        }
+                        for c in &letters[..letters.len() - 1] {
+                            args.push(Arg::Opt {
+                                name: format!("-{c}"),
+                                value: None,
+                            });
+                        }
+                        format!("-{}", letters[letters.len() - 1])
+                    } else if letters.len() >= 2
+                        && letters.iter().all(|c| c.is_alphabetic())
+                        && crate::syntax::registry::split_env(command).is_none()
                     {
                         let declared: &[&str] =
                             crate::syntax::registry::spec(command).map_or(&[], |s| s.options);
@@ -4788,16 +4834,13 @@ impl Parser<'_> {
             };
             let value = if matches!(self.peek(), Some(Token::OptEq)) {
                 self.pos += 1;
-                // The void option `-=`: empty name, empty value; it
-                // does nothing but open the segment.
+                // The void option `-=` is retired (draft 203): `;;`
+                // opens the segment.
                 if name == "-" {
-                    if matches!(self.peek(), Some(Token::Name { glued: true, .. })) {
-                        return Err(QuarbError::parse(format!(
-                            "the void option '-=' of '{command}' takes no value; it opens the \
-                             segment for a numeric flag ('-= -9')"
-                        )));
-                    }
-                    continue;
+                    return Err(QuarbError::parse(format!(
+                        "the void option '-=' is retired: write ';;' before the option \
+                         segment of '{command}' ('{command}(a;; -9)')"
+                    )));
                 }
                 // One value, as an operand reads (a bare word a
                 // string, a sigil an expression); the options are
@@ -4862,8 +4905,8 @@ impl Parser<'_> {
             };
             if name == "-" {
                 return Err(QuarbError::parse(format!(
-                    "a lone '-' in the option segment of '{command}' is the void option and is \
-                     written '-='; a numeric flag follows it ('-= -9')"
+                    "a lone '-' in the option segment of '{command}' is no option; a numeric \
+                     option follows ';;' ('{command}(a;; -9)')"
                 )));
             }
             args.push(Arg::Opt { name, value });
@@ -4871,7 +4914,61 @@ impl Parser<'_> {
     }
 
     /// A parsed call's shape checks.
-    fn finish_call(&mut self, name: String, args: Vec<Arg>) -> Result<FnCall> {
+    fn finish_call(&mut self, name: String, mut args: Vec<Arg>) -> Result<FnCall> {
+        let mut by_row = false;
+        // Under the signature notation (draft 203) the row is the
+        // one source: an option outside it is refused by name, a
+        // valued option needs its value and a switch takes none, a
+        // required valued option must be written, and every short
+        // spelling is canonicalised to its long name so the readers
+        // see one spelling.
+        if crate::syntax::registry::split_env(&name).is_none()
+            && let Some(opts) = crate::syntax::man::options_of(&name)
+        {
+            let synopsis = crate::syntax::man::synopsis(&name).unwrap_or_default();
+            let mut present: Vec<&str> = Vec::new();
+            for arg in &mut args {
+                let Arg::Opt { name: opt, value } = arg else {
+                    continue;
+                };
+                let Some(spec) = opts.iter().find(|o| o.answers_to(opt)) else {
+                    return Err(QuarbError::parse(format!(
+                        "'{name}' has no option '{opt}'; the synopsis: {synopsis}"
+                    )));
+                };
+                match (&spec.value, value.is_some()) {
+                    (Some(placeholder), false) => {
+                        return Err(QuarbError::parse(format!(
+                            "option '{opt}' of '{name}' takes a value ('{opt}={placeholder}'); the synopsis: {synopsis}"
+                        )));
+                    }
+                    (None, true) => {
+                        return Err(QuarbError::parse(format!(
+                            "option '{opt}' of '{name}' is a switch and takes no value; the synopsis: {synopsis}"
+                        )));
+                    }
+                    _ => {}
+                }
+                if let Some(long) = &spec.long {
+                    *opt = long.clone();
+                    present.push(long.as_str());
+                } else if let Some(short) = &spec.short {
+                    present.push(short.as_str());
+                }
+            }
+            if let Some(missing) = opts.iter().find(|o| {
+                o.required
+                    && !present
+                        .iter()
+                        .any(|p| o.long.as_deref() == Some(p) || o.short.as_deref() == Some(p))
+            }) {
+                return Err(QuarbError::parse(format!(
+                    "'{name}' needs {}; the synopsis: {synopsis}",
+                    missing.spelled()
+                )));
+            }
+            by_row = true;
+        }
         // The options a command declares, as its synopsis lists
         // them; every other one is refused by name. An environment
         // command's options are the callee's to judge.
@@ -4880,7 +4977,7 @@ impl Parser<'_> {
         // the expression read on each item before the reduction
         // (draft 164); it needs its expression.
         let takes_of = crate::syntax::registry::takes_of(&name);
-        for arg in &args {
+        for arg in args.iter().filter(|_| !by_row) {
             if let Arg::Opt { name: opt, value } = arg
                 && takes_of
                 && matches!(opt.as_str(), "--of" | "-o")
@@ -4928,7 +5025,11 @@ impl Parser<'_> {
                 "'{name}' takes no range argument ('window(a..b)' does)"
             )));
         }
-        let call = FnCall { name, args };
+        let call = FnCall {
+            name,
+            args,
+            headless: false,
+        };
         validate_stat_args(&call)?;
         Ok(call)
     }
@@ -7397,15 +7498,24 @@ impl Parser<'_> {
     /// `$| h`, and fragment invocations, up to the closing paren.
     fn inline_pipe_tail(&mut self) -> Result<Vec<Command>> {
         let mut commands = Vec::new();
+        // The static mode along the tail (spec: Execution Modes): an
+        // inline pipe starts on the scalar plane, and a command that
+        // leaves the thread on a node — `graft(NOTATION)`, standing
+        // on the parsed document's root — opens the way for a hop in
+        // the next stage, as it does at the top level.
+        let mut mode = PipeMode::Scalar;
         loop {
             match self.peek() {
                 Some(Token::Pipe) if matches!(self.toks.get(self.pos + 1), Some(Token::Amp)) => {
                     self.pos += 1;
                     self.invoke_inline_fragment("|", &mut commands)?;
+                    mode = PipeMode::Scalar;
                 }
                 Some(Token::Pipe) => {
                     self.pos += 1;
-                    commands.push(self.inline_command()?);
+                    let command = self.inline_command_in(mode)?;
+                    mode = command_mode_out(&command, mode);
+                    commands.push(command);
                 }
                 Some(Token::At)
                     if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe))
@@ -7446,7 +7556,10 @@ impl Parser<'_> {
         // of the command, the seed its input. A built-in with
         // parentheses is the call operand, read before this arm
         // (`upper(x)` is `(x | upper)`).
-        let call = if crate::syntax::registry::split_env(&name).is_some()
+        // Headless (spec: The stdin slot, ruling 2026-11-02): no pipe
+        // fills the slot here, so the first operand does when the
+        // operands reach the parameters, the seed otherwise.
+        let mut call = if crate::syntax::registry::split_env(&name).is_some()
             && matches!(self.peek(), Some(Token::LParen))
         {
             self.call_with_name(name)?
@@ -7454,8 +7567,10 @@ impl Parser<'_> {
             FnCall {
                 name,
                 args: Vec::new(),
+                headless: false,
             }
         };
+        call.headless = true;
         let mut commands = vec![func_command(call)?];
         commands.extend(self.inline_pipe_tail()?);
         Ok(Operand::Piped {
@@ -7590,10 +7705,16 @@ impl Parser<'_> {
     /// command parser, minus what needs a real capsa: pushes and
     /// subcontexts refuse.
     fn inline_command(&mut self) -> Result<Command> {
-        // Expression pipe tails live on the scalar plane; a
-        // path-shaped command errors in pipe_item before it can
-        // become navigation.
-        let command = self.pipe_item(PipeMode::Scalar)?;
+        self.inline_command_in(PipeMode::Scalar)
+    }
+
+    /// One `| ...` command of an inline pipe in the static mode the
+    /// tail stands in: the scalar plane, where a path-shaped command
+    /// errors in pipe_item before it can become navigation, or the
+    /// node a graft left the thread on, where a hop is the next
+    /// stage.
+    fn inline_command_in(&mut self, mode: PipeMode) -> Result<Command> {
+        let command = self.pipe_item(mode)?;
         match &command {
             Command::Push(_)
             | Command::ExprPush { .. }
@@ -7753,6 +7874,7 @@ impl Parser<'_> {
                 // `@| %` bare — the column reading of the stream.
                 if !enriched && !self.at_view_dots() {
                     return Ok(Some(Command::Agg(FnCall {
+                        headless: false,
                         name: "%".into(),
                         args: Vec::new(),
                     })));
@@ -8318,6 +8440,7 @@ impl Parser<'_> {
                 // otherwise `foo(::x)` parses here and its unparse
                 // `(::x | foo)` fails its own reparse.
                 let command_call = FnCall {
+                    headless: false,
                     name: call.name,
                     args: args.collect(),
                 };
@@ -9659,7 +9782,9 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     };
     // The retired positional word `sample` points at its switch
     // before any count is held against it (draft 164).
-    if crate::syntax::registry::spec(&call.name).is_some_and(|s| s.options.contains(&"--sample"))
+    if (crate::syntax::registry::spec(&call.name).is_some_and(|s| s.options.contains(&"--sample"))
+        || crate::syntax::man::options_of(&call.name)
+            .is_some_and(|o| o.iter().any(|s| s.long.as_deref() == Some("--sample"))))
         && call
             .args
             .iter()
@@ -9696,6 +9821,7 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     if !nested && places_input {
         let stripped = FnCall {
+            headless: false,
             name: call.name.clone(),
             args: call
                 .args
@@ -9747,11 +9873,49 @@ fn func_command(call: FnCall) -> Result<Command> {
     func_command_at(call, false)
 }
 
+/// A bare word where a flag now stands (draft 203): `dfmt(iso)`,
+/// `scale(binary)`; the pointer names the flag.
+fn retired_word_pointer(call: &FnCall) -> Option<String> {
+    let word = call.args.iter().find_map(|a| match a {
+        Arg::Lit(Value::Str(s)) => Some(s.as_str()),
+        _ => None,
+    })?;
+    match (call.name.as_str(), word) {
+        ("dfmt", "iso") => Some("'iso' is a flag: write dfmt(--iso)".to_string()),
+        ("scale", "binary") => Some("'binary' is a flag: write scale(--binary)".to_string()),
+        _ => None,
+    }
+}
+
+/// `duration` / `td` take `--from` or `--to`, one instant beside the
+/// topic, never both (draft 203).
+fn duration_takes_one_end(call: &FnCall) -> Option<String> {
+    if !matches!(call.name.as_str(), "duration" | "td") {
+        return None;
+    }
+    let has = |which: &str| {
+        call.args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, .. } if name == which))
+    };
+    (has("--from") && has("--to")).then(|| {
+        format!(
+            "{} takes --from or --to, not both: the topic is the other instant",
+            call.name
+        )
+    })
+}
+
 fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
     use crate::syntax::registry::{Agg, Check};
     // An environment command runs once per capsa after `|`.
     if crate::syntax::registry::split_env(&call.name).is_some() {
         return Ok(Command::Func(call));
+    }
+    // The words that became flags (draft 203) point at the flag
+    // before any count is held against them.
+    if let Some(pointer) = retired_word_pointer(&call).or_else(|| duration_takes_one_end(&call)) {
+        return Err(QuarbError::parse(pointer));
     }
     check_operand_bound(&call, nested, false)?;
     let spec = crate::syntax::registry::spec(&call.name);
@@ -10027,7 +10191,7 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
             Ok(())
         };
         let atergo = |v: &Value| matches!(v, Value::Str(s) if s == "atergo");
-        // `--desc` is an option, not a locale or mode word
+        // `--desc` and `--atergo` are options, not locale words
         let positional: Vec<&Arg> = call
             .args
             .iter()
@@ -10035,16 +10199,18 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
             .collect();
         match positional.as_slice() {
             [] => return Ok(()),
-            [Arg::Lit(v)] if atergo(v) => return Ok(()),
-            [Arg::Lit(v)] => return locale(v),
-            [Arg::Lit(loc), Arg::Lit(mode)] if atergo(mode) && !atergo(loc) => {
-                return locale(loc);
+            // the word is retired (draft 203): the flag
+            [Arg::Lit(v)] | [_, Arg::Lit(v)] if atergo(v) => {
+                return Err(QuarbError::parse(
+                    "'atergo' is a flag: write sort(--atergo) or sort(-a), sort(ru-RU; -a)",
+                ));
             }
+            [Arg::Lit(v)] => return locale(v),
             _ => {
                 return Err(QuarbError::parse(
-                    "sort takes a locale identifier, the word atergo, or both \
-                     with the locale first: sort, sort(ru-RU), sort(atergo), \
-                     sort(ru-RU; atergo); keyed sorting is sort_by",
+                    "sort takes a locale identifier, then the flags --atergo (-a) and \
+                     --desc (-d): sort, sort(ru-RU), sort(-a), sort(ru-RU; -a); keyed \
+                     sorting is sort_by",
                 ));
             }
         }
@@ -10193,21 +10359,31 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 "number takes an optional level expression: number, number(:depth)",
             )),
         },
-        // `timeline[(EXPR[; ANCHOR][; forward])]` — the capsa's time
-        // expression, an anchor expression, and the word `forward`
-        // in last position.
+        // `timeline[(EXPR[; ANCHOR]; --forward)]` — the capsa's time
+        // expression, an anchor expression, and the flag (draft 203:
+        // the word `forward` is retired).
         "timeline" => {
-            let args = match call.args.split_last() {
-                Some((Arg::Lit(Value::Str(w)), rest)) if w == "forward" => rest,
-                _ => call.args.as_slice(),
-            };
+            if call
+                .args
+                .iter()
+                .any(|a| matches!(a, Arg::Lit(Value::Str(w)) if w == "forward"))
+            {
+                return Err(QuarbError::parse(
+                    "'forward' is a flag: write timeline(expr; --forward), timeline(expr; anchor; --forward)",
+                ));
+            }
+            let args: Vec<&Arg> = call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { .. }))
+                .collect();
             if args.len() <= 2 && args.iter().all(|a| !matches!(a, Arg::Range(..))) {
                 Ok(())
             } else {
                 Err(QuarbError::parse(
-                    "timeline takes the time expression, an optional anchor, and \
-                     the optional word forward: timeline($_), timeline($_; $.d), \
-                     timeline($_; $.d; forward)",
+                    "timeline takes the time expression, an optional anchor, then \
+                     the flag --forward: timeline($_), timeline($_; $.d), \
+                     timeline($_; $.d; --forward)",
                 ))
             }
         }
@@ -10229,43 +10405,72 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                     return Err(QuarbError::parse(match switch {
                         Some(sw) => format!("'{s}' is a string here: write {sw}"),
                         None => format!(
-                            "tree takes a depth and column expressions, then the switches \
-                             --kind, --traits, --props, --record: tree(2; -t), tree(0; -r; ::mtime) \
+                            "tree takes column expressions, then the options -d=n (--depth=n), \
+                             --kind, --traits, --props, --record: tree(-d=2 -t), tree(::mtime; -d=0 -r) \
                              ('{s}' is a string here)"
                         ),
                     }));
                 }
+                // The depth is an option (draft 203): a bare number
+                // was it.
+                if let Arg::Lit(Value::Int(n)) = a {
+                    return Err(QuarbError::parse(format!(
+                        "tree's depth is an option: write tree(-d={n}) or tree(--depth={n})"
+                    )));
+                }
+                if let Arg::Opt { name, value } = a
+                    && (name == "-d" || name == "--depth")
+                    && !matches!(value, Some(Operand::Lit(Value::Int(n))) if *n >= 0)
+                {
+                    return Err(QuarbError::parse(
+                        "tree's depth is a count: tree(-d=2), tree(--depth=0)",
+                    ));
+                }
             }
-            let ok = call.args.iter().all(|a| match a {
-                Arg::Lit(Value::Int(n)) => *n >= 0,
-                Arg::Expr(_) | Arg::Opt { .. } => true,
-                _ => false,
-            }) && call
+            let ok = call
                 .args
                 .iter()
-                .filter(|a| matches!(a, Arg::Lit(Value::Int(_))))
-                .count()
-                <= 1;
+                .all(|a| matches!(a, Arg::Expr(_) | Arg::Opt { .. }));
             if ok {
                 Ok(())
             } else {
                 Err(QuarbError::parse(
-                    "tree takes a depth and column expressions, then the switches \
-                     --kind (-k), --traits (-t), --props (-p), --record (-r): tree(2; -t), \
-                     tree(0; -r; ::mtime), tree(0; -t; (/* @| count))",
+                    "tree takes column expressions, then the options -d=n (--depth=n), \
+                     --kind (-k), --traits (-t), --props (-p), --record (-r): tree(-d=2 -t), \
+                     tree(::mtime; -d=0 -r), tree((/* @| count); -d=0 -t)",
                 ))
             }
         }
-        // `outline[(level; text[; "1."])]` — the two expressions, then
-        // the numbering style; bare over a record stream.
-        "outline" => match call.args.as_slice() {
-            [] | [Arg::Expr(_), Arg::Expr(_)] => Ok(()),
-            [Arg::Expr(_), Arg::Expr(_), Arg::Lit(Value::Str(style))] if style == "1." => Ok(()),
-            _ => Err(QuarbError::parse(
-                "outline takes a level and a text, then an optional numbering \
-                 style: outline(:depth; ::lemma), outline(:depth; ::lemma; \"1.\")",
-            )),
-        },
+        // `outline[(level; text; --style="1.")]` — the two expressions,
+        // then the numbering style as an option (draft 203); bare
+        // over a record stream.
+        "outline" => {
+            let positional: Vec<&Arg> = call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { .. }))
+                .collect();
+            if let Some(Arg::Opt { value, .. }) = call
+                .args
+                .iter()
+                .find(|a| matches!(a, Arg::Opt { name, .. } if name == "--style"))
+                && !matches!(value, Some(Operand::Lit(Value::Str(s))) if s == "1.")
+            {
+                return Err(QuarbError::parse(
+                    "outline's numbering style is \"1.\": outline(:depth; ::lemma; --style=\"1.\")",
+                ));
+            }
+            match positional.as_slice() {
+                [] | [Arg::Expr(_), Arg::Expr(_)] => Ok(()),
+                [Arg::Expr(_), Arg::Expr(_), Arg::Lit(Value::Str(_))] => Err(QuarbError::parse(
+                    "outline's numbering style is an option: outline(:depth; ::lemma; --style=\"1.\")",
+                )),
+                _ => Err(QuarbError::parse(
+                    "outline takes a level and a text, then the numbering style as an \
+                     option: outline(:depth; ::lemma), outline(:depth; ::lemma; --style=\"1.\")",
+                )),
+            }
+        }
         // `zscore([key]; [--sample])` — the switch selects the n − 1
         // spread (draft 164; the positional word is retired), an
         // expression partitions the standardizing.
@@ -11520,23 +11725,25 @@ mod tests {
     #[test]
     fn options_close_a_simple_commands_parentheses() {
         let refuse = |q: &str| parse(&lexer::lex(q).unwrap()).unwrap_err().to_string();
-        // No built-in declares an option yet: each is refused by
-        // name, which also shows the segment parsed.
-        assert!(
-            refuse("/x | upper(-i)").contains("'upper' takes no options"),
-            "{}",
-            refuse("/x | upper(-i)")
-        );
+        // An option outside the row is refused by name, which also
+        // shows the segment parsed (draft 203: the row is the source).
+        let e = refuse("/x | upper(-i)");
+        assert!(e.contains("'upper' has no option '-i'"), "{e}");
         let e = refuse("/x | ::n @| sort(::name; --locale=ru)");
-        assert!(e.contains("'--locale' given"), "{e}");
+        assert!(e.contains("has no option '--locale'"), "{e}");
         let e = refuse("/x | upper(--casefold -i)");
-        assert!(e.contains("'--casefold' given"), "{e}");
-        // Once in the segment every dash token is an option; the
-        // void option opens a segment for a numeric flag.
+        assert!(e.contains("has no option '--casefold'"), "{e}");
+        // Once in the segment every dash token is an option; `;;`
+        // opens a segment for a numeric option, and the void option
+        // `-=` that did is retired.
         let e = refuse("/x | upper(-T=4 -9)");
-        assert!(e.contains("'-T' given"), "{e}");
+        assert!(e.contains("no option '-T'"), "{e}");
+        let e = refuse("/x | upper(;; -9)");
+        assert!(e.contains("no option '-9'"), "{e}");
         let e = refuse("/x | upper(-= -9)");
-        assert!(e.contains("'-9' given"), "{e}");
+        assert!(e.contains("'-=' is retired"), "{e}");
+        // `;;` with nothing after it ends the operands
+        parse(&lexer::lex("/x | ::n | round(2;;)").unwrap()).unwrap();
         // The options stand last.
         let e = refuse("/x | upper(a; -n=10; b)");
         assert!(e.contains("stand last"), "{e}");
@@ -11544,8 +11751,9 @@ mod tests {
         parse(&lexer::lex("/x | ::n | round(-2)").unwrap()).unwrap();
         parse(&lexer::lex("/x | ::n | substr(-3..)").unwrap()).unwrap();
         // The canonical spelling: operands, then the segment; the
-        // void option re-emitted where the segment would not open.
+        // segment opened with `;;` where its first option would not.
         let call = |args: Vec<Arg>| FnCall {
+            headless: false,
             name: "f".into(),
             args,
         };
@@ -11564,7 +11772,7 @@ mod tests {
         );
         assert_eq!(
             crate::syntax::unparse::fn_call_text(&call(vec![opt("-9", None)])),
-            "f(-= -9)"
+            "f(;; -9)"
         );
     }
 
@@ -11636,15 +11844,14 @@ mod tests {
     }
 
     #[test]
-    fn macro_body_shell_is_gated_without_allow_shell() {
-        // A macro body's shell command is evaluated at expansion (parse)
-        // time; with no --allow-shell context it must be refused before
-        // the command ever runs.
-        let toks = lexer::lex("macro &m: ^ | `echo hi`; &m").unwrap();
-        let err = parse(&toks).unwrap_err();
+    fn macro_body_shell_literal_is_retired() {
+        // A macro body's backtick command was evaluated at expansion
+        // time under the shell gate; the literal is retired (ruling
+        // 2026-11-02) and refuses at the lexer, naming the mount.
+        let err = lexer::lex("macro &m: ^ | `echo hi`; &m").unwrap_err();
         assert!(
-            err.to_string().contains("allow-shell"),
-            "expected the shell gate to fire, got: {err}"
+            err.to_string().contains("sh=shell:"),
+            "expected the retirement pointer, got: {err}"
         );
     }
 

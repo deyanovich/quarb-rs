@@ -912,6 +912,7 @@ pub(crate) fn eval_operand<H: Host>(
                             && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
                     {
                         resolved = Command::Func(FnCall {
+                            headless: false,
                             name: call.name.clone(),
                             args: call
                                 .args

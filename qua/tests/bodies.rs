@@ -77,9 +77,9 @@ fn a_bare_word_in_a_body_names_a_command() {
 
 #[test]
 fn a_commands_options_keep_bare_words_as_strings() {
-    // `sort(atergo)`: the option is the string "atergo".
+    // `sort(-a)`: the a tergo order is a flag (draft 203).
     assert_eq!(
-        values("/w/* | :: @| unique @| sort(atergo) @| join(\",\")"),
+        values("/w/* | :: @| unique @| sort(-a) @| join(\",\")"),
         vec!["sid,huck,tom"]
     );
     // The grouping call takes fields, which are bodies.

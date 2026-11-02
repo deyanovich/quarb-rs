@@ -1672,6 +1672,23 @@ pub trait AstAdapter {
     fn declared_notation(&self, _node: NodeId) -> Option<String> {
         None
     }
+
+    /// Graft a text on demand (spec: Grafting, `graft(NOTATION)`):
+    /// parse `text` as the notation named, or as what it declares
+    /// about itself when none is, and answer the parsed document's
+    /// root, a free root with no parent in the arbor. `None` when
+    /// this adapter has no composing layer to graft with; `Some(Err)`
+    /// names what did not parse or what the operand did not name.
+    fn graft_text(&self, _text: &str, _notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        None
+    }
+
+    /// Whether a composing layer stands in this adapter, so that
+    /// `graft_text` answers and a host need not add one (the host
+    /// wraps every other source in a graft-only layer at the mount).
+    fn grafts_on_demand(&self) -> bool {
+        false
+    }
 }
 
 /// Forwards every [`AstAdapter`] method to a wrapped adapter — the
@@ -1721,7 +1738,7 @@ macro_rules! forward_ast_adapter {
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
-            provenance_list unit_scale unit_names declared_notation
+            provenance_list unit_scale unit_names declared_notation graft_text grafts_on_demand
         );
     };
     (@each [$inner:tt] $ex:tt $($m:ident)*) => {
@@ -1798,6 +1815,8 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [unit_scale $($r:ident)*] unit_scale) => {};
     (@unless [$i:tt] [unit_names $($r:ident)*] unit_names) => {};
     (@unless [$i:tt] [declared_notation $($r:ident)*] declared_notation) => {};
+    (@unless [$i:tt] [graft_text $($r:ident)*] graft_text) => {};
+    (@unless [$i:tt] [grafts_on_demand $($r:ident)*] grafts_on_demand) => {};
     // Another method heads the list: look further down.
     (@unless [$i:tt] [$x:ident $($r:ident)*] $m:ident) => {
         $crate::forward_ast_adapter!(@unless [$i] [$($r)*] $m);
@@ -2204,6 +2223,20 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] declared_notation) => {
         fn declared_notation(&self, node: $crate::NodeId) -> Option<String> {
             $crate::forward_ast_adapter!(@target self $i).declared_notation(node)
+        }
+    };
+    (@fwd [$i:tt] graft_text) => {
+        fn graft_text(
+            &self,
+            text: &str,
+            notation: Option<&str>,
+        ) -> Option<Result<$crate::NodeId, String>> {
+            $crate::forward_ast_adapter!(@target self $i).graft_text(text, notation)
+        }
+    };
+    (@fwd [$i:tt] grafts_on_demand) => {
+        fn grafts_on_demand(&self) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).grafts_on_demand()
         }
     };
     (@fwd [$i:tt] unit_scale) => {

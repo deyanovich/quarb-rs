@@ -145,10 +145,13 @@ fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
     );
     // the option needs its expression; an unknown option refuses
     let e = refuse("/rows/* @| sum(--of)");
-    assert!(e.contains("takes the expression to reduce"), "{e}");
+    assert!(
+        e.contains("option '--of' of 'sum' takes a value ('--of=expr')"),
+        "{e}"
+    );
     let e = refuse("/rows/* @| sum(--foo=1)");
     assert!(
-        e.contains("'sum' takes '--of=expr' ('-o=expr')") && e.contains("'--foo' given"),
+        e.contains("'sum' has no option '--foo'; the synopsis: sum{stream}(-o|--of=expr?)"),
         "{e}"
     );
     // a keyed aggregate keeps its key operand
