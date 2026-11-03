@@ -772,6 +772,21 @@ pub enum Predicate {
     /// list of integers); any other value is taken for its
     /// truthiness.
     Computed(Operand),
+    /// `[..$n]`, `[$a..$b]`, `[1..$n]` — a positional range inside a
+    /// fragment's body with a parameter for a bound (spec: Fragments,
+    /// call by name): resolved at the invocation to `Range`, each
+    /// parameter bound to an integer literal, or refused naming the
+    /// parameter. Never reaches evaluation.
+    RangeForm(Bound, Bound),
+}
+
+/// One bound of a [`Predicate::RangeForm`]: open, an integer, or a
+/// fragment parameter standing for one.
+#[derive(Debug, Clone)]
+pub enum Bound {
+    Open,
+    Int(i64),
+    Param(String),
 }
 
 /// A boolean predicate expression.

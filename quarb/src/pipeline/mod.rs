@@ -487,7 +487,10 @@ pub(crate) fn positional<T>(items: Vec<T>, pred: &Predicate) -> Vec<T> {
         // Select` dispatch) route `Predicate::Expr` to per-capsa
         // filtering before it reaches here, so this arm is defensive —
         // it must never silently pass every item through as a filter.
-        Predicate::Expr(_) | Predicate::Computed(_) | Predicate::Positions(_) => items,
+        Predicate::Expr(_)
+        | Predicate::Computed(_)
+        | Predicate::Positions(_)
+        | Predicate::RangeForm(_, _) => items,
     }
 }
 

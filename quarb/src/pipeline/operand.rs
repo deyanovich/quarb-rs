@@ -122,8 +122,11 @@ pub(crate) fn eval_operand<H: Host>(
                     .map(|(_, v)| v)
                     .unwrap_or(Value::Null),
                 // a table's column as the table answers it (the
-                // record keyed by the labels on an indexed table)
-                t @ Value::Table(_) => crate::pipeline::commands::record_field(t, name),
+                // record keyed by the labels on an indexed table); a
+                // quarq's own core field (`$.f:unq`)
+                t @ (Value::Table(_) | Value::Quarq(_)) => {
+                    crate::pipeline::commands::record_field(t, name)
+                }
                 _ => Value::Null,
             }]
         }
@@ -145,7 +148,9 @@ pub(crate) fn eval_operand<H: Host>(
         // number, null, …) → the POSITION's core field, since the
         // thread still stands at a node, a key that is no core
         // field answering null without a refusal (`| :name |
-        // indent(:depth - 1)`, `bibref(cmos) | :genus`).
+        // indent(:depth - 1)`, `bibref(cmos) | :genus`); a QUARQ
+        // answers its own core field first (`:unq`, the canonical
+        // text `--expand` prints).
         // `:name` with a node reference as the topic reads the node the
         // reference names (`map(:name)` over a route)
         Operand::Field { base, name }
@@ -169,7 +174,13 @@ pub(crate) fn eval_operand<H: Host>(
                     Some(Value::Record(_) | Value::List(_) | Value::Table(_))
                 ) =>
         {
-            if crate::graph::navigate::CORE_FIELDS.contains(&name.as_str()) {
+            let own = scope.topic.and_then(|t| match t {
+                Value::Quarq(q) => q.core_field(name),
+                _ => None,
+            });
+            if let Some(v) = own {
+                vec![v]
+            } else if crate::graph::navigate::CORE_FIELDS.contains(&name.as_str()) {
                 note(host.origin_at(ext).position);
                 vec![host.project(ext, &Projection::CoreMeta(name.clone()))]
             } else {
@@ -2485,6 +2496,11 @@ pub(crate) fn through<H: Host>(host: &H, v: &Value, projection: &Projection) -> 
         Value::List(items) => {
             Value::list(items.iter().map(|x| through(host, x, projection)).collect())
         }
+        // a quarq's own core field (`:unq`)
+        Value::Quarq(q) => match projection {
+            Projection::CoreMeta(key) => q.core_field(key).unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }

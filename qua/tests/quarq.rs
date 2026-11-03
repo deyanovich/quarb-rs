@@ -167,3 +167,40 @@ fn a_navigating_quarq_is_the_inline_fragment() {
         "Iliad"
     );
 }
+
+/// The quarq's own core field (`QUARQ_TEXT_FIELD`) is the engine's
+/// fact about the value: the canonical text the quarq stands for, the
+/// line `--expand` prints (spec: Quarqs; Core Fields). The quarq
+/// itself keeps printing as `q(…)`, `::form` stays null on a value,
+/// and any other core field reads the thread's position as it does
+/// for any value.
+#[test]
+fn a_quarq_answers_its_text_through_its_core_field() {
+    let f = quarb::QUARQ_TEXT_FIELD;
+    assert_eq!(
+        one(&format!("= q(/rows/*[::pages > 500] @| count) | :{f}")),
+        "/rows/*[::pages > 500] @| count"
+    );
+    // a fragment inside the quarq is expanded: the text is the expansion
+    assert_eq!(
+        one(&format!(
+            "def &long: /rows/*[::pages > 500]; = q(&long @| count) | :{f}"
+        )),
+        "/rows/*[::pages > 500] @| count"
+    );
+    assert_eq!(
+        one("def &long: /rows/*[::pages > 500]; = q(&long @| count)"),
+        "q(/rows/*[::pages > 500] @| count)"
+    );
+    assert_eq!(one(&format!("= q(+ 3) | :{f}")), "$_ + 3");
+    // a held quarq, a record's field, a list's items
+    assert_eq!(one(&format!("= q(+ 3) | .f | $.f:{f}")), "$_ + 3");
+    assert_eq!(one(&format!("= %(f = q(+ 3)) | :f:{f}")), "$_ + 3");
+    assert_eq!(
+        one(&format!("= @(q(/a); q(/b)) | map(:{f})")),
+        "@(\"/a\"; \"/b\")"
+    );
+    // not a quarq: no core field of the position, null without a refusal
+    assert_eq!(one(&format!("= 3 | :{f}")), "null");
+    assert_eq!(one("= q(+ 3) | ::form"), "null");
+}

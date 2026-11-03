@@ -149,7 +149,10 @@ pub fn walk_predicate<V: Visitor + ?Sized>(v: &mut V, p: &Predicate) {
     match p {
         Predicate::Expr(e) => v.pred(e),
         Predicate::Computed(o) => v.operand(o),
-        Predicate::Positions(_) | Predicate::Index(_) | Predicate::Range(_, _) => {}
+        Predicate::Positions(_)
+        | Predicate::Index(_)
+        | Predicate::Range(_, _)
+        | Predicate::RangeForm(_, _) => {}
     }
 }
 

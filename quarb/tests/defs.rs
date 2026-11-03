@@ -136,10 +136,21 @@ fn expand_first_steps() {
         vec!["&adults @| count".to_string()]
     );
     assert_eq!(exp(q), "/row[::Age >= 18] @| count");
-    // No macro invocations: nothing to report (defs are textual).
+    // No macro invocations: a fragment is spliced in one step, so
+    // the one expansion of a query of fragments alone is its
+    // canonical text — never an empty answer.
     assert_eq!(
         expand_first("def &a: /x; &a @| count", &Defs::default()).unwrap(),
-        Vec::<String>::new()
+        vec!["/x @| count".to_string()]
+    );
+    assert_eq!(
+        expand_first(
+            "def &novel: [::genre = \"novel\"]; def &novels: /row&novel; \
+             &novels::title @| [..2]",
+            &Defs::default()
+        )
+        .unwrap(),
+        vec!["/row[::genre = \"novel\"]::title @| [..2]".to_string()]
     );
     // Diagnostics still fire in the -1 lens: the full parse runs.
     assert!(
@@ -559,5 +570,57 @@ fn rounded_hole_with_a_parameter() {
     assert_eq!(
         exp(r#"def &f($c): | "x=${$c}"; /* | &f(::a)"#),
         exp(r#"def (=f)(_c): | "x=(_(_c))"; /* | (=f)(::a)"#)
+    );
+}
+
+/// A form parameter stands where the form it binds would stand
+/// (spec: Fragments, call by name): as a literal count, as a slice
+/// bound, as a group's key and as a bare record field — each read at
+/// the invocation as if written there.
+#[test]
+fn a_parameter_stands_where_the_form_it_binds_stands() {
+    let err = |q: &str| expand(q, &Defs::default()).unwrap_err().to_string();
+    // a literal count
+    assert_eq!(
+        exp("def &top($n): @| first($n); /row @| &top(3)"),
+        "/row @| first(3)"
+    );
+    // a slice bound, either side, both sides, in a step's predicate
+    assert_eq!(exp("def &f($n): @| [..$n]; /row @| &f(2)"), "/row @| [..2]");
+    assert_eq!(
+        exp("def &f($n): @| [1..$n]; /row @| &f(2)"),
+        "/row @| [1..2]"
+    );
+    assert_eq!(exp("def &f($n): @| [$n..]; /row @| &f(2)"), "/row @| [2..]");
+    assert_eq!(
+        exp("def &f($a, $b): @| [$a..$b]; /row @| &f(2, 3)"),
+        "/row @| [2..3]"
+    );
+    assert_eq!(
+        exp("def &g($n): /row[..$n]; &g(2) | ::title"),
+        "/row[..2] | ::title"
+    );
+    assert!(
+        err("def &f($n): @| [..$n]; /row @| &f(::x)").contains("slice bound"),
+        "{}",
+        err("def &f($n): @| [..$n]; /row @| &f(::x)")
+    );
+    // a group's key and a bare record field, named by the bound form
+    assert_eq!(
+        exp("def &per($key): @| group($key) | count; /row @| &per(::genre)"),
+        "/row @| group(::genre) | count"
+    );
+    assert_eq!(
+        exp("def &card($extra): | %(::title; $extra); /row | &card(::year)"),
+        "/row | %(::title; ::year)"
+    );
+    // the convention holds at the invocation: a collision, a value
+    // with no name
+    assert!(
+        err("def &card($extra): | %(::title; $extra); /row | &card(::title)").contains("twice")
+    );
+    assert!(
+        err("def &card($extra): | %(::title; $extra); /row | &card(::year + 1)")
+            .contains("needs a name")
     );
 }

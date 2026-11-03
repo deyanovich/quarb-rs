@@ -3173,6 +3173,11 @@ pub(crate) fn apply_predicates<T>(
                 items = positional(items, pred);
                 i += 1;
             }
+            // (resolved at the invocation; never evaluated)
+            Predicate::RangeForm(_, _) => {
+                items.clear();
+                i += 1;
+            }
             // A computed bracket reads no node: its value, read once
             // in the walk's scope, is the position or the position
             // list; any other value is a condition on every item.

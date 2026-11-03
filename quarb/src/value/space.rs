@@ -32,10 +32,39 @@ pub struct Quarq {
     pub form: Option<Box<crate::syntax::expand::Form>>,
 }
 
+/// The name of the quarq's own core field, the inverse of the `q(…)`
+/// wrapping: the canonical text of what the quarq stands for (the line
+/// `--expand` prints). The spelling is the spec's (draft 208) and
+/// lives here alone.
+pub const QUARQ_TEXT_FIELD: &str = "unq";
+
 impl Quarq {
     /// Whether the body still holds expansions to fill.
     pub fn is_template(&self) -> bool {
         !self.holes.is_empty()
+    }
+
+    /// The inverse of the wrapping: the canonical spelling inside
+    /// `q(…)`, as `--expand` prints it, which for a quarq written
+    /// around an invocation is the expansion the invocation received.
+    pub fn unq_text(&self) -> &str {
+        self.source
+            .strip_prefix("q(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(&self.source)
+    }
+
+    /// The quarq's own core field (spec: Quarqs; Core Fields), named
+    /// by `QUARQ_TEXT_FIELD`: the engine's fact about the value, its
+    /// canonical text — the line `--expand` prints. None for any other
+    /// key: the thread's position answers the node's core fields as
+    /// for any value.
+    pub fn core_field(&self, key: &str) -> Option<Value> {
+        if key == QUARQ_TEXT_FIELD {
+            Some(Value::Str(self.unq_text().to_string()))
+        } else {
+            None
+        }
     }
 
     /// The construct the quarq grafts as: its exact form, else its

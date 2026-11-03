@@ -17,8 +17,8 @@
 use crate::error::{QuarbError, Result};
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, Budget, CmpOp, Command, ConcatMode, End, FnCall, Group,
-    Hole, IndexSpec, InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem,
+    Anchor, Arg, ArithOp, Axis, Bound, Branch, Budget, CmpOp, Command, ConcatMode, End, FnCall,
+    Group, Hole, IndexSpec, InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem,
     PredExpr, Predicate, ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef,
     ScopePath, Step, TableRow, TraitClause, hole_name,
 };
@@ -156,8 +156,15 @@ pub fn parse_first_steps(
     expander: &dyn Expander,
 ) -> Result<Vec<String>> {
     let mut p = Parser::new(tokens, defs, expander);
-    p.parse()?;
-    Ok(p.first_steps.into_inner())
+    let q = p.parse()?;
+    let steps = p.first_steps.into_inner();
+    // A query of fragments alone takes no macro step: a fragment is
+    // spliced in one step, so its one expansion is the canonical
+    // text (never an empty answer).
+    if steps.is_empty() {
+        return Ok(vec![crate::syntax::unparse::unparse(&q)]);
+    }
+    Ok(steps)
 }
 
 /// Parse a token stream containing only `def` statements into a
@@ -465,8 +472,21 @@ fn lp_in_command(c: &Command) -> Option<String> {
         | Command::Repeat { command: inner, .. }
         | Command::Attach { command: inner, .. } => lp_in_command(inner),
         Command::Nav(b) => b.steps.iter().find_map(lp_in_elem),
+        Command::Select(p) => lp_in_predicate(p),
         _ => None,
     }
+}
+
+/// A range form's parameter left unresolved (a quarq body the
+/// invocation did not reach).
+fn lp_in_predicate(p: &Predicate) -> Option<String> {
+    let Predicate::RangeForm(a, b) = p else {
+        return None;
+    };
+    [a, b].into_iter().find_map(|b| match b {
+        Bound::Param(p) => Some(p.clone()),
+        _ => None,
+    })
 }
 fn lp_in_elem(e: &PathElem) -> Option<String> {
     match e {
@@ -480,7 +500,13 @@ fn lp_in_elem(e: &PathElem) -> Option<String> {
             body: PushBody::Expr(e),
             ..
         } => lp_in_operand(e),
-        PathElem::Group(g) => g.alts.iter().flatten().find_map(lp_in_elem),
+        PathElem::Group(g) => g
+            .alts
+            .iter()
+            .flatten()
+            .find_map(lp_in_elem)
+            .or_else(|| g.predicates.iter().find_map(lp_in_predicate)),
+        PathElem::Step(s) => s.predicates.iter().find_map(lp_in_predicate),
         _ => None,
     }
 }
@@ -1770,6 +1796,7 @@ impl Parser<'_> {
                         match self.predicate()? {
                             pred @ (Predicate::Index(_)
                             | Predicate::Range(_, _)
+                            | Predicate::RangeForm(_, _)
                             | Predicate::Positions(_)
                             | Predicate::Computed(_)) => {
                                 // Select preserves the mode.
@@ -2399,6 +2426,12 @@ impl Parser<'_> {
                 };
                 let mut e = match self.predicate()? {
                     Predicate::Expr(e) => e,
+                    Predicate::RangeForm(_, _) => {
+                        return Err(QuarbError::parse(
+                            "a fragment parameter stands for a slice bound of a step \
+                             ('/row[..$n]'), not of a value's index",
+                        ));
+                    }
                     Predicate::Index(n) => {
                         return Ok(Command::Func(FnCall {
                             headless: false,
@@ -2446,6 +2479,7 @@ impl Parser<'_> {
                         Predicate::Expr(next) => e = PredExpr::And(Box::new(e), Box::new(next)),
                         Predicate::Index(_)
                         | Predicate::Range(_, _)
+                        | Predicate::RangeForm(_, _)
                         | Predicate::Positions(_)
                         | Predicate::Computed(_) => return Err(positional()),
                     }
@@ -3053,10 +3087,12 @@ impl Parser<'_> {
                 hole: &texts,
             },
         );
+        resolve_range_forms_query(&mut body, name, &forms)?;
         // a parameter in command position takes a quarq argument,
         // whose commands stand in its place; anything else has no
         // command to splice
         refuse_leftover(name, leftover_param(&body))?;
+        revalidate_records_query(&body)?;
 
         let mut bindings: Vec<(String, MacroBinding)> = def
             .params
@@ -3615,7 +3651,9 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                resolve_range_forms_query(&mut q, &name, &map)?;
                 refuse_leftover(&name, leftover_param(&q))?;
+                revalidate_records_query(&q)?;
                 q
             }
             DefBody::Pipeline(_) => {
@@ -3700,7 +3738,9 @@ impl Parser<'_> {
                 };
                 let mut commands = commands;
                 subst_commands(&mut commands, &subst);
+                resolve_range_forms_commands(&mut commands, &name, &map)?;
                 refuse_leftover(&name, leftover_in_commands(&commands))?;
+                revalidate_records_commands(&commands)?;
                 pipeline.extend(commands);
                 Ok(())
             }
@@ -3982,7 +4022,9 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                resolve_range_forms_query(&mut q, &name, &map)?;
                 refuse_leftover(&name, leftover_param(&q))?;
+                revalidate_records_query(&q)?;
                 q
             }
             DefBody::Macro(_) => {
@@ -4199,6 +4241,11 @@ impl Parser<'_> {
         map: &HashMap<String, Operand>,
         steps: &mut [PathElem],
     ) -> Result<()> {
+        // a slice bound the fragment's parameter stands for resolves
+        // against the invocation's argument
+        for p in &mut preds {
+            resolve_range_form(p, name, map)?;
+        }
         let subst = Subst {
             outer: map,
             hole: map,
@@ -7430,6 +7477,14 @@ impl Parser<'_> {
                 }
             }
         }
+        // `[..$n]`, `[$n..]`, `[1..$n]`, `[$a..$b]` — a positional
+        // range with a parameter for a bound, inside a fragment body
+        // (spec: Fragments): the form resolves at the invocation.
+        if !self.def_params.is_empty()
+            && let Some(pred) = self.range_form()
+        {
+            return Ok(pred);
+        }
         // `[2; 4; 5]`, `[1; 3..4; -1]` — a position list: positions
         // and ranges separated by `;`.
         if let Some(parts) = self.position_list()? {
@@ -7461,6 +7516,68 @@ impl Parser<'_> {
             return Ok(Predicate::Computed(op.clone()));
         }
         Ok(Predicate::Expr(expr))
+    }
+
+    /// A positional range with a fragment parameter for a bound, the
+    /// tokens after the `[`: `..` or `N..` then `$p`; `$p..`,
+    /// `$p..N`, or `$p..` then `$q`; closed by the `]`. `None` leaves
+    /// the tokens untouched.
+    fn range_form(&mut self) -> Option<Predicate> {
+        fn name_at(p: &Parser<'_>, i: usize) -> Option<String> {
+            match p.toks.get(i) {
+                Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) => Some(text.clone()),
+                _ => None,
+            }
+        }
+        let is_param = |p: &Self, n: &str| p.def_params.iter().any(|d| d == n);
+        let int_bound = |t: &str| -> Option<Bound> {
+            if t.is_empty() {
+                Some(Bound::Open)
+            } else {
+                t.parse::<i64>().ok().map(Bound::Int)
+            }
+        };
+        let at = |p: &Self, i: usize, t: &Token| p.toks.get(i) == Some(t);
+        // `..$p` / `N..$p`
+        if let Some(text) = name_at(self, self.pos)
+            && let Some(a) = text.strip_suffix("..")
+            && let Some(start) = int_bound(a)
+            && at(self, self.pos + 1, &Token::Dollar)
+            && let Some(p) = name_at(self, self.pos + 2)
+            && is_param(self, &p)
+            && at(self, self.pos + 3, &Token::RBracket)
+        {
+            self.pos += 4;
+            return Some(Predicate::RangeForm(start, Bound::Param(p)));
+        }
+        // `$p..` / `$p..N` / `$p..$q`
+        if at(self, self.pos, &Token::Dollar)
+            && let Some(text) = name_at(self, self.pos + 1)
+            && let Some((p, b)) = text.split_once("..")
+            && is_param(self, p)
+        {
+            let p = p.to_string();
+            if b.is_empty()
+                && at(self, self.pos + 2, &Token::Dollar)
+                && let Some(q) = name_at(self, self.pos + 3)
+                && is_param(self, &q)
+                && at(self, self.pos + 4, &Token::RBracket)
+            {
+                self.pos += 5;
+                return Some(Predicate::RangeForm(Bound::Param(p), Bound::Param(q)));
+            }
+            if let Some(end) = int_bound(b)
+                && at(self, self.pos + 2, &Token::RBracket)
+            {
+                self.pos += 3;
+                return Some(Predicate::RangeForm(Bound::Param(p), end));
+            }
+        }
+        None
     }
 
     /// The position list after a `[`, when the brackets hold one:
@@ -8947,6 +9064,7 @@ impl Parser<'_> {
             return match self.predicate()? {
                 pred @ (Predicate::Index(_)
                 | Predicate::Range(_, _)
+                | Predicate::RangeForm(_, _)
                 | Predicate::Positions(_)
                 | Predicate::Computed(_)) => Ok(Command::Select(pred)),
                 Predicate::Expr(_) => Err(QuarbError::parse(
@@ -10365,7 +10483,9 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                resolve_range_forms_query(&mut q, &name, &map)?;
                 refuse_leftover(&name, leftover_param(&q))?;
+                revalidate_records_query(&q)?;
                 self.operand_from_query(&name, q)
             }
             DefBody::Macro(_) => {
@@ -11486,6 +11606,11 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             Arg::Hole(_) => {
                 i += 1;
             }
+            // a fragment parameter: the form it binds names the field
+            // at the invocation, where the convention is checked again
+            Arg::Expr(Operand::Param(_)) => {
+                i += 1;
+            }
             Arg::Expr(e) => {
                 let Some(name) = crate::syntax::ast::auto_field_name(e) else {
                     return Err(QuarbError::parse(format!(
@@ -12311,10 +12436,31 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
     match command {
         Command::SessionPush(_) => {}
         Command::Hole { hole, .. } => subst_operand(&mut hole.expr, map),
-        Command::Func(call)
-        | Command::Agg(call)
-        | Command::RecordWith(call)
-        | Command::RecordPush { call, .. } => {
+        Command::Func(call) | Command::Agg(call) => {
+            for arg in &mut call.args {
+                match arg {
+                    Arg::Expr(e) => {
+                        let was_param = matches!(e, Operand::Param(_));
+                        subst_operand(e, map);
+                        // a parameter bound to a literal stands as the
+                        // literal argument the parser reads written
+                        // (`first($n)` → `first(3)`, `window($r)` →
+                        // `window(2..3)`): the form where the form
+                        // stands (spec: Fragments)
+                        if was_param && let Some(folded) = literal_arg(e) {
+                            *arg = folded;
+                        }
+                    }
+                    Arg::Opt { value: Some(e), .. } => subst_operand(e, map),
+                    Arg::Hole(h) => subst_operand(&mut h.expr, map),
+                    // `syntax:compare(">"; q($col); …)` — a quarq held
+                    // as an argument takes the parameters as a body
+                    Arg::Lit(Value::Quarq(q)) => *arg = Arg::Lit(subst_quarq(q, map)),
+                    _ => {}
+                }
+            }
+        }
+        Command::RecordWith(call) | Command::RecordPush { call, .. } => {
             for arg in &mut call.args {
                 match arg {
                     Arg::Expr(e) | Arg::Opt { value: Some(e), .. } => subst_operand(e, map),
@@ -12381,6 +12527,168 @@ fn subst_pred_expr(e: &mut PredExpr, map: &Subst<'_>) {
         PredExpr::Chain(operands, _) => operands.iter_mut().for_each(|o| subst_operand(o, map)),
         PredExpr::Truthy(o) => subst_operand(o, map),
     }
+}
+
+/// The literal argument a bound scalar folds to, as the parser reads
+/// it written: a scalar literal, or a closed integer range (`2..3`).
+/// A quarq, a list, a projector and anything computed stay
+/// expressions (a template fills where it is evaluated).
+fn literal_arg(op: &Operand) -> Option<Arg> {
+    match op {
+        Operand::Lit(
+            v @ (Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bool(_) | Value::Null),
+        ) => Some(Arg::Lit(v.clone())),
+        Operand::Range {
+            from,
+            to,
+            step: None,
+        } => match (&**from, &**to) {
+            (Operand::Lit(Value::Int(a)), Operand::Lit(Value::Int(b))) => {
+                Some(Arg::Range(Some(*a), Some(*b)))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The positional ranges with a parameter for a bound (`[..$n]`),
+/// resolved against the invocation's arguments: a parameter bound to
+/// an integer literal is that integer; anything else is refused
+/// naming the parameter (spec: Fragments, call by name).
+fn resolve_range_forms_query(
+    q: &mut Query,
+    name: &str,
+    map: &HashMap<String, Operand>,
+) -> Result<()> {
+    for corr in &mut q.correlations {
+        resolve_range_forms_query(corr, name, map)?;
+    }
+    for b in &mut q.branches {
+        resolve_range_forms_elems(&mut b.steps, name, map)?;
+    }
+    resolve_range_forms_commands(&mut q.pipeline, name, map)
+}
+
+fn resolve_range_forms_elems(
+    elems: &mut [PathElem],
+    name: &str,
+    map: &HashMap<String, Operand>,
+) -> Result<()> {
+    for elem in elems.iter_mut() {
+        match elem {
+            PathElem::Step(step) => {
+                for p in &mut step.predicates {
+                    resolve_range_form(p, name, map)?;
+                }
+            }
+            PathElem::Group(group) => {
+                for alt in &mut group.alts {
+                    resolve_range_forms_elems(alt, name, map)?;
+                }
+                for p in &mut group.predicates {
+                    resolve_range_form(p, name, map)?;
+                }
+            }
+            PathElem::Push {
+                body: PushBody::Query(q),
+                ..
+            } => resolve_range_forms_query(q, name, map)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_range_forms_commands(
+    cmds: &mut [Command],
+    name: &str,
+    map: &HashMap<String, Operand>,
+) -> Result<()> {
+    for c in cmds.iter_mut() {
+        resolve_range_forms_command(c, name, map)?;
+    }
+    Ok(())
+}
+
+fn resolve_range_forms_command(
+    c: &mut Command,
+    name: &str,
+    map: &HashMap<String, Operand>,
+) -> Result<()> {
+    match c {
+        Command::Select(p) => resolve_range_form(p, name, map),
+        Command::Nav(b) => resolve_range_forms_elems(&mut b.steps, name, map),
+        Command::Subcontext { body, .. } => resolve_range_forms_query(body, name, map),
+        Command::Map(inner)
+        | Command::Repeat { command: inner, .. }
+        | Command::Attach { command: inner, .. } => resolve_range_forms_command(inner, name, map),
+        _ => Ok(()),
+    }
+}
+
+fn resolve_range_form(p: &mut Predicate, name: &str, map: &HashMap<String, Operand>) -> Result<()> {
+    let Predicate::RangeForm(a, b) = p else {
+        return Ok(());
+    };
+    let bound = |b: &Bound| -> Result<Option<i64>> {
+        match b {
+            Bound::Open => Ok(None),
+            Bound::Int(n) => Ok(Some(*n)),
+            Bound::Param(param) => match map.get(param) {
+                Some(Operand::Lit(Value::Int(n))) => Ok(Some(*n)),
+                Some(other) => Err(QuarbError::parse(format!(
+                    "parameter '${param}' of '&{name}' stands where a slice bound \
+                     stands; it takes an integer, not '{}'",
+                    crate::syntax::unparse::operand_text(other)
+                ))),
+                None => Err(QuarbError::parse(format!(
+                    "parameter '${param}' of '&{name}' is not bound"
+                ))),
+            },
+        }
+    };
+    let (from, to) = (bound(a)?, bound(b)?);
+    *p = Predicate::Range(from, to);
+    Ok(())
+}
+
+/// The record convention, checked again on a fragment's body once its
+/// parameters are bound (`%(::title; $extra)`, `group($key)`): the
+/// bound form names its field as the written form would, or is
+/// refused at the invocation. A visitor, since the record call may
+/// sit inside an operand (`| %(:a; :b)` is the projector applied to
+/// the topic, its call under the piped shape).
+struct Revalidate(Option<QuarbError>);
+
+impl visit::Visitor for Revalidate {
+    fn call(&mut self, c: &FnCall) {
+        if self.0.is_none() {
+            let checked = if c.name == "group" {
+                validate_record_convention(c, "group")
+            } else {
+                validate_record(c)
+            };
+            if let Err(e) = checked {
+                self.0 = Some(e);
+            }
+        }
+        visit::walk_call(self, c);
+    }
+}
+
+fn revalidate_records_query(q: &Query) -> Result<()> {
+    let mut v = Revalidate(None);
+    v.query(q);
+    v.0.map_or(Ok(()), Err)
+}
+
+fn revalidate_records_commands(cmds: &[Command]) -> Result<()> {
+    let mut v = Revalidate(None);
+    for c in cmds {
+        v.command(c);
+    }
+    v.0.map_or(Ok(()), Err)
 }
 
 fn subst_operand(o: &mut Operand, map: &Subst<'_>) {

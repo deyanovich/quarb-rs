@@ -47,6 +47,7 @@ mod stdlib;
 mod syntax;
 pub use graph::reflect::QueryArbor;
 pub use syntax::expand::Form;
+pub use value::QUARQ_TEXT_FIELD;
 mod thread;
 mod value;
 // The public module paths, as they were before the layering.

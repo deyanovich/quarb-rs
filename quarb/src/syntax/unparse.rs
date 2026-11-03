@@ -590,6 +590,16 @@ pub(crate) fn predicate(p: &Predicate) -> String {
                 .join("; ")
         ),
         Predicate::Computed(o) => format!("[{}]", operand(o)),
+        Predicate::RangeForm(a, b) => format!("[{}..{}]", bound(a), bound(b)),
+    }
+}
+
+fn bound(b: &crate::syntax::ast::Bound) -> String {
+    use crate::syntax::ast::Bound;
+    match b {
+        Bound::Open => String::new(),
+        Bound::Int(n) => n.to_string(),
+        Bound::Param(p) => format!("${p}"),
     }
 }
 

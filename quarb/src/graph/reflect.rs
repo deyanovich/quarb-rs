@@ -445,6 +445,24 @@ impl QueryArbor {
                 }
                 self.intern(Some("predicate"), props, Some(parent));
             }
+            // a range with a parameter for a bound, as a fragment body
+            // holds it before the invocation resolves it: the range
+            // kind, the bounds as spelled
+            Predicate::RangeForm(from, to) => {
+                let spelled = |b: &crate::syntax::ast::Bound| match b {
+                    crate::syntax::ast::Bound::Open => None,
+                    crate::syntax::ast::Bound::Int(n) => Some(Value::Int(*n)),
+                    crate::syntax::ast::Bound::Param(p) => Some(Value::Str(format!("${p}"))),
+                };
+                let mut props = vec![("kind".to_string(), Value::Str("range".to_string()))];
+                if let Some(f) = spelled(from) {
+                    props.push(("from".to_string(), f));
+                }
+                if let Some(t) = spelled(to) {
+                    props.push(("to".to_string(), t));
+                }
+                self.intern(Some("predicate"), props, Some(parent));
+            }
             Predicate::Expr(e) => {
                 let id = self.intern(
                     Some("predicate"),

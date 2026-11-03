@@ -110,6 +110,8 @@ pub(crate) fn record_field(v: Value, name: &str) -> Value {
                 .map(|item| record_field(item, name))
                 .collect(),
         ),
+        // a quarq's own core field (`:unq`), null for any other key
+        Value::Quarq(q) => q.core_field(name).unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }
@@ -1092,6 +1094,8 @@ pub(crate) fn apply_command_in<H: Host>(
         // node: its value, read once against the first capsa's
         // scope, is the position or the position list; any other
         // value filters by truthiness as a condition would.
+        // (resolved at the invocation; never evaluated)
+        Command::Select(Predicate::RangeForm(_, _)) => Vec::new(),
         Command::Select(Predicate::Computed(op)) => {
             let value = match caps.first() {
                 Some(c) => operand_scalar(host, &c.ext, op, trace, c.scope(None, peers, outer)),
