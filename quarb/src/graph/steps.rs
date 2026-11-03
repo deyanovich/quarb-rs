@@ -56,6 +56,9 @@ pub(crate) fn navigate_paths(
         for (i, (ext, register)) in ctx.iter().enumerate() {
             let node = ext.node;
             match elem {
+                // a template hole never reaches a walk: the fill
+                // replaces it before anything runs
+                PathElem::Hole(_) | PathElem::Param(_) => {}
                 PathElem::Step(step) => {
                     // a link hop hands its edges over: one thread
                     // per edge (two rows on one leg, a node linked
@@ -1089,7 +1092,7 @@ pub(crate) fn group_is_plain(group: &Group) -> bool {
     group.alts.iter().flatten().all(|e| match e {
         PathElem::Step(_) => true,
         PathElem::Group(g) => group_is_plain(g),
-        PathElem::Mark(_) | PathElem::Push { .. } => false,
+        PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_) => false,
     })
 }
 
@@ -1174,6 +1177,7 @@ pub(crate) fn group_admits(
 /// histories.
 fn group_walks_links(group: &Group) -> bool {
     group.alts.iter().flatten().all(|elem| match elem {
+        PathElem::Hole(_) | PathElem::Param(_) => false,
         PathElem::Mark(_) | PathElem::Push { .. } => true,
         PathElem::Group(g) => group_walks_links(g),
         PathElem::Step(step) => {
@@ -1193,6 +1197,7 @@ fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
     for alt in &group.alts {
         for elem in alt {
             match elem {
+                PathElem::Hole(_) | PathElem::Param(_) => return None,
                 PathElem::Mark(_) | PathElem::Push { .. } => {}
                 PathElem::Group(g) => {
                     let d = group_promise(adapter, g)?;
@@ -1305,6 +1310,9 @@ pub(crate) fn expand_elems(
         }
         for path in &paths {
             match elem {
+                // a template hole never reaches a walk: the fill
+                // replaces it before anything runs
+                PathElem::Hole(_) | PathElem::Param(_) => {}
                 PathElem::Step(step) => {
                     // a link hop hands its edges over: one walk per
                     // edge (two rows on one leg, a node linked both
@@ -3069,6 +3077,9 @@ pub fn node_matches_elem(adapter: &impl AstAdapter, node: NodeId, elem: &PathEle
         })
     };
     match elem {
+        // a template hole never reaches a walk: the fill
+        // replaces it before anything runs
+        PathElem::Hole(_) | PathElem::Param(_) => false,
         PathElem::Step(step) => {
             matches_step(adapter, node, step)
                 && !apply_predicates(

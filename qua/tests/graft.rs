@@ -260,3 +260,38 @@ fn a_literal_grafts_with_no_source_mounted() {
         "1 2"
     );
 }
+
+/// Under a mount — a model file's `mount` or two sources on the
+/// command line — a text grafts through the mount's composing
+/// layer, and the thread walks on inside it.
+#[test]
+fn a_text_grafts_under_a_mount() {
+    let dir = std::env::temp_dir().join(format!("quarb-graft-mount-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("events.json"),
+        r#"{"events":[{"id":1,"payload":"{\"user\": {\"name\": \"ada\"}}"},
+                     {"id":2,"payload":"{\"user\": {\"name\": \"bo\"}}"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("audit.model"), "mount audit: events.json;\n").unwrap();
+    let qua = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        (
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let q = "/audit/events/*::payload | graft(json) | /user/name::";
+    let (out, err) = qua(&["--model", "audit.model", q]);
+    assert_eq!(out, "ada\nbo", "{err}");
+    let (out, err) = qua(&[q, "audit=events.json", "other=events.json"]);
+    assert_eq!(out, "ada\nbo", "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -117,20 +117,21 @@ fn a_reducer_in_a_body_over_a_group_takes_the_members_together() {
 }
 
 #[test]
-fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
+fn a_key_written_as_an_operand_is_refused_with_the_signature() {
     let e = refuse("/rows/* @| sum(::x)");
     assert!(
-        e.contains("'sum' takes no operand, 1 given") && e.contains("synopsis"),
+        e.contains("'sum' takes no operand, 1 given") && e.contains("signature"),
         "{e}"
     );
     let e = refuse("/rows/* | %(::k; ::x) @| group(::k) | sum(:x)");
     assert!(e.contains("'sum' takes no operand, 1 given"), "{e}");
+    // (an alias is spelled canonical at parse: the refusal names `var`)
     let e = refuse("/rows/* @| variance(::x; --sample)");
-    assert!(e.contains("variance takes no operand"), "{e}");
+    assert!(e.contains("var takes no operand"), "{e}");
     // the positional word is retired with the pointer to the switch
     let e = refuse("/rows/* @| variance(sample)");
     assert!(
-        e.contains("'sample' is an option: write variance(--sample)"),
+        e.contains("'sample' is an option: write var(--sample)"),
         "{e}"
     );
     let e = refuse("/rows/* | ::x @| zscore(sample; ::k)");
@@ -151,7 +152,7 @@ fn a_key_written_as_an_operand_is_refused_with_the_synopsis() {
     );
     let e = refuse("/rows/* @| sum(--foo=1)");
     assert!(
-        e.contains("'sum' has no option '--foo'; the synopsis: sum{stream}(-o|--of=expr?)"),
+        e.contains("'sum' has no option '--foo'; the signature: sum{stream}(-o|--of=expr?)"),
         "{e}"
     );
     // a keyed aggregate keeps its key operand

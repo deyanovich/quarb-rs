@@ -8,6 +8,14 @@ pub(crate) fn is_reference(r: &Reg) -> bool {
     matches!(r.value, Value::Node(_))
 }
 
+/// Whether the regula bears a fresh name (a template-born binder
+/// renamed at the graft): absent from `%.`, `#.` and the positions.
+pub(crate) fn is_hidden(r: &Reg) -> bool {
+    r.name
+        .as_deref()
+        .is_some_and(crate::syntax::ast::is_fresh_name)
+}
+
 /// What a register reference recalls, read through `part` (the
 /// regula's value, or its provenance): the latest regula, one by
 /// position or name, the whole side as a list, the named view as a
@@ -27,16 +35,33 @@ pub(crate) fn recall_part<T: Clone>(
     list: impl Fn(Vec<T>) -> T,
     record: impl Fn(Vec<(String, T)>) -> T,
 ) -> T {
-    let side = |refs: bool| register.iter().filter(move |r| is_reference(r) == refs);
+    // a fresh name — a macro template's own binder, renamed at the
+    // graft (design paper: Hygiene) — stands apart from the
+    // positions and the named view; the full views show it
+    let side = |refs: bool| {
+        register
+            .iter()
+            .filter(move |r| is_reference(r) == refs && !is_hidden(r))
+    };
     let full = |refs: bool| {
         let mut fields: Vec<(String, T)> = Vec::new();
-        for (i, reg) in side(refs).enumerate() {
+        // an anonymous regula is keyed by its position among the
+        // side's regulae, the positions `$.N` count — a hidden one
+        // is shown by its name and takes no position
+        let mut position = 0;
+        for reg in register.iter().filter(|r| is_reference(r) == refs) {
+            if !is_hidden(reg) {
+                position += 1;
+            }
             match &reg.name {
-                Some(name) => match fields.iter_mut().find(|(n, _)| n == name) {
-                    Some((_, v)) => *v = part(reg).clone(),
-                    None => fields.push((name.clone(), part(reg).clone())),
-                },
-                None => fields.push((format!(".{}", i + 1), part(reg).clone())),
+                Some(name) => {
+                    let shown = crate::syntax::ast::display_name(name);
+                    match fields.iter_mut().find(|(n, _)| *n == shown) {
+                        Some((_, v)) => *v = part(reg).clone(),
+                        None => fields.push((shown, part(reg).clone())),
+                    }
+                }
+                None => fields.push((format!(".{position}"), part(reg).clone())),
             }
         }
         record(fields)
@@ -79,7 +104,10 @@ fn named_side<T: Clone>(
     part: impl Fn(&Reg) -> &T,
 ) -> Vec<(String, T)> {
     let mut fields: Vec<(String, T)> = Vec::new();
-    for reg in register.iter().filter(|r| is_reference(r) == refs) {
+    for reg in register
+        .iter()
+        .filter(|r| is_reference(r) == refs && !is_hidden(r))
+    {
         if let Some(name) = &reg.name {
             match fields.iter_mut().find(|(n, _)| n == name) {
                 Some((_, v)) => *v = part(reg).clone(),

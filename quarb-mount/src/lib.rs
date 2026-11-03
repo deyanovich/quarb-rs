@@ -992,9 +992,39 @@ impl AstAdapter for MountAdapter {
                 .or(self.source_fill(m, inner)),
         }
     }
+
+    /// A free graft lands in a mount's composing layer (every
+    /// source gets one at the mount; spec: Grafting) and carries
+    /// that mount's tag, so the thread walks on inside the layer.
+    /// An open mount is preferred to opening a latent one.
+    fn graft_text(&self, text: &str, notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        let m = self.grafting_mount()?;
+        Some(
+            self.adapter(m)
+                .graft_text(text, notation)?
+                .map(|n| self.encode(m, n)),
+        )
+    }
+
+    fn grafts_on_demand(&self) -> bool {
+        self.grafting_mount().is_some()
+    }
+
+    fn form_of(&self, node: NodeId) -> Option<quarb::Form> {
+        let (m, inner) = self.decode(node)?;
+        self.adapter(m).form_of(inner)
+    }
 }
 
 impl MountAdapter {
+    /// The first mount whose adapter grafts on demand: among the
+    /// open ones first, then opening the latent ones in order.
+    fn grafting_mount(&self) -> Option<usize> {
+        (0..self.mounts.len())
+            .find(|&m| self.active(m).is_some_and(|a| a.grafts_on_demand()))
+            .or_else(|| (0..self.mounts.len()).find(|&m| self.adapter(m).grafts_on_demand()))
+    }
+
     /// The mount's fill: `:source` its target (the real-world
     /// address; the query-local name as a fallback), `:path` the
     /// node's name-path inside the mounted adapter, and — for a

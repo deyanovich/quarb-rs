@@ -465,9 +465,10 @@ fn defs_file_comments() {
     )
     .unwrap();
     assert_eq!(expand("&adults", &defs).unwrap(), "/row[::Age >= 18]");
+    // (the alias `tp` expands canonical: `strptime`)
     assert_eq!(
         expand("/x | &gregorian", &defs).unwrap(),
-        "/x | tp(\"%Y-%m-%d\") | $_ + \"12d\""
+        "/x | strptime(\"%Y-%m-%d\") | $_ + \"12d\""
     );
     // only a line-leading `#` comments; `#` has no meaning inside a
     // definition body, so a mid-line `#` still errors as query text

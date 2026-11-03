@@ -312,7 +312,7 @@ fn operands_keep_their_kind_and_the_input_fills_the_data_slot() {
         "{x} @| sklearn:model_selection.cross_val_score(--cv=2)"
     ));
     assert!(
-        e.contains("needs 1 operand") && e.contains("cross_val_score(estimator; [X = $_]"),
+        e.contains("needs 1 operand") && e.contains("cross_val_score{X}(estimator; "),
         "{e}"
     );
     // a second table as the operand: the distance matrix of rows
@@ -432,7 +432,7 @@ fn a_parameter_is_reachable_as_an_operand_and_by_name() {
     // (`np.round(a, decimals=0, out=None)`: two after the input)
     let e = refuse("= 3.14159 | np:round(2; 3; 4)");
     assert!(
-        e.contains("takes 2 operands") && e.contains("np:round("),
+        e.contains("takes 2 operands") && e.contains("np:round{"),
         "{e}"
     );
 }

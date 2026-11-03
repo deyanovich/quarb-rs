@@ -1,6 +1,6 @@
 //! Printing an outline (lang/TODO.md): `indent` per value, and the
-//! row-aligned context commands `number` and `outline` over a stream
-//! of levels.
+//! row-aligned context command `outline` over a stream of levels
+//! (`@| number` is retired: `number` is the locale cast alone).
 
 use quarb::{QueryResult, Value};
 
@@ -23,6 +23,14 @@ fn values(q: &str) -> Vec<String> {
     }
 }
 
+/// The refusal's text.
+fn refused(q: &str) -> String {
+    match quarb::run(q, &doc()) {
+        Ok(_) => panic!("{q}: expected a refusal"),
+        Err(e) => e.to_string(),
+    }
+}
+
 #[test]
 fn indent_prefixes_the_value_at_hand() {
     assert_eq!(
@@ -36,15 +44,27 @@ fn indent_prefixes_the_value_at_hand() {
 }
 
 #[test]
-fn number_counts_per_level() {
+fn number_is_the_locale_cast_alone() {
+    // the outline numbering of `@| number` is retired (ruling
+    // 2026-11-03): `number` rides the plain pipe only
+    let e = refused("/toc/* @| number(::depth)");
+    assert!(e.contains("aggregate command 'number'"), "{e}");
+    let e = refused("/toc/* | ::depth @| number");
+    assert!(e.contains("aggregate command 'number'"), "{e}");
+    assert_eq!(values(r#"= "1 234,5" | number(fr)"#), ["1234.5"]);
+    // the text is optional: a level alone under --style is the
+    // number-only line `@| number` printed
     assert_eq!(
-        values("/toc/* @| number(::depth)"),
+        values(r#"/toc/* @| outline(::depth; --style="1.")"#),
         ["1", "1.1", "1.1.1", "1.2", "2"]
     );
-    // without an argument the value at hand is the level
     assert_eq!(
-        values("/toc/* | ::depth @| number"),
+        values(r#"/toc/* | ::depth @| outline(--style="1.")"#),
         ["1", "1.1", "1.1.1", "1.2", "2"]
+    );
+    assert_eq!(
+        values("/toc/* @| outline(::depth)"),
+        ["", "  ", "    ", "  ", ""]
     );
 }
 
@@ -82,6 +102,5 @@ fn the_shallowest_level_is_the_top_and_a_skipped_one_counts_once() {
 #[test]
 fn outline_commands_ride_the_context_pipe_only() {
     assert!(quarb::run("/toc/* | outline(::depth; ::title)", &doc()).is_err());
-    assert!(quarb::run("/toc/* @| outline(::depth)", &doc()).is_err());
     assert!(quarb::run(r#"/toc/* @| outline(::depth; ::title; "i.")"#, &doc()).is_err());
 }

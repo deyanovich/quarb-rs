@@ -21,13 +21,17 @@
 //! `"//"`, `::op` is `"+"` — so introspection reads in the language's
 //! own vocabulary.
 //!
-//! The vocabulary is **locked (v2)** and is a compatibility surface:
+//! The vocabulary is **locked (v3)** and is a compatibility surface:
 //! node kinds, property keys, and spellings keep their meaning;
 //! growth is additive only (new kinds and keys may appear, existing
 //! ones never change or vanish). v2 (2026-07-28) respelled the
 //! resolution axes canonically (`-->` → `-->`, `<--` → `<--`, ruling
 //! #14) and added the `--` axis; v1 consumers reading axis
-//! spellings see the new canon. The root carries the version as
+//! spellings see the new canon. v3 (2026-11-03) spells a node kind
+//! as the grammar's rule name with its underscores read as hyphens
+//! (`label-index`, `session-record`, `session-read`, `session-push`;
+//! the grammar keeps `label_index`), the kebab-case rule for every
+//! name the engine invents. The root carries the version as
 //! `:::vocabulary`, and [`QueryArbor::inventory`] exposes the
 //! kind → property-key map for conformance checking (the
 //! `vocabulary` test locks it). `param` is *reserved*: it names a
@@ -45,7 +49,7 @@ use crate::syntax::ast::{
     Anchor, Arg, Axis, Branch, Command, ConcatMode, Group, Matcher, Operand, PathElem, PredExpr,
     Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Step, TraitClause,
 };
-pub(crate) use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
+pub(crate) use crate::syntax::expand::{Answer, Expander, Form, MacroBinding, RegUsage};
 use crate::value::Value;
 use crate::{lexer, parser};
 
@@ -91,6 +95,10 @@ struct RNode {
     props: Vec<(String, Value)>,
     parent: Option<usize>,
     children: Vec<usize>,
+    /// The construct the node stands for, grafted as a copy when a
+    /// macro answers the node (design paper: a handle from each
+    /// reflected node to its AST node).
+    form: Option<Form>,
 }
 
 /// A parsed query exposed as an arbor.
@@ -128,6 +136,7 @@ impl QueryArbor {
             props,
             parent,
             children: Vec::new(),
+            form: None,
         });
         if let Some(p) = parent {
             self.nodes[p].children.push(id);
@@ -135,8 +144,51 @@ impl QueryArbor {
         id
     }
 
+    fn set_form(&mut self, id: usize, form: Form) {
+        self.nodes[id].form = Some(form);
+    }
+
+    /// The handle on every node interned under `parent` since
+    /// `from` that lacks one: the construct the walk just reflected.
+    /// A node that set its own narrower form keeps it.
+    fn attach(&mut self, parent: usize, from: usize, form: &dyn Fn() -> Form) {
+        let ids: Vec<usize> = self.nodes[parent].children[from..].to_vec();
+        for id in ids {
+            if self.nodes[id].form.is_none() {
+                self.nodes[id].form = Some(form());
+            }
+        }
+    }
+
+    /// The construct a node stands for, cloned.
+    pub(crate) fn form_at(&self, node: NodeId) -> Option<Form> {
+        self.nodes.get(node.0 as usize).and_then(|n| n.form.clone())
+    }
+
+    /// `::form` on every node interned under `parent` since
+    /// `from` that lacks one: the construct's own canonical text
+    /// (ruling 2026-11-03, draft 204: a macro body splices any
+    /// reflected form back into query text). A node that stamped its
+    /// own narrower form keeps it.
+    fn stamp(&mut self, parent: usize, from: usize, form: &dyn Fn() -> String) {
+        let mut text: Option<String> = None;
+        let ids: Vec<usize> = self.nodes[parent].children[from..].to_vec();
+        for id in ids {
+            if self.nodes[id].props.iter().any(|(k, _)| k == "form") {
+                continue;
+            }
+            let t = text.get_or_insert_with(form).clone();
+            self.nodes[id]
+                .props
+                .push(("form".to_string(), Value::Str(t)));
+        }
+    }
+
     fn walk_query(&mut self, q: &Query, parent: usize, role: Option<&str>) -> usize {
-        let mut props = Vec::new();
+        let mut props = vec![(
+            "form".to_string(),
+            Value::Str(crate::syntax::unparse::unparse(q)),
+        )];
         if let Some(role) = role {
             props.push(("role".to_string(), Value::Str(role.to_string())));
         }
@@ -144,6 +196,7 @@ impl QueryArbor {
             props.push(("outer".to_string(), Value::Bool(true)));
         }
         let id = self.intern(Some("query"), props, Some(parent));
+        self.set_form(id, Form::Query(q.clone()));
         for corr in &q.correlations {
             self.walk_query(corr, id, Some("correlation"));
         }
@@ -151,7 +204,17 @@ impl QueryArbor {
             self.walk_branch(branch, id);
         }
         if !q.pipeline.is_empty() {
-            let pipe = self.intern(Some("pipeline"), Vec::new(), Some(id));
+            let text: Vec<String> = q
+                .pipeline
+                .iter()
+                .map(crate::syntax::unparse::command)
+                .collect();
+            let pipe = self.intern(
+                Some("pipeline"),
+                vec![("form".to_string(), Value::Str(text.join(" ")))],
+                Some(id),
+            );
+            self.set_form(pipe, Form::Pipeline(q.pipeline.clone()));
             for command in &q.pipeline {
                 self.walk_command(command, pipe);
             }
@@ -160,7 +223,13 @@ impl QueryArbor {
     }
 
     fn walk_branch(&mut self, b: &Branch, parent: usize) {
-        let id = self.intern(Some("branch"), anchor_props(&b.anchor), Some(parent));
+        let mut props = anchor_props(&b.anchor);
+        props.push((
+            "form".to_string(),
+            Value::Str(crate::syntax::unparse::branch(b)),
+        ));
+        let id = self.intern(Some("branch"), props, Some(parent));
+        self.set_form(id, Form::Branch(b.clone()));
         for elem in &b.steps {
             self.walk_elem(elem, id);
         }
@@ -170,7 +239,22 @@ impl QueryArbor {
     }
 
     fn walk_elem(&mut self, e: &PathElem, parent: usize) {
+        let from = self.nodes[parent].children.len();
+        self.walk_elem_inner(e, parent);
+        self.stamp(parent, from, &|| crate::syntax::unparse::elem(e));
+        self.attach(parent, from, &|| Form::Elem(e.clone()));
+    }
+
+    fn walk_elem_inner(&mut self, e: &PathElem, parent: usize) {
         match e {
+            PathElem::Hole(h) => self.walk_hole(h, parent),
+            PathElem::Param(name) => {
+                self.intern(
+                    Some("param"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+            }
             PathElem::Mark(name) => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
@@ -210,9 +294,18 @@ impl QueryArbor {
         if let Some(mark) = reach_mark(g.reach) {
             props.push(("reach".to_string(), Value::Str(mark.to_string())));
         }
+        props.push((
+            "form".to_string(),
+            Value::Str(crate::syntax::unparse::group(g)),
+        ));
         let id = self.intern(Some("group"), props, Some(parent));
         for alt in &g.alts {
-            let alt_id = self.intern(Some("alt"), Vec::new(), Some(id));
+            let text: String = alt.iter().map(crate::syntax::unparse::elem).collect();
+            let alt_id = self.intern(
+                Some("alt"),
+                vec![("form".to_string(), Value::Str(text))],
+                Some(id),
+            );
             for elem in alt {
                 self.walk_elem(elem, alt_id);
             }
@@ -292,6 +385,10 @@ impl QueryArbor {
             }
             _ => {}
         }
+        props.push((
+            "form".to_string(),
+            Value::Str(crate::syntax::unparse::step(s)),
+        ));
         let id = self.intern(Some("step"), props, Some(parent));
         for t in &s.traits {
             self.walk_trait(t, id);
@@ -303,14 +400,30 @@ impl QueryArbor {
 
     fn walk_trait(&mut self, t: &TraitClause, parent: usize) {
         let alts = Value::list(t.alts.iter().map(|a| Value::Str(a.clone())).collect());
-        self.intern(
+        let id = self.intern(
             Some("trait"),
-            vec![("alts".to_string(), alts)],
+            vec![
+                ("alts".to_string(), alts),
+                (
+                    "form".to_string(),
+                    Value::Str(crate::syntax::unparse::trait_suffix(std::slice::from_ref(
+                        t,
+                    ))),
+                ),
+            ],
             Some(parent),
         );
+        self.set_form(id, Form::Trait(t.clone()));
     }
 
     fn walk_predicate(&mut self, p: &Predicate, parent: usize) {
+        let from = self.nodes[parent].children.len();
+        self.walk_predicate_inner(p, parent);
+        self.stamp(parent, from, &|| crate::syntax::unparse::predicate(p));
+        self.attach(parent, from, &|| Form::Predicate(p.clone()));
+    }
+
+    fn walk_predicate_inner(&mut self, p: &Predicate, parent: usize) {
         match p {
             Predicate::Index(n) => {
                 self.intern(
@@ -362,6 +475,13 @@ impl QueryArbor {
     }
 
     fn walk_pred_expr(&mut self, e: &PredExpr, parent: usize) {
+        let from = self.nodes[parent].children.len();
+        self.walk_pred_expr_inner(e, parent);
+        self.stamp(parent, from, &|| crate::syntax::unparse::pred_expr(e));
+        self.attach(parent, from, &|| Form::PredExpr(e.clone()));
+    }
+
+    fn walk_pred_expr_inner(&mut self, e: &PredExpr, parent: usize) {
         match e {
             PredExpr::Or(a, b) => {
                 let id = self.intern(Some("or"), Vec::new(), Some(parent));
@@ -408,6 +528,13 @@ impl QueryArbor {
     }
 
     fn walk_operand(&mut self, o: &Operand, parent: usize) {
+        let from = self.nodes[parent].children.len();
+        self.walk_operand_inner(o, parent);
+        self.stamp(parent, from, &|| crate::syntax::unparse::operand_text(o));
+        self.attach(parent, from, &|| Form::Operand(o.clone()));
+    }
+
+    fn walk_operand_inner(&mut self, o: &Operand, parent: usize) {
         match o {
             // A pattern literal reflects as one node whose ::form is
             // the canonical tight spelling (stars outside quotes).
@@ -420,7 +547,11 @@ impl QueryArbor {
                 for seg in segs {
                     match seg {
                         crate::syntax::ast::PatSeg::Star => {
-                            self.intern(Some("star"), Vec::new(), Some(id));
+                            self.intern(
+                                Some("star"),
+                                vec![("form".to_string(), Value::Str("*".to_string()))],
+                                Some(id),
+                            );
                         }
                         crate::syntax::ast::PatSeg::Lit(t) => {
                             self.intern(
@@ -428,6 +559,12 @@ impl QueryArbor {
                                 vec![
                                     ("value".to_string(), Value::Str(t.clone())),
                                     ("type".to_string(), Value::Str("text".to_string())),
+                                    (
+                                        "form".to_string(),
+                                        Value::Str(crate::syntax::unparse::literal(&Value::Str(
+                                            t.clone(),
+                                        ))),
+                                    ),
                                 ],
                                 Some(id),
                             );
@@ -443,11 +580,22 @@ impl QueryArbor {
                 let id = self.intern(Some("match"), Vec::new(), Some(parent));
                 self.walk_operand(scrutinee, id);
                 for (test, regex, result) in arms {
-                    let props = if *regex {
-                        vec![("regex".to_string(), Value::Bool(true))]
-                    } else {
-                        Vec::new()
+                    let test_text = match test {
+                        Operand::Lit(Value::Str(pat)) if *regex => {
+                            crate::syntax::unparse::regex_literal(pat, true)
+                        }
+                        _ => crate::syntax::unparse::operand_text(test),
                     };
+                    let mut props = vec![(
+                        "form".to_string(),
+                        Value::Str(format!(
+                            "{test_text} ? {}",
+                            crate::syntax::unparse::operand_text(result)
+                        )),
+                    )];
+                    if *regex {
+                        props.push(("regex".to_string(), Value::Bool(true)));
+                    }
                     let arm = self.intern(Some("when"), props, Some(id));
                     self.walk_operand(test, arm);
                     self.walk_operand(result, arm);
@@ -467,6 +615,9 @@ impl QueryArbor {
                     self.walk_projection(p, id);
                 }
             }
+            // a template expansion (design paper: the quasiquote):
+            // its text as the form, its expression beneath
+            Operand::Hole(h) => self.walk_hole(h, parent),
             // the quarq literal: its source, the body's commands as
             // its children (spec: Quarqs)
             Operand::Lit(Value::Quarq(q)) => {
@@ -605,13 +756,13 @@ impl QueryArbor {
             // `$,name` — the session read (draft 166); `%,` the memory
             Operand::Recall(RegRef::Session(name)) => {
                 self.intern(
-                    Some("session_read"),
+                    Some("session-read"),
                     vec![("name".to_string(), Value::Str(name.clone()))],
                     Some(parent),
                 );
             }
             Operand::Recall(RegRef::SessionRecord) => {
-                self.intern(Some("session_record"), Vec::new(), Some(parent));
+                self.intern(Some("session-record"), Vec::new(), Some(parent));
             }
             Operand::Recall(r) => {
                 self.intern(
@@ -651,7 +802,7 @@ impl QueryArbor {
             // `t[[x; y]]` — the lookup by label (draft 166): the base,
             // then each label
             Operand::LabelIndex { base, labels } => {
-                let id = self.intern(Some("label_index"), Vec::new(), Some(parent));
+                let id = self.intern(Some("label-index"), Vec::new(), Some(parent));
                 self.walk_operand(base, id);
                 for l in labels {
                     self.walk_operand(l, id);
@@ -886,6 +1037,12 @@ impl QueryArbor {
                                 vec![
                                     ("value".to_string(), Value::Str(t.clone())),
                                     ("type".to_string(), Value::Str("text".to_string())),
+                                    (
+                                        "form".to_string(),
+                                        Value::Str(crate::syntax::unparse::literal(&Value::Str(
+                                            t.clone(),
+                                        ))),
+                                    ),
                                 ],
                                 Some(id),
                             );
@@ -895,7 +1052,14 @@ impl QueryArbor {
                         // the default hole, each holding its operand
                         // subtree (the default's fallback second).
                         crate::syntax::ast::InterpSeg::Strict(e, msg) => {
-                            let mut props = Vec::new();
+                            let mut props = vec![(
+                                "form".to_string(),
+                                Value::Str(format!(
+                                    "${{{}:?{}}}",
+                                    crate::syntax::unparse::operand_text(e),
+                                    msg.as_deref().unwrap_or("")
+                                )),
+                            )];
                             if let Some(m) = msg {
                                 props.push(("message".to_string(), Value::Str(m.clone())));
                             }
@@ -903,7 +1067,16 @@ impl QueryArbor {
                             self.walk_operand(e, hid);
                         }
                         crate::syntax::ast::InterpSeg::Default(e, f) => {
-                            let hid = self.intern(Some("default"), Vec::new(), Some(id));
+                            let form = format!(
+                                "${{{}:-{}}}",
+                                crate::syntax::unparse::operand_text(e),
+                                crate::syntax::unparse::operand_text(f)
+                            );
+                            let hid = self.intern(
+                                Some("default"),
+                                vec![("form".to_string(), Value::Str(form))],
+                                Some(id),
+                            );
                             self.walk_operand(e, hid);
                             self.walk_operand(f, hid);
                         }
@@ -940,26 +1113,38 @@ impl QueryArbor {
         if let Some(k) = key {
             props.push(("key".to_string(), Value::Str(k)));
         }
-        self.intern(Some("projection"), props, Some(parent));
+        props.push((
+            "form".to_string(),
+            Value::Str(crate::syntax::unparse::projection(p)),
+        ));
+        let id = self.intern(Some("projection"), props, Some(parent));
+        self.set_form(id, Form::Projection(p.clone()));
     }
 
     fn walk_command(&mut self, command: &Command, parent: usize) {
+        let from = self.nodes[parent].children.len();
+        self.walk_command_inner(command, parent);
+        self.stamp(parent, from, &|| crate::syntax::unparse::command(command));
+        self.attach(parent, from, &|| Form::Command(command.clone()));
+    }
+
+    fn walk_command_inner(&mut self, command: &Command, parent: usize) {
         match command {
             // `| ,name` — the session push (draft 166)
             Command::SessionPush(name) => {
                 self.intern(
-                    Some("session_push"),
+                    Some("session-push"),
                     vec![("name".to_string(), Value::Str(name.clone()))],
                     Some(parent),
                 );
             }
             // `| %,` — the session memory as a record
             Command::Recall(RegRef::SessionRecord) => {
-                self.intern(Some("session_record"), Vec::new(), Some(parent));
+                self.intern(Some("session-record"), Vec::new(), Some(parent));
             }
             Command::Recall(RegRef::Session(name)) => {
                 self.intern(
-                    Some("session_read"),
+                    Some("session-read"),
                     vec![("name".to_string(), Value::Str(name.clone()))],
                     Some(parent),
                 );
@@ -1000,6 +1185,14 @@ impl QueryArbor {
                 }
                 self.intern(Some("push"), props, Some(parent));
             }
+            Command::Param { name, .. } => {
+                self.intern(
+                    Some("param"),
+                    vec![("name".to_string(), Value::Str(name.clone()))],
+                    Some(parent),
+                );
+            }
+            Command::Hole { hole, .. } => self.walk_hole(hole, parent),
             Command::Subcontext { name, body } => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
@@ -1145,7 +1338,28 @@ impl QueryArbor {
 
     fn walk_args(&mut self, args: &[Arg], parent: usize) {
         for arg in args {
+            let from = self.nodes[parent].children.len();
+            self.walk_arg(arg, parent);
+            self.stamp(parent, from, &|| crate::syntax::unparse::arg_text(arg));
+            self.attach(parent, from, &|| Form::Arg(arg.clone()));
+        }
+    }
+
+    /// A template expansion's node: `expansion`, its `form` the
+    /// hole as written, the expression under it.
+    fn walk_hole(&mut self, h: &crate::syntax::ast::Hole, parent: usize) {
+        let id = self.intern(
+            Some("expansion"),
+            vec![("form".to_string(), Value::Str(format!("${{{}}}", h.text)))],
+            Some(parent),
+        );
+        self.walk_operand(&h.expr, id);
+    }
+
+    fn walk_arg(&mut self, arg: &Arg, parent: usize) {
+        {
             match arg {
+                Arg::Hole(h) => self.walk_hole(h, parent),
                 // a record's typed key (draft 166) is the literal it is
                 Arg::Lit(v) | Arg::Key(v) => {
                     self.intern(
@@ -1319,9 +1533,10 @@ impl QueryArbor {
 /// Build a macro's expansion arbor: an unnamed root with one child
 /// per parameter, named after it. Each argument form's reflected
 /// subtree hangs under its parameter node (a `@rest` node carries
-/// one subtree per collected argument), and every form's subtree
-/// root carries `::form` — its unparsed text — so a macro body can
-/// splice arguments back into query text.
+/// one subtree per collected argument); every reflected node
+/// carries `::form`, its canonical text, so a macro body can splice
+/// any form back into query text, and the root answers
+/// `:::vocabulary` as the reflection root does.
 pub(crate) fn expansion_arbor(bindings: &[(String, MacroBinding)]) -> QueryArbor {
     let mut arbor = QueryArbor {
         nodes: Vec::new(),
@@ -1335,24 +1550,63 @@ pub(crate) fn expansion_arbor(bindings: &[(String, MacroBinding)]) -> QueryArbor
         };
         let mut props = Vec::new();
         if let MacroBinding::One(op) = binding {
-            props.push((
-                "form".to_string(),
-                Value::Str(crate::syntax::unparse::operand_text(op)),
-            ));
+            props.push(("form".to_string(), Value::Str(param_text(op))));
         }
         let pid = arbor.intern(Some(name), props, Some(0));
+        if let MacroBinding::One(op) = binding {
+            arbor.set_form(pid, param_form(op));
+        }
         for op in forms {
-            let before = arbor.nodes[pid].children.len();
-            arbor.walk_operand(op, pid);
-            if let Some(&child) = arbor.nodes[pid].children.get(before) {
-                arbor.nodes[child].props.push((
-                    "form".to_string(),
-                    Value::Str(crate::syntax::unparse::operand_text(op)),
-                ));
-            }
+            arbor.mount_argument(op, pid);
         }
     }
     arbor
+}
+
+/// A parameter node's `::form`: the argument's canonical text — a
+/// quarq argument's content, since the quarq mounts as its content
+/// (design paper: Arguments).
+fn param_text(op: &Operand) -> String {
+    match op {
+        Operand::Lit(Value::Quarq(q)) => Form::Pipeline((*q.body).clone()).text(),
+        _ => crate::syntax::unparse::operand_text(op),
+    }
+}
+
+/// The parameter node as the whole argument: its form.
+fn param_form(op: &Operand) -> Form {
+    match op {
+        Operand::Lit(Value::Quarq(q)) => Form::Pipeline((*q.body).clone()),
+        _ => Form::Operand(op.clone()),
+    }
+}
+
+impl QueryArbor {
+    /// An argument under its parameter node: the form's reflected
+    /// subtree — a quarq as its content, a `pipeline` node with the
+    /// commands under it, exactly as a form written in place (design
+    /// paper: Arguments; today's `q(…)` node is what a body cannot
+    /// walk).
+    fn mount_argument(&mut self, op: &Operand, parent: usize) {
+        match op {
+            Operand::Lit(Value::Quarq(q)) => {
+                let commands: Vec<Command> = (*q.body).clone();
+                let pipe = self.intern(
+                    Some("pipeline"),
+                    vec![(
+                        "form".to_string(),
+                        Value::Str(Form::Pipeline(commands.clone()).text()),
+                    )],
+                    Some(parent),
+                );
+                self.set_form(pipe, Form::Pipeline(commands.clone()));
+                for command in &commands {
+                    self.walk_command(command, pipe);
+                }
+            }
+            _ => self.walk_operand(op, parent),
+        }
+    }
 }
 
 /// The adapter a *data-aware* macro body queries: the expansion
@@ -1423,6 +1677,13 @@ impl<'a> ExpansionAdapter<'a> {
 impl AstAdapter for ExpansionAdapter<'_> {
     fn root(&self) -> NodeId {
         NodeId(0)
+    }
+
+    fn form_of(&self, node: NodeId) -> Option<Form> {
+        if Self::is_data(node) {
+            return None;
+        }
+        self.params.form_at(node)
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
@@ -1831,6 +2092,10 @@ impl AstAdapter for QueryArbor {
         NodeId(0)
     }
 
+    fn form_of(&self, node: NodeId) -> Option<Form> {
+        self.form_at(node)
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes
             .get(node.0 as usize)
@@ -2005,7 +2270,7 @@ impl AstAdapter for QueryArbor {
                 "query" => Some(Value::Str(self.source.clone())),
                 // The locked vocabulary version (growth is additive
                 // within a version; a break would bump it).
-                "vocabulary" => Some(Value::Int(2)),
+                "vocabulary" => Some(Value::Int(4)),
                 _ => None,
             };
         }
@@ -2126,6 +2391,51 @@ pub(crate) fn operand_invites(op: &Operand) -> std::collections::BTreeSet<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_expansion_root_carries_the_vocabulary_version() {
+        // a macro body can guard on the version (ruling 2026-11-03)
+        let arbor = expansion_arbor(&[]);
+        assert_eq!(arbor.metadata(NodeId(0), "vocabulary"), Some(Value::Int(4)));
+    }
+
+    #[test]
+    fn every_reflected_node_carries_its_form() {
+        let arbor = QueryArbor::parse(
+            r#"/a/b<x>[::n > 1 && ::m *= "q"] | ::k @| group(::k) | %(s = ($_ | sum)) | top(2; :s)"#,
+        )
+        .unwrap();
+        let missing: Vec<String> = arbor
+            .nodes
+            .iter()
+            .filter(|n| n.name.is_some() && !n.props.iter().any(|(k, _)| k == "form"))
+            .map(|n| n.name.clone().unwrap_or_default())
+            .collect();
+        assert!(missing.is_empty(), "nodes without ::form: {missing:?}");
+        // the form is the construct's own canonical text
+        let step = arbor
+            .nodes
+            .iter()
+            .find(|n| {
+                n.name.as_deref() == Some("step")
+                    && n.props
+                        .iter()
+                        .any(|(k, v)| k == "matcher" && *v == Value::Str("b".into()))
+            })
+            .unwrap();
+        let form = step
+            .props
+            .iter()
+            .find(|(k, _)| k == "form")
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            form,
+            Some(Value::Str(
+                // (`*=` canonicalises to the pattern comparison)
+                r#"/b<x>[::n > 1 && ::m == *"q"*]"#.into()
+            ))
+        );
+    }
 
     /// A tiny data adapter whose node ids deliberately set the top
     /// bit — permitted by the `NodeId` contract (opaque, hash- or
@@ -2304,8 +2614,11 @@ impl Expander for Reflector<'_> {
         body: &Query,
         bindings: &[(String, MacroBinding)],
         data_aware: bool,
-    ) -> crate::Result<Vec<Value>> {
+    ) -> crate::Result<Vec<Answer>> {
         let arbor = expansion_arbor(bindings);
+        // the same arbor again for the answers' forms: its ids are
+        // deterministic, and the body's adapter owns the first
+        let forms = expansion_arbor(bindings);
         let run = crate::graph::run::inherited().options();
         let result = if data_aware {
             let Some(data) = self.data else {
@@ -2322,12 +2635,43 @@ impl Expander for Reflector<'_> {
             gate(body, &run)?;
             eval(body, &arbor)
         };
+        // a refusal inside the body (a template that could not fill,
+        // a read that failed) is the expansion's error, not an empty
+        // answer
+        if let Some(why) = crate::value::ambient::take_refusal() {
+            return Err(QuarbError::expansion(format!(
+                "in expansion of '&{name}': {why}"
+            )));
+        }
         match result {
-            QueryResult::Values(vs) => Ok(vs),
-            QueryResult::Nodes(_) => Err(QuarbError::parse(format!(
-                "macro '&{name}' must produce query text; its body \
-                 returned nodes (project or interpolate)"
-            ))),
+            // a quarq answers its content as structure; any other
+            // value its text, parsed as today
+            QueryResult::Values(vs) => Ok(vs
+                .into_iter()
+                .map(|v| match v {
+                    Value::Quarq(q) => Answer::Form(q.into_form()),
+                    other => Answer::Text(other.to_string()),
+                })
+                .collect()),
+            // a reflected node answers its own construct, grafted as
+            // a copy (design paper: a body may answer in structure)
+            QueryResult::Nodes(ns) => ns
+                .into_iter()
+                .map(|n| {
+                    let form = if data_aware && ExpansionAdapter::is_data(n) {
+                        None
+                    } else {
+                        forms.form_at(n)
+                    };
+                    form.map(Answer::Form).ok_or_else(|| {
+                        QuarbError::parse(format!(
+                            "macro '&{name}' answered a node that is no form (the \
+                             expansion root, a rest parameter, or a data node); \
+                             answer a form's node, a quarq, or a text"
+                        ))
+                    })
+                })
+                .collect(),
         }
     }
 }

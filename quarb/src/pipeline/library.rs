@@ -62,16 +62,18 @@ impl OptionSpec {
         written.strip_prefix("--") == Some(self.long) || self.short == Some(written)
     }
 
+    /// The option as a signature row spells it: `-n|--count=x?`, a
+    /// switch bare (a library's options all have defaults).
     fn spelling(&self) -> String {
         let mut s = String::new();
         if let Some(short) = self.short {
             s.push_str(short);
-            s.push('/');
+            s.push('|');
         }
         s.push_str("--");
         s.push_str(self.long);
         if self.takes_value {
-            s.push_str("=…");
+            s.push_str("=x?");
         }
         s
     }
@@ -136,13 +138,24 @@ impl Synopsis {
         self.options.iter().any(|o| o.long == "*")
     }
 
-    /// The one-line synopsis a refusal quotes:
-    /// `| difflib:close_matches(candidates; -n=… --cutoff=…) → list of strings`.
+    /// The one-line signature a refusal quotes, in the notation of
+    /// the built-in rows (spec: Signatures, draft 203): the input's
+    /// parameter braced, the operands in the parenthesis (`?`
+    /// optional, `…` variadic), then the option segment
+    /// (`-n|--count=x?`; a switch bare; `--…` any keyword), and the
+    /// return after an arrow:
+    /// `difflib:close_matches{word}(candidates; -n|--count=x? --cutoff=x?) → list of strings`.
     pub fn render(&self, prefix: &str) -> String {
-        let pipe = match self.pipes {
-            Pipe::Plain => "|",
-            Pipe::Agg => "@|",
-            Pipe::Both => "| or @|",
+        let slot = match self.input {
+            InputSlot::Operand(i) | InputSlot::OperandOrSelf(i) => {
+                self.operands.get(i).map(|op| op.name).unwrap_or("input")
+            }
+            InputSlot::Option(long) => long,
+            InputSlot::Context => "context",
+        };
+        let braced = match self.input {
+            InputSlot::Option(long) => format!("{{--{long}}}"),
+            _ => format!("{{{slot}}}"),
         };
         let mut fields: Vec<String> = Vec::new();
         for (i, op) in self.operands.iter().enumerate() {
@@ -150,39 +163,35 @@ impl Synopsis {
                 fields.push("…".to_string());
                 continue;
             }
-            let slot = self.input.operand_index() == Some(i);
-            let mut f = if slot {
-                format!("[{} = $_]", op.name)
-            } else if op.required {
-                op.name.to_string()
-            } else {
-                format!("[{}]", op.name)
-            };
+            if self.input.operand_index() == Some(i) {
+                continue;
+            }
+            let mut f = op.name.to_string();
             if !op.values.is_empty() {
-                f.push_str(&format!(" ({})", op.values.join("|")));
+                f.push('=');
+                f.push_str(&op.values.join("|"));
+            }
+            if !op.required {
+                f.push('?');
             }
             fields.push(f);
         }
-        if !self.options.is_empty() {
-            fields.push(
-                self.options
-                    .iter()
-                    .map(|o| {
-                        if o.long == "*" {
-                            return "--…".to_string();
-                        }
-                        let mut s = o.spelling();
-                        if self.input == InputSlot::Option(o.long) {
-                            s.push_str(" = $_");
-                        }
-                        s
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+        let options: Vec<String> = self
+            .options
+            .iter()
+            .filter(|o| self.input != InputSlot::Option(o.long))
+            .map(|o| {
+                if o.long == "*" {
+                    return "--…".to_string();
+                }
+                o.spelling()
+            })
+            .collect();
+        if !options.is_empty() {
+            fields.push(options.join(" "));
         }
         format!(
-            "{pipe} {prefix}:{}({}) → {}",
+            "{prefix}:{}{braced}({}) → {}",
             self.name,
             fields.join("; "),
             self.returns
@@ -293,14 +302,19 @@ pub fn places_input(call: &FnCall) -> bool {
 /// Check a written call against the library's synopsis, before the
 /// run: the command exists, rides this pipe, has no operand or
 /// option outside the synopsis and no required operand missing.
-/// The refusal quotes the synopsis.
+/// The refusal quotes the signature.
 pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> Result<(), String> {
     let prefix = lib.prefix();
     let syn = lib.resolve(name)?;
-    let shown = syn.render(prefix);
+    // The inventory's row where the language writes one (the graph
+    // library's); the reflected signature otherwise.
+    let shown = match crate::syntax::man::entry(&format!("{prefix}:{name}")) {
+        Some(row) if !row.synopsis.is_empty() => format!("{} → {}", row.synopsis, syn.returns),
+        _ => syn.render(prefix),
+    };
     if !syn.pipes.admits(agg) {
         return Err(format!(
-            "'{prefix}:{name}' rides {}; written after '{}'; the synopsis: {shown}",
+            "'{prefix}:{name}' rides {}; written after '{}'; the signature: {shown}",
             match syn.pipes {
                 Pipe::Plain => "the plain pipe",
                 Pipe::Agg => "the aggregation pipe",
@@ -332,7 +346,7 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
     let room = fixed.saturating_sub(usize::from(slot_takes));
     if written_operands > room && !syn.variadic() {
         return Err(format!(
-            "'{prefix}:{name}' takes {room} operand{}, {written_operands} given; the synopsis: {shown}",
+            "'{prefix}:{name}' takes {room} operand{}, {written_operands} given; the signature: {shown}",
             if room == 1 { "" } else { "s" }
         ));
     }
@@ -364,7 +378,7 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
             && option_names.iter().any(|n| n == op.name)
         {
             return Err(format!(
-                "'{prefix}:{name}' takes '{}' once: it is operand {} and --{}= here; the synopsis: {shown}",
+                "'{prefix}:{name}' takes '{}' once: it is operand {} and --{}= here; the signature: {shown}",
                 op.name,
                 i + 1,
                 op.name.replace('_', "-")
@@ -393,7 +407,7 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
             .filter(|(i, op)| op.required && op.name != "..." && Some(*i) != slot)
             .count();
         return Err(format!(
-            "'{prefix}:{name}' needs {required} operand{}, {written_operands} given ({} unfilled); the synopsis: {shown}",
+            "'{prefix}:{name}' needs {required} operand{}, {written_operands} given ({} unfilled); the signature: {shown}",
             if required == 1 { "" } else { "s" },
             missing.join(", ")
         ));
@@ -407,17 +421,17 @@ pub fn check(lib: &dyn CommandLibrary, name: &str, call: &FnCall, agg: bool) -> 
                     continue;
                 }
                 return Err(format!(
-                    "'{prefix}:{name}' has no option '{opt}'; the synopsis: {shown}"
+                    "'{prefix}:{name}' has no option '{opt}'; the signature: {shown}"
                 ));
             };
             if spec.takes_value && value.is_none() {
                 return Err(format!(
-                    "option '{opt}' of '{prefix}:{name}' takes a value ('{opt}=…'); the synopsis: {shown}"
+                    "option '{opt}' of '{prefix}:{name}' takes a value ('{opt}=…'); the signature: {shown}"
                 ));
             }
             if !spec.takes_value && value.is_some() {
                 return Err(format!(
-                    "option '{opt}' of '{prefix}:{name}' is a switch and takes no value; the synopsis: {shown}"
+                    "option '{opt}' of '{prefix}:{name}' is a switch and takes no value; the signature: {shown}"
                 ));
             }
         }
@@ -442,4 +456,107 @@ pub fn canonical_options(
             (long, value)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_signature_renders_in_the_row_notation() {
+        // the input's parameter braced, the operands with `?` when
+        // optional and `…` when variadic, the options as a row spells
+        // them, the return after the arrow
+        let syn = Synopsis {
+            name: "ttest",
+            doc: "",
+            pipes: Pipe::Agg,
+            operands: &[
+                OperandSpec {
+                    name: "stream",
+                    doc: "",
+                    values: &[],
+                    required: true,
+                },
+                OperandSpec {
+                    name: "sample",
+                    doc: "",
+                    values: &[],
+                    required: false,
+                },
+            ],
+            options: &[
+                OptionSpec {
+                    short: None,
+                    long: "popmean",
+                    takes_value: true,
+                    doc: "",
+                },
+                OptionSpec {
+                    short: Some("-p"),
+                    long: "paired",
+                    takes_value: false,
+                    doc: "",
+                },
+            ],
+            input: InputSlot::Operand(0),
+            returns: "float",
+        };
+        assert_eq!(
+            syn.render("sp"),
+            "sp:ttest{stream}(sample?; --popmean=x? -p|--paired) → float"
+        );
+        // the slot elsewhere than first, a variadic tail, any keyword
+        let syn = Synopsis {
+            name: "cross_val_score",
+            doc: "",
+            pipes: Pipe::Agg,
+            operands: &[
+                OperandSpec {
+                    name: "estimator",
+                    doc: "",
+                    values: &[],
+                    required: true,
+                },
+                OperandSpec {
+                    name: "X",
+                    doc: "",
+                    values: &[],
+                    required: true,
+                },
+                OperandSpec {
+                    name: "...",
+                    doc: "",
+                    values: &[],
+                    required: false,
+                },
+            ],
+            options: &[OptionSpec {
+                short: None,
+                long: "*",
+                takes_value: true,
+                doc: "",
+            }],
+            input: InputSlot::OperandOrSelf(1),
+            returns: "a value",
+        };
+        assert_eq!(
+            syn.render("sklearn"),
+            "sklearn:cross_val_score{X}(estimator; …; --…) → a value"
+        );
+        // the context slot of a row-aligned aggregate
+        let syn = Synopsis {
+            name: "degree",
+            doc: "",
+            pipes: Pipe::Agg,
+            operands: &[],
+            options: &[],
+            input: InputSlot::Context,
+            returns: "int per node",
+        };
+        assert_eq!(
+            syn.render("graph"),
+            "graph:degree{context}() → int per node"
+        );
+    }
 }

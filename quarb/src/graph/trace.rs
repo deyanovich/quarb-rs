@@ -108,6 +108,9 @@ fn plan(q: &Query) -> Result<Vec<PStep>> {
                 expr: unparse::group(g),
             }),
             PathElem::Mark(_) => return Err(unsupported("marks")),
+            PathElem::Hole(_) | PathElem::Param(_) => {
+                return Err(unsupported("template expansions"));
+            }
             PathElem::Push { .. } => return Err(unsupported("pushes")),
         }
     }

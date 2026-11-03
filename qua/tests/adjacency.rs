@@ -79,7 +79,7 @@ fn a_command_after_a_pipe_reads_its_input_from_the_pipe() {
     let e = refuse("= 3.14159 | round(2; 3)");
     assert!(
         e.contains(
-            "'round' takes 1 operand at most, 2 given; the synopsis: round{number}(places?)"
+            "'round' takes 1 operand at most, 2 given; the signature: round{number}(places?)"
         ),
         "{e}"
     );

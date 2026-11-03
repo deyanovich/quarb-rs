@@ -216,6 +216,16 @@ pub enum Command {
     /// bound, where `&name` splices a def at parse time. A register
     /// holding no quarq refuses.
     Splice(RegRef),
+    /// `$then` in command position inside a definition body: a
+    /// parameter a quarq argument fills with its commands (design
+    /// paper: Arguments); after `@|` the quarq's one command is
+    /// read as the aggregate it names. Never survives substitution.
+    Param { name: String, agg: bool },
+    /// `| ${…}` inside a quarq template: an expansion in command
+    /// position, filled with the commands its value brings when the
+    /// literal is evaluated (design paper: the quasiquote); after
+    /// `@|` the aggregate form of what it brings.
+    Hole { hole: Hole, agg: bool },
     /// `| ,name` — the SESSION PUSH (spec: Capsa Operations, "Session
     /// memory", draft 166): the topic filed under the name for the
     /// rest of the session; it gathers — one thread files its topic,
@@ -431,8 +441,83 @@ impl FnCall {
 /// per capsa against its node (the key of a keyed aggregate like
 /// `sort_by(::age)`), or an offset range (`window(-2..0)`, either
 /// end optional).
+/// A template expansion (design paper: the quasiquote is a quarq
+/// with expansions): the hole's text as written and its expression,
+/// parsed at the definition and evaluated when the literal is, in
+/// the scope the literal stands in. Its kind is the position it
+/// stands at; a name position holds the hole in the name itself,
+/// spelled by [`hole_name`].
+#[derive(Debug, Clone)]
+pub struct Hole {
+    pub text: String,
+    pub expr: Box<Operand>,
+    /// The hole's place in the template's list: two holes may be
+    /// written alike (`.${$_}(… ${$_} …)`) and fill apart.
+    pub index: usize,
+}
+
+/// The reserved spelling of a hole standing where a name stands —
+/// a push, a step matcher, a property key: `\u{1}`, the hole's index
+/// in the template's list, `\u{1}`, and its text. No written name
+/// begins with the control character.
+pub fn hole_name(index: usize, text: &str) -> String {
+    format!("\u{1}{index}\u{1}{text}")
+}
+
+/// The hole a name position holds — its index in the template's
+/// list and its text — if the name is one.
+pub fn name_hole(name: &str) -> Option<(usize, &str)> {
+    let rest = name.strip_prefix('\u{1}')?;
+    let (index, text) = rest.split_once('\u{1}')?;
+    Some((index.parse().ok()?, text))
+}
+
+/// A binder's name as written in a macro's own template (design
+/// paper: Hygiene): `\u{2}` and the name, so the graft can tell a
+/// template-born binder from one an argument brought. Stripped at
+/// the graft, never run, never printed.
+pub fn template_name(name: &str) -> String {
+    format!("\u{2}{name}")
+}
+
+/// The name a template-born binder was written with, if the name
+/// carries the template mark.
+pub fn template_bare(name: &str) -> Option<&str> {
+    name.strip_prefix('\u{2}')
+}
+
+/// A fresh name for a template-born binder nobody invited (design
+/// paper: renamed unless invited): `\u{3}`, the expansion's number,
+/// `\u{3}` and the written name. Consistent across one expansion,
+/// absent from `%.` and `#.`, present in `%.*` and `#.*`, skipped by
+/// positional recalls.
+pub fn fresh_name(name: &str, expansion: usize) -> String {
+    format!("\u{3}{expansion}\u{3}{name}")
+}
+
+/// Whether a name is a fresh one.
+pub fn is_fresh_name(name: &str) -> bool {
+    name.starts_with('\u{3}')
+}
+
+/// A binder's name as shown: a fresh name as the written name and
+/// its expansion's number joined by a middle dot (`t·1`), a
+/// template-marked one bare, any other as it is.
+pub fn display_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix('\u{3}')
+        && let Some((n, written)) = rest.split_once('\u{3}')
+    {
+        return format!("{written}·{n}");
+    }
+    template_bare(name).unwrap_or(name).to_string()
+}
+
 #[derive(Debug, Clone)]
 pub enum Arg {
+    /// `${…}` where a record field or a call argument stands inside
+    /// a quarq template: a sequence expansion, one argument per
+    /// value reached (design paper: the quasiquote).
+    Hole(Hole),
     /// A record field's key that is no text (spec: Record, draft
     /// 166): `%(1 = "a"; 2013-01-01 = 5)`, the value of the field
     /// following it, as a text key's `Lit(Str)` does.
@@ -544,6 +629,18 @@ pub enum Projection {
 /// group — a breadcrumb push.
 #[derive(Debug, Clone)]
 pub enum PathElem {
+    /// `$col` glued to a path inside a definition body (`^/row$col`):
+    /// a parameter the argument's form continues the walk with — a
+    /// projection, steps — or, holding a quarq, ends the branch and
+    /// follows it with the quarq's commands (design paper: the
+    /// quasiquote, a parameter bare in a template). Never survives
+    /// substitution.
+    Param(String),
+    /// `${…}` where a path element stands inside a quarq template:
+    /// filled with steps, a predicate refining the element before
+    /// it, or a projection ending the branch (design paper: the
+    /// quasiquote).
+    Hole(Hole),
     /// `.name` (bare, node context) — mark the current node in the
     /// thread's mark array, under `name` when one is given; a bare
     /// `.` marks anonymously (the slot is still `((.N))`-addressable,
@@ -758,6 +855,10 @@ pub enum TableRow {
 
 #[derive(Debug, Clone)]
 pub enum Operand {
+    /// `${…}` where an operand stands inside a quarq template: a
+    /// literal expansion — the value as a literal node, a reached
+    /// form as the operand it is (design paper: the quasiquote).
+    Hole(Hole),
     /// A pattern literal — `*"sub"*`, `"app"*`, `*".gz"`,
     /// `*"a"*"b"*` — legal only as the right operand of `=` / `!=`
     /// (the parser assembles it from a glued star/string chain and

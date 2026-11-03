@@ -74,6 +74,7 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
     for a in &c.args {
         match a {
             Arg::Expr(e) => v.operand(e),
+            Arg::Hole(h) => v.operand(&h.expr),
             Arg::Opt { value: Some(e), .. } => v.operand(e),
             Arg::Pairs { keys, values } => {
                 v.operand(keys);
@@ -91,6 +92,7 @@ pub fn walk_call<V: Visitor + ?Sized>(v: &mut V, c: &FnCall) {
 pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
     match s {
         Command::SessionPush(_) => {}
+        Command::Hole { hole, .. } => v.operand(&hole.expr),
         Command::Func(call)
         | Command::Agg(call)
         | Command::RecordWith(call)
@@ -110,6 +112,7 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Push(_)
         | Command::Recall(_)
         | Command::Splice(_)
+        | Command::Param { .. }
         | Command::AggRecall(_)
         | Command::Spread { .. }
         | Command::FieldsPush => {}
@@ -118,7 +121,8 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
 
 pub fn walk_elem<V: Visitor + ?Sized>(v: &mut V, e: &PathElem) {
     match e {
-        PathElem::Mark(_) => {}
+        PathElem::Hole(h) => v.operand(&h.expr),
+        PathElem::Param(_) | PathElem::Mark(_) => {}
         PathElem::Step(st) => {
             for p in &st.predicates {
                 v.predicate(p);
@@ -299,6 +303,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
                 }
             }
         }
+        Operand::Hole(h) => v.operand(&h.expr),
         Operand::Pattern(_)
         | Operand::Lit(_)
         | Operand::Recall(_)

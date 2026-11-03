@@ -689,10 +689,8 @@ pub(crate) fn apply_command_in<H: Host>(
         // rides `|`. A non-list topic reduces as a singleton. The
         // reduction consumes the members: they no longer correspond
         // to the topic.
-        // (`number` is both: `@| number` numbers an outline, `| number(LOCALE)`
-        // reads text as a number under a locale's conventions; so is
-        // `ngrams`: `@| ngrams(n)` windows the stream, `| ngrams(n)`
-        // the word n-grams of a text.)
+        // (`ngrams` is both: `@| ngrams(n)` windows the stream,
+        // `| ngrams(n)` the word n-grams of a text.)
         // `| #` on a node: a `tabula` node read as a table (spec: The
         // Table); `| %` the record of its properties (draft 164);
         // `| @` has no reading of a node and is refused with the
@@ -752,10 +750,7 @@ pub(crate) fn apply_command_in<H: Host>(
             if stdlib::known_agg(&call.name)
                 // `| [$.pos]` reads its expression per capsa: the
                 // scalar route resolves the argument
-                && !matches!(
-                    call.name.as_str(),
-                    "number" | "ngrams" | "csv" | "table" | "pretty" | "[]"
-                ) =>
+                && !matches!(call.name.as_str(), "ngrams" | "csv" | "table" | "pretty" | "[]") =>
         {
             agg_as_func_command(call, caps, host, trace, outer, peers)
         }
@@ -1037,11 +1032,10 @@ pub(crate) fn apply_command_in<H: Host>(
         Command::Agg(call) if call.name == "zscore" => {
             zscore_command(call, caps, host, trace, outer, peers)
         }
-        // `@| number[(level)]` and `@| outline[(level; text; --style="1.")]`
-        // — each capsa's topic becomes its dotted number in the
-        // stream of levels, or its line of the outline. Row-aligned
-        // like `shift`.
-        Command::Agg(call) if matches!(call.name.as_str(), "number" | "outline") => {
+        // `@| outline[(level; text; --style="1.")]` — each capsa's
+        // topic becomes its line of the outline, numbered under
+        // `--style`. Row-aligned like `shift`.
+        Command::Agg(call) if call.name == "outline" => {
             outline_command(call, caps, host, trace, outer, peers)
         }
         // `@| tree[(…)]` — the context drawn as a tree, one text
@@ -1197,6 +1191,21 @@ pub(crate) fn apply_command_in<H: Host>(
         // `| &$.p` — the quarq the register holds runs here on each
         // capsa, its body the next commands (spec: Quarqs); late
         // bound, so the registers and the cursor are read now.
+        // a parameter in command position never reaches the
+        // evaluator: substitution fills it or the parser refuses
+        Command::Param { name, .. } => {
+            record_refusal(format!(
+                "parameter '${name}' stands in command position without a quarq"
+            ));
+            caps
+        }
+        Command::Hole { hole, .. } => {
+            record_refusal(format!(
+                "expansion '${{{}}}' stands outside a quarq template",
+                hole.text
+            ));
+            caps
+        }
         Command::Splice(r) => caps
             .into_iter()
             .enumerate()
@@ -3087,9 +3096,9 @@ fn of_values<H: Host>(
 /// (spec: omitted data): a count, the structural ones, the renderers
 /// that print what is there.
 const OMISSION_SAFE: &[&str] = &[
-    "count", "collapse", "first", "last", "nodes", "edges", "tree", "outline", "number", "json",
-    "jsonl", "kaiv", "yaml", "toml", "xml", "csv", "tsv", "md", "html", "text", "atrep", "copy",
-    "explain", "timeline",
+    "count", "collapse", "first", "last", "nodes", "edges", "tree", "outline", "json", "jsonl",
+    "kaiv", "yaml", "toml", "xml", "csv", "tsv", "md", "html", "text", "atrep", "copy", "explain",
+    "timeline",
 ];
 
 pub(crate) fn agg_command<H: Host>(
@@ -3349,6 +3358,7 @@ pub(crate) fn keyed_agg<H: Host>(
         key_args
             .iter()
             .filter_map(|a| match a {
+                Arg::Hole(_) => None,
                 Arg::Expr(e) => {
                     let inner = match e {
                         Operand::Desc(inner) => inner.as_ref(),

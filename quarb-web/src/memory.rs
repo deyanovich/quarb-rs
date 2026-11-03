@@ -813,6 +813,24 @@ impl MemoryStore {
             });
             by_path.insert(path, built.len() - 1);
         }
+        // A canonical that names ANOTHER page of the set is a claim
+        // about that page (its `->canonical` edge), not this page's
+        // identity: the page keeps its path's URL, so one URL names
+        // one page and a link to it lands on the page that is it.
+        if let Some(b) = base.as_ref() {
+            let own: HashMap<String, usize> = built
+                .iter()
+                .enumerate()
+                .filter_map(|(i, x)| b.join(&x.row.path).ok().map(|u| (u.to_string(), i)))
+                .collect();
+            for (i, x) in built.iter_mut().enumerate() {
+                if let Some(u) = x.row.url.as_deref()
+                    && own.get(u.trim_end_matches('#')).is_some_and(|&j| j != i)
+                {
+                    x.row.url = b.join(&x.row.path).ok().map(|u| u.to_string());
+                }
+            }
+        }
 
         // 2. Tree order: pre-order, siblings by name (byte order).
         let mut kids: HashMap<Option<PageKey>, Vec<usize>> = HashMap::new();

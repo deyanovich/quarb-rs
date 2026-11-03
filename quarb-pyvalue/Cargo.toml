@@ -17,5 +17,5 @@ homepage.workspace = true
 auto-initialize = ["pyo3/auto-initialize"]
 
 [dependencies]
-quarb = { path = "../quarb", version = "0.47.0" }
+quarb = { path = "../quarb", version = "0.48.0" }
 pyo3 = { version = "0.28", features = ["abi3-py38"] }

@@ -38,6 +38,33 @@ fn one(q: &str) -> String {
     v.into_iter().next().unwrap()
 }
 
+#[test]
+fn a_record_key_prints_bare_when_it_reads_bare() {
+    // a name with inner hyphens reads bare and prints bare; only a
+    // key the constructor would not read as itself is quoted, and
+    // every printed form reads back as the same record
+    assert_eq!(one("= %(in-degree = 2)"), "%(in-degree = 2)");
+    assert_eq!(
+        one(r#"= %(a_b = 1; c-d = 2; "e f" = 3)"#),
+        r#"%(a_b = 1; c-d = 2; "e f" = 3)"#
+    );
+    assert_eq!(one("= %(in-degree = 2) | :in-degree"), "2");
+    for (q, want) in [
+        (r#"= %("null" = 1)"#, r#"%("null" = 1)"#),
+        (r#"= %("true" = 1)"#, r#"%("true" = 1)"#),
+        (r#"= %("_x" = 1)"#, r#"%("_x" = 1)"#),
+        (r#"= %("a--b" = 1)"#, r#"%("a--b" = 1)"#),
+        (r#"= %("a-" = 1)"#, r#"%("a-" = 1)"#),
+        ("= %(x-1 = 1)", "%(x-1 = 1)"),
+    ] {
+        let printed = one(q);
+        assert_eq!(printed, want, "{q}");
+        assert_eq!(one(&format!("= {printed}")), printed, "{q} reads back");
+    }
+    // a typed key stays apart from the quoted text key
+    assert_eq!(one("= %(null = 1) | keys | [1] | type"), "null");
+}
+
 fn refuse(q: &str) -> String {
     run(q).unwrap_err().to_string()
 }
@@ -591,6 +618,30 @@ fn a_duration_between_two_instants() {
     assert!(e.contains("duration takes --from or --to, not both"), "{e}");
     assert_eq!(one("= duration('1775-12-16'; --to='x')"), "null");
     assert_eq!(one("= '1h 30min' | duration"), "1h 30min");
+}
+
+/// An option's value reads as an operand reads (spec: Options): a
+/// core-field path in it is the record's wherever the call stands —
+/// as a call operand, after a pipe inside a group — and a compound
+/// expression, bare or parenthesised, is read whole; `map` alone
+/// keeps `--to=(:a; :b)` as its column list.
+#[test]
+fn an_option_value_reads_as_an_operand_reads() {
+    let r = "= %(a = '2026-03-01T10:00') | %(d = duration('2026-03-01T09:00'; --to=:a)) | :d";
+    assert_eq!(one(r), "1h");
+    let r = "= %(a = '2026-03-01T10:00') | %(d = duration('2026-03-01T12:30'; --from=:a)) | :d";
+    assert_eq!(one(r), "2h 30min");
+    let r = "= %(a = '2026-03-01T10:00') | %(d = ('2026-03-01T12:30' | duration(--from=:a))) | :d";
+    assert_eq!(one(r), "2h 30min");
+    let r =
+        "= %(dep = '10:30') | %(w = duration('2000-01-01T09:00'; --to='2000-01-01T' ++ :dep)) | :w";
+    assert_eq!(one(r), "1h 30min");
+    let r = "= %(dep = '10:30') | %(w = duration('2000-01-01T09:00'; --to=('2000-01-01T' ++ :dep))) | :w";
+    assert_eq!(one(r), "1h 30min");
+    assert_eq!(
+        one("= '2000-01-01T09:00' | duration(--to='2000-01-01T' ++ '10:30')"),
+        "1h 30min"
+    );
 }
 
 /// The mixed span form a Russian output locale prints reads back as

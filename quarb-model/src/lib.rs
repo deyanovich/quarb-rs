@@ -1439,6 +1439,21 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
         }
         self.base.parent(node)
     }
+    /// The base's graft, as the enriched adapter answers it.
+    fn graft_text(&self, text: &str, notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        self.base.graft_text(text, notation)
+    }
+    fn grafts_on_demand(&self) -> bool {
+        self.base.grafts_on_demand()
+    }
+    // a model-born node is no construct; a source node's form is
+    // the source's (a reflected query under a model)
+    fn form_of(&self, node: NodeId) -> Option<quarb::Form> {
+        if node.0 & MODEL_TAG != 0 {
+            return None;
+        }
+        self.base.form_of(node)
+    }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         if node.0 & MODEL_TAG != 0 {
             let c = ((node.0 & !MODEL_TAG) >> CIDX_SHIFT) as usize;
@@ -1796,6 +1811,21 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             Some((_, 0)) => Some(self.base.root()),
             Some((c, _)) => Some(Self::container_node(c)),
             None => self.base.parent(node),
+        }
+    }
+
+    /// A graft is the base's: its composing layer answers, and the
+    /// grafted root is a base node (spec: Grafting).
+    fn graft_text(&self, text: &str, notation: Option<&str>) -> Option<Result<NodeId, String>> {
+        self.base.graft_text(text, notation)
+    }
+    fn grafts_on_demand(&self) -> bool {
+        self.base.grafts_on_demand()
+    }
+    fn form_of(&self, node: NodeId) -> Option<quarb::Form> {
+        match self.decode(node) {
+            Some(_) => None,
+            None => self.base.form_of(node),
         }
     }
 

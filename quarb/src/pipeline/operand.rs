@@ -21,7 +21,23 @@ pub(crate) fn eval_operand<H: Host>(
         Operand::Lit(Value::Quarq(q)) if q.projector.is_some() => {
             vec![q.projector.as_deref().cloned().expect("checked")]
         }
+        // a quarq template fills where it is evaluated: once per
+        // thread, in this scope (design paper: the quasiquote)
+        Operand::Lit(Value::Quarq(q)) if q.is_template() => {
+            vec![crate::pipeline::template::fill_template(
+                host, ext, q, trace, scope,
+            )]
+        }
         Operand::Lit(v) => vec![v.clone()],
+        // an expansion outside a template never evaluates: the
+        // parser refuses it, the fill replaces it
+        Operand::Hole(h) => {
+            record_refusal(format!(
+                "expansion '${{{}}}' stands outside a quarq template",
+                h.text
+            ));
+            vec![Value::Null]
+        }
         // A pattern literal is not a value: the grammar admits it
         // only as a comparison's right operand, where the Compare
         // arm intercepts it before operand evaluation.
@@ -78,11 +94,17 @@ pub(crate) fn eval_operand<H: Host>(
             // context (`%(lemma = (^//entry[//inflection:: = $_]
             // ::lemma))`), the predicate's own scope has no topic:
             // `$_` is the enclosing capsa's, carried across.
+            // On a node of a reflected query (the expansion arbor,
+            // a .quarb file) the topic of a node thread is the node
+            // itself, as the quarq of its form (design paper: a
+            // reflected node reads as the quarq of its subtree) —
+            // `$_ ++! %(…)`, `syntax:node($_; …)`, `… ?? $_`.
             vec![
                 scope
                     .topic
                     .cloned()
                     .or_else(|| with_run(|s| s.enclosing_topic.last().cloned()))
+                    .or_else(|| host.node_form(ext).map(Value::quarq_form))
                     .unwrap_or(Value::Null),
             ]
         }
@@ -903,13 +925,19 @@ pub(crate) fn eval_operand<H: Host>(
                 // the record's, as `::alt` in `levenshtein(::name;
                 // ::alt)` is the node's (the call form desugars to
                 // this pipe, and the inner capsa is not visible to
-                // the query).
+                // the query). An option's expression value reads the
+                // same scope (`duration("…"; --to=:a)`: `:a` is the
+                // record's, not the piped literal's).
+                let outer_expr = |a: &Arg| {
+                    matches!(a, Arg::Expr(_))
+                        || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
+                };
                 let resolved;
                 let command = match command {
                     Command::Func(call)
                         if stdlib::known_scalar(&call.name)
                             && !matches!(call.name.as_str(), "rec" | "record")
-                            && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
+                            && call.args.iter().any(outer_expr) =>
                     {
                         resolved = Command::Func(FnCall {
                             headless: false,
@@ -921,6 +949,15 @@ pub(crate) fn eval_operand<H: Host>(
                                     Arg::Expr(e) => {
                                         Arg::Lit(operand_scalar(host, ext, e, trace, scope))
                                     }
+                                    Arg::Opt {
+                                        name,
+                                        value: Some(e),
+                                    } if !matches!(e, Operand::Lit(_)) => Arg::Opt {
+                                        name: name.clone(),
+                                        value: Some(Operand::Lit(operand_scalar(
+                                            host, ext, e, trace, scope,
+                                        ))),
+                                    },
                                     other => other.clone(),
                                 })
                                 .collect(),
@@ -1176,24 +1213,45 @@ pub(crate) fn eval_operand<H: Host>(
         // the left's header, its items gathered as a constructor's
         // are. A refusal nulls the result.
         Operand::Concat { mode, left, right } => {
+            let row_of = |items: &[(Option<String>, Operand)]| -> Vec<(Option<String>, Value)> {
+                items
+                    .iter()
+                    .map(|(name, e)| match e {
+                        // a declared field casts its value
+                        Operand::Typed { inner, typing } => {
+                            let v = gathered(eval_operand(host, ext, inner, trace, scope));
+                            let key = name.clone().unwrap_or_default();
+                            (name.clone(), cast_reading(v, &key, Some(typing.clone())))
+                        }
+                        e => (
+                            name.clone(),
+                            gathered(eval_operand(host, ext, e, trace, scope)),
+                        ),
+                    })
+                    .collect()
+            };
+            // `$_ ++! %(axis = "//")` on a reflected node: the node
+            // copied with the named properties replaced (`++` added),
+            // its children kept, answered as a quarq (design paper:
+            // the node overwrite — the constructor applied to the
+            // node itself)
+            if matches!(left.as_ref(), Operand::Cursor | Operand::Topic)
+                && let Operand::Row(items) = right.as_ref()
+                && let Some(form) = host.node_form(ext)
+            {
+                let row = row_of(items);
+                return vec![match form.rewrite(*mode, &row) {
+                    Ok(f) => Value::quarq_form(f),
+                    Err(why) => {
+                        crate::pipeline::record_refusal(format!("{}: {why}", mode.symbol()));
+                        Value::Null
+                    }
+                }];
+            }
             let ls = forking(eval_operand(host, ext, left, trace, scope));
             let rs: Vec<Result<Value, String>> = match right.as_ref() {
                 Operand::Row(items) => {
-                    let row: Vec<(Option<String>, Value)> = items
-                        .iter()
-                        .map(|(name, e)| match e {
-                            // a declared field casts its value
-                            Operand::Typed { inner, typing } => {
-                                let v = gathered(eval_operand(host, ext, inner, trace, scope));
-                                let key = name.clone().unwrap_or_default();
-                                (name.clone(), cast_reading(v, &key, Some(typing.clone())))
-                            }
-                            e => (
-                                name.clone(),
-                                gathered(eval_operand(host, ext, e, trace, scope)),
-                            ),
-                        })
-                        .collect();
+                    let row = row_of(items);
                     ls.iter()
                         .map(|l| crate::stdlib::concat_row(*mode, l.clone(), row.clone()))
                         .collect()
@@ -1705,6 +1763,9 @@ pub(crate) fn record_build<H: Host>(
     while let Some(arg) = args.next() {
         let before = fields.len();
         match arg {
+            // a template hole never reaches a record build: the fill
+            // replaces it before anything runs
+            Arg::Hole(_) => {}
             Arg::Lit(Value::Str(_)) | Arg::Key(_) => {
                 let (name, key) = match arg {
                     Arg::Lit(Value::Str(name)) => (name.clone(), None),
@@ -1730,6 +1791,7 @@ pub(crate) fn record_build<H: Host>(
                     | Some(Arg::Named { .. })
                     | Some(Arg::Opt { .. })
                     | Some(Arg::Pairs { .. })
+                    | Some(Arg::Hole(_))
                     | None => (Value::Null, Prov::default()),
                 };
                 fields.push((name, value, prov));

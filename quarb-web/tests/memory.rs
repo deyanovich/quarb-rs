@@ -227,6 +227,58 @@ fn the_name_index_agrees_with_the_walk() {
 }
 
 #[test]
+fn a_canonical_naming_another_page_is_not_this_pages_url() {
+    // spec.html declares learn.html as its canonical: that is its
+    // `->canonical` edge, not its identity; a link to /learn.html
+    // lands on learn.html, and spec.html answers to its own path
+    let files = vec![
+        PageFile {
+            path: "index.html".into(),
+            html: page(
+                "Home",
+                "<link rel=\"canonical\" href=\"https://example.org/index.html\">",
+                "<p>Start with <a href=\"/learn.html\">Learn</a> or the <a href=\"/spec.html\">spec</a>.</p>",
+            ),
+        },
+        PageFile {
+            path: "learn.html".into(),
+            html: page(
+                "Learn",
+                "<link rel=\"canonical\" href=\"https://example.org/learn.html\">",
+                "<p>Lessons.</p>",
+            ),
+        },
+        PageFile {
+            path: "spec.html".into(),
+            html: page(
+                "Specifications",
+                "<link rel=\"canonical\" href=\"https://example.org/learn.html\">",
+                "<p>The spec.</p>",
+            ),
+        },
+    ];
+    let a = WebAdapter::new(MemoryStore::build(
+        SiteInput {
+            base_url: "https://example.org/".into(),
+            snapshot: None,
+        },
+        files,
+    ));
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/index.html//ref-->::title"),
+        ["Learn", "Specifications"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/spec.html::href"),
+        ["https://example.org/spec.html"]
+    );
+    assert_eq!(
+        strs(&a, "/sites/example.org/pages/spec.html->canonical::path"),
+        ["learn.html"]
+    );
+}
+
+#[test]
 fn base_href_moves_the_join_base() {
     let files = vec![
         PageFile {

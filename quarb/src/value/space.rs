@@ -21,6 +21,31 @@ pub struct Quarq {
     /// The projector or structured projector the body spells, when
     /// it spells one and nothing else.
     pub projector: Option<Box<Value>>,
+    /// The template's expansions (design paper: the quasiquote), in
+    /// the order the body's holes index them; empty for a quarq
+    /// without any, and for a filled one.
+    pub holes: std::sync::Arc<Vec<crate::syntax::ast::Hole>>,
+    /// The construct the quarq stands for exactly, when it came
+    /// from a reflected node (a node overwritten, a constructor's
+    /// answer): a step, a predicate, a projection — what the body's
+    /// commands only approximate (design paper: the node overwrite).
+    pub form: Option<Box<crate::syntax::expand::Form>>,
+}
+
+impl Quarq {
+    /// Whether the body still holds expansions to fill.
+    pub fn is_template(&self) -> bool {
+        !self.holes.is_empty()
+    }
+
+    /// The construct the quarq grafts as: its exact form, else its
+    /// commands as a pipeline.
+    pub fn into_form(self) -> crate::syntax::expand::Form {
+        match self.form {
+            Some(f) => *f,
+            None => crate::syntax::expand::Form::Pipeline((*self.body).clone()),
+        }
+    }
 }
 
 impl PartialEq for Quarq {
@@ -1825,6 +1850,44 @@ impl Value {
             source,
             body: std::sync::Arc::new(body),
             projector: projector.map(Box::new),
+            holes: std::sync::Arc::new(Vec::new()),
+            form: None,
+        })
+    }
+
+    /// A quarq standing for one construct exactly (design paper: the
+    /// node overwrite, the constructors): its body the commands the
+    /// construct reads as after a pipe, its form the construct.
+    pub fn quarq_form(form: crate::syntax::expand::Form) -> Value {
+        let body = form.as_commands();
+        // a construct with no reading after a pipe (a trait block)
+        // prints as itself
+        let source = if body.is_empty() {
+            format!("q({})", form.text())
+        } else {
+            crate::syntax::unparse::quarq_source(&body)
+        };
+        Value::Quarq(Quarq {
+            source,
+            body: std::sync::Arc::new(body),
+            projector: None,
+            holes: std::sync::Arc::new(Vec::new()),
+            form: Some(Box::new(form)),
+        })
+    }
+
+    /// A quarq template: a body with expansions still to fill.
+    pub fn quarq_template(
+        body: Vec<crate::syntax::ast::Command>,
+        holes: Vec<crate::syntax::ast::Hole>,
+    ) -> Value {
+        let source = crate::syntax::unparse::quarq_source(&body);
+        Value::Quarq(Quarq {
+            source,
+            body: std::sync::Arc::new(body),
+            projector: None,
+            holes: std::sync::Arc::new(holes),
+            form: None,
         })
     }
 
@@ -2761,6 +2824,30 @@ impl From<&str> for Value {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_key_prints_bare_when_it_reads_bare() {
+        use super::quarb_key;
+        for k in ["a", "a_b", "in-degree", "x-1", "a-b-c", "x_", "é", ".3"] {
+            assert_eq!(quarb_key(k), k, "{k} prints bare");
+        }
+        for (k, want) in [
+            ("e f", r#""e f""#),
+            ("a-", r#""a-""#),
+            ("a--b", r#""a--b""#),
+            ("-a", r#""-a""#),
+            ("_x", r#""_x""#),
+            ("1a", r#""1a""#),
+            ("a.b", r#""a.b""#),
+            ("null", r#""null""#),
+            ("true", r#""true""#),
+            ("nan", r#""nan""#),
+            (".and.", r#"".and.""#),
+            ("", r#""""#),
+        ] {
+            assert_eq!(quarb_key(k), want, "{k} prints quoted");
+        }
+    }
+
+    #[test]
     fn floats_print_as_python_prints_them() {
         for (f, want) in [
             (2.89e-82, "2.89e-82"),
@@ -2841,10 +2928,15 @@ mod tests {
         assert!(!Value::record(Vec::new()).is_truthy());
         assert_eq!(Value::list(Vec::new()).to_quarb(), "@()");
         assert_eq!(Value::record(Vec::new()).to_quarb(), "%()");
-        // a key that is not an identifier quotes
+        // a hyphenated name is a bare key; a key the constructor
+        // would not read bare quotes
         assert_eq!(
             Value::record(vec![("my-key".into(), Value::Int(1))]).to_quarb(),
-            "%(\"my-key\" = 1)"
+            "%(my-key = 1)"
+        );
+        assert_eq!(
+            Value::record(vec![("my key".into(), Value::Int(1))]).to_quarb(),
+            "%(\"my key\" = 1)"
         );
         // top-level list display (string coercion) is unchanged
         // (join, not the Quarb form — that is display_form's job)
@@ -2886,18 +2978,31 @@ pub fn quarb_string(s: &str) -> String {
     out
 }
 
-/// A record key as written in `%(k = v)`: bare when it is an
-/// identifier that is not a reserved word, quoted otherwise.
+/// A record key as written in `%(k = v)`: bare when the
+/// constructor reads it bare as that key, quoted otherwise.
 pub fn quarb_key(k: &str) -> String {
-    // An identifier in any script (a name is Unicode alphanumerics
-    // and `_`), never a boolean word.
-    let position = k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit());
-    let bare = position
-        || !k.is_empty()
-            && k.chars()
-                .next()
-                .is_some_and(|c| c.is_alphabetic() || c == '_')
-            && k.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !is_bool_word(k);
-    if bare { k.to_string() } else { quarb_string(k) }
+    if is_bare_key(k) {
+        k.to_string()
+    } else {
+        quarb_string(k)
+    }
+}
+
+/// Whether the constructor reads `k` unquoted as the text key `k`:
+/// a name — a letter, then letters, digits, `_` and single inner
+/// hyphens (`in-degree`, `x-1`) — that is no boolean word and no
+/// literal (`true`, `null`, `nan` written bare are typed keys);
+/// `_` opens the cursor record, so a key starting with it is
+/// quoted; and `.N`, the key of an anonymous regula in `%%.`.
+pub fn is_bare_key(k: &str) -> bool {
+    if k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let mut cs = k.chars();
+    matches!(cs.next(), Some(c) if c.is_alphabetic())
+        && cs.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        && !k.ends_with('-')
+        && !k.contains("--")
+        && !is_bool_word(k)
+        && !matches!(k, "true" | "false" | "null" | "nan" | "inf")
 }

@@ -1689,6 +1689,14 @@ pub trait AstAdapter {
     fn grafts_on_demand(&self) -> bool {
         false
     }
+
+    /// The construct a node of a reflected query stands for, cloned
+    /// (design paper: a handle from each reflected node to its AST
+    /// node): what a template expansion grafts when a hole reaches
+    /// the node. `None` for every arbor that is no query.
+    fn form_of(&self, _node: NodeId) -> Option<crate::Form> {
+        None
+    }
 }
 
 /// Forwards every [`AstAdapter`] method to a wrapped adapter — the
@@ -1739,6 +1747,7 @@ macro_rules! forward_ast_adapter {
             graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
             provenance_list unit_scale unit_names declared_notation graft_text grafts_on_demand
+            form_of
         );
     };
     (@each [$inner:tt] $ex:tt $($m:ident)*) => {
@@ -1817,6 +1826,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [declared_notation $($r:ident)*] declared_notation) => {};
     (@unless [$i:tt] [graft_text $($r:ident)*] graft_text) => {};
     (@unless [$i:tt] [grafts_on_demand $($r:ident)*] grafts_on_demand) => {};
+    (@unless [$i:tt] [form_of $($r:ident)*] form_of) => {};
     // Another method heads the list: look further down.
     (@unless [$i:tt] [$x:ident $($r:ident)*] $m:ident) => {
         $crate::forward_ast_adapter!(@unless [$i] [$($r)*] $m);
@@ -2237,6 +2247,11 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] grafts_on_demand) => {
         fn grafts_on_demand(&self) -> bool {
             $crate::forward_ast_adapter!(@target self $i).grafts_on_demand()
+        }
+    };
+    (@fwd [$i:tt] form_of) => {
+        fn form_of(&self, node: NodeId) -> Option<$crate::Form> {
+            $crate::forward_ast_adapter!(@target self $i).form_of(node)
         }
     };
     (@fwd [$i:tt] unit_scale) => {

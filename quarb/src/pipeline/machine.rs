@@ -143,7 +143,7 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         }
         // A spliced quarq is whatever it holds: the runtime
         // any-topic check types the result.
-        Command::Splice(_) => false,
+        Command::Splice(_) | Command::Param { .. } => false,
         // the session push files the topic and leaves the cursor untouched
         Command::SessionPush(_) => false,
         // A navigation command re-types by its own projection —

@@ -47,7 +47,7 @@ fn the_synopsis_is_checked_before_the_run() {
     assert!(e.contains("takes a value"), "{e}");
     let e = refuse("/rows/* @| sklearn:kmeans(--k=2)");
     assert!(
-        e.contains("has no option '--k'") && e.contains("-k/--n-clusters="),
+        e.contains("has no option '--k'") && e.contains("-k|--n-clusters="),
         "{e}"
     );
     // A module of the package is no command: the gate says so.

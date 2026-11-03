@@ -94,11 +94,6 @@ pub struct FnSpec {
     pub doc: &'static str,
     /// The answer to a null topic on the plain pipe.
     pub null: OnNull,
-    /// The options the command declares, as a utility's synopsis
-    /// lists them (`-i`, `--locale`); any other option in its
-    /// segment is refused by name. No built-in declares one yet:
-    /// the syntax stands empty for the shell-function round.
-    pub options: &'static [&'static str],
 }
 
 const fn scalar(name: &'static str, doc: &'static str) -> FnSpec {
@@ -110,7 +105,6 @@ const fn scalar(name: &'static str, doc: &'static str) -> FnSpec {
         check: Check::None,
         doc,
         null: OnNull::Null,
-        options: &[],
     }
 }
 
@@ -141,7 +135,6 @@ const fn reducing(name: &'static str, doc: &'static str) -> FnSpec {
         check: Check::None,
         doc,
         null: OnNull::Keep,
-        options: &[],
     }
 }
 
@@ -154,7 +147,6 @@ const fn context(name: &'static str, doc: &'static str) -> FnSpec {
         check: Check::None,
         doc,
         null: OnNull::Keep,
-        options: &[],
     }
 }
 
@@ -176,7 +168,6 @@ const fn keyed(name: &'static str, doc: &'static str) -> FnSpec {
         check: Check::Keyed,
         doc,
         null: OnNull::Keep,
-        options: &[],
     }
 }
 
@@ -189,7 +180,6 @@ const fn assoc(name: &'static str, agreement: bool, doc: &'static str) -> FnSpec
         check: Check::Stat,
         doc,
         null: OnNull::Keep,
-        options: &[],
     }
 }
 
@@ -202,13 +192,7 @@ const fn both(name: &'static str, doc: &'static str) -> FnSpec {
         check: Check::None,
         doc,
         null: OnNull::Null,
-        options: &[],
     }
-}
-
-/// The options a command declares beyond `--of` (draft 164).
-const fn with_options(spec: FnSpec, options: &'static [&'static str]) -> FnSpec {
-    FnSpec { options, ..spec }
 }
 
 const fn with_check(spec: FnSpec, check: Check) -> FnSpec {
@@ -240,6 +224,14 @@ pub const SPECS: &[FnSpec] = &[
     scalar("wc", "the count of words"),
     scalar("lc", "the count of lines"),
     scalar("sc", "the count of sentences"),
+    // The counters' long spellings (ruling 2026-11-03): the
+    // two-letter forms stay canonical.
+    scalar("codepoint-count", "cc, alias"),
+    scalar("byte-count", "bc, alias"),
+    scalar("word-count", "wc, alias"),
+    scalar("line-count", "lc, alias"),
+    scalar("sentence-count", "sc, alias"),
+    scalar("char-count", "gc, alias"),
     with_null(
         scalar("lines", "the lines of the text, one capsa each"),
         OnNull::Nothing,
@@ -278,7 +270,7 @@ pub const SPECS: &[FnSpec] = &[
         "the text without the accents of a language, its letters kept: \
          deaccent(fr); bare, every combining mark off (= strip)",
     ),
-    scalar("strip", "the text without any combining mark"),
+    scalar("strip", "deaccent, alias (deprecated; one release)"),
     scalar(
         "stem",
         "the Snowball stem under a language: stem(en), stem(ru), …",
@@ -312,15 +304,12 @@ pub const SPECS: &[FnSpec] = &[
         OnNull::Keep,
     ),
     with_check(
-        with_options(
-            scalar(
-                "map",
-                "the body applied to every value one level deep — the cells of a table, the items of a list, \
+        scalar(
+            "map",
+            "the body applied to every value one level deep — the cells of a table, the items of a list, \
                  the fields of a record, each the topic of the body in turn — and the structure answered \
                  with the results in place (a table re-types its columns); --to=:col, or a parenthesised \
                  list of columns, restricts the mapping",
-            ),
-            &["--to"],
         ),
         Check::Command,
     ),
@@ -348,16 +337,13 @@ pub const SPECS: &[FnSpec] = &[
     ),
     scalar("gc", "the count of grapheme clusters"),
     // Numbers.
-    FnSpec {
-        name: "number",
-        null: OnNull::Null,
-        layer: Layer::Value,
-        scalar: true,
-        agg: Some(Agg::Context),
-        check: Check::Command,
-        doc: "the numeric reading of text (per capsa), or the running number of each capsa (@|)",
-        options: &[],
-    },
+    with_check(
+        scalar(
+            "number",
+            "the numeric cast under a locale's conventions (number(fr) reads 1 234,56)",
+        ),
+        Check::Command,
+    ),
     scalar("round", "the number rounded to N digits"),
     scalar("floor", "the number rounded down"),
     scalar("ceil", "the number rounded up"),
@@ -494,7 +480,6 @@ pub const SPECS: &[FnSpec] = &[
         agg: Some(Agg::Reducing),
         check: Check::None,
         doc: "wide to long: melt(id; …) makes one record per other field, as name and value",
-        options: &["--name", "--value"],
     },
     // Serializations.
     with_null(
@@ -608,12 +593,9 @@ pub const SPECS: &[FnSpec] = &[
     // (`sh(cmd)` is retired, 2026-11-02: the shell is the environment
     // mount `sh=shell:`, its programs the commands `sh:tr(…)`.)
     // Reductions.
-    with_options(
-        reducing(
-            "count",
-            "how many; --values (-v) the non-null values alone, --nulls (-n) the nulls alone",
-        ),
-        &["--values", "-v", "--nulls", "-n"],
+    reducing(
+        "count",
+        "how many; --values (-v) the non-null values alone, --nulls (-n) the nulls alone",
     ),
     reducing("sum", "the sum"),
     reducing("product", "the product"),
@@ -629,7 +611,6 @@ pub const SPECS: &[FnSpec] = &[
         "the count of null fields; on a table one count per row",
     ),
     FnSpec {
-        options: &["--pretty", "--precision", "-p"],
         ..scalar(
             "session",
             "the session's settings: --pretty=always|structures|off prints the results through pretty, --precision=n sets its digits; alone, the settings as a record",
@@ -644,30 +625,18 @@ pub const SPECS: &[FnSpec] = &[
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),
     with_check(
-        with_options(
-            reducing(
-                "std",
-                "the standard deviation (sample with the word sample)",
-            ),
-            &["--sample"],
+        reducing(
+            "std",
+            "the standard deviation (sample with the word sample)",
         ),
         Check::Stat,
     ),
     with_check(
-        with_options(
-            reducing("var", "the variance (n − 1 with --sample)"),
-            &["--sample"],
-        ),
+        reducing("var", "the variance (n − 1 with --sample)"),
         Check::Stat,
     ),
-    with_check(
-        with_options(reducing("stddev", "std, alias"), &["--sample"]),
-        Check::Stat,
-    ),
-    with_check(
-        with_options(reducing("variance", "var, alias"), &["--sample"]),
-        Check::Stat,
-    ),
+    with_check(reducing("stddev", "std, alias"), Check::Stat),
+    with_check(reducing("variance", "var, alias"), Check::Stat),
     reducing(
         "entropy",
         "the Shannon entropy, bits: of a stream of counts, or of the \
@@ -703,14 +672,11 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(
-            reducing(
-                "frequencies",
-                "each distinct value with its count, most frequent first, as \
+        reducing(
+            "frequencies",
+            "each distinct value with its count, most frequent first, as \
                  records (value, n); frequencies(K) keeps the top K; --nulls (-n) adds a \
                  row for the nulls",
-            ),
-            &["--nulls", "-n"],
         ),
         Check::Command,
     ),
@@ -723,15 +689,12 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(
-            reducing(
-                "histogram",
-                "the stream drawn as bars, one text value: numbers in n equal-width \
+        reducing(
+            "histogram",
+            "the stream drawn as bars, one text value: numbers in n equal-width \
                  bins (10 unless given), other values one bar per distinct value, most \
                  frequent first (n the most shown, the rest one 'other' bar), the nulls \
                  last; --width (-w) the longest bar in cells (40)",
-            ),
-            &["--width", "-w"],
         ),
         Check::Command,
     ),
@@ -744,15 +707,12 @@ pub const SPECS: &[FnSpec] = &[
         reducing("triples", "every triple of capsae"),
         Check::Command,
     ),
-    with_options(
-        with_check(
-            reducing(
-                "sort",
-                "the capsae sorted by value (sort(LOCALE), sort(-a) a tergo); --desc (-d) descending",
-            ),
-            Check::Keyed,
+    with_check(
+        reducing(
+            "sort",
+            "the capsae sorted by value (sort(LOCALE), sort(-a) a tergo); --desc (-d) descending",
         ),
-        &["--desc", "-d"],
+        Check::Keyed,
     ),
     reducing("unique", "the distinct values"),
     reducing("reverse", "the capsae in reverse order"),
@@ -800,10 +760,7 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(
-            context("zscore", "each value standardized over the context"),
-            &["--sample"],
-        ),
+        context("zscore", "each value standardized over the context"),
         Check::Command,
     ),
     with_check(
@@ -815,13 +772,10 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(
-            on_node(context(
-                "edges",
-                "the edges among the context's nodes as a table, the induced subgraph: from, to, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
-            )),
-            &["--weight", "-w"],
-        ),
+        on_node(context(
+            "edges",
+            "the edges among the context's nodes as a table, the induced subgraph: from, to, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
+        )),
         Check::Command,
     ),
     with_check(
@@ -832,26 +786,17 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        with_options(
-            on_node(context(
-                "collapse",
-                "one thread per distinct node among the context's threads, in order of first arrival: @- the union of their arriving edges, the capsa gathered (equal regulae once, differing ones as lists); collapse(-e) one thread per node and arriving edge",
-            )),
-            &["-e", "--edges"],
-        ),
+        on_node(context(
+            "collapse",
+            "one thread per distinct node among the context's threads, in order of first arrival: @- the union of their arriving edges, the capsa gathered (equal regulae once, differing ones as lists); collapse(-e) one thread per node and arriving edge",
+        )),
         Check::Command,
     ),
     with_check(
-        with_options(
-            on_node(context(
-                "tree",
-                "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: column expressions; --depth=n (-d=n) the depth; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
-            )),
-            &[
-                "--depth", "-d", "--kind", "-k", "--traits", "-t", "--props", "-p", "--record",
-                "-r", "--sample", "-s",
-            ],
-        ),
+        on_node(context(
+            "tree",
+            "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: column expressions; --depth=n (-d=n) the depth; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
+        )),
         Check::Command,
     ),
     with_check(
@@ -863,7 +808,6 @@ pub const SPECS: &[FnSpec] = &[
     ),
     with_check(
         FnSpec {
-            options: &["--precision", "-p"],
             ..rendering(
                 "pretty",
                 "the records as an aligned table (closing: the tool renders it); after a value, the value pretty-printed: a table the grid, a record one field per line, a list one item per line; a float with at most six digits after the point (-p=n sets them), numeric columns right-aligned",
@@ -880,12 +824,9 @@ pub const SPECS: &[FnSpec] = &[
         "the output to the clipboard instead of the screen, exactly as it would have printed, on either pipe (closing: the tool applies it and says what it copied)",
     ),
     // Keyed aggregates.
-    with_options(
-        keyed(
-            "sort_by",
-            "the capsae sorted by keys; --desc (-d) descending",
-        ),
-        &["--desc", "-d"],
+    keyed(
+        "sort_by",
+        "the capsae sorted by keys; --desc (-d) descending",
     ),
     keyed("unique_by", "the first capsa per distinct key"),
     keyed("min_by", "the capsa with the least key"),
@@ -896,6 +837,33 @@ pub const SPECS: &[FnSpec] = &[
 ];
 
 /// The registered command called `name`.
+/// The canonical name of a command written by an alias (the
+/// inventory's `alias of` rows), the name itself otherwise. The
+/// parser spells every call canonical (ruling 2026-11-03, draft
+/// 204), so the reflection's `::form`, the unparser and the refusals
+/// name one command.
+pub fn canonical(name: &str) -> &str {
+    match name {
+        "codepoint-count" => "cc",
+        "char-count" => "gc",
+        "byte-count" => "bc",
+        "word-count" => "wc",
+        "line-count" => "lc",
+        "sentence-count" => "sc",
+        "strip" => "deaccent",
+        "tscore" => "t_score",
+        "logdice" => "log_dice",
+        "dec" => "decode",
+        "td" => "duration",
+        "tfmt" => "strftime",
+        "tp" => "strptime",
+        "avg" => "mean",
+        "stddev" => "std",
+        "variance" => "var",
+        other => other,
+    }
+}
+
 pub fn spec(name: &str) -> Option<&'static FnSpec> {
     SPECS.iter().find(|s| s.name == name)
 }

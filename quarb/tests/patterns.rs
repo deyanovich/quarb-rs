@@ -677,10 +677,10 @@ fn record_convention_canonicalizes() {
         canon("/a | %(::name; kb = ::size)"),
         "/a | %(::name; kb = ::size)"
     );
-    // a non-identifier key quotes; a value may be a comparison
+    // a hyphenated name is a bare key; a value may be a comparison
     assert_eq!(
-        canon("/a | %(\"my-key\" = 1; adult = ::age >= 18)"),
-        "/a | %(\"my-key\" = 1; adult = (::age >= 18))"
+        canon("/a | %(my-key = 1; adult = ::age >= 18)"),
+        "/a | %(my-key = 1; adult = (::age >= 18))"
     );
     assert_eq!(canon("/a | %(and = 1)"), "/a | %(and = 1)");
     // an identifier in any script is a bare key

@@ -931,13 +931,15 @@ fn apply_scalar_inner(
         "rtrim" => vec![Value::Str(text.trim_end().to_string())],
         // `cc` counts codepoints (né `chars`, the pre-0.25 alias);
         // `bc` counts UTF-8 bytes; `wc` counts words.
-        "cc" => vec![Value::Int(text.chars().count() as i64)],
+        // (each with its long alias, `char-count` for `gc`: what
+        // the eye calls a character)
+        "cc" | "codepoint-count" => vec![Value::Int(text.chars().count() as i64)],
         // `gc` counts grapheme clusters (UAX #29): what the eye
         // counts — a stressed vowel with its acute is one.
-        "gc" => vec![Value::Int(text.graphemes(true).count() as i64)],
-        "bc" => vec![Value::Int(text.len() as i64)],
-        "wc" => vec![Value::Int(text.split_whitespace().count() as i64)],
-        "lc" => vec![Value::Int(text.lines().count() as i64)],
+        "gc" | "char-count" => vec![Value::Int(text.graphemes(true).count() as i64)],
+        "bc" | "byte-count" => vec![Value::Int(text.len() as i64)],
+        "wc" | "word-count" => vec![Value::Int(text.split_whitespace().count() as i64)],
+        "lc" | "line-count" => vec![Value::Int(text.lines().count() as i64)],
         // UAX #29 sentence segmentation (unicode-segmentation):
         // `sentences` splits (each segment trimmed, empties
         // dropped), `sc` counts the same segments.
@@ -945,7 +947,7 @@ fn apply_scalar_inner(
             .into_iter()
             .map(|t| Value::Str(t.to_string()))
             .collect(),
-        "sc" => {
+        "sc" | "sentence-count" => {
             vec![Value::Int(sentences_of(&text).len() as i64)]
         }
         // `substr(a..b)` — the range predicate's spellings, on
@@ -2110,7 +2112,8 @@ fn apply_scalar_inner(
                     | Arg::Range(_, _)
                     | Arg::Named { .. }
                     | Arg::Opt { .. }
-                    | Arg::Pairs { .. } => None,
+                    | Arg::Pairs { .. }
+                    | Arg::Hole(_) => None,
                 })
                 .unwrap_or(Value::Null),
             other => other,
@@ -5078,6 +5081,13 @@ pub(crate) fn concat_row(
 ) -> Result<Value, String> {
     match left {
         Value::Null => Ok(Value::Null),
+        // a quarq standing for a node: the node copied with the
+        // named properties replaced (`++!`) or added (`++`), its
+        // children kept (design paper: the node overwrite)
+        Value::Quarq(q) if q.form.is_some() => {
+            let form = q.into_form().rewrite(mode, &row)?;
+            Ok(Value::quarq_form(form))
+        }
         Value::Table(t) if mode == ConcatMode::Merge => {
             let w = t.width();
             let n = t.rows.len() + 1;
@@ -7178,6 +7188,7 @@ fn arg_kind(a: &Arg) -> &'static str {
         Arg::Lit(_) => "a value",
         Arg::Key(_) => "a key",
         Arg::Expr(_) => "an expression",
+        Arg::Hole(_) => "an expansion",
         Arg::Range(..) => "a range",
         Arg::Named { .. } | Arg::Opt { .. } => "an option",
         Arg::Pairs { .. } => "a pairwise field",

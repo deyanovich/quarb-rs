@@ -379,7 +379,7 @@ fn macros_end_to_end() {
                          | "| .${$.k}-mean(/row${::form} @| mean)";
                ^ | &describe(::age, ::salary) | %."#
         ),
-        vec!["%(\"age-mean\" = 39.5; \"salary-mean\" = 86666.66666666667)"]
+        vec!["%(age-mean = 39.5; salary-mean = 86666.66666666667)"]
     );
     // a computed splice parameterizes a filter at expansion time
     assert_eq!(
@@ -403,7 +403,7 @@ fn data_aware_macros() {
                    | "| .n-${$_}(/row[${$col} = \"${$_}\"] @| count)";
                ^ | &pivot!(::dept) | %."#
         ),
-        vec!["%(\"n-eng\" = 2; \"n-sales\" = 1)"]
+        vec!["%(n-eng = 2; n-sales = 1)"]
     );
     // the form binding also filters the data at expansion time
     assert_eq!(

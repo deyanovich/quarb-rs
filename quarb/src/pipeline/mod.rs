@@ -29,6 +29,7 @@ mod machine;
 mod operand;
 mod register;
 mod run;
+mod template;
 
 // The arith helpers are reached by path outside the tests.
 #[cfg(test)]
@@ -219,6 +220,10 @@ pub(crate) trait Host {
     /// context (`.name($$_)`) and the `$$_` operand; `None` where no
     /// arbor stands under the thread (the calculator).
     fn node_ref(&self, ext: &Self::Ext) -> Option<Value>;
+    /// The construct the thread's node stands for, where the arbor
+    /// is a reflected query (design paper: the quasiquote): what a
+    /// template expansion reaching the node grafts.
+    fn node_form(&self, ext: &Self::Ext) -> Option<crate::syntax::expand::Form>;
     /// Whether a correlation witness admitted the thread.
     fn witnessed(&self, ext: &Self::Ext) -> bool;
     fn origins_at(&self, ext: &Self::Ext) -> Origins;

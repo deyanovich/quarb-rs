@@ -66,6 +66,12 @@ impl<A: AstAdapter> Host for A {
     fn node_ref(&self, ext: &GraphExt) -> Option<Value> {
         (!ext.unplaced).then(|| node_ref(self, ext.node))
     }
+    fn node_form(&self, ext: &GraphExt) -> Option<crate::syntax::expand::Form> {
+        if ext.unplaced {
+            return None;
+        }
+        self.form_of(ext.node)
+    }
     fn witnessed(&self, ext: &GraphExt) -> bool {
         !ext.bindings.is_empty()
     }
@@ -947,6 +953,9 @@ impl Host for Calc {
     }
     fn node_ref(&self, _: &()) -> Option<Value> {
         record_refusal(no_arbor("a mark"));
+        None
+    }
+    fn node_form(&self, _: &()) -> Option<crate::syntax::expand::Form> {
         None
     }
     fn witnessed(&self, _: &()) -> bool {

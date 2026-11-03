@@ -199,6 +199,7 @@ impl RunOptions {
             .find(|l| l.prefix() == prefix)
             .map(|l| l.as_ref())
             .or_else(|| (prefix == "graph").then_some(&crate::graph::library::GRAPH as _))
+            .or_else(|| (prefix == "syntax").then_some(&crate::syntax::construct::SYNTAX as _))
     }
 }
 

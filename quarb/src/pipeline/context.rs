@@ -221,9 +221,11 @@ pub(crate) fn timeline_command<H: Host>(
         .map(|(i, c)| {
             let read = |a: &Arg| match a {
                 Arg::Lit(v) | Arg::Key(v) => v.clone(),
-                Arg::Range(..) | Arg::Named { .. } | Arg::Opt { .. } | Arg::Pairs { .. } => {
-                    Value::Null
-                }
+                Arg::Range(..)
+                | Arg::Named { .. }
+                | Arg::Opt { .. }
+                | Arg::Pairs { .. }
+                | Arg::Hole(_) => Value::Null,
                 Arg::Expr(e) => {
                     operand_scalar(host, &c.ext, e, trace, c.scope(Some(i + 1), peers, outer))
                 }
@@ -292,9 +294,11 @@ pub(crate) fn timeline_command<H: Host>(
         .collect()
 }
 
-/// `@| number[(level)]`: each capsa's topic becomes its dotted number
-/// (`1`, `1.1`, `1.2`, `2`) in the stream of levels — the level
-/// expression read per capsa, or the value at hand without one.
+/// `@| outline[(level; text; --style="1.")]`: each capsa's topic
+/// becomes its line of the outline, the level and the text read per
+/// capsa (`depth` and `title` of a record without them), numbered
+/// `1`, `1.1`, `1.2`, `2` under `--style` (the `@| number` reading is
+/// retired: `number` is the locale cast alone).
 /// `@| tree[(operands)]` — the context drawn as a tree (spec: The
 /// tree): one text value, the mount root on top, every context node
 /// a starting point. A value context is refused: the tree draws
@@ -784,26 +788,29 @@ pub(crate) fn outline_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
-    let exprs: Vec<&Operand> = call
+    // The level and the text, each an expression or a literal.
+    let exprs: Vec<Operand> = call
         .args
         .iter()
         .filter_map(|a| match a {
-            Arg::Expr(e) => Some(e),
+            Arg::Expr(e) => Some(e.clone()),
+            Arg::Lit(v) => Some(Operand::Lit(v.clone())),
             _ => None,
         })
         .collect();
-    let lines = call.name == "outline";
     // `--style="1."` numbers the lines (draft 203: an option).
-    let numbered = !lines
-        || call
-            .args
-            .iter()
-            .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--style"));
+    let numbered = call
+        .args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--style"));
+    // Without an expression a record's `depth` and `title` serve;
+    // a plain value is the level itself and has no text.
     let field = |c: &Thread<H::Ext>, key: &str| match effective_topic(c, host) {
         Value::Record(o) => o
             .iter()
             .find(|(k, _)| k == key)
             .map_or(Value::Null, |(_, v)| v.clone()),
+        other if key == "depth" => other,
         _ => Value::Null,
     };
     let rows: Vec<(Option<i64>, String)> = caps
@@ -815,13 +822,11 @@ pub(crate) fn outline_command<H: Host>(
             };
             let level = match exprs.first() {
                 Some(e) => read(e),
-                None if lines => field(c, "depth"),
-                None => effective_topic(c, host),
+                None => field(c, "depth"),
             };
             let text = match exprs.get(1) {
                 Some(e) => read(e),
-                None if lines => field(c, "title"),
-                None => Value::Null,
+                None => field(c, "title"),
             };
             let text = match text {
                 Value::Null => String::new(),
@@ -852,7 +857,9 @@ pub(crate) fn outline_command<H: Host>(
             if c.topic.is_none() {
                 c.prov = host.prov_at(&c.ext);
             }
-            let line = if !lines {
+            // Without a text the numbered line is the number alone
+            // (`1`, `1.1`, `2`), as `@| number` printed it.
+            let line = if numbered && text.is_empty() {
                 number
             } else if numbered {
                 format!("{}{number} {text}", "  ".repeat(depth))

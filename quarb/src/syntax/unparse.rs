@@ -144,7 +144,7 @@ fn branch_ends_bare_leaf(b: &Branch) -> bool {
     b.projection.is_none() && matches!(b.steps.last(), Some(PathElem::Step(s)) if s.leaf)
 }
 
-fn branch(b: &Branch) -> String {
+pub(crate) fn branch(b: &Branch) -> String {
     // Anchors are semantic (the root differs from the current
     // node inside a subcontext body; marks are the thread's own),
     // so they reprint whenever set.
@@ -199,6 +199,8 @@ pub(crate) fn elem(e: &PathElem) -> String {
     match e {
         // A mark prints spaced for the same lexing reason as the
         // named push below; the anonymous mark is a lone dot.
+        PathElem::Hole(h) => format!("${{{}}}", h.text),
+        PathElem::Param(p) => format!("${p}"),
         PathElem::Mark(Some(name)) => format!(" .{} ", push_name(name)),
         PathElem::Mark(None) => " . ".to_string(),
         PathElem::Step(s) => step(s),
@@ -390,7 +392,7 @@ fn reach_mark(r: &Reach) -> &'static str {
 /// `<...>` trait clauses, CNF-shaped: clauses joined by `&&`,
 /// each a `||`-disjunction, parenthesized when both dimensions are
 /// in play. Empty for no traits.
-fn trait_suffix(traits: &[TraitClause]) -> String {
+pub(crate) fn trait_suffix(traits: &[TraitClause]) -> String {
     let mut out = String::new();
     if !traits.is_empty() {
         let many = traits.len() > 1;
@@ -433,7 +435,7 @@ fn step_suffix(s: &Step) -> String {
 /// trailing modifiers; in name position (`mods` false) it stays
 /// inline, the closer there being strictly `/)`. A slash in the body
 /// escapes.
-fn regex_literal(pat: &str, mods: bool) -> String {
+pub(crate) fn regex_literal(pat: &str, mods: bool) -> String {
     let split = || {
         let rest = pat.strip_prefix("(?")?;
         let k = rest.find(')')?;
@@ -532,9 +534,14 @@ fn trait_lit(lit: &str) -> String {
 
 /// A name, quoted when it does not lex as a bare name.
 fn name_text(n: &str) -> String {
+    // a name expansion prints as written (design paper: the
+    // quasiquote)
+    if let Some((_, t)) = crate::syntax::ast::name_hole(n) {
+        return format!("${{{t}}}");
+    }
     let bare = !n.is_empty()
         && n.chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '·'))
         && !n.starts_with('.');
     if bare {
         n.to_string()
@@ -1063,6 +1070,7 @@ pub(crate) fn operand(o: &Operand) -> String {
         ),
         Operand::Ordinal => "$ord".to_string(),
         Operand::Param(name) => format!("${name}"),
+        Operand::Hole(h) => format!("${{{}}}", h.text),
         Operand::Capture(n) => format!("${n}"),
         // The outer-scope wrapper prefixes one more `$` to the inner
         // spelling (`$.x` → `$$.x`).
@@ -1174,7 +1182,7 @@ fn arith(op: ArithOp) -> &'static str {
     }
 }
 
-fn literal(v: &Value) -> String {
+pub(crate) fn literal(v: &Value) -> String {
     match v {
         // The one string-literal rule, shared with the display form.
         Value::Str(s) => crate::value::quarb_string(s),
@@ -1402,6 +1410,10 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Filter(e) => format!("| [{}]", pred_expr(e)),
         Command::Recall(r) => format!("| {}", reg(r)),
         Command::Splice(r) => format!("| &{}", reg(r)),
+        Command::Param { name, agg } => format!("{}${name}", if *agg { "@| " } else { "" }),
+        Command::Hole { hole, agg } => {
+            format!("{}${{{}}}", if *agg { "@| " } else { "| " }, hole.text)
+        }
         Command::SessionPush(name) => format!("| ,{name}"),
     }
 }
@@ -1427,9 +1439,14 @@ fn is_record_call(name: &str) -> bool {
 /// A push name prints bare when it is an identifier, quoted
 /// otherwise (`."3"`, a pivot's data-driven column).
 fn push_name(n: &str) -> String {
+    if let Some((_, t)) = crate::syntax::ast::name_hole(n) {
+        return format!("${{{t}}}");
+    }
+    let shown = crate::syntax::ast::display_name(n);
+    let n = shown.as_str();
     if n.chars().next().is_some_and(|c| c.is_alphabetic())
         && n.chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '·')
     {
         n.to_string()
     } else {
@@ -1437,17 +1454,10 @@ fn push_name(n: &str) -> String {
     }
 }
 
+/// The value printer's rule: a key prints bare where the
+/// constructor reads it bare (`in-degree`), quoted otherwise.
 fn is_bare_key(k: &str) -> bool {
-    // An identifier in any script (names are Unicode alphanumerics
-    // and `_`), never a boolean word; and `.N`, the key of an
-    // anonymous regula in `%%.`.
-    if k.len() > 1 && k.starts_with('.') && k[1..].bytes().all(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    let mut cs = k.chars();
-    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
-        && cs.all(|c| c.is_alphanumeric() || c == '_')
-        && !crate::value::is_bool_word(k)
+    crate::value::is_bare_key(k)
 }
 
 /// The record convention's argument list: a literal
@@ -1523,8 +1533,9 @@ pub(crate) fn body_text(op: &Operand) -> String {
     }
 }
 
-fn arg_text(a: &Arg) -> String {
+pub(crate) fn arg_text(a: &Arg) -> String {
     match a {
+        Arg::Hole(h) => format!("${{{}}}", h.text),
         Arg::Lit(v) => literal(v),
         // a record's typed key prints as the literal it is
         Arg::Key(v) => literal(v),
@@ -1614,7 +1625,7 @@ pub(crate) fn reg(r: &RegRef) -> String {
         RegRef::Top => "$.".to_string(),
         RegRef::Index(n) => format!("$.{n}"),
         RegRef::Back(n) => format!("$.-{n}"),
-        RegRef::Named(n) => format!("$.{n}"),
+        RegRef::Named(n) => format!("$.{}", crate::syntax::ast::display_name(n)),
         RegRef::Session(n) => format!("$,{n}"),
         RegRef::SessionRecord => "%,".to_string(),
         RegRef::Whole => "@.".to_string(),
@@ -1800,6 +1811,21 @@ mod tests {
         assert_eq!(rt("= - (1 + 2)"), "= - (1 + 2)");
         let chain = format!("= {}", vec!["1"; 70].join(" + "));
         assert_eq!(rt(&chain), chain);
+    }
+
+    #[test]
+    fn command_aliases_canonicalize() {
+        // An alias is spelled canonical at parse (ruling 2026-11-03,
+        // draft 204), so `::form` and the refusals name the command.
+        assert_eq!(rt("= 10 | logdice(20; 30)"), "= 10 | log_dice(20; 30)");
+        assert_eq!(rt("/x | ::n @| avg"), "/x | ::n @| mean");
+        assert_eq!(
+            rt("/x | ::n @| stddev(--sample)"),
+            "/x | ::n @| std(--sample)"
+        );
+        assert_eq!(rt("= 'é' | strip"), "= \"é\" | deaccent");
+        assert_eq!(rt("= 'a' | td(--to='b')"), "= \"a\" | duration(--to=b)");
+        assert_eq!(rt("= 'a' | char-count"), "= \"a\" | gc");
     }
 
     #[test]

@@ -249,6 +249,10 @@ pub enum Token {
     /// A double-quoted string with `${...}` holes — an interpolation.
     /// Hole expressions are lexed and parsed at parse time.
     Interp(Vec<InterpPart>),
+    /// `${…}` in syntax position — a template expansion (design
+    /// paper: the quasiquote): the hole's text, read with the
+    /// interpolated string's own brace reader.
+    Expansion(String),
 }
 
 /// One segment of an interpolated string: literal text, or the raw
@@ -277,9 +281,12 @@ pub(crate) fn is_quantity_head(text: &str) -> bool {
             .is_some_and(crate::value::quantity::is_name_char)
 }
 
-/// Characters allowed in a bare name.
+/// Characters allowed in a bare name. The middle dot joins a fresh
+/// name's parts (`t·1`, a macro template's binder renamed at the
+/// graft: design paper, Hygiene), so an expansion's print lexes
+/// back.
 fn is_name_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '+')
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '+' | '·')
 }
 
 /// Whether `text` is the date-and-time head of an ISO instant —
@@ -702,7 +709,15 @@ fn after_call_head(tokens: &[Token], glued: bool) -> bool {
     glued
         && (matches!(
             tokens.last(),
-            Some(Token::Name { .. } | Token::Percent | Token::Amp | Token::Dollar | Token::At)
+            // a name expansion heads a push or a call too: `.${…}(1)`
+            Some(
+                Token::Name { .. }
+                    | Token::Percent
+                    | Token::Amp
+                    | Token::Dollar
+                    | Token::At
+                    | Token::Expansion(_)
+            )
         )
             // a macro's marker: `&tok!(…)`, `(=tok!)(…)`
             || (matches!(tokens.last(), Some(Token::Bang))
@@ -1328,6 +1343,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 });
                 tokens.push(Token::RParen);
                 i = k;
+            }
+            // `${…}` outside a string: a template expansion, lexed as
+            // one token holding the hole's text (design paper: the
+            // quasiquote); the parser decides from the position what
+            // kind of expansion it is, and refuses it outside a quarq
+            '$' if at(i + 1) == Some('{') => {
+                let (hole, next) = read_hole(&chars, i + 2)?;
+                tokens.push(Token::Expansion(hole));
+                i = next;
             }
             '$' => {
                 tokens.push(Token::Dollar);
@@ -2570,48 +2594,51 @@ fn read_interpolated_until(
                 if !text.is_empty() {
                     parts.push(InterpPart::Text(std::mem::take(&mut text)));
                 }
-                let mut hole = String::new();
-                i += 2;
-                // Scan to the matching `}`, honoring nested braces (a
-                // `{n}` quantifier inside the hole) and single-quoted
-                // strings (where `{`, `}`, and `'` are literal), so a
-                // legal value expression is not truncated at the first
-                // inner brace or quoted `}`.
-                let mut depth = 0usize;
+                let (hole, next) = read_hole(chars, i + 2)?;
+                i = next;
+                parts.push(InterpPart::Hole(hole));
+            }
+            _ => {
+                text.push(ch);
+                i += 1;
+            }
+        }
+    }
+    Err(QuarbError::lex("unterminated quoted name (\"…)"))
+}
+
+/// Read a `${…}` hole's text after the opening brace at `start`:
+/// scan to the matching `}`, honoring nested braces (a `{n}`
+/// quantifier inside the hole) and single-quoted strings (where
+/// `{`, `}`, and `'` are literal), so a legal value expression is
+/// not truncated at the first inner brace or quoted `}`. Answers
+/// the text and the index past the closing brace.
+fn read_hole(chars: &[char], start: usize) -> Result<(String, usize)> {
+    let mut hole = String::new();
+    let mut i = start;
+    let mut depth = 0usize;
+    loop {
+        match chars.get(i) {
+            Some('}') if depth == 0 => break,
+            Some('}') => {
+                depth -= 1;
+                hole.push('}');
+                i += 1;
+            }
+            Some('{') => {
+                depth += 1;
+                hole.push('{');
+                i += 1;
+            }
+            Some('\'') => {
+                hole.push('\'');
+                i += 1;
                 loop {
                     match chars.get(i) {
-                        Some('}') if depth == 0 => break,
-                        Some('}') => {
-                            depth -= 1;
-                            hole.push('}');
-                            i += 1;
-                        }
-                        Some('{') => {
-                            depth += 1;
-                            hole.push('{');
-                            i += 1;
-                        }
                         Some('\'') => {
                             hole.push('\'');
                             i += 1;
-                            loop {
-                                match chars.get(i) {
-                                    Some('\'') => {
-                                        hole.push('\'');
-                                        i += 1;
-                                        break;
-                                    }
-                                    Some(&c) => {
-                                        hole.push(c);
-                                        i += 1;
-                                    }
-                                    None => {
-                                        return Err(QuarbError::lex(
-                                            "unterminated interpolation '${…' (missing '}')",
-                                        ));
-                                    }
-                                }
-                            }
+                            break;
                         }
                         Some(&c) => {
                             hole.push(c);
@@ -2624,19 +2651,23 @@ fn read_interpolated_until(
                         }
                     }
                 }
-                i += 1;
-                if hole.trim().is_empty() {
-                    return Err(QuarbError::lex("empty interpolation '${}'"));
-                }
-                parts.push(InterpPart::Hole(hole));
             }
-            _ => {
-                text.push(ch);
+            Some(&c) => {
+                hole.push(c);
                 i += 1;
+            }
+            None => {
+                return Err(QuarbError::lex(
+                    "unterminated interpolation '${…' (missing '}')",
+                ));
             }
         }
     }
-    Err(QuarbError::lex("unterminated quoted name (\"…)"))
+    i += 1;
+    if hole.trim().is_empty() {
+        return Err(QuarbError::lex("empty interpolation '${}'"));
+    }
+    Ok((hole, i))
 }
 
 /// Read a quoted name after the opening quote at `start`, up to the

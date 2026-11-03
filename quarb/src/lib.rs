@@ -45,6 +45,8 @@ mod graph;
 mod pipeline;
 mod stdlib;
 mod syntax;
+pub use graph::reflect::QueryArbor;
+pub use syntax::expand::Form;
 mod thread;
 mod value;
 // The public module paths, as they were before the layering.

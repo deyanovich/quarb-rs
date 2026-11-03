@@ -1,4 +1,5 @@
-//! The reflection vocabulary lock (v1).
+//! The reflection vocabulary lock (v4; every kind carries `form`,
+//! its canonical text, from draft 204).
 //!
 //! A corpus spanning the whole syntax surface is reflected, and the
 //! resulting inventory — every node kind with its property keys —
@@ -14,6 +15,8 @@ use std::collections::BTreeSet;
 
 /// Every construct the reflector can emit, at least once.
 const CORPUS: &[&str] = &[
+    // a quarq template with an expansion (design paper: the quasiquote)
+    "/row | .t(q(| %(${/cols/*}))) | %.",
     // descendant axis, traits, expr/index/range predicates, leaf
     // anchor, adapter-metadata projection
     "//book<block || inline>[::pages > 200][2][1..3]$:::ident",
@@ -179,18 +182,18 @@ const CORPUS: &[&str] = &[
 /// kind → sorted property keys, as locked. `param` is reserved
 /// (never emitted: reflection sees expanded queries).
 const VOCABULARY: &[(&str, &[&str])] = &[
-    ("agg", &["lib", "name"]),
-    ("agg-expr", &[]),
-    ("agg-push", &["name"]),
-    ("agg-recall", &["ref"]),
-    ("agg-record", &["enriched"]),
+    ("agg", &["form", "lib", "name"]),
+    ("agg-expr", &["form"]),
+    ("agg-push", &["form", "name"]),
+    ("agg-recall", &["form", "ref"]),
+    ("agg-record", &["enriched", "form"]),
     // v1 additive growth: alt, group (2026-07-08, path patterns).
-    ("alt", &[]),
-    ("and", &[]),
-    ("arith", &["op"]),
+    ("alt", &["form"]),
+    ("and", &["form"]),
+    ("arith", &["form", "op"]),
     // v3 additive growth: attach (2026-10-31, the attaching push
     // `.:name(body)`, spec: Attached Regulae).
-    ("attach", &["name"]),
+    ("attach", &["form", "name"]),
     // v1 additive growth: mark key (2026-07-11, the (name)
     // anchor); the mark-array anchor keys (2026-07-24, marks
     // symmetry: (N), (.), (@), (@name)).
@@ -200,6 +203,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
         "branch",
         &[
             "anchored",
+            "form",
             "mark",
             "mark-back",
             "mark-index",
@@ -211,44 +215,47 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ),
     // v1 additive growth: capsae, piped (2026-07-11, @_ + inline
     // pipes).
-    ("capture", &["group"]),
+    ("capture", &["form", "group"]),
     // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
-    ("captures", &[]),
-    ("cmd", &["lib", "name"]),
-    ("compare", &["op"]),
+    ("captures", &["form"]),
+    ("cmd", &["form", "lib", "name"]),
+    ("compare", &["form", "op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     // v2 additive growth: concat (2026-10-20, draft 163: `++`,
     // `++!` with overwrite, `+@+` with item).
-    ("concat", &["item", "overwrite"]),
-    ("cond", &[]),
-    ("context", &["index"]),
+    ("concat", &["form", "item", "overwrite"]),
+    ("cond", &["form"]),
+    ("context", &["form", "index"]),
     // v1 additive growth: edge (2026-07-09, the $- accessor).
-    ("edge", &[]),
+    ("edge", &["form"]),
     // v1 additive growth: edges (2026-07-11, the @- plural).
-    ("edges", &[]),
-    ("expr", &[]),
-    ("expr-push", &["name"]),
-    ("field", &["name"]),
-    ("fields-push", &[]),
-    ("filter", &[]),
+    ("edges", &["form"]),
+    ("expansion", &["form"]),
+    ("expr", &["form"]),
+    ("expr-push", &["form", "name"]),
+    ("field", &["form", "name"]),
+    ("fields-push", &["form"]),
+    ("filter", &["form"]),
     // v1 additive growth: group (2026-07-08, path patterns).
-    ("group", &["max", "min", "reach"]),
+    ("group", &["form", "max", "min", "reach"]),
     // v1 additive growth: interp (2026-07-07, interpolation).
-    ("interp", &[]),
+    ("interp", &["form"]),
     // the invoking position `_` (2026-10-18; the node was spelled
     // outer from 2026-07-07 to draft 151, the row renamed with the
     // spec's term, the only non-additive change in the lock)
-    ("invoking", &[]),
-    ("label_index", &[]),
-    ("list", &[]),
-    ("literal", &["type", "value"]),
+    ("invoking", &["form"]),
+    // v3 (2026-11-03): the compound kinds spelt with hyphens, the
+    // grammar's rule names read as the engine invents a name.
+    ("label-index", &["form"]),
+    ("list", &["form"]),
+    ("literal", &["form", "type", "value"]),
     // v1 additive growth: map (2026-07-11, the $| pipe).
-    ("map", &[]),
+    ("map", &["form"]),
     // v1 additive growth: mark (2026-07-11, the mark store).
-    ("mark", &["name"]),
+    ("mark", &["form", "name"]),
     // v1 additive growth: match/when (2026-07-11, the value
     // match).
-    ("match", &[]),
+    ("match", &["form"]),
     // v1 additive growth: nav (2026-07-23, pipeline navigation —
     // a branch in command position; its contents reflect with the
     // ordinary branch kinds).
@@ -257,17 +264,17 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v2 additive growth: view (2026-10-20, draft 163: `#.` the named
     // regulae, `#.*` every one; the context table `#_` a matrix of
     // the side `context`).
-    ("matrix", &["side", "view"]),
-    ("nav", &[]),
-    ("neg", &[]),
-    ("not", &[]),
+    ("matrix", &["form", "side", "view"]),
+    ("nav", &["form"]),
+    ("neg", &["form"]),
+    ("not", &["form"]),
     // v1 additive growth: now (2026-07-12, the invocation instant;
     // call operands reflect as their (x | f(args)) desugaring).
-    ("now", &[]),
-    ("option", &["name", "value"]),
-    ("or", &[]),
-    ("ordinal", &[]),
-    ("parens", &[]),
+    ("now", &["form"]),
+    ("option", &["form", "name", "value"]),
+    ("or", &["form"]),
+    ("ordinal", &["form"]),
+    ("parens", &["form"]),
     // v1 additive growth: anchored key (2026-07-11, ^-operands);
     // mark key same day (the (name) anchor); the mark-array
     // anchor keys (2026-07-24, marks symmetry).
@@ -278,6 +285,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             // v3 additive growth: edge-end (2026-10-31, the edge's end
             // `$-:source` / `$-:target` as a node operand).
             "edge-end",
+            "form",
             "mark",
             "mark-back",
             "mark-index",
@@ -290,44 +298,45 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: peer-reg (2026-09-07, the node read
     // `X:.r`; since 2026-10-31 the attached regula, the node operand
     // its child or absent for the current node).
-    ("peer-reg", &["ref"]),
-    ("piped", &[]),
-    ("pipeline", &[]),
+    ("peer-reg", &["form", "ref"]),
+    ("piped", &["form"]),
+    ("pipeline", &["form"]),
     // v2 additive growth: position (2026-10-18, the cursor `$$_`).
-    ("position", &[]),
-    ("positions", &[]),
-    ("predicate", &["from", "kind", "to", "value"]),
-    ("projection", &["key", "kind", "type"]),
-    ("push", &["name"]),
+    ("position", &["form"]),
+    ("positions", &["form"]),
+    ("predicate", &["form", "from", "kind", "to", "value"]),
+    ("projection", &["form", "key", "kind", "type"]),
+    ("push", &["form", "name"]),
     // v2 additive growth: quarq (2026-10-23, draft 166: the `q(…)`
     // literal; its body's commands are its children).
-    ("quarq", &["source"]),
-    ("query", &["outer", "role"]),
-    ("recall", &["ref"]),
-    ("record-push", &["enriched", "name"]),
+    ("quarq", &["form", "source"]),
+    ("query", &["form", "outer", "role"]),
+    ("recall", &["form", "ref"]),
+    ("record-push", &["enriched", "form", "name"]),
     // v2 additive growth: record-with as an operand (2026-10-20,
     // draft 162: the cursor record `_`, reflected as the record of
     // the topic and the position).
-    ("record-with", &[]),
+    ("record-with", &["form"]),
     // v1 additive growth: repeat (2026-09-07, the quantified push —
     // the iteration loop).
-    ("repeat", &["max", "min"]),
-    ("seed", &[]),
-    ("select", &[]),
-    ("session_push", &["name"]),
-    ("session_read", &["name"]),
-    ("session_record", &[]),
-    ("span", &["from", "kind", "to"]),
+    ("repeat", &["form", "max", "min"]),
+    ("seed", &["form"]),
+    ("select", &["form"]),
+    ("session-push", &["form", "name"]),
+    ("session-read", &["form", "name"]),
+    ("session-record", &["form"]),
+    ("span", &["form", "from", "kind", "to"]),
     // v2 additive growth: splice (2026-10-23, draft 166: `| &$.p`,
     // the held quarq spliced at the recall).
-    ("splice", &["ref"]),
+    ("splice", &["form", "ref"]),
     // v1 additive growth: spread (2026-07-11, | ... core syntax);
     // outer key added same day (| ...?, the OPTIONAL MATCH round).
-    ("spread", &["outer"]),
+    ("spread", &["form", "outer"]),
     (
         "step",
         &[
             "axis",
+            "form",
             "label",
             "leaf",
             "matcher",
@@ -337,15 +346,15 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             "target",
         ],
     ),
-    ("subcontext", &["name"]),
-    ("topic", &[]),
-    ("topics", &[]),
-    ("trait", &["alts"]),
+    ("subcontext", &["form", "name"]),
+    ("topic", &["form"]),
+    ("topics", &["form"]),
+    ("trait", &["alts", "form"]),
     // v1 additive growth: value-meta (2026-09-06, a value's `:key`
     // provenance projection).
-    ("value-meta", &["key", "shape"]),
+    ("value-meta", &["form", "key", "shape"]),
     // v1 additive growth: when (2026-07-11, the value match's arm).
-    ("when", &["regex"]),
+    ("when", &["form", "regex"]),
 ];
 
 fn corpus_inventory() -> Vec<(String, Vec<String>)> {
@@ -383,7 +392,7 @@ fn vocabulary_is_locked() {
     assert_eq!(
         corpus_inventory(),
         locked,
-        "the reflection vocabulary drifted from the v1 lock: \
+        "the reflection vocabulary drifted from the v4 lock: \
          extend the corpus/lock table && the spec's normative \
          table together, additively"
     );
@@ -464,7 +473,7 @@ fn root_carries_the_version() {
     let arbor = QueryArbor::parse("/x").unwrap();
     assert_eq!(
         arbor.metadata(arbor.root(), "vocabulary"),
-        Some(Value::Int(2))
+        Some(Value::Int(4))
     );
     assert_eq!(
         arbor.metadata(arbor.root(), "query"),

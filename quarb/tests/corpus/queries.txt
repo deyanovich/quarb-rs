@@ -1693,3 +1693,4 @@ def &pricey: /rows/*[::fare > 300]; macro &agg($q): //step[1] | "&pricey @| ${::
 //p | words @| $.total
 //p | words @| %%(n = count)
 /w | %(lemma = morph:lemma; pos = morph:pos(--lang=ru)) @| morph:parse(-n=1)
+/row | .t(q(| %(${/cols/*}))) | %.

@@ -18,11 +18,11 @@ use crate::error::{QuarbError, Result};
 use crate::syntax::ast::visit::{self, Visitor as _};
 use crate::syntax::ast::{
     Anchor, Arg, ArithOp, Axis, Branch, Budget, CmpOp, Command, ConcatMode, End, FnCall, Group,
-    IndexSpec, InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem, PredExpr,
-    Predicate, ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef, ScopePath,
-    Step, TableRow, TraitClause,
+    Hole, IndexSpec, InterpSeg, LabelAlt, LabelClause, Matcher, Operand, PatSeg, PathElem,
+    PredExpr, Predicate, ProjShape, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef,
+    ScopePath, Step, TableRow, TraitClause, hole_name,
 };
-use crate::syntax::expand::{Expander, MacroBinding, RegUsage};
+use crate::syntax::expand::{Answer, Expander, Form, MacroBinding, RegUsage};
 use crate::syntax::lexer::{self, Token};
 use crate::value::ColumnType;
 use crate::value::Value;
@@ -87,6 +87,61 @@ pub fn parse_with_data_spanned(
         }
         (out, _) => out,
     }
+}
+
+/// A text filling a command-position expansion, read as the
+/// commands it spells (design paper: the text fallback): a leading
+/// pipe is the first command's own.
+pub(crate) fn parse_commands_text(text: &str) -> Result<Vec<Command>> {
+    let text = text.trim();
+    let text = if text.starts_with('|') || text.starts_with("@|") {
+        text.to_string()
+    } else {
+        format!("| {text}")
+    };
+    let tokens = lexer::lex(&text)?;
+    let expander = crate::graph::reflect::Reflector::new(None);
+    let mut p = Parser::new(&tokens, Defs::default(), &expander);
+    let mut commands = Vec::new();
+    p.pipeline_items(&mut commands, PipeMode::Nav)?;
+    if p.pos != tokens.len() {
+        return Err(QuarbError::parse(format!(
+            "'{text}' holds more than commands"
+        )));
+    }
+    Ok(commands)
+}
+
+/// A text filling a path-position expansion, read as the walk it
+/// spells: elements continuing from the current node, with the
+/// projection the text may end in.
+pub(crate) fn parse_elems_text(text: &str) -> Result<(Vec<PathElem>, Option<Projection>)> {
+    let tokens = lexer::lex(text.trim())?;
+    let expander = crate::graph::reflect::Reflector::new(None);
+    let mut p = Parser::new(&tokens, Defs::default(), &expander);
+    let b = p.branch_tail(Anchor::Current, Vec::new(), None)?;
+    if p.pos != tokens.len() {
+        return Err(QuarbError::parse(format!(
+            "'{text}' holds more than a walk"
+        )));
+    }
+    Ok((b.steps, b.projection))
+}
+
+/// A text filling an argument-position expansion, read as the
+/// record items it spells (`::title; ::year`).
+pub(crate) fn parse_record_items_text(text: &str) -> Result<Vec<Arg>> {
+    let tokens = lexer::lex(&format!("%({})", text.trim()))?;
+    let expander = crate::graph::reflect::Reflector::new(None);
+    let mut p = Parser::new(&tokens, Defs::default(), &expander);
+    p.pos += 1;
+    let call = p.record_args()?;
+    if p.pos != tokens.len() {
+        return Err(QuarbError::parse(format!(
+            "'{text}' holds more than record items"
+        )));
+    }
+    Ok(call.args)
 }
 
 /// Parse fully (so every diagnostic still fires), returning each
@@ -284,6 +339,488 @@ struct CaptureRec {
     recalls: usize,
 }
 
+/// A macro's answers sorted by kind: texts, reparsed as the
+/// specification has always had it, or forms, grafted as structure
+/// (design paper: a body may answer in structure).
+enum Split {
+    Texts(Vec<String>),
+    Forms(Vec<Form>),
+}
+
+/// Whether a form is predicates and nothing else: a predicate
+/// node, or a quarq holding only filters (`q([…])`, which parses as
+/// the per-capsa filter it is after a pipe).
+fn predicate_form(f: &Form) -> bool {
+    match f {
+        Form::Predicate(_) | Form::PredExpr(_) => true,
+        Form::Pipeline(cmds) => {
+            !cmds.is_empty()
+                && cmds
+                    .iter()
+                    .all(|c| matches!(c, Command::Filter(_) | Command::Select(_)))
+        }
+        Form::Command(Command::Filter(_) | Command::Select(_)) => true,
+        _ => false,
+    }
+}
+
+/// The predicates a predicate form holds, each as its own form.
+fn as_predicates(f: Form) -> Vec<Form> {
+    match f {
+        Form::Pipeline(cmds) => cmds
+            .into_iter()
+            .map(|c| match c {
+                Command::Filter(e) => Form::Predicate(Predicate::Expr(e)),
+                Command::Select(p) => Form::Predicate(p),
+                _ => unreachable!("checked by predicate_form"),
+            })
+            .collect(),
+        Form::Command(Command::Filter(e)) => vec![Form::Predicate(Predicate::Expr(e))],
+        Form::Command(Command::Select(p)) => vec![Form::Predicate(p)],
+        other => vec![other],
+    }
+}
+
+/// A predicate a macro answered among path elements refines the
+/// element before it, exactly as a predicate fragment does.
+fn attach_predicate(name: &str, pred: Predicate, steps: &mut [PathElem]) -> Result<()> {
+    match steps.last_mut() {
+        Some(PathElem::Step(s)) => {
+            s.predicates.push(pred);
+            Ok(())
+        }
+        Some(PathElem::Group(g)) => {
+            if !matches!(pred, Predicate::Expr(_)) {
+                return Err(QuarbError::parse(
+                    "a group takes expression predicates only \
+                     (positional selection has no order across \
+                     repetition tiers)",
+                ));
+            }
+            g.predicates.push(pred);
+            Ok(())
+        }
+        Some(
+            PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_),
+        ) => Err(QuarbError::parse(format!(
+            "the predicate '&{name}' answered refines a hop or a \
+                 group; a mark or a push takes no predicates"
+        ))),
+        None => Err(QuarbError::parse(format!(
+            "the predicate '&{name}' answered refines the step \
+             before it; nothing precedes it here — walk first \
+             ('/div&{name}')"
+        ))),
+    }
+}
+
+/// A parameter left standing in command position after
+/// substitution: its argument was no quarq, so nothing stood in
+/// for it.
+fn leftover_param(q: &Query) -> Option<String> {
+    leftover_in_commands(&q.pipeline)
+        .or_else(|| q.correlations.iter().find_map(leftover_param))
+        .or_else(|| {
+            q.branches
+                .iter()
+                .find_map(|b| b.steps.iter().find_map(lp_in_elem))
+        })
+}
+
+fn leftover_in_commands(cmds: &[Command]) -> Option<String> {
+    cmds.iter().find_map(lp_in_command)
+}
+
+/// The refusal a leftover parameter earns.
+fn refuse_leftover(name: &str, p: Option<String>) -> Result<()> {
+    match p {
+        Some(p) => Err(QuarbError::parse(format!(
+            "parameter '${p}' of '&{name}' stands where a path or a command \
+             continues; it takes a path (a projection, steps) or a quarq: \
+             '&{name}(…; q(| …))'"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn lp_in_command(c: &Command) -> Option<String> {
+    match c {
+        Command::Param { name, .. } => Some(name.clone()),
+        Command::Hole { hole, .. } => lp_in_operand(&hole.expr),
+        Command::Func(call)
+        | Command::Agg(call)
+        | Command::RecordWith(call)
+        | Command::RecordPush { call, .. }
+        | Command::AggRecord { call, .. } => call.args.iter().find_map(|a| match a {
+            Arg::Expr(e) | Arg::Opt { value: Some(e), .. } => lp_in_operand(e),
+            Arg::Lit(Value::Quarq(q)) => leftover_in_commands(&q.body),
+            _ => None,
+        }),
+        Command::Expr(e)
+        | Command::AggExpr(e)
+        | Command::ExprPush { expr: e, .. }
+        | Command::AggPush { body: e, .. } => lp_in_operand(e),
+        Command::Subcontext { body, .. } => leftover_param(body),
+        Command::Map(inner)
+        | Command::Repeat { command: inner, .. }
+        | Command::Attach { command: inner, .. } => lp_in_command(inner),
+        Command::Nav(b) => b.steps.iter().find_map(lp_in_elem),
+        _ => None,
+    }
+}
+fn lp_in_elem(e: &PathElem) -> Option<String> {
+    match e {
+        PathElem::Param(p) => Some(p.clone()),
+        PathElem::Hole(h) => lp_in_operand(&h.expr),
+        PathElem::Push {
+            body: PushBody::Query(q),
+            ..
+        } => leftover_param(q),
+        PathElem::Push {
+            body: PushBody::Expr(e),
+            ..
+        } => lp_in_operand(e),
+        PathElem::Group(g) => g.alts.iter().flatten().find_map(lp_in_elem),
+        _ => None,
+    }
+}
+fn lp_in_operand(o: &Operand) -> Option<String> {
+    match o {
+        Operand::Lit(Value::Quarq(q)) => leftover_in_commands(&q.body)
+            .or_else(|| q.holes.iter().find_map(|h| lp_in_operand(&h.expr))),
+        Operand::Hole(h) => lp_in_operand(&h.expr),
+        Operand::Piped { expr, commands } => {
+            lp_in_operand(expr).or_else(|| leftover_in_commands(commands))
+        }
+        Operand::Rel { steps, .. } | Operand::Ctx { steps, .. } => {
+            steps.iter().find_map(lp_in_elem)
+        }
+        Operand::Arith { left, right, .. }
+        | Operand::Concat { left, right, .. }
+        | Operand::Coalesce { left, right } => lp_in_operand(left).or_else(|| lp_in_operand(right)),
+        Operand::Neg(i)
+        | Operand::Desc(i)
+        | Operand::Gathered(i)
+        | Operand::Spread(i)
+        | Operand::Invoking(i)
+        | Operand::Position(i)
+        | Operand::Driver(i) => lp_in_operand(i),
+        Operand::Through { base, .. }
+        | Operand::Field { base, .. }
+        | Operand::ValueMeta { base, .. } => lp_in_operand(base),
+        Operand::Projected { base, .. } => lp_in_operand(base),
+        Operand::Typed { inner, .. } => lp_in_operand(inner),
+        Operand::List(items) => items.iter().find_map(lp_in_operand),
+        Operand::Row(items) => items.iter().find_map(|(_, e)| lp_in_operand(e)),
+        Operand::Cond { then, other, .. } => lp_in_operand(then).or_else(|| lp_in_operand(other)),
+        Operand::Group(e) => lp_in_pred(e),
+        _ => None,
+    }
+}
+fn lp_in_pred(e: &PredExpr) -> Option<String> {
+    match e {
+        PredExpr::Or(a, b) | PredExpr::And(a, b) => lp_in_pred(a).or_else(|| lp_in_pred(b)),
+        PredExpr::Not(a) => lp_in_pred(a),
+        PredExpr::Compare(l, _, r) => lp_in_operand(l).or_else(|| lp_in_operand(r)),
+        PredExpr::Chain(os, _) => os.iter().find_map(lp_in_operand),
+        PredExpr::Truthy(o) => lp_in_operand(o),
+    }
+}
+
+/// Every binder name and named recall of a command sequence passed
+/// through `f` — the pushes, the marks, the session push, the
+/// attaching push, `$.name` in every operand, nested bodies and
+/// quarq literals included. The marking of a template's binders and
+/// their renaming at the graft are the two uses.
+fn rename_in_commands(commands: &mut [Command], f: &mut dyn FnMut(&str) -> String) {
+    for c in commands.iter_mut() {
+        rename_in_command(c, f);
+    }
+}
+
+fn rename_in_query(q: &mut Query, f: &mut dyn FnMut(&str) -> String) {
+    for corr in &mut q.correlations {
+        rename_in_query(corr, f);
+    }
+    for b in &mut q.branches {
+        rename_in_branch(b, f);
+    }
+    rename_in_commands(&mut q.pipeline, f);
+}
+
+fn rename_in_branch(b: &mut Branch, f: &mut dyn FnMut(&str) -> String) {
+    if let Anchor::Id(op) = &mut b.anchor {
+        rename_in_operand(op, f);
+    }
+    for e in &mut b.steps {
+        rename_in_elem(e, f);
+    }
+}
+
+fn rename_reg(r: &mut RegRef, f: &mut dyn FnMut(&str) -> String) {
+    if let RegRef::Named(n) = r
+        && crate::syntax::ast::name_hole(n).is_none()
+    {
+        *n = f(n);
+    }
+}
+
+/// (a name an expansion computes is left to the fill: the material
+/// came from the arguments or the data, and the caller means to see
+/// it)
+fn rename_name(n: &mut Option<String>, f: &mut dyn FnMut(&str) -> String) {
+    if let Some(n) = n
+        && crate::syntax::ast::name_hole(n).is_none()
+    {
+        *n = f(n);
+    }
+}
+
+fn rename_in_command(c: &mut Command, f: &mut dyn FnMut(&str) -> String) {
+    match c {
+        Command::Push(name) => rename_name(name, f),
+        Command::SessionPush(name) => {
+            if crate::syntax::ast::name_hole(name).is_none() {
+                *name = f(name);
+            }
+        }
+        Command::Subcontext { name, body } => {
+            rename_name(name, f);
+            rename_in_query(body, f);
+        }
+        Command::ExprPush { name, expr } | Command::AggPush { name, body: expr } => {
+            rename_name(name, f);
+            rename_in_operand(expr, f);
+        }
+        Command::RecordPush { name, call, .. } => {
+            rename_name(name, f);
+            rename_in_args(&mut call.args, f);
+        }
+        Command::Attach { name, command } => {
+            rename_name(name, f);
+            rename_in_command(command, f);
+        }
+        Command::Func(call)
+        | Command::Agg(call)
+        | Command::RecordWith(call)
+        | Command::AggRecord { call, .. } => rename_in_args(&mut call.args, f),
+        Command::Expr(e) | Command::AggExpr(e) => rename_in_operand(e, f),
+        Command::Recall(r) | Command::Splice(r) | Command::AggRecall(r) => rename_reg(r, f),
+        Command::Select(Predicate::Expr(e)) | Command::Filter(e) => rename_in_pred(e, f),
+        Command::Nav(b) => rename_in_branch(b, f),
+        Command::Map(inner) | Command::Repeat { command: inner, .. } => rename_in_command(inner, f),
+        Command::Hole { hole, .. } => rename_in_operand(&mut hole.expr, f),
+        Command::Select(_)
+        | Command::Param { .. }
+        | Command::Spread { .. }
+        | Command::FieldsPush => {}
+    }
+}
+
+fn rename_in_args(args: &mut [Arg], f: &mut dyn FnMut(&str) -> String) {
+    for a in args.iter_mut() {
+        match a {
+            Arg::Expr(e) | Arg::Opt { value: Some(e), .. } => rename_in_operand(e, f),
+            Arg::Pairs { keys, values } => {
+                rename_in_operand(keys, f);
+                rename_in_operand(values, f);
+            }
+            Arg::Hole(h) => rename_in_operand(&mut h.expr, f),
+            Arg::Lit(Value::Quarq(q)) => {
+                let mut op = Operand::Lit(Value::Quarq(q.clone()));
+                rename_in_operand(&mut op, f);
+                if let Operand::Lit(v) = op {
+                    *a = Arg::Lit(v);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rename_in_elem(e: &mut PathElem, f: &mut dyn FnMut(&str) -> String) {
+    match e {
+        PathElem::Mark(name) => rename_name(name, f),
+        PathElem::Push { name, body } => {
+            rename_name(name, f);
+            match body {
+                PushBody::Query(q) => rename_in_query(q, f),
+                PushBody::Expr(e) => rename_in_operand(e, f),
+            }
+        }
+        PathElem::Step(s) => {
+            for p in &mut s.predicates {
+                if let Predicate::Expr(e) = p {
+                    rename_in_pred(e, f);
+                }
+            }
+        }
+        PathElem::Group(g) => {
+            for alt in &mut g.alts {
+                for e in alt {
+                    rename_in_elem(e, f);
+                }
+            }
+            for p in &mut g.predicates {
+                if let Predicate::Expr(e) = p {
+                    rename_in_pred(e, f);
+                }
+            }
+        }
+        PathElem::Hole(h) => rename_in_operand(&mut h.expr, f),
+        PathElem::Param(_) => {}
+    }
+}
+
+fn rename_in_pred(e: &mut PredExpr, f: &mut dyn FnMut(&str) -> String) {
+    match e {
+        PredExpr::Or(a, b) | PredExpr::And(a, b) => {
+            rename_in_pred(a, f);
+            rename_in_pred(b, f);
+        }
+        PredExpr::Not(a) => rename_in_pred(a, f),
+        PredExpr::Compare(l, _, r) => {
+            rename_in_operand(l, f);
+            rename_in_operand(r, f);
+        }
+        PredExpr::Chain(os, _) => {
+            for o in os {
+                rename_in_operand(o, f);
+            }
+        }
+        PredExpr::Truthy(o) => rename_in_operand(o, f),
+    }
+}
+
+fn rename_in_operand(o: &mut Operand, f: &mut dyn FnMut(&str) -> String) {
+    match o {
+        Operand::Recall(r) => rename_reg(r, f),
+        Operand::PeerReg { at, reg } => {
+            if let Some(at) = at {
+                rename_in_operand(at, f);
+            }
+            rename_reg(reg, f);
+        }
+        Operand::Lit(Value::Quarq(q)) => {
+            let mut body = (*q.body).clone();
+            rename_in_commands(&mut body, f);
+            let mut holes = (*q.holes).clone();
+            for h in &mut holes {
+                rename_in_operand(&mut h.expr, f);
+            }
+            *o = Operand::Lit(if holes.is_empty() {
+                quarq_literal(body)
+            } else {
+                Value::quarq_template(body, holes)
+            });
+        }
+        Operand::Hole(h) => rename_in_operand(&mut h.expr, f),
+        Operand::Rel { steps, anchor, .. } => {
+            if let Anchor::Id(op) = anchor {
+                rename_in_operand(op, f);
+            }
+            for e in steps {
+                rename_in_elem(e, f);
+            }
+        }
+        Operand::Ctx { steps, .. } => {
+            for e in steps {
+                rename_in_elem(e, f);
+            }
+        }
+        Operand::Arith { left, right, .. }
+        | Operand::Concat { left, right, .. }
+        | Operand::Coalesce { left, right } => {
+            rename_in_operand(left, f);
+            rename_in_operand(right, f);
+        }
+        Operand::Row(items) => {
+            for (_, i) in items {
+                rename_in_operand(i, f);
+            }
+        }
+        Operand::Neg(i)
+        | Operand::Desc(i)
+        | Operand::Gathered(i)
+        | Operand::Spread(i)
+        | Operand::Invoking(i)
+        | Operand::Position(i)
+        | Operand::Driver(i)
+        | Operand::Typed { inner: i, .. } => rename_in_operand(i, f),
+        Operand::Through { base, .. }
+        | Operand::Field { base, .. }
+        | Operand::ValueMeta { base, .. }
+        | Operand::Index { base, .. } => rename_in_operand(base, f),
+        Operand::Projected { base, shape } => {
+            rename_in_operand(base, f);
+            match shape {
+                ProjShape::Value(v) => rename_in_operand(v, f),
+                ProjShape::Columns { items, index } => {
+                    for (_, item) in items {
+                        rename_in_operand(item, f);
+                    }
+                    if let Some(i) = index {
+                        rename_in_operand(i, f);
+                    }
+                }
+            }
+        }
+        Operand::LabelIndex { base, labels } => {
+            rename_in_operand(base, f);
+            for l in labels {
+                rename_in_operand(l, f);
+            }
+        }
+        Operand::List(items) => {
+            for i in items {
+                rename_in_operand(i, f);
+            }
+        }
+        Operand::Range { from, to, step } => {
+            rename_in_operand(from, f);
+            rename_in_operand(to, f);
+            if let Some(s) = step {
+                rename_in_operand(s, f);
+            }
+        }
+        Operand::Piped { expr, commands } => {
+            rename_in_operand(expr, f);
+            rename_in_commands(commands, f);
+        }
+        Operand::Cond { cond, then, other } => {
+            rename_in_pred(cond, f);
+            rename_in_operand(then, f);
+            rename_in_operand(other, f);
+        }
+        Operand::Group(e) => rename_in_pred(e, f),
+        Operand::Match {
+            scrutinee,
+            arms,
+            other,
+        } => {
+            rename_in_operand(scrutinee, f);
+            for (t, _, r) in arms {
+                rename_in_operand(t, f);
+                rename_in_operand(r, f);
+            }
+            rename_in_operand(other, f);
+        }
+        Operand::Interp(segs) => {
+            for seg in segs {
+                match seg {
+                    InterpSeg::Text(_) => {}
+                    InterpSeg::Expr(e) | InterpSeg::Strict(e, _) => rename_in_operand(e, f),
+                    InterpSeg::Default(e, d) => {
+                        rename_in_operand(e, f);
+                        rename_in_operand(d, f);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The union of register names a macro's arguments invite (ruling
 /// #22) — computed before the arguments are consumed by expansion.
 fn invites_of(expander: &dyn Expander, args: &[Operand]) -> std::collections::BTreeSet<String> {
@@ -348,6 +885,10 @@ struct Parser<'a> {
     /// (`stem(ru)`, `sort(atergo)`); everywhere else — a body —
     /// a bare word names a command applied to the body's seed.
     arg_depth: usize,
+    /// Set while an option's value reads: a spaced dash-led word
+    /// after it (`--to=1 -9`) is the next option of the segment, not
+    /// a one-sided minus.
+    in_option_value: bool,
     /// Inside a keyed aggregate's parentheses (`sort_by(…)`): the
     /// rounded `-:col` there is the descending core-field key.
     keyed_args: bool,
@@ -361,14 +902,25 @@ struct Parser<'a> {
     /// material (`qua --expand-1`). Nested invocations expand in
     /// nested parsers and do not report here.
     first_steps: std::cell::RefCell<Vec<String>>,
+    /// The expansions of the quarq template being parsed (design
+    /// paper: the quasiquote), in reading order; `None` outside a
+    /// `q(…)`, where a `${…}` in syntax position is refused.
+    template_holes: Option<Vec<Hole>>,
+    /// Inside a `macro` body: a quarq template's binders are marked
+    /// template-born as they are parsed (design paper: Hygiene).
+    in_macro_body: bool,
+    /// The expansions this parser grafted structurally, numbering
+    /// the fresh names of each.
+    expansions: std::cell::Cell<usize>,
 }
 
 /// Nesting depth past which parsing refuses (see
 /// [`Parser::nest_depth`]). Far beyond any real query, and small
 /// enough that the deepest frame chain (each `(` costs several
 /// stack frames through the group/operand dual reading) fits the
-/// smallest stacks in play — test threads (2 MB) and wasm.
-const MAX_NEST: usize = 64;
+/// smallest stacks in play — test threads (2 MB) and wasm — with
+/// room to spare: at 64 the chain ran within a tenth of the 2 MB.
+const MAX_NEST: usize = 56;
 
 /// Where a path-position splice stands (spec: Bodies and Splice
 /// Positions) — inside a branch's walk, or as (part of) a group
@@ -442,7 +994,7 @@ fn walks_reverse_resolve(elems: &[PathElem]) -> bool {
             Axis::ReverseResolve { scope: None, .. } | Axis::ValueMatch { scope: None, .. }
         ),
         PathElem::Group(g) => g.alts.iter().any(|a| walks_reverse_resolve(a)),
-        PathElem::Mark(_) | PathElem::Push { .. } => false,
+        PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_) => false,
     })
 }
 
@@ -469,6 +1021,12 @@ pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
     match command {
         // the session push leaves the cursor untouched, as a push does
         Command::SessionPush(_) => cur,
+        // a parameter in command position is filled before anything
+        // runs; until then it stands for whatever its quarq brings
+        Command::Param { .. } => cur,
+        // an expansion in command position is filled before anything
+        // runs; it stands for whatever its value brings
+        Command::Hole { .. } => cur,
         // `session(…)` sets and passes the threads on: the query it
         // heads continues as after `=`, navigation included
         // (spec: Session settings)
@@ -567,9 +1125,13 @@ impl<'a> Parser<'a> {
             nest_depth: 0,
             subquery_depth: 0,
             arg_depth: 0,
+            in_option_value: false,
             keyed_args: false,
             captures: std::cell::RefCell::new(Vec::new()),
             first_steps: std::cell::RefCell::new(Vec::new()),
+            template_holes: None,
+            in_macro_body: false,
+            expansions: std::cell::Cell::new(0),
         }
     }
 
@@ -1114,6 +1676,25 @@ impl Parser<'_> {
                         }
                         continue;
                     }
+                    // `| ${…}` — an expansion in command position
+                    // (design paper: the quasiquote)
+                    if let Some(Token::Expansion(text)) = self.peek() {
+                        let text = text.clone();
+                        self.pos += 1;
+                        pipeline.push(Command::Hole {
+                            hole: self.expansion_hole(&text)?,
+                            agg: false,
+                        });
+                        continue;
+                    }
+                    // `| $then` alone — a parameter in command position
+                    // (design paper: Arguments); in an expression
+                    // (`| $col + 1`) it is the operand it always was
+                    if let Some(name) = self.lone_param_ahead() {
+                        self.pos += 2;
+                        pipeline.push(Command::Param { name, agg: false });
+                        continue;
+                    }
                     let command = self.pipe_item(mode)?;
                     let command = self.quantified_push(command)?;
                     mode = command_mode_out(&command, mode);
@@ -1126,6 +1707,26 @@ impl Parser<'_> {
                     mode = command_mode_out(&command, mode);
                     pipeline.push(command);
                 }
+                // `$then` where a pipe would stand, inside a definition
+                // body: a parameter in command position, which a quarq
+                // argument fills with its commands, pipe and all
+                // (design paper: Arguments)
+                Some(Token::Dollar)
+                    if matches!(
+                        self.toks.get(self.pos + 1),
+                        Some(Token::Name { text, quoted: false, .. }) if self.def_params.iter().any(|p| p == text)
+                    ) =>
+                {
+                    let Some(Token::Name { text, .. }) = self.toks.get(self.pos + 1) else {
+                        unreachable!("matched");
+                    };
+                    let command = Command::Param {
+                        name: text.clone(),
+                        agg: false,
+                    };
+                    self.pos += 2;
+                    pipeline.push(command);
+                }
                 Some(Token::At) => {
                     self.pos += 1;
                     self.expect(Token::Pipe, "'|' after '@' for aggregation")?;
@@ -1135,6 +1736,24 @@ impl Parser<'_> {
                         for s in &pipeline[before..] {
                             mode = command_mode_out(s, mode);
                         }
+                        continue;
+                    }
+                    // `@| ${…}` — an expansion in aggregate position
+                    if let Some(Token::Expansion(text)) = self.peek() {
+                        let text = text.clone();
+                        self.pos += 1;
+                        pipeline.push(Command::Hole {
+                            hole: self.expansion_hole(&text)?,
+                            agg: true,
+                        });
+                        continue;
+                    }
+                    // `@| $agg` — a parameter in command position after
+                    // the aggregate pipe: the quarq's command, read as
+                    // the aggregate it names (design paper: Arguments)
+                    if let Some(name) = self.lone_param_ahead() {
+                        self.pos += 2;
+                        pipeline.push(Command::Param { name, agg: true });
                         continue;
                     }
                     // Hops are per-thread; `@|` aggregates the
@@ -1234,6 +1853,16 @@ impl Parser<'_> {
         }
         if matches!(self.peek(), Some(Token::LParen)) {
             self.pos += 1;
+            // `.x(${…})` — a lone expansion as the body is the value
+            // it brings, a literal expansion, not a walk (design
+            // paper: the quasiquote)
+            if matches!(self.peek(), Some(Token::Expansion(_)))
+                && matches!(self.toks.get(self.pos + 1), Some(Token::RParen))
+            {
+                let expr = self.cond_expr()?;
+                self.expect(Token::RParen, "')' to close the push")?;
+                return Ok(Command::ExprPush { name, expr });
+            }
             // A subcontext body is a navigating sub-query; a
             // value expression (`.total(::price * ::qty)`) is
             // the fallback when the query reading does not
@@ -1415,6 +2044,10 @@ impl Parser<'_> {
             // them are value expressions; a plain recall is just the
             // single-operand case.
             Some(Token::Dollar) => Ok(Command::Expr(self.expr_head()?)),
+            // `q(${…})` — a literal expansion heads the body as an
+            // expression (design paper: `| q(${$_})` makes the
+            // string literal)
+            Some(Token::Expansion(_)) => Ok(Command::Expr(self.expr_head()?)),
             // `| _::prop` / `| _/kid::x` — the invoking position as the
             // command's expression.
             Some(Token::Driver | Token::Position | Token::Invoking) => {
@@ -1633,6 +2266,15 @@ impl Parser<'_> {
                 } else {
                     Some(text[1..].to_string())
                 };
+                // `.${…}(…)` — a name expansion: the push named by the
+                // value (design paper: the quasiquote)
+                if name.is_none()
+                    && let Some(Token::Expansion(t)) = self.peek()
+                {
+                    let t = t.clone();
+                    self.pos += 1;
+                    name = Some(self.name_hole(&t)?);
+                }
                 // `.:%` — the attaching fields push (spec: Attached
                 // Regulae): each field of the topic record filed
                 // under its name and attached to the node.
@@ -1894,6 +2536,15 @@ impl Parser<'_> {
             Some(Token::Caret) => true,
             Some(Token::MarkOpen) => self.mark_anchor_ahead(),
             Some(Token::IdAnchorOpen) => true,
+            // `(${…})` — a group whose one alternative is an
+            // expansion: the union a list of branches fills (design
+            // paper: the group expansion)
+            Some(Token::LParen)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::Expansion(_)))
+                    && matches!(self.toks.get(self.pos + 2), Some(Token::RParen)) =>
+            {
+                true
+            }
             Some(Token::LParen) => self.toks.get(self.pos + 1).is_some_and(axis),
             _ => false,
         }
@@ -2202,7 +2853,10 @@ impl Parser<'_> {
             )));
         }
         self.def_params = params.clone();
-        let body = self.parse_query()?;
+        self.in_macro_body = true;
+        let body = self.parse_query();
+        self.in_macro_body = false;
+        let body = body?;
         self.def_params.clear();
         self.expect(Token::Semi, "';' to end the definition")?;
         self.defs.entries.push((
@@ -2289,12 +2943,32 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Expand a macro invocation to query text: bind arguments
-    /// (literals by value, forms by their unparsed text), build the
-    /// expansion arbor, run the body against it, and join the text
-    /// results.
-    fn expand_macro_text(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<String> {
-        let values = self.expand_macro_values(name, def, args)?;
+    /// Renamed unless invited (design paper: Hygiene): every
+    /// template-born binder of a grafted answer gets a fresh name
+    /// for this expansion, consistently across the answer, unless
+    /// its name was spelled in one of the invocation's arguments —
+    /// then it keeps its name; a binder an argument brought keeps
+    /// its name, since the caller wrote it.
+    fn rename_binders(
+        &self,
+        invited: &std::collections::BTreeSet<String>,
+        apply: &mut dyn FnMut(&mut dyn FnMut(&str) -> String),
+    ) {
+        let n = self.expansions.get() + 1;
+        self.expansions.set(n);
+        apply(
+            &mut |name: &str| match crate::syntax::ast::template_bare(name) {
+                Some(bare) if invited.contains(bare) => bare.to_string(),
+                Some(bare) => crate::syntax::ast::fresh_name(bare, n),
+                None => name.to_string(),
+            },
+        );
+    }
+
+    /// The texts of an all-text answer joined, the expansion as the
+    /// specification has had it: single spaces, nothing refused but
+    /// emptiness.
+    fn join_text(&self, name: &str, values: Vec<String>) -> Result<String> {
         let text = values.join(" ");
         if text.trim().is_empty() {
             return Err(QuarbError::expansion(format!(
@@ -2305,13 +2979,11 @@ impl Parser<'_> {
         Ok(text)
     }
 
-    /// Expand a macro invocation at a path or operand position:
-    /// join like [`Self::expand_macro_text`], but first refuse the
-    /// silent-concatenation trap — several branch-shaped output
-    /// values would space-join into one accidental deep path
+    /// [`Self::join_text`] at a path or operand position, refusing
+    /// the silent-concatenation trap first — several branch-shaped
+    /// output values would space-join into one accidental deep path
     /// (`/a /b` reads as `/a/b`, which runs and finds nothing).
-    fn expand_macro_path_text(&self, name: &str, def: &Def, args: Vec<Operand>) -> Result<String> {
-        let values = self.expand_macro_values(name, def, args)?;
+    fn join_path_text(&self, name: &str, values: Vec<String>) -> Result<String> {
         let nav_start = |v: &str| {
             let t = v.trim_start();
             ["/", "\\", "->", "<-", "--", "(", "^", ">", "<"]
@@ -2326,24 +2998,21 @@ impl Parser<'_> {
                 values.len()
             )));
         }
-        let text = values.join(" ");
-        if text.trim().is_empty() {
-            return Err(QuarbError::expansion(format!(
-                "macro '&{name}' expanded to nothing"
-            )));
-        }
-        self.first_steps.borrow_mut().push(text.clone());
-        Ok(text)
+        self.join_text(name, values)
     }
 
-    /// The expansion's raw output values (each `.to_string()`ed),
-    /// before joining — see [`Self::expand_macro_text`].
-    fn expand_macro_values(
+    /// A macro's expansion: bind the arguments (a parameter outside
+    /// an interpolation is the argument form itself, inside one its
+    /// text), build the expansion arbor, run the body over it, and
+    /// answer what its final context holds — forms (reflected nodes,
+    /// quarqs) or texts (design paper: a body may answer in
+    /// structure).
+    fn expand_macro_answers(
         &self,
         name: &str,
         def: &Def,
         args: Vec<Operand>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Answer>> {
         let n = def.params.len();
         let arity_ok = match def.rest {
             Some(_) => args.len() >= n,
@@ -2384,6 +3053,10 @@ impl Parser<'_> {
                 hole: &texts,
             },
         );
+        // a parameter in command position takes a quarq argument,
+        // whose commands stand in its place; anything else has no
+        // command to splice
+        refuse_leftover(name, leftover_param(&body))?;
 
         let mut bindings: Vec<(String, MacroBinding)> = def
             .params
@@ -2394,10 +3067,373 @@ impl Parser<'_> {
         if let Some(rest) = &def.rest {
             bindings.push((rest.clone(), MacroBinding::Rest(args[n..].to_vec())));
         }
-        let values = self
-            .expander
-            .expand(&name, &body, &bindings, def.data_aware)?;
-        Ok(values.iter().map(|v| v.to_string()).collect())
+        self.expander.expand(name, &body, &bindings, def.data_aware)
+    }
+
+    /// An expansion's answers sorted: all texts, or all forms. A
+    /// context that mixes structure and text is refused, naming the
+    /// macro, since a half-structural answer has no defined join.
+    fn split_answers(&self, name: &str, answers: Vec<Answer>) -> Result<Split> {
+        let forms = answers
+            .iter()
+            .filter(|a| matches!(a, Answer::Form(_)))
+            .count();
+        if forms == 0 {
+            return Ok(Split::Texts(
+                answers
+                    .into_iter()
+                    .map(|a| match a {
+                        Answer::Text(t) => t,
+                        Answer::Form(_) => unreachable!("counted"),
+                    })
+                    .collect(),
+            ));
+        }
+        if forms != answers.len() {
+            return Err(QuarbError::expansion(format!(
+                "macro '&{name}' answered {} form(s) and {} text(s); an \
+                 expansion is structure or text, not both",
+                forms,
+                answers.len() - forms
+            )));
+        }
+        Ok(Split::Forms(
+            answers
+                .into_iter()
+                .map(|a| match a {
+                    Answer::Form(f) => f,
+                    Answer::Text(_) => unreachable!("counted"),
+                })
+                .collect(),
+        ))
+    }
+
+    /// The forms a macro answered, grafted where a query stands — a
+    /// branch head or a walk: path elements continue one branch in
+    /// answer order, a predicate refines the element before it, a
+    /// projection ends the branch, a branch or a query stands whole,
+    /// a quarq whose first command navigates is that navigation and
+    /// the commands after it (design paper: Grafting). Several
+    /// branch-shaped answers refuse, as their texts would; the
+    /// sanctioned union is a group expansion.
+    fn graft_query(&self, name: &str, forms: Vec<Form>) -> Result<Query> {
+        let mut out = Query {
+            correlations: Vec::new(),
+            branches: Vec::new(),
+            pipeline: Vec::new(),
+            join_at: 0,
+            outer: false,
+        };
+        let mut steps: Vec<PathElem> = Vec::new();
+        let mut projection: Option<Projection> = None;
+        let mut whole = 0usize;
+        let flush =
+            |steps: &mut Vec<PathElem>, projection: &mut Option<Projection>, out: &mut Query| {
+                if !steps.is_empty() || projection.is_some() {
+                    out.branches.push(Branch {
+                        steps: std::mem::take(steps),
+                        projection: projection.take(),
+                        anchor: Anchor::Current,
+                    });
+                }
+            };
+        let text = |fs: &[Form]| fs.iter().map(Form::text).collect::<Vec<_>>().join(" ");
+        let texts = text(&forms);
+        let pipeline_refusal = || {
+            QuarbError::expansion(format!(
+                "macro '&{name}' expanded to a pipeline fragment ('{texts}'); \
+                 at path position it must expand to navigation steps"
+            ))
+        };
+        for f in forms {
+            match f {
+                Form::Elem(e) => {
+                    if projection.is_some() {
+                        return Err(QuarbError::expansion(format!(
+                            "macro '&{name}' answered a step after a projection \
+                             ('{texts}'); a projection ends the branch"
+                        )));
+                    }
+                    steps.push(e);
+                }
+                Form::Predicate(p) => {
+                    attach_predicate(name, p, &mut steps)?;
+                }
+                Form::PredExpr(e) => {
+                    attach_predicate(name, Predicate::Expr(e), &mut steps)?;
+                }
+                Form::Projection(p) => {
+                    if projection.is_some() {
+                        return Err(QuarbError::expansion(format!(
+                            "macro '&{name}' answered two projections ('{texts}'); \
+                             a branch ends in one"
+                        )));
+                    }
+                    projection = Some(p);
+                }
+                Form::Branch(b) => {
+                    flush(&mut steps, &mut projection, &mut out);
+                    whole += 1;
+                    out.branches.push(b);
+                }
+                Form::Query(q) => {
+                    flush(&mut steps, &mut projection, &mut out);
+                    whole += 1;
+                    if !q.correlations.is_empty() {
+                        out.join_at = out.pipeline.len() + q.join_at;
+                    }
+                    out.correlations.extend(q.correlations);
+                    out.branches.extend(q.branches);
+                    out.pipeline.extend(q.pipeline);
+                }
+                Form::Pipeline(cmds) => {
+                    let mut cmds = cmds.into_iter();
+                    match cmds.next() {
+                        Some(Command::Nav(b)) => {
+                            flush(&mut steps, &mut projection, &mut out);
+                            whole += 1;
+                            out.branches.push(b);
+                            out.pipeline.extend(cmds);
+                        }
+                        Some(Command::Expr(Operand::Rel {
+                            steps: rs,
+                            projection: rp,
+                            anchor,
+                        })) => {
+                            flush(&mut steps, &mut projection, &mut out);
+                            whole += 1;
+                            out.branches.push(Branch {
+                                steps: rs,
+                                projection: rp,
+                                anchor,
+                            });
+                            out.pipeline.extend(cmds);
+                        }
+                        _ => return Err(pipeline_refusal()),
+                    }
+                }
+                Form::Command(Command::Nav(b)) => {
+                    flush(&mut steps, &mut projection, &mut out);
+                    whole += 1;
+                    out.branches.push(b);
+                }
+                Form::Command(_) => return Err(pipeline_refusal()),
+                Form::Operand(Operand::Rel {
+                    steps: rs,
+                    projection: rp,
+                    anchor,
+                })
+                | Form::Arg(Arg::Expr(Operand::Rel {
+                    steps: rs,
+                    projection: rp,
+                    anchor,
+                })) => {
+                    flush(&mut steps, &mut projection, &mut out);
+                    whole += 1;
+                    out.branches.push(Branch {
+                        steps: rs,
+                        projection: rp,
+                        anchor,
+                    });
+                }
+                other => {
+                    return Err(QuarbError::expansion(format!(
+                        "macro '&{name}' answered {} at a path position \
+                         ('{}'); navigation stands here — invoke it in \
+                         operand position, or answer a path",
+                        other.kind(),
+                        other.text()
+                    )));
+                }
+            }
+        }
+        flush(&mut steps, &mut projection, &mut out);
+        if whole >= 2 {
+            return Err(QuarbError::expansion(format!(
+                "macro '&{name}' expanded to {whole} branch-shaped values; \
+                 they do not join silently — answer one group, \
+                 '@| q((${{$_}}))', or a single branch"
+            )));
+        }
+        if out.branches.is_empty() {
+            return Err(QuarbError::expansion(format!(
+                "macro '&{name}' expanded to nothing"
+            )));
+        }
+        self.first_steps
+            .borrow_mut()
+            .push(crate::syntax::unparse::unparse(&out));
+        Ok(out)
+    }
+
+    /// The forms a macro answered, grafted after a pipe: commands
+    /// in answer order, whose first pipe must match the invoking
+    /// pipe; a predicate is the per-capsa filter it is after `|`;
+    /// a projection or an operand is the command it is written as
+    /// after a pipe (design paper: Grafting).
+    fn graft_commands(&self, name: &str, forms: Vec<Form>, pipe: &str) -> Result<Vec<Command>> {
+        let texts = forms.iter().map(Form::text).collect::<Vec<_>>().join(" ");
+        let mut out: Vec<Command> = Vec::new();
+        for f in forms {
+            match f {
+                Form::Command(c) => out.push(c),
+                Form::Pipeline(cmds) => out.extend(cmds),
+                Form::Query(q) if q.correlations.is_empty() => {
+                    match q.branches.len() {
+                        0 => {}
+                        1 => out.push(Command::Nav(q.branches.into_iter().next().expect("one"))),
+                        _ => {
+                            return Err(QuarbError::expansion(format!(
+                                "macro '&{name}' answered a union after a pipe \
+                                 ('{texts}'); a hop walks one path per thread"
+                            )));
+                        }
+                    }
+                    out.extend(q.pipeline);
+                }
+                Form::Branch(b) => out.push(Command::Nav(b)),
+                Form::Projection(p) => out.push(Command::Nav(Branch {
+                    steps: Vec::new(),
+                    projection: Some(p),
+                    anchor: Anchor::Current,
+                })),
+                // a relative path after a pipe is the hop it is written as
+                Form::Operand(Operand::Rel {
+                    steps,
+                    projection,
+                    anchor,
+                })
+                | Form::Arg(Arg::Expr(Operand::Rel {
+                    steps,
+                    projection,
+                    anchor,
+                })) => out.push(Command::Nav(Branch {
+                    steps,
+                    projection,
+                    anchor,
+                })),
+                Form::Operand(op) | Form::Arg(Arg::Expr(op)) => out.push(Command::Expr(op)),
+                Form::Arg(Arg::Lit(v)) => out.push(Command::Expr(Operand::Lit(v))),
+                Form::Predicate(Predicate::Expr(e)) | Form::PredExpr(e) => {
+                    if pipe != "|" {
+                        return Err(QuarbError::expansion(format!(
+                            "'@|' aggregates the whole context; the predicate \
+                             '&{name}' answered filters per capsa — invoke it \
+                             with '|'"
+                        )));
+                    }
+                    out.push(Command::Filter(e));
+                }
+                Form::Predicate(p) => out.push(Command::Select(p)),
+                other => {
+                    return Err(QuarbError::expansion(format!(
+                        "macro '&{name}' answered {} after a pipe ('{}'); a \
+                         walk continues at path position — or open the \
+                         template with the pipe: 'q(| …)'",
+                        other.kind(),
+                        other.text()
+                    )));
+                }
+            }
+        }
+        let Some(first) = out.first() else {
+            return Err(QuarbError::expansion(format!(
+                "macro '&{name}' expanded to nothing"
+            )));
+        };
+        let first = command_pipe(first);
+        if first != pipe {
+            return Err(QuarbError::parse(format!(
+                "macro '&{name}' expanded to a '{first}' pipeline \
+                 ('{texts}') but was invoked with '{pipe}'"
+            )));
+        }
+        self.first_steps.borrow_mut().push(
+            out.iter()
+                .map(crate::syntax::unparse::command)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        Ok(out)
+    }
+
+    /// The one form a macro answered, grafted where an operand
+    /// stands: an operand as it is, a predicate as a condition, a
+    /// path as a relative path, a quarq as its body piped from the
+    /// seed (design paper: Grafting).
+    fn graft_operand(&self, name: &str, forms: Vec<Form>) -> Result<Operand> {
+        if forms.len() != 1 {
+            return Err(QuarbError::expansion(format!(
+                "macro '&{name}' answered {} values in operand position; \
+                 an operand is one value",
+                forms.len()
+            )));
+        }
+        let form = forms.into_iter().next().expect("one");
+        let branch_query = |b: Branch| Query {
+            correlations: Vec::new(),
+            branches: vec![b],
+            pipeline: Vec::new(),
+            join_at: 0,
+            outer: false,
+        };
+        let op = match form {
+            Form::Operand(op) | Form::Arg(Arg::Expr(op)) => op,
+            Form::Arg(Arg::Lit(v)) => Operand::Lit(v),
+            Form::Predicate(Predicate::Expr(e)) | Form::PredExpr(e) => Operand::Group(Box::new(e)),
+            Form::Predicate(_) => {
+                return Err(QuarbError::expansion(format!(
+                    "macro '&{name}' answered a positional predicate in \
+                     operand position; a condition operand needs an expression"
+                )));
+            }
+            Form::Branch(b) => self.operand_from_query(name, branch_query(b))?,
+            Form::Query(q) => self.operand_from_query(name, q)?,
+            Form::Elem(e) => self.operand_from_query(
+                name,
+                branch_query(Branch {
+                    steps: vec![e],
+                    projection: None,
+                    anchor: Anchor::Current,
+                }),
+            )?,
+            Form::Projection(p) => Operand::Rel {
+                steps: Vec::new(),
+                projection: Some(p),
+                anchor: Anchor::Current,
+            },
+            Form::Pipeline(mut cmds) => match cmds.as_slice() {
+                [Command::Expr(_)] => match cmds.pop() {
+                    Some(Command::Expr(op)) => op,
+                    _ => unreachable!("matched"),
+                },
+                [Command::Nav(_)] => match cmds.pop() {
+                    Some(Command::Nav(b)) => self.operand_from_query(name, branch_query(b))?,
+                    _ => unreachable!("matched"),
+                },
+                _ => Operand::Piped {
+                    expr: Box::new(Operand::Seed),
+                    commands: cmds,
+                },
+            },
+            Form::Command(Command::Expr(op)) => op,
+            Form::Command(Command::Nav(b)) => self.operand_from_query(name, branch_query(b))?,
+            Form::Command(c) => Operand::Piped {
+                expr: Box::new(Operand::Seed),
+                commands: vec![c],
+            },
+            other => {
+                return Err(QuarbError::expansion(format!(
+                    "macro '&{name}' answered {} in operand position ('{}')",
+                    other.kind(),
+                    other.text()
+                )));
+            }
+        };
+        self.first_steps
+            .borrow_mut()
+            .push(crate::syntax::unparse::operand_text(&op));
+        Ok(op)
     }
 
     /// Parse `&name`, `&name(arg, …)`, or the data-aware `&name!(…)`
@@ -2579,6 +3615,7 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                refuse_leftover(&name, leftover_param(&q))?;
                 q
             }
             DefBody::Pipeline(_) => {
@@ -2598,8 +3635,18 @@ impl Parser<'_> {
             // `$$0`).
             DefBody::Macro(_) => {
                 let invited = invites_of(self.expander, &args);
-                let text = self.expand_macro_path_text(&name, &def, args)?;
-                let q = self.parse_expansion_query(&name, &text)?;
+                let answers = self.expand_macro_answers(&name, &def, args)?;
+                let q = match self.split_answers(&name, answers)? {
+                    Split::Texts(texts) => {
+                        let text = self.join_path_text(&name, texts)?;
+                        self.parse_expansion_query(&name, &text)?
+                    }
+                    Split::Forms(forms) => {
+                        let mut q = self.graft_query(&name, forms)?;
+                        self.rename_binders(&invited, &mut |f| rename_in_query(&mut q, f));
+                        q
+                    }
+                };
                 self.record_captures(&name, &invited, self.expander.usage_of_query(&q));
                 q
             }
@@ -2651,10 +3698,10 @@ impl Parser<'_> {
                     outer: &map,
                     hole: &map,
                 };
-                for mut command in commands {
-                    subst_command(&mut command, &subst);
-                    pipeline.push(command);
-                }
+                let mut commands = commands;
+                subst_commands(&mut commands, &subst);
+                refuse_leftover(&name, leftover_in_commands(&commands))?;
+                pipeline.extend(commands);
                 Ok(())
             }
             DefBody::Query(_) => Err(QuarbError::parse(format!(
@@ -2692,49 +3739,68 @@ impl Parser<'_> {
                 }
                 Ok(())
             }
-            // A macro expands to text; here it must be a command
-            // sequence whose first pipe matches the invocation.
+            // A macro answers forms, grafted as commands, or text,
+            // reparsed; either way a command sequence whose first
+            // pipe matches the invocation.
             DefBody::Macro(_) => {
                 let invited = invites_of(self.expander, &args);
-                let text = self.expand_macro_text(&name, &def, args)?;
-                let wrap = |e: QuarbError| {
-                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
-                        .wrapping(e)
-                };
-                let tokens = lexer::lex(&text).map_err(wrap)?;
-                let first = match tokens.first() {
-                    Some(Token::Pipe) => "|",
-                    Some(Token::At) => "@|",
-                    _ => {
-                        return Err(QuarbError::parse(format!(
-                            "macro '&{name}' expanded to a query fragment \
-                             ('{text}'); invoke it at path position — or \
-                             have the body emit a leading '| ' to splice \
-                             as pipeline commands"
-                        )));
+                let answers = self.expand_macro_answers(&name, &def, args)?;
+                let commands = match self.split_answers(&name, answers)? {
+                    Split::Forms(forms) => {
+                        let mut commands = self.graft_commands(&name, forms, pipe)?;
+                        self.rename_binders(&invited, &mut |f| {
+                            rename_in_commands(&mut commands, f)
+                        });
+                        commands
+                    }
+                    Split::Texts(texts) => {
+                        let text = self.join_text(&name, texts)?;
+                        self.reparse_commands(&name, &text, pipe)?
                     }
                 };
-                if first != pipe {
-                    return Err(QuarbError::parse(format!(
-                        "macro '&{name}' expanded to a '{first}' pipeline \
-                         ('{text}') but was invoked with '{pipe}'"
-                    )));
-                }
-                let mut p = self.child(&tokens, self.defs.before(&name))?;
-                let mut commands = Vec::new();
-                p.pipeline_items(&mut commands, PipeMode::Nav)
-                    .map_err(wrap)?;
-                if p.pos != tokens.len() {
-                    return Err(QuarbError::parse(format!(
-                        "macro '&{name}' expanded to text with trailing \
-                         content ('{text}')"
-                    )));
-                }
                 self.record_captures(&name, &invited, self.expander.usage_of_commands(&commands));
                 pipeline.extend(commands);
                 Ok(())
             }
         }
+    }
+
+    /// A macro's text answer after a pipe, reparsed: a command
+    /// sequence whose first pipe matches the invocation.
+    fn reparse_commands(&self, name: &str, text: &str, pipe: &str) -> Result<Vec<Command>> {
+        let wrap = |e: QuarbError| {
+            QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')")).wrapping(e)
+        };
+        let tokens = lexer::lex(text).map_err(wrap)?;
+        let first = match tokens.first() {
+            Some(Token::Pipe) => "|",
+            Some(Token::At) => "@|",
+            _ => {
+                return Err(QuarbError::parse(format!(
+                    "macro '&{name}' expanded to a query fragment \
+                     ('{text}'); invoke it at path position — or \
+                     have the body emit a leading '| ' to splice \
+                     as pipeline commands"
+                )));
+            }
+        };
+        if first != pipe {
+            return Err(QuarbError::parse(format!(
+                "macro '&{name}' expanded to a '{first}' pipeline \
+                 ('{text}') but was invoked with '{pipe}'"
+            )));
+        }
+        let mut p = self.child(&tokens, self.defs.before(name))?;
+        let mut commands = Vec::new();
+        p.pipeline_items(&mut commands, PipeMode::Nav)
+            .map_err(wrap)?;
+        if p.pos != tokens.len() {
+            return Err(QuarbError::parse(format!(
+                "macro '&{name}' expanded to text with trailing \
+                 content ('{text}')"
+            )));
+        }
+        Ok(commands)
     }
 
     fn branch(&mut self) -> Result<Branch> {
@@ -2812,6 +3878,25 @@ impl Parser<'_> {
                 && matches!(self.toks.get(self.pos + 1), Some(Token::Pipe))
             {
                 break;
+            }
+            // `^/row$col`, `/row[…] $then` inside a definition body —
+            // a parameter standing after the walk: the argument's
+            // form continues it (a projection, steps), or a quarq
+            // ends the branch and follows it with its commands
+            // (design paper: Arguments, the quasiquote).
+            if matches!(tok, Token::Dollar)
+                && self.pattern_depth == 0
+                && self.template_holes.is_some()
+                && let Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) = self.toks.get(self.pos + 1)
+                && self.def_params.iter().any(|p| p == text)
+            {
+                steps.push(PathElem::Param(text.clone()));
+                self.pos += 2;
+                continue;
             }
             if is_projection_start(tok) {
                 // `::name-->` is a resolution step (navigation
@@ -2897,12 +3982,62 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                refuse_leftover(&name, leftover_param(&q))?;
                 q
             }
             DefBody::Macro(_) => {
                 let invited = invites_of(self.expander, &args);
-                let text = self.expand_macro_path_text(&name, &def, args)?;
-                let q = self.parse_expansion_query(&name, &text)?;
+                let answers = self.expand_macro_answers(&name, &def, args)?;
+                let q = match self.split_answers(&name, answers)? {
+                    Split::Texts(texts) => {
+                        let text = self.join_path_text(&name, texts)?;
+                        self.parse_expansion_query(&name, &text)?
+                    }
+                    // predicates answered mid-walk refine the element
+                    // just walked, as a predicate fragment does (design
+                    // paper: Grafting)
+                    Split::Forms(forms) if forms.iter().all(predicate_form) => {
+                        let forms: Vec<Form> = forms.into_iter().flat_map(as_predicates).collect();
+                        if quant.is_some() {
+                            return Err(QuarbError::parse(format!(
+                                "the predicate '&{name}' answered refines what \
+                                 precedes it; a quantifier cannot ride it"
+                            )));
+                        }
+                        let mut preds: Vec<Predicate> = forms
+                            .into_iter()
+                            .map(|f| match f {
+                                Form::Predicate(p) => p,
+                                Form::PredExpr(e) => Predicate::Expr(e),
+                                _ => unreachable!("filtered"),
+                            })
+                            .collect();
+                        self.rename_binders(&invited, &mut |f| {
+                            for p in preds.iter_mut() {
+                                if let Predicate::Expr(e) = p {
+                                    rename_in_pred(e, f);
+                                }
+                            }
+                        });
+                        self.first_steps.borrow_mut().push(
+                            preds
+                                .iter()
+                                .map(crate::syntax::unparse::predicate)
+                                .collect::<String>(),
+                        );
+                        self.attach_predicate_fragment(&name, preds, &HashMap::new(), steps)?;
+                        while matches!(self.peek(), Some(Token::LBracket)) {
+                            let p = self.predicate()?;
+                            self.attach_predicate_fragment(&name, vec![p], &HashMap::new(), steps)?;
+                        }
+                        return Ok(None);
+                    }
+                    Split::Forms(forms) => {
+                        let mut q = self.graft_query(&name, forms)?;
+                        self.rename_binders(&invited, &mut |f| rename_in_query(&mut q, f));
+                        q
+                    }
+                };
                 self.record_captures(&name, &invited, self.expander.usage_of_query(&q));
                 q
             }
@@ -3089,9 +4224,11 @@ impl Parser<'_> {
                 g.predicates.extend(preds);
                 Ok(())
             }
-            Some(PathElem::Mark(_) | PathElem::Push { .. }) => Err(QuarbError::parse(format!(
+            Some(
+                PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_),
+            ) => Err(QuarbError::parse(format!(
                 "the predicate fragment '&{name}' refines a hop or a \
-                 group; a mark or a push takes no predicates"
+                     group; a mark or a push takes no predicates"
             ))),
             None => Err(QuarbError::parse(format!(
                 "the predicate fragment '&{name}' refines the step \
@@ -4404,6 +5541,8 @@ impl Parser<'_> {
             parsed?;
             self.expect(Token::RParen, "')' to close the command's operands")?;
         }
+        // An alias is spelled canonical from here on.
+        let name = crate::syntax::registry::canonical(&name).to_string();
         self.finish_call(name, args)
     }
 
@@ -4767,28 +5906,15 @@ impl Parser<'_> {
                         && letters.iter().all(|c| c.is_alphabetic())
                         && crate::syntax::registry::split_env(command).is_none()
                     {
-                        let declared: &[&str] =
-                            crate::syntax::registry::spec(command).map_or(&[], |s| s.options);
+                        // No row lists the letters: nothing bundles
+                        // but a reducer's `-o`.
                         let takes_of = crate::syntax::registry::takes_of(command);
                         for c in &letters {
                             let short = format!("-{c}");
-                            if !(declared.contains(&short.as_str()) || (takes_of && short == "-o"))
-                            {
-                                let mut shorts: Vec<&str> = declared
-                                    .iter()
-                                    .copied()
-                                    .filter(|o| !o.starts_with("--"))
-                                    .collect();
-                                if takes_of {
-                                    shorts.push("-o");
-                                }
+                            if !(takes_of && short == "-o") {
                                 return Err(QuarbError::parse(format!(
                                     "'{short}' in '{t}' is no switch of '{command}' (its short switches: {})",
-                                    if shorts.is_empty() {
-                                        "none".to_string()
-                                    } else {
-                                        shorts.join(" ")
-                                    }
+                                    if takes_of { "-o" } else { "none" }
                                 )));
                             }
                         }
@@ -4842,14 +5968,16 @@ impl Parser<'_> {
                          segment of '{command}' ('{command}(a;; -9)')"
                     )));
                 }
-                // One value, as an operand reads (a bare word a
-                // string, a sigil an expression); the options are
-                // whitespace-separated, so it ends at the space.
-                // `--of=expr` reads a whole expression (`--of=:price
-                // * :qty`), the last option it is.
-                if matches!(name.as_str(), "--of" | "-o") {
-                    Some(self.additive()?)
-                } else if name == "--to" && matches!(self.peek(), Some(Token::LBracket)) {
+                // One value, as an operand reads (spec: Options): a
+                // bare word a string, a sigil an expression, a
+                // compound one whole (`--of=:price * :qty`,
+                // `--to="2000-01-01T" ++ $-::dep`), a parenthesised
+                // one a group; the next option's dash ends it. `map`
+                // alone reads `--to=` as the cells to map.
+                if command == "map"
+                    && name == "--to"
+                    && matches!(self.peek(), Some(Token::LBracket))
+                {
                     // `--to=[rows]`, `--to=[rows]:col` — the value
                     // index of the structure names the cells mapped
                     self.pos += 1;
@@ -4883,7 +6011,10 @@ impl Parser<'_> {
                         };
                     }
                     Some(o)
-                } else if name == "--to" && matches!(self.peek(), Some(Token::LParen)) {
+                } else if command == "map"
+                    && name == "--to"
+                    && matches!(self.peek(), Some(Token::LParen))
+                {
                     // `--to=(:a; :b)` — a parenthesised projection
                     // list names several columns
                     self.pos += 1;
@@ -4898,7 +6029,11 @@ impl Parser<'_> {
                     self.expect(Token::RParen, "')' to close the column list of --to")?;
                     Some(Operand::List(items))
                 } else {
-                    Some(self.unary()?)
+                    let outer = self.in_option_value;
+                    self.in_option_value = true;
+                    let v = self.cond_expr();
+                    self.in_option_value = outer;
+                    Some(v?)
                 }
             } else {
                 None
@@ -4925,7 +6060,7 @@ impl Parser<'_> {
         if crate::syntax::registry::split_env(&name).is_none()
             && let Some(opts) = crate::syntax::man::options_of(&name)
         {
-            let synopsis = crate::syntax::man::synopsis(&name).unwrap_or_default();
+            let signature = crate::syntax::man::synopsis(&name).unwrap_or_default();
             let mut present: Vec<&str> = Vec::new();
             for arg in &mut args {
                 let Arg::Opt { name: opt, value } = arg else {
@@ -4933,18 +6068,18 @@ impl Parser<'_> {
                 };
                 let Some(spec) = opts.iter().find(|o| o.answers_to(opt)) else {
                     return Err(QuarbError::parse(format!(
-                        "'{name}' has no option '{opt}'; the synopsis: {synopsis}"
+                        "'{name}' has no option '{opt}'; the signature: {signature}"
                     )));
                 };
                 match (&spec.value, value.is_some()) {
                     (Some(placeholder), false) => {
                         return Err(QuarbError::parse(format!(
-                            "option '{opt}' of '{name}' takes a value ('{opt}={placeholder}'); the synopsis: {synopsis}"
+                            "option '{opt}' of '{name}' takes a value ('{opt}={placeholder}'); the signature: {signature}"
                         )));
                     }
                     (None, true) => {
                         return Err(QuarbError::parse(format!(
-                            "option '{opt}' of '{name}' is a switch and takes no value; the synopsis: {synopsis}"
+                            "option '{opt}' of '{name}' is a switch and takes no value; the signature: {signature}"
                         )));
                     }
                     _ => {}
@@ -4963,16 +6098,15 @@ impl Parser<'_> {
                         .any(|p| o.long.as_deref() == Some(p) || o.short.as_deref() == Some(p))
             }) {
                 return Err(QuarbError::parse(format!(
-                    "'{name}' needs {}; the synopsis: {synopsis}",
+                    "'{name}' needs {}; the signature: {signature}",
                     missing.spelled()
                 )));
             }
             by_row = true;
         }
-        // The options a command declares, as its synopsis lists
-        // them; every other one is refused by name. An environment
-        // command's options are the callee's to judge.
-        let declared: &[&str] = crate::syntax::registry::spec(&name).map_or(&[], |s| s.options);
+        // Without a row a built-in declares no option (a library
+        // command's are the library's to judge, an environment
+        // command's the callee's).
         // Every reducing aggregate takes `--of=expr` (`-o=expr`),
         // the expression read on each item before the reduction
         // (draft 164); it needs its expression.
@@ -4991,25 +6125,14 @@ impl Parser<'_> {
             }
             if let Arg::Opt { name: opt, .. } = arg
                 && crate::syntax::registry::split_env(&name).is_none()
-                && !declared.contains(&opt.as_str())
             {
-                return Err(QuarbError::parse(if takes_of && !declared.is_empty() {
-                    format!(
-                        "'{name}' takes '--of=expr' ('-o=expr'), the expression to reduce, and the options {}; '{opt}' given",
-                        declared.join(" ")
-                    )
-                } else if takes_of {
+                return Err(QuarbError::parse(if takes_of {
                     format!(
                         "'{name}' takes '--of=expr' ('-o=expr'), the expression to reduce; '{opt}' given"
                     )
-                } else if declared.is_empty() {
-                    format!(
-                        "'{name}' takes no options; its parentheses hold operands ('{opt}' given)"
-                    )
                 } else {
                     format!(
-                        "'{name}' has no option '{opt}' (its options: {})",
-                        declared.join(" ")
+                        "'{name}' takes no options; its parentheses hold operands ('{opt}' given)"
                     )
                 }));
             }
@@ -5279,6 +6402,14 @@ impl Parser<'_> {
         // conditional argument needs no second pair:
         // `rec("age", ::Age ? ::Age * 1 : 1912 - $.born)`.
         match self.cond_expr()? {
+            // `%(${…})`, `f(${…})` — a sequence expansion among the
+            // arguments (design paper: the quasiquote)
+            Operand::Hole(h) => Ok(Arg::Hole(h)),
+            // a quarq template among the arguments fills where it is
+            // evaluated, so it stays an expression
+            Operand::Lit(Value::Quarq(q)) if q.is_template() => {
+                Ok(Arg::Expr(Operand::Lit(Value::Quarq(q))))
+            }
             Operand::Lit(v) => Ok(Arg::Lit(v)),
             // `@("a"; "b")` of literals: the list as one literal
             // (`jaccard(@("cat"; "dog"))`).
@@ -5310,7 +6441,15 @@ impl Parser<'_> {
             }
             Some(Token::ColonColon) => {
                 self.pos += 1;
-                Projection::Property(self.opt_projection_name())
+                // `::${…}` — a name expansion: the property named by
+                // the value (design paper: the quasiquote)
+                if let Some(Token::Expansion(t)) = self.peek() {
+                    let t = t.clone();
+                    self.pos += 1;
+                    Projection::Property(Some(self.name_hole(&t)?))
+                } else {
+                    Projection::Property(self.opt_projection_name())
+                }
             }
             Some(Token::ColonColonColon) => {
                 // on a node path (after a step name, a wildcard, a
@@ -5382,6 +6521,14 @@ impl Parser<'_> {
     }
 
     fn path_elem_inner(&mut self) -> Result<PathElem> {
+        // `${…}` where a path element stands: a node expansion
+        // (design paper: the quasiquote) — steps, a predicate
+        // refining the element before it, or a projection
+        if let Some(Token::Expansion(text)) = self.peek() {
+            let text = text.clone();
+            self.pos += 1;
+            return Ok(PathElem::Hole(self.expansion_hole(&text)?));
+        }
         // Bare `.name` (no body) in path position marks the current
         // node — the context-typed push: nodes go to the mark
         // store, never the register. (`.name(` is a pattern push;
@@ -5649,10 +6796,14 @@ impl Parser<'_> {
                 _ => elems.push(self.path_elem()?),
             }
         }
-        if !elems
-            .iter()
-            .any(|e| matches!(e, PathElem::Step(_) | PathElem::Group(_)))
-        {
+        // (an expansion counts: it fills with hops, or with the
+        // alternatives themselves)
+        if !elems.iter().any(|e| {
+            matches!(
+                e,
+                PathElem::Step(_) | PathElem::Group(_) | PathElem::Hole(_) | PathElem::Param(_)
+            )
+        }) {
             return Err(QuarbError::parse(
                 "a path-pattern alternative needs at least one hop",
             ));
@@ -5786,7 +6937,16 @@ impl Parser<'_> {
         // is a leaf anchor and must still be consumed.
         let map_pipe_ahead =
             self.pattern_depth == 0 && matches!(self.toks.get(self.pos + 1), Some(Token::Pipe));
-        let leaf = if matches!(self.peek(), Some(Token::Dollar)) && !map_pipe_ahead {
+        // `/row $then` — a parameter in command position after the
+        // step is no leaf anchor either (design paper: Arguments)
+        let param_ahead = self.pattern_depth == 0
+            && self.template_holes.is_some()
+            && matches!(
+                self.toks.get(self.pos + 1),
+                Some(Token::Name { text, quoted: false, .. }) if self.def_params.iter().any(|p| p == text)
+            );
+        let leaf = if matches!(self.peek(), Some(Token::Dollar)) && !map_pipe_ahead && !param_ahead
+        {
             self.pos += 1;
             true
         } else {
@@ -6743,6 +7903,7 @@ impl Parser<'_> {
         let numeric = |t: &str| t.starts_with(|c: char| c.is_ascii_digit() || c == '.');
         let mut chars = text.chars();
         let op = match (chars.next(), chars.as_str()) {
+            (Some('-'), rest) if numeric(rest) && self.in_option_value => return Ok(()),
             (Some(c @ ('+' | '-' | '*')), rest) if numeric(rest) => c,
             (_, _) if numeric(text) => {
                 match crate::syntax::unparse::operand_text(left).chars().last() {
@@ -7384,6 +8545,27 @@ impl Parser<'_> {
                 }
             }
             self.pos += 1;
+            // `([cond] | …)` — an inline pipe headed by a filter: the
+            // capsa as it stands, kept or dropped by the condition,
+            // then the commands (design paper's ninth recipe: the
+            // literal's case as an inline pipe that yields null
+            // elsewhere)
+            if matches!(self.peek(), Some(Token::LBracket)) {
+                let saved_depth = self.arg_depth;
+                self.arg_depth = 0;
+                let parsed = (|| {
+                    let mut commands = vec![self.pipe_item(PipeMode::Nav)?];
+                    commands.extend(self.inline_pipe_tail()?);
+                    Ok::<_, QuarbError>(commands)
+                })();
+                self.arg_depth = saved_depth;
+                let commands = parsed?;
+                self.expect(Token::RParen, "')' to close a group")?;
+                return Ok(Operand::Piped {
+                    expr: Box::new(Operand::Seed),
+                    commands,
+                });
+            }
             // A parenthesised operand is a body, in a command's
             // parentheses too (`tree(0; (fields))`,
             // `project((fields); -r)`): inside it the expression
@@ -7963,6 +9145,73 @@ impl Parser<'_> {
     /// or `expr:-fallback` (the default hole) — or a pipe tail
     /// (`expr | command ...`); mixing them wants the piped side
     /// parenthesized.
+    /// `$name` standing alone where a command stands — a declared
+    /// parameter followed by a pipe, a closing parenthesis or the
+    /// end: the parameter in command position. A parameter opening
+    /// an expression (`$col + 1`) is not it.
+    fn lone_param_ahead(&self) -> Option<String> {
+        // inside a template only: in a body outside `q(…)`, `| $col`
+        // is the operand it always was, projecting by the argument
+        if self.template_holes.is_none() || !matches!(self.peek(), Some(Token::Dollar)) {
+            return None;
+        }
+        let Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) = self.toks.get(self.pos + 1)
+        else {
+            return None;
+        };
+        if !self.def_params.iter().any(|p| p == text) {
+            return None;
+        }
+        match self.toks.get(self.pos + 2) {
+            None | Some(Token::Pipe | Token::RParen | Token::At | Token::Semi) => {
+                Some(text.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// A `${…}` in syntax position: a template expansion (design
+    /// paper: the quasiquote), legal inside a quarq only, holding
+    /// one value expression parsed here, at the definition, and
+    /// evaluated when the literal is.
+    fn expansion_hole(&mut self, text: &str) -> Result<Hole> {
+        if self.template_holes.is_none() {
+            return Err(QuarbError::parse(format!(
+                "an expansion '${{{text}}}' stands inside a quarq template 'q(…)' or \
+                 inside a string; here write the value itself"
+            )));
+        }
+        let expr = match self.parse_hole(text)? {
+            InterpSeg::Expr(e) => e,
+            _ => {
+                return Err(QuarbError::parse(format!(
+                    "in '${{{text}}}': a template expansion holds one value \
+                     expression; ':?' and ':-' belong to the interpolated string"
+                )));
+            }
+        };
+        let holes = self.template_holes.as_mut().expect("checked above");
+        let hole = Hole {
+            text: text.to_string(),
+            expr: Box::new(expr),
+            index: holes.len(),
+        };
+        holes.push(hole.clone());
+        Ok(hole)
+    }
+
+    /// A `${…}` where a name stands — a push, a step matcher, a
+    /// property key: the hole is recorded and the name carries its
+    /// index and text in the reserved spelling.
+    fn name_hole(&mut self, text: &str) -> Result<String> {
+        let hole = self.expansion_hole(text)?;
+        Ok(hole_name(hole.index, text))
+    }
+
     fn parse_hole(&mut self, src: &str) -> Result<InterpSeg> {
         if let Some((idx, which)) = top_level_bash_op(src) {
             if idx == 0 || src[..idx].ends_with(|c: char| c.is_whitespace()) {
@@ -8339,7 +9588,8 @@ impl Parser<'_> {
                 ..
             }) if text == "q" && matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) => {
                 self.pos += 2;
-                if matches!(self.peek(), Some(Token::Pipe)) {
+                let piped = matches!(self.peek(), Some(Token::Pipe));
+                if piped {
                     self.pos += 1;
                 }
                 let saved_depth = self.arg_depth;
@@ -8348,13 +9598,67 @@ impl Parser<'_> {
                 self.keyed_args = false;
                 let saved_sub = self.subquery_depth;
                 self.subquery_depth = 0;
+                // the template's expansions collect here (design
+                // paper: the quasiquote); a nested quarq keeps its own
+                let saved_holes = self.template_holes.replace(Vec::new());
                 // the body may navigate (`q(//item[::n > 3])`, spliced
                 // later with `| &$.p`) and push: it is a pipeline's
                 // tail, read as the pipeline would read it
                 let parsed = (|| {
                     let mut commands = Vec::new();
-                    if matches!(self.peek(), Some(Token::Amp)) {
+                    if piped && let Some(Token::Expansion(text)) = self.peek() {
+                        // `q(| ${…})` — an expansion heads the body as
+                        // a command; `q(${…})` is the literal expansion
+                        // (`| q(${$_})` makes the string literal)
+                        let text = text.clone();
+                        self.pos += 1;
+                        commands.push(Command::Hole {
+                            hole: self.expansion_hole(&text)?,
+                            agg: false,
+                        });
+                    } else if matches!(self.peek(), Some(Token::Amp))
+                        && matches!(
+                            self.peek_invocation_body(),
+                            Some(DefBody::Query(_) | DefBody::Macro(_))
+                        )
+                    {
+                        // `q(&adults @| count)` — a query fragment (or
+                        // a macro) heads the body as it heads a query:
+                        // its branch is the navigation, its pipeline
+                        // follows (design paper: Arguments)
+                        let (name, q, quant) = self.invoke_query_fragment()?;
+                        if quant.is_some() || !q.correlations.is_empty() || q.branches.len() != 1 {
+                            return Err(QuarbError::parse(format!(
+                                "'&{name}' heads a quarq; one branch stands \
+                                 there, without a quantifier or a correlation"
+                            )));
+                        }
+                        commands.push(Command::Nav(q.branches.into_iter().next().expect("one")));
+                        commands.extend(q.pipeline);
+                    } else if matches!(self.peek(), Some(Token::Amp)) {
                         self.invoke_pipeline_fragment("|", &mut commands)?;
+                    } else if piped
+                        && matches!(self.peek(), Some(Token::Dollar))
+                        && let Some(Token::Name {
+                            text,
+                            quoted: false,
+                            ..
+                        }) = self.toks.get(self.pos + 1)
+                        && self.def_params.iter().any(|p| p == text)
+                        && matches!(
+                            self.toks.get(self.pos + 2),
+                            Some(Token::RParen | Token::Pipe | Token::At)
+                        )
+                    {
+                        // `q(| $then)` — the parameter in command
+                        // position heads the quarq (design paper:
+                        // Arguments); unpiped, `q($col)` is the quarq
+                        // of the operand
+                        commands.push(Command::Param {
+                            name: text.clone(),
+                            agg: false,
+                        });
+                        self.pos += 2;
                     } else {
                         commands.push(self.pipe_item(PipeMode::Nav)?);
                     }
@@ -8367,9 +9671,23 @@ impl Parser<'_> {
                 self.arg_depth = saved_depth;
                 self.keyed_args = saved_keyed;
                 self.subquery_depth = saved_sub;
-                let commands = parsed?;
+                let holes =
+                    std::mem::replace(&mut self.template_holes, saved_holes).unwrap_or_default();
+                let mut commands = parsed?;
                 self.expect(Token::RParen, "')' to close the quarq")?;
-                Ok(Operand::Lit(quarq_literal(commands)))
+                // a macro's own template: its binders and their
+                // recalls are marked template-born, for the graft to
+                // rename unless invited (design paper: Hygiene)
+                if self.in_macro_body {
+                    rename_in_commands(&mut commands, &mut |n: &str| {
+                        crate::syntax::ast::template_name(n)
+                    });
+                }
+                Ok(Operand::Lit(if holes.is_empty() {
+                    quarq_literal(commands)
+                } else {
+                    Value::quarq_template(commands, holes)
+                }))
             }
             // A call operand: a command word glued to `(` — the
             // pipe–call duality, `f(x, args) ≡ (x | f(args))`, the
@@ -8421,7 +9739,8 @@ impl Parser<'_> {
                     | Some(Arg::Key(_))
                     | Some(Arg::Named { .. })
                     | Some(Arg::Opt { .. })
-                    | Some(Arg::Pairs { .. }) => {
+                    | Some(Arg::Pairs { .. })
+                    | Some(Arg::Hole(_)) => {
                         return Err(QuarbError::parse(format!(
                             "'{}(...)' as an operand cannot ride a range or an option as its topic",
                             call.name
@@ -8469,8 +9788,29 @@ impl Parser<'_> {
                 // read as text. A command's own parentheses are the one
                 // exception (`stem(ru)`): there it is the short
                 // spelling of a quoted string.
+                // (`syntax:compare(…)` among a constructor's operands:
+                // a library's call stands as an operand there too,
+                // the prefix and the parentheses telling it apart
+                // from a bare word)
+                let prefixed_call = self.arg_depth > 0
+                    && matches!(
+                        (
+                            self.toks.get(self.pos + 1),
+                            self.toks.get(self.pos + 2),
+                            self.toks.get(self.pos + 3)
+                        ),
+                        (
+                            Some(Token::Field | Token::Colon { spaced: false }),
+                            Some(Token::Name {
+                                quoted: false,
+                                glued: true,
+                                ..
+                            }),
+                            Some(Token::LParen)
+                        )
+                    );
                 if !*quoted
-                    && self.arg_depth == 0
+                    && (self.arg_depth == 0 || prefixed_call)
                     && is_word(text)
                     && matches!(value, Value::Str(_))
                 {
@@ -8499,6 +9839,13 @@ impl Parser<'_> {
             // `"text ${expr} text"` — an interpolated string: each
             // hole's source is lexed and parsed as a full value
             // expression, in the same parameter scope.
+            // `${…}` where an operand stands: a literal expansion
+            // (design paper: the quasiquote)
+            Some(Token::Expansion(text)) => {
+                let text = text.clone();
+                self.pos += 1;
+                Ok(Operand::Hole(self.expansion_hole(&text)?))
+            }
             Some(Token::Interp(parts)) => {
                 let parts = parts.clone();
                 self.pos += 1;
@@ -9018,33 +10365,50 @@ impl Parser<'_> {
                         hole: &map,
                     },
                 );
+                refuse_leftover(&name, leftover_param(&q))?;
                 self.operand_from_query(&name, q)
             }
             DefBody::Macro(_) => {
                 let invited = invites_of(self.expander, &args);
-                let text = self.expand_macro_path_text(&name, &def, args)?;
-                let wrap = |e: QuarbError| {
-                    QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')"))
-                        .wrapping(e)
+                let answers = self.expand_macro_answers(&name, &def, args)?;
+                let op = match self.split_answers(&name, answers)? {
+                    Split::Forms(forms) => {
+                        let mut op = self.graft_operand(&name, forms)?;
+                        self.rename_binders(&invited, &mut |f| rename_in_operand(&mut op, f));
+                        op
+                    }
+                    Split::Texts(texts) => {
+                        let text = self.join_path_text(&name, texts)?;
+                        self.reparse_operand(&name, &text)?
+                    }
                 };
-                let tokens = lexer::lex(&text).map_err(wrap)?;
-                let mut p = self.child(&tokens, self.defs.before(&name))?;
-                // Predicates reset pattern scope; the predicate
-                // scope itself is inherited, so generated text
-                // obeys the same restrictions hand-written
-                // operands would (`<--` stays refused).
-                p.predicate_depth = self.predicate_depth;
-                let op = p.cond_expr().map_err(wrap)?;
-                if p.pos != tokens.len() {
-                    return Err(QuarbError::parse(format!(
-                        "macro '&{name}' expanded to text with trailing \
-                         content ('{text}')"
-                    )));
-                }
                 self.record_captures(&name, &invited, self.expander.usage_of_operand(&op));
                 Ok(op)
             }
         }
+    }
+
+    /// A macro's text answer in operand position, reparsed as one
+    /// operand under the splice site's scopes.
+    fn reparse_operand(&self, name: &str, text: &str) -> Result<Operand> {
+        let wrap = |e: QuarbError| {
+            QuarbError::expansion(format!("in expansion of '&{name}' ('{text}')")).wrapping(e)
+        };
+        let tokens = lexer::lex(text).map_err(wrap)?;
+        let mut p = self.child(&tokens, self.defs.before(name))?;
+        // Predicates reset pattern scope; the predicate
+        // scope itself is inherited, so generated text
+        // obeys the same restrictions hand-written
+        // operands would (`<--` stays refused).
+        p.predicate_depth = self.predicate_depth;
+        let op = p.cond_expr().map_err(wrap)?;
+        if p.pos != tokens.len() {
+            return Err(QuarbError::parse(format!(
+                "macro '&{name}' expanded to text with trailing \
+                 content ('{text}')"
+            )));
+        }
+        Ok(op)
     }
 
     /// A navigation body as an operand: a relative path — any
@@ -9578,6 +10942,12 @@ impl Parser<'_> {
                 }
                 matcher_for(text, *quoted)
             }
+            // `/${…}` — a name expansion: the value spelled as the
+            // hop's name (design paper: the quasiquote)
+            Some(Token::Expansion(text)) => {
+                let text = text.clone();
+                Ok(Matcher::Name(self.name_hole(&text)?))
+            }
             Some(Token::Regex(pat)) => Regex::new(pat)
                 .map(Matcher::Regex)
                 .map_err(|e| QuarbError::parse(format!("bad regex '~({pat})': {e}"))),
@@ -9782,9 +11152,8 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     };
     // The retired positional word `sample` points at its switch
     // before any count is held against it (draft 164).
-    if (crate::syntax::registry::spec(&call.name).is_some_and(|s| s.options.contains(&"--sample"))
-        || crate::syntax::man::options_of(&call.name)
-            .is_some_and(|o| o.iter().any(|s| s.long.as_deref() == Some("--sample"))))
+    if crate::syntax::man::options_of(&call.name)
+        .is_some_and(|o| o.iter().any(|s| s.long.as_deref() == Some("--sample")))
         && call
             .args
             .iter()
@@ -9817,7 +11186,7 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     if written <= max && !(reducing && places_input && !nested) {
         return Ok(());
     }
-    let synopsis = crate::syntax::man::synopsis(&call.name).unwrap_or_default();
+    let signature = crate::syntax::man::synopsis(&call.name).unwrap_or_default();
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     if !nested && places_input {
         let stripped = FnCall {
@@ -9847,12 +11216,12 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     };
     Err(QuarbError::parse(if nested {
         format!(
-            "'{}' inside an expression takes its input and {takes} after it, {written} given; the synopsis: {synopsis}",
+            "'{}' inside an expression takes its input and {takes} after it, {written} given; the signature: {signature}",
             call.name
         )
     } else {
         format!(
-            "'{}' takes {takes}, {written} given; the synopsis: {synopsis}",
+            "'{}' takes {takes}, {written} given; the signature: {signature}",
             call.name
         )
     }))
@@ -10111,6 +11480,12 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             Arg::Expr(Operand::Spread(_)) => {
                 i += 1;
             }
+            // a sequence expansion fills fields when the template is
+            // (design paper: the quasiquote); the fields it brings
+            // name themselves or are refused then
+            Arg::Hole(_) => {
+                i += 1;
+            }
             Arg::Expr(e) => {
                 let Some(name) = crate::syntax::ast::auto_field_name(e) else {
                     return Err(QuarbError::parse(format!(
@@ -10351,12 +11726,13 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                 )))
             }
         }
-        // `number[(level)]` — the level expression, or the value at
-        // hand without one.
+        // `number[(LOCALE)]` — the locale cast alone (the outline
+        // numbering of `@| number` is retired: `outline(…;
+        // --style="1.")` numbers an outline).
         "number" => match call.args.as_slice() {
-            [] | [Arg::Expr(_)] => Ok(()),
+            [] | [Arg::Lit(Value::Str(_))] => Ok(()),
             _ => Err(QuarbError::parse(
-                "number takes an optional level expression: number, number(:depth)",
+                "number takes a locale: number, number(fr); an outline is numbered by outline(…; --style=\"1.\")",
             )),
         },
         // `timeline[(EXPR[; ANCHOR]; --forward)]` — the capsa's time
@@ -10460,14 +11836,17 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                     "outline's numbering style is \"1.\": outline(:depth; ::lemma; --style=\"1.\")",
                 ));
             }
+            // The text is optional (`outline{stream}(level?; text?; …)`):
+            // a level alone under `--style` is the number-only line
+            // `@| number` used to print.
             match positional.as_slice() {
-                [] | [Arg::Expr(_), Arg::Expr(_)] => Ok(()),
                 [Arg::Expr(_), Arg::Expr(_), Arg::Lit(Value::Str(_))] => Err(QuarbError::parse(
                     "outline's numbering style is an option: outline(:depth; ::lemma; --style=\"1.\")",
                 )),
+                [] | [_] | [_, _] => Ok(()),
                 _ => Err(QuarbError::parse(
-                    "outline takes a level and a text, then the numbering style as an \
-                     option: outline(:depth; ::lemma), outline(:depth; ::lemma; --style=\"1.\")",
+                    "outline takes a level and an optional text, then the numbering style as an \
+                     option: outline(:depth; ::lemma), outline(:depth; --style=\"1.\")",
                 )),
             }
         }
@@ -10747,7 +12126,7 @@ fn is_projection_start(tok: &Token) -> bool {
 
 /// Build a [`Matcher`] from a name token. A quoted name is always a
 /// literal; a bare name containing `*` is a glob.
-fn matcher_for(text: &str, quoted: bool) -> Result<Matcher> {
+pub(crate) fn matcher_for(text: &str, quoted: bool) -> Result<Matcher> {
     if quoted {
         return Ok(Matcher::Name(text.to_string()));
     }
@@ -10779,21 +12158,126 @@ fn subst_query(q: &mut Query, map: &Subst<'_>) {
     for corr in &mut q.correlations {
         subst_query(corr, map);
     }
+    let mut trailing: Vec<Command> = Vec::new();
     for b in &mut q.branches {
         if let Anchor::Id(op) = &mut b.anchor {
             subst_operand(op, map);
         }
-        for elem in &mut b.steps {
-            subst_elem(elem, map);
+        if let Some(cmds) = subst_branch(b, map) {
+            trailing.extend(cmds);
         }
     }
-    for command in &mut q.pipeline {
-        subst_command(command, map);
+    // a quarq that ended a head branch: its commands head the
+    // pipeline (`/row $then | ::x` is `/row | <then> | ::x`)
+    if !trailing.is_empty() {
+        trailing.extend(std::mem::take(&mut q.pipeline));
+        q.pipeline = trailing;
     }
+    subst_commands(&mut q.pipeline, map);
+}
+
+/// A branch substituted: its elements as such, and a parameter
+/// standing in it replaced by the argument's form — a relative
+/// path's steps and projection continue the walk; a quarq ends it,
+/// and its commands are answered for the caller to run after the
+/// branch. A parameter whose argument is neither stays, for the
+/// caller to refuse.
+fn subst_branch(b: &mut Branch, map: &Subst<'_>) -> Option<Vec<Command>> {
+    let mut out: Vec<PathElem> = Vec::with_capacity(b.steps.len());
+    let mut trailing: Option<Vec<Command>> = None;
+    for mut elem in std::mem::take(&mut b.steps) {
+        if let PathElem::Param(p) = &elem {
+            match map.outer.get(p) {
+                Some(Operand::Rel {
+                    steps,
+                    projection,
+                    anchor: Anchor::Current,
+                }) => {
+                    out.extend(steps.iter().cloned());
+                    if projection.is_some() {
+                        b.projection = projection.clone();
+                    }
+                    continue;
+                }
+                Some(Operand::Lit(Value::Quarq(q))) => {
+                    trailing
+                        .get_or_insert_with(Vec::new)
+                        .extend(q.body.iter().cloned());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        subst_elem(&mut elem, map);
+        out.push(elem);
+    }
+    b.steps = out;
+    trailing
+}
+
+/// A quarq's body substituted (a def's parameters are spliced into
+/// it as into any body) and the literal rebuilt; a template keeps
+/// its holes, their expressions substituted too.
+fn subst_quarq(q: &crate::value::Quarq, map: &Subst<'_>) -> Value {
+    let mut body = (*q.body).clone();
+    subst_commands(&mut body, map);
+    let mut holes = (*q.holes).clone();
+    for h in &mut holes {
+        subst_operand(&mut h.expr, map);
+    }
+    if holes.is_empty() {
+        quarq_literal(body)
+    } else {
+        Value::quarq_template(body, holes)
+    }
+}
+
+/// A command sequence substituted: every command as such, and a
+/// parameter standing in command position replaced by the commands
+/// of the quarq its argument holds (a parameter whose argument is
+/// no quarq stays, for the caller to refuse).
+fn subst_commands(commands: &mut Vec<Command>, map: &Subst<'_>) {
+    let mut out: Vec<Command> = Vec::with_capacity(commands.len());
+    for mut command in std::mem::take(commands) {
+        // a quarq ending a hop's branch: the hop, then its commands
+        if let Command::Nav(b) = &mut command
+            && let Some(cmds) = subst_branch(b, map)
+        {
+            subst_command(&mut command, map);
+            out.push(command);
+            out.extend(cmds);
+            continue;
+        }
+        if let Command::Param { name, agg } = &command
+            && let Some(Operand::Lit(Value::Quarq(q))) = map.outer.get(name)
+        {
+            if *agg {
+                // `@| $agg` with `q(count)`: the one command the quarq
+                // holds, as the aggregate; a quarq holding more keeps
+                // the parameter for the refusal
+                match q.body.as_slice() {
+                    [Command::Func(call)] => out.push(Command::Agg(call.clone())),
+                    [Command::Expr(e)] => out.push(Command::AggExpr(e.clone())),
+                    [Command::Agg(_) | Command::AggExpr(_) | Command::AggPush { .. }] => {
+                        out.extend(q.body.iter().cloned())
+                    }
+                    _ => out.push(command),
+                }
+            } else {
+                out.extend(q.body.iter().cloned());
+            }
+            continue;
+        }
+        subst_command(&mut command, map);
+        out.push(command);
+    }
+    *commands = out;
 }
 
 fn subst_elem(elem: &mut PathElem, map: &Subst<'_>) {
     match elem {
+        PathElem::Param(_) => {}
+        PathElem::Hole(h) => subst_operand(&mut h.expr, map),
         PathElem::Mark(_) => {}
         PathElem::Step(step) => subst_step(step, map),
         PathElem::Group(group) => {
@@ -10826,13 +12310,19 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
 fn subst_command(command: &mut Command, map: &Subst<'_>) {
     match command {
         Command::SessionPush(_) => {}
+        Command::Hole { hole, .. } => subst_operand(&mut hole.expr, map),
         Command::Func(call)
         | Command::Agg(call)
         | Command::RecordWith(call)
         | Command::RecordPush { call, .. } => {
             for arg in &mut call.args {
-                if let Arg::Expr(e) | Arg::Opt { value: Some(e), .. } = arg {
-                    subst_operand(e, map);
+                match arg {
+                    Arg::Expr(e) | Arg::Opt { value: Some(e), .. } => subst_operand(e, map),
+                    Arg::Hole(h) => subst_operand(&mut h.expr, map),
+                    // `syntax:compare(">"; q($col); …)` — a quarq held
+                    // as an argument takes the parameters as a body
+                    Arg::Lit(Value::Quarq(q)) => *arg = Arg::Lit(subst_quarq(q, map)),
+                    _ => {}
                 }
             }
         }
@@ -10842,8 +12332,13 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         | Command::AggPush { body: e, .. } => subst_operand(e, map),
         Command::AggRecord { call, .. } => {
             for arg in &mut call.args {
-                if let Arg::Expr(e) | Arg::Opt { value: Some(e), .. } = arg {
-                    subst_operand(e, map);
+                match arg {
+                    Arg::Expr(e) | Arg::Opt { value: Some(e), .. } => subst_operand(e, map),
+                    Arg::Hole(h) => subst_operand(&mut h.expr, map),
+                    // `syntax:compare(">"; q($col); …)` — a quarq held
+                    // as an argument takes the parameters as a body
+                    Arg::Lit(Value::Quarq(q)) => *arg = Arg::Lit(subst_quarq(q, map)),
+                    _ => {}
                 }
             }
         }
@@ -10851,9 +12346,9 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
             if let Anchor::Id(op) = &mut b.anchor {
                 subst_operand(op, map);
             }
-            for elem in &mut b.steps {
-                subst_elem(elem, map);
-            }
+            // (a quarq argument here is answered by subst_commands,
+            // which sees the hop in its sequence)
+            subst_branch(b, map);
         }
         Command::Subcontext { body, .. } => subst_query(body, map),
         Command::Filter(e) => subst_pred_expr(e, map),
@@ -10866,6 +12361,7 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         | Command::FieldsPush
         | Command::Recall(_)
         | Command::Splice(_)
+        | Command::Param { .. }
         | Command::AggRecall(_)
         | Command::Spread { .. } => {}
     }
@@ -10894,10 +12390,11 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         // A quarq's body is source: a def's parameters are spliced
         // into it as into any body, and the literal is rebuilt.
         Operand::Lit(Value::Quarq(q)) => {
-            let mut body = (*q.body).clone();
-            body.iter_mut().for_each(|c| subst_command(c, map));
-            *o = Operand::Lit(quarq_literal(body));
+            *o = Operand::Lit(subst_quarq(q, map));
         }
+        // an expansion's expression takes the parameters as any
+        // operand does
+        Operand::Hole(h) => subst_operand(&mut h.expr, map),
         Operand::Match {
             scrutinee,
             arms,
@@ -11028,9 +12525,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         }
         Operand::Piped { expr, commands } => {
             subst_operand(expr, map);
-            for st in commands.iter_mut() {
-                subst_command(st, map);
-            }
+            subst_commands(commands, map);
         }
         Operand::Cond { cond, then, other } => {
             subst_pred_expr(cond, map);
@@ -11110,7 +12605,7 @@ impl visit::Visitor for MaxCtx {
 /// structured projector the `=` head gives. A read, a register, a
 /// command or a pipe in the body leaves it a quarq, applied later;
 /// the body is kept as written.
-fn quarq_literal(commands: Vec<Command>) -> Value {
+pub(crate) fn quarq_literal(commands: Vec<Command>) -> Value {
     use crate::syntax::ast::{Anchor, Projection};
     let projector = match commands.as_slice() {
         // `q(%(::Name; ::Fare))` as the pipe reads it now: the record

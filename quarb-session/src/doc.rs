@@ -67,7 +67,13 @@ pub enum Doc {
     Text(quarb_text::TextModel),
     #[cfg(feature = "sqlite")]
     Sqlite(quarb_sqlite::SqliteAdapter),
-    Mount(quarb_mount::MountAdapter),
+    /// The mounted sources, each with its own locator renderer, so
+    /// a mounted node renders as `/NAME` and the source's locator
+    /// (`/books/row[2]`), as the command line renders it.
+    Mount(
+        quarb_mount::MountAdapter,
+        Vec<Box<dyn Fn(NodeId) -> String>>,
+    ),
     /// Any adapter behind the object-safe trait, with its locator
     /// renderer — the carrier for scheme targets opened through
     /// qua's dispatch (`gcl:`, `kafka:`, `neo4j://`, …).
@@ -237,7 +243,7 @@ impl Doc {
             Doc::Text(a) => a,
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => a,
-            Doc::Mount(a) => a,
+            Doc::Mount(a, _) => a,
             Doc::Boxed(a, _, _) => &*a.0,
         }
     }
@@ -304,7 +310,7 @@ impl Doc {
             Doc::Text(a) => go!(a),
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => go!(a),
-            Doc::Mount(a) => go!(a),
+            Doc::Mount(a, _) => go!(a),
             Doc::Boxed(a, _, _) => go!(a),
         }
     }
@@ -329,7 +335,7 @@ impl Doc {
             Doc::Text(a) => go!(a),
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => go!(a),
-            Doc::Mount(a) => go!(a),
+            Doc::Mount(a, _) => go!(a),
             Doc::Boxed(a, _, _) => go!(a),
         }
     }
@@ -368,7 +374,7 @@ impl Doc {
             Doc::Text(a) => go!(a),
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => go!(a),
-            Doc::Mount(a) => go!(a),
+            Doc::Mount(a, _) => go!(a),
             Doc::Boxed(a, _, _) => go!(a),
         }
     }
@@ -385,7 +391,7 @@ impl Doc {
             Doc::Text(_) => "text",
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(_) => "sqlite",
-            Doc::Mount(_) => "mount",
+            Doc::Mount(..) => "mount",
             Doc::Boxed(_, _, family) => family,
         }
     }
@@ -413,7 +419,10 @@ impl Doc {
             Doc::Text(a) => a.locator(node),
             #[cfg(feature = "sqlite")]
             Doc::Sqlite(a) => a.locator(node),
-            Doc::Mount(a) => generic_locator(a, node),
+            Doc::Mount(a, renders) => match a.decode(node) {
+                None => "/".to_string(),
+                Some((m, inner)) => format!("/{}{}", a.mount_name(m), renders[m](inner)),
+            },
             Doc::Boxed(_, render, _) => render(node),
         }
     }
@@ -442,21 +451,25 @@ impl Doc {
     /// `Doc`s from text or bytes rather than paths.
     pub fn mount_docs(parts: Vec<(String, Doc)>) -> Result<Doc> {
         let mut mounts: Vec<quarb_mount::Mount> = Vec::new();
+        let mut renders = Vec::new();
         for (name, doc) in parts {
             if mounts.iter().any(|m| m.name == name) {
                 bail!("two sources mount as '{name}'; give each a distinct name");
             }
+            let (adapter, render) = doc.into_mounted()?;
+            renders.push(render);
             mounts.push(quarb_mount::Mount {
                 name,
                 // Assembled from text/bytes: no real-world address to
                 // record — the mount name stands in for :source.
                 target: None,
-                adapter: doc.into_boxed()?,
+                adapter,
             });
         }
         Ok(Doc::Mount(
             quarb_mount::MountAdapter::try_new(mounts)
                 .map_err(|e| anyhow::anyhow!("mount: {e}"))?,
+            renders,
         ))
     }
 
@@ -484,7 +497,7 @@ impl Doc {
         let a = self.base_dyn();
         let root = a.root();
         match self {
-            Doc::Mount(_) => urls
+            Doc::Mount(..) => urls
                 .iter()
                 .filter_map(|(name, url)| {
                     a.children_named(root, name)
@@ -506,7 +519,7 @@ impl Doc {
     /// no reference-target map. On a single source, nothing to
     /// declare: [`Doc::url_roots`] answers for it.
     pub fn declare_identities(&mut self, urls: &[(String, String)]) {
-        if let Doc::Mount(m) = self {
+        if let Doc::Mount(m, _) = self {
             for (name, url) in urls {
                 if let Some(idx) = (0..m.len()).find(|&i| m.mount_name(i) == name) {
                     m.declare_identity(idx, url.clone());
@@ -530,18 +543,33 @@ impl Doc {
     }
 
     /// Box this source as a shared adapter — a mount child.
-    fn into_boxed(self) -> Result<Box<dyn quarb::AstAdapter>> {
+    /// The document as a mountable adapter beside its own locator
+    /// renderer: the concrete adapter is shared between the two
+    /// (the `Shared` pattern), so the mount renders a node as the
+    /// source would.
+    #[allow(clippy::type_complexity)]
+    fn into_mounted(self) -> Result<(Box<dyn quarb::AstAdapter>, Box<dyn Fn(NodeId) -> String>)> {
         use quarb_mount::Shared;
+        macro_rules! shared {
+            ($a:expr, $render:ident) => {{
+                let a = Rc::new($a);
+                let r = a.clone();
+                (
+                    Box::new(Shared(a)) as Box<dyn quarb::AstAdapter>,
+                    Box::new(move |n| r.$render(n)) as Box<dyn Fn(NodeId) -> String>,
+                )
+            }};
+        }
         Ok(match self {
-            Doc::Json(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Csv(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Xml(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Html(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Text(a) => Box::new(Shared(Rc::new(a))),
+            Doc::Json(a) => shared!(a, pointer),
+            Doc::Csv(a) => shared!(a, locator),
+            Doc::Xml(a) => shared!(a, locator),
+            Doc::Html(a) => shared!(a, locator),
+            Doc::Text(a) => shared!(a, locator),
             #[cfg(feature = "sqlite")]
-            Doc::Sqlite(a) => Box::new(Shared(Rc::new(a))),
-            Doc::Mount(_) => bail!("cannot nest a mount inside a mount"),
-            Doc::Boxed(a, _, _) => a.0,
+            Doc::Sqlite(a) => shared!(a, locator),
+            Doc::Mount(..) => bail!("cannot nest a mount inside a mount"),
+            Doc::Boxed(a, render, _) => (a.0, render),
         })
     }
 }
@@ -582,6 +610,7 @@ impl Doc {
     /// (`NAME=TARGET`); an unnamed spec mounts under its file stem.
     pub fn mount_specs(specs: &[crate::MountSpec], opts: &Options) -> Result<Doc> {
         let mut mounts: Vec<quarb_mount::Mount> = Vec::new();
+        let mut renders = Vec::new();
         for (i, spec) in specs.iter().enumerate() {
             let name = spec.name.clone().unwrap_or_else(|| {
                 spec.path
@@ -596,7 +625,8 @@ impl Doc {
                     spec.path.display()
                 );
             }
-            let adapter = Doc::open(&spec.path, opts)?.into_boxed()?;
+            let (adapter, render) = Doc::open(&spec.path, opts)?.into_mounted()?;
+            renders.push(render);
             mounts.push(quarb_mount::Mount {
                 name,
                 target: Some(spec.path.display().to_string()),
@@ -606,22 +636,7 @@ impl Doc {
         Ok(Doc::Mount(
             quarb_mount::MountAdapter::try_new(mounts)
                 .map_err(|e| anyhow::anyhow!("mount: {e}"))?,
+            renders,
         ))
     }
-}
-
-/// A name-path locator built from the adapter trait alone
-/// (`parent`/`name`) — used for a mount, whose per-source render
-/// functions we do not keep.
-fn generic_locator<A: quarb::AstAdapter>(a: &A, node: NodeId) -> String {
-    let mut parts = Vec::new();
-    let mut cur = Some(node);
-    while let Some(n) = cur {
-        if let Some(nm) = a.name(n) {
-            parts.push(nm);
-        }
-        cur = a.parent(n);
-    }
-    parts.reverse();
-    format!("/{}", parts.join("/"))
 }

@@ -1022,6 +1022,12 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
     fn grafts_on_demand(&self) -> bool {
         true
     }
+    fn form_of(&self, node: NodeId) -> Option<quarb::Form> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().form_of(inner),
+            None => self.outer.form_of(node),
+        }
+    }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         match self.split(node) {
