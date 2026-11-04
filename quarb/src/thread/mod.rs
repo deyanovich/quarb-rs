@@ -113,6 +113,11 @@ pub(crate) struct Reg {
 #[derive(Clone)]
 pub(crate) struct Thread<X: Attachment> {
     pub(crate) register: Vec<Reg>,
+    /// The register's visible prefix for the thread's reads (spec:
+    /// Quarqs, the held quarq's appliers): under `&$.x!` and `&$.x#`
+    /// the body's recalls and marks resolve against the regulae
+    /// before the one holding `x`; pushes append past it as always.
+    pub(crate) window: Option<usize>,
     pub(crate) topic: Option<Value>,
     /// Where the topic's value was read (per field for a record).
     pub(crate) prov: Prov,
@@ -134,6 +139,7 @@ impl<X: Attachment> Thread<X> {
     pub(crate) fn bare(ext: X, topic: Option<Value>) -> Thread<X> {
         Thread {
             register: Vec::new(),
+            window: None,
             topic,
             prov: Prov::default(),
             members: Vec::new(),

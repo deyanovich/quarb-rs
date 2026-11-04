@@ -30,6 +30,7 @@ pub(crate) fn eval_bare<H: Host>(
     for _ in &query.branches {
         let t = Thread {
             register: outer.map(|s| s.register.to_vec()).unwrap_or_default(),
+            window: None,
             topic: None,
             prov: Prov::default(),
             members: Vec::new(),
@@ -143,7 +144,7 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         }
         // A spliced quarq is whatever it holds: the runtime
         // any-topic check types the result.
-        Command::Splice(_) | Command::Param { .. } => false,
+        Command::Splice(_) | Command::SpliceAs { .. } | Command::Param { .. } => false,
         // the session push files the topic and leaves the cursor untouched
         Command::SessionPush(_) => false,
         // A navigation command re-types by its own projection —

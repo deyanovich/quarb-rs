@@ -554,6 +554,21 @@ impl QueryArbor {
 
     fn walk_operand_inner(&mut self, o: &Operand, parent: usize) {
         match o {
+            // the glued recall reflects as the pipe form it stands for
+            Operand::Apply { base, reg, shot } => {
+                let command = match shot {
+                    Some(shot) => Command::SpliceAs {
+                        reg: reg.clone(),
+                        shot: *shot,
+                    },
+                    None => Command::Splice(reg.clone()),
+                };
+                let piped = Operand::Piped {
+                    expr: base.clone(),
+                    commands: vec![command],
+                };
+                self.walk_operand_inner(&piped, parent);
+            }
             // A pattern literal reflects as one node whose ::form is
             // the canonical tight spelling (stars outside quotes).
             Operand::Pattern(segs) => {
@@ -1301,6 +1316,21 @@ impl QueryArbor {
                 self.intern(
                     Some("splice"),
                     vec![("ref".to_string(), Value::Str(reg_spelling(r)))],
+                    Some(parent),
+                );
+            }
+            // `| &$.p!` / `| &$.p#` — the suffixed appliers: the
+            // splice kind with the suffix as spelled
+            Command::SpliceAs { reg: r, shot } => {
+                self.intern(
+                    Some("splice"),
+                    vec![
+                        ("ref".to_string(), Value::Str(reg_spelling(r))),
+                        (
+                            "as".to_string(),
+                            Value::Str(if *shot { "#" } else { "!" }.to_string()),
+                        ),
+                    ],
                     Some(parent),
                 );
             }

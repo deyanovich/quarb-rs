@@ -112,6 +112,7 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Push(_)
         | Command::Recall(_)
         | Command::Splice(_)
+        | Command::SpliceAs { .. }
         | Command::Param { .. }
         | Command::AggRecall(_)
         | Command::Spread { .. }
@@ -174,6 +175,7 @@ pub fn walk_pred<V: Visitor + ?Sized>(v: &mut V, e: &PredExpr) {
 
 pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
     match o {
+        Operand::Apply { base, .. } => v.operand(base),
         Operand::Rel { steps, anchor, .. } => {
             v.anchor(anchor);
             for e in steps {

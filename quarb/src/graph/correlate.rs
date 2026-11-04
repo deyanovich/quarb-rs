@@ -797,6 +797,7 @@ pub(crate) fn union_branches(
                 node_level && branch.projection.is_none(),
             ) {
                 caps.push(Capsa {
+                    window: None,
                     prov: if branch.projection.is_some() {
                         Prov::at(ext.node.into(), command_now())
                     } else {

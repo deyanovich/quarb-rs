@@ -812,6 +812,7 @@ pub(crate) fn apply_command_in<H: Host>(
                     })
                     .collect();
                 values.into_iter().zip(provs).map(move |(v, prov)| Thread::<H::Ext> {
+                    window: None,
                     prov,
                     register: c.register.clone(),
                     topic: Some(v),
@@ -1210,6 +1211,56 @@ pub(crate) fn apply_command_in<H: Host>(
             ));
             caps
         }
+        // `| &$.x!` / `| &$.x#` — the held quarq applied under the
+        // capsa windowed before the regula holding `x` (spec: Quarqs,
+        // the held quarq's appliers): the body's recalls and marks
+        // see what stood before the push; `!` keeps the applying
+        // cursor, `#` takes the topic and position recorded at the
+        // push; pushes the body makes land in the applying thread.
+        Command::SpliceAs { reg: r, shot } => caps
+            .into_iter()
+            .flat_map(|mut c| {
+                let Some(index) = crate::pipeline::register::recall_index(&c.register, r) else {
+                    record_refusal(format!(
+                        "&{}{} applies a quarq held by one regula, and the reference names none",
+                        crate::syntax::unparse::reg(r),
+                        if *shot { "#" } else { "!" }
+                    ));
+                    c.topic = Some(Value::Null);
+                    return vec![c];
+                };
+                let Value::Quarq(q) = c.register[index].value.clone() else {
+                    record_refusal(format!(
+                        "&{}{} applies a quarq, and the register holds {}",
+                        crate::syntax::unparse::reg(r),
+                        if *shot { "#" } else { "!" },
+                        stdlib::kind_of(&c.register[index].value)
+                    ));
+                    c.topic = Some(Value::Null);
+                    return vec![c];
+                };
+                let site = c.register[index].site.clone();
+                let window = c.window;
+                let ext = c.ext.clone();
+                let topic = c.topic.clone();
+                c.window = Some(index);
+                if *shot {
+                    c.topic = q.at.as_deref().cloned();
+                    c.ext = host.ext_at(crate::NodeId::from(site.position));
+                }
+                let mode = start_mode(std::slice::from_ref(&c));
+                let mut out =
+                    apply_commands(&q.body, mode, 0, false, vec![c], host, trace, outer);
+                for t in &mut out {
+                    t.window = window;
+                    if *shot {
+                        t.ext = ext.clone();
+                    }
+                }
+                let _ = topic;
+                out
+            })
+            .collect(),
         Command::Splice(r) => caps
             .into_iter()
             .enumerate()
@@ -1433,6 +1484,7 @@ pub(crate) fn agg_as_func_command<H: Host>(
                         members
                     } else {
                         let as_thread = |topic: Option<Value>, prov: Prov| Thread::<H::Ext> {
+                            window: None,
                             prov,
                             register: c.register.clone(),
                             topic,
@@ -2579,6 +2631,15 @@ pub(crate) fn expr_push_command<H: Host>(
         .map(|(i, mut c)| {
             let scope = c.scope(Some(i + 1), peers, outer);
             let (value, o) = capture(|| operand_value(host, &c.ext, expr, trace, scope));
+            // a pushed quarq records the pushing thread's topic: what
+            // `&$.x#` applies it to (the position rides the site)
+            let value = match value {
+                Value::Quarq(mut q) => {
+                    q.at = c.topic.clone().map(Box::new);
+                    Value::Quarq(q)
+                }
+                v => v,
+            };
             c.register.push(Reg {
                 prov: Prov::leaf(o),
                 site: host.origin_at(&c.ext),
@@ -2907,6 +2968,7 @@ pub(crate) fn func_command<H: Host>(
             stdlib::apply_scalar(call, topic, &|e| host.scale_of(e))
                 .into_iter()
                 .map(move |v| Thread::<H::Ext> {
+                    window: None,
                     prov: prov.clone(),
                     register: c.register.clone(),
                     topic: Some(v),
@@ -2951,6 +3013,7 @@ pub(crate) fn map_command<H: Host>(
                 .into_iter()
                 .zip(provs)
                 .map(|(v, prov)| Thread::<H::Ext> {
+                    window: None,
                     prov,
                     register: c.register.clone(),
                     topic: Some(v),
@@ -3243,6 +3306,7 @@ pub(crate) fn agg_command<H: Host>(
     stdlib::apply(call, topics, &|e| host.scale_of(e))
         .into_iter()
         .map(|v| Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(
                 inputs
                     .iter()
@@ -3296,6 +3360,7 @@ pub(crate) fn seed_capsa<H: Host>(caps: &[Thread<H::Ext>], host: &H) -> Thread<H
         })
         .unzip();
     Thread::<H::Ext> {
+        window: None,
         prov: Prov::list(provs),
         register: shared_register(caps),
         topic: Some(Value::list(topics)),
@@ -3489,6 +3554,7 @@ pub(crate) fn keyed_agg<H: Host>(
                         })
                         .collect();
                     Thread::<H::Ext> {
+                        window: None,
                         prov: Prov::leaf(origins),
                         register,
                         topic: Some(Value::Int(n)),
@@ -3527,6 +3593,7 @@ pub(crate) fn keyed_agg<H: Host>(
                     .map(|m| m.topic.clone().unwrap_or_else(|| host.node_scalar(&m.ext)))
                     .collect();
                 Thread::<H::Ext> {
+                    window: None,
                     prov,
                     register,
                     topic: Some(Value::list(topics)),

@@ -5,7 +5,7 @@
 //! applies (`map(q(+ 3))`); a held one is a value wherever a value
 //! stands (`map($.f)` fills with it) and is spliced by the fragment
 //! sigil before its register (`| &$.f`, `map(&$.f)`, `sort_by(&$.k)`)
-//! or applied by the glued colon (`v:$.f`). A projector is the
+//! or applied by the glued sigil (`v&$.f`; the colon projects). A projector is the
 //! simplest quarq and keeps its own type word.
 
 use quarb::{Defs, QueryResult, Value};
@@ -110,7 +110,7 @@ fn a_quarq_written_in_place_applies_and_a_held_one_is_spliced() {
     assert_eq!(one("= q(round(3)) | .f | 3.14159 | &$.f"), "3.142");
     assert_eq!(one("= q(mean | $_ * 5.6) | .f | @(1; 2; 3) | &$.f"), "11.2");
     // the glued colon applies a quarq as it applies a projector
-    assert_eq!(one("= @(1; 2) | .f(q(+ 1)) | $_:$.f"), "@(2; 3)");
+    assert_eq!(one("= @(1; 2) | .f(q(+ 1)) | $_&$.f"), "@(2; 3)");
     // a register holding no quarq refuses the splice
     let e = run("= \"x\" | .f | 10 | &$.f").unwrap_err().to_string();
     assert!(
@@ -123,7 +123,7 @@ fn a_quarq_written_in_place_applies_and_a_held_one_is_spliced() {
 fn a_quarq_is_late_bound_where_it_is_applied() {
     // `$_` and the registers are read at the application
     assert_eq!(one("= 5 | .n | q($_ + $.n) | .f | 10 | &$.f"), "15");
-    assert_eq!(one("= 5 | .n | q($_ + $.n) | .f | 10 | $_:$.f"), "15");
+    assert_eq!(one("= 5 | .n | q($_ + $.n) | .f | 10 | $_&$.f"), "15");
     assert_eq!(
         one("= 5 | .n | q($_ + $.n) | .f | 7 | .n | 10 | &$.f"),
         "17"
@@ -203,4 +203,55 @@ fn a_quarq_answers_its_text_through_its_core_field() {
     // not a quarq: no core field of the position, null without a refusal
     assert_eq!(one(&format!("= 3 | :{f}")), "null");
     assert_eq!(one("= q(+ 3) | ::form"), "null");
+}
+
+/// The held quarq's three appliers (spec: Quarqs, the held quarq's
+/// appliers): bare `&$.x` is late bound (the applying capsa and
+/// cursor), `&$.x!` resolves the body's recalls against the capsa
+/// windowed before the regula holding `x` with the applying cursor,
+/// `&$.x#` with the topic recorded at the push; the glued colon and
+/// `map` take the suffixes alike; pushes the body makes land in the
+/// applying thread under all three; a never-pushed quarq refuses.
+#[test]
+fn a_held_quarq_applies_late_windowed_or_as_pushed() {
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | &$.f"), "15");
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | &$.f!"), "10");
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | 7 | &$.f!"), "14");
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | 7 | &$.f#"), "10");
+    assert_eq!(
+        one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | 7 | &$.f#"),
+        "10"
+    );
+    // the glued sigil and map take the suffixes; the colon projects only
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | 7&$.f"), "21");
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | 7&$.f!"), "14");
+    assert_eq!(one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | 7&$.f#"), "10");
+    assert_eq!(
+        one("= 5 | .k(2) | .f(q($_ * $.k)) | .k(3) | @(1; 2) | map(&$.f!)"),
+        "@(2; 4)"
+    );
+    assert_eq!(one("= %(a = 1; b = 2) | .p(q(:a)) | $_:$.p"), "1");
+    let err = run("= 5 | .f(q(* 2)) | $_:$.f").unwrap_err().to_string();
+    assert!(err.contains("the colon projects"), "{err}");
+    let err = run("= 5 | .k(2) | .f(q($_ * $.k)) | 7:$.f!")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("takes no suffix"), "{err}");
+    // a push the body makes lands in the applying thread
+    assert_eq!(
+        one("= 5 | .k(2) | .f(q(.g($_ * $.k) | $.g)) | .k(3) | 7 | &$.f! | $.g"),
+        "14"
+    );
+    // the canonical text keeps the suffix
+    assert_eq!(
+        fixpoint("= 5 | .k(2) | .f(q($_ * $.k)) | 7 | &$.f#"),
+        "= 5 | .k(2) | .f(q($_ * $.k)) | 7 | &$.f#"
+    );
+    assert_eq!(
+        fixpoint("= 5 | .k(2) | .f(q($_ * $.k)) | 7&$.f!"),
+        "= 5 | .k(2) | .f(q($_ * $.k)) | (7&$.f!)"
+    );
+    // a never-pushed quarq has no regula to window before
+    let err = run("= 5 | .k(2) | &$.k#").unwrap_err().to_string();
+    assert!(err.contains("quarq"), "{err}");
 }

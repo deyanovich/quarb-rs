@@ -851,6 +851,21 @@ pub(crate) fn operand(o: &Operand) -> String {
             format!("{}{key}", operand(base))
         }
         Operand::Spread(inner) => format!("{}...", operand(inner)),
+        // `v&$.f`, `v&$.f!`, `v&$.f#` — the glued recall
+        Operand::Apply { base, reg: r, shot } => {
+            let b = match **base {
+                Operand::Arith { .. } | Operand::Concat { .. } | Operand::Coalesce { .. } => {
+                    parens(&operand(base))
+                }
+                _ => operand(base),
+            };
+            let suffix = match shot {
+                Some(true) => "#",
+                Some(false) => "!",
+                None => "",
+            };
+            format!("{b}&{}{}", reg(r), suffix)
+        }
         Operand::Projected { base, shape } => {
             let b = match **base {
                 Operand::Arith { .. } | Operand::Concat { .. } | Operand::Coalesce { .. } => {
@@ -1420,6 +1435,9 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Filter(e) => format!("| [{}]", pred_expr(e)),
         Command::Recall(r) => format!("| {}", reg(r)),
         Command::Splice(r) => format!("| &{}", reg(r)),
+        Command::SpliceAs { reg: r, shot } => {
+            format!("| &{}{}", reg(r), if *shot { "#" } else { "!" })
+        }
         Command::Param { name, agg } => format!("{}${name}", if *agg { "@| " } else { "" }),
         Command::Hole { hole, agg } => {
             format!("{}${{{}}}", if *agg { "@| " } else { "| " }, hole.text)

@@ -337,6 +337,7 @@ pub(crate) fn tree_command<H: Host>(
     }
     match host.render_tree(&starts, &spec, &column) {
         Ok(text) => vec![Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Str(text)),
@@ -387,6 +388,7 @@ pub(crate) fn graph_table_command<H: Host>(
     }
     match host.graph_table(&starts, &what, trace) {
         Ok(table) => vec![Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Table(std::sync::Arc::new(table))),
@@ -520,6 +522,7 @@ pub(crate) fn graph_library_command<H: Host>(
             },
         };
         return vec![Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Table(table)),
@@ -561,6 +564,7 @@ pub(crate) fn graph_library_command<H: Host>(
         let part: Vec<usize> = part_of.into_iter().map(|p| p.unwrap_or(0)).collect();
         return match host.graph_reduce(&starts, &what, &part, trace) {
             Ok(value) => vec![Thread::<H::Ext> {
+                window: None,
                 prov: Prov::leaf(origins),
                 register: shared_register(&caps),
                 topic: Some(value),
@@ -1023,6 +1027,7 @@ pub(crate) fn association_command<H: Host>(
     // Pipe)
     let node = host.unplaced_ext();
     vec![Thread::<H::Ext> {
+        window: None,
         prov: Prov::leaf(origins),
         register: Vec::new(),
         topic: Some(value),

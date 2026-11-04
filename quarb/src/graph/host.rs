@@ -383,6 +383,7 @@ impl<A: AstAdapter> Host for A {
                     false,
                 ) {
                     out.push(Capsa {
+                        window: None,
                         prov: if branch.projection.is_some() {
                             Prov::at(ext.node.into(), command_now())
                         } else {

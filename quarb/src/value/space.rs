@@ -30,6 +30,10 @@ pub struct Quarq {
     /// answer): a step, a predicate, a projection — what the body's
     /// commands only approximate (design paper: the node overwrite).
     pub form: Option<Box<crate::syntax::expand::Form>>,
+    /// The topic of the pushing thread at the push (spec: Quarqs,
+    /// the held quarq's appliers): what `&$.x#` takes as `$_`. None
+    /// until the quarq is pushed.
+    pub at: Option<Box<Value>>,
 }
 
 /// The name of the quarq's own core field, the inverse of the `q(…)`
@@ -1029,6 +1033,9 @@ impl Table {
                     }
                     out
                 }
+                // a column of projectors is a projector table's (held,
+                // read where it is applied): its cells stay projectors
+                None if cells.iter().any(|c| matches!(c, Value::Projection { .. })) => cells,
                 None => type_column(cells).1,
             };
             for (r, c) in t.rows.iter_mut().zip(coerced) {
@@ -1881,6 +1888,7 @@ impl Value {
             projector: projector.map(Box::new),
             holes: std::sync::Arc::new(Vec::new()),
             form: None,
+            at: None,
         })
     }
 
@@ -1902,6 +1910,7 @@ impl Value {
             projector: None,
             holes: std::sync::Arc::new(Vec::new()),
             form: Some(Box::new(form)),
+            at: None,
         })
     }
 
@@ -1917,6 +1926,7 @@ impl Value {
             projector: None,
             holes: std::sync::Arc::new(holes),
             form: None,
+            at: None,
         })
     }
 

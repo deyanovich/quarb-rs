@@ -594,6 +594,62 @@ fn run_file(
             println!();
             continue;
         }
+        // A capture reference, as the session reads it (spec: .quai;
+        // `:help`): `&N#` replays line N's frozen footprint and takes
+        // the next number, `&N!` re-runs line N against a freshly read
+        // source; the engine alone would refuse both spellings.
+        // only a cell that is a standalone `&N#` or `&N!` is a history
+        // reference; any other `#` (a table literal, `#.`, a string)
+        // is the query's own
+        let reference = numeric_ref_with(q.trim(), '#')
+            .map(Prepared::Frozen)
+            .or_else(|| numeric_ref_with(q.trim(), '!').map(|n| Prepared::Live(format!("&{n}"))));
+        match reference {
+            Some(Prepared::Frozen(n)) => {
+                let cells = session.borrow().frozen(n).cloned();
+                match cells {
+                    Some(cells) => {
+                        let memory = session.borrow().session_memory();
+                        for c in &cells {
+                            for l in c.display_in(memory.as_ref()).lines() {
+                                println!("    {l}");
+                            }
+                        }
+                        session.borrow_mut().record_frozen(cells);
+                    }
+                    None => {
+                        failed = true;
+                        println!("    error: &{n}# has no captured result (line {n} hasn't run)");
+                        session.borrow_mut().commit(&q, Vec::new());
+                    }
+                }
+                println!();
+                continue;
+            }
+            Some(Prepared::Live(live)) => {
+                let result = session.borrow().eval_fresh(&live);
+                match result {
+                    Ok(cells) => {
+                        let memory = session.borrow().session_memory();
+                        for c in &cells {
+                            for l in c.display_in(memory.as_ref()).lines() {
+                                println!("    {l}");
+                            }
+                        }
+                        print_diagnostics(&session.borrow(), "    ");
+                        session.borrow_mut().commit(&live, cells);
+                    }
+                    Err(e) => {
+                        failed = true;
+                        println!("    error: {e:#}");
+                        session.borrow_mut().commit(&live, Vec::new());
+                    }
+                }
+                println!();
+                continue;
+            }
+            _ => {}
+        }
         // a session push and a `session(…)` that sets answer nothing:
         // no line after them (the engine yields no thread; the guard
         // here keeps the transcript's shape whatever the host prints)
@@ -806,18 +862,24 @@ fn repl(
         // `#`, and its `!` signage rejects a bang on a pure fragment.
         match prepare(line) {
             Err(e) => eprintln!("{}: {e}", error_prefix()),
-            Ok(Prepared::Frozen(n)) => match session.borrow().frozen(n).cloned() {
-                Some(cells) => {
-                    for c in &cells {
-                        println!("{}", c.display());
+            // (the snapshot is cloned out before the session is
+            // borrowed again to record the replay: a borrow held across
+            // the match scrutinee poisoned every later line)
+            Ok(Prepared::Frozen(n)) => {
+                let cells = session.borrow().frozen(n).cloned();
+                match cells {
+                    Some(cells) => {
+                        for c in &cells {
+                            println!("{}", c.display());
+                        }
+                        session.borrow_mut().record_frozen(cells);
                     }
-                    session.borrow_mut().record_frozen(cells);
+                    None => eprintln!(
+                        "{}: &{n}# has no captured result (line {n} hasn't run)",
+                        error_prefix()
+                    ),
                 }
-                None => eprintln!(
-                    "{}: &{n}# has no captured result (line {n} hasn't run)",
-                    error_prefix()
-                ),
-            },
+            }
             Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, true),
             Ok(Prepared::Eval(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, false),
         }

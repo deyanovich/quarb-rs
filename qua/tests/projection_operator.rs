@@ -172,3 +172,23 @@ fn equality_inside_map_and_after_a_pipe() {
     assert_eq!(one("= 5 | $_ = 5 && $_ > 1"), "true");
     assert_eq!(one("= 5 | $_ > 3 ? $_ : null"), "5");
 }
+
+/// A table shape nests in a record or a list, and at the head (spec:
+/// Projection by the Glued Colon, the structure at any depth): one row
+/// of the projections under their names, read where it stands.
+#[test]
+fn a_table_shape_nests_in_a_record_or_a_list() {
+    assert_eq!(
+        one("/rows/*[1]:%(t = #(::name; ::pages); n = ::name) | :t | type"),
+        "@(\"text\"; \"int\")"
+    );
+    assert_eq!(
+        one("/rows/*[1]:%(t = #(::name; ::pages)) | :t | :pages"),
+        "@(683)"
+    );
+    assert_eq!(one("/rows/*[1]:@(#(::name)) | [1] | type"), "text");
+    assert_eq!(
+        one("= %(t = #(::name; p = ::pages)) | .p | /rows/*[1]:$.p | :t | :p"),
+        "@(683)"
+    );
+}

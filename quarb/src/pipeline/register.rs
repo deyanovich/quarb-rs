@@ -152,6 +152,28 @@ pub(crate) fn session_recall(r: &RegRef) -> Value {
     }
 }
 
+/// The index of the one regula a reference names — the latest by
+/// name, one by position on the value side — or none for a view
+/// (`$.`, `%.`, …) or a miss. What the suffixed appliers window the
+/// capsa before (spec: Quarqs, the held quarq's appliers).
+pub(crate) fn recall_index(register: &[Reg], r: &RegRef) -> Option<usize> {
+    let side: Vec<usize> = register
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !is_reference(r) && !is_hidden(r))
+        .map(|(i, _)| i)
+        .collect();
+    match r {
+        RegRef::Top => side.last().copied(),
+        RegRef::Index(n) => side.get(n.saturating_sub(1)).copied(),
+        RegRef::Back(n) => side.iter().rev().nth(n.saturating_sub(1)).copied(),
+        RegRef::Named(name) => register
+            .iter()
+            .rposition(|r| r.name.as_deref() == Some(name.as_str())),
+        _ => None,
+    }
+}
+
 /// The value a register reference recalls.
 pub(crate) fn recall(register: &[Reg], r: &RegRef) -> Value {
     if matches!(r, RegRef::Session(_) | RegRef::SessionRecord) {

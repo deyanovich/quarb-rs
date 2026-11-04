@@ -239,6 +239,23 @@ pub(crate) fn eval_operand<H: Host>(
         // projection operator (spec: The Projection Operator): the
         // shape read on each value (or node) of the base, every
         // projector in it replaced by its reading there.
+        // `v&$.f`, `v&$.f!`, `v&$.f#` — the glued recall: the pipe
+        // form `v | &$.f` as one operand (spec: Quarqs, the held
+        // quarq's recalls)
+        Operand::Apply { base, reg, shot } => {
+            let command = match shot {
+                Some(shot) => Command::SpliceAs {
+                    reg: reg.clone(),
+                    shot: *shot,
+                },
+                None => Command::Splice(reg.clone()),
+            };
+            let piped = Operand::Piped {
+                expr: base.clone(),
+                commands: vec![command],
+            };
+            eval_operand(host, ext, &piped, trace, scope)
+        }
         Operand::Projected { base, shape } => {
             use crate::syntax::ast::ProjShape;
             // the probes: a path's nodes (each with its projection,
@@ -315,8 +332,31 @@ pub(crate) fn eval_operand<H: Host>(
                             }
                             other => eval_operand(host, x, other, trace, pscope),
                         };
+                        // a held register projects and nothing else
+                        // (spec: Projection by the Glued Colon): a
+                        // quarq that is one projection or a projector
+                        // structure, or a projector structure itself;
+                        // anything else refuses pointing at the sigil
+                        let held = matches!(v.as_ref(), Operand::Recall(_));
                         for value in values {
                             out.push(match value {
+                                Value::Quarq(q) if held => match &q.projector {
+                                    Some(p) => walk_projections((**p).clone(), &read),
+                                    None => {
+                                        crate::pipeline::record_refusal(
+                                            "the colon projects; to run the quarq write v | &$.f (or v&$.f)"
+                                                .into(),
+                                        );
+                                        Value::Null
+                                    }
+                                },
+                                v @ (Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null) if held => {
+                                    crate::pipeline::record_refusal(format!(
+                                        "the colon projects, and the register holds {} with no projector in it; to run a quarq write v | &$.f",
+                                        crate::stdlib::kind_of(&v)
+                                    ));
+                                    Value::Null
+                                }
                                 // a held quarq runs on the probe as
                                 // the glued colon applies it
                                 Value::Quarq(q) => run_quarq(host, x, &q, trace, pscope),
@@ -724,7 +764,12 @@ pub(crate) fn eval_operand<H: Host>(
             }
         }
         Operand::Table { header, rows } => {
-            let cell = |e: &Operand| operand_value(host, ext, e, trace, scope);
+            // a projector literal stays the projector, as a list item
+            // or a record field does (a held projector table)
+            let cell = |e: &Operand| match e {
+                Operand::Lit(v @ Value::Projection { .. }) => v.clone(),
+                _ => operand_value(host, ext, e, trace, scope),
+            };
             match table_literal(header.clone(), rows, cell) {
                 Ok(t) => vec![Value::table(t)],
                 Err(why) => {
@@ -808,6 +853,7 @@ pub(crate) fn eval_operand<H: Host>(
             // pipeline would: as a node (`@| unique` tells two nodes
             // apart whatever they read as).
             let capsa = |x: H::Ext, topic: Option<Value>, prov: Prov| Thread::<H::Ext> {
+                window: None,
                 prov,
                 register: scope.register.to_vec(),
                 topic,
@@ -859,6 +905,7 @@ pub(crate) fn eval_operand<H: Host>(
                         .map(|m| m.topic.clone().unwrap_or_else(|| host.node_scalar(&m.ext)))
                         .collect();
                     vec![Thread::<H::Ext> {
+                        window: None,
                         prov: scope.prov.cloned().unwrap_or_else(|| host.prov_at(ext)),
                         register: scope.register.to_vec(),
                         topic: Some(Value::list(topics)),

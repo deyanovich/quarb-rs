@@ -216,6 +216,12 @@ pub enum Command {
     /// bound, where `&name` splices a def at parse time. A register
     /// holding no quarq refuses.
     Splice(RegRef),
+    /// `| &$.x!` / `| &$.x#` — the held quarq applied with the
+    /// capsa windowed before the regula holding `x` (spec: Quarqs,
+    /// the held quarq's appliers): `!` with the applying cursor,
+    /// `#` (`shot`) with the topic and position recorded at the
+    /// push.
+    SpliceAs { reg: RegRef, shot: bool },
     /// `$then` in command position inside a definition body: a
     /// parameter a quarq argument fills with its commands (design
     /// paper: Arguments); after `@|` the quarq's one command is
@@ -1139,6 +1145,15 @@ pub enum Operand {
     Piped {
         expr: Box<Operand>,
         commands: Vec<Command>,
+    },
+    /// `v&$.f`, `v&$.f!`, `v&$.f#` — the sigil glued to a value
+    /// applies the held quarq to it (spec: Quarqs, the held quarq's
+    /// recalls): the pipe form `v | &$.f` as one operand, the suffix
+    /// the recall's (`!` the closure, `#` the photograph).
+    Apply {
+        base: Box<Operand>,
+        reg: RegRef,
+        shot: Option<bool>,
     },
     /// `now()` — the invocation instant (spec: The Temporal
     /// Fragment, Determinism): one timeline point bound by the

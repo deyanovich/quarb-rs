@@ -83,7 +83,9 @@ impl<X: Attachment> Thread<X> {
     ) -> Scope<'a, X> {
         Scope {
             prov: Some(&self.prov),
-            register: &self.register,
+            register: &self.register[..self
+                .window
+                .map_or(self.register.len(), |w| w.min(self.register.len()))],
             members: &self.members,
             topic: self.topic.as_ref(),
             ordinal,

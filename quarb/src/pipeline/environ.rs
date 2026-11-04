@@ -328,6 +328,7 @@ fn lib_agg_command<H: Host>(
     items
         .into_iter()
         .map(|v| Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(origins.clone()),
             register: register.clone(),
             topic: Some(v),
@@ -459,6 +460,7 @@ pub(crate) fn env_agg_command<H: Host>(
     let node = seed.ext.bare();
     text.lines()
         .map(|line| Thread::<H::Ext> {
+            window: None,
             prov: Prov::leaf(origins.clone()),
             register: register.clone(),
             topic: Some(Value::Str(line.trim_end_matches('\r').to_string())),

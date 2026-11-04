@@ -631,7 +631,10 @@ fn rename_in_command(c: &mut Command, f: &mut dyn FnMut(&str) -> String) {
         | Command::RecordWith(call)
         | Command::AggRecord { call, .. } => rename_in_args(&mut call.args, f),
         Command::Expr(e) | Command::AggExpr(e) => rename_in_operand(e, f),
-        Command::Recall(r) | Command::Splice(r) | Command::AggRecall(r) => rename_reg(r, f),
+        Command::Recall(r)
+        | Command::Splice(r)
+        | Command::SpliceAs { reg: r, .. }
+        | Command::AggRecall(r) => rename_reg(r, f),
         Command::Select(Predicate::Expr(e)) | Command::Filter(e) => rename_in_pred(e, f),
         Command::Nav(b) => rename_in_branch(b, f),
         Command::Map(inner) | Command::Repeat { command: inner, .. } => rename_in_command(inner, f),
@@ -1079,7 +1082,7 @@ pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::Subcontext { .. } => PipeMode::Nav,
         Command::Filter(_) | Command::Select(_) | Command::AggPush { .. } => cur,
         // a spliced quarq may navigate: the permissive mode follows
-        Command::Splice(_) => PipeMode::Nav,
+        Command::Splice(_) | Command::SpliceAs { .. } => PipeMode::Nav,
         Command::Func(_)
         | Command::Expr(_)
         | Command::Agg(_)
@@ -3709,7 +3712,11 @@ impl Parser<'_> {
                 ));
             }
             self.pos += 1;
-            pipeline.push(Command::Splice(self.splice_register()?));
+            let r = self.splice_register()?;
+            pipeline.push(match self.splice_suffix() {
+                Some(shot) => Command::SpliceAs { reg: r, shot },
+                None => Command::Splice(r),
+            });
             return Ok(());
         }
         let (name, args, bang, quant) = self.invocation()?;
@@ -4544,6 +4551,45 @@ impl Parser<'_> {
     /// the columns; named rows without a header infer it.
     fn table_literal(&mut self) -> Result<Operand> {
         self.expect(Token::LParen, "'(' after '#'")?;
+        // `#(::A; n = ::B)` nested in a record or list shape (spec:
+        // Projection by the Glued Colon, the structure at any depth):
+        // the projector table, one row of the projections under their
+        // names, read by the structure's walk where it stands
+        if matches!(self.peek(), Some(Token::Field | Token::ColonColon))
+            || (matches!(self.peek(), Some(Token::Name { .. }))
+                && matches!(self.toks.get(self.pos + 1), Some(Token::Eq))
+                && matches!(
+                    self.toks.get(self.pos + 2),
+                    Some(Token::Field | Token::ColonColon)
+                ))
+        {
+            let ProjShape::Columns { items, index } = self.shape_columns()? else {
+                unreachable!("the columns shape")
+            };
+            if index.is_some() {
+                return Err(QuarbError::parse(
+                    "the index option stands on the table shape the colon applies (t:#(:A; -i=:A)), not in a nested one",
+                ));
+            }
+            let mut header = Vec::with_capacity(items.len());
+            for (name, op) in &items {
+                match name
+                    .clone()
+                    .or_else(|| crate::syntax::ast::auto_field_name(op).map(str::to_string))
+                {
+                    Some(n) => header.push(n),
+                    None => {
+                        return Err(QuarbError::parse(
+                            "a nested table shape names its columns: #(::A; n = ::B)",
+                        ));
+                    }
+                }
+            }
+            return Ok(Operand::Table {
+                header: Some(header),
+                rows: vec![TableRow::Record(items)],
+            });
+        }
         let mut header: Option<Vec<String>> = None;
         let mut rows: Vec<TableRow> = Vec::new();
         // the first list, held until the next item says whether it
@@ -8201,6 +8247,20 @@ impl Parser<'_> {
                         shape,
                     };
                 }
+                // `v&$.f`, `v&$.f!`, `v&$.f#` — the sigil glued to a
+                // value applies the held quarq to it (spec: Quarqs,
+                // the held quarq's recalls); `&&` lexes apart, and a
+                // path takes its own `&` before this loop
+                Some(Token::Amp) if matches!(self.toks.get(self.pos + 1), Some(Token::Dollar)) => {
+                    self.pos += 1;
+                    let reg = self.splice_register()?;
+                    let shot = self.splice_suffix();
+                    o = Operand::Apply {
+                        base: Box::new(o),
+                        reg,
+                        shot,
+                    };
+                }
                 // `REF::prop`: a property read through the node the
                 // value names (spec: reading through a reference)
                 Some(Token::ColonColon) => {
@@ -10424,15 +10484,34 @@ impl Parser<'_> {
         }
     }
 
+    /// The applier's suffix after a held quarq's register (spec:
+    /// Quarqs, the held quarq's appliers): `!` applies it under the
+    /// capsa windowed before the regula with the applying cursor,
+    /// `#` (true) with the cursor recorded at the push; none is the
+    /// late-bound application.
+    fn splice_suffix(&mut self) -> Option<bool> {
+        let shot = match self.peek() {
+            Some(Token::Hash) => true,
+            Some(Token::Bang) => false,
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(shot)
+    }
+
     fn splice_operand_fragment(&mut self) -> Result<Operand> {
         // `&$.p` as an operand: the held quarq run on the capsa, as
         // a piped body would be (spec: Quarqs)
         if matches!(self.toks.get(self.pos + 1), Some(Token::Dollar)) {
             self.pos += 1;
             let r = self.splice_register()?;
+            let command = match self.splice_suffix() {
+                Some(shot) => Command::SpliceAs { reg: r, shot },
+                None => Command::Splice(r),
+            };
             return Ok(Operand::Piped {
                 expr: Box::new(Operand::Seed),
-                commands: vec![Command::Splice(r)],
+                commands: vec![command],
             });
         }
         let (name, args, bang, quant) = self.invocation()?;
@@ -10635,9 +10714,20 @@ impl Parser<'_> {
         } else {
             // a typed projector in the shape is the typed value, so
             // the shape applied casts the column it reads (`t:@(:A<int>)`)
-            self.unary().map(|mut v| {
+            self.unary().and_then(|mut v| {
                 fold_typed(&mut v);
-                ProjShape::Value(Box::new(v))
+                // the colon projects and takes no suffix: the recalls
+                // are the sigil's (spec: Quarqs, the held quarq's
+                // recalls)
+                if matches!(v, Operand::Recall(_))
+                    && matches!(self.peek(), Some(Token::Hash | Token::Bang))
+                {
+                    return Err(QuarbError::parse(
+                        "the colon projects and takes no suffix; the recalls are the sigil's: \
+                         v&$.f!, v&$.f# (or v | &$.f!)",
+                    ));
+                }
+                Ok(ProjShape::Value(Box::new(v)))
             })
         };
         self.arg_depth = saved_depth;
@@ -12507,6 +12597,7 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         | Command::FieldsPush
         | Command::Recall(_)
         | Command::Splice(_)
+        | Command::SpliceAs { .. }
         | Command::Param { .. }
         | Command::AggRecall(_)
         | Command::Spread { .. } => {}
@@ -12702,6 +12793,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
         }
         // an expansion's expression takes the parameters as any
         // operand does
+        Operand::Apply { base, .. } => subst_operand(base, map),
         Operand::Hole(h) => subst_operand(&mut h.expr, map),
         Operand::Match {
             scrutinee,
