@@ -106,9 +106,18 @@ fn a_table_takes_rows_and_retypes() {
         one("= #(@(a; b); %(1; 2)) ++ %(a = 1; c = 2; b = 3; d = 4) | @"),
         "@%(@(a; b; c; d); %(1; 2; null; null); %(1; 3; 2; 4))"
     );
+    // a table under the header rule (ruling 2026-11-05): headers that
+    // overlap without being equal refused naming the shared column,
+    // `++!` appending the columns with the right side's under it;
+    // disjoint headers append the columns, by position here
+    assert!(refuse("= #(@(a; b); %(1; 2)) ++ #(@(b; c); %(3; 4))").contains("share 'b'"));
     assert_eq!(
-        one("= #(@(a; b); %(1; 2)) ++ #(@(b; c); %(3; 4)) | @"),
-        "@%(@(a; b; c); %(1; 2; null); %(null; 3; 4))"
+        one("= #(@(a; b); %(1; 2)) ++! #(@(b; c); %(3; 4)) | @"),
+        "%(a = 1; b = 3; c = 4)"
+    );
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) ++ #(@(c); %(3)) | @"),
+        "%(a = 1; b = 2; c = 3)"
     );
     // a table row by row, columns by name on a frame
     assert_eq!(

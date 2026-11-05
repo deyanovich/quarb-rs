@@ -1278,7 +1278,6 @@ impl Parser<'_> {
             )));
         }
         validate_correlation_refs(&query)?;
-        validate_keyed_commands(&query)?;
         refuse_unmade_names(&query)?;
         self.sweep_captures(&query)?;
         Ok(query)
@@ -2312,10 +2311,16 @@ impl Parser<'_> {
                         validate_record(&call)?;
                         return Ok(Command::RecordWith(call));
                     }
-                    return Ok(Command::Recall(match self.view_dots("%%")? {
+                    let r = match self.view_dots("%%")? {
                         1 => RegRef::NodeRecord,
                         _ => RegRef::NodeFullRecord,
-                    }));
+                    };
+                    // `| %%. ++ %(…)` — the view heads an expression
+                    if self.expr_continues() {
+                        self.pos = head;
+                        return Ok(Command::Expr(self.additive()?));
+                    }
+                    return Ok(Command::Recall(r));
                 }
                 if matches!(self.peek(), Some(Token::LParen)) {
                     let call = self.record_args()?;
@@ -2346,10 +2351,18 @@ impl Parser<'_> {
                         args: Vec::new(),
                     }));
                 }
-                Ok(Command::Recall(match self.view_dots("%")? {
+                let r = match self.view_dots("%")? {
                     1 => RegRef::Record,
                     _ => RegRef::FullRecord,
-                }))
+                };
+                // `| %. ++ $_` — the named view heads an expression:
+                // the keys of a fold, then its answer (finding
+                // 2026-11-05)
+                if self.expr_continues() {
+                    self.pos = head;
+                    return Ok(Command::Expr(self.additive()?));
+                }
+                Ok(Command::Recall(r))
             }
             // `| ...` — the spread. Dots are name characters, so
             // the ellipsis arrives as one name; it outranks the
@@ -2642,6 +2655,7 @@ impl Parser<'_> {
                 Ok(Command::Expr(self.additive()?))
             }
             _ => {
+                let head = self.pos;
                 let call = self.func_call()?;
                 // `now()` refuses to stand after a pipe: it takes no topic.
                 if call.name == "now" {
@@ -2651,6 +2665,15 @@ impl Parser<'_> {
                     ));
                 }
                 self.check_unit_call(&call)?;
+                // `| min(--by=:Sex) ++ max(--by=:Sex)` — a call with no
+                // operand that an expression operator follows heads
+                // the expression, the call over the topic as its left
+                // side (ruling 2026-11-05); a call with operands keeps
+                // the stage reading
+                if call.args.iter().all(|a| matches!(a, Arg::Opt { .. })) && self.expr_continues() {
+                    self.pos = head;
+                    return Ok(Command::Expr(self.additive()?));
+                }
                 func_command(call)
             }
         }
@@ -2761,7 +2784,12 @@ impl Parser<'_> {
 
     /// Whether the next token is a view's dot, star or dots.
     fn at_view_dots(&self) -> bool {
-        matches!(self.peek(), Some(Token::Name { text, .. }) if text == "." || text == ".*" || text == "..")
+        self.view_dots_at(self.pos)
+    }
+
+    /// Whether the token at `pos` is a view's dots.
+    fn view_dots_at(&self, pos: usize) -> bool {
+        matches!(self.toks.get(pos), Some(Token::Name { text, .. }) if text == "." || text == ".*" || text == "..")
     }
 
     /// Parse one `||` branch: navigation and an optional projection.
@@ -2846,7 +2874,16 @@ impl Parser<'_> {
                 preds.push(self.predicate()?);
             }
             DefBody::Predicates(preds)
-        } else if matches!(self.peek(), Some(Token::Pipe | Token::At)) {
+        } else if matches!(self.peek(), Some(Token::Pipe))
+            || (matches!(self.peek(), Some(Token::At))
+                // `@(…)` / `@%(…)` open a value, not the aggregation
+                // pipe: a value-headed line is a query body, so a
+                // session recalls it (finding 2026-11-05: `&4 | ,df`
+                // after a constructor cell)
+                && !matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+                && !(matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                    && matches!(self.toks.get(self.pos + 2), Some(Token::LParen))))
+        {
             let mut commands = Vec::new();
             // A fragment body's splice-time mode is unknowable at
             // definition time; parse permissively (navigation mode)
@@ -5284,8 +5321,15 @@ impl Parser<'_> {
     }
 
     fn value_only_head(&self) -> bool {
-        let next_paren = matches!(self.toks.get(self.pos + 1), Some(Token::LParen));
-        match self.peek() {
+        self.value_only_head_at(self.pos)
+    }
+
+    /// [`value_only_head`](Self::value_only_head) at a position: the
+    /// token there can only open a value, so the `=` sigil may be
+    /// dropped before it.
+    fn value_only_head_at(&self, pos: usize) -> bool {
+        let next_paren = matches!(self.toks.get(pos + 1), Some(Token::LParen));
+        match self.toks.get(pos) {
             Some(Token::Name { quoted: true, .. }) | Some(Token::Interp(_)) => true,
             Some(Token::Name {
                 text,
@@ -5298,13 +5342,18 @@ impl Parser<'_> {
             // `@(`, `%(`, `#(`, and the record-array sugar `@%(`
             Some(Token::At) => {
                 next_paren
-                    || (matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
-                        && matches!(self.toks.get(self.pos + 2), Some(Token::LParen)))
+                    || (matches!(self.toks.get(pos + 1), Some(Token::Percent))
+                        && matches!(self.toks.get(pos + 2), Some(Token::LParen)))
             }
             Some(Token::Percent | Token::Hash) => next_paren,
             Some(Token::Dollar) => {
-                matches!(self.toks.get(self.pos + 1), Some(Token::Name { text, .. }) if text.starts_with(','))
+                matches!(self.toks.get(pos + 1), Some(Token::Name { text, .. }) if text.starts_with(','))
             }
+            // `($,aq | count)` — a parenthesised pipe headed by a
+            // value that can only open one (finding 2026-11-05: the
+            // session recall is a value wherever `$.x` is, the query
+            // head included)
+            Some(Token::LParen) => self.value_only_head_at(pos + 1),
             _ => false,
         }
     }
@@ -5456,6 +5505,15 @@ impl Parser<'_> {
                         "a table row separates its items with ';': %(\"Braund\"; 22)",
                     ));
                 }
+            }
+        }
+        // A positional item that is an accessor is named by it, as the
+        // record constructor names it: `%($.Sex)` is `%(Sex = $.Sex)`
+        // in a row as in a stage — one constructor, one naming rule
+        // (finding 2026-11-05). Literals stay positional.
+        for (name, item) in items.iter_mut() {
+            if name.is_none() {
+                *name = crate::syntax::ast::auto_field_name(item).map(str::to_string);
             }
         }
         Ok(items)
@@ -6180,7 +6238,19 @@ impl Parser<'_> {
                 // `--to="2000-01-01T" ++ $-::dep`), a parenthesised
                 // one a group; the next option's dash ends it. `map`
                 // alone reads `--to=` as the cells to map.
-                if command == "map"
+                // `--by=(:Sex; :Pclass)` — the key columns as a tuple
+                // of projectors (ruling 2026-11-05), as `-i=(:a; :b)`
+                // names an index
+                if name == "--by" && matches!(self.peek(), Some(Token::LParen)) {
+                    self.pos += 1;
+                    let mut items = vec![self.additive()?];
+                    while matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+                        self.pos += 1;
+                        items.push(self.additive()?);
+                    }
+                    self.expect(Token::RParen, "')' to close the key tuple of --by")?;
+                    Some(Operand::List(items))
+                } else if command == "map"
                     && name == "--to"
                     && matches!(self.peek(), Some(Token::LBracket))
                 {
@@ -9308,6 +9378,13 @@ impl Parser<'_> {
                     keep: false,
                 }))
             }
+            // `@| #.`, `@| #.*`, `@| ##.`, `@| #_` — the context's
+            // tables as the aggregation's expression, read once over
+            // the context (ruling 2026-11-05: the context accessors
+            // stand as a stage after either pipe)
+            Some(Token::Matrix { .. } | Token::NodeMatrix { .. } | Token::CtxTable) => {
+                Ok(Some(Command::AggExpr(self.expr_head()?)))
+            }
             Some(Token::Percent) => {
                 let head = self.pos;
                 self.pos += 1;
@@ -10013,6 +10090,17 @@ impl Parser<'_> {
                         n = call.name
                     )));
                 }
+                // A call with no operand to ride — none at all, or
+                // options alone (`max(--by=:Sex)`) — reads the topic
+                // as its stdin: the pipe form `($_ | max(--by=:Sex))`
+                // (the stdin-slot ruling 2026-11-02; ruling
+                // 2026-11-05: `min(--by=:Sex) ++ max(--by=:Sex)`).
+                if matches!(call.args.first(), None | Some(Arg::Opt { .. })) {
+                    return Ok(Operand::Piped {
+                        expr: Box::new(Operand::Topic),
+                        commands: vec![Command::Func(call)],
+                    });
+                }
                 let mut args = call.args.into_iter();
                 let first = match args.next() {
                     Some(Arg::Lit(v)) => Operand::Lit(v),
@@ -10022,16 +10110,10 @@ impl Parser<'_> {
                     | Some(Arg::Named { .. })
                     | Some(Arg::Opt { .. })
                     | Some(Arg::Pairs { .. })
-                    | Some(Arg::Hole(_)) => {
+                    | Some(Arg::Hole(_))
+                    | None => {
                         return Err(QuarbError::parse(format!(
-                            "'{}(...)' as an operand cannot ride a range or an option as its topic",
-                            call.name
-                        )));
-                    }
-                    None => {
-                        return Err(QuarbError::parse(format!(
-                            "a call operand needs a first argument to ride as the topic \
-                             ('{0}(x)' is '(x | {0})'); only now() is nullary",
+                            "'{}(...)' as an operand cannot ride a range or a key as its topic",
                             call.name
                         )));
                     }
@@ -10158,6 +10240,27 @@ impl Parser<'_> {
             {
                 self.pos += 2;
                 Ok(Operand::Recall(RegRef::SessionRecord))
+            }
+            // `%.`, `%.*`, `%%.`, `%%.*` — the register views as
+            // values: an accessor is an operand wherever `$.name` is
+            // — a field, a list item, a push body, a template hole,
+            // a side of `++` (finding 2026-11-05)
+            Some(Token::Percent)
+                if matches!(self.toks.get(self.pos + 1), Some(Token::Percent))
+                    && self.view_dots_at(self.pos + 2) =>
+            {
+                self.pos += 2;
+                Ok(Operand::Recall(match self.view_dots("%%")? {
+                    1 => RegRef::NodeRecord,
+                    _ => RegRef::NodeFullRecord,
+                }))
+            }
+            Some(Token::Percent) if self.view_dots_at(self.pos + 1) => {
+                self.pos += 1;
+                Ok(Operand::Recall(match self.view_dots("%")? {
+                    1 => RegRef::Record,
+                    _ => RegRef::FullRecord,
+                }))
             }
             // `%(a = 1; ::x)` — the record literal as a value: a
             // field of another record, an item of a list, an
@@ -13132,11 +13235,6 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
 /// joined expression's ON clause (its final step's brackets) may
 /// reference strictly earlier entries (and the driver as `$$…`);
 /// the driver's pipeline reads any witness back.
-/// A keyed aggregate — `top`, `bottom`, `sort_by`, `unique_by`,
-/// `min_by`, `max_by` — ranks a context, so it rides `@|`; on the
-/// plain pipe it works per window, after `@| window`. Without a
-/// window before it, it would rank each capsa's single value against
-/// itself and pass everything through — refuse with the pointer.
 /// The highest correlation context (`$*k`) a predicate expression
 /// references, anywhere in it — nested bodies included.
 pub(crate) fn max_ctx_pred_expr(e: &PredExpr) -> usize {
@@ -13561,28 +13659,6 @@ pub(crate) fn node_free(op: &Operand) -> bool {
         Operand::Neg(inner) | Operand::Desc(inner) => node_free(inner),
         _ => false,
     }
-}
-
-fn validate_keyed_commands(q: &Query) -> Result<()> {
-    let mut grouped = false;
-    for command in &q.pipeline {
-        match command {
-            // `@| window` partitions the stream; a keyed command on
-            // the plain pipe then works per window.
-            Command::Agg(call) if call.name == "window" => grouped = true,
-            Command::Func(call) if crate::syntax::registry::known_keyed(&call.name) && !grouped => {
-                return Err(QuarbError::parse(format!(
-                    "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per window, after '@| window')",
-                    n = call.name
-                )));
-            }
-            _ => {}
-        }
-    }
-    for c in &q.correlations {
-        validate_keyed_commands(c)?;
-    }
-    Ok(())
 }
 
 fn validate_correlation_refs(q: &Query) -> Result<()> {

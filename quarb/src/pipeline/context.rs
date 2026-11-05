@@ -11,10 +11,18 @@ pub(crate) fn effective_prov<H: Host>(host: &H, c: &Thread<H::Ext>) -> Prov {
     }
 }
 
-/// A capsa's effective topic: the topic if set, else the node's
-/// default scalar.
+/// A thread's topic as `$_` reads it: the topic if set; on a node
+/// of a reflected query, the quarq of its form; else null. A thread
+/// that never projected has a null topic — a node's name is not its
+/// value — and `@_`, the seed after `@|`, a group's topic and every
+/// reduction over the context read the threads' topics through this
+/// one function, so `@_` is the list of the `$_` by construction
+/// (ruling 2026-11-05).
 pub(crate) fn effective_topic<H: Host>(c: &Thread<H::Ext>, host: &H) -> Value {
-    c.topic.clone().unwrap_or_else(|| host.node_scalar(&c.ext))
+    c.topic
+        .clone()
+        .or_else(|| host.node_form(&c.ext).map(Value::quarq_form))
+        .unwrap_or(Value::Null)
 }
 
 /// Partition the context for `window` / `shift`: for each capsa, the

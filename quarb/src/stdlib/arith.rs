@@ -382,6 +382,98 @@ fn kind(v: &Value) -> String {
 /// a record coordinate by field; a mismatch is refused naming the
 /// dimensions. A table's columns re-type after. `x` is the matrix
 /// product.
+/// Two indexed tables under an operator: the same index shape and
+/// data header; the rows aligned on the index — the union of the
+/// labels in order first met, a label on one side alone giving
+/// null cells, a label on several rows pairing its n-th rows — the
+/// data cells combined, the labels kept.
+fn labeled_broadcast(
+    op: ArithOp,
+    t: &crate::Table,
+    u: &crate::Table,
+    scale: UnitScale,
+) -> Result<Value, String> {
+    let sym = op.symbol();
+    let names =
+        |x: &crate::Table| -> Vec<String> { (0..x.width()).map(|j| x.column_name(j)).collect() };
+    let (tn, un) = (names(t), names(u));
+    if t.index != u.index || tn[t.index..] != un[u.index..] {
+        return Err(format!(
+            "{sym}: the tables differ in shape, {} and {} (and in their headers: {} against {})",
+            t.kind()
+                .trim_start_matches("a frame ")
+                .trim_start_matches("an array "),
+            u.kind()
+                .trim_start_matches("a frame ")
+                .trim_start_matches("an array "),
+            tn.join(", "),
+            un.join(", ")
+        ));
+    }
+    let k = t.index;
+    let w = t.width();
+    let label = |r: &Vec<Value>| -> Vec<Value> { r[..k].to_vec() };
+    let occurrences = |seen: &mut Vec<(Vec<Value>, usize)>, l: &Vec<Value>| -> usize {
+        match seen.iter_mut().find(|(x, _)| x == l) {
+            Some((_, n)) => {
+                *n += 1;
+                *n
+            }
+            None => {
+                seen.push((l.clone(), 1));
+                1
+            }
+        }
+    };
+    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
+    let mut seen = Vec::new();
+    let left: Vec<(Vec<Value>, usize, &Vec<Value>)> = t
+        .rows
+        .iter()
+        .map(|r| {
+            let l = label(r);
+            let n = occurrences(&mut seen, &l);
+            keys.push((l.clone(), n));
+            (l, n, r)
+        })
+        .collect();
+    let mut seen = Vec::new();
+    let right: Vec<(Vec<Value>, usize, &Vec<Value>)> = u
+        .rows
+        .iter()
+        .map(|r| {
+            let l = label(r);
+            let n = occurrences(&mut seen, &l);
+            if !keys.iter().any(|(x, m)| *x == l && *m == n) {
+                keys.push((l.clone(), n));
+            }
+            (l, n, r)
+        })
+        .collect();
+    let rows = keys
+        .iter()
+        .map(|(l, n)| {
+            let a = left
+                .iter()
+                .find(|(x, m, _)| x == l && m == n)
+                .map(|(_, _, r)| *r);
+            let b = right
+                .iter()
+                .find(|(x, m, _)| x == l && m == n)
+                .map(|(_, _, r)| *r);
+            let mut row = l.clone();
+            for j in k..w {
+                row.push(match (a, b) {
+                    (Some(a), Some(b)) => broadcast(op, &a[j], &b[j], scale)?,
+                    _ => Value::Null,
+                });
+            }
+            Ok(row)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Value::table(t.rebuild(rows)?))
+}
+
 pub(crate) fn broadcast(
     op: ArithOp,
     left: &Value,
@@ -394,6 +486,12 @@ pub(crate) fn broadcast(
     let sym = op.symbol();
     match (left, right) {
         (l, r) if !is_structure(l) && !is_structure(r) => Ok(arith(op, l, r, scale)),
+        // Two indexed tables: aligned by label, the index kept
+        // (ruling 2026-11-05: a record read off an indexed table
+        // meets another by label).
+        (Value::Table(t), Value::Table(u)) if t.index > 0 && u.index > 0 => {
+            labeled_broadcast(op, t, u, scale)
+        }
         // Two tables: the same header and dimensions, cell by cell.
         (Value::Table(t), Value::Table(u)) => {
             if t.header != u.header || t.rows.len() != u.rows.len() || t.width() != u.width() {

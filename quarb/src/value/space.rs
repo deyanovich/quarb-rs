@@ -1330,6 +1330,20 @@ impl Table {
                 values.push(v);
             }
         }
+        // a label standing on several rows has no one cell to put
+        // under its column: refused naming it, as a column read is
+        // (ruling 2026-11-05)
+        let mut seen: Vec<&[Value]> = Vec::with_capacity(self.rows.len());
+        for r in &self.rows {
+            let key = &r[..self.index];
+            if seen.contains(&key) {
+                return Err(format!(
+                    "the label {} stands on several rows, so it has no one cell to put under its column: aggregate the rows first (| mean(--by=:col)), or read them with | @",
+                    self.label_name(r)
+                ));
+            }
+            seen.push(key);
+        }
         let mut header: Vec<String> = h[..k].to_vec();
         for &j in &data {
             for v in &values {

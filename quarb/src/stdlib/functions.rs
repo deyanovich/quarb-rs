@@ -678,10 +678,19 @@ fn apply_scalar_inner(
         "types" => return vec![refusing(call, Err(TYPES_RETIRED.into()))],
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
         | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack"
-        | "unstack" => {
+        | "unstack" | "autoindex" => {
             return vec![refusing(
                 call,
                 match call.name.as_str() {
+                    // the implicit index made explicit (ruling
+                    // 2026-11-05)
+                    "autoindex" => match topic {
+                        Value::Table(t) => autoindex(call, &t, scale),
+                        other => Err(format!(
+                            "autoindex labels the rows of a table, not {}",
+                            kind_of(&other)
+                        )),
+                    },
                     // the two levels moved between index and header
                     // (spec: The Table, "Levels of the header")
                     "stack" | "unstack" => match topic {
@@ -2584,10 +2593,11 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// The table reshapers `stack` and `unstack` and `map` itself take
 /// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
 /// read the structure whole.
-const BROADCAST_EXEMPT: [&str; 16] = [
+const BROADCAST_EXEMPT: [&str; 17] = [
     "map",
     "stack",
     "unstack",
+    "autoindex",
     "record",
     "rec",
     "xml",
@@ -3550,6 +3560,96 @@ fn describe_values(input: &[Value], scale: Scale) -> Value {
             .map(|n| (n.to_string(), stat(n)))
             .collect(),
     )
+}
+
+/// `autoindex(--start=x? --step=d?)` (ruling 2026-11-05): the implicit
+/// index made explicit — a column named `index` of consecutive labels,
+/// one per row in order, prepended and named the index. The positions
+/// from 1 unless `--start` says where to begin (`--start=0` is pandas'
+/// default index); the start a number, a quantity or an instant, the
+/// step 1 by default for a number and required otherwise — a quantity
+/// of the start's dimension, a duration for an instant — a step of
+/// another dimension, or missing where required, refused naming the
+/// start. An index the table had stays a plain column.
+fn autoindex(call: &FnCall, t: &crate::Table, scale: Scale) -> Result<Value, String> {
+    let option = |name: &str| -> Option<Value> {
+        call.args.iter().find_map(|a| match a {
+            Arg::Opt {
+                name: n,
+                value: Some(crate::syntax::ast::Operand::Lit(v)),
+            } if n == name => Some(v.clone()),
+            _ => None,
+        })
+    };
+    // a date written bare reads as the instant it spells
+    let read = |v: Value| match v {
+        Value::Str(s) => crate::temporal::parse_iso(&s)
+            .map(|(secs, nanos, offset_min)| Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+                calendar: Default::default(),
+            })
+            .unwrap_or(Value::Str(s)),
+        v => v,
+    };
+    let start = option("--start").map(read).unwrap_or(Value::Int(1));
+    let step = option("--step").map(read);
+    let numeric = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_));
+    let step = match (&start, step) {
+        (s, None) if numeric(s) => Value::Int(1),
+        (s, Some(d)) if numeric(s) && numeric(&d) => d,
+        (Value::Quantity { base, .. }, Some(d)) if matches!(&d, Value::Quantity { base: b, .. } if b == base) => {
+            d
+        }
+        (Value::Instant { .. }, Some(d)) if d.is_duration() => d,
+        (s @ (Value::Quantity { .. } | Value::Instant { .. }), None) => {
+            return Err(format!(
+                "the start {} takes a step of its own kind: --step={}",
+                s.to_quarb(),
+                if s.is_duration() || matches!(s, Value::Instant { .. }) {
+                    "1_d"
+                } else {
+                    "1_<unit>"
+                }
+            ));
+        }
+        (s, Some(d))
+            if numeric(s) || matches!(s, Value::Quantity { .. } | Value::Instant { .. }) =>
+        {
+            return Err(format!(
+                "the step {} is of another kind than the start {}: a number steps by a \
+                 number, a quantity by a quantity of its dimension, an instant by a duration",
+                d.to_quarb(),
+                s.to_quarb()
+            ));
+        }
+        (s, _) => {
+            return Err(format!(
+                "--start takes a number, a quantity or an instant, not {}",
+                kind_of(s)
+            ));
+        }
+    };
+    let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+    let mut header = vec!["index".to_string()];
+    header.extend(names);
+    let mut declared: Vec<Option<crate::ColumnType>> = vec![None];
+    declared.extend((0..t.width()).map(|j| t.declaration(j)));
+    let mut label = start;
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(t.rows.len());
+    for r in &t.rows {
+        let mut row = Vec::with_capacity(r.len() + 1);
+        row.push(label.clone());
+        row.extend(r.iter().cloned());
+        rows.push(row);
+        label = crate::stdlib::arith::arith(crate::syntax::ast::ArithOp::Add, &label, &step, scale);
+    }
+    Ok(Value::table(
+        crate::Table::typed(Some(header), rows, declared)?
+            .with_index(1)
+            .with_name(t.name.clone()),
+    ))
 }
 
 /// `describe` on a table: a table with one row per statistic, indexed
@@ -4893,6 +4993,15 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
             kind_of(&other)
         )),
         (ConcatMode::Overwrite, Value::Record(fields)) => record_concat(fields, right, true),
+        // `t ++! u` — the right side's columns appended, overwriting
+        // the left's of one name (the header rule, ruling 2026-11-05)
+        (ConcatMode::Overwrite, Value::Table(t)) if matches!(&right, Value::Table(_)) => {
+            table_concat(&t, right, true)
+        }
+        (ConcatMode::Overwrite, Value::Table(_)) => Err(format!(
+            "'++!' on a table takes a table, its columns under the left side's names; {} takes '++'",
+            kind_of(&right)
+        )),
         (ConcatMode::Overwrite, other) => Err(format!(
             "'++!' overwrites a record's fields; {} takes '++'",
             kind_of(&other)
@@ -4905,7 +5014,7 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
             }
             Ok(Value::list(out))
         }
-        (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right),
+        (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right, false),
         (ConcatMode::Merge, Value::Record(fields)) => record_concat(fields, right, false),
         (ConcatMode::Merge, Value::Str(s)) => {
             Ok(Value::Str(format!("{s}{}", right.display_form())))
@@ -4963,9 +5072,19 @@ fn record_concat(
 }
 
 /// A table's rows joined by a record (one row under the literal's
-/// rules) or by a table (row by row, columns by name on a frame, by
-/// position on an array); the columns re-type after.
-fn table_concat(t: &crate::Table, right: Value) -> Result<Value, String> {
+/// rules), or by a table under the header rule (ruling 2026-11-05):
+/// the same header appends the right side's rows, by column name on
+/// a frame and by position on an array, the index kept; disjoint
+/// headers append its columns (`column_concat`: by label where both
+/// tables are indexed, by position otherwise); headers that overlap
+/// without being equal are refused naming the shared columns. Two
+/// indexed tables compare their data columns for the overlap, their
+/// index being the alignment. `++!` follows the same rule and
+/// overwrites where `++` would repeat or refuse: under the same
+/// header a right row whose label the left has replaces that row in
+/// place (the update), under overlapping headers the right side's
+/// values take the shared names.
+fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value, String> {
     let mut header = t.header.clone();
     let mut rows = t.rows.clone();
     let n = rows.len() + 1;
@@ -4975,13 +5094,76 @@ fn table_concat(t: &crate::Table, right: Value) -> Result<Value, String> {
             rows.push(row);
         }
         Value::Table(more) => match (&header, &more.header) {
-            (Some(_), Some(h2)) => {
-                for r in &more.rows {
-                    let fields: Vec<(String, Value)> =
-                        h2.iter().cloned().zip(r.iter().cloned()).collect();
-                    let n = rows.len() + 1;
-                    let row = place_named(&mut header, &mut rows, &fields, n)?;
-                    rows.push(row);
+            (Some(h1), Some(h2)) => {
+                let same = h1.len() == h2.len() && h1.iter().all(|c| h2.contains(c));
+                if same {
+                    // the right's label, read in its columns named like
+                    // the left's index levels, for the update
+                    let levels: Vec<usize> = if overwrite && t.index > 0 {
+                        (0..t.index)
+                            .map(|j| h2.iter().position(|c| *c == h1[j]).unwrap_or(0))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let label = |r: &Vec<Value>, cols: &[usize]| -> Vec<Value> {
+                        cols.iter()
+                            .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
+                            .collect()
+                    };
+                    let mut seen_left: Vec<(Vec<Value>, usize)> = Vec::new();
+                    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
+                    if !levels.is_empty() {
+                        let own: Vec<usize> = (0..t.index).collect();
+                        for r in &rows {
+                            let l = label(r, &own);
+                            let n = occurrence(&mut seen_left, &l);
+                            keys.push((l, n));
+                        }
+                    }
+                    let mut seen_right: Vec<(Vec<Value>, usize)> = Vec::new();
+                    for r in &more.rows {
+                        let fields: Vec<(String, Value)> =
+                            h2.iter().cloned().zip(r.iter().cloned()).collect();
+                        let n = rows.len() + 1;
+                        let row = place_named(&mut header, &mut rows, &fields, n)?;
+                        if levels.is_empty() {
+                            rows.push(row);
+                            continue;
+                        }
+                        let l = label(r, &levels);
+                        let n = occurrence(&mut seen_right, &l);
+                        match keys.iter().position(|(x, m)| *x == l && *m == n) {
+                            Some(i) => rows[i] = row,
+                            None => {
+                                keys.push((l, n));
+                                rows.push(row);
+                            }
+                        }
+                    }
+                } else {
+                    // the data columns where both are indexed (the
+                    // index aligns, it is not a column to repeat), the
+                    // whole header otherwise
+                    let both = t.index > 0 && more.index > 0;
+                    let (left, right): (&[String], &[String]) = if both {
+                        (&h1[t.index..], &h2[more.index..])
+                    } else {
+                        (h1, h2)
+                    };
+                    let shared: Vec<&String> = right.iter().filter(|c| left.contains(c)).collect();
+                    if shared.is_empty() || overwrite {
+                        return column_concat(t, &more, overwrite);
+                    }
+                    return Err(format!(
+                        "the headers share {} but are not the same: one header appends rows, disjoint headers append columns; '++!' appends the columns and takes the right side's under the shared name{}",
+                        shared
+                            .iter()
+                            .map(|c| format!("'{c}'"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        if shared.len() == 1 { "" } else { "s" }
+                    ));
                 }
             }
             (None, None) => {
@@ -5015,11 +5197,257 @@ fn table_concat(t: &crate::Table, right: Value) -> Result<Value, String> {
     }
     // a declared column casts the appended cells or refuses naming
     // it; a column the header gained is undeclared
-    Ok(Value::table(crate::Table::typed(
-        header,
-        rows,
-        t.declared.clone(),
-    )?))
+    Ok(Value::table(
+        crate::Table::typed(header, rows, t.declared.clone())?
+            .with_index(t.index)
+            .with_name(t.name.clone()),
+    ))
+}
+
+/// The n-th time a label is met on one side: the count kept per
+/// label, so a label standing on several rows pairs its n-th row
+/// with the other side's n-th.
+fn occurrence(seen: &mut Vec<(Vec<Value>, usize)>, l: &[Value]) -> usize {
+    match seen.iter_mut().find(|(x, _)| x == l) {
+        Some((_, n)) => {
+            *n += 1;
+            *n
+        }
+        None => {
+            seen.push((l.to_vec(), 1));
+            1
+        }
+    }
+}
+
+/// `t ++ u` with disjoint headers, or `t ++! u` with headers that
+/// overlap (ruling 2026-11-05): the right side's columns appended,
+/// the rows aligned by label where both tables are indexed
+/// (`labeled_concat`) and by position otherwise, on tables of one
+/// height; the left side's index and name kept.
+fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<Value, String> {
+    if t.index > 0 && u.index > 0 {
+        return labeled_concat(t, u, overwrite);
+    }
+    if t.rows.len() != u.rows.len() {
+        return Err(format!(
+            "the left table has {} row{}, the right {}; columns append by position on tables of one height (index both to align them by label)",
+            t.rows.len(),
+            if t.rows.len() == 1 { "" } else { "s" },
+            u.rows.len()
+        ));
+    }
+    let names =
+        |x: &crate::Table| -> Vec<String> { (0..x.width()).map(|j| x.column_name(j)).collect() };
+    let (tn, un) = (names(t), names(u));
+    let mut header: Vec<String> = tn.clone();
+    let mut declared: Vec<Option<crate::ColumnType>> =
+        (0..t.width()).map(|j| t.declaration(j)).collect();
+    let mut right_cols: Vec<(usize, usize)> = Vec::new(); // (column of u, column of the result)
+    for j in 0..u.width() {
+        match tn.iter().position(|n| *n == un[j]) {
+            Some(p) if overwrite => {
+                right_cols.push((j, p));
+                declared[p] = u.declaration(j);
+            }
+            Some(_) => {
+                return Err(format!(
+                    "both tables have a column '{}'; '++!' takes the right side's",
+                    un[j]
+                ));
+            }
+            None => {
+                header.push(un[j].clone());
+                declared.push(u.declaration(j));
+                right_cols.push((j, header.len() - 1));
+            }
+        }
+    }
+    let width = header.len();
+    let rows: Vec<Vec<Value>> = t
+        .rows
+        .iter()
+        .zip(&u.rows)
+        .map(|(l, r)| {
+            let mut row = l.clone();
+            row.resize(width, Value::Null);
+            for &(j, to) in &right_cols {
+                row[to] = r.get(j).cloned().unwrap_or(Value::Null);
+            }
+            row
+        })
+        .collect();
+    Ok(Value::table(
+        crate::Table::typed(Some(header), rows, declared)?
+            .with_index(t.index)
+            .with_name(t.name.clone()),
+    ))
+}
+
+/// The column append of two indexed tables, the rows aligned on the
+/// index after pandas `join` (ruling 2026-11-05): two one-level
+/// indexes align by label whatever their names, the left's name
+/// kept; a composite index takes a plain one on the level that
+/// carries the plain index's name, the plain side's row repeated
+/// over the other levels (refused naming both where no level carries
+/// it, and a plain label on several rows refused); two composite
+/// indexes align on the same levels in the same order, refused
+/// otherwise. The union of the labels in order first met, null where
+/// a side lacks one; a label standing on several rows of a side
+/// pairs its n-th row with the other side's n-th. A data column both
+/// sides have is refused as a duplicate field (`++!` takes the right
+/// side's).
+fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<Value, String> {
+    let names =
+        |x: &crate::Table| -> Vec<String> { (0..x.width()).map(|j| x.column_name(j)).collect() };
+    let (tn, un) = (names(t), names(u));
+    let (ti, ui) = (&tn[..t.index], &un[..u.index]);
+    let no_level = |levels: &[String], name: &str| {
+        format!(
+            "no level of the index ({}) carries the name '{}'; a plain index aligns on the level of its name",
+            levels.join("; "),
+            name
+        )
+    };
+    // the side whose index shapes the result, the key columns of
+    // each side, and whether the plain side's row is repeated over
+    // the composite side's other levels (broadcast) or paired n-th
+    // with n-th
+    let (shape_left, lk, rk, broadcast): (bool, Vec<usize>, Vec<usize>, bool) = match (
+        t.index, u.index,
+    ) {
+        (1, 1) => (true, vec![0], vec![0], false),
+        (_, 1) => match ti.iter().position(|n| *n == ui[0]) {
+            Some(j) => (true, vec![j], vec![0], true),
+            None => return Err(no_level(ti, &ui[0])),
+        },
+        (1, _) => match ui.iter().position(|n| *n == ti[0]) {
+            Some(j) => (false, vec![0], vec![j], true),
+            None => return Err(no_level(ui, &ti[0])),
+        },
+        (k, _) => {
+            if ti != ui {
+                return Err(format!(
+                    "the composite indexes differ, ({}) against ({}); they align on the same levels in the same order",
+                    ti.join("; "),
+                    ui.join("; ")
+                ));
+            }
+            (true, (0..k).collect(), (0..k).collect(), false)
+        }
+    };
+    let (shape, other, sk, ok) = if shape_left {
+        (t, u, &lk, &rk)
+    } else {
+        (u, t, &rk, &lk)
+    };
+    let k = shape.index;
+    // the header: the shape side's index, the left's data columns,
+    // the right's appended where new (under `++!` laid onto the
+    // left's column of one name)
+    let mut header: Vec<String> = (0..k).map(|j| shape.column_name(j)).collect();
+    let mut declared: Vec<Option<crate::ColumnType>> =
+        (0..k).map(|j| shape.declaration(j)).collect();
+    let mut left_cols: Vec<(usize, usize)> = Vec::new(); // (column of t, column of the result)
+    for j in t.index..t.width() {
+        header.push(tn[j].clone());
+        declared.push(t.declaration(j));
+        left_cols.push((j, header.len() - 1));
+    }
+    let mut right_cols: Vec<(usize, usize)> = Vec::new();
+    for j in u.index..u.width() {
+        match left_cols.iter().find(|(lj, _)| tn[*lj] == un[j]) {
+            Some(&(_, to)) if overwrite => {
+                right_cols.push((j, to));
+                declared[to] = u.declaration(j);
+            }
+            Some(_) => {
+                return Err(format!(
+                    "both tables have a column '{}'; '++!' takes the right side's",
+                    un[j]
+                ));
+            }
+            None => {
+                header.push(un[j].clone());
+                declared.push(u.declaration(j));
+                right_cols.push((j, header.len() - 1));
+            }
+        }
+    }
+    let width = header.len();
+    let (shape_cols, other_cols) = if shape_left {
+        (&left_cols, &right_cols)
+    } else {
+        (&right_cols, &left_cols)
+    };
+    let key = |r: &Vec<Value>, cols: &[usize]| -> Vec<Value> {
+        cols.iter()
+            .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
+            .collect()
+    };
+    let fill = |row: &mut Vec<Value>, r: &Vec<Value>, cols: &[(usize, usize)]| {
+        for &(j, to) in cols {
+            row[to] = r.get(j).cloned().unwrap_or(Value::Null);
+        }
+    };
+    // the shape side's rows in order, keyed
+    let mut seen: Vec<(Vec<Value>, usize)> = Vec::new();
+    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    for r in &shape.rows {
+        let l = key(r, sk);
+        let n = occurrence(&mut seen, &l);
+        let mut row = vec![Value::Null; width];
+        for j in 0..k {
+            row[j] = r.get(j).cloned().unwrap_or(Value::Null);
+        }
+        fill(&mut row, r, shape_cols);
+        keys.push((l, n));
+        rows.push(row);
+    }
+    // the other side's rows: onto the shape row(s) of the same key,
+    // or appended with the key in its level(s) and null elsewhere
+    let mut seen_other: Vec<(Vec<Value>, usize)> = Vec::new();
+    for r in &other.rows {
+        let l = key(r, ok);
+        let n = occurrence(&mut seen_other, &l);
+        if broadcast && n > 1 {
+            return Err(format!(
+                "the label {} stands on several rows of the plain index; one row per label aligns with a composite index (aggregate them first)",
+                crate::value::held_text(&l[0])
+            ));
+        }
+        let targets: Vec<usize> = if broadcast {
+            keys.iter()
+                .enumerate()
+                .filter(|(_, (x, _))| *x == l)
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            keys.iter()
+                .position(|(x, m)| *x == l && *m == n)
+                .into_iter()
+                .collect()
+        };
+        if targets.is_empty() {
+            let mut row = vec![Value::Null; width];
+            for (v, &lvl) in l.iter().zip(sk.iter()) {
+                row[lvl] = v.clone();
+            }
+            fill(&mut row, r, other_cols);
+            keys.push((l, n));
+            rows.push(row);
+        } else {
+            for i in targets {
+                fill(&mut rows[i], r, other_cols);
+            }
+        }
+    }
+    Ok(Value::table(
+        crate::Table::typed(Some(header), rows, declared)?
+            .with_index(k)
+            .with_name(t.name.clone()),
+    ))
 }
 
 /// One row of named fields laid under a table's header by name, a
@@ -6817,8 +7245,33 @@ pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Op
             .next()
             .unwrap_or(Value::Null)
     };
+    let switch = |long: &str, short: &str| {
+        call.args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, value: None } if name == long || name == short))
+    };
     match topic {
         Value::Record(fields) if name == "count" => Some(Value::Int(fields.len() as i64)),
+        // `count(-v)` / `count(-n)` over a table: the record of the
+        // per-column counts of the values (of the nulls), the index
+        // left out, as describe's count row has them (draft.213)
+        Value::Table(t)
+            if name == "count" && (switch("--values", "-v") || switch("--nulls", "-n")) =>
+        {
+            let nulls = switch("--nulls", "-n");
+            Some(Value::record(
+                (t.index..t.width())
+                    .map(|j| {
+                        let n = t
+                            .rows
+                            .iter()
+                            .filter(|r| matches!(r.get(j), Some(Value::Null) | None) == nulls)
+                            .count();
+                        (t.column_name(j), Value::Int(n as i64))
+                    })
+                    .collect(),
+            ))
+        }
         Value::Table(t) if name == "count" => Some(Value::Int(t.rows.len() as i64)),
         Value::Record(fields) if NUMERIC.contains(&name) => {
             Some(one(fields.iter().map(|(_, v)| v.clone()).collect()))

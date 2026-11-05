@@ -2835,7 +2835,9 @@ fn json_and_jsonl_over_the_stream() {
 
 #[test]
 fn record_push_in_one_step() {
-    // Ruling #49: `.%(...)` builds and pushes; `.name%(...)` names it.
+    // Ruling #49: `.%(...)` builds and pushes one anonymous regula;
+    // `.name%(...)` names it (ruling 2026-11-05: the spec stands,
+    // `| %(…) | .%` files a constructor's fields).
     let t = MockTree::sample();
     let ones = vals("/a/* | .r%(:name; n = 1) | $.r:n", &t);
     assert!(
@@ -2853,6 +2855,11 @@ fn record_push_in_one_step() {
     assert!(
         !anon.is_empty() && anon.iter().all(|v| matches!(v, Value::Int(2))),
         "{anon:?}"
+    );
+    let unnamed = vals("/a/* | .%(:name; n = 2) | $.n", &t);
+    assert!(
+        !unnamed.is_empty() && unnamed.iter().all(|v| matches!(v, Value::Null)),
+        "{unnamed:?}"
     );
     // the enriched form carries the register's named regulae
     let rich = vals("/a/* | .k(:name) | .%%(n = 3) | $.:k", &t);
@@ -3992,7 +3999,17 @@ fn the_attaching_fields_push_attaches_every_field() {
         vec![Value::Str("w.rs".into())]
     );
     assert!(parse(&lex("/a | .:%{2}").unwrap()).is_ok());
-    assert!(parse(&lex("/a | .:%(a = 1)").unwrap()).is_err());
+    // `.:%(body)` is no push (ruling 2026-11-05: the spec stands)
+    let refused = match lex("/a | .:%(a = 1)") {
+        Ok(toks) => parse(&toks).is_err(),
+        Err(_) => true,
+    };
+    assert!(refused, "the attaching fields push is bare");
+    let refused = match lex("/a | .:%%(a = 1)") {
+        Ok(toks) => parse(&toks).is_err(),
+        Err(_) => true,
+    };
+    assert!(refused, "the enriched view '%%(…)' is a stage, not a push");
 }
 
 #[test]

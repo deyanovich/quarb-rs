@@ -569,7 +569,7 @@ fn run_file(
     let base_dir = file.parent();
     let mut failed = false;
     for cell in cells {
-        let q = cell.join("\n");
+        let mut q = cell.join("\n");
         let n = session.borrow().line_no();
         println!("&{n}  {}", cell[0]);
         for l in &cell[1..] {
@@ -597,13 +597,29 @@ fn run_file(
         // A capture reference, as the session reads it (spec: .quai;
         // `:help`): `&N#` replays line N's frozen footprint and takes
         // the next number, `&N!` re-runs line N against a freshly read
-        // source; the engine alone would refuse both spellings.
-        // only a cell that is a standalone `&N#` or `&N!` is a history
-        // reference; any other `#` (a table literal, `#.`, a string)
-        // is the query's own
-        let reference = numeric_ref_with(q.trim(), '#')
-            .map(Prepared::Frozen)
-            .or_else(|| numeric_ref_with(q.trim(), '!').map(|n| Prepared::Live(format!("&{n}"))));
+        // source; the engine alone would refuse both spellings. Either
+        // may head a pipeline (`&4# | ,df`, `&4! | count`; finding
+        // 2026-11-05), as the bare `&4 | …` does through the macro
+        // table. Only a cell that starts so is a history reference;
+        // any other `#` (a table literal, `#.`, a string) is the
+        // query's own.
+        let reference = match history_head(q.trim()) {
+            Some((n, '#', "")) => Some(Prepared::Frozen(n)),
+            Some((n, '#', tail)) => match frozen_head_query(&session.borrow(), n, tail) {
+                Ok(headed) => Some(Prepared::Eval(headed)),
+                Err(e) => {
+                    failed = true;
+                    println!("    error: {e}");
+                    session.borrow_mut().commit(&q, Vec::new());
+                    println!();
+                    continue;
+                }
+            },
+            Some((n, '!', tail)) => Some(Prepared::Live(
+                format!("&{n} {tail}").trim_end().to_string(),
+            )),
+            _ => None,
+        };
         match reference {
             Some(Prepared::Frozen(n)) => {
                 let cells = session.borrow().frozen(n).cloned();
@@ -648,6 +664,7 @@ fn run_file(
                 println!();
                 continue;
             }
+            Some(Prepared::Eval(headed)) => q = headed,
             _ => {}
         }
         // a session push and a `session(…)` that sets answer nothing:
@@ -878,6 +895,13 @@ fn repl(
                         "{}: &{n}# has no captured result (line {n} hasn't run)",
                         error_prefix()
                     ),
+                }
+            }
+            Ok(Prepared::FrozenHead(n, tail)) => {
+                let headed = frozen_head_query(&session.borrow(), n, &tail);
+                match headed {
+                    Ok(q) => run_and_commit(&mut session.borrow_mut(), remount, &q, false),
+                    Err(e) => eprintln!("{}: {e}", error_prefix()),
                 }
             }
             Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, true),
@@ -1150,6 +1174,8 @@ fn print_diagnostics(session: &Session, indent: &str) {
 enum Prepared {
     /// A standalone `&N#` — replay line N's frozen footprint.
     Frozen(usize),
+    /// `&N# | …` — line N's frozen footprint heading a pipeline.
+    FrozenHead(usize, String),
     /// A `&N!` live reading — re-run line N against a freshly
     /// re-materialized source.
     Live(String),
@@ -1158,28 +1184,63 @@ enum Prepared {
 }
 
 fn prepare(line: &str) -> Result<Prepared> {
-    if let Some(n) = numeric_ref_with(line, '#') {
-        return Ok(Prepared::Frozen(n));
-    }
-    if let Some(n) = numeric_ref_with(line, '!') {
-        return Ok(Prepared::Live(format!("&{n}")));
-    }
-    if line.contains('#') {
-        anyhow::bail!(
-            "'#' is the frozen-history suffix, valid only as a standalone '&N#' in this build; \
-             continuation off a frozen closure ('&N# | …') rides the daemon"
-        );
-    }
-    Ok(Prepared::Eval(line.to_string()))
+    // `&N#` / `&N!` alone, or heading a pipeline (finding
+    // 2026-11-05); any other `#` is the query's own (`#.`, `#(…)`)
+    Ok(match history_head(line) {
+        Some((n, '#', "")) => Prepared::Frozen(n),
+        Some((n, '#', tail)) => Prepared::FrozenHead(n, tail.to_string()),
+        Some((n, '!', tail)) => Prepared::Live(format!("&{n} {tail}").trim_end().to_string()),
+        _ => Prepared::Eval(line.to_string()),
+    })
 }
 
-/// Match a bare capture ref `&<digits><suffix>` (the whole trimmed
-/// line), returning N.
-fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
-    line.strip_suffix(suffix)?
-        .strip_prefix('&')?
-        .parse::<usize>()
-        .ok()
+/// `&N#` / `&N!` heading a line, alone or before a pipe tail
+/// (`&4# | ,df`): N, the suffix, and the tail from its pipe (empty
+/// when the reference stands alone).
+fn history_head(line: &str) -> Option<(usize, char, &str)> {
+    let rest = line.trim().strip_prefix('&')?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let n: usize = rest[..digits].parse().ok()?;
+    let rest = &rest[digits..];
+    let suffix = rest.chars().next().filter(|c| matches!(c, '#' | '!'))?;
+    let tail = rest[1..].trim_start();
+    if !(tail.is_empty()
+        || tail.starts_with('|')
+        || tail.starts_with("@|")
+        || tail.starts_with("*__"))
+    {
+        return None;
+    }
+    Some((n, suffix, tail))
+}
+
+/// `&N# | …` — line N's frozen footprint as the head of a pipeline:
+/// the captured cells as literals, one cell the value itself,
+/// several a list spread into one thread each (a node cell its
+/// locator as text), then the tail.
+fn frozen_head_query(
+    session: &Session,
+    n: usize,
+    tail: &str,
+) -> std::result::Result<String, String> {
+    let cells = session
+        .frozen(n)
+        .ok_or_else(|| format!("&{n}# has no captured result (line {n} hasn't run)"))?;
+    let lits: Vec<String> = cells
+        .iter()
+        .map(|c| match c {
+            quarb_session::Cell::Value(v) => v.to_quarb(),
+            quarb_session::Cell::Node(s) => quarb::Value::Str(s.clone()).to_quarb(),
+        })
+        .collect();
+    let head = match lits.as_slice() {
+        [one] => one.clone(),
+        many => format!("@({}) | ...", many.join("; ")),
+    };
+    Ok(format!("= {head} {tail}"))
 }
 
 /// Handle a `:` command; returns true to exit the loop.

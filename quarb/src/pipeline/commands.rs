@@ -619,12 +619,27 @@ pub(crate) fn apply_command_in<H: Host>(
         // A keyed aggregate on the plain pipe works per capsa on the
         // capsa's *members* (a group's rows): reorder or filter them,
         // rebuild the list topic from the survivors. A memberless
-        // capsa passes through unchanged.
-        Command::Func(call) if stdlib::known_keyed(&call.name) => caps
-            .into_iter()
+        // capsa ranks the rows of its table topic or the items of its
+        // list topic, the table (the list) answered, the index kept
+        // (ruling 2026-11-05: `| mean(--by=:Sex) | sort_by(:::index)`);
+        // any other memberless capsa is refused with the pointer.
+        Command::Func(call) if stdlib::known_keyed(&call.name) => {
+            if caps.iter().any(|c| {
+                c.members.is_empty() && !matches!(c.topic, Some(Value::Table(_) | Value::List(_)))
+            }) {
+                return refuse_all::<H>(
+                    caps,
+                    &format!(
+                        "'{n}' ranks a context: write '@| {n}(…)'; on the plain pipe it ranks the \
+                         rows of a table or the items of a list, or works per window after '@| window'",
+                        n = call.name
+                    ),
+                );
+            }
+            caps.into_iter()
             .map(|mut c| {
                 if c.members.is_empty() {
-                    return c;
+                    return keyed_over_value(call, c, host, trace, outer, peers);
                 }
                 let members = keyed_agg(
                     call,
@@ -639,9 +654,7 @@ pub(crate) fn apply_command_in<H: Host>(
                     members
                         .iter()
                         .map(|m| {
-                            m.topic
-                                .clone()
-                                .unwrap_or_else(|| host.node_scalar(&m.ext))
+                            crate::pipeline::effective_topic(m, host)
                         })
                         .collect(),
                 ));
@@ -649,7 +662,8 @@ pub(crate) fn apply_command_in<H: Host>(
                 c.members = members;
                 c
             })
-            .collect(),
+            .collect()
+        }
         // An association aggregate on the plain pipe reads its two
         // expressions off each capsa's *members* (a list topic of
         // records) — `| :rows | corr(:x; :y)`. A memberless capsa has
@@ -1491,6 +1505,42 @@ pub(crate) fn agg_as_func_command<H: Host>(
     let call = if of.is_some() { &stripped } else { call };
     caps.into_iter()
         .map(|mut c| {
+            // `| mean(--by=:Sex)` — the grouped reduction (ruling
+            // 2026-11-05): the table's rows grouped by the key
+            // column(s), one row per distinct key in order of first
+            // appearance; every other column reduced as the reducer
+            // reduces it alone, named `col_reducer`; `--of=expr` the
+            // one expression per group instead. The answer is a
+            // table indexed by the keys; an index the input had is
+            // dropped unless `--by` names it.
+            if let Some(keys) = by_option(call) {
+                let topic = c.topic.take();
+                let scope = c.scope(None, peers, outer);
+                let grouped = match topic {
+                    Some(Value::Table(t)) => grouped_reduction(call, of, &t, &keys, host, &c.ext, trace, scope),
+                    Some(topic @ Value::List(_)) => match stdlib::table_reading(topic) {
+                        Ok(Value::Table(t)) => grouped_reduction(call, of, &t, &keys, host, &c.ext, trace, scope),
+                        _ => Err("--by groups the rows of a table; the list is no table (records of one shape make one)".into()),
+                    },
+                    other => Err(format!(
+                        "--by groups the rows of a table, not {}",
+                        match &other {
+                            Some(v) => stdlib::kind_of(v),
+                            None => "a node".to_string(),
+                        }
+                    )),
+                };
+                c.topic = Some(match grouped {
+                    Ok(v) => v,
+                    Err(why) => {
+                        record_refusal(format!("{}: {why}", call.name));
+                        Value::Null
+                    }
+                });
+                c.prov = c.prov.flat();
+                c.members = Vec::new();
+                return c;
+            }
             // The reducers over structures (draft 164): a record's
             // values, a table's columns into a record; `count` of
             // a record's fields and a table's rows.
@@ -1596,7 +1646,7 @@ pub(crate) fn agg_as_func_command<H: Host>(
                     Some(l @ Value::List(_)) if call.name == "type" => vec![l],
                     Some(l @ Value::List(_)) => l.into_items().unwrap_or_default(),
                     Some(other) => vec![other],
-                    None => vec![host.node_scalar(&c.ext)],
+                    None => vec![crate::pipeline::effective_topic(&c, host)],
                 },
             };
             let mut out = stdlib::apply(call, items, &|e| host.scale_of(e));
@@ -2750,7 +2800,10 @@ pub(crate) fn record_push_command<H: Host>(
                 split_fields(built)
             };
             // Filed, the topic left as it was (spec: the record
-            // push, draft 154).
+            // push, draft 154): `.%(…)` one anonymous regula, beside
+            // `.name%(…)` under the name and `.%%(…)` the enriched
+            // view (ruling 2026-11-05: the spec stands; `| %(…) | .%`
+            // files a constructor's fields).
             c.register.push(Reg {
                 prov,
                 site: host.origin_at(&c.ext),
@@ -2878,7 +2931,7 @@ pub(crate) fn order_command<H: Host>(
             c
         })
         .collect();
-    let topic_of = |c: &Thread<H::Ext>| c.topic.clone().unwrap_or_else(|| host.node_scalar(&c.ext));
+    let topic_of = |c: &Thread<H::Ext>| crate::pipeline::effective_topic(c, host);
     match call.name.as_str() {
         // With a locale argument, topics sort by their text
         // under that locale's collation (colligo; codepoint
@@ -3191,6 +3244,317 @@ fn filter_threads<H: Host>(
 /// read on each capsa in turn — its own topic, position and memory
 /// in reach — as the value the reduction takes; a null result is a
 /// missing value, as the reduction treats one.
+/// A keyed thread command over a table or list VALUE (ruling
+/// 2026-11-05): the rows (the items) stand as threads, each its
+/// record (its item) as the topic, ranked as the command ranks
+/// threads; the survivors rebuild the table with its index, name
+/// and declarations (the list). `:::index` as a key is the row's
+/// label — the index column, the tuple of them under several.
+fn keyed_over_value<H: Host>(
+    call: &FnCall,
+    mut c: Thread<H::Ext>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Thread<H::Ext> {
+    let topic = c.topic.take();
+    let make = |v: Value| Thread::<H::Ext> {
+        window: None,
+        prov: c.prov.clone(),
+        register: c.register.clone(),
+        topic: Some(v),
+        members: Vec::new(),
+        captures: c.captures.clone(),
+        named: c.named.clone(),
+        ext: c.ext.clone(),
+    };
+    let answer = match topic {
+        Some(Value::Table(t)) => {
+            let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+            let call = index_key_as_columns(call, &t, &names);
+            let rows: Vec<Thread<H::Ext>> = t
+                .rows
+                .iter()
+                .map(|r| {
+                    make(Value::record(
+                        names.iter().cloned().zip(r.iter().cloned()).collect(),
+                    ))
+                })
+                .collect();
+            let kept = keyed_agg(&call, rows, host, trace, outer, peers, false);
+            let rows: Vec<Vec<Value>> = kept
+                .iter()
+                .map(|m| match &m.topic {
+                    Some(Value::Record(f)) => names
+                        .iter()
+                        .map(|n| f.get(n).cloned().unwrap_or(Value::Null))
+                        .collect(),
+                    _ => vec![Value::Null; names.len()],
+                })
+                .collect();
+            match t.rebuild(rows) {
+                Ok(nt) => Value::table(nt),
+                Err(why) => {
+                    record_refusal(format!("{}: {why}", call.name));
+                    Value::Null
+                }
+            }
+        }
+        Some(Value::List(items)) => {
+            let threads: Vec<Thread<H::Ext>> = items.iter().cloned().map(make).collect();
+            let kept = keyed_agg(call, threads, host, trace, outer, peers, false);
+            Value::list(
+                kept.iter()
+                    .map(|m| crate::pipeline::effective_topic(m, host))
+                    .collect(),
+            )
+        }
+        other => other.unwrap_or(Value::Null),
+    };
+    c.topic = Some(answer);
+    c.prov = c.prov.flat();
+    c
+}
+
+/// The call with `:::index` among its keys spelled as the index
+/// column(s) a row record carries: one column its field, several a
+/// list of them.
+fn index_key_as_columns(call: &FnCall, t: &crate::Table, names: &[String]) -> FnCall {
+    use crate::syntax::ast::{Anchor, Projection};
+    if t.index == 0 {
+        return call.clone();
+    }
+    let label = || -> Operand {
+        let fields: Vec<Operand> = names[..t.index]
+            .iter()
+            .map(|n| Operand::Field {
+                base: Box::new(Operand::Topic),
+                name: n.clone(),
+            })
+            .collect();
+        if fields.len() == 1 {
+            fields.into_iter().next().expect("one")
+        } else {
+            Operand::List(fields)
+        }
+    };
+    let is_index = |o: &Operand| {
+        matches!(
+            o,
+            Operand::Rel { steps, projection: Some(Projection::AdapterMeta(k)), anchor: Anchor::Current }
+                if steps.is_empty() && k == "index"
+        )
+    };
+    let mut call = call.clone();
+    for a in call.args.iter_mut() {
+        if let Arg::Expr(e) = a {
+            match e {
+                Operand::Desc(inner) if is_index(inner) => *inner = Box::new(label()),
+                o if is_index(o) => *o = label(),
+                _ => {}
+            }
+        }
+    }
+    call
+}
+
+/// The key columns of a grouped reduction, from `--by=:col` /
+/// `--by=(:a; :b)` (ruling 2026-11-05); `None` without the option.
+fn by_option(call: &FnCall) -> Option<Vec<String>> {
+    fn key_of(o: &Operand) -> Vec<String> {
+        match o {
+            Operand::Lit(v) => stdlib::index_levels(v)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
+            // `:Sex` as the option's expression: the column's name
+            Operand::Field { base, name } if matches!(**base, Operand::Topic) => vec![name.clone()],
+            Operand::Typed { inner, .. } => key_of(inner),
+            // `(:Sex; :Pclass)` — the tuple of keys
+            Operand::List(items) => items.iter().flat_map(key_of).collect(),
+            other => vec![crate::syntax::unparse::operand(other)],
+        }
+    }
+    call.args.iter().find_map(|a| match a {
+        Arg::Opt { name, value } if name == "--by" => Some(match value {
+            Some(o) => key_of(o),
+            None => Vec::new(),
+        }),
+        _ => None,
+    })
+}
+
+/// `--by`: the rows grouped by the key columns, each group reduced
+/// column by column (`Age_mean`, `Fare_count`), or by the `--of`
+/// expression read on the group's table (`Age_min` for a bare
+/// column projector, else the reducer's name); the answer indexed
+/// by the keys, composite for several.
+#[allow(clippy::too_many_arguments)]
+fn grouped_reduction<H: Host>(
+    call: &FnCall,
+    of: Option<&Operand>,
+    t: &crate::Table,
+    keys: &[String],
+    host: &H,
+    ext: &H::Ext,
+    trace: &H::Trace,
+    scope: Scope<'_, H::Ext>,
+) -> Result<Value, String> {
+    if keys.is_empty() {
+        return Err("--by names the key column: --by=:col, --by=(:a; :b)".into());
+    }
+    let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+    let mut key_cols: Vec<usize> = Vec::with_capacity(keys.len());
+    for k in keys {
+        match names.iter().position(|n| n == k) {
+            Some(j) => key_cols.push(j),
+            None => {
+                return Err(format!(
+                    "--by names column '{k}', and the table has no such column (its columns: {})",
+                    names.join(", ")
+                ));
+            }
+        }
+    }
+    // the reduced columns: every data column but the keys; an index
+    // the input had is dropped unless `--by` names it
+    let data: Vec<usize> = (t.index..t.width())
+        .filter(|j| !key_cols.contains(j))
+        .collect();
+    let reducer = {
+        let canonical = crate::syntax::registry::canonical(&call.name).to_string();
+        // `percentile(25)` → `percentile25`
+        match call.args.iter().find(|a| matches!(a, Arg::Lit(_))) {
+            Some(Arg::Lit(v)) if canonical == "percentile" => {
+                format!("{canonical}{}", v.display_form())
+            }
+            _ => canonical,
+        }
+    };
+    let stripped = {
+        let mut c = call.without_of();
+        c.args
+            .retain(|a| !matches!(a, Arg::Opt { name, .. } if name == "--by"));
+        c
+    };
+    // the groups, in order of first appearance
+    let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+    for (i, r) in t.rows.iter().enumerate() {
+        let key: Vec<Value> = key_cols
+            .iter()
+            .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
+            .collect();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, rows)) => rows.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    let mut header: Vec<String> = key_cols.iter().map(|&j| names[j].clone()).collect();
+    let mut declared: Vec<Option<crate::ColumnType>> =
+        key_cols.iter().map(|&j| t.declaration(j)).collect();
+    let one = |cells: Vec<Value>| -> Value {
+        stdlib::apply(&stripped, cells, &|e| host.scale_of(e))
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null)
+    };
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(groups.len());
+    let switch = |long: &str, short: &str| {
+        call.args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, value: None } if name == long || name == short))
+    };
+    match of {
+        // `count(--by=:k)` counts the group's rows, nulls included,
+        // as `count` over a table counts rows: the one column
+        // `count`; `--values` / `--nulls` count per column, named
+        // `col_count` / `col_nulls` (draft.213)
+        None if reducer == "count" && !switch("--values", "-v") && !switch("--nulls", "-n") => {
+            header.push("count".to_string());
+            declared.push(None);
+            for (key, members) in &groups {
+                let mut row = key.clone();
+                row.push(Value::Int(members.len() as i64));
+                rows.push(row);
+            }
+        }
+        None => {
+            let suffix = if reducer == "count" && switch("--nulls", "-n") {
+                "nulls"
+            } else {
+                reducer.as_str()
+            };
+            for &j in &data {
+                header.push(format!("{}_{suffix}", names[j]));
+                declared.push(None);
+            }
+            for (key, members) in &groups {
+                let mut row = key.clone();
+                for &j in &data {
+                    let cells: Vec<Value> = members
+                        .iter()
+                        .map(|&i| t.rows[i].get(j).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    row.push(one(cells));
+                }
+                rows.push(row);
+            }
+        }
+        Some(expr) => {
+            let column = match expr {
+                Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+                    Some(name.clone())
+                }
+                Operand::Lit(Value::Projection { key, .. }) => Some(key.clone()),
+                _ => None,
+            };
+            header.push(match &column {
+                Some(c) => format!("{c}_{reducer}"),
+                None => reducer.clone(),
+            });
+            declared.push(None);
+            for (key, members) in &groups {
+                // the group's table, the keys left out, the expression
+                // read on it as `--of` reads it on the whole
+                let group_rows: Vec<Vec<Value>> = members
+                    .iter()
+                    .map(|&i| {
+                        data.iter()
+                            .map(|&j| t.rows[i].get(j).cloned().unwrap_or(Value::Null))
+                            .collect()
+                    })
+                    .collect();
+                let group = Value::table(crate::Table::new(
+                    Some(data.iter().map(|&j| names[j].clone()).collect()),
+                    group_rows,
+                ));
+                let value = group_value(
+                    host,
+                    ext,
+                    expr,
+                    trace,
+                    Scope {
+                        topic: Some(&group),
+                        prov: None,
+                        members: &[],
+                        ..scope
+                    },
+                );
+                let reduced = match value {
+                    Value::List(items) => one(items.to_vec()),
+                    other => one(vec![other]),
+                };
+                let mut row = key.clone();
+                row.push(reduced);
+                rows.push(row);
+            }
+        }
+    }
+    let n = key_cols.len();
+    crate::Table::typed(Some(header), rows, declared).map(|t| Value::table(t.with_index(n)))
+}
+
 fn of_values<H: Host>(
     expr: &Operand,
     caps: Vec<Thread<H::Ext>>,
@@ -3287,14 +3651,16 @@ pub(crate) fn agg_command<H: Host>(
                     })
                     .collect(),
             ),
-            None => host.node_scalar(&c.ext),
+            // a thread that never projected reduces as `$_` reads
+            // it: null (ruling 2026-11-05: `@_` is the list of the
+            // `$_`, and a reduction reads the same list)
+            None => crate::pipeline::effective_topic(c, host),
         })
         .collect();
-    // The combinations family combines values; a node
-    // stands in a reduction by its name. Nodes that share one
-    // name (a table's rows, a list's same-named fields) would
-    // combine into a silent nothing, so the command says what
-    // to write instead.
+    // The combinations family combines values, and bare nodes
+    // have none (a node is not its name), so they would combine
+    // into a silent nothing; the command says what to write
+    // instead.
     if matches!(call.name.as_str(), "combinations" | "pairs" | "triples")
         && caps.len() > 1
         && caps.iter().all(|c| c.topic.is_none())
@@ -3308,7 +3674,7 @@ pub(crate) fn agg_command<H: Host>(
     {
         record_refusal(format!(
             "'{0}' combines values, and these nodes have none to tell \
-                 them apart (a node stands by its name): project a value \
+                 them apart (a bare node reads as null): project a value \
                  first — '| ::title @| {0}'",
             call.name
         ));
@@ -3522,7 +3888,10 @@ pub(crate) fn seed_capsa<H: Host>(caps: &[Thread<H::Ext>], host: &H) -> Thread<H
         .iter()
         .map(|c| match &c.topic {
             Some(t) => (t.clone(), c.prov.clone()),
-            None => (host.node_scalar(&c.ext), host.prov_at(&c.ext)),
+            None => (
+                crate::pipeline::effective_topic(c, host),
+                host.prov_at(&c.ext),
+            ),
         })
         .unzip();
     Thread::<H::Ext> {

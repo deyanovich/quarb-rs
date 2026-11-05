@@ -1769,6 +1769,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 && glued
                 // `#(:A)` after the projection operator holds columns
                 && !(i > 0 && chars[i - 1] == '#')
+                // a trait sits on a hop name: glued to an opener
+                // (`((:year div 2) | …)`, `[(:n > 1)]`) or a separator
+                // the paren is a value group on the topic's field
+                && !(i > 0 && matches!(chars[i - 1], '(' | '[' | '{' | '=' | ';' | ',' | '|'))
                 && !matches!(at(i + 2), Some(':' | '-'))
                 && trait_body_ahead(&chars, i + 2)
                 && !(after_call_head(&tokens, glued)
@@ -3453,6 +3457,20 @@ mod glued_operator_tests {
         for q in ["*__(.g; .h) count", "@|(.g; .h) count", "*__{.g; .h} count"] {
             assert_eq!(lex(q).unwrap(), lex("@|{.g; .h} count").unwrap(), "{q}");
         }
+        // a field group glued to an opener is no trait: `((:year div
+        // 2) | round(6))` in a record field (finding 2026-11-04)
+        assert!(
+            !lex("%(r = ((:year div 2) | round(6)))")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::Lt { .. }))
+        );
+        assert!(
+            lex("/a(:b)")
+                .unwrap()
+                .iter()
+                .any(|t| matches!(t, Token::Lt { .. }))
+        );
         // the aggregate push's sigil and selector, rounded
         for (rounded, sigil) in [
             ("| .n*(count)", "| .n@(count)"),

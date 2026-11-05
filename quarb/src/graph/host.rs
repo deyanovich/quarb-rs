@@ -277,9 +277,7 @@ impl<A: AstAdapter> Host for A {
                         Some(_) => note_all(&p.prov.origins),
                         None => note(p.ext.node.into()),
                     }
-                    p.topic
-                        .clone()
-                        .unwrap_or_else(|| node_scalar(self, p.ext.node))
+                    crate::pipeline::effective_topic(p, self)
                 }
                 Some(proj) => {
                     note(p.ext.node.into());

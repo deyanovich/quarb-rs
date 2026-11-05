@@ -93,3 +93,51 @@ fn the_runner_reads_a_hash_inside_a_cell_as_the_query_s_own() {
     assert!(out.contains("&2  = 5"), "{out}");
     assert!(out.contains("&3  &1#"), "{out}");
 }
+
+/// A history reference heads a pipeline (finding 2026-11-05): `&N#`
+/// hands the captured result to the tail, `&N!` the live re-run, as
+/// the bare `&N | …` re-runs the line through the macro table; a
+/// session recall in parentheses opens a query.
+#[test]
+fn the_runner_reads_a_history_reference_heading_a_pipeline() {
+    let dir = scratch();
+    std::fs::write(
+        dir.join("cells.quai"),
+        "    /books/*/price::\n\n    &1# | ($_ * 2)\n\n    &1! @| sum\n\n    &1 @| count\n\n    \
+         /books/* @| # | ,t\n\n    ($,t | count)\n\n    &1# @| sum\n",
+    )
+    .unwrap();
+    let (out, err, ok) = quai(&dir, &["--run", "cells.quai"], "");
+    assert!(ok, "{out}\n{err}");
+    assert!(!out.contains("error:"), "{out}");
+    assert!(
+        out.contains("&2  &1# | ($_ * 2)\n    50\n    36\n"),
+        "{out}"
+    );
+    assert!(out.contains("&3  &1! @| sum\n    43\n"), "{out}");
+    assert!(out.contains("&4  &1 @| count\n    2\n"), "{out}");
+    assert!(out.contains("&6  ($,t | count)\n    2\n"), "{out}");
+    assert!(out.contains("&7  &1# @| sum\n    43\n"), "{out}");
+}
+
+/// A value-headed cell — a constructor, a literal — is recalled like
+/// any other: `&N | ,df` files the cell's value, `&N#` and `&N!`
+/// stand too (finding 2026-11-05: a `@(…)` head read as the
+/// aggregation pipe, so the line never became a macro).
+#[test]
+fn a_constructor_headed_cell_is_recalled() {
+    let dir = scratch();
+    std::fs::write(
+        dir.join("cells.quai"),
+        "    @(%(Name = \"a\"; Age = 1); %(Name = \"b\"; Age = 2)) | #\n\n    &1 | ,df\n\n    \
+         ($,df | count)\n\n    &1# | count\n\n    &1! | count\n\n    @%(@(a); %(1); %(2))\n\n    &6 | count\n",
+    )
+    .unwrap();
+    let (out, err, ok) = quai(&dir, &["--run", "cells.quai"], "");
+    assert!(ok, "{out}\n{err}");
+    assert!(!out.contains("error:"), "{out}");
+    assert!(out.contains("&3  ($,df | count)\n    2\n"), "{out}");
+    assert!(out.contains("&4  &1# | count\n    2\n"), "{out}");
+    assert!(out.contains("&5  &1! | count\n    2\n"), "{out}");
+    assert!(out.contains("&7  &6 | count\n    2\n"), "{out}");
+}

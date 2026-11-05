@@ -621,6 +621,10 @@ pub const SPECS: &[FnSpec] = &[
         "unstack",
         "the index's innermost level moved into the header",
     ),
+    scalar(
+        "autoindex",
+        "the implicit index made explicit: a column `index` of consecutive labels, one per row, prepended and named the index; --start=x where to begin (a number, a quantity, an instant), --step=d the step (1 for a number; required for a quantity of the start's dimension, a duration for an instant)",
+    ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),

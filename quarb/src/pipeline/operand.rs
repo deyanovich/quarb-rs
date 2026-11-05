@@ -152,10 +152,11 @@ pub(crate) fn eval_operand<H: Host>(
         // answers its own core field first (`:unq`, the canonical
         // text `--expand` prints).
         // `:name` with a node reference as the topic reads the node the
-        // reference names (`map(:name)` over a route)
+        // reference names (`map(:name)` over a route); an unknown
+        // field is refused there as on a path (finding 2026-11-05:
+        // `$$_:%(:Age)` answered null where `/row:%(:Age)` refused)
         Operand::Field { base, name }
             if matches!(**base, Operand::Topic)
-                && crate::graph::navigate::CORE_FIELDS.contains(&name.as_str())
                 && scope.topic.is_some_and(|t| matches!(t, Value::Node(_))) =>
         {
             let topic = scope.topic.cloned().unwrap_or(Value::Null);
@@ -190,10 +191,13 @@ pub(crate) fn eval_operand<H: Host>(
         Operand::Field { base, name } => eval_operand(host, ext, base, trace, scope)
             .into_iter()
             .map(|v| match &v {
-                // a core field read through the node a value names
+                // a core field read through the node a value names;
+                // an unknown field is refused as it is on a path,
+                // naming the core fields (finding 2026-11-05: glued to
+                // a reference, `:Age` answered null where the path
+                // form refused)
                 Value::Node(_) | Value::List(_)
-                    if crate::graph::navigate::CORE_FIELDS.contains(&name.as_str())
-                        && !crate::graph::navigate::ref_nodes(&v).is_empty() =>
+                    if !crate::graph::navigate::ref_nodes(&v).is_empty() =>
                 {
                     through(host, &v, &Projection::CoreMeta(name.clone()))
                 }
@@ -845,6 +849,24 @@ pub(crate) fn eval_operand<H: Host>(
         Operand::Positions { projection } => host.positions(scope, projection.as_ref()),
         Operand::Matrix { node, full } => matrix(scope, *node, *full),
         Operand::CtxTable => ctx_table(host, scope),
+        // A record constructor as a value (`%(y = %(n = (@@_ @|
+        // count)))`) builds its fields on this very scope — the
+        // context's peers in reach, as the flat record has them —
+        // not in a sub-capsa of its own, which would stand alone
+        // (finding 2026-11-04).
+        Operand::Piped { expr, commands }
+            if matches!(**expr, Operand::Topic)
+                && let [Command::Func(call)] = commands.as_slice()
+                && matches!(call.name.as_str(), "rec" | "record") =>
+        {
+            match record_build(&call.args, host, ext, trace, scope) {
+                Ok((r, _)) => vec![Value::Record(r)],
+                Err(why) => {
+                    crate::pipeline::record_refusal(why);
+                    vec![Value::Null]
+                }
+            }
+        }
         Operand::Piped { expr, commands } => {
             // A capsa of the tail: this scope's register, captures,
             // marks, witness and arrivals, standing at `n` with
@@ -902,7 +924,7 @@ pub(crate) fn eval_operand<H: Host>(
                     let topics: Vec<Value> = scope
                         .members
                         .iter()
-                        .map(|m| m.topic.clone().unwrap_or_else(|| host.node_scalar(&m.ext)))
+                        .map(|m| crate::pipeline::effective_topic(m, host))
                         .collect();
                     vec![Thread::<H::Ext> {
                         window: None,
@@ -929,7 +951,7 @@ pub(crate) fn eval_operand<H: Host>(
                         ),
                         None => capsa(
                             host.restate(&scope, &m.ext),
-                            Some(host.node_scalar(&m.ext)),
+                            Some(crate::pipeline::effective_topic(m, host)),
                             host.prov_at(&m.ext),
                         ),
                     })

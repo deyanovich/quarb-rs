@@ -121,10 +121,12 @@ fn after_the_plain_pipe_once_per_capsa_on_the_topics_text() {
         run_with("/p/* | ::n | u:printf(\"%s-%s\"; $_; ::x)", vec![bin()]).unwrap(),
         vec!["a-2", "b-1"]
     );
-    // A node stands by its name on the input.
+    // A bare node feeds what `$_` reads on it: nothing (ruling
+    // 2026-11-05: a node's name is not its value); the text comes
+    // through a projection, `| ::` above.
     assert_eq!(
         run_with("/w/* | u:tr(a-z; A-Z)", vec![bin()]).unwrap(),
-        vec!["0", "1", "2"]
+        vec!["", "", ""]
     );
 }
 

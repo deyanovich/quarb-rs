@@ -197,3 +197,16 @@ fn a_body_call_with_a_surplus_operand_reads_it_as_the_input() {
         ["@(\"Iliad\"; \"Odyssey\")"]
     );
 }
+
+/// A nested record constructor builds its fields on the scope it
+/// stands in: the context's peers stay in reach, as in the flat
+/// record (finding 2026-11-04).
+#[test]
+fn a_nested_record_keeps_the_context_in_reach() {
+    assert_eq!(
+        rows(
+            "/books/* @| %(y = %(min = (@@_::year @| min); max = (@@_::year @| max)); n = (@@_ @| count))"
+        ),
+        ["%(y = %(min = -750; max = 1815); n = 4)"]
+    );
+}

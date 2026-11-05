@@ -603,11 +603,13 @@ fn record_field_colon_canonicalizes() {
 }
 
 #[test]
-fn keyed_aggregates_refuse_the_plain_pipe() {
-    // A keyed aggregate ranks a context: `@|`, or per group after
-    // `@| group`; alone on the plain pipe it is refused, loudly.
-    assert!(refuse("/a | top(3, ::x)").contains("@| top"));
-    assert!(refuse("/a | sort_by(::x)").contains("@| sort_by"));
+fn keyed_aggregates_on_either_pipe() {
+    // A keyed aggregate ranks a context on `@|`, or per partition
+    // under a fold; on the plain pipe it parses and ranks the rows
+    // of a table or the items of a list topic (ruling 2026-11-05),
+    // the run refusing a bare node thread with the pointer.
+    assert!(canon("/a | top(3, ::x)").contains("| top("));
+    assert!(canon("/a | sort_by(::x)").contains("| sort_by("));
     assert!(canon("/a @| top(3, ::x)").contains("@| top"));
     assert!(canon("/a | .k(::k) @|{.k} top(3, ::x)").contains("top("));
     assert!(canon("/a *__ top(3, ::x)").contains("@| top"));

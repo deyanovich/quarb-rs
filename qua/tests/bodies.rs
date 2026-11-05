@@ -191,3 +191,13 @@ fn the_aggregate_push_stays_out_of_expression_pipes() {
     let err = refuse("/w/* | :: | .n(($_ | .t@(count)))");
     assert!(err.contains("pushes belong to real capsae"), "{err}");
 }
+
+/// A field group glued to an opener is a value group, not the
+/// rounded trait: `((:n div 2) | round(1))` (finding 2026-11-04).
+#[test]
+fn a_field_group_after_an_opener_is_no_trait() {
+    assert_eq!(
+        values("/w/* @| [..2] | %(n = ($_ @| count)) | %(r = ((:n div 2) | round(1)))"),
+        values("/w/* @| [..2] | %(r = 0.5)")
+    );
+}
