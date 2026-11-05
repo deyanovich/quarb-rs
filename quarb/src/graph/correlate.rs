@@ -795,6 +795,7 @@ pub(crate) fn union_branches(
                 &[],
                 seed_register,
                 node_level && branch.projection.is_none(),
+                None,
             ) {
                 caps.push(Capsa {
                     window: None,
@@ -869,7 +870,10 @@ pub(crate) fn dedup_merge(caps: Vec<Capsa>) -> Vec<Capsa> {
     for c in caps {
         let key = (c.ext.node, arrival_key(&c.ext), reg_key(&c.register));
         match index.get(&key) {
-            Some(&i) => merge_prov(&mut kept[i], &c),
+            Some(&i) => {
+                merge_prov(&mut kept[i], &c);
+                crate::graph::threads::merge_into(&mut kept[i].ext.trail, c.ext.trail.clone());
+            }
             None => {
                 index.insert(key, kept.len());
                 kept.push(c);

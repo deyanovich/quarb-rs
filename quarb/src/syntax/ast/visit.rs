@@ -108,7 +108,8 @@ pub fn walk_command<V: Visitor + ?Sized>(v: &mut V, s: &Command) {
         Command::Nav(b) => v.branch(b),
         Command::Map(inner)
         | Command::Repeat { command: inner, .. }
-        | Command::Attach { command: inner, .. } => v.command(inner),
+        | Command::Attach { command: inner, .. }
+        | Command::Fold { command: inner, .. } => v.command(inner),
         Command::Push(_)
         | Command::Recall(_)
         | Command::Splice(_)

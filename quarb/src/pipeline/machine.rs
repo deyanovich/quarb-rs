@@ -100,7 +100,7 @@ pub(crate) fn pipeline_projected(query: &Query) -> bool {
     let mut before_group: Vec<bool> = Vec::new();
     for command in &query.pipeline {
         match command {
-            Command::Agg(call) if matches!(call.name.as_str(), "group" | "window") => {
+            Command::Agg(call) if call.name == "window" => {
                 before_group.push(projected);
                 projected = true;
             }
@@ -139,9 +139,9 @@ pub(crate) fn command_projects(command: &Command) -> bool {
         | Command::AggPush { .. } => false,
         // A quantified push is its push, round after round; an
         // attaching push is the push it wraps.
-        Command::Repeat { command, .. } | Command::Attach { command, .. } => {
-            command_projects(command)
-        }
+        Command::Repeat { command, .. }
+        | Command::Attach { command, .. }
+        | Command::Fold { command, .. } => command_projects(command),
         // A spliced quarq is whatever it holds: the runtime
         // any-topic check types the result.
         Command::Splice(_) | Command::SpliceAs { .. } | Command::Param { .. } => false,
@@ -164,7 +164,6 @@ pub(crate) fn command_projects(command: &Command) -> bool {
                     call.name.as_str(),
                     "sort" | "unique" | "reverse" | "first" | "last"
                 ))
-                || call.name == "group"
         }
         _ => true,
     }

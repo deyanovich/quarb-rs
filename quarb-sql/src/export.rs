@@ -1816,6 +1816,8 @@ impl Exporter {
         let mut pending_name: Option<String> = None;
         // After a grouped reduction: (key, agg_sql, alias).
         let mut grouped: Option<(String, String, String)> = None;
+        // A pushed key awaiting its fold: (the regula's name, key_sql).
+        let mut pushed_key: Option<(String, String)> = None;
 
         while i < commands.len() {
             let s = commands[i];
@@ -1882,6 +1884,17 @@ impl Exporter {
                         ));
                     }
                 }
+                // `| .k(::k)` before a fold by `.k`: the GROUP BY key
+                // (a projection body is a subcontext of one branch).
+                "expr-push" if grouped.is_none() && pushed_key.is_none() => {
+                    let kids = self.arbor.children(s);
+                    let key = self.operand(kids[0], join.map(|(l, _)| l))?;
+                    pushed_key = Some((self.prop_s(s, "name"), key));
+                }
+                "subcontext" if grouped.is_none() && pushed_key.is_none() => {
+                    let key = self.pushed_column(s, join.map(|(l, _)| l))?;
+                    pushed_key = Some((self.prop_s(s, "name"), key));
+                }
                 "filter" => {
                     if grouped.is_some() {
                         // HAVING: `$_` / the alias refer to the
@@ -1912,6 +1925,48 @@ impl Exporter {
                         sel.having = Some(h.replace("__AGG__", &agg));
                     }
                 }
+                "agg" if self.prop(s, "group").is_some() => {
+                    // `@|{.k} agg`: the fold by the pushed key is the
+                    // grouped reduction, GROUP BY key.
+                    let name = self.prop_s(s, "name");
+                    if !matches!(
+                        name.as_str(),
+                        "count" | "sum" | "mean" | "avg" | "min" | "max"
+                    ) {
+                        return Err(SqlError::Unsupported(format!(
+                            "the '{name}' command per group (GROUP BY reduces)"
+                        )));
+                    }
+                    let selector = self.prop_s(s, "group");
+                    if selector.contains(';') {
+                        return Err(SqlError::Unsupported(
+                            "a fold by several regulae (one GROUP BY key translates)".into(),
+                        ));
+                    }
+                    let (reg, key) = pushed_key.take().ok_or_else(|| {
+                        SqlError::Unsupported("a fold by a regula no push of a key made".into())
+                    })?;
+                    if selector != "." && selector != format!(".{reg}") {
+                        return Err(SqlError::Unsupported(format!(
+                            "a fold by '{selector}' (the pushed key is '.{reg}')"
+                        )));
+                    }
+                    if self.strict {
+                        return Err(SqlError::Semantics(
+                            "GROUP BY result order is unordered in SQL".into(),
+                        ));
+                    }
+                    sel.group_by = Some(key.clone());
+                    let col = if name == "count" {
+                        pending_col = None;
+                        None
+                    } else {
+                        self.assume_numeric(pending_name.take());
+                        pending_col.take()
+                    };
+                    let agg = sql_agg(&name, col)?;
+                    grouped = Some((key, agg.clone(), agg));
+                }
                 "agg" => {
                     let name = self.prop_s(s, "name");
                     match name.as_str() {
@@ -1928,21 +1983,6 @@ impl Exporter {
                             };
                             sel.select = vec![sql_agg(&name, col)?];
                             self.aggregate = true;
-                        }
-                        "group" => {
-                            if self.strict {
-                                return Err(SqlError::Semantics(
-                                    "GROUP BY result order is unordered in SQL".into(),
-                                ));
-                            }
-                            self.notes.push(
-                                "GROUP BY: SQL keeps a NULL-key group; Quarb's group \
-                                 drops null keys"
-                                    .to_string(),
-                            );
-                            let key = self.group_key(s, join)?;
-                            sel.group_by = Some(key.clone());
-                            grouped = Some((key, String::new(), String::new()));
                         }
                         "sort_by" => {
                             if self.strict {
@@ -2068,19 +2108,39 @@ impl Exporter {
         {
             sel.select = vec![c];
         }
+        // A grouped reduction never recorded (`@|{.k} count` with no
+        // `| .n | %.`) answers one value per group: the aggregate
+        // alone, grouped by the key.
+        if let Some((_, agg, _)) = grouped
+            && sel.select.is_empty()
+        {
+            sel.select = vec![agg];
+        }
         Ok(())
     }
 
-    fn group_key(&mut self, s: NodeId, join: Option<(&str, &str)>) -> Result<String, SqlError> {
-        let kids = self.arbor.children(s);
-        // group(::k) or group("name", expr) — the key expression is
-        // the last child; a literal first child is its name.
-        let key = kids
-            .iter()
-            .rev()
-            .find(|&&k| self.kind(k) != "literal")
-            .ok_or_else(|| SqlError::Unsupported("a literal group key".into()))?;
-        self.operand(*key, join.map(|(l, _)| l))
+    /// The column a pushed projection body names — `.k(::k)` is a
+    /// subcontext whose one branch is the bare projection; any
+    /// other body is Quarb-side state.
+    fn pushed_column(&mut self, s: NodeId, qual: Option<&str>) -> Result<String, SqlError> {
+        let body = || {
+            let q = self.kid(s, "query")?;
+            let b = self.kid(q, "branch")?;
+            let p = self.kid(b, "projection")?;
+            let bare = self.kids(q, "branch").len() == 1
+                && self.kids(q, "pipeline").is_empty()
+                && self.arbor.children(b).len() == 1
+                && self.prop_s(p, "kind") == "property";
+            bare.then_some(p)
+        };
+        let p = body()
+            .ok_or_else(|| SqlError::Unsupported("a pushed body (Quarb-side state)".into()))?;
+        let col = self.projection_col(p)?;
+        let col = self.sql_ident(&col, "column name")?;
+        Ok(match qual {
+            Some(q) => format!("{q}.{col}"),
+            None => col,
+        })
     }
 
     /// A HAVING filter: `$_` and `$.name` refer to the aggregate.
@@ -2159,7 +2219,7 @@ mod null_and_literal_tests {
 
     // Grouped pipeline that never pushes, so `partial_pushdown` hinges
     // only on the leading predicate (mirrors the crate's partial gate).
-    const GROUPED: &str = " | ::x @| group(\"g\", ::x) | count | .n | %.";
+    const GROUPED: &str = " | ::x | .g(::x) @|{.g} count | .n | %.";
 
     #[test]
     fn pattern_literal_pushes_as_like() {

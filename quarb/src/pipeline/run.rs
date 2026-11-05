@@ -241,6 +241,10 @@ pub(crate) struct RunState {
     /// keyed by the layer's node identity, type-erased because the
     /// run knows no attachment type; see `pipeline/attached.rs`.
     pub(crate) attached: Option<Box<dyn std::any::Any>>,
+    /// Whether the run records lineage for `@| threads` (spec: The
+    /// Pipeline, the thread tree): on when the query holds the
+    /// command, off — and free — otherwise.
+    pub(crate) trail: bool,
 }
 
 thread_local! {

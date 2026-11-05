@@ -149,7 +149,7 @@ fn after_the_aggregation_pipe_once_over_the_context_as_lines() {
     // The shared regulae ride every returned capsa.
     assert_eq!(
         run_with(
-            "/w/* | :: @| .total(count) @| u:sort @| [1] | %(w = $_; total = $.total)",
+            "/w/* | :: | .total@(count) @| u:sort @| [1] | %(w = $_; total = $.total)",
             vec![bin()]
         )
         .unwrap(),

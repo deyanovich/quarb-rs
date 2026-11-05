@@ -60,7 +60,7 @@ fn a_bound_integer_is_the_slice_bound() {
 #[test]
 fn a_bound_form_names_a_key_and_a_field() {
     assert_eq!(
-        one("def &per($key): @| group($key) @| count; /rows/* @| &per(::pages)"),
+        one("def &per($key): | .k($key) @|{.k} count @| count; /rows/* | &per(::pages)"),
         "3"
     );
     assert_eq!(

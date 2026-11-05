@@ -4,9 +4,6 @@ use crate::pipeline::*;
 use crate::syntax::ast::IndexSpec;
 use crate::syntax::parser::{PipeMode, command_mode_out};
 
-/// One group of a keyed aggregate: the key, its fields, its members.
-type Group<X> = (Vec<Value>, Vec<(String, Value, Prov)>, Vec<Thread<X>>);
-
 /// One field of a record — or of every record in a list, so a
 /// group's member list reads elementwise; anything
 /// else is null.
@@ -116,24 +113,6 @@ pub(crate) fn record_field(v: Value, name: &str) -> Value {
     }
 }
 
-/// The field chain of a bare topic-field operand — `:n` is
-/// `["n"]`, `:a:b` is `["a", "b"]` — or none when the operand
-/// reads anything else.
-pub(crate) fn topic_field(op: &Operand) -> Option<Vec<String>> {
-    fn chain(op: &Operand) -> Option<Vec<String>> {
-        match op {
-            Operand::Topic => Some(Vec::new()),
-            Operand::Field { base, name } => {
-                let mut names = chain(base)?;
-                names.push(name.clone());
-                Some(names)
-            }
-            _ => None,
-        }
-    }
-    chain(op).filter(|names| !names.is_empty())
-}
-
 /// Apply one pipeline command to the capsa context.
 /// Run `commands` in order. `@| group(…)` directly followed by
 /// `| count` is one fused step: the groups are tallied as they
@@ -162,16 +141,18 @@ pub(crate) fn apply_commands<H: Host>(
         if top {
             with_run(|s| s.command = (offset + i) as u32 + 1);
         }
-        if let (Command::Agg(call), Some(Command::Func(next))) = (&commands[i], commands.get(i + 1))
-        {
-            if call.name == "group" && next.name == "count" && next.args.is_empty() {
-                caps = keyed_agg(call, caps, host, trace, outer, None, true);
-                mode = command_mode_out(&commands[i + 1], command_mode_out(&commands[i], mode));
-                i += 2;
-                continue;
-            }
-        }
+        // the lineage for `@| threads`: the inputs before the step,
+        // the step on every output after it (only when recording)
+        let lineage = top && crate::graph::threads::recording();
+        let inputs: Vec<H::Ext> = if lineage {
+            caps.iter().map(|c| c.ext.clone()).collect()
+        } else {
+            Vec::new()
+        };
         caps = apply_command_in(&commands[i], mode, caps, host, trace, outer);
+        if lineage {
+            host.note_step(&commands[i], &inputs, &mut caps);
+        }
         mode = command_mode_out(&commands[i], mode);
         // A walk's facts are in scope for the one command after it.
         for c in &mut caps {
@@ -670,9 +651,9 @@ pub(crate) fn apply_command_in<H: Host>(
             })
             .collect(),
         // An association aggregate on the plain pipe reads its two
-        // expressions off each capsa's *members* (a group's rows) —
-        // `@| group(::k) | corr(:x; :y)`. A memberless capsa has no
-        // pairs to associate: null.
+        // expressions off each capsa's *members* (a list topic of
+        // records) — `| :rows | corr(:x; :y)`. A memberless capsa has
+        // no pairs to associate: null.
         Command::Func(call) if stdlib::association(&call.name) => caps
             .into_iter()
             .map(|mut c| {
@@ -916,25 +897,86 @@ pub(crate) fn apply_command_in<H: Host>(
             call,
             enriched,
         } => record_push_command(name, call, enriched, caps, host, trace, outer, peers),
-        // `@| .name(body)` — the aggregate push: the body runs once
-        // over the context as a whole, and its value is filed under
-        // the name on every capsa; the context passes on unchanged.
-        Command::AggPush { name, body } => {
+        // `@| .name(body)` — the aggregation pipe's push (ruling
+        // 2026-11-04): the context collapses to the one thread the
+        // pipe answers, standing nowhere, its topic the list it was
+        // handed, the body's value filed on it under the name.
+        Command::AggPush {
+            name,
+            body,
+            keep: false,
+            ..
+        } => {
             if caps.is_empty() {
                 return caps;
             }
-            let seed = seed_capsa(&caps, host);
+            let mut seed = seed_capsa(&caps, host);
             let scope = seed.scope(None, peers, outer);
-            let (value, o) =
-                capture(|| operand_value(host, &seed.ext, body, trace, scope));
-            let prov = Prov::leaf(o);
+            let (value, o) = capture(|| operand_value(host, &seed.ext, body, trace, scope));
+            seed.ext = host.unplaced_ext();
+            seed.register.push(Reg {
+                prov: Prov::leaf(o),
+                site: host.origin_at(&seed.ext),
+                name: name.clone(),
+                value,
+            });
+            vec![seed]
+        }
+        // `| .name@(body)` — the aggregate push: the body runs once
+        // over the context as a whole, and its value is filed under
+        // the name on every capsa; the context passes on unchanged.
+        // `| .name@{.x}(body)` runs it per partition of the selector's
+        // regulae, filing each partition's value on its members.
+        Command::AggPush {
+            name, body, regs, ..
+        } => {
+            if caps.is_empty() {
+                return caps;
+            }
+            if regs.is_empty() {
+                let seed = seed_capsa(&caps, host);
+                let scope = seed.scope(None, peers, outer);
+                let (value, o) =
+                    capture(|| operand_value(host, &seed.ext, body, trace, scope));
+                let prov = Prov::leaf(o);
+                return caps
+                    .into_iter()
+                    .map(|mut c| {
+                        c.register.push(Reg {
+                            prov: prov.clone(),
+                            site: host.origin_at(&c.ext),
+                            name: name.clone(),
+                            value: value.clone(),
+                        });
+                        c
+                    })
+                    .collect();
+            }
+            let Some(groups) = partition_by(regs, &caps, host) else {
+                return Vec::new();
+            };
+            let mut filed: Vec<Option<(Value, Prov)>> = vec![None; caps.len()];
+            for (_, members) in groups {
+                let seed_members: Vec<Thread<H::Ext>> =
+                    members.iter().map(|&i| caps[i].clone()).collect();
+                let seed = seed_capsa(&seed_members, host);
+                let scope = seed.scope(None, peers, outer);
+                let (value, o) =
+                    capture(|| operand_value(host, &seed.ext, body, trace, scope));
+                let prov = Prov::leaf(o);
+                for i in members {
+                    filed[i] = Some((value.clone(), prov.clone()));
+                }
+            }
             caps.into_iter()
-                .map(|mut c| {
+                .enumerate()
+                .map(|(i, mut c)| {
+                    let (value, prov) = filed[i].take().expect("every capsa in one partition");
                     c.register.push(Reg {
-                        prov: prov.clone(),
+                        prov,
                         site: host.origin_at(&c.ext),
                         name: name.clone(),
-                        value: value.clone(),
+                        value,
                     });
                     c
                 })
@@ -1046,6 +1088,9 @@ pub(crate) fn apply_command_in<H: Host>(
         Command::Agg(call) if call.name == "tree" => {
             tree_command(call, caps, host, trace, outer, peers)
         }
+        // `@| threads` — the thread tree (spec: The Pipeline, the
+        // thread tree): the lineage the run recorded, as one text.
+        Command::Agg(call) if call.name == "threads" => threads_command(call, caps, host),
         // `@| collapse` — one thread per distinct node among the
         // context's threads (spec: Expansion paths), the merge the
         // navigation no longer makes.
@@ -1158,6 +1203,13 @@ pub(crate) fn apply_command_in<H: Host>(
         }
         // Reduce the whole context's topics to a new context.
         Command::Agg(call) => agg_command(call, caps, host),
+        // `@|{.g} …` — the fold by a regula (spec: The Pipeline): the
+        // context partitioned by the regula's value, the command run
+        // per partition as it runs over the whole context, each
+        // answer with the folding regula on top.
+        Command::Fold { regs, command } => {
+            fold_command(regs, command, mode, caps, host, trace, outer)
+        }
         // Recall a register value into the topic.
         Command::Recall(r) => caps
             .into_iter()
@@ -3324,6 +3376,120 @@ pub(crate) fn agg_command<H: Host>(
         .collect()
 }
 
+/// One folding regula's slot of a partition: its value, its name,
+/// the members' origins for it.
+pub(crate) type FoldSlot = (Value, Option<String>, Origins);
+
+/// The context partitioned by the value the selector's regulae
+/// recall on each capsa — by the tuple of the values when it names
+/// several — in first-appearance order: a node by its identity, any
+/// other value by equality, null one group of its own. Per partition
+/// its slots (in selector order) and its members' positions in
+/// `caps`. None when a position past the capsa is refused.
+pub(crate) fn partition_by<H: Host>(
+    regs: &[RegRef],
+    caps: &[Thread<H::Ext>],
+    host: &H,
+) -> Option<Vec<(Vec<FoldSlot>, Vec<usize>)>> {
+    /// One slot of the partition key: a node by identity, a value
+    /// by its sort key.
+    #[derive(Hash, PartialEq, Eq)]
+    enum FoldKey {
+        Node(u64),
+        Value(crate::value::SortKey),
+    }
+    let scale = |e: &str| host.scale_of(e);
+    let mut groups: Vec<(Vec<FoldSlot>, Vec<usize>)> = Vec::new();
+    let mut by_key: HashMap<Vec<FoldKey>, usize> = HashMap::new();
+    for (ci, c) in caps.iter().enumerate() {
+        let mut key = Vec::with_capacity(regs.len());
+        let mut slots: Vec<FoldSlot> = Vec::with_capacity(regs.len());
+        for reg in regs {
+            let index = crate::pipeline::register::fold_index(&c.register, reg);
+            if matches!(reg, RegRef::Top | RegRef::Index(_) | RegRef::Back(_)) && index.is_none() {
+                record_refusal(format!(
+                    "no regula at position '{}': the capsa holds {} regulae",
+                    crate::syntax::unparse::fold_selector(std::slice::from_ref(reg)),
+                    c.register.len()
+                ));
+                return None;
+            }
+            let name = index.and_then(|i| c.register[i].name.clone());
+            let value = index.map_or(Value::Null, |i| c.register[i].value.clone());
+            let origins = index
+                .map(|i| c.register[i].prov.origins.clone())
+                .unwrap_or_default();
+            key.push(match &value {
+                Value::Node(n) => FoldKey::Node(n.id),
+                v => FoldKey::Value(v.sort_key_with(&scale)),
+            });
+            slots.push((value, name, origins));
+        }
+        let slot = *by_key.entry(key).or_insert(groups.len());
+        if slot == groups.len() {
+            groups.push((slots, Vec::new()));
+        } else {
+            for (held, (_, _, origins)) in groups[slot].0.iter_mut().zip(slots) {
+                held.2.union(&origins);
+            }
+        }
+        groups[slot].1.push(ci);
+    }
+    Some(groups)
+}
+
+/// The fold by a regula (spec: The Pipeline, the fold by a regula):
+/// the context partitioned by the value the selector recalls on each
+/// capsa — by the tuple of the values when the selector names
+/// several — in first-appearance order (`partition_by`); the command
+/// run per partition exactly as `@|` runs it over the whole context;
+/// the folding regulae pushed on top of each answer in selector
+/// order, holding the group's values with the members' origins for
+/// them (deduplicated), and an answer standing on the node when a
+/// regula holds one (the last such in the selector). A position past
+/// the capsa is refused.
+pub(crate) fn fold_command<H: Host>(
+    regs: &[RegRef],
+    command: &Command,
+    mode: PipeMode,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    let Some(groups) = partition_by(regs, &caps, host) else {
+        return Vec::new();
+    };
+    let mut pool: Vec<Option<Thread<H::Ext>>> = caps.into_iter().map(Some).collect();
+    let mut out = Vec::new();
+    for (slots, members) in groups {
+        let members: Vec<Thread<H::Ext>> = members
+            .into_iter()
+            .map(|i| pool[i].take().expect("each member in one partition"))
+            .collect();
+        let mut folded = apply_command_in(command, mode, members, host, trace, outer);
+        let node = slots.iter().rev().find_map(|(v, _, _)| match v {
+            Value::Node(n) => Some(crate::NodeId(n.id)),
+            _ => None,
+        });
+        for t in &mut folded {
+            if let Some(id) = node {
+                t.ext = host.ext_at(id);
+            }
+            for (value, name, origins) in &slots {
+                t.register.push(Reg {
+                    name: name.clone(),
+                    value: value.clone(),
+                    prov: Prov::leaf(origins.clone()),
+                    site: host.origin_at(&t.ext),
+                });
+            }
+        }
+        out.extend(folded);
+    }
+    out
+}
+
 /// The regulae every capsa of the context shares — the first
 /// capsa's register, kept where each other capsa filed the same
 /// name with an equal value. One capsa shares its whole register;
@@ -3477,134 +3643,6 @@ pub(crate) fn keyed_agg<H: Host>(
     // last; unique_by treats null as its own group.
     let has_null = |k: &[Value]| k.iter().any(|v| matches!(v, Value::Null));
     let has_nan = |k: &[Value]| k.iter().any(stdlib::is_nan);
-
-    // `group` partitions instead of reordering: one capsa per
-    // distinct key (first-appearance order; null keys grouped out,
-    // pandas' dropna), topic = the list of member topics, the key
-    // fields pushed as named regs for later recall ($.city).
-    if call.name == "group" {
-        // (key, key fields, members) per group; when counting, the
-        // members stay empty and `tally` holds (count, origins,
-        // first node) instead.
-        let mut groups: Vec<Group<H::Ext>> = Vec::new();
-        let mut tally: Vec<(i64, Origins, H::Ext)> = Vec::new();
-        let member_origins = |c: &Thread<H::Ext>| match &c.topic {
-            Some(_) => c.prov.origins.clone(),
-            None => host.origins_at(&c.ext),
-        };
-        // Key → position in `groups`: one probe per capsa, where a
-        // scan over the groups formed so far made a word count over
-        // a novel quadratic in its vocabulary.
-        let mut index: HashMap<Vec<SortKey>, usize> = HashMap::new();
-        for (i, c) in caps.into_iter().enumerate() {
-            let scope = c.scope(Some(i + 1), peers, outer);
-            let fields = match record_fields_prov(&call.args, host, &c.ext, trace, scope) {
-                Ok(f) => f,
-                Err(why) => {
-                    crate::pipeline::record_refusal(why);
-                    continue;
-                }
-            };
-            let key: Vec<Value> = fields.iter().map(|(_, v, _)| v.clone()).collect();
-            if key.iter().any(|v| matches!(v, Value::Null)) {
-                continue;
-            }
-            let hashed: Vec<SortKey> = key
-                .iter()
-                .map(|v| v.sort_key_with(&|e| host.scale_of(e)))
-                .collect();
-            match index.get(&hashed) {
-                Some(&at) => {
-                    let (_, kf, members) = &mut groups[at];
-                    // The key was read from this member too.
-                    for ((_, _, p), (_, _, q)) in kf.iter_mut().zip(&fields) {
-                        p.origins.union(&q.origins);
-                    }
-                    if counting {
-                        let (n, acc, _) = &mut tally[at];
-                        *n += 1;
-                        acc.union(&member_origins(&c));
-                    } else {
-                        members.push(c)
-                    }
-                }
-                None => {
-                    index.insert(hashed, groups.len());
-                    if counting {
-                        tally.push((1, member_origins(&c), c.ext.bare()));
-                        groups.push((key, fields, Vec::new()))
-                    } else {
-                        groups.push((key, fields, vec![c]))
-                    }
-                }
-            }
-        }
-        if counting {
-            return groups
-                .into_iter()
-                .zip(tally)
-                .map(|((_, fields, _), (n, origins, node))| {
-                    let register = fields
-                        .into_iter()
-                        .map(|(name, value, prov)| Reg {
-                            prov,
-                            site: host.origin_at(&node),
-                            name: Some(name),
-                            value,
-                        })
-                        .collect();
-                    Thread::<H::Ext> {
-                        window: None,
-                        prov: Prov::leaf(origins),
-                        register,
-                        topic: Some(Value::Int(n)),
-                        members: Vec::new(),
-                        captures: Vec::new(),
-                        named: Vec::new(),
-                        ext: node.clone(),
-                    }
-                })
-                .collect();
-        }
-        return groups
-            .into_iter()
-            .map(|(_, fields, members)| {
-                let node = members[0].ext.bare();
-                let register = fields
-                    .into_iter()
-                    .map(|(name, value, prov)| Reg {
-                        prov,
-                        site: host.origin_at(&node),
-                        name: Some(name),
-                        value,
-                    })
-                    .collect();
-                let prov = Prov::list(
-                    members
-                        .iter()
-                        .map(|m| match &m.topic {
-                            Some(_) => m.prov.clone(),
-                            None => host.prov_at(&m.ext),
-                        })
-                        .collect(),
-                );
-                let topics: Vec<Value> = members
-                    .iter()
-                    .map(|m| m.topic.clone().unwrap_or_else(|| host.node_scalar(&m.ext)))
-                    .collect();
-                Thread::<H::Ext> {
-                    window: None,
-                    prov,
-                    register,
-                    topic: Some(Value::list(topics)),
-                    members,
-                    captures: Vec::new(),
-                    named: Vec::new(),
-                    ext: node.clone(),
-                }
-            })
-            .collect();
-    }
 
     // One table under a keyed aggregate ranks its ROWS (spec: The
     // Table): each row is keyed as the cursor record (`:Age` its

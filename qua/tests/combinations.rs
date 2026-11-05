@@ -49,7 +49,7 @@ fn a_pair_counts_the_same_from_either_order() {
     // (kitty, levin) in another: one group of two
     assert_eq!(
         values(
-            "/scenes/* | (/who/*:: @| pairs) | [$_] @| group(p = $_) | count \
+            "/scenes/* | (/who/*:: @| pairs) | [$_] | .p($_) @|{.p} count \
              | \"${$.p}: ${$_}\" @| sort"
         ),
         [

@@ -496,7 +496,7 @@ fn unparse_fixpoint() {
         "//*<block>[:index = 2][1..3]$",
         "/items/*[/price:: * /qty:: > 15]/name::",
         "/a || /b::x | upper @| join(\", \")",
-        "/row @| group(::Pclass) | top(2, ::Fare) @| ungroup | %($.Pclass; ::Name)",
+        "/row | .Pclass(::Pclass) @|{.Pclass} top(2, ::Fare) @| ungroup | %($.Pclass; ::Name)",
         "/row | .who | [$ord mod 2 = 1] | $.who",
         "/row | .a(::x) | %. @| [2..-1]",
         "/row | .(::x) | .b(::y) | %%.",
@@ -520,7 +520,7 @@ fn unparse_fixpoint() {
         "/row | .d(::dept) | .m(^/row[::dept = $.d]::pay @| mean) | $.m - $$__",
         "/users/* <=> /orders/*[/uid:: = $$0/id::] | %(::name; amt = $$1/amt::)",
         "/tracks/* | %(::title; artist = ::album_id-->::artist_id-->::name)",
-        "/invoices/* | ::qty * ::track_id-->::price @| group(::customer) | sum",
+        "/invoices/* | ::qty * ::track_id-->::price | .customer(::customer) @|{.customer} sum",
         // Round-trip regressions (2026-07-21 review): constant and
         // operand commands keep their parens; a quoted dot-leading
         // string stays a constant topic; quoted trait names reprint
@@ -607,8 +607,8 @@ fn a_parameter_stands_where_the_form_it_binds_stands() {
     );
     // a group's key and a bare record field, named by the bound form
     assert_eq!(
-        exp("def &per($key): @| group($key) | count; /row @| &per(::genre)"),
-        "/row @| group(::genre) | count"
+        exp("def &per($key): | .k($key) @|{.k} count; /row | &per(::genre)"),
+        "/row | .k(::genre) @|{.k} count"
     );
     assert_eq!(
         exp("def &card($extra): | %(::title; $extra); /row | &card(::year)"),

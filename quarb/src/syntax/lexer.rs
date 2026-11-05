@@ -163,6 +163,11 @@ pub enum Token {
     ProjectColon,
     /// `@` — register/aggregation sigil.
     At,
+    /// `@` glued to a push name before its body — `.n@(body)`,
+    /// `.n@{.x}(body)` — the aggregate push's sigil (ruling
+    /// 2026-11-04): the body over the whole context, or over the
+    /// partition of the regulae in the braces.
+    PushAt,
     /// `@@` glued before a dot, the node-reference views (`@@.`);
     /// a spaced `@ @|` stays the row reading before the
     /// aggregation pipe.
@@ -219,6 +224,10 @@ pub enum Token {
     /// `(m, None)` (open-ended, clamped to the adapter's quantifier
     /// bound at execution).
     Quant { min: usize, max: Option<usize> },
+    /// `{.g}` glued to the aggregation pipe: the fold's selector
+    /// (spec: The Pipeline, the fold by a regula), its text as
+    /// written; `glued` is false when a space stood before it.
+    FoldSel { text: String, glued: bool },
     /// `{;100_km}` / `{10_km;100_km}` / `{2_h;}` — a budget
     /// quantifier: the floor and the ceiling as written (spec: The
     /// budget quantifier). A brace pair alone, never after `+`/`*`.
@@ -285,7 +294,7 @@ pub(crate) fn is_quantity_head(text: &str) -> bool {
 /// name's parts (`t·1`, a macro template's binder renamed at the
 /// graft: design paper, Hygiene), so an expansion's print lexes
 /// back.
-fn is_name_char(c: char) -> bool {
+pub(crate) fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '+' | '·')
 }
 
@@ -985,6 +994,22 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Hash);
                 i += 1;
             }
+            // `.n@(body)` / `.n@{.x}(body)` — the aggregate push's
+            // sigil, glued to the push name (ruling 2026-11-04)
+            '@' if !matches!(at(i + 1), Some('@' | '_' | '.' | '*' | '|'))
+                && !after_whitespace(&chars, i)
+                && matches!(
+                    tokens.last(),
+                    Some(Token::Name { text, quoted: false, .. }) if text.starts_with('.')
+                )
+                && !matches!(
+                    tokens.len().checked_sub(2).map(|k| &tokens[k]),
+                    Some(Token::Dollar | Token::At | Token::AtAt)
+                ) =>
+            {
+                tokens.push(Token::PushAt);
+                i += 1;
+            }
             // `@(a; b)` — the list literal — follows whitespace.
             '@' if at(i + 1) == Some('(') => {
                 // The node-id anchor's opener glues to its list
@@ -1593,6 +1618,44 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // reach this arm — `read_balanced` takes them raw.
             // The rounded register and anchor families (ruling
             // #43): a parenthesized symbol is the value side —
+            // `*__(.g; .h)` / `@|(.g)` — the fold's selector in its
+            // rounded form (ruling 2026-11-04): the references in one
+            // pair of parentheses glued to the aggregation pipe, as
+            // `(.who)` is the rounded `$.who`. Spaced, `@| (.g)`, it is
+            // the selector unglued, refused by the parser naming the
+            // glued form.
+            '(' if matches!(tokens.as_slice(), [.., Token::At, Token::Pipe])
+                && at(i + 1) == Some('.') =>
+            {
+                let Some(len) = chars[i + 1..].iter().position(|&c| c == ')') else {
+                    return Err(QuarbError::lex(
+                        "'(' after '@|' opens the fold's selector and needs its ')'",
+                    ));
+                };
+                let text: String = chars[i + 1..i + 1 + len].iter().collect();
+                let glued = i > 0 && matches!(chars[i - 1], '|' | '_');
+                tokens.push(Token::FoldSel { text, glued });
+                i += len + 2;
+            }
+            // `.n*(.x)(body)` / `.n@(.x)(body)` — the partition push's
+            // selector in its rounded form: the parenthesis after the
+            // sigil whose content is a capsa reference and which a
+            // second parenthesis, the body's, follows
+            '(' if matches!(tokens.as_slice(), [.., Token::PushAt])
+                && at(i + 1) == Some('.')
+                && chars[i + 1..]
+                    .iter()
+                    .position(|&c| c == ')')
+                    .is_some_and(|len| at(i + 1 + len + 1) == Some('(')) =>
+            {
+                let len = chars[i + 1..]
+                    .iter()
+                    .position(|&c| c == ')')
+                    .expect("checked above");
+                let text: String = chars[i + 1..i + 1 + len].iter().collect();
+                tokens.push(Token::FoldSel { text, glued: true });
+                i += len + 2;
+            }
             // `(_)` `(.)` `(.name)` `(*)` `(*.)` `(*-)` `(-)`
             // for `$_` `$.` `$.name` `@*` `@.` `@-` `$*N` `$-` —
             // and double parentheses the node side — `(())` the
@@ -1999,7 +2062,56 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // is otherwise a name (`..3` in a range, `...` the
             // spread), so only `..` directly before `/` is the hop;
             // the name lexer breaks on the same shape.
-            c if is_name_char(c) => i = lex_name(&chars, i, glued, &mut tokens)?,
+            c if is_name_char(c) => {
+                i = lex_name(&chars, i, glued, &mut tokens)?;
+                // `.n*(body)` / `.n*(.x)(body)` — the rounded aggregate
+                // push's sigil, `*` for `@` (ruling 2026-11-04), read
+                // into the push name by the name lexer: split it off
+                let after_sigil: bool = matches!(
+                    tokens.len().checked_sub(2).map(|k| &tokens[k]),
+                    Some(
+                        Token::Slash
+                            | Token::SlashSlash
+                            | Token::Backslash
+                            | Token::BackslashBackslash
+                            | Token::Dollar
+                            | Token::At
+                            | Token::AtAt
+                    )
+                );
+                if let Some(Token::Name {
+                    text,
+                    quoted: false,
+                    ..
+                }) = tokens.last_mut()
+                    && text.starts_with('.')
+                    && text.len() >= 2
+                    && text.ends_with('*')
+                    && at(i) == Some('(')
+                    && !after_sigil
+                {
+                    text.pop();
+                    tokens.push(Token::PushAt);
+                }
+            }
+            // `@|{.g}` — the fold's selector on the aggregation pipe
+            // (`*__{.g}` after the rounded pipe); glued to the pipe's
+            // last character, or refused by the parser.
+            '{' if matches!(
+                tokens.as_slice(),
+                [.., Token::At, Token::Pipe] | [.., Token::PushAt]
+            ) =>
+            {
+                let Some(len) = chars[i + 1..].iter().position(|&c| c == '}') else {
+                    return Err(QuarbError::lex(
+                        "'{' after '@|' opens the fold's selector and needs its '}'",
+                    ));
+                };
+                let text: String = chars[i + 1..i + 1 + len].iter().collect();
+                let glued = i > 0 && matches!(chars[i - 1], '|' | '_' | '@');
+                tokens.push(Token::FoldSel { text, glued });
+                i += len + 2;
+            }
             '{' if budget_body(&chars, i + 1, '}') => {
                 let (floor, ceiling, next) = read_budget(&chars, i + 1, '}')?;
                 tokens.push(Token::Budget { floor, ceiling });
@@ -3336,6 +3448,29 @@ mod glued_operator_tests {
         // pipes: standalone `__`, `*__`, `,__`
         assert_eq!(lex("/a __ count").unwrap(), lex("/a | count").unwrap());
         assert_eq!(lex("/a *__ max").unwrap(), lex("/a @| max").unwrap());
+        // the fold's selector: braces or parentheses, glued to
+        // either pipe spelling (ruling 2026-11-04)
+        for q in ["*__(.g; .h) count", "@|(.g; .h) count", "*__{.g; .h} count"] {
+            assert_eq!(lex(q).unwrap(), lex("@|{.g; .h} count").unwrap(), "{q}");
+        }
+        // the aggregate push's sigil and selector, rounded
+        for (rounded, sigil) in [
+            ("| .n*(count)", "| .n@(count)"),
+            ("| .n*(.x)(count)", "| .n@{.x}(count)"),
+            ("| .n@(.x; .y)(count)", "| .n@{.x; .y}(count)"),
+            ("| .*(count)", "| .@(count)"),
+        ] {
+            assert_eq!(lex(rounded).unwrap(), lex(sigil).unwrap(), "{rounded}");
+        }
+        assert!(matches!(
+            lex("@| (.g) count").unwrap().as_slice(),
+            [
+                Token::At,
+                Token::Pipe,
+                Token::FoldSel { glued: false, .. },
+                ..
+            ]
+        ));
         assert_eq!(lex("/a ,__ upper").unwrap(), lex("/a $| upper").unwrap());
         assert_eq!(lex("__ ...").unwrap(), lex("| ...").unwrap());
         assert!(
@@ -3681,7 +3816,7 @@ mod glued_operator_tests {
             ]
         ));
         assert!(matches!(
-            lex("@| group(:name)").unwrap().as_slice(),
+            lex("@| top(:name)").unwrap().as_slice(),
             [
                 Token::At,
                 Token::Pipe,

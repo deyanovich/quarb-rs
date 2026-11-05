@@ -147,14 +147,20 @@ fn the_spread_item_keys_by_the_bare_keys() {
 
 #[test]
 fn the_operator_unparses_to_a_fixpoint() {
-    assert_eq!(fixpoint("= 5 | $_:$.p"), "= 5 | $_:$.p");
-    assert_eq!(fixpoint("= 5 | $_:($.p)"), "= 5 | $_:$.p");
+    assert_eq!(
+        fixpoint("= 5 | .p(@(1; 2)) | $_:$.p"),
+        "= 5 | .p(@(1; 2)) | $_:$.p"
+    );
+    assert_eq!(
+        fixpoint("= 5 | .p(@(1; 2)) | $_:($.p)"),
+        "= 5 | .p(@(1; 2)) | $_:$.p"
+    );
     assert_eq!(fixpoint("= 5 | $_:#(:A; s = :B)"), "= 5 | $_:#(:A; s = :B)");
     assert_eq!(fixpoint("= 5 | $_:@(:A; 1)"), "= 5 | $_:@(:A; 1)");
     fixpoint("= 5 | $_:%(n = :A)");
     fixpoint("//x:%(:props...)");
     fixpoint("= 5 | %(:props...; n = 1)");
-    fixpoint("//x:$.cols @| #");
+    fixpoint("= 5 | .cols(@(1)) | //x:$.cols @| #");
 }
 
 #[test]

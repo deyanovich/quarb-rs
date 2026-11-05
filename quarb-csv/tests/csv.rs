@@ -139,7 +139,7 @@ fn records_and_json() {
 fn grouping() {
     // value_counts
     assert_eq!(
-        values("/row @| group(::dept) | count | %($.dept; n = $_)"),
+        values("/row | .dept(::dept) @|{.dept} count | %($.dept; n = $_)"),
         vec![
             "%(dept = \"eng\"; n = 2)",
             "%(dept = \"sales\"; n = 1)",
@@ -150,7 +150,7 @@ fn grouping() {
     // null mean, per the missing-key rule, sorts last)
     assert_eq!(
         values(
-            "/row::salary @| group(::dept) | mean | .m | %($.dept; mean = $.m) \
+            "/row::salary | .dept(::dept) @|{.dept} mean | .m | %($.dept; mean = $.m) \
              @| sort_by($.m)"
         ),
         vec![
@@ -161,52 +161,52 @@ fn grouping() {
     );
     // computed group keys, record-convention named
     assert_eq!(
-        values("/row @| group(\"senior\", ::age idiv 40) | count | %($.senior; n = $_)"),
+        values("/row | .senior(::age idiv 40) @|{.senior} count | %($.senior; n = $_)"),
         vec!["%(senior = 0; n = 2)", "%(senior = 1; n = 2)"]
     );
-    // null keys form no group (pandas dropna): Dee's empty salary
+    // a null key is a partition of its own (the fold, 2026-11-04;
+    // the retired group dropped it): Dee's empty salary
     assert_eq!(
-        values("/row @| group(::salary) | count @| count"),
-        vec!["3"]
+        values("/row | .salary(::salary) @|{.salary} count @| count"),
+        vec!["4"]
     );
 }
 
-/// A group carries its member capsae alongside the list topic:
-/// keyed aggregates on `|` work per group, `@| ungroup` flattens
-/// back with the group's key registers inherited.
+/// The fold by a regula runs a keyed aggregate per partition: the
+/// surviving threads stand on their nodes with the key on top of
+/// each capsa (no ungroup; `group` retired 2026-11-04).
 #[test]
 fn group_members() {
-    // per-group top-1 by salary, flattened to rows
+    // per-group top-1 by salary; a missing key does not compete,
+    // so Dee's partition (salary null) yields no thread
     assert_eq!(
         values(
-            "/row @| group(::dept) | top(1, ::salary) @| ungroup \
+            "/row | .dept(::dept) @|{.dept} top(1, ::salary) \
              | %($.dept; ::name; ::salary)"
         ),
         vec![
             "%(dept = \"eng\"; name = \"Ada\"; salary = \"120000\")",
-            "%(dept = \"sales\"; name = \"Bo\"; salary = \"45000\")",
-            "%(dept = \"ops, misc\"; name = \"Dee\"; salary = null)"
+            "%(dept = \"sales\"; name = \"Bo\"; salary = \"45000\")"
         ]
     );
-    // a keyed command on `|` rebuilds the list topic from the
-    // surviving members, so reductions see the trimmed group
+    // the surviving thread carries its value on, so a reduction
+    // after the keyed command sees the trimmed partition
     assert_eq!(
-        values("/row::salary @| group(::dept) | top(1, $_) | sum | %($.dept; max = $_)"),
+        values("/row::salary | .dept(::dept) @|{.dept} top(1, $_) | sum | %($.dept; max = $_)"),
         vec![
             "%(dept = \"eng\"; max = 120000)",
-            "%(dept = \"sales\"; max = 45000)",
-            "%(dept = \"ops, misc\"; max = null)"
+            "%(dept = \"sales\"; max = 45000)"
         ]
     );
     // ungroup restores the pre-group typing: an unprojected
     // context comes back as nodes
     assert_eq!(
-        nodes("/row @| group(::dept) | top(1, ::age) @| ungroup"),
+        nodes("/row | .dept(::dept) @|{.dept} top(1, ::age)"),
         vec!["/row[3]", "/row[2]", "/row[4]"]
     );
     // ... and a projected one as its values
     assert_eq!(
-        values("/row::name @| group(::dept) | top(1, ::age) @| ungroup"),
+        values("/row::name | .dept(::dept) @|{.dept} top(1, ::age)"),
         vec!["Cy", "Bo", "Dee"]
     );
     // a keyed command on the plain pipe with no group before it is
@@ -358,7 +358,9 @@ fn interpolation() {
 #[test]
 fn root_anchor_in_subcontexts() {
     assert_eq!(
-        values("/row @| group(::dept) | count | .n | .t(^/row @| count) | $.n * 100 idiv $.t"),
+        values(
+            "/row | .dept(::dept) @|{.dept} count | .n | .t(^/row @| count) | $.n * 100 idiv $.t"
+        ),
         vec!["50", "25", "25"]
     );
     // at the top level the anchor is inert (root is already the
@@ -476,7 +478,7 @@ fn register_record_view() {
     // a group's key regs are already named: %. after a reduction
     // labels the row without %()
     assert_eq!(
-        values("/row @| group(::dept) | count | .n | %."),
+        values("/row | .dept(::dept) @|{.dept} count | .n | %."),
         vec![
             "%(dept = \"eng\"; n = 2)",
             "%(dept = \"sales\"; n = 1)",
@@ -554,7 +556,7 @@ fn captures() {
     );
     // ... and group keys
     assert_eq!(
-        values(r#"/row | [::dept == (/^(\w)/)] @| group("initial", $1) | count | .n | %."#),
+        values(r#"/row | [::dept == (/^(\w)/)] | .initial($1) @|{.initial} count | .n | %."#),
         vec![
             "%(initial = \"e\"; n = 2)",
             "%(initial = \"s\"; n = 1)",
@@ -609,7 +611,7 @@ fn correlated_subqueries() {
     // condition, each cell counting with THIS group's key
     assert_eq!(
         values(
-            "/row @| group(::dept) \
+            "/row | .dept(::dept) @|{.dept} first \
              | .adults(^/row[::dept = $.dept][::age >= 18] @| count) | %."
         ),
         vec![
@@ -631,8 +633,10 @@ fn correlated_subqueries() {
         values("/row @| [..2] | ::age | .t(^/row[:index = $$__:index]::name) | $.t"),
         vec!["Ada", "Bo"]
     );
-    // an unset recall is null at any level
-    assert_eq!(values("/row[1] | $.x"), vec![""]);
+    // a recall of a name no push made is refused at parse
+    // (2026-11-04), at any level
+    let e = quarb::run("/row[1] | $.x", &CsvAdapter::parse(DOC).unwrap()).unwrap_err();
+    assert!(e.to_string().contains("no push '.x'"), "{e}");
     // the capsa is shared through nested bodies: `$.a` two bodies
     // down is the push the top-level pipeline made
     assert_eq!(

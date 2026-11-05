@@ -108,14 +108,14 @@ fn a_reduction_reads_its_field_through_of_and_a_keyed_aggregate_takes_the_topic_
     // draft 164: the field to reduce is the `--of` option; a key
     // written as an operand is a surplus operand
     assert_eq!(
-        run("/rows/* | %(k = ::k; x = ::x) @| group(k = $_:k) | sum(--of=:x)").unwrap(),
+        run("/rows/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} sum(--of=:x)").unwrap(),
         vec!["6", "3"]
     );
     assert_eq!(
-        run("/rows/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(--sample -o=:x)").unwrap(),
+        run("/rows/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} variance(--sample -o=:x)").unwrap(),
         vec!["8", "null"]
     );
-    let e = run("/rows/* | %(k = ::k; x = ::x) @| group(k = $_:k) | sum(:x)").unwrap_err();
+    let e = run("/rows/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} sum(:x)").unwrap_err();
     assert!(
         e.to_string().contains("'sum' takes no operand, 1 given"),
         "{e}"

@@ -115,6 +115,10 @@ fn the_same_brackets_on_the_pipes_and_on_values() {
         ["#(@(pages);\n  %(683);\n  %(474))"]
     );
     // a register holding no position is the condition it always
-    // was: null keeps no row
-    assert_eq!(names(&format!("{t} | [$.nope]")), ["#(@(name; pages))"]);
+    // was: null keeps no row (a name no push made refuses at parse
+    // time, ruling 2026-11-04, so the null is pushed)
+    assert_eq!(
+        names(&format!("{t} | .nope(null) | [$.nope]")),
+        ["#(@(name; pages))"]
+    );
 }

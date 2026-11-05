@@ -4,8 +4,8 @@
 //! which the graph reads off the query's reflection. The parser
 //! holds an expander and never evaluates anything itself.
 use crate::syntax::ast::{
-    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, Group, Operand, PathElem,
-    PredExpr, Predicate, Projection, Query, Reach, RegRef, TraitClause,
+    Anchor, Arg, ArithOp, Axis, Branch, CmpOp, Command, ConcatMode, Operand, PathElem, PredExpr,
+    Predicate, Projection, Query, Reach, RegRef, TraitClause,
 };
 use crate::value::Value;
 

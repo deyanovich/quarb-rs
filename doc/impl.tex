@@ -1206,10 +1206,11 @@ root-anchored sequence of hops, each an axis followed by a name:
     \texttt{min\_by}/\texttt{max\_by}, \texttt{top}/\texttt{bottom};
     capsa-preserving, missing keys do not compete), whole-context
     positional selection, and per-capsa filters \\
-\texttt{@| group(::k) | top(2, ::v) @| ungroup}, \texttt{\$ord}
-  & \live value-keyed grouping (list topics + member capsae, keys as
-    named regs), per-group keyed commands on the plain pipe,
-    \texttt{ungroup} flattening, and the \texttt{\$ordinal} operand
+\texttt{| .k(::k) @|{.k} top(2, ::v)}, \texttt{\$ord}
+  & \live the fold by a regula (one partition per value of the
+    pushed key, the command per partition, the key on top of each
+    folded thread; \texttt{group} retired 2026-11-04),
+    \texttt{ungroup} for windows, and the \texttt{\$ordinal} operand
     (position in the current context, scope-threaded into filters) \\
 \texttt{| \%.}, \texttt{qua q.quarb}
   & \live the register record view (named regs as a record: the

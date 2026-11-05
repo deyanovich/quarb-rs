@@ -174,6 +174,14 @@ pub(crate) fn recall_index(register: &[Reg], r: &RegRef) -> Option<usize> {
     }
 }
 
+/// The regula a fold selector names (spec: The Pipeline, the fold by a
+/// regula), as the capsa reference finds it: a name as the recall does,
+/// `.` the last value regula, the positions counting the value side
+/// alone, as `$.N` does — never a mark; a fold by a mark names it.
+pub(crate) fn fold_index(register: &[Reg], r: &RegRef) -> Option<usize> {
+    recall_index(register, r)
+}
+
 /// The value a register reference recalls.
 pub(crate) fn recall(register: &[Reg], r: &RegRef) -> Value {
     if matches!(r, RegRef::Session(_) | RegRef::SessionRecord) {

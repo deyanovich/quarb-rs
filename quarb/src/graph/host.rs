@@ -44,12 +44,6 @@ impl<A: AstAdapter> Host for A {
         }
         Prov::at(ext.node.into(), command_now())
     }
-    fn origins_at(&self, ext: &GraphExt) -> Origins {
-        if ext.unplaced {
-            return Origins::at(Position::default(), command_now());
-        }
-        Origins::at(ext.node.into(), command_now())
-    }
     fn origin_at(&self, ext: &GraphExt) -> Origin {
         Origin {
             position: if ext.unplaced {
@@ -330,6 +324,7 @@ impl<A: AstAdapter> Host for A {
             arrived: scope.ext.arrived.clone(),
             unplaced: at.unplaced,
             walk: None,
+            trail: at.trail.clone(),
         }
     }
     fn graft(&self, text: &str, notation: Option<&str>) -> Option<Result<GraphExt, String>> {
@@ -381,7 +376,26 @@ impl<A: AstAdapter> Host for A {
                     &c.ext.bindings,
                     &c.register,
                     false,
+                    c.ext.trail.clone(),
                 ) {
+                    let topic = branch
+                        .projection
+                        .as_ref()
+                        .map(|p| project(self, ext.node, p));
+                    // the branch's own projection is a step of the
+                    // lineage after the last hop
+                    let trail = match &branch.projection {
+                        Some(p) if crate::graph::threads::recording() => {
+                            crate::graph::threads::step(
+                                &ext.trail,
+                                &crate::syntax::unparse::projection(p),
+                                false,
+                                Some(ext.node),
+                                topic.as_ref(),
+                            )
+                        }
+                        _ => ext.trail.clone(),
+                    };
                     out.push(Capsa {
                         window: None,
                         prov: if branch.projection.is_some() {
@@ -390,15 +404,13 @@ impl<A: AstAdapter> Host for A {
                             Prov::default()
                         },
                         register,
-                        topic: branch
-                            .projection
-                            .as_ref()
-                            .map(|p| project(self, ext.node, p)),
+                        topic,
                         members: Vec::new(),
                         captures: c.captures.clone(),
                         named: c.named.clone(),
                         ext: GraphExt {
                             bindings: c.ext.bindings.clone(),
+                            trail,
                             ..ext
                         },
                     });
@@ -441,6 +453,18 @@ impl<A: AstAdapter> Host for A {
         let kind = crate::graph::koine::Render::from_name(kind)
             .expect("command names are valid render names");
         crate::graph::koine::render_values(values, kind)
+    }
+    fn render_threads(
+        &self,
+        threads: &[Thread<GraphExt>],
+        spec: &crate::graph::threads::ThreadsSpec,
+    ) -> Result<String, String> {
+        Ok(crate::graph::threads::render(self, threads, spec, &|n| {
+            node_scalar(self, n)
+        }))
+    }
+    fn note_step(&self, command: &Command, inputs: &[GraphExt], outputs: &mut [Thread<GraphExt>]) {
+        crate::graph::threads::record_step(command, inputs, outputs);
     }
     fn render_tree(
         &self,
@@ -812,6 +836,8 @@ pub(crate) fn eval_with(
     options: Option<Run>,
 ) -> QueryResult {
     let _run = enter(options);
+    // the lineage for `@| threads`, when the query asks for it
+    crate::graph::threads::begin(query);
     // the mounted document's declared units reach every quantity
     // coercion of the run, the table builder's included
     crate::value::ambient::with_unit_scale(&|e| adapter.unit_scale(e), || {
@@ -943,9 +969,6 @@ impl Host for Calc {
             command: command_now(),
             ..Origin::default()
         }
-    }
-    fn origins_at(&self, _: &()) -> Origins {
-        Origins::at(Position::default(), command_now())
     }
     fn quantifier_bound(&self) -> usize {
         // the run's bound first (`--quantifier-bound`), as the graph

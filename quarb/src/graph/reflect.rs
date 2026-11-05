@@ -1268,10 +1268,20 @@ impl QueryArbor {
                 let id = self.intern(Some("expr-push"), props, Some(parent));
                 self.walk_operand(expr, id);
             }
-            Command::AggPush { name, body } => {
+            Command::AggPush {
+                name, body, regs, ..
+            } => {
                 let mut props = Vec::new();
                 if let Some(n) = name {
                     props.push(("name".to_string(), Value::Str(n.clone())));
+                }
+                // per partition: the selector as written, as the fold
+                // reflects its own
+                if !regs.is_empty() {
+                    props.push((
+                        "group".to_string(),
+                        Value::Str(crate::syntax::unparse::fold_selector(regs)),
+                    ));
                 }
                 let id = self.intern(Some("agg-push"), props, Some(parent));
                 self.walk_operand(body, id);
@@ -1364,6 +1374,19 @@ impl QueryArbor {
             Command::Map(inner) => {
                 let id = self.intern(Some("map"), Vec::new(), Some(parent));
                 self.walk_command(inner, id);
+            }
+            // `@|{.g} count` — the fold by a regula: the command's own
+            // node, with the selector as written under `group` (null,
+            // absent, for the global fold)
+            Command::Fold { regs, command } => {
+                let first = self.nodes.len();
+                self.walk_command(command, parent);
+                if let Some(node) = self.nodes.get_mut(first) {
+                    node.props.push((
+                        "group".to_string(),
+                        Value::Str(crate::syntax::unparse::fold_selector(regs)),
+                    ));
+                }
             }
             Command::Attach { name, command } => {
                 let mut props = Vec::new();
@@ -2450,7 +2473,7 @@ mod tests {
     #[test]
     fn every_reflected_node_carries_its_form() {
         let arbor = QueryArbor::parse(
-            r#"/a/b<x>[::n > 1 && ::m *= "q"] | ::k @| group(::k) | %(s = ($_ | sum)) | top(2; :s)"#,
+            r#"/a/b<x>[::n > 1 && ::m *= "q"] | .k(::k) | ::k @|{.k} %(s = (@_ @| sum)) @| top(2; :s)"#,
         )
         .unwrap();
         let missing: Vec<String> = arbor

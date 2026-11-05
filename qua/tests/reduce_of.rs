@@ -63,16 +63,17 @@ fn the_option_reads_an_expression_on_each_item_over_the_context() {
 #[test]
 fn after_group_the_option_reads_each_member() {
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | sum(--of=:x)").unwrap(),
+        run("/rows/* | %(::k; ::x) | .k(::k) @|{.k} sum(--of=:x)").unwrap(),
         vec!["6", "3"]
     );
     assert_eq!(
-        run("/rows/* | %(::k; ::x; ::p) @| group(::k) | mean(-o=:x * :p)").unwrap(),
+        run("/rows/* | %(::k; ::x; ::p) | .k(::k) @|{.k} mean(-o=:x * :p)").unwrap(),
         vec!["6", "3"]
     );
     // the spec's own example
     assert_eq!(
-        run("/rows/* | %(::k; n = ::x) @| group(::k) | sum(--of=:n) | %($.k; total = $_)").unwrap(),
+        run("/rows/* | %(::k; n = ::x) | .k(::k) @|{.k} sum(--of=:n) | %($.k; total = $_)")
+            .unwrap(),
         vec!["%(k = \"a\"; total = 6)", "%(k = \"b\"; total = 3)"]
     );
     // a list topic without members: each item as the topic
@@ -101,17 +102,19 @@ fn a_numeric_reducer_over_lists_says_so() {
 #[test]
 fn a_reducer_in_a_body_over_a_group_takes_the_members_together() {
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | %(k = $.k; n = count; s = ($_ | sum(--of=:x)))")
-            .unwrap(),
+        run(
+            "/rows/* | %(::k; ::x) | .k(::k) @|{.k} %(k = $.k; n = count; s = ($_ | sum(--of=:x)))"
+        )
+        .unwrap(),
         [r#"%(k = "a"; n = 2; s = 6)"#, r#"%(k = "b"; n = 1; s = 3)"#]
     );
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | %(n = ($_ | count))").unwrap(),
+        run("/rows/* | %(::k; ::x) | .k(::k) @|{.k} %(n = ($_ | count))").unwrap(),
         ["%(n = 2)", "%(n = 1)"]
     );
     // a navigation body still runs per member
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | %(xs = ($_ | :x @| join(\",\")))").unwrap(),
+        run("/rows/* | %(::k; ::x) | .k(::k) @|{.k} %(xs = ($_ | :x @| join(\",\")))").unwrap(),
         [r#"%(xs = "1,5")"#, r#"%(xs = "3")"#]
     );
 }
@@ -123,7 +126,7 @@ fn a_key_written_as_an_operand_is_refused_with_the_signature() {
         e.contains("'sum' takes no operand, 1 given") && e.contains("signature"),
         "{e}"
     );
-    let e = refuse("/rows/* | %(::k; ::x) @| group(::k) | sum(:x)");
+    let e = refuse("/rows/* | %(::k; ::x) | .k(::k) @|{.k} sum(:x)");
     assert!(e.contains("'sum' takes no operand, 1 given"), "{e}");
     // (an alias is spelled canonical at parse: the refusal names `var`)
     let e = refuse("/rows/* @| variance(::x; --sample)");
@@ -141,7 +144,7 @@ fn a_key_written_as_an_operand_is_refused_with_the_signature() {
     );
     // nested, the first argument is the input: `(:x | sum)`
     assert_eq!(
-        run("/rows/* | %(::k; ::x) @| group(::k) | %($.k; total = sum(:x))").unwrap(),
+        run("/rows/* | %(::k; ::x) | .k(::k) @|{.k} %($.k; total = sum(:x))").unwrap(),
         vec!["%(k = \"a\"; total = 6)", "%(k = \"b\"; total = 3)"]
     );
     // the option needs its expression; an unknown option refuses
@@ -169,7 +172,7 @@ fn the_option_round_trips_through_unparse() {
     for q in [
         "/rows/* @| sum(--of=::x)",
         "/rows/* @| mean(--of=::x * ::p)",
-        "/rows/* | %(::k; ::x) @| group(::k) | variance(--sample --of=:x)",
+        "/rows/* | %(::k; ::x) | .k(::k) @|{.k} variance(--sample --of=:x)",
     ] {
         let printed = quarb::Query::parse(q, &doc()).unwrap().canonical();
         let again = quarb::Query::parse(&printed, &doc()).unwrap().canonical();

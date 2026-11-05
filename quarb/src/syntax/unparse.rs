@@ -1214,6 +1214,14 @@ pub(crate) fn literal(v: &Value) -> String {
         // Null displays as empty text; as a literal it must spell
         // its keyword or the round-trip drops it.
         Value::Null => "null".to_string(),
+        // A projector displays as its bare key (the text coercion);
+        // as a literal it is spelled as written, `::a`, or the
+        // round-trip reads a word.
+        Value::Projection {
+            ladder,
+            key,
+            typing,
+        } => Value::projector_spelling(*ladder, key, typing.as_ref()),
         other => other.to_string(),
     }
 }
@@ -1341,11 +1349,6 @@ pub(crate) fn command(st: &Command) -> String {
                 record_args(call, "; ")
             )
         }
-        // `group(...)` follows the record convention: its keys print
-        // as a record's do.
-        Command::Agg(call) if call.name == "group" => {
-            format!("@| group{}", record_args(call, "; "))
-        }
         Command::Agg(call) if call.name == "#" && !call.args.is_empty() => {
             format!("@| {}", reshape_text(call))
         }
@@ -1409,10 +1412,31 @@ pub(crate) fn command(st: &Command) -> String {
             Some(n) => format!("| .{}({})", push_name(n), body_text(expr)),
             None => format!("| .({})", body_text(expr)),
         },
-        Command::AggPush { name, body } => match name {
+        // `| .n@(body)` / `| .n@{.x}(body)` — the aggregate push, the
+        // sigil glued to the name, the partition's selector in braces
+        // `@| .n(body)` — the aggregation pipe's push, one thread
+        Command::AggPush {
+            name,
+            body,
+            keep: false,
+            ..
+        } => match name {
             Some(n) => format!("@| .{}({})", push_name(n), body_text(body)),
             None => format!("@| .({})", body_text(body)),
         },
+        Command::AggPush {
+            name, body, regs, ..
+        } => {
+            let sel = if regs.is_empty() {
+                String::new()
+            } else {
+                format!("{{{}}}", fold_selector(regs))
+            };
+            match name {
+                Some(n) => format!("| .{}@{sel}({})", push_name(n), body_text(body)),
+                None => format!("| .@{sel}({})", body_text(body)),
+            }
+        }
         Command::AggRecord { call, enriched } => format!(
             "@| {}{}",
             if *enriched { "%%" } else { "%" },
@@ -1434,6 +1458,16 @@ pub(crate) fn command(st: &Command) -> String {
         Command::Select(p) => format!("@| {}", predicate(p)),
         Command::Filter(e) => format!("| [{}]", pred_expr(e)),
         Command::Recall(r) => format!("| {}", reg(r)),
+        // `@|{.g} count` — the fold by a regula: the selector glued to
+        // the pipe, the command as it prints after a bare `@|`
+        Command::Fold {
+            regs,
+            command: inner,
+        } => {
+            let text = command(inner);
+            let rest = text.strip_prefix("@| ").unwrap_or(&text);
+            format!("@|{{{}}} {rest}", fold_selector(regs))
+        }
         Command::Splice(r) => format!("| &{}", reg(r)),
         Command::SpliceAs { reg: r, shot } => {
             format!("| &{}{}", reg(r), if *shot { "#" } else { "!" })
@@ -1648,6 +1682,18 @@ fn fn_call(call: &crate::syntax::ast::FnCall) -> String {
     format!("{}({})", call.name, text)
 }
 
+/// The fold's selector as written: the capsa references without
+/// their `$` (`.g`, `.`, `.-1`, `.2`), several joined by `; `.
+pub(crate) fn fold_selector(regs: &[RegRef]) -> String {
+    regs.iter()
+        .map(|r| {
+            let full = reg(r);
+            full.strip_prefix('$').unwrap_or(&full).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub(crate) fn reg(r: &RegRef) -> String {
     match r {
         RegRef::Top => "$.".to_string(),
@@ -1718,8 +1764,8 @@ mod tests {
             "/row @| %(v = $_) ++ %(w = 1) | 1",
             "= @(1; @(2)) | flatten(1)",
             "= %(@(a; b) = @(1; 2))",
-            "= %(id = 7; $.k = $.v) | keys",
-            "/a | %($.k = $_) | values",
+            "= 1 | .k | .v | %(id = 7; $.k = $.v) | keys",
+            "/a | .k | %($.k = $_) | values",
             "= 1..6 @| #(--width=2) | dim",
         ] {
             assert_fixpoint(q);
@@ -1805,8 +1851,8 @@ mod tests {
             "/a | ((!3))::name",
             "/a | .v(1) | ((!$.v:%origin:id)):name",
             "/a | ((!@(2; 3)))/*::x",
-            "/a | $.v:%provenance",
-            "/a | $.v:@provenance",
+            "/a | .v | $.v:%provenance",
+            "/a | .v | $.v:@provenance",
         ] {
             // A path-headed expression command prints parenthesized,
             // as every such command does; the spelling inside is the
@@ -1831,6 +1877,37 @@ mod tests {
         // the rounded hole's opener is escaped inside a string
         assert_eq!(rt("= 'a(,b'"), r#"= "a\(,b""#);
         assert_fixpoint(r#"= "a\(,b""#);
+    }
+
+    /// The fold's selector prints as written, several references
+    /// joined by `; `.
+    #[test]
+    fn fold_selector_round_trips() {
+        for q in [
+            "/a | .g(::x) @|{.g} count",
+            "/a | .g(::x) | .h(::y) @|{.g; .h} count",
+            "/a | .g(::x) | .h(::y) @|{.; .-2} sum",
+        ] {
+            assert_eq!(assert_fixpoint(q), q);
+        }
+        assert_eq!(
+            rt("/a | .g(::x) | .h(::y) @|{.g;.h} count"),
+            "/a | .g(::x) | .h(::y) @|{.g; .h} count"
+        );
+        // the rounded spellings canonicalize to the symbols
+        assert_eq!(
+            rt("/a | .g(::x) | .h(::y) *__(.g; .h) count"),
+            "/a | .g(::x) | .h(::y) @|{.g; .h} count"
+        );
+    }
+
+    /// A projector at the expression head is a literal (draft 166);
+    /// it prints as written, not as its bare key.
+    #[test]
+    fn head_projector_keeps_its_ladder() {
+        for q in ["= ::a", "= :a", "= :::a", "= ::a | count", "= :A<int>"] {
+            assert_eq!(assert_fixpoint(q), q);
+        }
         // grouping prints only where the parse needs it
         assert_eq!(rt("= (1 + 2) * 3"), "= (1 + 2) * 3");
         assert_eq!(rt("= 1 + 2 * 3"), "= 1 + 2 * 3");

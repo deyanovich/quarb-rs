@@ -328,7 +328,7 @@ fn command_pipe(command: &Command) -> &'static str {
     match command {
         Command::Agg(_)
         | Command::Select(_)
-        | Command::AggPush { .. }
+        | Command::AggPush { keep: false, .. }
         | Command::AggRecord { .. }
         | Command::AggExpr(_)
         | Command::AggRecall(_) => "@|",
@@ -470,7 +470,8 @@ fn lp_in_command(c: &Command) -> Option<String> {
         Command::Subcontext { body, .. } => leftover_param(body),
         Command::Map(inner)
         | Command::Repeat { command: inner, .. }
-        | Command::Attach { command: inner, .. } => lp_in_command(inner),
+        | Command::Attach { command: inner, .. }
+        | Command::Fold { command: inner, .. } => lp_in_command(inner),
         Command::Nav(b) => b.steps.iter().find_map(lp_in_elem),
         Command::Select(p) => lp_in_predicate(p),
         _ => None,
@@ -614,7 +615,10 @@ fn rename_in_command(c: &mut Command, f: &mut dyn FnMut(&str) -> String) {
             rename_name(name, f);
             rename_in_query(body, f);
         }
-        Command::ExprPush { name, expr } | Command::AggPush { name, body: expr } => {
+        Command::ExprPush { name, expr }
+        | Command::AggPush {
+            name, body: expr, ..
+        } => {
             rename_name(name, f);
             rename_in_operand(expr, f);
         }
@@ -637,7 +641,9 @@ fn rename_in_command(c: &mut Command, f: &mut dyn FnMut(&str) -> String) {
         | Command::AggRecall(r) => rename_reg(r, f),
         Command::Select(Predicate::Expr(e)) | Command::Filter(e) => rename_in_pred(e, f),
         Command::Nav(b) => rename_in_branch(b, f),
-        Command::Map(inner) | Command::Repeat { command: inner, .. } => rename_in_command(inner, f),
+        Command::Map(inner)
+        | Command::Repeat { command: inner, .. }
+        | Command::Fold { command: inner, .. } => rename_in_command(inner, f),
         Command::Hole { hole, .. } => rename_in_operand(&mut hole.expr, f),
         Command::Select(_)
         | Command::Param { .. }
@@ -1093,9 +1099,9 @@ pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         | Command::RecordWith(_)
         | Command::Spread { .. }
         | Command::Map(_) => PipeMode::Scalar,
-        Command::Repeat { command, .. } | Command::Attach { command, .. } => {
-            command_mode_out(command, cur)
-        }
+        Command::Repeat { command, .. }
+        | Command::Attach { command, .. }
+        | Command::Fold { command, .. } => command_mode_out(command, cur),
     }
 }
 
@@ -1273,6 +1279,7 @@ impl Parser<'_> {
         }
         validate_correlation_refs(&query)?;
         validate_keyed_commands(&query)?;
+        refuse_unmade_names(&query)?;
         self.sweep_captures(&query)?;
         Ok(query)
     }
@@ -1759,6 +1766,19 @@ impl Parser<'_> {
                 Some(Token::At) => {
                     self.pos += 1;
                     self.expect(Token::Pipe, "'|' after '@' for aggregation")?;
+                    // `@|{.g}` — the fold by a regula: the selector
+                    // read first, the command after it wrapped below
+                    let fold = self.fold_selector()?;
+                    let before = pipeline.len();
+                    if fold.is_some()
+                        && (matches!(self.peek(), Some(Token::Amp | Token::Expansion(_)))
+                            || self.lone_param_ahead().is_some())
+                    {
+                        return Err(QuarbError::parse(
+                            "the fold's selector takes an aggregate written out (@|{.g} count); \
+                             a fragment, an expansion or a parameter stands after a bare '@|'",
+                        ));
+                    }
                     if matches!(self.peek(), Some(Token::Amp)) {
                         let before = pipeline.len();
                         self.invoke_pipeline_fragment("@|", pipeline)?;
@@ -1804,6 +1824,7 @@ impl Parser<'_> {
                             | Predicate::Computed(_)) => {
                                 // Select preserves the mode.
                                 pipeline.push(Command::Select(pred));
+                                wrap_fold(pipeline, before, fold);
                                 continue;
                             }
                             Predicate::Expr(_) => {
@@ -1823,17 +1844,20 @@ impl Parser<'_> {
                         let command = Command::AggExpr(self.additive()?);
                         mode = command_mode_out(&command, mode);
                         pipeline.push(command);
+                        wrap_fold(pipeline, before, fold);
                         continue;
                     }
                     if let Some(command) = self.agg_sigil_command()? {
                         mode = command_mode_out(&command, mode);
                         pipeline.push(command);
+                        wrap_fold(pipeline, before, fold);
                         continue;
                     }
                     let call = self.func_call()?;
                     let command = agg_command(call)?;
                     mode = command_mode_out(&command, mode);
                     pipeline.push(command);
+                    wrap_fold(pipeline, before, fold);
                 }
                 _ => break,
             }
@@ -1850,7 +1874,96 @@ impl Parser<'_> {
     /// (`.name%(…)`), the subcontext or computed body
     /// (`.name(body)`), else the bare push (a mark in navigation
     /// mode). Shared by the plain and the attaching spelling.
+    /// An aggregate push's body, either spelling (ruling 2026-11-04):
+    /// an `@|` body, the context its stream — a command call heading
+    /// it is read as the pipe command it names with the stream on
+    /// stdin where the command has room for every operand written
+    /// (`.all@(join(", "))` joins the context), and as the call
+    /// operand it is elsewhere, its first argument the input, where
+    /// the operands overflow the command's parameters (`sum(:n)` is
+    /// `(:n | sum)`, the stdin slot's reading); anything else is the
+    /// expression over the seed, with its inline pipe tail.
+    fn agg_push_body(&mut self) -> Result<Operand> {
+        if let Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) = self.peek()
+            && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            && text != "q"
+            && (crate::syntax::registry::spec(text).is_some()
+                || crate::syntax::registry::split_env(text).is_some())
+        {
+            let mut call = self.func_call()?;
+            self.check_unit_call(&call)?;
+            let written = call
+                .args
+                .iter()
+                .filter(|a| !matches!(a, Arg::Opt { .. }))
+                .count();
+            let overflow =
+                crate::syntax::man::operand_bound(&call.name).is_some_and(|bound| written > bound);
+            let head = if overflow {
+                let at = call
+                    .args
+                    .iter()
+                    .position(|a| !matches!(a, Arg::Opt { .. }))
+                    .expect("an operand written");
+                match call.args.remove(at) {
+                    Arg::Expr(e) => e,
+                    Arg::Lit(v) | Arg::Key(v) => Operand::Lit(v),
+                    other => {
+                        call.args.insert(at, other);
+                        Operand::Seed
+                    }
+                }
+            } else {
+                Operand::Seed
+            };
+            let mut commands = vec![func_command(call)?];
+            commands.extend(self.inline_pipe_tail()?);
+            return Ok(Operand::Piped {
+                expr: Box::new(head),
+                commands,
+            });
+        }
+        let expr = self.cond_expr()?;
+        let commands = self.inline_pipe_tail()?;
+        Ok(if commands.is_empty() {
+            expr
+        } else {
+            Operand::Piped {
+                expr: Box::new(expr),
+                commands,
+            }
+        })
+    }
+
     fn push_rest(&mut self, name: Option<String>) -> Result<Command> {
+        // `.name@(body)` / `.name@{.x}(body)` — the aggregate push
+        // (ruling 2026-11-04): the body over the whole context, or
+        // over each partition of the regulae in the braces, filed on
+        // every thread; the threads pass on.
+        if matches!(self.peek(), Some(Token::PushAt)) {
+            self.pos += 1;
+            let regs = self.fold_selector()?.unwrap_or_default();
+            if !matches!(self.peek(), Some(Token::LParen)) {
+                return Err(QuarbError::parse(
+                    "the aggregate push takes a body: '| .name@(body)' files the body's value \
+                     over the whole context on every thread, '| .name@{.x}(body)' per partition \
+                     of the regula .x",
+                ));
+            }
+            self.pos += 1;
+            let body = self.agg_push_body()?;
+            self.expect(Token::RParen, "')' to close the aggregate push's body")?;
+            return Ok(Command::AggPush {
+                name,
+                body,
+                regs,
+                keep: true,
+            });
+        }
         // `.%(...)` / `.name%(...)` — the record push
         //: the constructor's fields, built and
         // filed in one step; `.%%(...)` the enriched view.
@@ -5614,7 +5727,7 @@ impl Parser<'_> {
         let mut args = Vec::new();
         if matches!(self.peek(), Some(Token::LParen)) {
             self.pos += 1;
-            // The record-convention calls (`rec`, `record`, `group`)
+            // The record-convention calls (`rec`, `record`)
             // take `key = value` items and `;` between them as the
             // sigil forms do.
             let convention = is_record_convention(&name);
@@ -5780,7 +5893,7 @@ impl Parser<'_> {
                         break;
                     }
                     if convention {
-                        self.record_item(args, name != "group")?;
+                        self.record_item(args, true)?;
                     } else if name == "csv"
                         && args.is_empty()
                         && let Some(Token::Name {
@@ -9080,6 +9193,7 @@ impl Parser<'_> {
             | Command::RecordPush { .. }
             | Command::FieldsPush
             | Command::Subcontext { .. }
+            | Command::AggPush { .. }
             | Command::Attach { .. } => Err(QuarbError::parse(
                 "a pipe inside an expression transforms a value; \
                      pushes belong to real capsae (use a command)",
@@ -9175,34 +9289,24 @@ impl Parser<'_> {
                     name = Some(q.clone());
                     self.pos += 1;
                 }
-                if let Some(n) = &name
-                    && text.len() > 1
-                    && !n.chars().next().is_some_and(|c| c.is_alphabetic())
-                {
-                    return Err(QuarbError::parse(format!(
-                        "a push name starts with a letter ('@| .name(body)'); quote any other \
-                         ('@| .\"{n}\"(body)')"
-                    )));
-                }
                 if !matches!(self.peek(), Some(Token::LParen)) {
                     return Err(QuarbError::parse(
                         "the aggregate push takes a body: '@| .name(body)' files the body's \
-                         value on every capsa (a plain '| .name' files each topic)",
+                         value on the one thread the pipe answers; '| .name@(body)' on every \
+                         thread (a plain '| .name' files each topic)",
                     ));
                 }
                 self.pos += 1;
-                let expr = self.cond_expr()?;
-                let commands = self.inline_pipe_tail()?;
-                let body = if commands.is_empty() {
-                    expr
-                } else {
-                    Operand::Piped {
-                        expr: Box::new(expr),
-                        commands,
-                    }
-                };
+                let body = self.agg_push_body()?;
                 self.expect(Token::RParen, "')' to close the aggregate push's body")?;
-                Ok(Some(Command::AggPush { name, body }))
+                // the aggregation pipe's push (ruling 2026-11-04): the
+                // context collapses to the one thread the pipe answers
+                Ok(Some(Command::AggPush {
+                    name,
+                    body,
+                    regs: Vec::new(),
+                    keep: false,
+                }))
             }
             Some(Token::Percent) => {
                 let head = self.pos;
@@ -10475,6 +10579,70 @@ impl Parser<'_> {
 
     /// Expand a fragment invocation in operand position.
     /// The register after `&`: `&$.p` splices the quarq it holds.
+    /// The fold's selector glued to the aggregation pipe (spec: The
+    /// Pipeline, the fold by a regula): `{.name}`, `{.}` the last
+    /// push, `{.N}` and `{.-N}` by position, read as the capsa
+    /// reference is without its `$`; several references separated
+    /// by `;` (`{.who; .w}`) fold by the tuple of their values; the
+    /// rounded form `*__(.who; .w)` (parentheses, either pipe
+    /// spelling) lexes to the same token. None when no selector
+    /// stands.
+    fn fold_selector(&mut self) -> Result<Option<Vec<RegRef>>> {
+        let Some(Token::FoldSel { text, glued }) = self.peek() else {
+            return Ok(None);
+        };
+        if !glued {
+            return Err(QuarbError::parse(
+                "the fold's selector is glued to the pipe; write @|{.g} or *__(.g)",
+            ));
+        }
+        let text = text.clone();
+        self.pos += 1;
+        text.split(';')
+            .map(|part| Self::fold_reference(part.trim()))
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
+    }
+
+    /// One capsa reference of the selector, without its `$`.
+    fn fold_reference(text: &str) -> Result<RegRef> {
+        let Some(rest) = text.strip_prefix('.') else {
+            return Err(QuarbError::parse(
+                "the selector names a regula as the capsa does: @|{.name}, @|{.} for the last push, @|{.-1}",
+            ));
+        };
+        let reg = if rest.is_empty() {
+            RegRef::Top
+        } else if let Some(n) = rest.strip_prefix('-') {
+            match n.parse::<usize>() {
+                Ok(n) if n > 0 => RegRef::Back(n),
+                _ => {
+                    return Err(QuarbError::parse(
+                        "the selector names a regula as the capsa does: @|{.name}, @|{.} for the last push, @|{.-1}",
+                    ));
+                }
+            }
+        } else if let Ok(n) = rest.parse::<usize>() {
+            if n == 0 {
+                return Err(QuarbError::parse(
+                    "the selector names a regula as the capsa does: @|{.name}, @|{.} for the last push, @|{.-1}",
+                ));
+            }
+            RegRef::Index(n)
+        } else if rest.chars().next().is_some_and(char::is_alphabetic)
+            && rest.chars().all(crate::syntax::lexer::is_name_char)
+        {
+            // a regula and nothing more: no projection or expression
+            // rides the selector (categories are pushed before the fold)
+            RegRef::Named(rest.to_string())
+        } else {
+            return Err(QuarbError::parse(
+                "the selector names a regula as the capsa does: @|{.name}, @|{.} for the last push, @|{.-1}",
+            ));
+        };
+        Ok(reg)
+    }
+
     fn splice_register(&mut self) -> Result<RegRef> {
         match self.operand()? {
             Operand::Recall(r) => Ok(r),
@@ -11334,8 +11502,8 @@ fn agg_command(call: FnCall) -> Result<Command> {
 }
 
 /// A `|` command: a scalar, or an aggregate that also works per capsa
-/// — a keyed aggregate on a group's members (`@| group(::k) | top(2,
-/// ::v)`), a reducing one on a list topic (`@| group(::k) | mean`).
+/// — a keyed aggregate on a window's members (`@| window(-1..1) |
+/// max_by(::v)`), a reducing one on a list topic (`| :rows | mean`).
 /// A whole-context command (`ungroup`, `window`, `shift`) never takes
 /// the plain pipe. The arguments pass the registry's check.
 /// The refusal of a unit operand nobody knows, in the command's
@@ -11381,7 +11549,7 @@ fn check_operand_bound(call: &FnCall, nested: bool, agg: bool) -> Result<()> {
     let spec = crate::syntax::registry::spec(&call.name);
     let reducing =
         spec.is_some_and(|s| matches!(s.agg, Some(crate::syntax::registry::Agg::Reducing)));
-    // A keyed aggregate (`sort_by`, `group`, `top`, `unique_by`)
+    // A keyed aggregate (`sort_by`, `top`, `unique_by`)
     // takes `$_` as a key — the topic itself — never as the input
     // placed: a surplus there is a count, not a misplaced input.
     let keyed_agg =
@@ -11611,6 +11779,13 @@ fn cmp_text(op: CmpOp) -> &'static str {
 pub(crate) fn retired_command(name: &str) -> Option<String> {
     match name {
         "rec" | "record" => Some(format!("'{name}(…)' is retired: the record is '%(…)'")),
+        // retired 2026-11-04 (spec: The Pipeline, the fold by a regula):
+        // the key is pushed and the fold by it gathers the groups
+        "group" => Some(
+            "'group(key)' is retired: push the key and fold by it, '| .k(key) @|{.k} …' \
+             ('@| group(k) | f' is '| .k(k) @|{.k} f'; the members as one list, '@|{.k} (@@_)')"
+                .into(),
+        ),
         "chars" => Some("'chars' is retired: write 'cc'".into()),
         "types" => Some("'types' is retired: the type of a table's columns is 'type'".into()),
         "table" => Some("'table' is retired: the table is '@| pretty'".into()),
@@ -11629,20 +11804,17 @@ pub(crate) fn retired_command(name: &str) -> Option<String> {
     }
 }
 
-/// The shared record-convention argument check, for `record(...)`
-/// and `group(...)` keys.
+/// The record-convention argument check, for `record(...)`.
 /// The calls that follow the record convention — `key = value`
 /// items, the flat `k, v` list, `;` separators.
 fn is_record_convention(name: &str) -> bool {
-    matches!(name, "rec" | "record" | "group")
+    matches!(name, "rec" | "record")
 }
 
 fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
     if call.args.is_empty() {
-        // a record has fields; a grouping has keys
-        let noun = if what == "group" { "key" } else { "field" };
         return Err(QuarbError::parse(format!(
-            "{what} needs at least one {noun}, e.g. {what}(::name)"
+            "{what} needs at least one field, e.g. {what}(::name)"
         )));
     }
     // Field names are fully static — literals or auto-named
@@ -11755,11 +11927,6 @@ fn valid_locale_tag(tag: &str) -> bool {
 /// keyed command needs at least one expression key, and `top` /
 /// `bottom` take a literal integer count first.
 fn validate_keyed(call: &FnCall) -> Result<()> {
-    // `group` follows the record convention for its keys (auto-named
-    // projections, or literal-name-then-expression).
-    if call.name == "group" {
-        return validate_record_convention(call, "group");
-    }
     // `sort` takes a Unicode locale identifier selecting the
     // collation (`sort(ru-RU)`), the word `atergo` selecting the
     // inverse-lexicographic order, or both, locale first
@@ -12522,6 +12689,20 @@ fn subst_step(step: &mut Step, map: &Subst<'_>) {
     }
 }
 
+/// The command a fold selector heads, wrapped: the one command the
+/// `@|` branch pushed after the selector was read.
+fn wrap_fold(pipeline: &mut Vec<Command>, before: usize, fold: Option<Vec<RegRef>>) {
+    if let Some(regs) = fold
+        && pipeline.len() == before + 1
+    {
+        let command = pipeline.pop().expect("one command pushed");
+        pipeline.push(Command::Fold {
+            regs,
+            command: Box::new(command),
+        });
+    }
+}
+
 fn subst_command(command: &mut Command, map: &Subst<'_>) {
     match command {
         Command::SessionPush(_) => {}
@@ -12591,7 +12772,8 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
         Command::Select(Predicate::Expr(e)) => subst_pred_expr(e, map),
         Command::Map(inner)
         | Command::Repeat { command: inner, .. }
-        | Command::Attach { command: inner, .. } => subst_command(inner, map),
+        | Command::Attach { command: inner, .. }
+        | Command::Fold { command: inner, .. } => subst_command(inner, map),
         Command::Select(_)
         | Command::Push(_)
         | Command::FieldsPush
@@ -12745,7 +12927,7 @@ fn resolve_range_form(p: &mut Predicate, name: &str, map: &HashMap<String, Opera
 }
 
 /// The record convention, checked again on a fragment's body once its
-/// parameters are bound (`%(::title; $extra)`, `group($key)`): the
+/// parameters are bound (`%(::title; $extra)`, `.k($key)`): the
 /// bound form names its field as the written form would, or is
 /// refused at the invocation. A visitor, since the record call may
 /// sit inside an operand (`| %(:a; :b)` is the projector applied to
@@ -12755,11 +12937,7 @@ struct Revalidate(Option<QuarbError>);
 impl visit::Visitor for Revalidate {
     fn call(&mut self, c: &FnCall) {
         if self.0.is_none() {
-            let checked = if c.name == "group" {
-                validate_record_convention(c, "group")
-            } else {
-                validate_record(c)
-            };
+            let checked = validate_record(c);
             if let Err(e) = checked {
                 self.0 = Some(e);
             }
@@ -12956,8 +13134,8 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
 /// the driver's pipeline reads any witness back.
 /// A keyed aggregate — `top`, `bottom`, `sort_by`, `unique_by`,
 /// `min_by`, `max_by` — ranks a context, so it rides `@|`; on the
-/// plain pipe it works per group, after `@| group`. Without a group
-/// command before it, it would rank each capsa's single value against
+/// plain pipe it works per window, after `@| window`. Without a
+/// window before it, it would rank each capsa's single value against
 /// itself and pass everything through — refuse with the pointer.
 /// The highest correlation context (`$*k`) a predicate expression
 /// references, anywhere in it — nested bodies included.
@@ -12979,6 +13157,199 @@ fn max_ctx_command(s: &Command) -> usize {
     let mut v = MaxCtx(0);
     v.command(s);
     v.0
+}
+
+/// The push names a query makes and the names it recalls (spec: The
+/// Capsa, the recall of a name no push made — ruling 2026-11-04): a
+/// name recalled anywhere in the expanded query that no push, mark or
+/// attaching push in the query makes is a parse-time refusal, naming
+/// the regulae that exist. Order-blind, since a recall may stand
+/// before its push (a quarq applied late, an attached regula read
+/// far from its push); a body sees the enclosing query's names; a
+/// quarq literal's body is not walked (its names resolve where it is
+/// applied); a record push or the fields push makes names the parser
+/// cannot know, and turns the check off.
+#[derive(Default)]
+struct PushNames {
+    pushed: Vec<String>,
+    /// Every push that files on the value side, named or not (a
+    /// mark files a node and takes no value position).
+    values: usize,
+    recalled: Vec<String>,
+    /// The positions recalled (`$.N`, `$.-N`, `$.`, the fold's
+    /// `{.N}`): each must stand within the value regulae the query
+    /// files (ruling 2026-11-04: a position past the capsa refuses).
+    positions: Vec<RegRef>,
+    dynamic: bool,
+    /// Inside a quarq literal's body: its pushes count (they land in
+    /// the applying thread), its recalls do not (they resolve where
+    /// it is applied).
+    in_quarq: bool,
+}
+
+impl PushNames {
+    fn quarq_body(&mut self, q: &crate::value::Quarq) {
+        let saved = self.in_quarq;
+        self.in_quarq = true;
+        for c in q.body.iter() {
+            self.command(c);
+        }
+        self.in_quarq = saved;
+    }
+    fn push(&mut self, name: &Option<String>) {
+        if let Some(n) = name {
+            self.pushed.push(n.clone());
+        }
+        self.values += 1;
+    }
+    fn mark(&mut self, name: &Option<String>) {
+        if let Some(n) = name {
+            self.pushed.push(n.clone());
+        }
+    }
+    fn recall(&mut self, r: &RegRef) {
+        if self.in_quarq {
+            return;
+        }
+        match r {
+            RegRef::Named(n) => self.recalled.push(n.clone()),
+            RegRef::Top | RegRef::Index(_) | RegRef::Back(_) => self.positions.push(r.clone()),
+            _ => {}
+        }
+    }
+}
+
+impl visit::Visitor for PushNames {
+    fn command(&mut self, c: &Command) {
+        match c {
+            Command::Push(name)
+            | Command::ExprPush { name, .. }
+            | Command::Subcontext { name, .. }
+            | Command::Attach { name, .. } => self.push(name),
+            // the aggregate push recalls its partition's regulae first
+            Command::AggPush { name, regs, .. } => {
+                regs.iter().for_each(|r| self.recall(r));
+                self.push(name);
+            }
+            // a record push files its fields under their names, known
+            // where the key is written or the value names itself; a
+            // spread or an expansion files names the parser cannot know
+            Command::RecordPush {
+                name: Some(name), ..
+            } => self.push(&Some(name.clone())),
+            Command::RecordPush { call, .. } => {
+                let mut i = 0;
+                while i < call.args.len() {
+                    match &call.args[i] {
+                        Arg::Lit(Value::Str(name)) | Arg::Key(Value::Str(name)) => {
+                            self.pushed.push(name.clone());
+                            self.values += 1;
+                            i += 2;
+                        }
+                        Arg::Key(_) => {
+                            self.values += 1;
+                            i += 2;
+                        }
+                        Arg::Expr(e) => {
+                            match crate::syntax::ast::auto_field_name(e) {
+                                Some(n) => self.pushed.push(n.to_string()),
+                                None => self.dynamic = true,
+                            }
+                            self.values += 1;
+                            i += 1;
+                        }
+                        Arg::Opt { .. } => i += 1,
+                        _ => {
+                            self.dynamic = true;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            // the fields push files the topic's fields: names the parser
+            // cannot know, so both checks stand down
+            Command::FieldsPush => self.dynamic = true,
+            Command::Recall(r)
+            | Command::AggRecall(r)
+            | Command::Splice(r)
+            | Command::SpliceAs { reg: r, .. } => self.recall(r),
+            Command::Fold { regs, .. } => regs.iter().for_each(|r| self.recall(r)),
+            _ => {}
+        }
+        visit::walk_command(self, c);
+    }
+    fn elem(&mut self, e: &PathElem) {
+        match e {
+            PathElem::Push { name, .. } => self.push(name),
+            PathElem::Mark(name) => self.mark(name),
+            _ => {}
+        }
+        visit::walk_elem(self, e);
+    }
+    fn operand(&mut self, o: &Operand) {
+        match o {
+            // (an attached read `X:.name` reads what another thread
+            // attached at the node, in this query or before it: not
+            // a recall of the capsa, so not checked)
+            Operand::Recall(r) | Operand::Apply { reg: r, .. } => self.recall(r),
+            Operand::Lit(Value::Quarq(q)) => self.quarq_body(q),
+            _ => {}
+        }
+        visit::walk_operand(self, o);
+    }
+    fn call(&mut self, c: &FnCall) {
+        for a in &c.args {
+            if let Arg::Lit(Value::Quarq(q)) = a {
+                self.quarq_body(q);
+            }
+        }
+        visit::walk_call(self, c);
+    }
+}
+
+/// The refusal for a recalled name no push made, if any.
+fn refuse_unmade_names(q: &Query) -> Result<()> {
+    let mut v = PushNames::default();
+    v.query(q);
+    if v.dynamic {
+        return Ok(());
+    }
+    for r in &v.positions {
+        let past = match r {
+            RegRef::Top => v.values == 0,
+            RegRef::Index(n) | RegRef::Back(n) => *n > v.values,
+            _ => false,
+        };
+        if past {
+            return Err(QuarbError::parse(format!(
+                "no regula at position '{}'; the query files {} value regula{}",
+                crate::syntax::unparse::fold_selector(std::slice::from_ref(r)),
+                v.values,
+                if v.values == 1 { "" } else { "e" }
+            )));
+        }
+    }
+    for name in &v.recalled {
+        if !v.pushed.iter().any(|p| p == name) {
+            let mut seen: Vec<String> = Vec::new();
+            for p in &v.pushed {
+                let shown = crate::syntax::ast::display_name(p);
+                if !seen.contains(&shown) {
+                    seen.push(shown);
+                }
+            }
+            let exist = if seen.is_empty() {
+                "nothing is pushed".to_string()
+            } else {
+                format!("the regulae are .{}", seen.join(", ."))
+            };
+            return Err(QuarbError::parse(format!(
+                "no push '.{}' before this point; {exist}",
+                crate::syntax::ast::display_name(name)
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct MaxCtx(usize);
@@ -13196,14 +13567,12 @@ fn validate_keyed_commands(q: &Query) -> Result<()> {
     let mut grouped = false;
     for command in &q.pipeline {
         match command {
-            // `@| group` and `@| window` partition the stream; a
-            // keyed command on the plain pipe then works per part.
-            Command::Agg(call) if matches!(call.name.as_str(), "group" | "window") => {
-                grouped = true
-            }
+            // `@| window` partitions the stream; a keyed command on
+            // the plain pipe then works per window.
+            Command::Agg(call) if call.name == "window" => grouped = true,
             Command::Func(call) if crate::syntax::registry::known_keyed(&call.name) && !grouped => {
                 return Err(QuarbError::parse(format!(
-                    "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per group, after '@| group')",
+                    "'{n}' ranks a context: write '@| {n}(…)' (on the plain pipe it works per window, after '@| window')",
                     n = call.name
                 )));
             }
@@ -13452,7 +13821,6 @@ mod tests {
             "/r/* | %(::name; ::name)",
             "/r/* | %(a = ::x; a = ::y)",
             "/r/* | %(name = ::x; ::name)",
-            "/r/* @| group(::k, ::k) | count",
         ] {
             let toks = lexer::lex(q).unwrap();
             let err = parse(&toks).expect_err(q).to_string();
@@ -13598,7 +13966,7 @@ mod tests {
             "/r/* | .y(::quarter ? (::quarter | s/ Q.*$//) * 1 : 0)",
             // command operands: rec named field, group key
             "/r/* | %(age = ::Age ? ::Age * 1 : 0)",
-            "/r/* @| group(\"src\", ::Age ? \"manifest\" : \"records\") | count",
+            "/r/* | .src(::Age ? \"manifest\" : \"records\") @|{.src} count",
             // fragment argument
             "def &f($x): /r/*[::a = $x]; &f(::b ? 1 : 2)",
             // the old double-parens spelling must keep parsing

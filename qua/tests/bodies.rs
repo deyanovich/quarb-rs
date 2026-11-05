@@ -4,7 +4,7 @@
 //! command may be headless (a built-in applied to the seed), a
 //! bare word in it names a command (never text), a command's own
 //! parentheses hold options where a bare word is a string. The
-//! aggregate push `@| .name(body)` files once on every capsa and
+//! aggregate push `| .name@(body)` files once on every capsa and
 //! passes the context on; `@| %(…)` is the aggregate record; `@|
 //! %.` and `@| $.name` read the shared regulae once; every
 //! reduction keeps the regulae its inputs share.
@@ -84,7 +84,7 @@ fn a_commands_options_keep_bare_words_as_strings() {
     );
     // The grouping call takes fields, which are bodies.
     assert_eq!(
-        values("/w/* | :: @| group(n = cc) | count @| join(\",\")"),
+        values("/w/* | :: | .n(cc) @|{.n} count @| join(\",\")"),
         vec!["5,1"]
     );
 }
@@ -93,26 +93,26 @@ fn a_commands_options_keep_bare_words_as_strings() {
 fn the_aggregate_push_files_once_on_every_capsa_and_passes_the_context_on() {
     // Every word carries the total; the stream is unchanged.
     assert_eq!(
-        values("/w/* | :: @| .total(count) | %(w = $_; total = $.total) @| [1..2]"),
+        values("/w/* | :: | .total@(count) | %(w = $_; total = $.total) @| [1..2]"),
         vec!["%(w = \"tom\"; total = 6)", "%(w = \"tom\"; total = 6)"]
     );
     // A second body sees the same stream and the regula just filed.
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| .unique(unique @| count) @| %."),
+        values("/w/* | :: | .total@(count) | .unique@(unique @| count) @| %."),
         vec!["%(total = 6; unique = 3)"]
     );
     assert_eq!(
         values(
-            "/w/* | :: @| .total(count) @| .share(unique @| count | ($_ div $.total)) @| $.share"
+            "/w/* | :: | .total@(count) | .share@(unique @| count | ($_ div $.total)) @| $.share"
         ),
         vec!["0.5"]
     );
     // The body's seed is the list of the peers' topics: a node
     // context stands by its names.
-    assert_eq!(values("/w/* @| .n(count) @| $.n"), vec!["6"]);
+    assert_eq!(values("/w/* | .n@(count) @| $.n"), vec!["6"]);
     // Nothing to file on an empty context.
     assert_eq!(
-        values("/w/*[:: = \"none\"] | :: @| .n(count) @| count"),
+        values("/w/*[:: = \"none\"] | :: | .n@(count) @| count"),
         vec!["0"]
     );
 }
@@ -130,35 +130,35 @@ fn the_aggregate_record_builds_from_the_context_as_a_whole() {
     );
     // The enriched form opens with the shared named regulae.
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| %%(unique = unique @| count)"),
+        values("/w/* | :: | .total@(count) @| %%(unique = unique @| count)"),
         vec!["%(total = 6; unique = 3)"]
     );
     // The field bodies may read the register every capsa shares.
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| %(share = unique @| count | ($_ div $.total))"),
+        values("/w/* | :: | .total@(count) @| %(share = unique @| count | ($_ div $.total))"),
         vec!["%(share = 0.5)"]
     );
 }
 
 #[test]
 fn register_accessors_after_the_aggregation_pipe_read_once() {
-    assert_eq!(values("/w/* | :: @| .total(count) @| $.total"), vec!["6"]);
+    assert_eq!(values("/w/* | :: | .total@(count) @| $.total"), vec!["6"]);
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| %."),
+        values("/w/* | :: | .total@(count) @| %."),
         vec!["%(total = 6)"]
     );
     // After `|` they read per capsa, as before.
     assert_eq!(
-        values("/w/* | :: @| .total(count) | $.total @| count"),
+        values("/w/* | :: | .total@(count) | $.total @| count"),
         vec!["6"]
     );
     // Only what every capsa shares: a per-capsa push is not shared.
     assert_eq!(
-        values("/w/* | :: | .w @| .total(count) @| %."),
+        values("/w/* | :: | .w | .total@(count) @| %."),
         vec!["%(total = 6)"]
     );
     // An expression over the accessor belongs to `|` or a body.
-    let err = refuse("/w/* | :: @| .total(count) @| $.total * 2");
+    let err = refuse("/w/* | :: | .total@(count) @| $.total * 2");
     assert!(err.contains("reads once"), "{err}");
 }
 
@@ -166,7 +166,7 @@ fn register_accessors_after_the_aggregation_pipe_read_once() {
 fn a_reduction_keeps_the_regulae_its_inputs_share() {
     // The filed total survives the reduction.
     assert_eq!(
-        values("/w/* | :: @| .total(count) @| unique @| count | %(unique = $_; total = $.total)"),
+        values("/w/* | :: | .total@(count) @| unique @| count | %(unique = $_; total = $.total)"),
         vec!["%(unique = 3; total = 6)"]
     );
     // A single capsa keeps its whole register across an aggregate.
@@ -188,6 +188,6 @@ fn a_reduction_keeps_the_regulae_its_inputs_share() {
 
 #[test]
 fn the_aggregate_push_stays_out_of_expression_pipes() {
-    let err = refuse("/w/* | :: | .n(($_ @| .t(count)))");
+    let err = refuse("/w/* | :: | .n(($_ | .t@(count)))");
     assert!(err.contains("pushes belong to real capsae"), "{err}");
 }

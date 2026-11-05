@@ -121,7 +121,7 @@ fn after_the_aggregation_pipe_the_stream_crosses_once() {
     // One call over the list, one capsa back per element, the
     // shared regulae carried.
     assert_eq!(
-        run("/w/* | :: @| .n(count) @| morph:lemma | %(w = $_; n = $.n) @| [1]").unwrap(),
+        run("/w/* | :: | .n@(count) @| morph:lemma | %(w = $_; n = $.n) @| [1]").unwrap(),
         vec!["%(w = \"книга\"; n = 3)"]
     );
     assert_eq!(

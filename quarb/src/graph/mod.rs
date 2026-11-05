@@ -24,6 +24,7 @@ pub(crate) mod tabula;
 pub mod target;
 #[cfg(test)]
 mod tests;
+pub(crate) mod threads;
 pub mod trace;
 pub(crate) mod tree;
 

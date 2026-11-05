@@ -48,11 +48,11 @@ const CORPUS: &[&str] = &[
     // register recalls, topic, ordinal filter, positional selection
     "/x | .n(::a * ::b) | $.n | .named | . | .(::a + 1) \
      | [$ord mod 2 = 1] @| [2..-1] @| [3]",
-    "/x | $_ | @. | %. | %.* | $. | $.2",
+    "/x | .(1) | .(2) | $_ | @. | %. | %.* | $. | $.2",
     // v2 additive growth (2026-10-20, draft 163): the capsa counted
     // back on both faces, the cursor record, the context table, a
     // signed quantity literal
-    "/x | .a | .b | $.-2 | $.. | (.-2) | (..) | _ | _:topic | _:position::k | #_ | (-1_km + 1_km)",
+    "/x | .a(1) | .b(2) | $.-2 | $.. | (.-2) | (..) | _ | _:topic | _:position::k | #_ | (-1_km + 1_km)",
     "/x/* | .M | .N | ((.-2))/y | ((..)) | %(a = $$..::k; b = $$.-2::k) | #. | ##. | #.:M",
     // the node side of the capsa: marks as references, the node
     // views, the position as a value (`$$_`) and its tail
@@ -77,7 +77,7 @@ const CORPUS: &[&str] = &[
     "/row | .t(^/row @| count) | $.t",
     // the aggregate push, the aggregate record (enriched) and a
     // once-read register accessor after `@|`
-    "/row | ::fare @| .total(count) @| %%(unique = unique @| count) @| $.total",
+    "/row | ::fare | .total@(count) @| %%(unique = unique @| count) @| $.total",
     // environment commands carry their alias as `lib`
     "/row | ::name | sh:tr(a-z; A-Z) @| go:sort(-r)",
     // a named option (the csv delimiter) reflects as an option node

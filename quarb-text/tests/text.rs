@@ -759,7 +759,7 @@ fn sentence_tailoring_undoes_declared_breaks() {
     // UAX #29 itself keeps "dollars. so" together (no break before a
     // lowercase letter): five sentences before the tailoring.
     assert_eq!(
-        values(&plain, "//token @| group(s = :::sentence) | count @| count"),
+        values(&plain, "//token | .s(:::sentence) @|{.s} count @| count"),
         ["5"]
     );
     let tailoring = syndesmos::Syndesmos::parse("Dr.\nMrs.\n").unwrap();
@@ -783,10 +783,7 @@ fn sentence_tailoring_undoes_declared_breaks() {
         ["3"]
     );
     assert_eq!(
-        values(
-            &tailored,
-            "//token @| group(s = :::sentence) | count @| count"
-        ),
+        values(&tailored, "//token | .s(:::sentence) @|{.s} count @| count"),
         ["3"]
     );
     // Same tokens, same positions.

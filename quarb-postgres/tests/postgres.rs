@@ -47,7 +47,7 @@ fn sql_shapes() {
     // GROUP BY with a FK chain as the key
     assert_eq!(
         values(
-            "/tracks/* | ::price @| group(\"artist\", ::album_id-->::artist_id-->::name) \
+            "/tracks/* | ::price | .artist(::album_id-->::artist_id-->::name) @|{.artist} \
              | sum | .rev | %($.artist; rev = $.rev)"
         ),
         vec![

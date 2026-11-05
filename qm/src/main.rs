@@ -293,7 +293,7 @@ fn main() -> anyhow::Result<()> {
             println!("exported {} message(s) to {}", vs.len(), file.display());
         }
         Cmd::Count => {
-            let q = "/* | ::message-id @| group(::from) | count | .messages | %.";
+            let q = "/* | ::message-id | .from(::from) @|{.from} count | .messages | %.";
             if let QueryResult::Values(vs) = quarb::run(q, &a)? {
                 for v in vs {
                     println!("{v}");

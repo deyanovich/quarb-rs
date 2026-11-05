@@ -7,7 +7,7 @@
 //! (`| upper`), and an *aggregate* when it reads the whole context
 //! on `@|`. The aggregates divide by what they do with the capsae:
 //! a [`Agg::Reducing`] aggregate folds them to a value (and so also
-//! works per capsa on a group's list members: `@| group(::k) |
+//! works per partition under a fold by a regula: `| .k(::k) @|{.k}
 //! mean`); a [`Agg::Context`] command reads the whole context only and
 //! never takes the plain pipe; a [`Agg::Keyed`] aggregate reorders or
 //! filters the capsae themselves by per-capsa keys; an
@@ -800,6 +800,13 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
+        context(
+            "threads",
+            "the context's thread tree drawn as text, the lineage the run records when the query holds the command: every step of the expanded query a level printed as its text, a thread's line its cursor after the step as ($$_; $_), the forks children box-drawn as tree draws, alike threads merging marked (N merged) / ⤴ merged, every @| stage a paragraph of its own with its answers as children; --depth=n (-d=n) the steps drawn within a paragraph; --capsa (-c) every leaf's capsa after its cursor",
+        ),
+        Check::Command,
+    ),
+    with_check(
         rendering(
             "csv",
             "the records as CSV (closing: the tool renders it); after a table value, the table as CSV",
@@ -833,7 +840,6 @@ pub const SPECS: &[FnSpec] = &[
     keyed("max_by", "the capsa with the greatest key"),
     keyed("top", "the N capsae with the greatest key"),
     keyed("bottom", "the N capsae with the least key"),
-    keyed("group", "the capsae grouped by keys"),
 ];
 
 /// The registered command called `name`.

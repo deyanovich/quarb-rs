@@ -2035,10 +2035,10 @@ fn value_expression_commands() {
 #[test]
 fn fused_group_count_matches_the_two_commands() {
     let t = MockTree::sample();
-    let fused = vals("//* @| group(d = :depth) | count", &t);
+    let fused = vals("//* | .d(:depth) @|{.d} count", &t);
     // The unfused route: the group's list topic, counted inside
     // an operand, so no `| count` command follows the group.
-    let unfused = vals("//* @| group(d = :depth) | %(n = ($_ @| count)) | :n", &t);
+    let unfused = vals("//* | .d(:depth) @|{.d} %(n = (@@_ @| count)) | :n", &t);
     assert_eq!(fused, unfused);
     assert!(fused.len() > 1);
     assert_eq!(
@@ -2052,14 +2052,14 @@ fn fused_group_count_matches_the_two_commands() {
             .unwrap()
     );
     // The count then feeding a record with the recalled key.
-    let recs = vals("//* @| group(d = :depth) | count | %($.d; n = $_)", &t);
-    let refs = vals("//* @| group(d = :depth) | %($.d; n = ($_ @| count))", &t);
+    let recs = vals("//* | .d(:depth) @|{.d} count | %($.d; n = $_)", &t);
+    let refs = vals("//* | .d(:depth) @|{.d} %($.d; n = (@@_ @| count))", &t);
     assert_eq!(recs, refs);
     // A filter on the count keeps the fused capsae's registers.
     assert_eq!(
-        vals("//* @| group(d = :depth) | count | [$_ > 1] | $.d", &t),
+        vals("//* | .d(:depth) @|{.d} count | [$_ > 1] | $.d", &t),
         vals(
-            "//* @| group(d = :depth) | %(d = $.d; n = ($_ @| count)) | [:n > 1] | :d",
+            "//* | .d(:depth) @|{.d} %(d = $.d; n = (@@_ @| count)) | [:n > 1] | :d",
             &t
         )
     );
@@ -3126,16 +3126,13 @@ fn group_and_ungroup_carry_origins() {
     // at the parent (one origin, deduplicated on join); the
     // group's own provenance is its members' — the index each
     // member read at itself.
-    let rows = traced("/*/* | .d(\\:name) | :index @| group(d = $.d)", &t);
+    let rows = traced("/*/* | .d(\\:name) | :index @|{.d} (@_)", &t);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].prov.origins, origins(&[(2, 2), (3, 2)]));
     assert_eq!(rows[1].prov.origins, origins(&[(5, 2), (6, 2)]));
-    let rows = traced("/*/* | .d(\\:name) | :index @| group(d = $.d) | $.d", &t);
+    let rows = traced("/*/* | .d(\\:name) | :index @|{.d} (@_) | $.d", &t);
     assert_eq!(rows[0].prov.origins, origins(&[(1, 1)]));
-    let rows = traced(
-        "/*/* | .d(\\:name) | :index @| group(d = $.d) @| ungroup | $.d",
-        &t,
-    );
+    let rows = traced("/*/* | .d(\\:name) | :index | $.d", &t);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[3].prov.origins, origins(&[(4, 1)]));
 }
@@ -3147,15 +3144,9 @@ fn a_group_sums_a_record_field() {
     // field read on the group's list projects each member, so
     // `:n | sum` says the same. Both agree with grouping the values.
     let t = MockTree::sample();
-    let by_value = traced("/*/* | .d(\\:name) | :index @| group(d = $.d) | sum", &t);
-    let keyed = traced(
-        "/*/* | .d(\\:name) | %(n = :index) @| group(d = $.d) | sum(--of=:n)",
-        &t,
-    );
-    let read = traced(
-        "/*/* | .d(\\:name) | %(n = :index) @| group(d = $.d) | :n | sum",
-        &t,
-    );
+    let by_value = traced("/*/* | .d(\\:name) | :index @|{.d} sum", &t);
+    let keyed = traced("/*/* | .d(\\:name) | %(n = :index) @|{.d} sum(--of=:n)", &t);
+    let read = traced("/*/* | .d(\\:name) | %(n = :index) | :n @|{.d} sum", &t);
     assert_eq!(by_value.len(), 2);
     for i in 0..2 {
         assert!(by_value[i].topic.is_some());
@@ -3338,7 +3329,7 @@ fn value_side_provenance_projection() {
 #[test]
 fn value_meta_needs_a_value_base() {
     assert!(parse(&lex("/a/x.rs | 1:::source").unwrap()).is_err());
-    assert!(parse(&lex("/a | $.n:%provenance:text").unwrap()).is_ok());
+    assert!(parse(&lex("/a | .n(:index) | $.n:%provenance:text").unwrap()).is_ok());
 }
 
 // ---- attached regulae: .:name, X:.name ----------------------------

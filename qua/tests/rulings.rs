@@ -159,5 +159,5 @@ fn record_sigil_refusals() {
         );
     }
     // a grouping key keeps its spelling
-    assert!(quarb::run(r#"/items/* @| group("k"; ::name) @| count"#, &doc()).is_ok());
+    assert!(quarb::run(r#"/items/* | .k(::name) @|{.k} count"#, &doc()).is_ok());
 }

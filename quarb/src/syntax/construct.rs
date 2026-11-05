@@ -481,6 +481,8 @@ impl Form {
             "agg-push" => Form::Command(Command::AggPush {
                 name: None,
                 body: Operand::Topic,
+                regs: Vec::new(),
+                keep: false,
             }),
             "attach" => Form::Command(Command::Attach {
                 name: None,
@@ -640,12 +642,16 @@ impl Form {
                     expr: c.into_operand()?,
                 })
             }
-            Form::Command(Command::AggPush { name, .. }) => {
+            Form::Command(Command::AggPush {
+                name, regs, keep, ..
+            }) => {
                 count(1, "one body")?;
                 let c = children.into_iter().next().expect("one");
                 Form::Command(Command::AggPush {
                     name,
                     body: c.into_operand()?,
+                    regs,
+                    keep,
                 })
             }
             Form::Command(Command::Attach { name, .. }) => {

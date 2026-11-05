@@ -137,9 +137,9 @@ pub(crate) fn eval_operand<H: Host>(
             note_all(&o);
             vec![host.origins_meta(&o, key).unwrap_or(Value::Null)]
         }
-        // A field read on a list of records reads each:
-        // a group's member list projects to the members' values, so
-        // `@| group(...) | :n | sum` sums a field per group.
+        // A field read on a list of records reads each: a list of
+        // records projects to the records' values, so `(@_:n) @| sum`
+        // sums a field over the members.
         // A leading `:name` on a thread (spec: Field Projections,
         // draft 164), by the topic: a RECORD → its field, null when
         // absent; a LIST → the field of each item as a list (node

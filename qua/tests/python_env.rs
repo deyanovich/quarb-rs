@@ -101,7 +101,7 @@ fn after_the_aggregation_pipe_one_call_over_the_stream() {
     // One thread per returned value, each carrying the shared regulae.
     assert_eq!(run("/p/* | ::x @| py:spread").unwrap(), vec!["4", "2"]);
     assert_eq!(
-        run("/p/* | ::x @| .n(count) @| py:spread | %(v = $_; n = $.n)").unwrap(),
+        run("/p/* | ::x | .n@(count) @| py:spread | %(v = $_; n = $.n)").unwrap(),
         vec!["%(v = 4; n = 2)", "%(v = 2; n = 2)"]
     );
 }

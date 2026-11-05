@@ -228,7 +228,6 @@ pub(crate) trait Host {
     fn node_form(&self, ext: &Self::Ext) -> Option<crate::syntax::expand::Form>;
     /// Whether a correlation witness admitted the thread.
     fn witnessed(&self, ext: &Self::Ext) -> bool;
-    fn origins_at(&self, ext: &Self::Ext) -> Origins;
     /// The thread's position as a scalar (its name, text or value).
     fn node_scalar(&self, ext: &Self::Ext) -> Value;
     fn project(&self, ext: &Self::Ext, proj: &Projection) -> Value;
@@ -359,6 +358,27 @@ pub(crate) trait Host {
         spec: &crate::graph::tree::TreeSpec,
         column: &dyn Fn(&Self::Ext, &Operand) -> Value,
     ) -> Result<String, String>;
+    /// `@| threads`: the context's thread tree as text (spec: The
+    /// Pipeline, the thread tree). Err where the host keeps no
+    /// lineage.
+    fn render_threads(
+        &self,
+        threads: &[Thread<Self::Ext>],
+        spec: &crate::graph::threads::ThreadsSpec,
+    ) -> Result<String, String> {
+        let _ = (threads, spec);
+        Err("threads draws the lineage of a run over an arbor; this host keeps none".into())
+    }
+    /// Lineage for `@| threads`, recorded only when the run asks: the
+    /// top-level step `command` just ran, from `inputs` to `outputs`.
+    fn note_step(
+        &self,
+        command: &Command,
+        inputs: &[Self::Ext],
+        outputs: &mut [Thread<Self::Ext>],
+    ) {
+        let _ = (command, inputs, outputs);
+    }
     /// `@| edges` / `@| nodes`: the context's graph as a table (spec:
     /// The graph as a table). Err where the host has no nodes.
     fn graph_table(

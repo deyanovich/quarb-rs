@@ -20,6 +20,7 @@ pub(crate) fn navigate_paths(
     witness: &[Option<NodeId>],
     seed_register: &[Reg],
     node_level: bool,
+    trail: Option<std::sync::Arc<crate::graph::threads::Trail>>,
 ) -> Vec<(GraphExt, Vec<Reg>)> {
     // The frontier: one attachment per path (its node, its marks, the
     // edges it arrived by) with the path's register beside it. The
@@ -31,14 +32,47 @@ pub(crate) fn navigate_paths(
             arrived: Vec::new(),
             unplaced: false,
             walk: None,
+            trail,
         },
         seed_register.to_vec(),
     )];
+    // the lineage's hop in progress: the elements since the last
+    // mark, one level of the thread tree
+    let recording = crate::graph::threads::recording();
+    let mut hop_text = String::new();
+    let mut hop_lead = String::new();
+    let mut hop_lead_open = true;
+    let mut hop_first = true;
     for elem in elems {
+        let elem_text = if recording {
+            crate::syntax::unparse::elem(elem)
+        } else {
+            String::new()
+        };
+        if recording && matches!(elem, PathElem::Step(_) | PathElem::Group(_)) {
+            hop_text.push_str(&elem_text);
+            // the literal part: the elements up to the first wildcard
+            if hop_lead_open && crate::graph::threads::literal_elem(&elem_text) {
+                hop_lead.push_str(&elem_text);
+            } else {
+                hop_lead_open = false;
+            }
+        }
         // A mark files a reference to each in-flight path's node.
         if let PathElem::Mark(name) = elem {
+            hop_text.clear();
+            hop_lead.clear();
+            hop_lead_open = true;
+            hop_first = true;
             for (ext, register) in &mut ctx {
                 register.push(mark_reg(adapter, ext.node, name.clone()));
+                ext.trail = crate::graph::threads::step(
+                    &ext.trail,
+                    &elem_text,
+                    false,
+                    Some(ext.node),
+                    None,
+                );
             }
             continue;
         }
@@ -77,6 +111,9 @@ pub(crate) fn navigate_paths(
                             .map(|s| (s, arrived_edge(adapter, node, step, s)))
                             .collect()
                     };
+                    if succs.is_empty() {
+                        crate::graph::threads::ended(&ext.trail, hop_first);
+                    }
                     next.extend(succs.into_iter().map(|(s, edge)| {
                         let arrived = edge.into_iter().collect();
                         (
@@ -87,6 +124,9 @@ pub(crate) fn navigate_paths(
                                 arrived,
                                 unplaced: false,
                                 walk: None,
+                                trail: crate::graph::threads::hop(
+                                    &ext.trail, hop_first, &hop_text, &hop_lead, s,
+                                ),
                             },
                             register.clone(),
                         )
@@ -100,6 +140,7 @@ pub(crate) fn navigate_paths(
                             arrived: Vec::new(),
                             unplaced: false,
                             walk: None,
+                            trail: None,
                         },
                         visited: vec![node],
                         register: register.clone(),
@@ -109,16 +150,28 @@ pub(crate) fn navigate_paths(
                         hops: 0,
                         total: 0.0,
                     };
-                    next.extend(
-                        expand_group(adapter, group, anchor, trace, outer, witness)
-                            .into_iter()
-                            .map(|p| {
-                                let arrived = p.last_edge.clone().into_iter().collect();
-                                // the walk's facts ride the exit; one
-                                // thread per walk, none merged
-                                (None, GraphExt { arrived, ..p.ext }, p.register)
-                            }),
-                    );
+                    let walks = expand_group(adapter, group, anchor, trace, outer, witness);
+                    if walks.is_empty() {
+                        crate::graph::threads::ended(&ext.trail, hop_first);
+                    }
+                    next.extend(walks.into_iter().map(|p| {
+                        let arrived = p.last_edge.clone().into_iter().collect();
+                        // the walk's facts ride the exit; one
+                        // thread per walk, none merged; the
+                        // whole walk one hop of the lineage
+                        let trail = crate::graph::threads::hop(
+                            &ext.trail, hop_first, &hop_text, &hop_lead, p.ext.node,
+                        );
+                        (
+                            None,
+                            GraphExt {
+                                arrived,
+                                trail,
+                                ..p.ext
+                            },
+                            p.register,
+                        )
+                    }));
                 }
                 PathElem::Mark(_) => unreachable!("handled above"),
                 PathElem::Push { .. } => {}
@@ -147,6 +200,7 @@ pub(crate) fn navigate_paths(
                     for (a, b) in kept.1.iter_mut().zip(&r) {
                         a.prov.origins.union(&b.prov.origins);
                     }
+                    crate::graph::threads::merge_into(&mut kept.0.trail, ext.trail.clone());
                     let slot = &mut kept.0.arrived;
                     for edge in ext.arrived {
                         if !slot.contains(&edge) {
@@ -161,6 +215,9 @@ pub(crate) fn navigate_paths(
             }
         }
         ctx = merged;
+        if matches!(elem, PathElem::Step(_) | PathElem::Group(_)) {
+            hop_first = false;
+        }
         if ctx.is_empty() {
             break;
         }
@@ -243,6 +300,7 @@ pub(crate) fn navigate_from_level(
         witness,
         seed_register,
         node_level,
+        None,
     )
     .into_iter()
     .filter(|(e, r)| seen.insert((e.node, arrival_key(e), reg_key(r))))
@@ -428,6 +486,7 @@ impl GPath {
                 arrived: Vec::new(),
                 unplaced: false,
                 walk: None,
+                trail: None,
             },
             visited,
             register: self.register.clone(),

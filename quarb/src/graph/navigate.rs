@@ -30,6 +30,9 @@ pub(crate) struct GraphExt {
     /// (`$-:round`, `$-:hops`, `$-:total`), cleared when that
     /// command has run.
     pub(crate) walk: Option<WalkFacts>,
+    /// The thread's lineage for `@| threads` (spec: The Pipeline,
+    /// the thread tree): None unless the run records it.
+    pub(crate) trail: Option<std::sync::Arc<crate::graph::threads::Trail>>,
 }
 
 /// What a walk knows of the edge it crossed (spec: Edge facts): the
@@ -140,6 +143,7 @@ impl GraphExt {
             arrived: Vec::new(),
             unplaced: false,
             walk: None,
+            trail: None,
         }
     }
 

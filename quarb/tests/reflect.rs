@@ -4,8 +4,8 @@
 use quarb::reflect::QueryArbor;
 use quarb::{QueryResult, Value};
 
-const QUERY: &str = "/row[::Age > 30 || /orders] @| group(::Pclass) \
-                     | mean | .mean-age | %. @| sort_by($.mean-age)";
+const QUERY: &str = "/row[::Age > 30 || /orders] | .Pclass(::Pclass) \
+                     @|{.Pclass} mean | .mean-age | %. @| sort_by($.mean-age)";
 
 fn arbor() -> QueryArbor {
     QueryArbor::parse(QUERY).unwrap()
@@ -32,7 +32,7 @@ fn structure_and_locators() {
     // two pipelines-of-commands: the pipeline node groups them
     assert_eq!(
         locators("/query/pipeline/*").len(),
-        5 // agg(group), func(mean), push, recall, agg(sort_by)
+        5 // push(.Pclass), agg(mean, group .Pclass), push, recall, agg(sort_by)
     );
     // same-kind siblings disambiguate positionally
     assert_eq!(
@@ -67,7 +67,6 @@ fn default_projections() {
     assert_eq!(
         values("//cmd:: || //agg:: @| sort"),
         vec![
-            Value::Str("group".to_string()),
             Value::Str("mean".to_string()),
             Value::Str("sort_by".to_string()),
         ]

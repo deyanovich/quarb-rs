@@ -24,19 +24,19 @@ fn values(q: &str) -> Vec<String> {
 #[test]
 fn a_property_reads_every_member() {
     assert_eq!(
-        values(r#"/rows/* @| group(b = ::book) | %(b = $.b; words = ($_ | ::word @| join(" ")))"#),
+        values(r#"/rows/* | .b(::book) @|{.b} %(b = $.b; words = (@@_::word @| join(" ")))"#),
         [
             "%(b = \"mark\"; words = \"The beginning of\")",
             "%(b = \"luke\"; words = \"Since\")"
         ]
     );
     assert_eq!(
-        values(r#"/rows/* @| group(b = ::book) | ::word"#),
+        values(r#"/rows/* | .b(::book) @|{.b} (@@_::word)"#),
         ["The, beginning, of", "Since"]
     );
     assert_eq!(
         values(
-            r#"/rows/* @| group(b = ::book) | %(n = ($_ @| count); ws = (::word @| join("+")))"#
+            r#"/rows/* | .b(::book) @|{.b} %(n = (@@_ @| count); ws = (@@_::word @| join("+")))"#
         ),
         [
             "%(n = 3; ws = \"The+beginning+of\")",
@@ -48,7 +48,7 @@ fn a_property_reads_every_member() {
 fn a_record_field_still_reads_every_member() {
     assert_eq!(
         values(
-            r#"/rows/* | %(b = ::book; w = ::word) @| group(b = $_:b) | %(b = $.b; ws = ($_ | :w @| join(" ")))"#
+            r#"/rows/* | %(b = ::book; w = ::word) | .b($_:b) @|{.b} %(b = $.b; ws = (@_:w @| join(" ")))"#
         ),
         [
             "%(b = \"mark\"; ws = \"The beginning of\")",
@@ -123,10 +123,10 @@ fn membership_in_a_large_list_hashes() {
 #[test]
 fn a_record_field_keeps_every_value() {
     assert_eq!(
-        values(r#"/rows/* @| group(b = ::book) | %(b = $.b; words = ($_ | ::word))"#),
+        values(r#"/rows/* | .b(::book) @|{.b} %(b = $.b; words = (@@_::word))"#),
         [
             "%(b = \"mark\"; words = @(\"The\"; \"beginning\"; \"of\"))",
-            "%(b = \"luke\"; words = \"Since\")"
+            "%(b = \"luke\"; words = @(\"Since\"))"
         ]
     );
 }
@@ -135,7 +135,7 @@ fn a_record_field_keeps_every_value() {
 fn an_operand_pipe_keeps_the_group_keys() {
     assert_eq!(
         values(
-            r#"/rows @| first | %(top = (/* | %(b = ::book) @| group(b = $_:b) | %(b = $.b; n = ($_ @| count)) @| top(1; :n) | :b @| first))"#
+            r#"/rows/* | .b(::book) @|{.b} %(b = $.b; n = (@@_ @| count)) @| top(1; :n) | %(top = :b)"#
         ),
         ["%(top = \"mark\")"]
     );

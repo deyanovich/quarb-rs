@@ -18,7 +18,7 @@ fn translations() {
     assert_eq!(t("SELECT COUNT(*) FROM tracks"), "/tracks/* @| count");
     assert_eq!(
         t("SELECT customer, SUM(qty) AS total FROM invoices GROUP BY customer HAVING total > 1"),
-        "/invoices/* | ::qty @| group(::customer) | sum | .total | [$_ > 1] | %."
+        "/invoices/* | .customer(::customer) | ::qty @|{.customer} sum | .total | [$_ > 1] | %."
     );
     assert_eq!(
         t(
@@ -62,12 +62,12 @@ fn translations() {
             "SELECT customer, SUM(qty) AS total FROM invoices GROUP BY customer \
            HAVING SUM(qty) > 1"
         ),
-        "/invoices/* | ::qty @| group(::customer) | sum | .total | [$_ > 1] | %."
+        "/invoices/* | .customer(::customer) | ::qty @|{.customer} sum | .total | [$_ > 1] | %."
     );
     // An aliased group key names the key field.
     assert_eq!(
         t("SELECT country AS c, COUNT(*) FROM artists GROUP BY country"),
-        "/artists/* @| group(\"c\", ::country) | count | .count | %."
+        "/artists/* | .c(::country) @|{.c} count | .count | %."
     );
     // SQL strings escape into Quarb string syntax.
     assert_eq!(
@@ -211,8 +211,13 @@ fn export_translations() {
         "SELECT title, secs FROM tracks WHERE price < 1 ORDER BY title"
     );
     assert_eq!(x("/tracks/* @| count"), "SELECT COUNT(*) FROM tracks");
+    // the fold's answer unrecorded: one value per group
     assert_eq!(
-        x("/invoices/* | ::qty @| group(::customer) | sum | .total | [$_ > 1] | %."),
+        x("/tracks/* | .price(::price) @|{.price} count"),
+        "SELECT COUNT(*) FROM tracks GROUP BY price"
+    );
+    assert_eq!(
+        x("/invoices/* | .customer(::customer) | ::qty @|{.customer} sum | .total | [$_ > 1] | %."),
         "SELECT customer, SUM(qty) AS total FROM invoices GROUP BY customer \
          HAVING SUM(qty) > 1"
     );
@@ -285,7 +290,7 @@ fn export_details() {
     // Grouped '| count' counts every member like Quarb does —
     // COUNT(*), never the NULL-skipping COUNT(col).
     assert_eq!(
-        x("/t/* | ::c @| group(::k) | count | .n | %."),
+        x("/t/* | ::c | .k(::k) @|{.k} count | .n | %."),
         "SELECT k, COUNT(*) AS n FROM t GROUP BY k"
     );
     // ORDER BY then LIMIT renders (that order matches Quarb's).
@@ -324,7 +329,7 @@ fn identifiers_are_gated() {
 fn refuses_the_internal_agg_marker() {
     // "__AGG__" is the exporter's placeholder for the HAVING
     // aggregate — same spoofing hazard as "__LEFT__".
-    let q = "/t/* | ::q @| group(::k) | sum | .s | [$_ = \"__AGG__\"] | %.";
+    let q = "/t/* | ::q | .k(::k) @|{.k} sum | .s | [$_ = \"__AGG__\"] | %.";
     assert!(export(q).unwrap_err().to_string().contains("__AGG__"));
     assert!(quarb_sql::pushdown(q, None).is_none());
 }
@@ -429,7 +434,7 @@ fn pushdown_gate() {
     // identical.
     assert!(pushdown("/tracks/*[::title *= \"o\"] | ::title").is_none()); // LIKE folding
     assert!(pushdown("/tracks/*[::album_id] | ::title").is_none()); // truthiness
-    assert!(pushdown("/t/* | ::p @| group(::k) | sum | .s | %.").is_none()); // group order
+    assert!(pushdown("/t/* | ::p | .k(::k) @|{.k} sum | .s | %.").is_none()); // group order
     assert!(pushdown("/t/* | ::p @| unique").is_none()); // distinct order
     assert!(pushdown("/t/* @| sort_by(::a) | ::a").is_none()); // collation
     assert!(pushdown("/t/* @| [..3]").is_none()); // unordered LIMIT
@@ -440,13 +445,17 @@ fn pushdown_gate() {
 fn partial_pushdown_gate() {
     use quarb_sql::partial_pushdown;
     // In: a strict leading predicate with an unpushable pipeline.
-    let p = partial_pushdown("/events/*[::kind = \"rare\"] | ::amount @| group(\"b\", ::amount idiv 100) | count | .n | %.", None).unwrap();
+    let p = partial_pushdown(
+        "/events/*[::kind = \"rare\"] | ::amount | .b(::amount idiv 100) @|{.b} count | .n | %.",
+        None,
+    )
+    .unwrap();
     assert_eq!(p.table, "events");
     assert_eq!(p.where_sql, "kind = 'rare'");
     // Only the LEADING expression run pushes; positional first = out.
     assert!(
         partial_pushdown(
-            "/t/*[2][::a = 1] | ::a @| group(\"g\", ::a) | count | .n | %.",
+            "/t/*[2][::a = 1] | ::a | .g(::a) @|{.g} count | .n | %.",
             None
         )
         .is_none()
@@ -460,7 +469,7 @@ fn partial_pushdown_gate() {
     // Non-strict predicates (LIKE folding) = out.
     assert!(
         partial_pushdown(
-            "/t/*[::a *= \"x\"] | ::a @| group(\"g\", ::a) | count | .n | %.",
+            "/t/*[::a *= \"x\"] | ::a | .g(::a) @|{.g} count | .n | %.",
             None
         )
         .is_none()
@@ -581,7 +590,7 @@ fn a_plan_records_the_column_types_it_assumes() {
     let plan = quarb_sql::pushdown("/books/* @| count", None).unwrap();
     assert!(plan.column_types.is_empty());
     let partial = quarb_sql::partial_pushdown(
-        "/books/*[::pages > 300] | ::title @| group(::title) | count",
+        "/books/*[::pages > 300] | ::title | .title(::title) @|{.title} count",
         None,
     )
     .unwrap();
@@ -590,7 +599,7 @@ fn a_plan_records_the_column_types_it_assumes() {
     assert!(quarb_sql::pushdown("/books/*[::code = '150'] | ::title", None).is_none());
     assert!(
         quarb_sql::partial_pushdown(
-            "/books/*[::code = '150'] | ::title @| group(::title) | count",
+            "/books/*[::code = '150'] | ::title | .title(::title) @|{.title} count",
             None
         )
         .is_none()

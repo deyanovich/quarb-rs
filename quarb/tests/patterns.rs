@@ -469,7 +469,10 @@ fn rounded_pipes_registers_anchors_canonicalize() {
     // the value side: single parens
     assert_eq!(canon("/a ,__ (?(_) .maior. 2)"), canon("/a $| [$_ > 2]"));
     assert_eq!(canon("/a .s /b __ (.s)"), canon("/a .s /b | $.s"));
-    assert_eq!(canon("/a . /b . __ (.2)"), canon("/a . /b . | $.2"));
+    assert_eq!(
+        canon("/a | .(1) | .(2) | (.2)"),
+        canon("/a | .(1) | .(2) | $.2")
+    );
     assert_eq!(
         canon("/a :-b(?(-)::w .maior. 1)"),
         canon("/a->b[$-::w > 1]")
@@ -536,7 +539,10 @@ fn regex_literal_canonicalizes() {
     // a bare `/…/` after `==` is that path, never a regex literal
     assert_eq!(canon("/u[::name == ::pat]"), "/u[::name == ::pat]");
     assert_eq!(canon("/u[::name == /p/q::re]"), "/u[::name == /p/q::re]");
-    assert_eq!(canon("/u[::name !== $.re]"), "/u[::name !== $.re]");
+    assert_eq!(
+        canon("/u | .re(1) | [::name !== $.re]"),
+        "/u | .re(1) | [::name !== $.re]"
+    );
     // the value-match arms take the literal too
     assert_eq!(
         canon("/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)"),
@@ -577,7 +583,7 @@ fn record_field_colon_canonicalizes() {
     // the colon ladder; `%+` the named-captures record.
     assert_eq!(canon("/a | .r | $.r:x"), "/a | .r | $.r:x");
     assert_eq!(canon("/a | .r | (.r):x"), "/a | .r | $.r:x");
-    assert_eq!(canon("/a | $.r:a:b"), "/a | $.r:a:b");
+    assert_eq!(canon("/a | .r | $.r:a:b"), "/a | .r | $.r:a:b");
     assert_eq!(canon("/a | :n"), "/a | :n");
     assert_eq!(canon("/a | $_:n"), "/a | :n");
     assert_eq!(canon("/a | [:n .maior. 1]"), canon("/a | [$_:n > 1]"));
@@ -603,7 +609,7 @@ fn keyed_aggregates_refuse_the_plain_pipe() {
     assert!(refuse("/a | top(3, ::x)").contains("@| top"));
     assert!(refuse("/a | sort_by(::x)").contains("@| sort_by"));
     assert!(canon("/a @| top(3, ::x)").contains("@| top"));
-    assert!(canon("/a @| group(::k) | top(3, ::x)").contains("| top"));
+    assert!(canon("/a | .k(::k) @|{.k} top(3, ::x)").contains("top("));
     assert!(canon("/a *__ top(3, ::x)").contains("@| top"));
     // a field of the topic record is a key like any other
     for q in [
@@ -612,7 +618,7 @@ fn keyed_aggregates_refuse_the_plain_pipe() {
         "/a | %(::n; t = ::t) @| min_by(:t)",
         "/a | %(::n; t = ::t) @| max_by(:t)",
         "/a | %(::n; t = ::t) @| top(2, :t)",
-        "/a | %(::n; t = ::t) @| group(:t) | top(1, :n)",
+        "/a | %(::n; t = ::t) | .t(:t) @|{.t} top(1, :n)",
     ] {
         assert!(canon(q).contains("(:"), "{q}: {}", canon(q));
     }
@@ -694,11 +700,8 @@ fn record_convention_canonicalizes() {
         canon("/a | .r%(k = ::x; j = 1)"),
         "/a | .r%(k = ::x; j = 1)"
     );
-    assert_eq!(
-        canon("/a @| group(k = ::x; ::y)"),
-        "/a @| group(k = ::x; ::y)"
-    );
-    assert_eq!(canon("/a @| group(\"k\", ::x)"), "/a @| group(k = ::x)");
+    // group is retired (2026-11-04): the pointer names the fold
+    assert!(refuse("/a @| group(k = ::x; ::y)").contains("retired"));
 }
 
 #[test]

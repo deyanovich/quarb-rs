@@ -337,6 +337,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
             &[],
             &[],
             false,
+            None,
         )
         .into_iter()
         .map(|(e, _reg)| (e.node, e.arrived))

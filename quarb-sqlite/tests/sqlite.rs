@@ -174,8 +174,8 @@ fn sql_shapes() {
     // GROUP BY album HAVING count > 1 — via the FK chain in the key
     assert_eq!(
         values(
-            "/tracks/*[::album_id] @| group(\"album\", ::album_id-->::title) \
-             | count | .n | [$_ > 1] | %."
+            "/tracks/*[::album_id] | .album(::album_id-->::title) @|{.album} \
+             count | .n | [$_ > 1] | %."
         ),
         vec![
             "%(album = \"The Planets\"; n = 3)",
@@ -323,8 +323,8 @@ fn filtered_open_matches_scan() {
         )
         .unwrap();
     }
-    let q = "/events/*[::kind = \"a\"] | ::amount @| group(\"half\", ::amount idiv 25) \
-             | count | .n | %.";
+    let q = "/events/*[::kind = \"a\"] | ::amount | .half(::amount idiv 25) @|{.half} \
+             count | .n | %.";
     let plan =
         quarb_sql::partial_pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect("partial plan");
     let run = |a: &SqliteAdapter| -> Vec<String> {

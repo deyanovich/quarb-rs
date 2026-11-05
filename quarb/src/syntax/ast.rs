@@ -179,13 +179,26 @@ pub enum Command {
     /// `top`, `bottom`) instead reorder or filter the capsae
     /// themselves, preserving nodes and registers.
     Agg(FnCall),
-    /// `@| .name(body)` — the aggregate push: the body is a
-    /// subcontext fed the context as a whole (its seed topic the
-    /// list of the peers' topics, its register the regulae every
-    /// capsa shares), and its value is filed under the name on EVERY
-    /// capsa; the context passes on unchanged, so a later body
-    /// reads the same stream and the regula just filed.
-    AggPush { name: Option<String>, body: Operand },
+    /// The aggregate push: the body is a subcontext fed the context
+    /// as a whole (its seed topic the list of the peers' topics, its
+    /// register the regulae every capsa shares), its value filed
+    /// under the name. Two spellings (ruling 2026-11-04): `@|
+    /// .name(body)` (`keep` false) is the aggregation pipe's command
+    /// like any other — the context collapses to the one thread the
+    /// pipe answers, standing nowhere, its topic the list it was
+    /// handed, the regula filed on it (under a fold, one thread per
+    /// partition); `| .name@(body)` (`keep` true) files the value on
+    /// EVERY thread and passes them on, so a later body reads the
+    /// same stream and the regula just filed, and `| .name@{.x}(body)`
+    /// runs the body per partition of the regulae in the braces (the
+    /// fold's selector, tuples included), filing each partition's
+    /// value on its members; `regs` is empty for the whole context.
+    AggPush {
+        name: Option<String>,
+        body: Operand,
+        regs: Vec<RegRef>,
+        keep: bool,
+    },
     /// `@| %(…)` / `@| %%(…)` — the aggregate record: the
     /// constructor's fields are bodies fed the context as a whole,
     /// and the result is one capsa whose topic is the record (the
@@ -222,6 +235,17 @@ pub enum Command {
     /// `#` (`shot`) with the topic and position recorded at the
     /// push.
     SpliceAs { reg: RegRef, shot: bool },
+    /// `@|{.g} count` — the fold by a regula (spec: The Pipeline,
+    /// the fold by a regula): the context partitioned by the regulae
+    /// the selector names (one, or several `;`-separated, the key
+    /// their tuple), the aggregation-pipe command run per partition
+    /// as `@|` runs it over the whole context, the folding regulae
+    /// pushed on top of each answer in selector order, holding the
+    /// group's values.
+    Fold {
+        regs: Vec<RegRef>,
+        command: Box<Command>,
+    },
     /// `$then` in command position inside a definition body: a
     /// parameter a quarq argument fills with its commands (design
     /// paper: Arguments); after `@|` the quarq's one command is

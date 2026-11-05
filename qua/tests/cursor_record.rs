@@ -122,7 +122,12 @@ fn the_capsa_counts_back_and_names_the_penultimate() {
     assert_eq!(all(&format!("{q}$.-2")), "10 | 20");
     assert_eq!(all(&format!("{q}$..")), "10 | 20");
     assert_eq!(all(&format!("{q}$.-3")), "1 | 2");
-    assert_eq!(all(&format!("{q}$.-4 | type")), "null | null");
+    // a position past the capsa refuses at parse time (ruling 2026-11-04)
+    let e = quarb::Query::parse(&format!("{q}$.-4"), &doc())
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no regula at position '.-4'"), "{e}");
     assert_eq!(all(&format!("{q}(.-2)")), "10 | 20");
     assert_eq!(all(&format!("{q}(..)")), "10 | 20");
     // spaced, the minus is subtraction

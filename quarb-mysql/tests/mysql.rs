@@ -40,7 +40,7 @@ fn fk_machinery() {
 fn sql_shapes() {
     assert_eq!(
         values(
-            "/tracks/* | ::price @| group(\"artist\", ::album_id-->::artist_id-->::name) \
+            "/tracks/* | ::price | .artist(::album_id-->::artist_id-->::name) @|{.artist} \
              | sum | .rev | %($.artist; rev = $.rev)"
         ),
         vec![

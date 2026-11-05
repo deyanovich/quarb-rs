@@ -14,9 +14,9 @@
 //!   `value_eq` treats NULL as an ordinary value), `IN (…)` → an
 //!   `or`-chain, `LIKE` → anchored `=~` regexes.
 //! - Aggregates (`COUNT(*)`, `COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX`)
-//!   → `@|` reductions; `GROUP BY k` → `@| group(::k)` with the
-//!   aggregate riding the plain pipe and `HAVING` a filter after
-//!   it.
+//!   → `@|` reductions; `GROUP BY k` → `| .k(::k) @|{.k}` with the
+//!   aggregate folding by the pushed key and `HAVING` a filter
+//!   after it.
 //! - `JOIN t2 ON t2.b = t1.a` → correlation (driver-first): `/t1/*
 //!   <=> /t2/*[::b = $$0::a]` — the FROM table drives, the ON rides
 //!   the joined expression — with the joined side's select columns
@@ -899,9 +899,16 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 SelectItem::Agg(..) => {}
             }
         }
-        notes.push(
-            "GROUP BY: SQL keeps a NULL-key group; Quarb's group drops null keys".to_string(),
-        );
+        // The key is pushed under its name (the alias, else the
+        // column) and the reduction folds by it: `| .k(::k) @|{.k}
+        // sum`. SQL's NULL-key group is the fold's null partition.
+        let key_name = key_alias.clone().unwrap_or_else(|| k.column.clone());
+        if !plain_register(&key_name) {
+            return Err(SqlError::Unsupported(format!(
+                "the GROUP BY key {key_name:?} (not a plain register name)"
+            )));
+        }
+        write!(q, " | .{key_name}({})", scope.operand(k)?).unwrap();
         if let Some(c) = col {
             let op = scope.operand(c)?;
             if matches!(a, Agg::CountCol) {
@@ -916,17 +923,13 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                 write!(q, " | {op}").unwrap();
             }
         }
-        match &key_alias {
-            Some(ka) => write!(q, " @| group({}, {})", quarb_str(ka), scope.operand(k)?).unwrap(),
-            None => write!(q, " @| group({})", scope.operand(k)?).unwrap(),
-        }
         let name = alias.clone().unwrap_or_else(|| agg_fn(a).to_string());
         if !plain_register(&name) {
             return Err(SqlError::Unsupported(format!(
                 "the aggregate alias {name:?} (not a plain register name)"
             )));
         }
-        write!(q, " | {} | .{name}", agg_fn(a)).unwrap();
+        write!(q, " @|{{.{key_name}}} {} | .{name}", agg_fn(a)).unwrap();
         if let Some(h) = &having {
             // HAVING refers to the aggregate (an aggregate call,
             // its alias, or its function name) or the group key.
@@ -935,6 +938,28 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             write!(q, " | [{cond}]").unwrap();
         }
         write!(q, " | %.").unwrap();
+        // ORDER BY / LIMIT after the grouped form: the sort key is
+        // a field of the group record, the key or the aggregate.
+        if let Some((c, desc)) = &order_by {
+            let field = if c.column.eq_ignore_ascii_case(&k.column) {
+                key_name.clone()
+            } else if c.column.eq_ignore_ascii_case(&name) {
+                name.clone()
+            } else {
+                return Err(SqlError::Unsupported(format!(
+                    "ORDER BY '{}': neither the GROUP BY key nor the aggregate",
+                    c.column
+                )));
+            };
+            write!(q, " @| sort_by(:{field})").unwrap();
+            if *desc {
+                q.push_str(" @| reverse");
+            }
+        }
+        if let Some(n) = &limit {
+            write!(q, " @| [..{n}]").unwrap();
+        }
+        return Ok(Translation { query: q, notes });
     } else if items.iter().any(|i| matches!(i, SelectItem::Agg(..))) {
         // Bare aggregates over the whole table.
         if items.len() != 1 {
@@ -1031,8 +1056,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         return Ok(Translation { query: q, notes });
     }
 
-    // ORDER BY / LIMIT after grouped or aggregate forms; the sort
-    // key names a field of the group record.
+    // ORDER BY / LIMIT after the bare aggregate form.
     if let Some((c, desc)) = &order_by {
         write!(q, " @| sort_by(::{})", quarb_key(&c.column)?).unwrap();
         if *desc {

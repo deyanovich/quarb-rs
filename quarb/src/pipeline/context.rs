@@ -299,6 +299,39 @@ pub(crate) fn timeline_command<H: Host>(
 /// capsa (`depth` and `title` of a record without them), numbered
 /// `1`, `1.1`, `1.2`, `2` under `--style` (the `@| number` reading is
 /// retired: `number` is the locale cast alone).
+/// `@| threads[(-d=n; -c)]` — the thread tree (spec: The Pipeline,
+/// the thread tree): the lineage the run recorded for the context's
+/// threads, drawn as one text — every step a level, the forks
+/// children, each aggregation a paragraph. `apply_command`'s arm.
+pub(crate) fn threads_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+) -> Vec<Thread<H::Ext>> {
+    let spec = crate::graph::threads::ThreadsSpec::from_call(call);
+    let mut origins = Origins::default();
+    for c in &caps {
+        origins.insert(host.origin_at(&c.ext));
+    }
+    match host.render_threads(&caps, &spec) {
+        Ok(text) => vec![Thread::<H::Ext> {
+            window: None,
+            prov: Prov::leaf(origins),
+            register: shared_register(&caps),
+            topic: Some(Value::Str(text)),
+            members: Vec::new(),
+            captures: Vec::new(),
+            named: Vec::new(),
+            // the drawing's one thread has no position
+            ext: host.unplaced_ext(),
+        }],
+        Err(why) => {
+            record_refusal(why);
+            Vec::new()
+        }
+    }
+}
+
 /// `@| tree[(operands)]` — the context drawn as a tree (spec: The
 /// tree): one text value, the mount root on top, every context node
 /// a starting point. A value context is refused: the tree draws

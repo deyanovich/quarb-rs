@@ -86,7 +86,7 @@ fn sample_dispersion() {
     close(&floats("/n/* | :: @| variance(--sample)"), &[4.0]);
     // Per group of records, with the group projection.
     assert_eq!(
-        values("/g/* | %(k = ::k; x = ::x) @| group(k = $_:k) | variance(--sample --of=:x)"),
+        values("/g/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} variance(--sample --of=:x)"),
         ["0.5", "0.5"]
     );
     let e = quarb::run("/n/* | :: @| stddev(2)", &doc()).unwrap_err();
@@ -142,7 +142,7 @@ fn diversity_aggregates() {
     close(&floats("/w/* | :: @| mtld(0.5)"), &[2.0]);
     // Over a grouped count table: counts are the group sizes.
     close(
-        &floats("/w/* | :: @| group(w = $_) | count @| entropy"),
+        &floats("/w/* | :: | .w($_) @|{.w} count @| entropy"),
         &[3f64.log2()],
     );
 }
@@ -158,11 +158,11 @@ fn association_aggregates() {
     close(&floats("/p/* @| cosine(::x; ::y)"), &[1.0]);
     // Per group on the plain pipe: a rises, b falls.
     close(
-        &floats("/g/* @| group(k = ::k) | corr(::x; ::y)"),
+        &floats("/g/* | .k(::k) @|{.k} corr(::x; ::y)"),
         &[1.0, -1.0],
     );
     close(
-        &floats("/g/* | %(k = ::k; x = ::x; y = ::y) @| group(k = $_:k) | corr(:x; :y)"),
+        &floats("/g/* | %(k = ::k; x = ::x; y = ::y) | .k($_:k) @|{.k} corr(:x; :y)"),
         &[1.0, -1.0],
     );
     let e = quarb::run("/p/* @| corr(::x)", &doc()).unwrap_err();
@@ -203,5 +203,8 @@ fn distance_dispersion_and_agreement() {
     // The "per" group agrees on half its pairs with a chance
     // agreement of a half: κ = 0; the "loc" group names one category
     // on both sides: null.
-    assert_eq!(values("/gold/* @| group(::g) | kappa(::g; ::p)"), ["0", ""]);
+    assert_eq!(
+        values("/gold/* | .g(::g) @|{.g} kappa(::g; ::p)"),
+        ["0", ""]
+    );
 }
